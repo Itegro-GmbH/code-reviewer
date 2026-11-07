@@ -92,7 +92,7 @@ The token of each read is minted for it and limited to one repository and to rea
 page (`tracker_sync_state.cursor`), so a call that ends early (the request has about twenty seconds, GitHub did not answer) is
 continued by the next call, which answers `202` while there is more to read and `200` when the cache is complete. A sync that has not
 moved for an hour (counted from the last page that was saved, `tracker_sync_state.updated_at`, not from its start) starts again from the
-beginning.
+beginning. The nightly resync (below) continues a sync for a week instead of an hour, because its calls are a day apart.
 
 **The nightly resync** (#932). A delivery can be missed (a GitHub App that does not subscribe to `issues`, `sub_issues` or `check_suite`, a delivery GitHub gave up on)
 and nothing flags it, so once a night (`GET /api/internal/tracker-resync`, `app/vercel.json`, `CRON_SECRET`) every **active project** is synced
@@ -100,8 +100,11 @@ with the same code as **Resync**. The run has a budget of four minutes, counted 
 slice of what is left (the rest of the budget divided by the projects still to go, at least ten seconds), so one huge project cannot use up the night
 for the others. The projects whose last sync ended, or that never ran, come first, the one attempted longest ago first; a project whose last sync did
 not end comes after them. The projects the budget does not reach are counted `deferred` and, having the oldest attempt, come first the next night.
-A sync that its slice ends in the middle of does **not** continue the next night: a sync that has not moved for an hour starts again from the first
-page, so a repository too big for its slice is `partial` every night, and the Resync route (which has no slice) is what completes it. One project's
+A sync that its slice ends in the middle of **continues the next night**: the nightly run asks the sync to resume, so a sync that has not moved for
+a week (not an hour) starts again from the first page. A repository too big for one slice is `partial` for a few nights, completes, and only then applies
+the [rebuild rule](#the-rebuild-rule), counted from the start of the whole sync, so what an earlier night wrote is not removed. A page that is in flight
+when the slice ends is aborted thirty seconds later, and never later than 285 seconds into the run (the function may run 300), so the counts line is
+always logged. One project's
 failure is logged (its repository id and the code of the failure, the platform's own code when it has one) and the others go on; when the platform
 answers a project with a **rate limit**, the other projects of the same installation are skipped in this run (counted `deferred`). A deployment
 without the factory (`implementer`) reads the mirror nowhere: the route answers `skipped` and asks GitHub for nothing. The answer is counts only
@@ -148,9 +151,13 @@ When the last phase of a full sync is over:
    log, and the next sync tries again. The count is kept across the calls of one sync;
 2. the **board statuses** no board said anything about since the sync began are emptied (an item that left the board without a delivery).
    They are not emptied before: a board that cannot be read keeps the statuses the cache has, and a status a webhook set while the sync was
-   between its phases survives;
-3. the pull requests of every issue are computed again from the `closes` of the pull requests, in one pass over the pull requests;
-4. `last_full_sync_at` is set and the cursor is cleared.
+   between its phases survives. A board the App may not read keeps its place in the list of boards, so the position of the boards after it does
+   not shift between the calls of one sync;
+3. at the end of the **checks** phase the checks of every row that is not an open pull request are emptied (every open pull request was read in
+   that phase, and a state GitHub does not know is written as empty). They are not emptied before: a sync that is cut in the middle of the checks
+   leaves the pull requests it has not reached as they were;
+4. the pull requests of every issue are computed again from the `closes` of the pull requests, in one pass over the pull requests;
+5. `last_full_sync_at` is set and the cursor is cleared.
 
 Because the sync reads the same fields the webhooks read, with the same functions (`tracker-map.ts`: the same rule for the closing
 keywords, the merged state and the state of the checks), **a cache that was deleted and synced holds what a cache kept current by

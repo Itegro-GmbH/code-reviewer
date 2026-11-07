@@ -6,15 +6,20 @@
 //
 //  - Paginated and resumable: one page of one phase at a time, and the position (`cursor`) is saved after each page. A sync that ends
 //    early (the time of the request is over, GitHub did not answer) continues with the next call where it stopped; a sync that has not
-//    moved for `STALE_AFTER_MS` (its state is written with every page) starts again from the beginning. Starting is one atomic claim
-//    (`claimSync`): of two calls at once one starts, the other continues the sync that is there and never resets its position.
+//    moved for `STALE_AFTER_MS` (its state is written with every page) starts again from the beginning. The nightly resync (#932) asks to
+//    `resume`: its calls are a day apart, so it waits `RESUME_STALE_AFTER_MS` instead, and a repository too big for one night's slice
+//    completes over several nights. Starting is one atomic claim (`claimSync`): of two calls at once one starts, the other continues the
+//    sync that is there and never resets its position.
 //  - The issues are read by the time of their last change, oldest first, and a list longer than one walk of pages is continued from the
 //    time of the last item read (`since`), so a repository of any size ends. An item seen twice is written twice, the same.
 //  - The rebuild rule: when the last phase is over, the items that were not written since the sync began are gone from the provider and are
 //    removed, and the pull requests that close an issue are linked again. A cache that was deleted and synced holds what a cache that was
-//    kept current holds (`docs/ticket-mirror.md`). When a ticket of the list could not be read, nothing is removed: the row of that
-//    ticket would look gone.
-//  - The board statuses are not emptied before the board is read: the statuses no board said anything about are emptied at the end.
+//    kept current holds (`docs/ticket-mirror.md`). "Since the sync began" is the start the sync state keeps, so the rows an earlier night of
+//    the same sync wrote are not removed. When a ticket of the list could not be read, nothing is removed: the row of that ticket would
+//    look gone.
+//  - The board statuses and the checks are not emptied before they are read (a slice that ends in the middle leaves what it did not reach as
+//    it was): the statuses no board said anything about are emptied at the end of the sync, and the checks of what is not an open pull
+//    request at the end of the checks.
 //  - Nothing is mapped: the values are the provider's. The sync never touches anything but the cache.
 import type {
   TrackerItemWrite,
@@ -26,6 +31,9 @@ import { TRACKER_PROVIDER } from "./mirror.ts";
 
 /** A sync that has not moved for this long is abandoned and starts again. */
 export const STALE_AFTER_MS = 60 * 60 * 1000;
+
+/** The same for a call that asks to `resume` (the nightly resync, whose calls are a day apart). */
+export const RESUME_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type SyncPhase = "issues" | "checks" | "board";
 
@@ -67,7 +75,7 @@ export type TrackerSyncDependencies = {
     | "setChecksState"
     | "linkPullRequests"
     | "clearBoardStatusesNotSeenSince"
-    | "clearChecksStates"
+    | "clearChecksStatesOfClosed"
     | "removeNotWrittenSince"
     | "getSyncState"
     | "claimSync"
@@ -83,11 +91,17 @@ export type TrackerSync = {
   /**
    * Continues the sync of the repository, or starts one, and reads pages until it is done, `maxPages` pages were read or `deadline`
    * (milliseconds since the epoch) has passed. Throws what the provider throws; the position of the last page that was written is kept.
+   * `resume`: an unfinished sync is continued unless it has not moved for `RESUME_STALE_AFTER_MS`, not `STALE_AFTER_MS`.
    */
   run(
     integration: Integration,
     repository: RepoRef & { id: string },
-    options?: { maxPages?: number; deadline?: number; signal?: AbortSignal },
+    options?: {
+      maxPages?: number;
+      deadline?: number;
+      signal?: AbortSignal;
+      resume?: boolean;
+    },
   ): Promise<SyncProgress>;
 };
 
@@ -162,7 +176,10 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
       const claim = await tracker.claimSync(repository.id, {
         cursor: JSON.stringify({ phase: "issues", page: 1 }),
         startedAt: now().toISOString(),
-        staleBefore: new Date(now().getTime() - STALE_AFTER_MS).toISOString(),
+        staleBefore: new Date(
+          now().getTime() -
+            (options.resume === true ? RESUME_STALE_AFTER_MS : STALE_AFTER_MS),
+        ).toISOString(),
         ...(unreadable === undefined ? {} : { replacing: unreadable }),
       });
       if (claim.state === undefined)
@@ -235,8 +252,6 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
                     ...skippedSoFar,
                   };
           } else {
-            // The checks are read afresh: what the cache held may be out of date.
-            await tracker.clearChecksStates(repository.id);
             next = { phase: "checks", page: 1, ...skippedSoFar };
           }
         } else if (page.phase === "checks" && cursor.phase === "checks") {
@@ -246,6 +261,9 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
               pullRequest.number,
               pullRequest.checksState,
             );
+          if (page.last)
+            // Every open pull request was read (a state the platform does not know is written as none): what is left is not one.
+            await tracker.clearChecksStatesOfClosed(repository.id);
           next = page.last
             ? { phase: "board", after: null, ...carried }
             : { phase: "checks", page: cursor.page + 1, ...carried };

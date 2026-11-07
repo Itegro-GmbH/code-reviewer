@@ -170,8 +170,11 @@ export type TrackerRepository = {
     repositoryId: string,
     since: string,
   ): Promise<void>;
-  /** Forgets the checks of every pull request (a full sync of them starts from nothing). */
-  clearChecksStates(repositoryId: string): Promise<void>;
+  /**
+   * Forgets the checks of every row that is not an open pull request (the end of a full sync of the checks: every open pull request was
+   * read, and a state the platform does not know was written as none).
+   */
+  clearChecksStatesOfClosed(repositoryId: string): Promise<void>;
   /**
    * Removes the items not written since `before`; answers how many. Tombstones go only when they were written last more than
    * `TOMBSTONE_KEPT_MS` before `before`.
@@ -472,13 +475,16 @@ export function createTrackerRepository(
         .execute();
     },
 
-    async clearChecksStates(repositoryId) {
+    async clearChecksStatesOfClosed(repositoryId) {
       await db
         .updateTable("tracker_items")
         .set({ checks_state: null })
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("checks_state", "is not", null)
+        .where((eb) =>
+          eb.or([eb("kind", "<>", "pull_request"), eb("state", "<>", "open")]),
+        )
         .execute();
     },
 

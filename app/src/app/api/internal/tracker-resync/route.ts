@@ -17,9 +17,12 @@ export async function GET(request: Request): Promise<Response> {
     env: process.env,
     enabled: () => getCapabilities().has("implementer"),
     targets: resyncTargets,
-    resync: (target, deadline) =>
+    resync: (target, deadline, signal) =>
+      // The nights of one sync are a day apart: continue what an earlier night left (`resume`), do not start it again.
       trackerServiceFor(target.workspaceId).sync(target.repositoryId, {
         deadline,
+        signal,
+        resume: true,
       }),
   });
 }

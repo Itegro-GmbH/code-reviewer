@@ -302,14 +302,20 @@ describe("the tickets of the mirror", () => {
   });
 
   // #923-T94
-  it("sets and forgets the checks of a pull request", async () => {
+  it("sets the checks of a pull request, and forgets those of what is not an open pull request", async () => {
     const { tracker, first } = await setup();
     await tracker.upsertItem(first.id, item(7, { kind: "pull_request" }));
+    await tracker.upsertItem(
+      first.id,
+      item(8, { kind: "pull_request", state: "closed" }),
+    );
 
     expect(await tracker.setChecksState(first.id, 7, "failure")).toBe(true);
+    expect(await tracker.setChecksState(first.id, 8, "success")).toBe(true);
+    await tracker.clearChecksStatesOfClosed(first.id);
+    // #932: an open pull request keeps what the sync wrote; the sync wrote none for a pull request it did not read.
     expect((await tracker.getItem(first.id, 7))?.checksState).toBe("failure");
-    await tracker.clearChecksStates(first.id);
-    expect((await tracker.getItem(first.id, 7))?.checksState).toBeNull();
+    expect((await tracker.getItem(first.id, 8))?.checksState).toBeNull();
     expect(await tracker.setChecksState(first.id, 99, "failure")).toBe(false);
   });
 

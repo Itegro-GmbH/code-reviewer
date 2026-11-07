@@ -4,7 +4,13 @@
 // the code of the Resync route, one project's failure never stops the others, and a deployment without the factory asks GitHub for nothing.
 import { describe, expect, it, vi } from "vitest";
 import type { ResyncTarget } from "../tracker/resync-targets.ts";
-import { handleTrackerResyncCron, resyncProjects } from "./tracker-resync.ts";
+import {
+  abortDelayMs,
+  handleTrackerResyncCron,
+  RESYNC_ABORT_GRACE_MS,
+  RESYNC_HARD_LIMIT_MS,
+  resyncProjects,
+} from "./tracker-resync.ts";
 
 const SECRET = "cron-secret-0123456789abcdef0123456789abcdef";
 
@@ -445,5 +451,98 @@ describe("the budget clock (#932)", () => {
 
     expect(resync).not.toHaveBeenCalled();
     expect(await response.json()).toMatchObject({ projects: 1, deferred: 1 });
+  });
+});
+
+describe("the page in flight at the end of the budget (#932)", () => {
+  // #932-R40
+  it("hands every sync an abort signal that is still open", async () => {
+    const calls: { target: ResyncTarget; signal: AbortSignal | undefined }[] =
+      [];
+    const resync = vi.fn(
+      async (t: ResyncTarget, _deadline: number, signal?: AbortSignal) => {
+        calls.push({ target: t, signal });
+        return { status: "done" as const };
+      },
+    );
+
+    await resyncProjects([target("r-1")], { resync, logFailure: vi.fn() });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(calls[0]?.signal?.aborted).toBe(false);
+  });
+
+  // #932-R41
+  it("aborts a little after the end of the slice of the project", () => {
+    expect(abortDelayMs(100_000, 0, 90_000)).toBe(
+      10_000 + RESYNC_ABORT_GRACE_MS,
+    );
+  });
+
+  // #932-R42
+  it("never aborts later than the hard limit of the run, which is shorter than the function's 300 seconds", () => {
+    expect(RESYNC_HARD_LIMIT_MS).toBeLessThan(300_000);
+    // The slice ends at the end of the budget: the grace would go past the hard limit.
+    expect(abortDelayMs(RESYNC_HARD_LIMIT_MS - 1000, 0, 200_000)).toBe(
+      RESYNC_HARD_LIMIT_MS - 200_000,
+    );
+  });
+
+  // #932-R43
+  it("aborts at once, and never with a delay that is none, when the time is already over", () => {
+    expect(abortDelayMs(1000, 0, RESYNC_HARD_LIMIT_MS + 5000)).toBe(1);
+  });
+
+  // #932-R44
+  it("logs the counts line even when a project's failure cannot be logged", async () => {
+    const log = vi.fn();
+
+    await expect(
+      resyncProjects([target("r-1")], {
+        resync: async () => {
+          throw new Error("boom");
+        },
+        logFailure: () => {
+          throw new Error("log is gone");
+        },
+        log,
+      }),
+    ).rejects.toThrow("log is gone");
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toContain("nightly resync");
+  });
+
+  // #932-R45
+  it("logs the counts line once on a normal run", async () => {
+    const log = vi.fn();
+
+    await resyncProjects([target("r-1"), target("r-2")], {
+      resync: async () => ({ status: "done" as const }),
+      log,
+    });
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toContain("2 projects, 2 done");
+  });
+});
+
+describe("the order of the projects does not depend on the locale (#932)", () => {
+  // #932-R46
+  it("breaks a tie of the attempt time by the id in plain code unit order", async () => {
+    const order: string[] = [];
+
+    await resyncProjects([target("r-a"), target("r-B"), target("r-C")], {
+      resync: async (t) => {
+        order.push(t.repositoryId);
+        return { status: "done" as const };
+      },
+      logFailure: vi.fn(),
+      log: vi.fn(),
+    });
+
+    // `localeCompare` would put "r-a" before "r-B".
+    expect(order).toEqual(["r-B", "r-C", "r-a"]);
   });
 });

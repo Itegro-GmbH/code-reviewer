@@ -88,7 +88,12 @@ export type TrackerService = {
    */
   sync(
     repositoryId: string,
-    options?: { maxPages?: number; deadline?: number },
+    options?: {
+      maxPages?: number;
+      deadline?: number;
+      signal?: AbortSignal;
+      resume?: boolean;
+    },
   ): Promise<SyncProgress>;
 };
 

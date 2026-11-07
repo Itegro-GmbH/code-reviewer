@@ -2558,8 +2558,8 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
-    name: "tracker.clearChecksStates",
-    run: (a, b) => a.tracker.clearChecksStates(b.repository.id),
+    name: "tracker.clearChecksStatesOfClosed",
+    run: (a, b) => a.tracker.clearChecksStatesOfClosed(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {

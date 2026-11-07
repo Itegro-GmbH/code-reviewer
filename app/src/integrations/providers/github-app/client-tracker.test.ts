@@ -505,6 +505,88 @@ describe("the board of the full sync", () => {
     });
   });
 
+  // #932-R23
+  it("keeps the place of a board it may not read, so that the position of the boards after it does not shift", async () => {
+    const refused = (type: string) => ({
+      errors: [{ type, path: ["repository", "projectsV2", "nodes", 1] }],
+    });
+    const { client } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      const query = (call.body as { query: string }).query;
+      return {
+        json: query.includes("projectsV2")
+          ? {
+              data: {
+                repository: {
+                  projectsV2: {
+                    nodes: [{ id: "PVT_1" }, null, { id: "PVT_3" }],
+                  },
+                },
+              },
+              ...refused("FORBIDDEN"),
+            }
+          : items(["Done"], false),
+      };
+    });
+
+    // The position "2:" was saved when the board in the middle could still be read: it still means the third board.
+    const third = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      "2:",
+    );
+    expect(third).toEqual({
+      available: true,
+      items: [{ nodeId: "I_0", status: "Done" }],
+      next: null,
+    });
+  });
+
+  // #932-R24
+  it("goes on with the next board it may read after one it may not, and ends when there is none", async () => {
+    const seen: unknown[] = [];
+    const { client } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      const body = call.body as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      if (!body.query.includes("projectsV2")) seen.push(body.variables.project);
+      return {
+        json: body.query.includes("projectsV2")
+          ? {
+              data: {
+                repository: {
+                  projectsV2: {
+                    nodes: [null, { id: "PVT_2" }, null, { id: "PVT_4" }, null],
+                  },
+                },
+              },
+              errors: [{ type: "FORBIDDEN", path: ["repository"] }],
+            }
+          : items(["Done"], false),
+      };
+    });
+
+    const first = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      null,
+    );
+    const second = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      first.next,
+    );
+
+    expect(first.next).toBe("3:");
+    expect(second.next).toBeNull();
+    expect(seen).toEqual(["PVT_2", "PVT_4"]);
+  });
+
   // #932-R20
   it("is still not available when the refused answer has no usable data", async () => {
     const { client } = scripted((call) =>
@@ -661,6 +743,31 @@ describe("the boards of a repository (#922)", () => {
     expect(query.query).toContain('query:"is:open"');
   });
 
+  // #932-R25
+  it("is not available when a board of the list is one it may not read, instead of leaving it out of the list", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: {
+                repository: { projectsV2: { nodes: [node({}), null] } },
+              },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["repository", "projectsV2", "nodes", 1],
+                },
+              ],
+            },
+          }
+        : undefined,
+    );
+
+    expect(
+      await client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
+    ).toEqual({ available: false, boards: [] });
+  });
+
   // #922-T41
   it.each(["FORBIDDEN", "INSUFFICIENT_SCOPES", "NOT_FOUND"])(
     "is not available when GitHub answers with only %s errors",
@@ -806,6 +913,30 @@ describe("the board status of one ticket (#932)", () => {
     expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
       available: true,
       status: "In Review",
+    });
+  });
+
+  // #932-R26
+  it("is not available when every board item of the ticket is refused: there is no status to write", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: { node: { projectItems: { nodes: [null, null] } } },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["node", "projectItems", "nodes", 0],
+                },
+              ],
+            },
+          }
+        : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: false,
+      status: null,
     });
   });
 

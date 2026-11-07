@@ -13,9 +13,12 @@
 //  - Projects whose last sync ended (or never ran) come first, the one attempted longest ago first; a project whose last sync did not end
 //    comes after them, so it neither goes first every night nor starves the rest. The projects the budget does not reach are counted
 //    `deferred`; they keep their old attempt time and so come first the next night.
-//  - A sync the slice ends in the middle of does NOT continue the next night: the sync state of a sync that has not moved for an hour is
-//    abandoned (`STALE_AFTER_MS` in `sync.ts`), so the next run starts it again from the first page. A project too big for its slice is
-//    `partial` every night, and its cache is healed by the deliveries and by Resync (the sync route has no such slice).
+//  - A sync the slice ends in the middle of CONTINUES the next night (the cron asks the sync to `resume`; `RESUME_STALE_AFTER_MS` in
+//    `sync.ts`): a project too big for one slice is `partial` for a few nights, completes, and only then applies the rebuild rule (what
+//    GitHub no longer has is removed). The rebuild counts from the start of the whole sync, not of the last night. A sync that has not
+//    moved for a week starts again from the first page.
+//  - A page in flight is aborted a little after the slice ends (`RESYNC_ABORT_GRACE_MS`) and never later than `RESYNC_HARD_LIMIT_MS`
+//    into the run, so a slow answer of GitHub cannot take the function past its limit and the counts line is always logged.
 //  - A deployment without the factory (`implementer`) reads the mirror nowhere: nothing is asked of GitHub there and the answer is `skipped`.
 //  - Overlapping runs are safe: the sync is claimed in the database, a second caller continues the sync that is there.
 // The answer carries counts only.
@@ -29,6 +32,11 @@ export const TRACKER_RESYNC_ERROR_CODES = ["TRACKER_RESYNC_FAILED"] as const;
 export const RESYNC_BUDGET_MS = 240_000;
 /** How long one call of the sync reads before it answers `partial`. */
 export const RESYNC_CALL_MS = 20_000;
+
+/** How long after the end of its slice the page of a project that is in flight may still be answered. */
+export const RESYNC_ABORT_GRACE_MS = 30_000;
+/** The latest, from the start of the run, that a page in flight is aborted: the function's 300 seconds less a margin to log and answer. */
+export const RESYNC_HARD_LIMIT_MS = 285_000;
 
 /** The least a project gets of the budget (a call of the sync reads at least one page), unless the budget itself is smaller. */
 export const RESYNC_MIN_SLICE_MS = 10_000;
@@ -44,10 +52,14 @@ type Dependencies = {
   /** False in a deployment that has no use for the mirror. */
   enabled: () => boolean;
   targets: () => Promise<ResyncTarget[]>;
-  /** One call of the sync of one project until `deadline` (milliseconds since the epoch); throws what the sync throws. */
+  /**
+   * One call of the sync of one project until `deadline` (milliseconds since the epoch); throws what the sync throws. The signal aborts
+   * the page in flight a little after the slice of the project is over.
+   */
   resync: (
     target: ResyncTarget,
     deadline: number,
+    signal: AbortSignal,
   ) => Promise<{ status: "done" | "partial" }>;
   now?: () => number;
   budgetMs?: number;
@@ -55,6 +67,8 @@ type Dependencies = {
   minSliceMs?: number;
   /** The line of a project that failed; default: console.error. */
   logFailure?: (line: string) => void;
+  /** The line with the counts of the run; default: console.info. */
+  log?: (line: string) => void;
 };
 
 export type ResyncCounts = {
@@ -82,26 +96,47 @@ function codeOf(error: unknown): string {
 function byTurn(a: ResyncTarget, b: ResyncTarget): number {
   if (a.unfinished !== b.unfinished) return a.unfinished ? 1 : -1;
   if (a.lastAttemptAt === b.lastAttemptAt)
-    return a.repositoryId.localeCompare(b.repositoryId);
+    return a.repositoryId < b.repositoryId
+      ? -1
+      : a.repositoryId > b.repositoryId
+        ? 1
+        : 0;
   if (a.lastAttemptAt === null) return -1;
   if (b.lastAttemptAt === null) return 1;
-  return a.lastAttemptAt.localeCompare(b.lastAttemptAt);
+  return a.lastAttemptAt < b.lastAttemptAt ? -1 : 1;
 }
 
-/** Walks the projects in their turn; every project is its own try. `startedAt` is when the budget began (default: now). */
+/** In how many milliseconds the page in flight of a project is aborted (at least 1): after the end of its slice, never past the hard limit. */
+export function abortDelayMs(
+  projectStopAt: number,
+  startedAt: number,
+  now: number,
+): number {
+  const abortAt = Math.min(
+    projectStopAt + RESYNC_ABORT_GRACE_MS,
+    startedAt + RESYNC_HARD_LIMIT_MS,
+  );
+  return Math.max(1, abortAt - now);
+}
+
+/**
+ * Walks the projects in their turn; every project is its own try. `startedAt` is when the budget began (default: now). The line with the
+ * counts is logged in every case, also when something other than a project's failure ends the walk.
+ */
 export async function resyncProjects(
   targets: readonly ResyncTarget[],
   options: Pick<
     Dependencies,
-    "resync" | "now" | "budgetMs" | "minSliceMs" | "logFailure"
+    "resync" | "now" | "budgetMs" | "minSliceMs" | "logFailure" | "log"
   > & { startedAt?: number },
 ): Promise<ResyncCounts> {
   const now = options.now ?? (() => Date.now());
   const logFailure =
     options.logFailure ?? ((line: string) => console.error(line));
   const minSliceMs = options.minSliceMs ?? RESYNC_MIN_SLICE_MS;
-  const stopAt =
-    (options.startedAt ?? now()) + (options.budgetMs ?? RESYNC_BUDGET_MS);
+  const log = options.log ?? ((line: string) => console.info(line));
+  const startedAt = options.startedAt ?? now();
+  const stopAt = startedAt + (options.budgetMs ?? RESYNC_BUDGET_MS);
   const counts: ResyncCounts = {
     projects: targets.length,
     done: 0,
@@ -110,35 +145,45 @@ export async function resyncProjects(
     deferred: 0,
   };
   const rateLimited = new Set<string>();
-  const ordered = [...targets].sort(byTurn);
-  for (const [index, target] of ordered.entries()) {
-    if (now() >= stopAt || rateLimited.has(target.integrationId)) {
-      counts.deferred += 1;
-      continue;
-    }
-    // A fair share of what is left, for this project and the ones still to come (those of a rate limited installation are not counted
-    // out: they are skipped one by one, and what they leave is the next project's).
-    const slice = Math.max(
-      minSliceMs,
-      Math.floor((stopAt - now()) / (ordered.length - index)),
-    );
-    const projectStopAt = Math.min(now() + slice, stopAt);
-    try {
-      let status: "done" | "partial" = "partial";
-      while (status === "partial" && now() < projectStopAt) {
-        const deadline = Math.min(now() + RESYNC_CALL_MS, projectStopAt);
-        status = (await options.resync(target, deadline)).status;
+  try {
+    const ordered = [...targets].sort(byTurn);
+    for (const [index, target] of ordered.entries()) {
+      if (now() >= stopAt || rateLimited.has(target.integrationId)) {
+        counts.deferred += 1;
+        continue;
       }
-      if (status === "done") counts.done += 1;
-      else counts.partial += 1;
-    } catch (error) {
-      counts.failed += 1;
-      const code = codeOf(error);
-      if (RATE_LIMIT_CODES.has(code)) rateLimited.add(target.integrationId);
-      logFailure(
-        `[tracker] TRACKER_RESYNC_PROJECT_FAILED: the nightly resync of repository=${target.repositoryId} failed (${code}); the other projects go on${RATE_LIMIT_CODES.has(code) ? ", those of the same installation are left for the next run" : ""}.`,
+      // A fair share of what is left, for this project and the ones still to come (those of a rate limited installation are not counted
+      // out: they are skipped one by one, and what they leave is the next project's).
+      const slice = Math.max(
+        minSliceMs,
+        Math.floor((stopAt - now()) / (ordered.length - index)),
       );
+      const projectStopAt = Math.min(now() + slice, stopAt);
+      const signal = AbortSignal.timeout(
+        abortDelayMs(projectStopAt, startedAt, now()),
+      );
+      try {
+        let status: "done" | "partial" = "partial";
+        while (status === "partial" && now() < projectStopAt) {
+          const deadline = Math.min(now() + RESYNC_CALL_MS, projectStopAt);
+          status = (await options.resync(target, deadline, signal)).status;
+        }
+        if (status === "done") counts.done += 1;
+        else counts.partial += 1;
+      } catch (error) {
+        counts.failed += 1;
+        const code = codeOf(error);
+        if (RATE_LIMIT_CODES.has(code)) rateLimited.add(target.integrationId);
+        logFailure(
+          `[tracker] TRACKER_RESYNC_PROJECT_FAILED: the nightly resync of repository=${target.repositoryId} failed (${code}); the other projects go on${RATE_LIMIT_CODES.has(code) ? ", those of the same installation are left for the next run" : ""}.`,
+        );
+      }
     }
+  } finally {
+    log(
+      `[tracker] nightly resync done: ${String(counts.projects)} projects, ${String(counts.done)} done, ${String(counts.partial)} partial, ` +
+        `${String(counts.failed)} failed, ${String(counts.deferred)} deferred`,
+    );
   }
   return counts;
 }
@@ -154,6 +199,7 @@ export async function handleTrackerResyncCron(
     budgetMs,
     minSliceMs,
     logFailure,
+    log,
   }: Dependencies,
 ): Promise<Response> {
   // The budget runs from here: listing the projects is part of what the function's time limit pays for.
@@ -174,11 +220,8 @@ export async function handleTrackerResyncCron(
       ...(now === undefined ? {} : { now }),
       ...(budgetMs === undefined ? {} : { budgetMs }),
       ...(logFailure === undefined ? {} : { logFailure }),
+      ...(log === undefined ? {} : { log }),
     });
-    console.info(
-      `[tracker] nightly resync done: ${String(counts.projects)} projects, ${String(counts.done)} done, ${String(counts.partial)} partial, ` +
-        `${String(counts.failed)} failed, ${String(counts.deferred)} deferred`,
-    );
     return Response.json({ status: "ok", ...counts }, { headers });
   } catch {
     // The cause is not repeated: it may carry a connection string. The platform shows the 500.

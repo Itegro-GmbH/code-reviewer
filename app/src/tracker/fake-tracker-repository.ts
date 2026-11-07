@@ -210,12 +210,13 @@ export function createFakeTrackerRepository(
             boardStatus: null,
           });
     },
-    async clearChecksStates(repositoryId) {
+    async clearChecksStatesOfClosed(repositoryId) {
       for (const item of rowsOf(repositoryId))
-        items.set(key(repositoryId, item.number), {
-          ...item,
-          checksState: null,
-        });
+        if (item.kind !== "pull_request" || item.state !== "open")
+          items.set(key(repositoryId, item.number), {
+            ...item,
+            checksState: null,
+          });
     },
     async removeNotWrittenSince(repositoryId, before) {
       let removed = 0;

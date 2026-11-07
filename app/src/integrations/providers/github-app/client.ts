@@ -476,7 +476,8 @@ export type GithubAppClient = {
   /**
    * The boards (GitHub Projects, projects_v2) of a repository (#922; GraphQL): id, number, title and the Status field with its option
    * names, at most `BOARDS_MAX` of them, closed ones left out. A board the token may not read (the permission "Projects" is missing, or
-   * the repository belongs to a user and has no organization board) is `available: false`, not a failure.
+   * the repository belongs to a user and has no organization board) is `available: false`, not a failure; so is a list in which one board
+   * came back null (it may not be read and cannot be named): the list is never silently short.
    */
   listRepositoryBoards(
     installationId: string,
@@ -594,6 +595,9 @@ function boardStatusOf(
   if (!isRecord(node.projectItems)) return undefined;
   const { nodes } = node.projectItems;
   if (!Array.isArray(nodes)) return undefined;
+  // Board items GitHub could not give are null: when nothing but those came there is no answer, and "no status" would be a guess.
+  if (nodes.length > 0 && nodes.every((item: unknown) => item === null))
+    return undefined;
   for (const item of nodes as unknown[]) {
     if (!isRecord(item) || !isRecord(item.fieldValueByName)) continue;
     const { name } = item.fieldValueByName;
@@ -602,14 +606,17 @@ function boardStatusOf(
   return null;
 }
 
-/** The ids of the boards a `BOARDS_QUERY` answer lists; null when the answer is not that. */
-function boardIdsOf(data: Record<string, unknown>): string[] | null {
+/**
+ * The ids of the boards a `BOARDS_QUERY` answer lists, in the order GitHub gives them; null when the answer is not that. A board the token
+ * may not read keeps its place as `null`: the position of the boards after it must not shift, the cursor of a sync names them by it.
+ */
+function boardIdsOf(data: Record<string, unknown>): (string | null)[] | null {
   const repository = data.repository;
   if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
   const nodes = repository.projectsV2.nodes;
   if (!Array.isArray(nodes)) return null;
-  return nodes.flatMap((node: unknown) =>
-    isRecord(node) && typeof node.id === "string" ? [node.id] : [],
+  return nodes.map((node: unknown) =>
+    isRecord(node) && typeof node.id === "string" ? node.id : null,
   );
 }
 
@@ -621,6 +628,8 @@ function repositoryBoardsOf(
   if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
   const nodes = repository.projectsV2.nodes;
   if (!Array.isArray(nodes)) return null;
+  // A board GitHub could not give (null: the token may not read it) cannot be named, so the list would be silently short: no answer.
+  if (nodes.includes(null)) return null;
   const boards: RepositoryBoard[] = [];
   for (const node of nodes as unknown[]) {
     if (
@@ -2636,24 +2645,35 @@ export function createGithubAppClient(
             if (projects === null) return unavailable;
             const boards = boardIdsOf(projects);
             if (boards === null) return unavailable;
-            const board = boards[index];
-            if (board === undefined)
+            // A board the token may not read is skipped, the indexes of the others stay what they were.
+            let at = index;
+            while (at < boards.length && boards[at] === null) at += 1;
+            const board = boards[at];
+            if (board === undefined || board === null)
               return { available: true, items: [], next: null };
 
             const data = await graphql(
               token,
               BOARD_ITEMS_QUERY,
-              { project: board, after: cursor, first: BOARD_PAGE_SIZE },
+              {
+                project: board,
+                // The cursor belongs to the board it was saved for: another board starts from its first page.
+                after: at === index ? cursor : null,
+                first: BOARD_PAGE_SIZE,
+              },
               signal,
             );
             if (data === null) return unavailable;
             const page = boardPageOf(data);
             if (page === null) return unavailable;
+            let following = at + 1;
+            while (following < boards.length && boards[following] === null)
+              following += 1;
             const next =
               page.endCursor !== null && page.hasNextPage
-                ? `${index}:${page.endCursor}`
-                : index + 1 < boards.length
-                  ? `${index + 1}:`
+                ? `${at}:${page.endCursor}`
+                : following < boards.length
+                  ? `${following}:`
                   : null;
             return { available: true, items: page.items, next };
           },
