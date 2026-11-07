@@ -587,27 +587,39 @@ export function createGithubConnectors(
           throw new ActionInputError(
             `"${PROJECT_MEMBERS}" cannot be resolved on this server; name the logins.`,
           );
-        const known = (await deps.projectMembers(call)).filter((login) =>
-          GITHUB_LOGIN.test(login),
-        );
-        if (known.length === 0)
+        // All of them, in the order they joined: GitHub decides who can review, and the first REVIEWERS_MAX it accepts are asked.
+        const known = new Map<string, string>();
+        for (const login of await deps.projectMembers(call))
+          if (GITHUB_LOGIN.test(login) && !known.has(login.toLowerCase()))
+            known.set(login.toLowerCase(), login);
+        if (known.size === 0)
           throw new ActionInputError(
             "None of the members of the project has a GitHub login to ask for a review.",
           );
-        logins = reviewerLogins(known.slice(0, REVIEWERS_MAX));
+        logins = [...known.values()];
       } else logins = reviewerLogins(reviewers);
       const { provider, integration, repo } = await targetOrFail(deps, call);
       if (provider.requestReviewers === undefined) throw unavailable(name);
       try {
         // The members of a project need not all be able to review this pull request (a collaborator of the repository, not its author),
-        // so they are asked one by one and the ones GitHub refuses are left out; people the lane names are asked for as they are.
+        // so they are asked one by one, in order, until REVIEWERS_MAX are accepted; the ones GitHub refuses for that reason are left
+        // out. People the lane names are asked for as they are.
         const { requested } = await provider.requestReviewers(
           integration,
           repo,
           pullRequest,
           logins,
-          { skipRefused: members, signal: call.signal },
+          {
+            skipRefused: members,
+            ...(members ? { max: REVIEWERS_MAX } : {}),
+            signal: call.signal,
+          },
         );
+        if (members && requested.length === 0)
+          throw new ConnectorError(
+            "github_validation",
+            "GitHub accepted none of the members of the project as reviewers: they are not collaborators of the repository, or the author of the pull request. Add them to the repository or name other reviewers.",
+          );
         return { requested };
       } catch (error) {
         throw toConnectorError(name, error);

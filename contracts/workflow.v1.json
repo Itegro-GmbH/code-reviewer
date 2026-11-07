@@ -45,7 +45,7 @@
           "$ref": "#/$defs/Steps"
         },
         "onFailure": {
-          "description": "Steps that run once after the run ended `failed` or `cancelled`, never after `succeeded` (#902). The run keeps its final status. The form is that of `steps`; the validator holds them to comments (`ticket.comment`, `github.issue.comment`), label changes (`ticket.labels`, `github.issue.labels`) and `if` over them (`on_failure_step_not_allowed`), gives them `{{failure.status}}`, `{{failure.stepId}}`, `{{failure.code}}` and `{{failure.message}}` and none of the steps above, and counts them against the 50 steps of the document.",
+          "description": "Steps that run once after the run ended `failed` or `cancelled`, never after `succeeded` (#902). The run keeps its final status. The form is that of `steps`; the validator holds them to comments (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), label changes (`ticket.labels`, `github.issue.labels`) and `if` over them (`on_failure_step_not_allowed`), gives them `{{failure.status}}`, `{{failure.stepId}}`, `{{failure.code}}` and `{{failure.message}}` and none of the steps above, and counts them against the 50 steps of the document.",
           "$ref": "#/$defs/Steps"
         }
       },

@@ -258,7 +258,7 @@ describe("ticket.requestReview", () => {
   it("asks the members of the project one by one when the text is project members, and leaves out the ones GitHub refuses", async () => {
     const { client, connector } = setup(
       { reviewersAfter: ["carol"] },
-      async () => ["carol", "dave", "not a login!"],
+      async () => ["carol", "dave", "not a login!", "Carol"],
     );
 
     const output = await connector("ticket.requestReview").run(
@@ -269,7 +269,71 @@ describe("ticket.requestReview", () => {
     const [asked] = client.calls.filter(
       (c) => c.method === "requestPullRequestReviewers",
     );
-    expect(asked?.args.slice(4, 6)).toEqual([["carol", "dave"], true]);
+    expect(asked?.args.slice(4, 7)).toEqual([["carol", "dave"], true, 15]);
+  });
+
+  // #917-T125
+  it("passes every member on in order, not the first 15, and lets GitHub stop at 15 that it accepts", async () => {
+    const members = Array.from({ length: 20 }, (_, i) => `user${String(i)}`);
+    const { client, connector } = setup(
+      { reviewersAfter: members.slice(3, 18) },
+      async () => members,
+    );
+
+    const output = await connector("ticket.requestReview").run(
+      call({ pullRequest: 12, reviewers: "project members" }),
+    );
+
+    expect(output).toEqual({ requested: members.slice(3, 18) });
+    const [asked] = client.calls.filter(
+      (c) => c.method === "requestPullRequestReviewers",
+    );
+    expect(asked?.args.slice(4, 7)).toEqual([members, true, 15]);
+  });
+
+  // #917-T126
+  it("ends with github_validation and says why when none of the members could be requested", async () => {
+    const { connector } = setup({ reviewersAfter: [] }, async () => [
+      "carol",
+      "dave",
+    ]);
+
+    const error = await failure(
+      connector("ticket.requestReview").run(
+        call({ pullRequest: 12, reviewers: "project members" }),
+      ),
+    );
+
+    expect(error).toBeInstanceOf(ConnectorError);
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message).toContain("none of the members");
+  });
+
+  // #917-T127
+  it("does not hide a failure that is not about a person: a refusal for a closed pull request ends the step with github_validation", async () => {
+    const { connector } = setup(
+      {
+        reviewersFailure: new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "GitHub answered 422 for POST /repos/{owner}/{repo}/pulls/{n}/requested_reviewers.",
+          {
+            status: 422,
+            refusal: "other",
+            reason: "Review cannot be requested on closed pull requests",
+          },
+        ),
+      },
+      async () => ["carol"],
+    );
+
+    const error = await failure(
+      connector("ticket.requestReview").run(
+        call({ pullRequest: 12, reviewers: "project members" }),
+      ),
+    );
+
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message).toContain("closed pull requests");
   });
 
   // #917-T122

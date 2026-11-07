@@ -183,14 +183,14 @@ export interface IntegrationProvider {
    * Only where the app can ask for a review (#917, `ticket.requestReview`): requests a review of pull request `prNumber` from these users
    * (logins), as the app, with a token limited to this repository and the pull request permission. Answers the users that are asked
    * afterwards. Asking twice is harmless. With `skipRefused`, a user the platform refuses (not a collaborator, the author) is left
-   * out instead of failing the call. Rejects like `openPullRequest`; `INTEGRATION_REQUEST_REFUSED` is a user that cannot review.
+   * out instead of failing the call (a refusal for another reason still fails it); `max` stops asking once that many are requested. Rejects like `openPullRequest`; `INTEGRATION_REQUEST_REFUSED` is a user that cannot review.
    */
   requestReviewers?(
     integration: Integration,
     repo: RepoRef,
     prNumber: number,
     reviewers: readonly string[],
-    options?: { skipRefused?: boolean; signal?: AbortSignal },
+    options?: { skipRefused?: boolean; max?: number; signal?: AbortSignal },
   ): Promise<{ requested: string[] }>;
 
   /**

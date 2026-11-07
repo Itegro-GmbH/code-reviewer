@@ -126,6 +126,24 @@ describe("ticket.setStatus", () => {
     ]);
   });
 
+  // #917-T307
+  it("is no obstacle for pullRequest.comment after a failure, which is a comment, and still no place for ticket.requestReview", () => {
+    const document = afterPullRequest([]);
+    document.onFailure = [
+      commentOnPullRequest({
+        pullRequest: 12,
+        body: "Stopped: {{failure.message}}",
+      }),
+    ];
+
+    expect(codes(document)).toEqual([]);
+
+    document.onFailure = [requestReview({ pullRequest: 12 })];
+    expect(codes(document)).toEqual([
+      ["/onFailure/0/connector", "on_failure_step_not_allowed"],
+    ]);
+  });
+
   // #917-T306
   it("yields the status for later steps", () => {
     expect(

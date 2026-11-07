@@ -111,6 +111,9 @@ function graphql(
     lookup: unknown;
     add?: unknown;
     set?: unknown;
+    /** `errors` that come next to the `data` of the mutation that adds the card, or the one that sets the status. */
+    addErrors?: unknown;
+    setErrors?: unknown;
   },
 ): Answer | undefined {
   if (seen.path !== "/graphql") return undefined;
@@ -121,6 +124,9 @@ function graphql(
         data: answers.add ?? {
           addProjectV2ItemById: { item: { id: "PVTI_card" } },
         },
+        ...(answers.addErrors === undefined
+          ? {}
+          : { errors: answers.addErrors }),
       },
     };
   if (query.includes("updateProjectV2ItemFieldValue"))
@@ -129,6 +135,9 @@ function graphql(
         data: answers.set ?? {
           updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_card" } },
         },
+        ...(answers.setErrors === undefined
+          ? {}
+          : { errors: answers.setErrors }),
       },
     };
   return { json: { data: answers.lookup } };
@@ -232,7 +241,13 @@ describe("requesting reviewers", () => {
       if (entry.path !== REVIEWS_PATH) return undefined;
       const [login] = (entry.body as { reviewers: string[] }).reviewers;
       return login === "stranger"
-        ? { status: 422, json: { message: "Review cannot be requested." } }
+        ? {
+            status: 422,
+            json: {
+              message:
+                "Reviews may only be requested from collaborators. One or more of the users you specified is not a collaborator of the acme/widgets repository.",
+            },
+          }
         : { status: 201, json: { requested_reviewers: [{ login }] } };
     });
 
@@ -271,6 +286,87 @@ describe("requesting reviewers", () => {
     );
 
     expect(error.code).toBe("GITHUB_APP_NOT_FOUND");
+  });
+
+  // #917-T205
+  it("leaves out the author of the pull request with skipRefused, but not a 422 that is about something else", async () => {
+    const author = setup((entry) => {
+      if (entry.path !== REVIEWS_PATH) return undefined;
+      const [login] = (entry.body as { reviewers: string[] }).reviewers;
+      return login === "writer"
+        ? {
+            status: 422,
+            json: {
+              message: "Review cannot be requested from pull request author.",
+            },
+          }
+        : { status: 201, json: { requested_reviewers: [{ login }] } };
+    });
+    const closed = setup((entry) =>
+      entry.path === REVIEWS_PATH
+        ? {
+            status: 422,
+            json: {
+              message: "Review cannot be requested on closed pull requests.",
+            },
+          }
+        : undefined,
+    );
+
+    expect(
+      await author.client.requestPullRequestReviewers(
+        "4242",
+        REVIEW,
+        "acme/widgets",
+        12,
+        ["writer", "bob"],
+        { skipRefused: true },
+      ),
+    ).toEqual(["bob"]);
+    const error = await failureOf(
+      closed.client.requestPullRequestReviewers(
+        "4242",
+        REVIEW,
+        "acme/widgets",
+        12,
+        ["alice", "bob"],
+        { skipRefused: true },
+      ),
+    );
+    expect(error.status).toBe(422);
+    expect(closed.calls()).toHaveLength(1);
+  });
+
+  // #917-T206
+  it("stops asking once max users are requested, counting the ones that were refused as not asked", async () => {
+    const { client, calls } = setup((entry) => {
+      if (entry.path !== REVIEWS_PATH) return undefined;
+      const [login] = (entry.body as { reviewers: string[] }).reviewers;
+      return login === "stranger"
+        ? {
+            status: 422,
+            json: {
+              message: "Reviews may only be requested from collaborators.",
+            },
+          }
+        : { status: 201, json: { requested_reviewers: [{ login }] } };
+    });
+
+    const requested = await client.requestPullRequestReviewers(
+      "4242",
+      REVIEW,
+      "acme/widgets",
+      12,
+      ["stranger", "alice", "bob", "carol"],
+      { skipRefused: true, max: 2 },
+    );
+
+    expect(requested).toEqual(["alice", "bob"]);
+    expect(calls().map((entry) => entry.body)).toEqual([
+      { reviewers: ["stranger"] },
+      { reviewers: ["alice"] },
+      { reviewers: ["bob"] },
+    ]);
   });
 });
 
@@ -329,7 +425,7 @@ describe("moving an issue on a board", () => {
       graphql(entry, {
         lookup: {
           repository: { issue: { id: "I_issue" } },
-          node: board(["Done"]),
+          node: { ...board(["Done"]), owner: { login: "Acme" } },
         },
       }),
     );
@@ -479,5 +575,78 @@ describe("moving an issue on a board", () => {
         ).code,
       ).toBe("GITHUB_APP_REQUEST_FAILED");
     expect(seen).toEqual([]);
+  });
+  // #917-T217
+  it("answers board_not_found for a node id of a project that belongs to another owner or to none, and moves nothing", async () => {
+    const lookupOf = (node: unknown) => ({
+      repository: { issue: { id: "I_issue" } },
+      node,
+    });
+    const elsewhere = setup((entry) =>
+      graphql(entry, {
+        lookup: lookupOf({ ...board(["Done"]), owner: { login: "other-org" } }),
+      }),
+    );
+    const unowned = setup((entry) =>
+      graphql(entry, { lookup: lookupOf(board(["Done"])) }),
+    );
+
+    for (const { client, calls } of [elsewhere, unowned]) {
+      expect(
+        await client.moveIssueOnBoard("4242", BOARD, "acme/widgets", 5, {
+          board: "PVT_kwDOabc-_1",
+          status: "Done",
+        }),
+      ).toEqual({ kind: "board_not_found" });
+      expect(calls()).toHaveLength(1);
+    }
+  });
+
+  // #917-T218
+  it("rejects when GraphQL answers errors next to partial data on the mutation that sets the status or the one that adds the card", async () => {
+    const lookup = lookupByNumber(board(["Done"]));
+    const sets = setup((entry) =>
+      graphql(entry, {
+        lookup,
+        set: { updateProjectV2ItemFieldValue: null },
+        setErrors: [{ type: "UNPROCESSABLE", message: "The option is gone." }],
+      }),
+    );
+    const adds = setup((entry) =>
+      graphql(entry, {
+        lookup,
+        add: { addProjectV2ItemById: null },
+        addErrors: [{ type: "NOT_FOUND", message: "Could not resolve." }],
+      }),
+    );
+    const bare = setup((entry) =>
+      graphql(entry, {
+        lookup,
+        set: { updateProjectV2ItemFieldValue: { projectV2Item: null } },
+      }),
+    );
+    const move = { board: "7", status: "Done" };
+
+    const refused = await failureOf(
+      sets.client.moveIssueOnBoard("4242", BOARD, "acme/widgets", 5, move),
+    );
+    const missing = await failureOf(
+      adds.client.moveIssueOnBoard("4242", BOARD, "acme/widgets", 5, move),
+    );
+    const noItem = await failureOf(
+      bare.client.moveIssueOnBoard("4242", BOARD, "acme/widgets", 5, move),
+    );
+
+    expect(refused).toMatchObject({
+      code: "GITHUB_APP_REQUEST_FAILED",
+      status: 422,
+      reason: "The option is gone.",
+    });
+    expect(missing).toMatchObject({
+      code: "GITHUB_APP_NOT_FOUND",
+      status: 404,
+    });
+    expect(noItem.code).toBe("GITHUB_APP_REQUEST_FAILED");
+    expect(adds.calls()).toHaveLength(2);
   });
 });

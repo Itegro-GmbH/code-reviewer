@@ -369,6 +369,7 @@ export function fakeGithubAppClient(
         prNumber,
         reviewers,
         options?.skipRefused === true,
+        ...(options?.max === undefined ? [] : [options.max]),
         ...(options?.signal === undefined ? [] : [options.signal]),
       );
       throwIfAborted(options?.signal);

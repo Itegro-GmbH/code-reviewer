@@ -183,7 +183,9 @@ export function resolveActionInputs(
     const resolved =
       typeof raw === "string" && input.type.kind === "string"
         ? renderText(raw, values, undefined, {
-            defuse: true,
+            // An input with no root (`target: []`: a board, a status) is a name looked up on the provider by exact equality: it is
+            // never a text that is written anywhere, so nothing is put into it.
+            defuse: input.target?.length !== 0,
             plain: name === "title",
           })
         : typeof raw === "string"

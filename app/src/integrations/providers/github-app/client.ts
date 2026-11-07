@@ -302,8 +302,10 @@ export type GithubAppClient = {
    * Requests a review of a pull request from these GitHub users (#917; `POST .../pulls/{n}/requested_reviewers`), with a token limited
    * to `scope`. Answers the logins that are requested afterwards, as GitHub spells them. A user who has already been asked stays
    * asked, so it can be done twice. GitHub refuses the whole request when one of them cannot review (not a collaborator, the author of
-   * the pull request): that is a 422, `GITHUB_APP_REQUEST_FAILED`. With `skipRefused` the users are asked one by one and the ones
-   * GitHub refuses are left out instead. 404 when there is no such pull request. Aborts like `getPullRequest`.
+   * the pull request): that is a 422, `GITHUB_APP_REQUEST_FAILED`. With `skipRefused` the users are asked one by one, in the order
+   * given, and the ones GitHub refuses for that reason (its 422 says they are not collaborators or are the author) are left out
+   * instead; any other 422 (a closed pull request, say) still rejects. `max` stops asking once that many are requested. 404 when
+   * there is no such pull request. Aborts like `getPullRequest`.
    */
   requestPullRequestReviewers(
     installationId: string,
@@ -311,7 +313,7 @@ export type GithubAppClient = {
     repoFullName: string,
     prNumber: number,
     reviewers: readonly string[],
-    options?: { skipRefused?: boolean; signal?: AbortSignal },
+    options?: { skipRefused?: boolean; max?: number; signal?: AbortSignal },
   ): Promise<string[]>;
   /**
    * Sets the `Status` field of an issue on a GitHub Project (projects_v2) board of the repository's owner to the option named `status`
@@ -713,6 +715,9 @@ function checkPullRequestNumber(prNumber: number): void {
     );
 }
 
+/** What GitHub's 422 says when the user cannot review the pull request: not a collaborator of the repository, or its author. */
+const REVIEWER_REFUSED = /\bcollaborators?\b|pull request author/i;
+
 /** A GitHub login: letters, digits and single hyphens, up to 39 characters. */
 function checkLogin(login: string): void {
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login))
@@ -744,7 +749,7 @@ const BOARD_BY_NUMBER_QUERY = `query($owner: String!, $name: String!, $issue: In
 }`;
 const BOARD_BY_ID_QUERY = `query($owner: String!, $name: String!, $issue: Int!, $board: ID!) {
   repository(owner: $owner, name: $name) { issue(number: $issue) { id } }
-  node(id: $board) { ... on ProjectV2 { ${BOARD_FIELDS} } }
+  node(id: $board) { ... on ProjectV2 { ${BOARD_FIELDS} owner { ... on Organization { login } ... on User { login } } } }
 }`;
 const ADD_TO_BOARD_MUTATION = `mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
@@ -1783,7 +1788,7 @@ export function createGithubAppClient(
       checkInstallationId(installationId);
       checkPullRequestNumber(prNumber);
       for (const login of reviewers) checkLogin(login);
-      const { skipRefused = false, signal } = options;
+      const { skipRefused = false, max = Infinity, signal } = options;
       const path = `${repoPath(repoFullName)}/pulls/${prNumber}/requested_reviewers`;
       const asked = new Set(reviewers.map((login) => login.toLowerCase()));
       return withScopedToken(
@@ -1816,14 +1821,18 @@ export function createGithubAppClient(
             return [...requested.values()];
           }
           for (const login of reviewers) {
+            if (requested.size >= max) break;
             try {
               await ask([login]);
             } catch (error) {
-              // A user who cannot review this pull request (not a collaborator, its author) is left out.
+              // A user who cannot review this pull request (not a collaborator, its author) is left out; a 422 for another
+              // reason (the pull request is closed, say) is not about the user and stays a failure.
               if (
                 !(error instanceof GithubAppError) ||
                 error.code !== "GITHUB_APP_REQUEST_FAILED" ||
-                error.status !== 422
+                error.status !== 422 ||
+                error.reason === undefined ||
+                !REVIEWER_REFUSED.test(error.reason)
               )
                 throw error;
             }
@@ -1851,10 +1860,13 @@ export function createGithubAppClient(
         installationId,
         scope,
         async (token): Promise<BoardMove> => {
-          // GraphQL answers 200 with `errors`; a refusal of the token's rights is told apart from a thing that is not there.
+          // GraphQL answers 200 with `errors`; a refusal of the token's rights is told apart from a thing that is not there. `operation` is
+          // the mutation whose object must come back: errors next to partial `data` are a failure when it is null (a card that was not
+          // added or a status that was not set must not read as moved). A query leaves "not found" to the caller, which sees the null.
           const graphql = async (
             query: string,
             variables: Record<string, unknown>,
+            operation?: string,
           ): Promise<Record<string, unknown>> => {
             const json = await request(
               token,
@@ -1881,12 +1893,38 @@ export function createGithubAppClient(
                 "GitHub answered FORBIDDEN for POST /graphql.",
                 { status: 403, refusal: "permission_missing" },
               );
-            const data = json.data;
-            if (isRecord(data)) return data;
-            // No data and no reason this code knows: not what was asked for.
-            if (errors.length === 0 || !typeOf("NOT_FOUND"))
+            const data = isRecord(json.data) ? json.data : null;
+            const objectNull =
+              operation === undefined
+                ? data === null
+                : data === null || !isRecord(data[operation]);
+            if (errors.length > 0 && objectNull) {
+              if (typeOf("UNPROCESSABLE")) {
+                const message = errors.find(
+                  (entry) => entry.type === "UNPROCESSABLE",
+                )?.message;
+                const reason =
+                  typeof message === "string"
+                    ? cleanReason(message)
+                    : undefined;
+                throw new GithubAppError(
+                  "GITHUB_APP_REQUEST_FAILED",
+                  "GitHub answered UNPROCESSABLE for POST /graphql.",
+                  { status: 422, ...(reason === undefined ? {} : { reason }) },
+                );
+              }
+              if (typeOf("NOT_FOUND")) {
+                if (operation === undefined) return data ?? {};
+                throw new GithubAppError(
+                  "GITHUB_APP_NOT_FOUND",
+                  "GitHub answered NOT_FOUND for POST /graphql.",
+                  { status: 404 },
+                );
+              }
+            }
+            if (data === null || (operation !== undefined && objectNull))
               throw shapeError("POST /graphql");
-            return {};
+            return data;
           };
           const found = await graphql(
             "number" in board ? BOARD_BY_NUMBER_QUERY : BOARD_BY_ID_QUERY,
@@ -1909,6 +1947,18 @@ export function createGithubAppClient(
               : found.node;
           const facts = toBoardFacts(boardJson);
           if (facts === null) return { kind: "board_not_found" };
+          // A node id names any project the token can see; only a project of the repository's owner is a board of this run.
+          if (!("number" in board)) {
+            const projectOwner =
+              isRecord(boardJson) && isRecord(boardJson.owner)
+                ? boardJson.owner.login
+                : undefined;
+            if (
+              typeof projectOwner !== "string" ||
+              projectOwner.toLowerCase() !== owner.toLowerCase()
+            )
+              return { kind: "board_not_found" };
+          }
           const option = facts.field?.options.find(
             (candidate) => candidate.name === move.status,
           );
@@ -1918,21 +1968,31 @@ export function createGithubAppClient(
               available: facts.field?.options.map((entry) => entry.name) ?? [],
             };
           // Adding an issue that is on the board already answers its card, so the same call works for both.
-          const added = await graphql(ADD_TO_BOARD_MUTATION, {
-            project: facts.id,
-            content: issue.id,
-          });
+          const added = await graphql(
+            ADD_TO_BOARD_MUTATION,
+            { project: facts.id, content: issue.id },
+            "addProjectV2ItemById",
+          );
           const item = isRecord(added.addProjectV2ItemById)
             ? added.addProjectV2ItemById.item
             : null;
           if (!isRecord(item) || typeof item.id !== "string")
             throw shapeError("POST /graphql");
-          await graphql(SET_STATUS_MUTATION, {
-            project: facts.id,
-            item: item.id,
-            field: facts.field.id,
-            option: option.id,
-          });
+          const set = await graphql(
+            SET_STATUS_MUTATION,
+            {
+              project: facts.id,
+              item: item.id,
+              field: facts.field.id,
+              option: option.id,
+            },
+            "updateProjectV2ItemFieldValue",
+          );
+          const updated = isRecord(set.updateProjectV2ItemFieldValue)
+            ? set.updateProjectV2ItemFieldValue.projectV2Item
+            : null;
+          if (!isRecord(updated) || typeof updated.id !== "string")
+            throw shapeError("POST /graphql");
           return { kind: "moved", status: option.name };
         },
         signal,

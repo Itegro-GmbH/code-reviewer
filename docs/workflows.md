@@ -235,18 +235,20 @@ Connectors are named by what they do, not by the provider; the provider is the o
 **aliases** that saved lanes keep using (#916, #917): `ticket.comment` is `github.issue.comment`, `ticket.labels` is `github.issue.labels` and
 `pullRequest.open` is `github.pullRequest.open`, each with the same inputs and outputs (`ticket` where the old name says `issue`). `pullRequest.comment`
 writes below a pull request, the way `ticket.comment` does below an issue. The aliases are allowed in `onFailure` as before (`ticket.comment`, `ticket.labels`,
-`github.issue.comment`, `github.issue.labels`).
+`github.issue.comment`, `github.issue.labels`), and so is `pullRequest.comment`, which is a comment too (`ticket.setStatus` and `ticket.requestReview` are not).
 
 `ticket.setStatus` writes the **Status field of a GitHub Project** (projects_v2) of the repository's owner: the issue is put into the column `status` names and, when it
 is not on the board yet, added to it first. `board` is named on the action for now (the project that is connected to a board comes with #922, which moves it there). The option
 name is looked up **when the step runs**: a board without such an option ends the step with `board_status_unknown`, and the message names the options it has. A board that
-is not found among the owner's projects ends it with `github_not_found`. The App needs the opt-in **Projects** permission (see [GitHub actions](#github-actions) and `docs/github-app.md`); without
+is not found among the owner's projects ends it with `github_not_found`; a board named by its node id must belong to the repository's owner, else it is not found as well. `board` and `status` are names that are looked up
+by equality, so nothing is put into them (no mention of a person is defused in a status such as `Needs @design`). GraphQL errors that come with partial data never read as moved: the step ends when the card was not added or the status not set. The App needs the opt-in **Projects** permission (see [GitHub actions](#github-actions) and `docs/github-app.md`); without
 it the step ends with `github_permission_missing`. The validator holds `board` to the number of a Project or its `PVT_…` node id and `status` to a literal that is not blank (`invalid_value`).
 
 `ticket.requestReview` asks for a review of a pull request, usually the one a `pullRequest.open` step opened: `{{open.number}}`. `"project members"` asks the members of the
-workspace that have a GitHub login (until a project has members of its own, #922); the ones that cannot review that pull request (not a collaborator of the repository, its author)
-are left out. A list of logins is asked as written, and GitHub's refusal of one of them (`github_validation`) ends the step. At most 15 people. Any other text than `"project members"`
-is `invalid_value` with `available: ["project members"]`.
+workspace that have a GitHub login (until a project has members of its own, #922), in the order they joined. They are asked **one by one until GitHub has accepted 15 of them**: the ones that cannot review that pull
+request (GitHub says they are not a collaborator of the repository, or the author) are left out, and so the first 15 members are not simply taken. Any other refusal (a closed pull request, say) ends the step.
+When none of them could be asked the step ends with `github_validation` and says why, instead of yielding an empty `requested`. A list of logins is asked as written, and GitHub's refusal of one of them
+(`github_validation`) ends the step. At most 15 people. Any other text than `"project members"` is `invalid_value` with `available: ["project members"]`.
 
 The action works on the repository of the run. `head`, `base`, `issue`, `ticket`, `pullRequest`, `reviewers`, `board`, `status`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 a label trigger an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
@@ -274,7 +276,7 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 `onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
 (`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
 
-- **What they may be.** An `action` of `ticket.comment` or `ticket.labels` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+- **What they may be.** An `action` of `ticket.comment`, `ticket.labels` or `pullRequest.comment` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
   `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
 - **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
@@ -1193,7 +1195,7 @@ Beyond the form:
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
-| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |

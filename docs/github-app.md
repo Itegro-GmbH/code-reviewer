@@ -211,9 +211,12 @@ To use `ticket.setStatus`:
 1. In the App's settings on GitHub (*Permissions & events > Organization permissions*), set **Projects** (`organization_projects`) to **Read and write** and save.
 2. Every installation has to accept the changed permissions (GitHub asks an owner of the organization). Until it does, GitHub refuses the token of the action
    (HTTP 422) and the step ends with `github_permission_missing`, naming "Projects: Read and write" and "Issues: Read-only".
-3. The action's own token holds exactly `organization_projects: write`, `issues: read` and `metadata: read`, limited to the one repository of the run
+3. The action's own token holds exactly `organization_projects: write`, `issues: read` and `metadata: read`
    (`BOARD_STATUS_TOKEN_PERMISSIONS` in `app/src/integrations/providers/github-app/job-access.ts`). It only reads the project's `Status` field and the issue, adds the issue
    to the project when it is not on it, and sets that one field.
+
+The token is limited to the one repository of the run **for issues and pull requests**. The Projects permission is an organization permission and has no repository to limit it to: it applies to
+**the owner's projects** (every project of the organization the installation can see), so the action itself keeps to the project of the owner of the run's repository (a project node id of another owner is not found).
 
 The project must belong to the **owner of the repository** (an organization; GitHub does not let an App write the projects of a user with an installation token). The board is
 named by its number (the number in the project's address, `…/projects/7`) or its node id. `ticket.requestReview` needs nothing new: it uses Pull requests: Read and write.
