@@ -10,6 +10,7 @@ import { Button } from "../components/button.tsx";
 import { PageHeader } from "../components/page-header.tsx";
 import { Alert } from "../components/ui/alert.tsx";
 import { ROLE_NOT_ALLOWED } from "../copy/messages.ts";
+import type { ProfileService } from "../profiles/service.ts";
 import { WorkflowError } from "../workflows/errors.ts";
 import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
@@ -21,6 +22,9 @@ import type {
   WorkflowRunService,
 } from "../workflow-runs/service.ts";
 import type { WorkflowRunsApi } from "./api.ts";
+import type { BuilderApi } from "./builder/api.ts";
+import { LaneBuilder } from "./builder/builder.tsx";
+import type { ProfileOption } from "./builder/inspector.tsx";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { WorkflowRunsList } from "./runs-list.tsx";
@@ -51,9 +55,14 @@ export type WorkflowPageData =
   | NotFound
   | {
       kind: "ready";
-      workflow: Pick<WorkflowView, "id" | "name" | "version" | "archivedAt">;
+      workflow: Pick<
+        WorkflowView,
+        "id" | "name" | "version" | "archivedAt" | "versions" | "document"
+      >;
       form: StartFormSpec;
       runs: RunSummaryView[];
+      /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
+      profiles: ProfileOption[];
     };
 
 export async function loadWorkflowPage(
@@ -61,6 +70,8 @@ export async function loadWorkflowPage(
   deps: {
     workflows: Pick<WorkflowService, "get">;
     runs: Pick<WorkflowRunService, "list">;
+    /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
+    profiles?: Pick<ProfileService, "list">;
   },
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
@@ -69,6 +80,8 @@ export async function loadWorkflowPage(
   }));
   if (found === undefined) return { kind: "not_found" };
   const { workflow, runs } = found;
+  const listed =
+    deps.profiles === undefined ? [] : (await deps.profiles.list()).profiles;
   return {
     kind: "ready",
     workflow: {
@@ -76,9 +89,14 @@ export async function loadWorkflowPage(
       name: workflow.name,
       version: workflow.version,
       archivedAt: workflow.archivedAt,
+      versions: workflow.versions,
+      document: workflow.document,
     },
     form: startFormOf(workflow.document),
     runs,
+    profiles: listed
+      .filter((profile) => profile.archivedAt === null)
+      .map((profile) => ({ name: profile.name, version: profile.version })),
   };
 }
 
@@ -145,12 +163,15 @@ export function WorkflowPageContent({
   data,
   mayStart,
   api,
+  builderApi,
 }: {
   workspaceSlug: string;
   data: Extract<WorkflowPageData, { kind: "ready" }>;
   mayStart: boolean;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
+  /** Only tests pass this, for the same reason: the builder's calls to the validate and save routes. */
+  builderApi?: BuilderApi;
 }) {
   const { workflow } = data;
   return (
@@ -170,10 +191,21 @@ export function WorkflowPageContent({
           />
         }
       />
-      <StartSection
+      <LaneBuilder
         workspaceSlug={workspaceSlug}
-        data={data}
-        mayStart={mayStart}
+        workflowId={workflow.id}
+        version={workflow.version}
+        versions={workflow.versions}
+        document={workflow.document}
+        profiles={data.profiles}
+        startPanel={
+          <StartSection
+            workspaceSlug={workspaceSlug}
+            data={data}
+            mayStart={mayStart}
+          />
+        }
+        {...(builderApi === undefined ? {} : { api: builderApi })}
       />
       <section aria-labelledby="runs-heading" className="flex flex-col gap-4">
         <h2 id="runs-heading" className="text-xl font-semibold">
