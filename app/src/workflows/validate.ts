@@ -89,6 +89,7 @@ function indexSteps(
   index: Map<string, StepInfo>,
   report: (found: Issue) => void,
   depth = 0,
+  preStepOf?: StepInfo["preStepOf"],
 ): number {
   if (!Array.isArray(steps)) return 0;
   let count = 0;
@@ -107,7 +108,14 @@ function indexSteps(
             `The id ${shown(id)} is already used by the step at ${first.path}. Every step needs its own id, also inside branches and loops.`,
           ),
         );
-      else index.set(id, { id, path: at, kind: String(node.kind), branches });
+      else
+        index.set(id, {
+          id,
+          path: at,
+          kind: String(node.kind),
+          branches,
+          ...(preStepOf === undefined ? {} : { preStepOf }),
+        });
     }
     if (depth + 1 > NESTING_DEPTH_MAX) return;
     if (node.kind === "if") {
@@ -118,6 +126,7 @@ function indexSteps(
         index,
         report,
         depth + 1,
+        preStepOf,
       );
       count += indexSteps(
         node.else,
@@ -126,6 +135,7 @@ function indexSteps(
         index,
         report,
         depth + 1,
+        preStepOf,
       );
     } else if (node.kind === "loop") {
       count += indexSteps(
@@ -135,6 +145,7 @@ function indexSteps(
         index,
         report,
         depth + 1,
+        preStepOf,
       );
     }
   });
@@ -406,6 +417,35 @@ function canonicalOf(trigger: CheckedTrigger): string | undefined {
 }
 
 /** `trigger` (one, as before #916) or `triggers` (several, each with pre-steps), as a list of triggers; both at once is refused. */
+/** Two label triggers that wait for one label would start two runs for one event: the second is reported, naming the first. */
+function checkDuplicateLabels(
+  triggers: readonly CheckedTrigger[],
+  report: Report,
+): void {
+  const first = new Map<string, string>();
+  for (const [position, trigger] of triggers.entries()) {
+    if (
+      trigger.kind === undefined ||
+      canonicalTriggerKind(trigger.kind) !== "ticket.labeled" ||
+      trigger.label === undefined
+    )
+      continue;
+    const key = trigger.label.trim().toLowerCase();
+    const earlier = first.get(key);
+    if (earlier === undefined) {
+      first.set(key, trigger.id === "" ? `#${position + 1}` : trigger.id);
+      continue;
+    }
+    report(
+      issue(
+        pointer(trigger.path, "label"),
+        "duplicate_trigger_label",
+        `The label ${shown(trigger.label)} already starts the workflow through the trigger ${shown(earlier)}. Two triggers waiting for one label would start two runs for one event: give this one another label.`,
+      ),
+    );
+  }
+}
+
 function checkTriggers(
   document: Record<string, unknown>,
   report: Report,
@@ -597,6 +637,7 @@ export function validateWorkflow(
   }
 
   const triggers = checkTriggers(document, report);
+  checkDuplicateLabels(triggers, report);
   const budget = checkBudget(
     document.budgetUsd,
     options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
@@ -606,13 +647,18 @@ export function validateWorkflow(
   // One index for the pre-steps of every trigger and the shared steps: an id is used once in the whole document (#916).
   const index = new Map<string, StepInfo>();
   let stepCount = 0;
-  for (const trigger of triggers)
+  for (const [position, trigger] of triggers.entries())
     stepCount += indexSteps(
       trigger.steps,
       trigger.stepsPath,
       [],
       index,
       report,
+      0,
+      {
+        id: trigger.id === "" ? `#${position + 1}` : trigger.id,
+        path: trigger.stepsPath,
+      },
     );
   stepCount += indexSteps(document.steps, "/steps", [], index, report);
   if (document.onFailure !== undefined)

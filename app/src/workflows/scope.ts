@@ -120,6 +120,8 @@ export type StepInfo = {
   kind: string;
   /** The `if` branches around it, outermost first. */
   branches: { ifId: string; branch: "then" | "else" }[];
+  /** Of a pre-step (#916): the trigger it belongs to and the pointer of its pre-steps. It runs for that trigger only. */
+  preStepOf?: { id: string; path: string };
 };
 
 export type Use = {
@@ -200,6 +202,14 @@ function whyNotReachable(
     return {
       code: "reference_to_later_step",
       message: `${shown(info.id)} is still running here: it contains this step, and its values exist only when it has ended. Use a step that ends before.`,
+    };
+  if (
+    info.preStepOf !== undefined &&
+    !isPrefix(info.preStepOf.path, use.nodePath)
+  )
+    return {
+      code: "reference_not_in_scope",
+      message: `${shown(info.id)} is a pre-step of trigger ${clip(info.preStepOf.id)}, which does not run for this one. Only the pre-steps of the trigger that fired run, so a step outside them cannot rely on its values.`,
     };
   const later =
     comparePaths(info.path, use.nodePath) > 0 &&

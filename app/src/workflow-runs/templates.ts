@@ -46,7 +46,8 @@ export type RenderOptions = {
 const ZERO_WIDTH_SPACE = "\u200b";
 
 /**
- * The values of an issue a label started a run for (#845) that whoever opened the issue wrote: its title, its body and its labels.
+ * The values of a ticket (#845, #916) that whoever opened it or the organisation's settings wrote: its title, body, labels, type and
+ * assignees (`type` is a name an organisation chose, `assignees` are logins, both reach a text as they are).
  * They go into the text of an action defused, like what an agent wrote: an issue that says `@org/team` or `Closes #5` must not mention
  * that team or close that issue from a comment or a pull request the workflow writes. The number and the address are the platform's,
  * and so is the repository, and stay as they are (`Closes #{{trigger.issue.number}}` is the workflow's own sentence).
@@ -55,6 +56,8 @@ const OUTSIDER_TRIGGER_FIELDS: ReadonlySet<string> = new Set([
   "title",
   "body",
   "labels",
+  "type",
+  "assignees",
 ]);
 
 /** What the failure of a run says besides its status and the id of a step of the workflow: a code a runner or a connector chose, and a message that may quote one. */

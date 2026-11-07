@@ -9,6 +9,9 @@
 //
 // Expand only, safe for the live database and for the version that is still running:
 //  - the old version never reads or writes `trigger_id` and never writes a new kind;
+//  - `trigger_input` keeps the shape the old version reads: a run started by hand or through the API stores the input exactly as it was
+//    handed in unless the trigger has a `ticket` input; only then is it `{ input, ticket }`, which a document the old version saved
+//    cannot ask for. The old version therefore reads `{{trigger.input.repo}}` of every run the new one writes for such a document;
 //  - `add column` without a default changes the catalog only; Postgres does not rewrite the table. It takes a short exclusive lock on
 //    `workflow_runs`; the wait is bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back
 //    (`MIGRATION_FAILED`) and the deployment can be run again;

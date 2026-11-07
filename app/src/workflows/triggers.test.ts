@@ -159,6 +159,105 @@ describe("triggers with pre-steps", () => {
     ).toEqual([["/triggers/0/steps/0/body", "reference_unknown_field"]]);
   });
 
+  // #916-T69
+  it("reports a reference to a pre-step of another trigger as not in scope, naming that trigger", () => {
+    const phrase =
+      "a pre-step of trigger manual, which does not run for this one";
+    // A shared step reads the pre-step of a trigger.
+    const fromShared = check(
+      workflow(
+        [LABELED, { ...MANUAL, steps: [labels("mark", ["go"])] }],
+        [comment("say", 7, "{{mark.labels}}")],
+      ),
+    );
+    expect(fromShared.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/body",
+        code: "reference_not_in_scope",
+        message: expect.stringContaining(phrase) as string,
+      }),
+    ]);
+    // A pre-step reads the pre-step of another trigger.
+    const fromOther = check(
+      workflow([
+        { ...LABELED, steps: [comment("note", 7, "{{mark.labels}}")] },
+        { ...MANUAL, steps: [labels("mark", ["go"])] },
+      ]),
+    );
+    expect(fromOther.errors).toEqual([
+      expect.objectContaining({
+        path: "/triggers/0/steps/0/body",
+        code: "reference_not_in_scope",
+        message: expect.stringContaining(phrase) as string,
+      }),
+    ]);
+    // A pre-step still reads the step before it in its own trigger, and a step that comes later in it is a later step.
+    expect(
+      codes(
+        workflow([
+          LABELED,
+          {
+            ...MANUAL,
+            steps: [
+              labels("mark", ["go"]),
+              comment("note", 7, "{{mark.labels}}"),
+            ],
+          },
+        ]),
+      ),
+    ).toEqual([]);
+    expect(
+      codes(
+        workflow([
+          LABELED,
+          {
+            ...MANUAL,
+            steps: [
+              comment("note", 7, "{{mark.labels}}"),
+              labels("mark", ["go"]),
+            ],
+          },
+        ]),
+      ),
+    ).toEqual([["/triggers/1/steps/0/body", "reference_to_later_step"]]);
+  });
+
+  // #916-T70
+  it("reports two label triggers that wait for the same label at the second one, without regard to case", () => {
+    const result = check(
+      workflow([
+        LABELED,
+        { id: "again", kind: "ticket.labeled", label: " GO " },
+        MANUAL,
+      ]),
+    );
+
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        path: "/triggers/1/label",
+        code: "duplicate_trigger_label",
+        message: expect.stringContaining("'labeled'") as string,
+      }),
+    ]);
+    // The old kind is the same trigger, and another label is fine.
+    expect(
+      codes(
+        workflow([
+          LABELED,
+          { id: "old", kind: "github.issueLabeled", label: "go" },
+        ]),
+      ),
+    ).toEqual([["/triggers/1/label", "duplicate_trigger_label"]]);
+    expect(
+      codes(
+        workflow([
+          LABELED,
+          { id: "two", kind: "ticket.labeled", label: "stop" },
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
   // #916-T25
   it("holds a step id once across the pre-steps of every trigger and the shared steps", () => {
     expect(
@@ -361,7 +460,11 @@ describe("triggers with pre-steps", () => {
     expect(
       codes(
         workflow(
-          Array.from({ length: 11 }, (_, n) => ({ ...LABELED, id: `t${n}` })),
+          Array.from({ length: 11 }, (_, n) => ({
+            ...LABELED,
+            id: `t${n}`,
+            label: `go-${n}`,
+          })),
         ),
       ),
     ).toEqual([["/triggers", "limit_exceeded"]]);

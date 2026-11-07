@@ -48,6 +48,7 @@ import {
   type ConnectorRegistry,
 } from "./connectors.ts";
 import { conditionHolds } from "./conditions.ts";
+import { readStoredInput } from "./ticket.ts";
 import {
   forTrigger,
   machineNodes,
@@ -194,8 +195,8 @@ function parseOutput(text: string | null): unknown {
 
 /**
  * What `{{trigger.*}}` holds for a run (#916): its `id` and `kind`, and what the trigger stored when it started the run. A run started
- * by hand or through the API stored `{ input, ticket? }`; a run a label started stored `{ ticket, issue, repo }` (`label-trigger.ts`).
- * A run written before triggers had ids stored a manual run's input as handed in, which is read as `{ input }`.
+ * by hand or through the API stored its input as handed in, or `{ input, ticket }` when it has a ticket (`readStoredInput`); a run a
+ * label started stored `{ ticket, issue, repo }` (`label-trigger.ts`).
  *
  * TODO(#923): `workflow_runs.ticket_ref` (the ticket's reference, `github:owner/repo#128`) comes with the ticket mirror of #923, in a
  * migration of its own. This change does not add the column; once it exists, `createRun` of the label trigger and of the start service
@@ -206,8 +207,8 @@ function triggerValueOf(run: StoredWorkflowRun): Record<string, unknown> {
   const record = isRecord(stored) ? stored : {};
   const kind = canonicalTriggerKind(run.triggerKind as TriggerKind);
   const facts = { id: run.triggerId ?? legacyTriggerId(kind), kind };
-  if (run.triggerId === null && kind === "manual")
-    return { ...facts, input: record };
+  if (kind === "manual" || kind === "api")
+    return { ...facts, ...readStoredInput(stored) };
   return { ...facts, ...record };
 }
 

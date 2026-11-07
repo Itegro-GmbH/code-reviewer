@@ -142,6 +142,16 @@ The label an `ticket.labeled` trigger waits for is not added again by the bot's 
 **label trigger** itself, and not for a pre-step of a trigger that is no label trigger (the example above adds the label of `labeled` in the
 pre-step of `manual`, which is right).
 
+Why a pre-step may add the label of **another** trigger and a shared step may not add any trigger's label: the webhook ignores the App's own
+writes, so a label a step adds never fires a trigger by itself. That makes it safe for the pre-step of `manual` to put the label of `labeled` on
+the ticket: that pre-step runs for `manual` only, never for the trigger whose label it adds, and it is how one context is made like the other.
+A shared step has no such place: it runs for **every** trigger, so the label it adds is always the label of a trigger it also runs for. The
+document would then state, in its own steps, that a run puts back the label that started it, and only the webhook's exemption would keep that
+from looping. The validator does not rely on that exemption for the steps that run for every trigger, so they may add none of the labels that
+start the workflow, and the pre-step of a label trigger may not add its own. Two `ticket.labeled` triggers may not wait for the same label
+(`duplicate_trigger_label`, case does not matter): one label would start two runs. The JSON Schema cannot say that, the validator does, and
+reports it at the `label` of the second trigger, naming the first.
+
 Other triggers (Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger).
 
 ### One repository per run, and targets
@@ -243,7 +253,7 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 `onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
 (`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
 
-- **What they may be.** An `action` of `github.issue.comment` or `github.issue.labels`, and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+- **What they may be.** An `action` of `ticket.comment` or `ticket.labels` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
   `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
 - **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
@@ -1154,8 +1164,9 @@ Beyond the form:
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
 | `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
+| `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
-| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`github.issue.comment`), a label change (`github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |

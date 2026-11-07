@@ -49,7 +49,12 @@ import {
   RUNS_LISTED_MAX,
   TRIGGER_INPUT_MAX_CHARS,
 } from "./limits.ts";
-import { ticketValue } from "./ticket.ts";
+import {
+  readStoredInput,
+  storedInputOf,
+  ticketValue,
+  type TicketValue,
+} from "./ticket.ts";
 
 export type StepView = {
   id: string;
@@ -280,15 +285,9 @@ function readBody(body: unknown): {
   };
 }
 
-/**
- * The input of a run as the caller handed it in, from what a run stored. A run started since #916 stores `{ input, ticket? }` (the input
- * without the ticket, which is stored resolved); one that has no trigger id stored the input as it was.
- */
+/** The input of a run as the caller handed it in (without the ticket, which is stored resolved), from what a run stored. */
 function inputHandedIn(run: StoredWorkflowRun): Record<string, unknown> {
-  const stored = jsonOrNull(run.triggerInput);
-  if (!isRecord(stored)) return {};
-  if (run.triggerId === null) return stored;
-  return isRecord(stored.input) ? stored.input : {};
+  return readStoredInput(jsonOrNull(run.triggerInput)).input;
 }
 
 /** The trigger the caller means: the one it names, or the only one that can be started. */
@@ -347,9 +346,7 @@ export function createWorkflowRunService(
   ): StoredWorkflowRun {
     const { [TICKET_INPUT]: ticket, ...rest } = input;
     const earlierRest = inputHandedIn(earlier);
-    const stored = jsonOrNull(earlier.triggerInput);
-    const resolved =
-      isRecord(stored) && isRecord(stored.ticket) ? stored.ticket : undefined;
+    const resolved = readStoredInput(jsonOrNull(earlier.triggerInput)).ticket;
     const earlierName = isRecord(resolved?.repo)
       ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.number)}`
       : undefined;
@@ -464,7 +461,7 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
           "There is no such repository in this workspace.",
         );
-      let stored: Record<string, unknown> = { input: handedIn };
+      let ticket: TicketValue | undefined;
       if (ref !== undefined) {
         const issue = await deps.readTicket(repository.id, ref.ref.number);
         if (issue === undefined)
@@ -472,9 +469,10 @@ export function createWorkflowRunService(
             "WORKFLOW_RUN_TICKET_NOT_FOUND",
             "There is no such ticket in that repository (a pull request is none).",
           );
-        stored = { ...stored, ticket: ticketValue(issue, repository) };
+        ticket = ticketValue(issue, repository);
       }
-      const triggerInput = JSON.stringify(stored);
+      // Without a ticket the input is stored as it always was: a version that still runs during a deploy reads it as `trigger.input`.
+      const triggerInput = JSON.stringify(storedInputOf(handedIn, ticket));
       if (triggerInput.length > TRIGGER_INPUT_MAX_CHARS)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REQUEST_INVALID",

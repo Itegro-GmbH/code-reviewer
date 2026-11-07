@@ -15,6 +15,7 @@ import {
   TICKET_ASSIGNEE_MAX_CHARS,
   TICKET_TYPE_MAX_CHARS,
 } from "./limits.ts";
+import { isRecord } from "../workflows/json.ts";
 import { cleanText } from "./templates.ts";
 
 /** What `{{trigger.ticket}}` holds: `TICKET_TYPE` of `src/workflows/ticket-ref.ts`. */
@@ -80,4 +81,29 @@ export function ticketValue(
       defaultBranch: bounded(repo.defaultBranch, BRANCH_MAX_CHARS, false),
     },
   };
+}
+
+/**
+ * What a run started by hand or through the API stored as its `trigger_input`: the input as it was handed in (the shape every version
+ * stored, kept for every run whose trigger has no `ticket` input, so a version that still runs during a deploy reads it), or
+ * `{ input, ticket }` for a run that has a ticket (the input without the ticket, and the ticket as it was read when the run started).
+ * The two are told apart by `ticket`: a record next to an `input` record and nothing else.
+ */
+export function readStoredInput(stored: unknown): {
+  input: Record<string, unknown>;
+  ticket?: Record<string, unknown>;
+} {
+  if (!isRecord(stored)) return { input: {} };
+  const { input, ticket, ...others } = stored;
+  if (Object.keys(others).length === 0 && isRecord(input) && isRecord(ticket))
+    return { input, ticket };
+  return { input: stored };
+}
+
+/** The `trigger_input` to store for a run started by hand or through the API: the raw input, or `{ input, ticket }` once a ticket is resolved. */
+export function storedInputOf(
+  input: Record<string, unknown>,
+  ticket: TicketValue | undefined,
+): Record<string, unknown> {
+  return ticket === undefined ? input : { input, ticket };
 }

@@ -231,7 +231,7 @@ describe("the pre-steps of the trigger that fired, then the shared steps", () =>
   });
 
   // #916-T63
-  it("starts a workflow written with the single trigger of before as it did: its id is read from the kind, its input is the input", async () => {
+  it("starts a workflow written with the single trigger of before as it did: its id is read from the kind, its input is stored as handed in", async () => {
     const { app } = await harness();
     const workflow = await app.saveWorkflow({
       version: 1,
@@ -264,8 +264,10 @@ describe("the pre-steps of the trigger that fired, then the shared steps", () =>
       triggerKind: "manual",
       triggerId: "manual",
     });
+    // A manual run without a ticket stores the input exactly as development does (the version that runs during a deploy reads it so).
     expect(JSON.parse(state.run.triggerInput)).toEqual({
-      input: { repo: "acme/widgets", topic: "caching" },
+      repo: "acme/widgets",
+      topic: "caching",
     });
   });
 
@@ -485,7 +487,7 @@ describe("starting a run through the API with a ticket", () => {
     expect(started.run).toMatchObject({
       trigger: "manual",
       triggerId: "manual",
-      input: { input: { repo: "acme/widgets" } },
+      input: { repo: "acme/widgets" },
     });
     expect(started.run.baseBranch).toBe("main");
   });
