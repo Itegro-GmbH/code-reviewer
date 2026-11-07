@@ -203,7 +203,12 @@ describe("the runs of a ticket", () => {
       .execute();
     await db
       .updateTable("workflow_runs")
-      .set({ status: "discarded", discarded_at: "2026-11-07T09:30:00.000Z" })
+      // A discarded run is over: it has its end (workflow_runs_end_check).
+      .set({
+        status: "discarded",
+        discarded_at: "2026-11-07T09:30:00.000Z",
+        finished_at: "2026-11-07T09:30:00.000Z",
+      })
       .where("id", "=", discarded.id)
       .execute();
 
