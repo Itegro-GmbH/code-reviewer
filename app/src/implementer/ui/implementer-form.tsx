@@ -465,7 +465,7 @@ export function ImplementerForm({
       <Alert variant="info" role="status">
         {FORM_COPY.noRepositoryBefore}{" "}
         <Link
-          href={workspacePath(workspaceSlug, "/connections")}
+          href={workspacePath(workspaceSlug, "/settings/integrations")}
           className="font-semibold underline underline-offset-4"
         >
           {FORM_COPY.noRepositoryLink}

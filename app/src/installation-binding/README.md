@@ -53,7 +53,7 @@ belongs to, and never hands the repositories of one customer to another. The dec
 "Link an existing installation" lists the installations the person's token can use that no other workspace has linked (an
 authorization, then a signed list `github-picker`), and a choice goes through steps 3 to 5 again.
 
-A state never carries an address. Where a browser lands is a fixed page: `/w/<slug>/connections?github=<code>` for a workspace
+A state never carries an address. Where a browser lands is a fixed page: `/w/<slug>/connections?github=<code>` (in the factory, #925, the Integrations tab of the settings: `/w/<slug>/settings/integrations?github=<code>`, and `/connections` redirects there with the two query parameters) for a workspace
 the person administers, `/github/result?github=<code>` otherwise; `redirect` or `next` parameters are ignored.
 
 ## What never creates a connection

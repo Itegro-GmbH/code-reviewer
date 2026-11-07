@@ -5,6 +5,7 @@
 // (read per call) and the master key from the environment. Server code only.
 import "server-only";
 import { loadAuthConfig } from "../auth/config.ts";
+import { getCapabilities } from "../capabilities/shared.ts";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import { createWorkspacesRepository } from "../db/repositories/workspaces-repository.ts";
@@ -83,5 +84,6 @@ export function getBindingRouteHandlers(): BindingRouteHandlers {
       ),
     isAuthorizationState: (state) =>
       purposeOfState(secret, state) === "github-authorize",
+    capabilities: () => getCapabilities(),
   });
 }

@@ -2,7 +2,8 @@
 
 "use client";
 // The sub-navigation of the workspace settings (#178): one link per sub-page, the current one carries `aria-current="page"`,
-// which the styling turns into an underline as well, so the location is never shown by colour alone.
+// which the styling turns into an underline as well, so the location is never shown by colour alone. The factory (#925) has the four
+// tabs (General, Members, Billing, Integrations) and, for a tab that has more than one page, a second row with its pages.
 //
 // "Advanced" (#658) only holds the deletion of the workspace and is the Owner's alone, so only an Owner sees the link. The
 // settings layout (`app/(app)/w/[workspace]/settings/layout.tsx`) knows the role and hands it down through
@@ -20,9 +21,13 @@ import {
   type ReactNode,
 } from "react";
 import {
+  FACTORY_SETTINGS_SECTIONS,
   SETTINGS_SECTIONS,
+  SETTINGS_TABS,
   settingsSectionHref,
+  settingsTabOf,
   type SettingsSection,
+  type SettingsTab,
 } from "./settings-sections.ts";
 
 const SettingsAccessContext = createContext<Promise<boolean> | null>(null);
@@ -68,7 +73,16 @@ function SettingsNavWithAccess(props: SettingsNavProps) {
   return <SettingsLinks {...props} advanced={advanced} />;
 }
 
-function SettingsLinks({
+function SettingsLinks(props: SettingsNavProps & { advanced: boolean }) {
+  const capabilities = useCapabilities();
+  return capabilities.has("implementer") ? (
+    <FactorySettingsLinks {...props} />
+  ) : (
+    <SectionLinks {...props} />
+  );
+}
+
+function SectionLinks({
   workspaceSlug,
   current,
   showPlan = false,
@@ -106,4 +120,76 @@ function SettingsLinks({
       </ul>
     </nav>
   );
+}
+
+function FactorySettingsLinks({
+  workspaceSlug,
+  current,
+  showPlan = false,
+  showBilling = false,
+  advanced,
+}: SettingsNavProps & { advanced: boolean }) {
+  const capabilities = useCapabilities();
+  // The page that is open is always listed, even where its capability or flag would hide it (a bookmarked address), so its tab is marked.
+  const listed = FACTORY_SETTINGS_SECTIONS.filter((section) => {
+    if (section.segment === current) return true;
+    if (
+      section.capability !== undefined &&
+      !capabilities.has(section.capability)
+    )
+      return false;
+    if (section.segment === "plan") return showPlan && !showBilling;
+    if (section.segment === "billing") return showBilling;
+    if (section.segment === "advanced") return advanced;
+    return true;
+  });
+  const currentTab = settingsTabOf(current);
+  // A tab is the first page listed for it; a tab with no page in this deployment (Billing without billing and without a plan) is left out.
+  const tabs = SETTINGS_TABS.flatMap(({ tab, label }) => {
+    const first = listed.find((section) => section.tab === tab);
+    return first === undefined ? [] : [{ tab, label, first }];
+  });
+  const pages = listed.filter((section) => section.tab === currentTab);
+  return (
+    <div className="flex flex-col gap-3">
+      <nav aria-label="Settings sections">
+        <ul className="flex flex-wrap items-center gap-1">
+          {tabs.map(({ tab, label, first }) => (
+            <li key={tab}>
+              <Link
+                href={settingsSectionHref(workspaceSlug, first.segment)}
+                aria-current={tab === currentTab ? "page" : undefined}
+                className={PILL_LINK_CLASS}
+              >
+                {label}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </nav>
+      {pages.length > 1 ? (
+        <nav aria-label={`${tabLabel(currentTab)} pages`}>
+          <ul className="flex flex-wrap items-center gap-1">
+            {pages.map((section) => (
+              <li key={section.segment || "general"}>
+                <Link
+                  href={settingsSectionHref(workspaceSlug, section.segment)}
+                  aria-current={
+                    section.segment === current ? "page" : undefined
+                  }
+                  className={PILL_LINK_CLASS}
+                >
+                  {section.label}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      ) : null}
+    </div>
+  );
+}
+
+function tabLabel(tab: SettingsTab): string {
+  return SETTINGS_TABS.find((entry) => entry.tab === tab)?.label ?? "Settings";
 }

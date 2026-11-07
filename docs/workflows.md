@@ -1084,7 +1084,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
 There is no editor for workflows (an AI writes them through the API), but a member can see them, start one by hand and watch a run. The pages exist
-only in a deployment with the capability `implementer`, appear in the sidebar as **Workflows**, and are open to every member (the permission
+only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
 `start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 

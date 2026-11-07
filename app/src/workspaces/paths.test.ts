@@ -3,7 +3,9 @@
 // The addresses of a workspace: which paths name a workspace, which slug they name, and that an odd spelling
 // can only fail to name one.
 import { describe, expect, it } from "vitest";
+import { createCapabilitySet } from "../capabilities/capability.ts";
 import {
+  connectionsPlace,
   isWorkspaceSlug,
   legacyWorkspaceTarget,
   workspaceApiPath,
@@ -72,6 +74,24 @@ describe("building an address", () => {
     expect(workspacePath("acme")).toBe("/w/acme");
     expect(workspaceApiPath("acme", "/runs")).toBe("/api/w/acme/runs");
     expect(workspaceHome("acme")).toBe("/w/acme/projects");
+  });
+});
+
+describe("where the connections are shown", () => {
+  // #925
+  it("is /connections everywhere but in the factory, whose settings have the tab", () => {
+    expect(connectionsPlace()).toBe("/connections");
+    expect(connectionsPlace(createCapabilitySet(["review"]))).toBe(
+      "/connections",
+    );
+    expect(
+      connectionsPlace(createCapabilitySet(["review", "dynamic-review"])),
+    ).toBe("/connections");
+    expect(
+      connectionsPlace(
+        createCapabilitySet(["review", "dynamic-review", "implementer"]),
+      ),
+    ).toBe("/settings/integrations");
   });
 });
 
