@@ -127,6 +127,7 @@ export function addressesOf(
         // The boards of a repository and the tickets of a project by its id (#922): read by the factory's cockpit only.
         route.pattern ===
           "/api/w/:workspace/repositories/:repositoryId/boards" ||
+        route.pattern === "/api/w/:workspace/projects/:projectId" ||
         route.pattern === "/api/w/:workspace/projects/:projectId/issues" ||
         route.pattern === "/w/:workspace/settings/billing",
     },

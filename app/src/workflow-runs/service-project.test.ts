@@ -76,13 +76,17 @@ const REPOSITORIES: Record<string, string> = {
   "acme/other": "repo-other",
 };
 
-function harness(document: unknown, projectId: string | null = "project-1") {
+function harness(
+  document: unknown,
+  projectId: string | null = "project-1",
+  earlier?: StoredWorkflowRun,
+) {
   const created: NewWorkflowRun[] = [];
   const readTicket = vi.fn(async () => ISSUE);
   const service = createWorkflowRunService({
     runs: {
       async findByRequest() {
-        return undefined;
+        return earlier;
       },
       async createRun(input: NewWorkflowRun) {
         created.push(input);
@@ -216,5 +220,64 @@ describe("a manual start within the project of the lane (#922)", () => {
     });
 
     expect(created.map((run) => run.repositoryId)).toEqual(["repo-other"]);
+  });
+  // #937-T20
+  it("gives a start that leaves input.repo out the repository of the project, and stores it as if it was named", async () => {
+    const { service, created } = harness(BY_REPO);
+
+    await service.start(USER, "wf-1", { input: {}, clientRequestId: "r-1" });
+
+    expect(created).toHaveLength(1);
+    expect(created[0]?.repositoryId).toBe("repo-widgets");
+    expect(JSON.parse(created[0]!.triggerInput)).toEqual({
+      repo: "acme/widgets",
+    });
+  });
+
+  // #937-T21
+  it("still holds a named input.repo to the project, and leaves a lane without a project to name it", async () => {
+    const named = harness(BY_REPO);
+    const loose = harness(BY_REPO, null);
+
+    const failure = await refusal(
+      named.service.start(USER, "wf-1", {
+        input: { repo: "acme/other" },
+        clientRequestId: "r-1",
+      }),
+    );
+    const missing = await refusal(
+      loose.service.start(USER, "wf-1", { input: {}, clientRequestId: "r-1" }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT");
+    expect(missing.code).toBe("WORKFLOW_RUN_INPUT_INVALID");
+    expect(named.created).toEqual([]);
+    expect(loose.created).toEqual([]);
+  });
+
+  // #937-T22
+  it("answers the replay of a start that left input.repo out with the run it made, and refuses another input under the same request id", async () => {
+    const earlier = {
+      id: "run-1",
+      workflowId: "wf-1",
+      triggerId: "manual",
+      triggerInput: JSON.stringify({ repo: "acme/widgets" }),
+    } as unknown as StoredWorkflowRun;
+    const { service, created } = harness(BY_REPO, "project-1", earlier);
+
+    const again = await service.start(USER, "wf-1", {
+      input: {},
+      clientRequestId: "r-1",
+    });
+    const other = await refusal(
+      service.start(USER, "wf-1", {
+        input: { repo: "acme/other" },
+        clientRequestId: "r-1",
+      }),
+    );
+
+    expect(again.created).toBe(false);
+    expect(other.code).toBe("WORKFLOW_RUN_REQUEST_REUSED");
+    expect(created).toEqual([]);
   });
 });

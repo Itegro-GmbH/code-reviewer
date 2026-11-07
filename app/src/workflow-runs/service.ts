@@ -13,7 +13,8 @@
 //     the shared steps) is one the engine runs (only a kind the engine does not run is refused here, with the step named, rather than
 //     failing halfway through a run that already cost money);
 //  5. the input fits the trigger's `input` schema (checked again here with `checkResultValue`: the validator knows the schema, only a
-//     start knows the values);
+//     start knows the values); a lane of a project whose input declares `repo` is given the project's repository when the start names
+//     neither a `repo` nor a `ticket` (#937), before the input is checked;
 //  6. the repository is one of the workspace's, active, and the platform still resolves it: that of the `ticket` input when the trigger
 //     has one (the ticket is read through the provider and handed to the steps as `trigger.ticket`), else the one named by `input.repo`;
 //  7. the repository is the ticket source of the project the lane belongs to (#922; `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` for a ticket,
@@ -24,7 +25,10 @@ import type {
   StoredWorkflowRun,
   WorkflowRunsRepository,
 } from "../db/repositories/workflow-runs-repository.ts";
-import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
+import type {
+  ProjectsRepository,
+  StoredProject,
+} from "../db/repositories/projects-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
@@ -36,6 +40,7 @@ import {
 import {
   checkResultValue,
   validateResultSchema,
+  type ResultSchema,
 } from "../workflows/result-schema.ts";
 import { formatTicketRef, parseTicketRef } from "../workflows/ticket-ref.ts";
 import { TICKET_INPUT, isStartableKind } from "../workflows/triggers.ts";
@@ -399,6 +404,26 @@ export function createWorkflowRunService(
    * written with its keys in another order is the same request. A body that names a trigger must name the one the run was started by;
    * a ticket is the same when it names the same issue (the repository's letters are not told apart).
    */
+  /**
+   * `input`, with `repo` set to the repository of the project when the input of the trigger declares `repo`, the caller names neither a
+   * `repo` nor a `ticket`, and the lane belongs to a project (#937). Anything else is returned as it is.
+   */
+  async function withProjectRepository(
+    input: Record<string, unknown>,
+    schema: ResultSchema,
+    project: StoredProject | undefined,
+  ): Promise<Record<string, unknown>> {
+    if (
+      project === undefined ||
+      input.repo !== undefined ||
+      input[TICKET_INPUT] !== undefined ||
+      !Object.hasOwn(schema.properties, "repo")
+    )
+      return input;
+    const name = await deps.repositoryName(project.ticketSource.repositoryId);
+    return name === undefined ? input : { ...input, repo: name };
+  }
+
   function sameRequest(
     earlier: StoredWorkflowRun,
     workflowId: string,
@@ -406,7 +431,12 @@ export function createWorkflowRunService(
     input: Record<string, unknown>,
   ): StoredWorkflowRun {
     const { [TICKET_INPUT]: ticket, ...rest } = input;
-    const earlierRest = inputHandedIn(earlier);
+    // A `repo` the project filled in (#937) is not in a replay that left it out.
+    const { repo: filledRepo, ...earlierWithoutRepo } = inputHandedIn(earlier);
+    const earlierRest =
+      rest.repo === undefined
+        ? earlierWithoutRepo
+        : { ...earlierWithoutRepo, repo: filledRepo };
     const resolved = readStoredInput(jsonOrNull(earlier.triggerInput)).ticket;
     const earlierName = isRecord(resolved?.repo)
       ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.number)}`
@@ -541,7 +571,14 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
           "The input of the trigger has no usable schema.",
         );
-      const problems = checkResultValue(schema, input);
+      // #937: a lane of a project works in the repository of the project, so a manual or api start that declares `repo` and leaves it out
+      // is given the project's repository (a start that names one still is held to it, below); a start that has a `ticket` has its repository.
+      const project =
+        found.workflow.projectId === null
+          ? undefined
+          : await deps.projects.getById(found.workflow.projectId);
+      const given = await withProjectRepository(input, schema, project);
+      const problems = checkResultValue(schema, given);
       if (problems.length > 0)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_INPUT_INVALID",
@@ -550,7 +587,7 @@ export function createWorkflowRunService(
         );
 
       // The repository of the run: the ticket's when the input has one, else the one named by `input.repo`.
-      const { [TICKET_INPUT]: ticketText, ...handedIn } = input;
+      const { [TICKET_INPUT]: ticketText, ...handedIn } = given;
       const ref =
         typeof ticketText === "string" ? parseTicketRef(ticketText) : undefined;
       if (ref !== undefined && !ref.ok)
@@ -559,7 +596,7 @@ export function createWorkflowRunService(
           "The ticket is not a reference like github:owner/repo#128.",
           { errors: [] },
         );
-      const repoName = ref === undefined ? input.repo : ref.ref.repo;
+      const repoName = ref === undefined ? given.repo : ref.ref.repo;
       if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
@@ -572,10 +609,6 @@ export function createWorkflowRunService(
           "There is no such repository in this workspace.",
         );
       // #922: a lane works within the ticket source of its project; checked before the platform is asked about the ticket.
-      const project =
-        found.workflow.projectId === null
-          ? undefined
-          : await deps.projects.getById(found.workflow.projectId);
       if (
         project !== undefined &&
         project.ticketSource.repositoryId !== repository.id

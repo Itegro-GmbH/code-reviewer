@@ -21,6 +21,8 @@ export const PROJECT_ERROR_CODES = [
   "PROJECT_ALREADY_EXISTS",
   /** Creating a project (#922): the platform could not be asked for the boards of the repository. 503. */
   "PROJECT_BOARDS_UNAVAILABLE",
+  /** Setting the board of a project (#937): the workspace has no project with this id. 404. */
+  "PROJECT_NOT_FOUND",
 ] as const;
 export type ProjectErrorCode = (typeof PROJECT_ERROR_CODES)[number];
 
@@ -39,6 +41,7 @@ export const PROJECT_ERROR_STATUS: Record<
   PROJECT_ALREADY_EXISTS: 409,
   // Never a 502: a proxy swaps its body (#690).
   PROJECT_BOARDS_UNAVAILABLE: 503,
+  PROJECT_NOT_FOUND: 404,
 };
 
 /** A value of the body of a new project that cannot be used (#922), with the values that would have been accepted. */

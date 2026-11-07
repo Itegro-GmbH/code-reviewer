@@ -62,8 +62,11 @@ export const LIST_MAX_ITEMS_LIMIT = 1000;
 /** A workflow id as the routes take it (`/workflows/<id>`); longer is "not found". Its own bound, not that of a step id. */
 export const WORKFLOW_ID_MAX_LENGTH = 64;
 
-/** Per workspace. */
-export const WORKFLOWS_PER_WORKSPACE_MAX = 100;
+/**
+ * Per project (#937; it was per workspace): the lanes that are not archived. A lane without a project counts with the other lanes without one.
+ * Per project so that copying the built-in lanes into every project cannot use up the room of the workspace.
+ */
+export const WORKFLOWS_PER_PROJECT_MAX = 100;
 /**
  * Per workspace: archived workflows stay (their versions are history), but not without bound. At the maximum an archive is refused
  * (`WORKFLOW_ARCHIVE_LIMIT_REACHED`), so archiving and creating again cannot grow the rows for ever; creating and saving go on.

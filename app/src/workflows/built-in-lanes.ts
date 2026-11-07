@@ -7,6 +7,9 @@
 //
 // "Issue to PR" is the first workflow of `docs/workflows.md`, which a test holds to `contracts/examples/workflow/Workflow.json`.
 
+/** The code a lane is reported with when copying it failed in a way no lane has a code for (the other lanes are still copied). */
+export const LANE_COPY_FAILED = "LANE_COPY_FAILED";
+
 /** The keys a new project names the lanes it copies by. */
 export const BUILT_IN_LANE_KEYS = [
   "issue-to-pr",
@@ -188,7 +191,7 @@ function reviewAPullRequest(environment: string): Record<string, unknown> {
             repo: {
               type: "string",
               description:
-                "The repository of the pull request, as owner/name: the project's repository.",
+                "The repository of the pull request, as owner/name. Leave it out: a lane of a project works in the project's repository.",
             },
             pullRequest: {
               type: "integer",

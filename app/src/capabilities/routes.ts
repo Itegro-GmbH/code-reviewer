@@ -212,6 +212,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // A project is one ticket source (#922): the factory's new project (its board and its first lanes), the boards of a repository it can
   // take, and the tickets of a project by its own id (the same answer as the issues of its repository).
   { route: "/api/w/[workspace]/projects", class: "implementer" },
+  // The board of a project, set or changed on its Setup tab (#937).
+  { route: "/api/w/[workspace]/projects/[projectId]", class: "implementer" },
   {
     route: "/api/w/[workspace]/projects/[projectId]/issues",
     class: "implementer",
