@@ -471,6 +471,140 @@ describe("the board of the full sync", () => {
     },
   );
 
+  // #932-R19
+  it("reads the boards it may read when only some of them are refused, instead of calling all of them unavailable", async () => {
+    const { client } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      const query = (call.body as { query: string }).query;
+      return {
+        json: query.includes("projectsV2")
+          ? {
+              // The second board is another organization's: GitHub answers null for it and says why.
+              data: {
+                repository: {
+                  projectsV2: { nodes: [{ id: "PVT_1" }, null] },
+                },
+              },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["repository", "projectsV2", "nodes", 1],
+                },
+              ],
+            }
+          : items(["Done"], false),
+      };
+    });
+
+    expect(
+      await client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+    ).toEqual({
+      available: true,
+      items: [{ nodeId: "I_0", status: "Done" }],
+      next: null,
+    });
+  });
+
+  // #932-R23
+  it("keeps the place of a board it may not read, so that the position of the boards after it does not shift", async () => {
+    const refused = (type: string) => ({
+      errors: [{ type, path: ["repository", "projectsV2", "nodes", 1] }],
+    });
+    const { client } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      const query = (call.body as { query: string }).query;
+      return {
+        json: query.includes("projectsV2")
+          ? {
+              data: {
+                repository: {
+                  projectsV2: {
+                    nodes: [{ id: "PVT_1" }, null, { id: "PVT_3" }],
+                  },
+                },
+              },
+              ...refused("FORBIDDEN"),
+            }
+          : items(["Done"], false),
+      };
+    });
+
+    // The position "2:" was saved when the board in the middle could still be read: it still means the third board.
+    const third = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      "2:",
+    );
+    expect(third).toEqual({
+      available: true,
+      items: [{ nodeId: "I_0", status: "Done" }],
+      next: null,
+    });
+  });
+
+  // #932-R24
+  it("goes on with the next board it may read after one it may not, and ends when there is none", async () => {
+    const seen: unknown[] = [];
+    const { client } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      const body = call.body as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
+      if (!body.query.includes("projectsV2")) seen.push(body.variables.project);
+      return {
+        json: body.query.includes("projectsV2")
+          ? {
+              data: {
+                repository: {
+                  projectsV2: {
+                    nodes: [null, { id: "PVT_2" }, null, { id: "PVT_4" }, null],
+                  },
+                },
+              },
+              errors: [{ type: "FORBIDDEN", path: ["repository"] }],
+            }
+          : items(["Done"], false),
+      };
+    });
+
+    const first = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      null,
+    );
+    const second = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      first.next,
+    );
+
+    expect(first.next).toBe("3:");
+    expect(second.next).toBeNull();
+    expect(seen).toEqual(["PVT_2", "PVT_4"]);
+  });
+
+  // #932-R20
+  it("is still not available when the refused answer has no usable data", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: { repository: null },
+              errors: [{ type: "NOT_FOUND" }],
+            },
+          }
+        : undefined,
+    );
+
+    expect(
+      await client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+    ).toEqual({ available: false, items: [], next: null });
+  });
+
   // #923-R17
   it.each([
     [
@@ -609,6 +743,42 @@ describe("the boards of a repository (#922)", () => {
     expect(query.query).toContain('query:"is:open"');
   });
 
+  // #932-R25
+  it("leaves a board it may not read out of the list and keeps the readable ones: an unreadable board can be neither synced nor moved on", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: {
+                repository: { projectsV2: { nodes: [node({}), null] } },
+              },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["repository", "projectsV2", "nodes", 1],
+                },
+              ],
+            },
+          }
+        : undefined,
+    );
+
+    expect(
+      await client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
+    ).toEqual({
+      available: true,
+      boards: [
+        {
+          projectV2Id: "PVT_1",
+          number: 1,
+          title: "Roadmap",
+          statusFieldId: "PVTSSF_1",
+          statuses: ["Todo", "In Progress", "Done"],
+        },
+      ],
+    });
+  });
+
   // #922-T41
   it.each(["FORBIDDEN", "INSUFFICIENT_SCOPES", "NOT_FOUND"])(
     "is not available when GitHub answers with only %s errors",
@@ -645,5 +815,181 @@ describe("the boards of a repository (#922)", () => {
     await expect(
       broken.client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
     ).rejects.toBeInstanceOf(GithubAppError);
+  });
+});
+
+describe("the board status of one ticket (#932)", () => {
+  const answer = (projectItems: unknown) => ({
+    json: { data: { node: { projectItems } } },
+  });
+  const statuses = (...values: (string | null)[]) =>
+    answer({
+      nodes: values.map((name) => ({
+        fieldValueByName: name === null ? null : { name },
+      })),
+    });
+
+  // #932-T08
+  it("asks for the not archived board items of the ticket with the board token, and answers the first status", async () => {
+    const { client, calls } = scripted((call) =>
+      call.path === "/graphql"
+        ? statuses(null, "In Review", "Done")
+        : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: true,
+      status: "In Review",
+    });
+
+    expect(tokenRequests(calls)[0]?.body).toEqual({
+      repository_ids: [7001],
+      permissions: BOARD.permissions,
+    });
+    const body = calls.find((call) => call.path === "/graphql")?.body as {
+      query: string;
+      variables: unknown;
+    };
+    expect(body.variables).toEqual({ id: "I_12" });
+    expect(body.query).toContain("includeArchived:false");
+  });
+
+  // #932-T09
+  it("answers no status for a ticket that is on no board, or has none on its boards", async () => {
+    const none = scripted((call) =>
+      call.path === "/graphql" ? answer({ nodes: [] }) : undefined,
+    );
+    expect(
+      await none.client.readTrackerBoardStatus("4242", BOARD, "I_12"),
+    ).toEqual({ available: true, status: null });
+
+    const empty = scripted((call) =>
+      call.path === "/graphql" ? statuses(null, "") : undefined,
+    );
+    expect(
+      await empty.client.readTrackerBoardStatus("4242", BOARD, "I_12"),
+    ).toEqual({ available: true, status: null });
+
+    // A node that is none (deleted since) has no board either.
+    const gone = scripted((call) =>
+      call.path === "/graphql" ? { json: { data: { node: null } } } : undefined,
+    );
+    expect(
+      await gone.client.readTrackerBoardStatus("4242", BOARD, "I_12"),
+    ).toEqual({ available: true, status: null });
+  });
+
+  // #932-T10
+  it.each([
+    [
+      "GraphQL says the app may not read it",
+      { errors: [{ type: "FORBIDDEN" }] },
+    ],
+    ["the answer is not a ticket's", { data: { node: { id: "x" } } }],
+  ])("is not available when %s", async (_name, json) => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql" ? { json } : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: false,
+      status: null,
+    });
+  });
+
+  // #932-R21
+  it("answers the status the readable board items give when one board item is refused", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: {
+                node: {
+                  projectItems: {
+                    nodes: [null, { fieldValueByName: { name: "In Review" } }],
+                  },
+                },
+              },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["node", "projectItems", "nodes", 0],
+                },
+              ],
+            },
+          }
+        : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: true,
+      status: "In Review",
+    });
+  });
+
+  // #932-R26
+  it("is not available when every board item of the ticket is refused: there is no status to write", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: { node: { projectItems: { nodes: [null, null] } } },
+              errors: [
+                {
+                  type: "FORBIDDEN",
+                  path: ["node", "projectItems", "nodes", 0],
+                },
+              ],
+            },
+          }
+        : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: false,
+      status: null,
+    });
+  });
+
+  // #932-R22
+  it("is not available when the ticket itself is refused: no data, no status", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: { node: null },
+              errors: [{ type: "NOT_FOUND" }],
+            },
+          }
+        : undefined,
+    );
+
+    expect(await client.readTrackerBoardStatus("4242", BOARD, "I_12")).toEqual({
+      available: false,
+      status: null,
+    });
+  });
+
+  // #932-T11
+  it("fails, and does not read as 'no board', when GitHub has an error that is not about the permission", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql"
+        ? { json: { errors: [{ type: "RATE_LIMITED", message: "slow down" }] } }
+        : undefined,
+    );
+
+    await expect(
+      client.readTrackerBoardStatus("4242", BOARD, "I_12"),
+    ).rejects.toBeInstanceOf(GithubAppError);
+  });
+
+  // #932-T12
+  it("refuses a node id that is no usable id before asking anything", async () => {
+    const { client, calls } = scripted(() => undefined);
+
+    await expect(
+      client.readTrackerBoardStatus("4242", BOARD, ""),
+    ).rejects.toBeInstanceOf(GithubAppError);
+    expect(calls).toEqual([]);
   });
 });

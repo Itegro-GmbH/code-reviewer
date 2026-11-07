@@ -52,6 +52,8 @@ export type FakeGithubAppClientData = {
     string,
     { nodeId: string; status: string | null }[][]
   >;
+  /** What `readTrackerBoardStatus` answers, by node id (#932); a ticket not listed is on no board, `null`: boards cannot be read. */
+  trackerBoardStatuses?: Record<string, string | null> | null;
   /** What `listRepositoryBoards` answers, by "owner/name"; `available: false` for a repository not listed (#922). */
   repositoryBoards?: Record<
     string,
@@ -564,6 +566,16 @@ export function fakeGithubAppClient(
         available: true,
         items: pages[index] ?? [],
         next: index + 1 < pages.length ? String(index + 1) : null,
+      };
+    },
+    async readTrackerBoardStatus(installationId, scope, nodeId) {
+      record("readTrackerBoardStatus", installationId, scope, nodeId);
+      if (data.trackerFailure) throw data.trackerFailure;
+      if (data.trackerBoardStatuses === null)
+        return { available: false, status: null };
+      return {
+        available: true,
+        status: data.trackerBoardStatuses?.[nodeId] ?? null,
       };
     },
     async listRepositoryBoards(installationId, scope, repoFullName) {

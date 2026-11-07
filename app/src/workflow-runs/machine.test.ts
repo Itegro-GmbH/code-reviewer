@@ -890,3 +890,66 @@ describe("a run that waits for an answer (#920)", () => {
     ).toEqual({ move: "idle" });
   });
 });
+
+describe("a paused run and a discarded run (#921)", () => {
+  // #921-T60
+  it("starts no step of a paused run: not the first, not the next after a step that succeeded", () => {
+    expect(nextMove(state({ pauseRequested: true }))).toEqual({
+      move: "idle",
+    });
+    expect(
+      nextMove(state({ pauseRequested: true, steps: [done("plan")] })),
+    ).toEqual({ move: "idle" });
+  });
+
+  // #921-T61
+  it("holds a step that was written and not claimed yet, and starts it again when the run is resumed", () => {
+    const pending = step("plan", {
+      status: "pending",
+      hasJob: false,
+      startedAt: null,
+    });
+
+    expect(nextMove(state({ pauseRequested: true, steps: [pending] }))).toEqual(
+      { move: "idle" },
+    );
+    expect(nextMove(state({ steps: [pending] }))).toEqual({
+      move: "execute",
+      position: 0,
+      takeOver: false,
+    });
+  });
+
+  // #921-T62
+  it("goes on with the step that runs: it is read when its turn has ended, and the run ends when the steps are over", () => {
+    expect(
+      nextMove(
+        state({
+          pauseRequested: true,
+          steps: [step("plan", { status: "running" })],
+        }),
+      ),
+    ).toEqual({ move: "read_job", position: 0 });
+    expect(
+      nextMove(
+        state({
+          pauseRequested: true,
+          nodes: [agent("plan")],
+          steps: [done("plan")],
+        }),
+      ),
+    ).toEqual({ move: "finish_run", status: "succeeded", errorCode: null });
+  });
+
+  // #921-T63
+  it("does nothing for a discarded run, whatever its rows say", () => {
+    for (const steps of [
+      [],
+      [step("plan", { status: "running" })],
+      [done("plan")],
+    ])
+      expect(nextMove(state({ runStatus: "discarded", steps }))).toEqual({
+        move: "idle",
+      });
+  });
+});

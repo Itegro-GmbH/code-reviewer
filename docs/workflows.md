@@ -8,7 +8,7 @@ workspace with versions.
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run), and a workflow can clean up after a failed or cancelled run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
@@ -70,7 +70,7 @@ An answer you will see while fixing:
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
 | `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
-| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
+| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled`, not after a discard ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
 Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist). Lengths are counted in
 characters (an emoji is one), as the JSON Schema counts them.
@@ -292,11 +292,11 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 
   They are **data, not commands**: none of them is a [target](#one-repository-per-run-and-targets) (`target_from_untrusted_value`), and `code` and `message`, which may quote a connector, GitHub or a runner,
   go into a comment **defused** like the text an agent wrote or the title of an issue (no mention of a person or team, no `Closes #n`, no comment marker, see [Results and facts](#results-and-facts)).
-- **When they run.** After a step failed, the budget ended the run (`budget_exhausted`; they cost nothing, so they run), a condition could not be told (`condition_failed`), or a member cancelled the run
-  (after its agent has stopped, [Cancelling a run](#cancelling-a-run)). They do **not** run when the run could not even start (`workflow_owner_gone`) or its steps do not fit its document (`document_unusable`):
+- **When they run.** After a step failed, the budget ended the run (`budget_exhausted`; they cost nothing, so they run), a condition could not be told (`condition_failed`), or (legacy, runs of before #921) a member stopped the run
+  with the old cancel, after its agent had stopped. They do **not** run when a member [discards](#discarding-a-run) the run: nothing technical failed. They do **not** run when the run could not even start (`workflow_owner_gone`) or its steps do not fit its document (`document_unusable`):
   nothing of such a run can be trusted to act on an issue.
 - **A step of `onFailure` that fails** is recorded (the run page shows it, with its code) and the next one runs; it is never repeated and starts nothing else. The run ends with the status it was going to have.
-  A cancel asked for while they run changes nothing: the run ends `failed` and they finish.
+  A discard while they run ends the run `discarded` and the steps that did not start are skipped; an old cancel asked for while they run changes nothing: the run ends `failed` and they finish.
 
 ## References and data flow
 
@@ -577,7 +577,7 @@ the open findings on the issue. `{{review.findings}}` after the loop is the last
 `review` is a session of its own (`"session": "new"`) and starts **from the branch of `implement`** (`"branch": "{{implement.branch}}"`), so it reads the code the implementer wrote, in every round
 ([Branches](#branches-and-what-a-step-starts-from)). It declares its `result` although the profile `reviewer` brings the same default: the example then validates and reads without the profile at hand.
 
-**When a step fails inside the loop** (or the budget ends the run, or a member cancels it) the run ends as `failed` (or `cancelled`), no pull request is opened, and `onFailure` runs: `report` comments on the issue what stopped
+**When a step fails inside the loop** (or the budget ends the run) the run ends as `failed`, no pull request is opened, and `onFailure` runs: `report` comments on the issue what stopped
 the run (the step, its code and a short message, defused), and `release` takes `agent working` off and puts `agent failed` on. It cannot put `agent implement` back: that label starts the workflow, so adding it is refused
 (`label_retriggers_workflow`); a person puts it on again when the issue should be tried again. The run keeps its status; the page shows the two steps after the one that failed ([After a failure](#after-a-failure-onfailure)).
 
@@ -699,7 +699,7 @@ What the engine does when a turn ends with a question:
 
 - the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once, and the step keeps it whatever
   becomes of it (a step that fails or is cancelled while it waits still shows what its turns cost: the costs of the steps add up to what the run spent). **The run waits as long as it
-  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`, the comment of the question is edited to `<!-- factory cancelled … -->` ("cancelled before it was answered") and the label `agent waiting` goes);
+  takes: there is no deadline and no fallback.** A run is active or discarded: [discard it](#discarding-a-run) to give up (a waiting run is discarded as any other: the step ends `failed` with the code `discarded`, the run is `discarded`, the comment of the question is edited to `<!-- factory discarded … -->` ("the run was discarded") and the labels `agent waiting` and `agent working` go; a run of before #921 that was stopped with the old cancel ended `cancelled`, with the marker `cancelled`, and is still read that way);
 - the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `askedAt`, `state` and, once answered, `answer`) and shown on the run page. The agent's
   sandbox is gone, as after `done`; the Implementer session and its snapshot stay;
 - one run per ticket, one open question per run: the run holds the ticket's slot (`trigger_key`) while it waits, so a second run for the same ticket is `busy`, not started.
@@ -751,33 +751,48 @@ to `<!-- factory answered … -->` with the question and **"Answered by @login: 
 name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
 [`app/src/webhooks/README.md`](../app/src/webhooks/README.md).
 
-### Cancelling a run
+### Discarding a run
 
-`POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
-(`outcome`) and carries the run:
+*#921.* A run is **active** (`running` or `waiting`) or **discarded**. Any run can be discarded: one that runs, one that waits for an answer, and one that is over however it ended (`succeeded`, `failed`, or `cancelled` by the old stop).
+`POST /api/w/<slug>/workflows/<id>/runs/<runId>/discard` (no body), for every member (`start_implementer_task`: whoever may start a run may discard one). The answer is always 200 and says what the call did (`outcome`) and carries the run:
 
-| Outcome | Status | Meaning |
-| --- | --- | --- |
-| `requested` | 202 | The run runs and is marked. The turn of its step is asked to stop; the run ends `cancelled` when that turn has ended. |
-| `already_requested` | 200 | Somebody asked before; nothing changed (the engine is told again, which is harmless). |
-| `already_ended` | 200 | The run is over (`succeeded`, `failed` or `cancelled`); nothing changed, the run shows how it ended. |
+| Outcome | Meaning |
+| --- | --- |
+| `discarded` | The run is `discarded` now (`discardedAt` is set, and so is `finishedAt` when the run had none). |
+| `already_discarded` | Somebody discarded it before; nothing changed. |
 
-`404 WORKFLOW_RUN_NOT_FOUND` for a run of another workspace or workflow. What happens, in this order:
+`404 WORKFLOW_RUN_NOT_FOUND` for a run of another workspace or workflow. **The old route `POST …/runs/<runId>/cancel` forwards to the same call** and answers the same body (so its `requested`, `already_requested` and `already_ended` are gone: a client that branched on them
+reads `discarded` or `already_discarded`); it is kept for clients of before #921 and is not documented further. What happens, in this order, under the lock of the run:
 
-1. The run is marked (`cancelRequestedAt`) under the lock of the run. From then on the engine writes and starts no step. A step that was written and not claimed ends `skipped`; steps the walk had not reached
-   are not written at all (there is no row for a branch that never began).
-2. The job of the turn that runs is asked to stop (`jobs.cancel_requested_at`). A turn that still waits for a runner ends at once (`cancelled`, nothing ran, no record counts, the hold is given back).
-   A turn that runs is told by its next heartbeat (`cancelRequested: true`; every 30 seconds on the Worker, at most 60 on a customer's runner): the Worker or the runner ends the agent the way it does when it is stopped (SIGTERM), pushes what is
-   committed, takes the snapshot when that is cheap, and reports `cancelled` with the usage it measured. The lease check before that push still says `held`, and the heart keeps beating until the agent's process has ended, so the lease cannot lapse during the stop. See [Implementer](implementer.md#cancelling-a-run-891).
-3. The job ends `cancelled` (code `cancelled`, a stable code) with that report; billing charges what the turn used and nothing else. A holder that never reports (it died, it heard nothing) is not waited for for ever: the job is
-   ended by the app after a grace of 4 minutes, or when its lease lapses, or when its claim is given back; none of these queues the turn again.
-4. The engine reads the end of the turn like any other: the step ends `failed` with the code `cancelled` (its cost is what the runner reported; a turn that never ran, because no runner took it or its Worker could not be started, is booked at no cost; one that ran and reported nothing is booked as the limit, as for any step), and the run ends
-   `cancelled`, without `errorCode` (after its [`onFailure`](#after-a-failure-onfailure) steps, when the workflow has them: the agent has stopped by then). A turn that finished by itself in the same moment keeps its result; the run still ends `cancelled`.
-5. A step whose turn was queued behind another instruction of its session (`session.continue`) discards that instruction first, so no turn starts later that no run reads. A turn that starts after the stop (the claimant was
-   in the middle of starting it) is asked to stop by the one that started it, so no turn runs on that nobody wants.
+1. The steps that are not over end: a step that was written and not claimed is `skipped`; a step that ran or waited for an answer is `failed` with the code `discarded` and keeps what its turns cost (a run's spent money never goes down). Steps the walk had not reached are not written.
+2. The run becomes **`discarded`**. It is over for the engine: nothing is written or started for it any more, whatever its turn reports later. **`onFailure` does not run**: nothing technical failed.
+3. The one-run-per-ticket rule counts active runs only (`running` and `waiting`), so the **ticket is free at this moment**: a label put on it again starts a new run of the workflow, and a run started by hand is not blocked.
 
-An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label by itself: a workflow with [`onFailure`](#after-a-failure-onfailure) cleans up after the agent has stopped (the facts have `status` `cancelled`); without it the issue keeps `agent working` and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
-the run `cancelled` the same way, not `failed`.
+Then, after the lock is released (a failure of any of these is logged and changes nothing above):
+
+4. The job of a turn that runs is asked to stop (`jobs.cancel_requested_at`; see [Implementer](implementer.md#cancelling-a-run-891)). A turn that still waits for a runner ends at once; a turn that runs is told by its next heartbeat, ends the agent the way
+   it does when it is stopped, pushes what is committed, and reports `cancelled`; billing charges what the turn used. A step that was claimed and has no turn recorded yet has its turn found by its request id and asked to stop, and an instruction queued behind another turn
+   of its session is discarded; a turn that starts after the discard is stopped by the one that started it. The engine ignores what these turns report.
+5. If a question was open, its comment is edited to say the run was discarded ("The agent had a question, and the run was discarded. No answer is needed.", marker `<!-- factory discarded run=… step=… q=… -->`). The labels **`agent waiting` and `agent working`** are taken off the
+   ticket (or the pull request) the run is about only when the run was `running` or `waiting` **and no other run that goes on holds the same ticket**: a newer run on the ticket owns those labels. Discarding a run that was over edits nothing on the ticket (it has no open question
+   and no label of its own). The question stays as the agent asked it on the run page; nobody can answer it (an answer is refused with `WORKFLOW_RUN_NOT_WAITING`, a `/answer` comment finds no waiting run). An answer that was accepted in the moment of the discard
+   puts no `agent working` label back.
+6. The request to pause (`pauseRequestedAt`) is cleared: nothing is left to pause.
+
+The edits of step 5 are best effort and happen after the lock is released. **Repeating the discard** (`already_discarded`) tries them again, under the same rule, so a crash or a refusal of GitHub after the first call is repaired by clicking again; the outcome stays
+`already_discarded`. (A repeat tells a run that was going on from one that was over by `finishedAt`: a discard sets it to its own time only for a run that had none.)
+
+An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened): its step ends `discarded` and the call goes on. A discarded run **stays listed**, greyed, with its steps and what it cost; it keeps its `errorCode` when it had failed, so the page
+still says why. Nothing else is deleted: the branch the agent pushed stays on GitHub.
+
+**Legacy.** `cancelled` stays a valid status for the runs the cancel of #891 wrote (`cancelRequestedAt` set): nobody writes it any more, such a run is shown as before, and a run that carried the mark when this version started is ended by the engine as it always was
+(`cancelled`, `onFailure` after the agent has stopped). Stopping the task of an agent step through the Implementer route (the task's own stop, not the run's) still ends the run `cancelled`, as before: the step's turn ends with the code `cancelled` and the machine finishes the run so. A run that is `cancelled` can be discarded.
+
+### Pausing a run
+
+*#921.* `POST /api/w/<slug>/workflows/<id>/runs/<runId>/pause` and `…/resume` (no body, the same right): the run is asked to **stop after its current step** (`pauseRequestedAt`), or lets go on. The step that runs goes on and is read when its turn has ended; the engine then writes and starts no further step
+of the workflow until the run is resumed (a step that was written and not claimed yet waits too). The steps of [`onFailure`](#after-a-failure-onfailure) are not held. A paused run is still `running` (or `waiting`): it holds its ticket, and a discard works as ever.
+The answer is 200 with the run and `outcome`: `changed`, or `unchanged` for a repeat and for a run that is over or discarded. `resume` makes the engine look at the run at once. A step that was claimed in the moment of the call runs: pause does not take a start back.
 
 A run looks like this (a step is `pending` when written, `running` once claimed, `waiting` while its turn's question is not answered (#920), then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
@@ -915,7 +930,7 @@ When the last one is over, the run ends with the stored status and error code (`
 - **Idempotent.** Like every move it is made under the lock of the run from the rows, so a doubled event or a sweep finds what the first one did. A step that was claimed and has no outcome after two minutes is ended
   `action_interrupted`, not repeated; the steps after it still run.
 - **The run is still `running` meanwhile**, which also keeps the issue busy for the label trigger (one running run per workflow and issue). The sweep finds it if the engine dies.
-- **Cancel.** The run is cancelled when its agent has stopped; `onFailure` starts then, and ignores a cancel that is (or becomes) asked for while it runs. The route answers `requested` or `already_requested` as ever.
+- **Cancel (legacy).** A run that carries the mark of the old stop (#891) is cancelled when its agent has stopped; `onFailure` starts then, and ignores a stop that is (or becomes) asked for while it runs. A **discard** (#921) is not a failure: `onFailure` does not run for it.
 - **Budget.** The steps cost nothing (comments and labels), so a budget that is used up does not stop them. They never start an agent: whatever the document says, an agent step or a loop in `onFailure` ends the cleanup.
 - **A document of an older version** has no `onFailure` and runs as before; the column is null for every run that exists.
 
@@ -937,9 +952,9 @@ When the last one is over, the run ends with the stored status and error code (`
 
 ### Known limits
 
-- **A cancelled run ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds on the Worker, 60 at most on a customer's runner) plus the time the agent needs to stop and push (the stop of a turn has 120 seconds, and the heart keeps beating meanwhile), and at the latest after the
+- **A cancelled run of before #921 ends when its agent has stopped** (#891), at the next heartbeat of its runner (30 seconds on the Worker, 60 at most on a customer's runner) plus the time the agent needs to stop and push (the stop of a turn has 120 seconds, and the heart keeps beating meanwhile), and at the latest after the
   grace of 4 minutes, when the app ends the job itself. A runner of an earlier release ignores `cancelRequested`: it goes on until that grace ends the job and its claim is lost, so it stops without a push. The steps that had not
-  started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. The run page has a plain button, no confirmation.
+  started are not written as skipped rows (only a step that was written and not claimed is); the page shows what ran. A discard has no such wait: the run is over at once, and only the agent's stop and push take that long. The run page has plain buttons, no confirmation.
 - **`onFailure` reads no step of the workflow.** After a failure any step may not have run, so the facts of the failure (`status`, `stepId`, `code`, `message`) and the trigger are all it has: it cannot name the branch the agent pushed or quote an earlier result. (A later extension could offer them with a `| default`.)
 - **`onFailure` is not shown apart on the run page and not in the run's JSON**: its steps are rows after the failed one, like any step; `workflow_runs.failure` is not returned by the routes yet.
 - **Profiles are resolved per step**, at the moment the step starts; a profile without a version can mean version 2 for step two of a run whose step one ran
@@ -1187,6 +1202,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 | `cancelled` | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code. |
+| `discarded` | step | A member discarded the run while the step ran or waited for an answer (#921). The run is `discarded`, not `failed`; `onFailure` does not run. |
 
 ### Errors of the run routes (`error`)
 
@@ -1233,13 +1249,13 @@ not exist.
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
-  - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+  - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed`, `discarded` (#921) or `cancelled` (the old stop, legacy). Every run that is not discarded has a button **Discard this run** ([Discarding a run](#discarding-a-run)) with the note "A run is active or discarded. Discard when the agent went the wrong way and you want to start over in a new run."; a run that is active also has **Pause after this step** (**Resume** while it is paused, [Pausing a run](#pausing-a-run)). A discarded run says "Discarded: no longer active, nothing counts against the ticket. Start a fresh run when you want." and has no button; the list of runs keeps it, greyed. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
   - **A question** (#920). A step whose agent asked shows the question, the numbered options and the context as plain text, and, while the run waits, a button for each option, a field for a note or a text of your
     own, and **Send answer** (`POST .../runs/<runId>/answer`). Once answered it shows who answered what and from where (this page or a comment). A waiting run is polled like a running one, so an answer given on the ticket shows up
-    here, and **Cancel run** works while it waits.
+    here, and **Discard this run** works while it waits.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
     - *reported*: the runner reported the cost;
     - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;

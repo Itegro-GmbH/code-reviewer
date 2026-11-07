@@ -55,6 +55,26 @@ function renderList(
 }
 
 describe("the list of runs", () => {
+  // #921-T107
+  it("keeps a discarded run listed, greyed, with its status", () => {
+    const { container } = renderList([
+      summary({
+        id: "run-2",
+        status: "discarded",
+        discardedAt: "2026-11-05T10:03:00.000Z",
+        finishedAt: "2026-11-05T10:03:00.000Z",
+      }),
+      summary({ id: "run-1", status: "running" }),
+    ]);
+
+    const discarded = container.querySelector("[data-run-id=run-2]");
+    expect(discarded?.className).toContain("opacity-60");
+    expect(discarded?.textContent).toContain("Discarded");
+    expect(
+      container.querySelector("[data-run-id=run-1]")?.className ?? "",
+    ).not.toContain("opacity-60");
+  });
+
   // #845-T63
   it("names a label as the trigger and shows who put it on", () => {
     const { container } = renderList([

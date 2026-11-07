@@ -109,6 +109,13 @@ function channel(
         `cancelled ${step.stepId} q${String(ask.n)} on ${step.waitingOnCommentId ?? "no comment"}`,
       );
     },
+    async discarded(run, open) {
+      calls.push(
+        open === undefined
+          ? "discarded, no open question"
+          : `discarded ${open.step.stepId} q${String(open.ask.n)} on ${open.step.waitingOnCommentId ?? "no comment"}`,
+      );
+    },
   };
   return { asks, calls };
 }
@@ -378,15 +385,17 @@ describe("a turn that ends with a question", () => {
   });
 
   // #920-T58
-  it("is stopped while it waits: the step ends cancelled and the run cancelled, nothing starts", async () => {
+  it("is stopped while it waits (the mark of the stop of #891): the step ends cancelled and the run cancelled, nothing starts", async () => {
     const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     await endTurn(app, { agentAsk: QUESTION });
 
-    const cancelled = await app.service.cancel(workflow.id, runId);
+    const marked = await app.runs.lockRun(runId, (lock) =>
+      lock.requestCancel(),
+    );
     await app.engine.advance(runId);
 
-    expect(cancelled.outcome).toBe("requested");
+    expect(marked).toBe(true);
     const state = await app.stateOf(runId);
     expect(state.run).toMatchObject({ status: "cancelled", errorCode: null });
     expect(state.run.finishedAt).not.toBeNull();
@@ -521,10 +530,10 @@ describe("a question that is not shown yet, a stop, and what a step costs (#920)
   it("marks the comment of the question as cancelled when the run is stopped while it waits, and keeps the cost of the turn that asked", async () => {
     const { asks, calls } = channel();
     const app = await startEngineHarness({ asks });
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     await endTurn(app, { agentAsk: QUESTION, costUsd: 0.5 });
 
-    await app.service.cancel(workflow.id, runId);
+    await app.runs.lockRun(runId, (lock) => lock.requestCancel());
     await app.engine.advance(runId);
     await app.engine.advance(runId);
 
@@ -546,7 +555,7 @@ describe("a question that is not shown yet, a stop, and what a step costs (#920)
   it("takes a waiting run into the sweep only when its question has no comment yet, or a stop is asked for", async () => {
     const { asks } = channel();
     const app = await startEngineHarness({ asks });
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     await onTicket(app, runId);
     const due = () =>
       dueWorkflowRuns(app.h.db, {
@@ -572,7 +581,7 @@ describe("a question that is not shown yet, a stop, and what a step costs (#920)
     await app.engine.advance(runId);
     expect(await due()).toEqual([]);
 
-    await app.service.cancel(workflow.id, runId);
+    await app.runs.lockRun(runId, (lock) => lock.requestCancel());
     expect(await due()).toEqual([{ workspaceId: app.workspaceId, runId }]);
   });
 });

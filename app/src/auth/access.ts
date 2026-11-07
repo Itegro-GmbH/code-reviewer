@@ -57,6 +57,8 @@ export const PUBLIC_PATHS: readonly PublicPath[] = [
   { path: "/api/internal/repository-sync", match: "exact" },
   // The same cron, once a minute: lapsed leases, resends, the give-up and the cleanup (#328).
   { path: "/api/internal/dispatch-sweep", match: "exact" },
+  // The same cron, once a night: the full sync of the ticket mirror of every active project (#932).
+  { path: "/api/internal/tracker-resync", match: "exact" },
 ];
 
 /**

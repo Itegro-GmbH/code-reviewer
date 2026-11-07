@@ -2412,6 +2412,20 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #921: the lock of B's run is not A's to take, so A cannot discard it.
+    name: "workflowRuns.lockRun discardRun",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, (lock) => lock.discardRun()),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // #921: nor pause it.
+    name: "workflowRuns.lockRun setPause",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, (lock) => lock.setPause(true)),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     // #920: B's ticket holds no run of A that waits.
     name: "workflowRuns.listWaitingForTicket",
     run: (a, b) =>
@@ -2425,6 +2439,12 @@ const CASES: Case[] = [
     // #920: B's repository holds no run of A that waits.
     name: "workflowRuns.listWaitingWithoutTicket",
     run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #921: B's repository holds no run of A that goes on.
+    name: "workflowRuns.listActiveOnRepository",
+    run: (a, b) => a.workflowRuns.listActiveOnRepository(b.repository.id, 10),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
@@ -2505,6 +2525,16 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    name: "tracker.findItemByNode",
+    run: (a, b) => a.tracker.findItemByNode(`node-${b.externalRepositoryId}`),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.newestWriteAt",
+    run: (a, b) => a.tracker.newestWriteAt(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBeNull(),
+  },
+  {
     name: "tracker.listItems",
     run: (a, b) =>
       a.tracker.listItems(b.repository.id, { state: "open", limit: 10 }),
@@ -2548,8 +2578,8 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
-    name: "tracker.clearChecksStates",
-    run: (a, b) => a.tracker.clearChecksStates(b.repository.id),
+    name: "tracker.clearChecksStatesOfClosed",
+    run: (a, b) => a.tracker.clearChecksStatesOfClosed(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {

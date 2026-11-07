@@ -122,6 +122,8 @@ function askChannelFor(workspaceId: string) {
       return connectorTargetOf(workspaceId, run.repositoryId);
     },
     listSteps: (runId) => runs.listSteps(runId),
+    isDiscarded: async (runId) =>
+      (await runs.getRun(runId))?.status === "discarded",
     memberLogins: () =>
       createWorkspaceMembersRepository(db, workspaceId).githubLogins(),
     async runLink(run) {
@@ -160,14 +162,17 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
 }
 
 /**
- * The part of the engine that takes an answer, built when an answer comes. The engine reaches the Implementer and, through it, the keys
- * of the instance (the app secret): a route that only reads or starts runs, and a webhook that carries no answer, do not need them and
- * load without them.
+ * The part of the engine that takes an answer or discards a run, built when one comes. The engine reaches the Implementer and, through it,
+ * the keys of the instance (the app secret): a route that only reads or starts runs, and a webhook that carries no answer, do not need them
+ * and load without them.
  */
-function lazyAnswerEngine(workspaceId: string): Pick<WorkflowEngine, "answer"> {
+function lazyAnswerEngine(
+  workspaceId: string,
+): Pick<WorkflowEngine, "answer" | "discard"> {
   return {
     answer: (runId, input) =>
       workflowEngineFor(workspaceId).answer(runId, input),
+    discard: (runId) => workflowEngineFor(workspaceId).discard(runId),
   };
 }
 

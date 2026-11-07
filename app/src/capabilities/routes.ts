@@ -58,6 +58,9 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/instance-portal/model-catalog/order", class: "core" },
   { route: "/api/instance-portal/settings", class: "core" },
   { route: "/api/internal/dispatch-sweep", class: "core" },
+  // The nightly full sync of the ticket mirror (#932). Core on purpose: the cron entry is in `vercel.json` of every deployment, and a
+  // route that answers 404 would show as a failed cron; the handler answers `skipped` where there is no factory.
+  { route: "/api/internal/tracker-resync", class: "core" },
   { route: "/api/invitations/accept", class: "core" },
   { route: "/api/operator/v1/[...path]", class: "core" },
   { route: "/api/operator/v1/entitlements/default", class: "core" },
@@ -306,9 +309,21 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
     class: "implementer",
   },
-  // Stops a run (#891).
+  // Stops a run (#891); since #921 it forwards to the discard of a run, which has its own route, and a run can be paused and resumed.
   {
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
     class: "implementer",
   },
   // Answers the question a run waits for (#920).

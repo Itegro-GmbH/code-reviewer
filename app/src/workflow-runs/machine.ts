@@ -30,6 +30,10 @@
 // goes on in the same session (`resume_turn`), and the step reads that turn like any other. A stop asked for while the run waits ends the step as
 // cancelled at once (`cancel_waiting`).
 //
+// A run can be paused (#921, `pauseRequested`): the step that runs goes on and is read, and no further step of the workflow is written or
+// started until the run is resumed. A discarded run (#921) is over for the engine: `nextMove` does nothing for it, and the engine's `discard`
+// ends its steps itself.
+//
 // A run is `running` until the walk is over (`succeeded`), a step failed or the budget ran out (`failed`), or a member stopped it (`cancelled`, #891:
 // once a stop is asked for, no step is written or started any more; a turn that runs is asked to stop, a step that did not start is
 // skipped, and the run ends when nothing runs).
@@ -100,9 +104,12 @@ export type FailureRecord = {
 };
 
 export type MachineState = {
-  runStatus: "running" | "waiting" | "succeeded" | "failed" | "cancelled";
-  /** A member asked for the run to stop (#891). */
+  runStatus:
+    "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "discarded";
+  /** A member asked for the run to stop (#891). Legacy: a member discards a run now (#921), which never reaches the machine. */
   cancelRequested: boolean;
+  /** A member asked the run to stop after its current step (#921): no step of the workflow starts until it is resumed. */
+  pauseRequested?: boolean;
   budgetMicroUsd: number;
   spentMicroUsd: number;
   /** The steps written so far, by position. */
@@ -608,6 +615,12 @@ export function nextMove(state: MachineState): Move {
   if (state.runStatus !== "running") return { move: "idle" };
   if (state.failure !== null) return failureMove(state, state.failure);
   const move = workflowMove(state);
+  // #921: paused. The step that runs goes on and is read; the next one is not written or started (the steps of `onFailure` are not held).
+  if (
+    state.pauseRequested === true &&
+    (move.move === "add_step" || (move.move === "execute" && !move.takeOver))
+  )
+    return { move: "idle" };
   if (
     move.move !== "finish_run" ||
     move.status === "succeeded" ||

@@ -88,6 +88,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/repository-sync",
   // The same cron, once a minute: the sweep of a hosted deployment, a 404 outside serverless mode (#328).
   "/api/internal/dispatch-sweep",
+  // The nightly resync of the ticket mirror (#932): the same credential.
+  "/api/internal/tracker-resync",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",
@@ -216,6 +218,10 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows/[workflowId]/runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+  // Discard, pause and resume a run (#921).
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
   // The answer to the question a run waits for (#920).
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
   // The runners on customers' machines (#854).

@@ -12,6 +12,9 @@
 //    comment already is. A question that was never posted (the answer came first) is posted as answered, never as an open question.
 //  - A run that is stopped while the question is open edits the comment the same way (the marker says `cancelled`) and takes the label
 //    `agent waiting` off.
+//  - A run a member discards (#921) edits the comment of its open question the same way (the marker says `discarded`). The labels
+//    `agent working` and `agent waiting` come off the ticket only when the discard frees it: the run was going on and no other run that
+//    goes on holds the ticket (the engine decides, `freeTicket`). A run that was over has no label of its own to take off.
 //  - Labels and the edit are best effort: the question and the answer are what matter, and a repository that refuses a label does not
 //    stop a run.
 import type {
@@ -25,6 +28,7 @@ import {
   answerRecordComment,
   answeredComment,
   cancelledComment,
+  discardedComment,
   markerOf,
   supersededComment,
   mentionsOf,
@@ -43,6 +47,8 @@ export type AskChannelDependencies = {
   memberLogins(): Promise<readonly string[]>;
   /** The address of the page of the run in this app. */
   runLink(run: StoredWorkflowRun): Promise<string>;
+  /** Whether the run is discarded now (#921): an answer that comes as a member discards the run puts no label back. */
+  isDiscarded(runId: string): Promise<boolean>;
 };
 
 export function createGithubAskChannel(
@@ -70,6 +76,15 @@ export function createGithubAskChannel(
       await provider.changeIssueLabels(integration, repo, place.number, change);
     } catch {
       // A label is a hint for people; the question does not depend on it.
+    }
+  }
+
+  /** Whether the run is discarded now; a failure to find out counts as no. */
+  async function isDiscarded(run: StoredWorkflowRun): Promise<boolean> {
+    try {
+      return await deps.isDiscarded(run.id);
+    } catch {
+      return false;
     }
   }
 
@@ -156,10 +171,12 @@ export function createGithubAskChannel(
         } catch {
           // As above.
         }
-      await labels(target, place, {
-        add: [LABEL_WORKING],
-        remove: [LABEL_WAITING],
-      });
+      // Looked at last: a discard that came while the comment was edited has taken the labels off, and none is put back for it.
+      if (!(await isDiscarded(run)))
+        await labels(target, place, {
+          add: [LABEL_WORKING],
+          remove: [LABEL_WAITING],
+        });
     },
 
     async cancelled(run, step, ask) {
@@ -183,6 +200,37 @@ export function createGithubAskChannel(
         }
       // Nobody works on the ticket any more, so only the one that said somebody had to answer goes.
       await labels(target, place, { add: [], remove: [LABEL_WAITING] });
+    },
+
+    async discarded(run, open, { freeTicket }) {
+      const place = placeOf(run, await deps.listSteps(run.id));
+      const target = place === undefined ? undefined : await deps.targetOf(run);
+      if (place === undefined || target === undefined) return;
+      const { provider, integration, repo } = target;
+      if (
+        open !== undefined &&
+        open.step.waitingOnCommentId !== null &&
+        provider.updateIssueComment !== undefined
+      )
+        try {
+          await provider.updateIssueComment(
+            integration,
+            repo,
+            open.step.waitingOnCommentId,
+            discardedComment({
+              identity: identityOf(run, open.step, open.ask),
+              ask: open.ask,
+            }),
+          );
+        } catch {
+          // The run is over either way; a comment that cannot be edited stays as it is.
+        }
+      // Nobody works on the ticket any more, and nobody has to answer: both labels go, unless another run holds the ticket.
+      if (freeTicket)
+        await labels(target, place, {
+          add: [],
+          remove: [LABEL_WAITING, LABEL_WORKING],
+        });
     },
 
     async superseded(run, step, ask, commentId) {

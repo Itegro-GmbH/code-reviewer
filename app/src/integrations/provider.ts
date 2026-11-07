@@ -421,6 +421,18 @@ export interface IntegrationProvider {
   ): Promise<TrackerPage>;
 
   /**
+   * Only together with `parseTrackerChange`: the status the project boards give a ticket now, by the platform's id of the ticket
+   * (#932): the status on the first board that has one, or null when the ticket is on no board or has no status. `available: false`
+   * when the app may not read boards. Rejects when the platform cannot be asked.
+   */
+  readBoardStatus?(
+    integration: Integration,
+    repo: RepoRef,
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+
+  /**
    * Only where tickets sit on a board (#922, GitHub: the GitHub Projects, projects_v2, of the repository): the boards a project may take as
    * its own, with the Status field of each and the names of its options, read with a token of its own that holds the read permission of
    * the boards and nothing else. A repository whose boards the app may not read (the Projects permission is missing, the repository

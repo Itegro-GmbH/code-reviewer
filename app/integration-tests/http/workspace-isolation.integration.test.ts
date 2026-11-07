@@ -717,6 +717,51 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #921: a member discards a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/discard",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/discard`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/discard/route.ts",
+    implementer: true,
+  },
+  {
+    // #921: a member pauses a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/pause",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/pause`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/pause/route.ts",
+    implementer: true,
+  },
+  {
+    // #921: a member resumes a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/resume",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/resume`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/resume/route.ts",
+    implementer: true,
+  },
+  {
     // #920: a member answers the question of a run; another workspace's run is not found, and nothing is answered there.
     name: "POST workflows/[workflowId]/runs/[runId]/answer",
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
