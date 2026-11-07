@@ -4,8 +4,7 @@
 // there is one. Used for a node in the inspector and for the errors that belong to no node, under the header of the builder.
 import { Button } from "../../components/button.tsx";
 import { Badge } from "../../components/ui/badge.tsx";
-import type { Doc } from "./document.ts";
-import { setAt } from "./document.ts";
+import { setAt, type Doc } from "./document.ts";
 import { fixOf, type Problem } from "./problems.ts";
 
 export function ProblemList({

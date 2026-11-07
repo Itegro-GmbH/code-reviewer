@@ -25,6 +25,7 @@ import {
   browserBuilderApi,
   VALIDATE_DEBOUNCE_MS,
   type BuilderApi,
+  type ReachLookup,
   type ValidateAnswer,
 } from "./api.ts";
 import { BUILDER_COPY, describeSaveFailure } from "./copy.ts";
@@ -36,7 +37,6 @@ import {
   nodeAt,
   normalise,
   removeNode,
-  successorAfterRemoval,
   type Doc,
   type Pointer,
 } from "./document.ts";
@@ -122,6 +122,8 @@ export function LaneBuilder({
   const inspectorHeading = useRef<HTMLHeadingElement>(null);
   const focusTarget = useRef<FocusTarget | undefined>(undefined);
   const [focusTick, setFocusTick] = useState(0);
+  /** What the screen reader is told about the check: the result of the latest one, never "Checking…" between two pauses. */
+  const [announcement, setAnnouncement] = useState("");
 
   useEffect(() => {
     if (doc === undefined) return;
@@ -139,6 +141,18 @@ export function LaneBuilder({
       controller.abort();
     };
   }, [calls, doc, validateDelayMs]);
+
+  const answered =
+    checked !== undefined && checked.doc === doc ? checked.answer : undefined;
+  const result =
+    answered === undefined
+      ? undefined
+      : BUILDER_COPY.checkResult(
+          answered.valid,
+          answered.valid ? answered.steps : answered.errors.length,
+          answered.truncated,
+        );
+  if (result !== undefined && result !== announcement) setAnnouncement(result);
 
   useEffect(() => {
     const target = focusTarget.current;
@@ -175,6 +189,10 @@ export function LaneBuilder({
     answer?.budgetUsd ??
     (typeof doc.budgetUsd === "number" ? doc.budgetUsd : BUDGET_DEFAULT_USD);
 
+  /** What a field of the inspector can reach: asked of the document as it stands (unsaved), with the samples of this lane's latest run. */
+  const lookup: ReachLookup = (request, signal) =>
+    calls.scope(doc, request, workflowId, signal);
+
   const edit = (next: Doc): void => {
     setDoc(next);
     setJustSaved(false);
@@ -206,14 +224,12 @@ export function LaneBuilder({
     select(inserted.pointer);
   };
 
+  // Selection and focus agree: both go to the node that is shown in the inspector once the step is gone.
   const remove = (): void => {
     const removed = removeNode(doc, effective);
-    const next = successorAfterRemoval(doc, effective);
     edit(removed.doc);
     setSelected(removed.selection);
-    focusAfterRender(
-      next === undefined ? { to: "inspector" } : { to: "card", pointer: next },
-    );
+    focusAfterRender({ to: "card", pointer: removed.selection });
   };
 
   const move = (direction: -1 | 1): void => {
@@ -270,9 +286,10 @@ export function LaneBuilder({
   return (
     <div className="flex flex-col gap-4" data-slot="lane-builder">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div role="status" aria-live="polite" data-slot="validity">
-          {status}
-        </div>
+        <div data-slot="validity">{status}</div>
+        <span role="status" aria-live="polite" className="sr-only">
+          {announcement}
+        </span>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
@@ -353,6 +370,7 @@ export function LaneBuilder({
             pointer={effective}
             problems={sorted.byNode.get(effective) ?? []}
             profiles={profiles}
+            lookup={lookup}
             headingRef={inspectorHeading}
             onChange={edit}
             onRemove={remove}

@@ -295,6 +295,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // workflow with its versions. The lane builder and the pages below edit, show and start them.
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
+  // The values a step can reach, for the picker of the lane builder (#927).
+  { route: "/api/w/[workspace]/workflows/scope", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",
     class: "implementer",

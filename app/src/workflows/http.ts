@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The handlers behind the workflow routes (#833): `GET/POST .../workflows?projectId=` (a lane belongs to a project, #922), `POST .../workflows/validate` and
+// The handlers behind the workflow routes (#833): `GET/POST .../workflows?projectId=` (a lane belongs to a project, #922), `POST .../workflows/validate`, `POST .../workflows/scope` (#927) and
 // `GET/PUT/DELETE .../workflows/:id` (DELETE archives), with their collaborators passed in so the route files only wire the real ones and tests wire fakes.
 // Order: the user first (nothing is looked at before the caller is known), then where the request comes from, then, for a body, its
 // content type and size, then the service. Every answer is `Cache-Control: no-store`. The body of a write is the workflow document
@@ -23,6 +23,7 @@ export type WorkflowRouteHandlers = {
   list(request: Request): Promise<Response>;
   create(request: Request): Promise<Response>;
   validate(request: Request): Promise<Response>;
+  scope(request: Request): Promise<Response>;
   get(request: Request, workflowId: string): Promise<Response>;
   update(request: Request, workflowId: string): Promise<Response>;
   archive(request: Request, workflowId: string): Promise<Response>;
@@ -132,6 +133,12 @@ export function createWorkflowRouteHandlers({
     validate: (request) =>
       answer(request, async () =>
         Response.json(await service.validate(await readBody(request)), {
+          headers: NO_STORE,
+        }),
+      ),
+    scope: (request) =>
+      answer(request, async () =>
+        Response.json(await service.scope(await readBody(request)), {
           headers: NO_STORE,
         }),
       ),

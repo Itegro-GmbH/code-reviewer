@@ -44,6 +44,7 @@ import {
 import {
   GITHUB_ISSUE_LABELS,
   PROJECT_MEMBERS,
+  START_BRANCH_ROOTS,
   TICKET_LABELS,
   TICKET_REQUEST_REVIEW,
   TICKET_SET_STATUS,
@@ -92,6 +93,11 @@ export type Checker = ScopeContext & {
    * well formed. The pre-steps of a trigger that is not a label trigger have none: the bot's own writes start no run (#916).
    */
   retriggerLabels?: readonly string[];
+  /**
+   * Called with where a node sits and what it can reach, before the node is checked (and for the `until` of a loop, with the scope of
+   * the body). The scope lookup of the lane builder (`reach.ts`) reads the reach here, so it is the validator's own and not a copy.
+   */
+  probe?: (path: string, env: Env, state: StepState) => void;
 };
 
 export type StepState = {
@@ -795,7 +801,7 @@ function checkStartBranch(
     );
   checkInput(value, STRING, where, c, reachOf(env, where, state), {
     input: "branch",
-    roots: ["input", "defaultBranch", "branch"],
+    roots: START_BRANCH_ROOTS,
   });
 }
 
@@ -1182,6 +1188,7 @@ function checkLoop(
     });
   }
   const untilAt = pointer(path, "until");
+  if (bodyEnv !== undefined) c.probe?.(untilAt, bodyEnv, state);
   if (node.until === undefined)
     missing(
       path,
@@ -1239,6 +1246,7 @@ export function checkSteps(
       );
       continue;
     }
+    c.probe?.(at, env, state);
     const id = node.id;
     const validId = typeof id === "string" && isStepId(id, state.onFailure);
     if (id === undefined)

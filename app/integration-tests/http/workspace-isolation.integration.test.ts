@@ -610,6 +610,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    name: "POST workflows/scope",
+    route: "/api/w/[workspace]/workflows/scope",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows/scope",
+    body: () => ({}),
+    params: () => ({}),
+    file: "workflows/scope/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
     name: "GET workflows/[workflowId]",
     route: "/api/w/[workspace]/workflows/[workflowId]",
     method: "GET",

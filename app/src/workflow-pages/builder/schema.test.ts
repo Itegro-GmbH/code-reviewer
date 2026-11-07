@@ -101,7 +101,9 @@ describe("conditions", () => {
     expect(operandFrom("3", "text")).toBe("3");
     expect(operandFrom("true", "text")).toBe("true");
     expect(operandFrom("3", "number", "")).toBe(3);
-    expect(operandFrom("", "number", 5)).toBe(0);
+    // #927: text that is no number yet leaves the operand as it was; the field keeps the draft.
+    expect(operandFrom("", "number", 5)).toBe(5);
+    expect(operandFrom("-", "number", 5)).toBe(5);
     expect(operandFrom("x", "number", 5)).toBe(5);
     expect(operandFrom("true", "boolean")).toBe(true);
     expect(operandFrom("false", "boolean")).toBe(false);

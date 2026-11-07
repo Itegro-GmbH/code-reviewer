@@ -109,6 +109,8 @@ async function startRoutes(
     await import("../../src/app/api/w/[workspace]/workflows/route.ts");
   const validateRoute =
     await import("../../src/app/api/w/[workspace]/workflows/validate/route.ts");
+  const scopeRoute =
+    await import("../../src/app/api/w/[workspace]/workflows/scope/route.ts");
   const itemRoute =
     await import("../../src/app/api/w/[workspace]/workflows/[workflowId]/route.ts");
 
@@ -134,6 +136,10 @@ async function startRoutes(
     validateRoute.POST(json("POST", `${base(workspace)}/validate`, body), {
       params: Promise.resolve({ workspace }),
     } as Parameters<typeof validateRoute.POST>[1]);
+  const scope = (body: unknown, workspace = "default") =>
+    scopeRoute.POST(json("POST", `${base(workspace)}/scope`, body), {
+      params: Promise.resolve({ workspace }),
+    } as Parameters<typeof scopeRoute.POST>[1]);
   const get = (id: string, query = "", workspace = "default") =>
     itemRoute.GET(new Request(`${base(workspace)}/${id}${query}`), {
       params: Promise.resolve({ workspace, workflowId: id }),
@@ -182,10 +188,12 @@ async function startRoutes(
     projectIds,
     listRoute,
     validateRoute,
+    scopeRoute,
     itemRoute,
     list,
     create,
     validate,
+    scope,
     get,
     update,
     archive,
@@ -428,12 +436,41 @@ describe("the workflow route files", () => {
     },
   );
 
+  // #927-T28
+  it("let a Member ask what a step of an unsaved document can reach, with the profiles of the workspace, and store nothing", async () => {
+    const { scope, rows, addEnvironment } = await startRoutes({
+      role: "member",
+    });
+    await addEnvironment("node");
+
+    const answer = await scope({ document: tiny(), at: "/steps/0" });
+    const unknown = await scope({ document: tiny(), at: "/steps/7" });
+
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("cache-control")).toBe("no-store");
+    expect(await answer.json()).toMatchObject({
+      at: "/steps/0",
+      sampled: false,
+      entries: expect.arrayContaining([
+        expect.objectContaining({ reference: "trigger.id", category: "run" }),
+      ]),
+    });
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toMatchObject({
+      error: "WORKFLOW_REQUEST_INVALID",
+      issues: [{ path: "at", code: "scope_at_unknown" }],
+    });
+    expect(await rows()).toEqual([]);
+  });
+
   // #833-M1-T227
   it("export only the methods each route serves", async () => {
-    const { listRoute, validateRoute, itemRoute } = await startRoutes();
+    const { listRoute, validateRoute, scopeRoute, itemRoute } =
+      await startRoutes();
 
     expect(Object.keys(listRoute).sort()).toEqual(["GET", "POST"]);
     expect(Object.keys(validateRoute).sort()).toEqual(["POST"]);
+    expect(Object.keys(scopeRoute).sort()).toEqual(["POST"]);
     expect(Object.keys(itemRoute).sort()).toEqual(["DELETE", "GET", "PUT"]);
   });
 });
