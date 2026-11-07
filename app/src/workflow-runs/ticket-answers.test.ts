@@ -47,6 +47,7 @@ function run(id: string, ticket: number | null): StoredWorkflowRun {
     budgetMicroUsd: 1,
     spentMicroUsd: 0,
     clientRequestId: id,
+    ticketRef: ticket === null ? null : `github:acme/widgets#${ticket}`,
     triggerKind: "ticket.labeled",
     triggerId: null,
     createdBy: null,
@@ -119,16 +120,31 @@ function harness(options: {
     if (options.replyFails === true) throw new Error("GitHub said no");
     expect(call).toHaveLength(4);
   });
+  const runs = options.runs ?? [run("run-1", 7)];
+  const listWaitingForTicket = vi.fn(async (ticketRef: string) =>
+    runs.filter((candidate) => candidate.ticketRef === ticketRef),
+  );
+  const listWaitingWithoutTicket = vi.fn(async () =>
+    runs.filter((candidate) => candidate.ticketRef === null),
+  );
   const answers = createTicketAnswers({
     activeRepository: async () =>
       options.active === false ? undefined : { id: "r-1" },
-    listWaiting: async () => options.runs ?? [run("run-1", 7)],
+    listWaitingForTicket,
+    listWaitingWithoutTicket,
     listSteps: async (runId) => options.steps?.[runId] ?? [waitingStep(OPEN)],
     engine: { answer },
     kick,
     reply,
   });
-  return { answers, answer, kick, reply };
+  return {
+    answers,
+    answer,
+    kick,
+    reply,
+    listWaitingForTicket,
+    listWaitingWithoutTicket,
+  };
 }
 
 describe("an answer on a ticket", () => {
@@ -201,6 +217,29 @@ describe("an answer on a ticket", () => {
 
     expect(answer).toHaveBeenCalledTimes(1);
     expect(answer).toHaveBeenCalledWith("run-new", expect.anything());
+  });
+
+  // #920-T126
+  it("looks the run up by the ticket reference of the comment, and takes no run of another ticket or repository", async () => {
+    const { answers, answer, listWaitingForTicket } = harness({
+      runs: [
+        run("run-other-ticket", 8),
+        { ...run("run-other-repo", 7), repositoryId: "r-2" },
+        run("run-1", 7),
+      ],
+      steps: {
+        "run-other-ticket": [waitingStep(OPEN)],
+        "run-other-repo": [waitingStep(OPEN)],
+        "run-1": [waitingStep(OPEN)],
+      },
+    });
+
+    const taken = await answers.answer("d", ANSWER);
+
+    expect(listWaitingForTicket).toHaveBeenCalledWith("github:acme/widgets#7");
+    expect(taken).toEqual({ outcome: "answered", runId: "run-1" });
+    expect(answer).toHaveBeenCalledTimes(1);
+    expect(answer).toHaveBeenCalledWith("run-1", expect.anything());
   });
 
   // #920-T124

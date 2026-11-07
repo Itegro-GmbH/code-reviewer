@@ -290,8 +290,19 @@ export type WorkflowRunsRepository = {
    * before the turn, so this is true from the first moment of the turn.
    */
   isAgentStepDelivery(deliveryId: string): Promise<boolean>;
-  /** #920: the runs of a repository that wait for an answer, the one that began to wait last first; at most `limit`. */
-  listWaiting(
+  /**
+   * #920: the runs that wait for an answer and are about this ticket (`github:owner/repo#128`, `workflow_runs.ticket_ref`, #923), the one
+   * that began to wait last first; at most `limit`.
+   */
+  listWaitingForTicket(
+    ticketRef: string,
+    limit: number,
+  ): Promise<StoredWorkflowRun[]>;
+  /**
+   * #920: the runs of a repository that wait for an answer and are about no ticket (their question is on the pull request an earlier step
+   * opened), the one that began to wait last first; at most `limit`.
+   */
+  listWaitingWithoutTicket(
     repositoryId: string,
     limit: number,
   ): Promise<StoredWorkflowRun[]>;
@@ -606,12 +617,27 @@ export function createWorkflowRunsRepository(
 
     listSteps: (runId) => stepsOf(db, runId),
 
-    async listWaiting(repositoryId, limit) {
+    async listWaitingForTicket(ticketRef, limit) {
+      const rows = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("ticket_ref", "=", ticketRef)
+        .where("status", "=", "waiting")
+        .orderBy("updated_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return rows.map(runFrom);
+    },
+
+    async listWaitingWithoutTicket(repositoryId, limit) {
       const rows = await db
         .selectFrom("workflow_runs")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
+        .where("ticket_ref", "is", null)
         .where("status", "=", "waiting")
         .orderBy("updated_at", "desc")
         .orderBy("id")

@@ -670,6 +670,22 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #920: a member answers the question of a run; another workspace's run is not found, and nothing is answered there.
+    name: "POST workflows/[workflowId]/runs/[runId]/answer",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/answer`,
+    body: () => ({ text: "Yes, retry on network errors." }),
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/answer/route.ts",
+    implementer: true,
+  },
+  {
     // #843-T120: every member lists the profiles of their own workspace; the other workspace's are not reachable.
     name: "GET profiles",
     route: "/api/w/[workspace]/profiles",

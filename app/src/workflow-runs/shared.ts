@@ -137,6 +137,18 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
   });
 }
 
+/**
+ * The part of the engine that takes an answer, built when an answer comes. The engine reaches the Implementer and, through it, the keys
+ * of the instance (the app secret): a route that only reads or starts runs, and a webhook that carries no answer, do not need them and
+ * load without them.
+ */
+function lazyAnswerEngine(workspaceId: string): Pick<WorkflowEngine, "answer"> {
+  return {
+    answer: (runId, input) =>
+      workflowEngineFor(workspaceId).answer(runId, input),
+  };
+}
+
 /** The run service of one workspace. */
 export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
   const db = getDatabase();
@@ -145,7 +157,7 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
     // #920: the engine that takes an answer from the page of the run.
-    engine: workflowEngineFor(workspaceId),
+    engine: lazyAnswerEngine(workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();
@@ -227,10 +239,12 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
       );
       return repository?.active === true ? { id: repository.id } : undefined;
     },
-    // TODO(#923): find the run by the ticket (`ticket_ref`) once the mirror has it; until then the newest waiting runs of the repository are read.
-    listWaiting: (repositoryId) => runs.listWaiting(repositoryId, 100),
+    listWaitingForTicket: (ticketRef) =>
+      runs.listWaitingForTicket(ticketRef, 100),
+    listWaitingWithoutTicket: (repositoryId) =>
+      runs.listWaitingWithoutTicket(repositoryId, 100),
     listSteps: (runId) => runs.listSteps(runId),
-    engine: workflowEngineFor(workspaceId),
+    engine: lazyAnswerEngine(workspaceId),
     async reply(repositoryId, answer, text, key) {
       const target = await connectorTargetOf(workspaceId, repositoryId);
       if (target?.provider.commentOnIssue === undefined) return;

@@ -687,7 +687,7 @@ account without one (an email address is never written on a ticket or into the i
 
 Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
 
-**Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (the issue of its `ticket` input or of the label that started it; TODO(#923): `ticket_ref` once the ticket mirror is there),
+**Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (`workflow_runs.ticket_ref`, #923: the issue of its `ticket` input or of the label that started it; a run written before the column was backfilled, and one that has none reads the issue from the input of its trigger),
 else on the **pull request** an action step of the run opened, else nowhere. There it is a comment of the GitHub App of the workspace:
 
 ```
@@ -711,7 +711,7 @@ the run page whatever happens (a repeated attempt finds its comment by the marke
 a waiting run that has no comment yet, and so does every `advance`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
 
 **The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
-own tables (a run of the workspace that waits on that ticket or pull request, the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
+own tables (a run of the workspace that waits and whose `ticket_ref` is that ticket, else one about no ticket whose pull request it is; the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
 no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. A comment that has write access and still cannot answer (an answer that is empty once cleaned, or too long, no question
 waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none. The comment of the question is then edited
 to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the

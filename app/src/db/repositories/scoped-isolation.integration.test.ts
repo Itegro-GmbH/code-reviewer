@@ -2370,9 +2370,19 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #920: B's ticket holds no run of A that waits.
+    name: "workflowRuns.listWaitingForTicket",
+    run: (a, b) =>
+      a.workflowRuns.listWaitingForTicket(
+        b.workflowRun.ticketRef ?? "none",
+        10,
+      ),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     // #920: B's repository holds no run of A that waits.
-    name: "workflowRuns.listWaiting",
-    run: (a, b) => a.workflowRuns.listWaiting(b.repository.id, 10),
+    name: "workflowRuns.listWaitingWithoutTicket",
+    run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {

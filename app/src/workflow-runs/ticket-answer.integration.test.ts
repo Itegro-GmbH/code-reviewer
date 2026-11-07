@@ -69,7 +69,10 @@ async function waitingRun() {
         );
         return found?.active === true ? { id: found.id } : undefined;
       },
-      listWaiting: (repositoryId) => app.runs.listWaiting(repositoryId, 100),
+      listWaitingForTicket: (ticketRef) =>
+        app.runs.listWaitingForTicket(ticketRef, 100),
+      listWaitingWithoutTicket: (repositoryId) =>
+        app.runs.listWaitingWithoutTicket(repositoryId, 100),
       listSteps: (runId) => app.runs.listSteps(runId),
       engine: app.engine,
       kick: (runId) => void kicked.push(runId),

@@ -19,6 +19,7 @@ import type {
   StoredWorkflowRun,
 } from "../db/repositories/workflow-runs-repository.ts";
 import { isRecord } from "../workflows/json.ts";
+import { parseTicketRef } from "../workflows/ticket-ref.ts";
 import type { StepAsk } from "./ask.ts";
 import {
   LABEL_WAITING,
@@ -63,12 +64,17 @@ function wholeNumber(value: unknown): number | undefined {
 }
 
 /**
- * The ticket the run is about, from the input of its trigger: `trigger.ticket` of a run with a `ticket` input, and the issue of a run a label
- * started. TODO(#923): `workflow_runs.ticket_ref` comes with the ticket mirror and is what to read then.
+ * The ticket the run is about: the number in `workflow_runs.ticket_ref` (#923). A run written before the column existed and not
+ * backfilled has none, and its ticket is read from the input of its trigger: `trigger.ticket` of a run with a `ticket` input, and the
+ * issue of a run a label started.
  */
 export function ticketNumberOf(
-  run: Pick<StoredWorkflowRun, "triggerInput">,
+  run: Pick<StoredWorkflowRun, "ticketRef" | "triggerInput">,
 ): number | undefined {
+  if (run.ticketRef !== null) {
+    const parsed = parseTicketRef(run.ticketRef);
+    if (parsed.ok) return parsed.ref.number;
+  }
   const { input, ticket } = readStoredInput(jsonOrNull(run.triggerInput));
   const found =
     ticket ??
@@ -103,7 +109,7 @@ export function pullRequestNumberOf(
 
 /** Where a question of the run is shown. */
 export function placeOf(
-  run: Pick<StoredWorkflowRun, "triggerInput">,
+  run: Pick<StoredWorkflowRun, "ticketRef" | "triggerInput">,
   steps: readonly StoredStepRun[],
 ): Place | undefined {
   const ticket = ticketNumberOf(run);

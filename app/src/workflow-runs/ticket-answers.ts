@@ -4,10 +4,10 @@
 // access (the same check as `/review`, made by the parser of the webhook; a bot never counts), and this finds the run that waits for it and
 // answers it. It serves ONE workspace.
 //
-//  - The run is found in the database, never by what a comment says: the runs of the workspace that wait, on the repository of the comment,
-//    whose question is open and whose ticket (or, failing that, whose pull request) is the number the comment is on. A run waits for one
-//    question at a time and a ticket has one run per workflow, so the newest waiting run wins when two workflows wait on the same ticket.
-//    A comment on anything else starts nothing.
+//  - The run is found in the database, never by what a comment says: the runs of the workspace that wait, whose question is open and whose
+//    ticket is the one the comment is on (`workflow_runs.ticket_ref`, #923), else the runs about no ticket whose pull request is. A run
+//    waits for one question at a time and a ticket has one run per workflow, so the newest waiting run wins when two workflows wait on
+//    the same ticket. A comment on anything else starts nothing.
 //  - The answer belongs to ONE question: a comment answers it only when it was written after the question was asked (its id is greater than
 //    the id of the comment that carries the question, and it is not older than the moment the step began to wait). A late or redelivered
 //    comment from before never answers a question that came later, whatever it says.
@@ -25,6 +25,7 @@ import type {
 import type { TicketAnswer } from "../integrations/types.ts";
 import { parseStepAsk, type StepAsk } from "./ask.ts";
 import { placeOf } from "./ask-channel.ts";
+import { formatTicketRef } from "../workflows/ticket-ref.ts";
 import type { WorkflowEngine } from "./engine.ts";
 
 /** What an answer on a ticket came to; the webhook records `answered` as its outcome and logs the rest. */
@@ -47,11 +48,10 @@ export type TicketAnswersDependencies = {
   activeRepository(
     repo: TicketAnswer["repo"],
   ): Promise<{ id: string } | undefined>;
-  /**
-   * The runs that wait on a repository, newest first.
-   * TODO(#923): look the run up by the ticket (`workflow_runs.ticket_ref`) once the ticket mirror has it, instead of reading the newest ones.
-   */
-  listWaiting(repositoryId: string): Promise<StoredWorkflowRun[]>;
+  /** The runs that wait and are about the ticket (`github:owner/repo#128`, `workflow_runs.ticket_ref`), newest first. */
+  listWaitingForTicket(ticketRef: string): Promise<StoredWorkflowRun[]>;
+  /** The runs that wait on a repository and are about no ticket (their question is on a pull request), newest first. */
+  listWaitingWithoutTicket(repositoryId: string): Promise<StoredWorkflowRun[]>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
   engine: Pick<WorkflowEngine, "answer">;
   kick(runId: string): void;
@@ -131,7 +131,18 @@ export function createTicketAnswers(
       const repository = await deps.activeRepository(answer.repo);
       if (repository === undefined) return { outcome: "no_run" };
       let stale = false;
-      for (const run of await deps.listWaiting(repository.id)) {
+      const candidates = [
+        ...(await deps.listWaitingForTicket(
+          formatTicketRef({
+            provider: "github",
+            repo: answer.repo.fullName,
+            number: answer.number,
+          }),
+        )),
+        ...(await deps.listWaitingWithoutTicket(repository.id)),
+      ];
+      for (const run of candidates) {
+        if (run.repositoryId !== repository.id) continue;
         const steps = await deps.listSteps(run.id);
         const waiting = steps.findLast((step) => step.status === "waiting");
         const ask = parseStepAsk(waiting?.ask ?? null);

@@ -31,7 +31,10 @@ const ASKED: StepAsk = {
   options: ["Network errors", "Network errors and 5xx answers"],
 };
 
-function run(triggerInput: unknown): StoredWorkflowRun {
+function run(
+  triggerInput: unknown,
+  ticketRef: string | null = null,
+): StoredWorkflowRun {
   return {
     id: "run-1",
     workspaceId: "w-1",
@@ -45,6 +48,7 @@ function run(triggerInput: unknown): StoredWorkflowRun {
     budgetMicroUsd: 1,
     spentMicroUsd: 0,
     clientRequestId: "run-1",
+    ticketRef,
     triggerKind: "ticket.labeled",
     triggerId: null,
     createdBy: null,
@@ -112,7 +116,24 @@ describe("where a question is shown", () => {
     expect(ticketNumberOf(run({ issue: { number: 11 } }))).toBe(11);
     expect(ticketNumberOf(run({ repo: "acme/widgets" }))).toBeUndefined();
     expect(ticketNumberOf(run({ ticket: { number: 0 } }))).toBeUndefined();
-    expect(ticketNumberOf({ triggerInput: "not json" })).toBeUndefined();
+    expect(
+      ticketNumberOf({ ticketRef: null, triggerInput: "not json" }),
+    ).toBeUndefined();
+  });
+
+  // #920-T132
+  it("is the ticket reference of the run when it has one, whatever its input says", () => {
+    expect(
+      ticketNumberOf(run({ ticket: { number: 7 } }, "github:acme/widgets#12")),
+    ).toBe(12);
+    expect(
+      ticketNumberOf(run({ repo: "acme/widgets" }, "github:acme/widgets#12")),
+    ).toBe(12);
+    // A reference that is no reference is no ticket: the input is read as for a run written before the column.
+    expect(ticketNumberOf(run({ issue: { number: 11 } }, "garbage"))).toBe(11);
+    expect(
+      placeOf(run({ repo: "x" }, "github:acme/widgets#12"), [opened(5)]),
+    ).toEqual({ number: 12, kind: "ticket" });
   });
 
   // #920-T131

@@ -60,7 +60,7 @@ A turn ends with `done` or with `ask` (`docs/workflows.md`, "A question: `done` 
 turns at the end, and `finishStep` adds only the difference). `nextMove` does nothing for a `waiting` run, however long, except `cancel_waiting` once a stop is asked for; `waiting` also holds the ticket's slot
 (`trigger_key`). The question is shown through the optional `AskChannel` of the engine (`asks`), after the lock is released: `asked`, `answered` and `cancelled` (a stop while it waits). A step that waits with no comment
 (`waiting_on_comment_id` null) is announced again by `advance` and by the sweep (`dueWorkflowRuns` takes such a waiting run too); the marker of the comment makes that idempotent, and what happened meanwhile decides what is
-posted (an answer that came first is posted as answered, a stop is not posted). `finishStep` keeps the cost a step was charged when it asked, whatever outcome it ends with. `ticket-answers.ts` binds a `/answer` comment to the
+posted (an answer that came first is posted as answered, a stop is not posted). `finishStep` keeps the cost a step was charged when it asked, whatever outcome it ends with. `ticket-answers.ts` finds the waiting run of the ticket by `workflow_runs.ticket_ref` (`listWaitingForTicket`; a run about no ticket is found by its pull request, `listWaitingWithoutTicket`) and binds a `/answer` comment to the
 open question (`isOlderThanQuestion`) and replies to a comment that could not answer.
 
 `engine.answer` (called by the answer route and the `/answer` comment) runs under the lock of the run: of two answers one wins. It puts the answer on the step (`state: "answered"`) and makes step and run `running` again;

@@ -220,3 +220,43 @@ describe("the runs of a ticket", () => {
     await expect(run("x".repeat(513), 0)).rejects.toThrow();
   });
 });
+
+describe("the runs that wait for an answer (#920)", () => {
+  // #920-T127
+  it("finds the waiting runs of a ticket by its reference, newest first, and the waiting runs of a repository that are about no ticket", async () => {
+    const { runs, otherRuns, run, db } = await setup();
+    const wait = (id: string, at: string) =>
+      db
+        .updateTable("workflow_runs")
+        .set({ status: "waiting", updated_at: at })
+        .where("id", "=", id)
+        .execute();
+    const older = await run(REF, 0);
+    const newer = await run(REF, 0);
+    const running = await run(REF, 0);
+    const other = await run("github:acme/widgets#13", 0);
+    const noTicket = await run(undefined, 0);
+    await wait(older.id, "2026-11-07T09:00:00.000Z");
+    await wait(newer.id, "2026-11-07T10:00:00.000Z");
+    await wait(other.id, "2026-11-07T10:00:00.000Z");
+    await wait(noTicket.id, "2026-11-07T10:00:00.000Z");
+
+    expect(
+      (await runs.listWaitingForTicket(REF, 10)).map((found) => found.id),
+    ).toEqual([newer.id, older.id]);
+    expect(
+      (await runs.listWaitingForTicket(REF, 1)).map((found) => found.id),
+    ).toEqual([newer.id]);
+    expect(
+      (await runs.listWaitingWithoutTicket(older.repositoryId, 10)).map(
+        (found) => found.id,
+      ),
+    ).toEqual([noTicket.id]);
+    expect(running.status).toBe("running");
+    // Another workspace sees none of them.
+    expect(await otherRuns.listWaitingForTicket(REF, 10)).toEqual([]);
+    expect(
+      await otherRuns.listWaitingWithoutTicket(older.repositoryId, 10),
+    ).toEqual([]);
+  });
+});
