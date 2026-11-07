@@ -19,7 +19,7 @@ export type MirrorOutcome = "updated" | "not_mirrored";
 
 export type TrackerMirror = {
   /**
-   * Writes the change. Throws what the database or the provider throws (a delivery that fails is redelivered; for a delivery that is
+   * Writes the change. Throws what the database or the provider throws (a delivery that fails can be redelivered by hand, GitHub does not retry it; for a delivery that is
    * more than the mirror, the webhook handler logs the failure and goes on).
    */
   apply(

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it, vi } from "vitest";
+import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import { TrackerError } from "./errors.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
@@ -273,6 +274,27 @@ describe("the full sync of a repository", () => {
       expect(run).not.toHaveBeenCalled();
     },
   );
+
+  // #932-R23
+  it("keeps the code of the platform's failure on the error, so that the nightly resync can tell a rate limit", async () => {
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const { service } = await setup({
+      sync: async () => {
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_RATE_LIMITED",
+          "GitHub rate limit reached.",
+        );
+      },
+    });
+
+    await expect(service.sync("r-1")).rejects.toMatchObject({
+      code: "TRACKER_SYNC_FAILED",
+      providerCode: "INTEGRATION_ACCESS_RATE_LIMITED",
+    });
+    error.mockRestore();
+  });
 
   // #923-T62
   it("answers a failure of GitHub with one code and tells the log nothing but the code", async () => {

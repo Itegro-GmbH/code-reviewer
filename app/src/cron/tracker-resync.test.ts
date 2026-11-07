@@ -3,21 +3,22 @@
 // The nightly resync of the ticket mirror (#932): the platform's cron calls it with the shared secret, it syncs every active project with
 // the code of the Resync route, one project's failure never stops the others, and a deployment without the factory asks GitHub for nothing.
 import { describe, expect, it, vi } from "vitest";
-import {
-  handleTrackerResyncCron,
-  resyncProjects,
-  type ResyncTarget,
-} from "./tracker-resync.ts";
+import type { ResyncTarget } from "../tracker/resync-targets.ts";
+import { handleTrackerResyncCron, resyncProjects } from "./tracker-resync.ts";
 
 const SECRET = "cron-secret-0123456789abcdef0123456789abcdef";
 
 const target = (
   id: string,
-  lastFullSyncAt: string | null = null,
+  lastAttemptAt: string | null = null,
+  integrationId = "i-1",
+  unfinished = false,
 ): ResyncTarget => ({
   workspaceId: "w-1",
   repositoryId: id,
-  lastFullSyncAt,
+  integrationId,
+  lastAttemptAt,
+  unfinished,
 });
 
 function request(authorization?: string): Request {
@@ -152,7 +153,7 @@ describe("the nightly resync of the ticket mirror", () => {
 
 describe("walking the projects", () => {
   // #932-T18
-  it("takes the project synced longest ago first, one that never was first of all", async () => {
+  it("takes the project attempted longest ago first, one that never was first of all", async () => {
     const order: string[] = [];
 
     await resyncProjects(
@@ -186,7 +187,7 @@ describe("walking the projects", () => {
   });
 
   // #932-T20
-  it("stops at its budget: the project it is in keeps its place (partial), the ones not reached are deferred", async () => {
+  it("stops at its budget: a project it ends in the middle of is partial, the ones not reached are deferred", async () => {
     let clock = 0;
     const seen: string[] = [];
 
@@ -195,6 +196,7 @@ describe("walking the projects", () => {
       {
         now: () => clock,
         budgetMs: 100,
+        minSliceMs: 10,
         resync: async (t, deadline) => {
           seen.push(`${t.repositoryId}@${String(deadline)}`);
           clock += 60;
@@ -203,14 +205,245 @@ describe("walking the projects", () => {
       },
     );
 
-    // Each call is limited by what is left of the budget; r-1 uses it up, so r-2 and r-3 are not started.
-    expect(seen).toEqual(["r-1@100", "r-1@100"]);
+    // r-1 gets a third of the budget (33) and stops there; r-2 gets half of what is left (60 + 20); the budget is gone before r-3.
+    expect(seen).toEqual(["r-1@33", "r-2@80"]);
     expect(counts).toEqual({
       projects: 3,
       done: 0,
+      partial: 2,
+      failed: 0,
+      deferred: 1,
+    });
+  });
+});
+
+describe("a project that needs more than the budget (#932)", () => {
+  /** A fake of the sync state: what `resyncTargets` would read, and what a sync that ran writes. */
+  function nights() {
+    let clock = 1_000_000;
+    const lastAttempt = new Map<string, string>();
+    const unfinished = new Set<string>();
+    const huge = "r-0-huge";
+    const sync = async (t: ResyncTarget, deadline: number) => {
+      if (t.repositoryId === huge) {
+        // Never done: it reads until its deadline, and the sync state keeps its cursor.
+        clock = deadline;
+        lastAttempt.set(t.repositoryId, new Date(clock).toISOString());
+        unfinished.add(t.repositoryId);
+        return { status: "partial" as const };
+      }
+      clock += 1_000;
+      lastAttempt.set(t.repositoryId, new Date(clock).toISOString());
+      return { status: "done" as const };
+    };
+    const targets = () =>
+      ["r-a", huge, "r-b", "r-c"].map((id) =>
+        target(id, lastAttempt.get(id) ?? null, "i-1", unfinished.has(id)),
+      );
+    return { sync, targets, now: () => clock };
+  }
+
+  // #932-T22
+  it("does not stop the others from syncing in the same run", async () => {
+    const { sync, targets, now } = nights();
+    const seen: string[] = [];
+
+    const counts = await resyncProjects(targets(), {
+      now,
+      budgetMs: 240_000,
+      minSliceMs: 1_000,
+      resync: async (t, deadline) => {
+        seen.push(t.repositoryId);
+        return sync(t, deadline);
+      },
+    });
+
+    expect(seen.filter((id) => id !== "r-0-huge").sort()).toEqual([
+      "r-a",
+      "r-b",
+      "r-c",
+    ]);
+    expect(counts).toEqual({
+      projects: 4,
+      done: 3,
       partial: 1,
       failed: 0,
+      deferred: 0,
+    });
+  });
+
+  // #932-T23
+  it("gives a project a fair slice of what is left, so that the huge one cannot use the whole budget", async () => {
+    const deadlines = new Map<string, number>();
+    let clock = 0;
+
+    await resyncProjects([target("r-huge"), target("r-i")], {
+      now: () => clock,
+      budgetMs: 100_000,
+      minSliceMs: 1_000,
+      resync: async (t, deadline) => {
+        deadlines.set(t.repositoryId, deadline);
+        clock = deadline;
+        return { status: "partial" };
+      },
+    });
+
+    // Half of 100 s for the first, half of the rest for the second.
+    expect(deadlines.get("r-huge")).toBe(50_000);
+    expect(deadlines.get("r-i")).toBe(100_000);
+  });
+
+  // #932-T24
+  it("does not go first every night: after a sync that did not end it comes after the projects whose sync did", async () => {
+    const { sync, targets, now } = nights();
+    const firstOf: string[] = [];
+
+    for (let night = 0; night < 3; night += 1) {
+      const order: string[] = [];
+      await resyncProjects(targets(), {
+        now,
+        budgetMs: 240_000,
+        minSliceMs: 1_000,
+        resync: async (t, deadline) => {
+          order.push(t.repositoryId);
+          return sync(t, deadline);
+        },
+      });
+      firstOf.push(order[0] ?? "");
+    }
+
+    // Night 1: nothing was ever attempted (ids decide). Nights 2 and 3: its last sync did not end, so it comes after the finished ones.
+    expect(firstOf[0]).toBe("r-0-huge");
+    expect(firstOf[1]).not.toBe("r-0-huge");
+    expect(firstOf[2]).not.toBe("r-0-huge");
+  });
+
+  // #932-T25
+  it("takes the projects the budget did not reach before the ones that were attempted", async () => {
+    let clock = 0;
+    const order: string[] = [];
+
+    const counts = await resyncProjects(
+      [
+        target("r-attempted", "2026-11-07T03:00:00.000Z"),
+        target("r-untouched", null),
+      ],
+      {
+        now: () => clock,
+        budgetMs: 1_000,
+        minSliceMs: 1_000,
+        resync: async (t) => {
+          order.push(t.repositoryId);
+          clock += 1_000;
+          return { status: "done" };
+        },
+      },
+    );
+
+    expect(order).toEqual(["r-untouched"]);
+    expect(counts).toMatchObject({ done: 1, deferred: 1 });
+  });
+});
+
+describe("a rate limit (#932)", () => {
+  const rateLimited = () =>
+    Object.assign(new Error("slow down"), {
+      code: "TRACKER_SYNC_FAILED",
+      providerCode: "INTEGRATION_ACCESS_RATE_LIMITED",
+    });
+
+  // #932-T26
+  it("skips the other projects of the same installation, counts them deferred, and goes on with the other installations", async () => {
+    const logFailure = vi.fn();
+    const seen: string[] = [];
+
+    const counts = await resyncProjects(
+      [
+        target("r-1", null, "i-1"),
+        target("r-2", null, "i-1"),
+        target("r-3", null, "i-2"),
+        target("r-4", null, "i-1"),
+      ],
+      {
+        logFailure,
+        resync: async (t) => {
+          seen.push(t.repositoryId);
+          if (t.repositoryId === "r-1") throw rateLimited();
+          return { status: "done" };
+        },
+      },
+    );
+
+    expect(seen).toEqual(["r-1", "r-3"]);
+    expect(counts).toEqual({
+      projects: 4,
+      done: 1,
+      partial: 0,
+      failed: 1,
       deferred: 2,
     });
+    expect(logFailure).toHaveBeenCalledTimes(1);
+  });
+
+  // #932-T27
+  it("does not skip anything for a failure that is not a rate limit", async () => {
+    const seen: string[] = [];
+
+    const counts = await resyncProjects(
+      [target("r-1", null, "i-1"), target("r-2", null, "i-1")],
+      {
+        logFailure: () => undefined,
+        resync: async (t) => {
+          seen.push(t.repositoryId);
+          throw Object.assign(new Error("x"), {
+            code: "TRACKER_SYNC_FAILED",
+            providerCode: "INTEGRATION_ACCESS_UNAVAILABLE",
+          });
+        },
+      },
+    );
+
+    expect(seen).toEqual(["r-1", "r-2"]);
+    expect(counts).toMatchObject({ failed: 2, deferred: 0 });
+  });
+
+  // #932-T28
+  it("logs the code of the platform, not the code of the wrapper", async () => {
+    const logFailure = vi.fn();
+
+    await resyncProjects([target("r-1")], {
+      logFailure,
+      resync: async () => {
+        throw rateLimited();
+      },
+    });
+
+    const line = String(logFailure.mock.calls[0]?.[0]);
+    expect(line).toContain("INTEGRATION_ACCESS_RATE_LIMITED");
+    expect(line).not.toContain("slow down");
+  });
+});
+
+describe("the budget clock (#932)", () => {
+  // #932-T29
+  it("starts when the handler is entered, so that listing the projects is paid from the budget", async () => {
+    let clock = 0;
+    const resync = vi.fn(async () => ({ status: "done" as const }));
+
+    const response = await handleTrackerResyncCron(
+      request(`Bearer ${SECRET}`),
+      deps({
+        now: () => clock,
+        budgetMs: 100,
+        targets: async () => {
+          clock += 150;
+          return [target("r-1")];
+        },
+        resync,
+      }),
+    );
+
+    expect(resync).not.toHaveBeenCalled();
+    expect(await response.json()).toMatchObject({ projects: 1, deferred: 1 });
   });
 });

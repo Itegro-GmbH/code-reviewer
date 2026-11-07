@@ -1279,8 +1279,9 @@ export function createGithubAppClient(
   }
 
   /**
-   * One GraphQL query. Null when GitHub says the board is not ours to read: every error of the answer is `FORBIDDEN`,
-   * `INSUFFICIENT_SCOPES` or `NOT_FOUND`; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
+   * One GraphQL query. When every error of the answer is `FORBIDDEN`, `INSUFFICIENT_SCOPES` or `NOT_FOUND` (some board is not ours to
+   * read), the data that came with them is returned when there is any (the boards we may read, #932): the nodes GitHub could not give
+   * are null in it. Null when there is none; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
    * a query GitHub could not run) and anything else wrong (no answer, not JSON) fails as for REST, so the sync keeps its place and goes
    * on from there.
    */
@@ -1303,7 +1304,10 @@ export function createGithubAppClient(
         isRecord(error) && typeof error.type === "string" ? error.type : "",
       );
       if (types.every((type) => BOARD_UNAVAILABLE_ERRORS.has(type)))
-        return null;
+        return isRecord(json.data) &&
+          Object.values(json.data).some((value) => value !== null)
+          ? json.data
+          : null;
       if (types.includes("RATE_LIMITED"))
         throw new GithubAppError(
           "GITHUB_APP_RATE_LIMITED",

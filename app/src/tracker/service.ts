@@ -214,12 +214,19 @@ export function createTrackerService(
         return await deps.sync.run(integration, repository, options);
       } catch (error) {
         // The code of the failure is for the log; the body of a failure of the platform is never repeated.
+        const providerCode =
+          error instanceof IntegrationError
+            ? error.code
+            : error instanceof Error
+              ? error.name
+              : "unknown";
         console.error(
-          `[tracker] sync of repository=${repository.id} failed (${error instanceof IntegrationError ? error.code : error instanceof Error ? error.name : "unknown"})`,
+          `[tracker] sync of repository=${repository.id} failed (${providerCode})`,
         );
         throw new TrackerError(
           "TRACKER_SYNC_FAILED",
           "GitHub could not be asked, or refused. The sync stands where it was; start it again.",
+          { providerCode },
         );
       }
     },
