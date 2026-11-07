@@ -55,7 +55,7 @@ import {
   type AnswerInput,
   type StepAsk,
 } from "./ask.ts";
-import { placeOf } from "./ask-place.ts";
+import { placeOf, ticketNumberOf } from "./ask-place.ts";
 import { conditionHolds } from "./conditions.ts";
 import { readStoredInput } from "./ticket.ts";
 import {
@@ -97,6 +97,9 @@ import { outcomeOfTurn, type CostBasis, type EndedTurn } from "./turn-facts.ts";
 export type TurnRead = { turnId: string; ended: EndedTurn | undefined };
 /** A turn found by the request id it was started under. */
 export type RequestedTurn = TurnRead & { jobId: string };
+
+/** The most runs of a repository a discard looks at to see whether another one holds its ticket. */
+const ACTIVE_RUNS_LOOKED_AT = 200;
 
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
@@ -163,12 +166,15 @@ export type AskChannel = {
     ask: StepAsk,
   ): Promise<void>;
   /**
-   * #921: the run was discarded: edits the comment of its open question (`open`, when a step waited for an answer) to say so, and takes both
-   * `agent working` and `agent waiting` off the ticket or pull request the run is about, whatever state the run was in.
+   * #921: the run was discarded: edits the comment of its open question (`open`, when a step waited for an answer) to say so. With
+   * `freeTicket` it also takes both `agent working` and `agent waiting` off the ticket or pull request the run is about: the engine says so
+   * for a run that was going on while no other run that goes on holds the ticket; without it the labels are not touched, they are
+   * another run's.
    */
   discarded(
     run: StoredWorkflowRun,
     open: { step: StoredStepRun; ask: StepAsk } | undefined,
+    options: { freeTicket: boolean },
   ): Promise<void>;
   /**
    * A second comment for the same question was posted (two announcements at once) and the other one is the question's: edits the comment
@@ -1337,6 +1343,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       log(
         `[workflow-runs] STEP_CONTINUE_QUEUED run=${run.id} step=${step.stepId}`,
       );
+      // #921: a discard that came while the instruction was being queued found no turn to stop: the instruction is taken out of
+      // the session again, and a turn it started meanwhile is asked to stop, or the end of the turn before it would start it for no run.
+      const current = await deps.runs.getRun(run.id);
+      if (current === undefined || current.status !== "running")
+        await stopUnrecordedTurn(run, step, steps);
       return undefined;
     }
     const turn = await deps.turns.read(begun.runId);
@@ -1455,7 +1466,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     // #891: a stop that was asked for between the decision and the claim: the step does not start. Not a step of `onFailure` (#902): it
     // runs after the stop, or after a failure, and a stop asked for meanwhile changes neither.
     const current = await deps.runs.getRun(run.id);
-    if (current?.cancelRequestedAt != null && current.failure === null) {
+    if (
+      current === undefined ||
+      current.status !== "running" ||
+      (current.cancelRequestedAt !== null && current.failure === null)
+    ) {
       await deps.runs.settleOwnStep(claimed.id, { status: "skipped" });
       return;
     }
@@ -1632,7 +1647,16 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         // The step is over: a member discarded the run (#921), or a stop ended it (#891).
         const current = await deps.runs.getRun(run.id);
         if (current?.status === "discarded")
-          await deps.asks.discarded(current, { step: shown, ask: after.ask });
+          await deps.asks.discarded(
+            current,
+            { step: shown, ask: after.ask },
+            {
+              freeTicket: !(await ticketHeldByAnother(
+                current,
+                await deps.runs.listSteps(current.id),
+              )),
+            },
+          );
         else await deps.asks.cancelled(run, shown, after.ask);
       }
     } catch {
@@ -1884,10 +1908,80 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     if (found !== undefined) await deps.jobs.requestCancel(found.jobId);
   }
 
+  /**
+   * Whether another run that goes on holds the ticket (or the pull request) `run` is about (#921): the labels on it are that run's then.
+   * A look that fails counts as yes: the labels stay, and a repeat of the discard repairs it.
+   */
+  async function ticketHeldByAnother(
+    run: StoredWorkflowRun,
+    steps: readonly StoredStepRun[],
+  ): Promise<boolean> {
+    try {
+      const place = placeOf(run, steps);
+      if (place === undefined) return false;
+      const active = await deps.runs.listActiveOnRepository(
+        run.repositoryId,
+        ACTIVE_RUNS_LOOKED_AT,
+      );
+      for (const other of active) {
+        if (other.id === run.id) continue;
+        const ticket = ticketNumberOf(other);
+        const otherPlace =
+          ticket !== undefined
+            ? { number: ticket }
+            : placeOf(other, await deps.runs.listSteps(other.id));
+        if (otherPlace?.number === place.number) return true;
+      }
+      return false;
+    } catch {
+      log(`[workflow-runs] DISCARD_TICKET_NOT_CHECKED run=${run.id}`);
+      return true;
+    }
+  }
+
+  /**
+   * Best effort, outside the lock: edits the comment of the question that was open and, when the discard freed the ticket, takes the labels
+   * off. `wasLive`: the run was going on when it was discarded (a run that was over has no label of its own on the ticket).
+   */
+  async function showDiscard(
+    run: StoredWorkflowRun,
+    steps: readonly StoredStepRun[],
+    open: { step: StoredStepRun; ask: StepAsk } | undefined,
+    wasLive: boolean,
+  ): Promise<void> {
+    if (deps.asks === undefined || (open === undefined && !wasLive)) return;
+    try {
+      const freeTicket = wasLive && !(await ticketHeldByAnother(run, steps));
+      await deps.asks.discarded(run, open, { freeTicket });
+    } catch {
+      log(`[workflow-runs] DISCARD_NOT_SHOWN run=${run.id}`);
+    }
+  }
+
   async function discard(runId: string): Promise<DiscardResult> {
     const done = await deps.runs.lockRun(runId, async (lock) => {
-      if (lock.run.status === "discarded")
-        return { outcome: "already_discarded" as const };
+      const wasLive =
+        lock.run.status === "running" || lock.run.status === "waiting";
+      if (lock.run.status === "discarded") {
+        // A repeat: the ticket may have been left as it was by a crash or a refusal of GitHub after the first discard committed. A run
+        // that was going on ends with the time of its discard (the discard wrote both); one that was over had ended before.
+        const interrupted = lock.steps.findLast(
+          (step) =>
+            step.errorCode === "discarded" &&
+            parseStepAsk(step.ask)?.state === "open",
+        );
+        const ask = parseStepAsk(interrupted?.ask ?? null);
+        return {
+          outcome: "already_discarded" as const,
+          run: lock.run,
+          steps: [...lock.steps],
+          wasLive: lock.run.finishedAt === lock.run.discardedAt,
+          open:
+            interrupted !== undefined && ask !== undefined
+              ? { step: interrupted, ask }
+              : undefined,
+        };
+      }
       const steps = [...lock.steps];
       for (const step of steps) {
         if (step.status === "pending")
@@ -1910,6 +2004,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         outcome: "discarded" as const,
         run: lock.run,
         steps,
+        wasLive,
         open:
           waiting !== undefined && ask?.state === "open"
             ? { step: waiting, ask }
@@ -1917,8 +2012,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       };
     });
     if (done === undefined) return { outcome: "not_found" };
-    if (done.outcome === "already_discarded") return done;
-    const { run, steps, open } = done;
+    const { run, steps, open, wasLive } = done;
+    if (done.outcome === "already_discarded") {
+      await showDiscard(run, steps, open, wasLive);
+      return { outcome: "already_discarded" };
+    }
     // Outside the lock: the queue takes its own. A turn that was waiting ends at once; one that runs is told by its next heartbeat, and
     // what it reports reaches no run any more (a discarded run is over).
     for (const step of steps) {
@@ -1938,12 +2036,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         );
       }
     }
-    if (deps.asks !== undefined)
-      try {
-        await deps.asks.discarded(run, open);
-      } catch {
-        log(`[workflow-runs] DISCARD_NOT_SHOWN run=${runId}`);
-      }
+    await showDiscard(run, steps, open, wasLive);
     log(`[workflow-runs] run discarded run=${runId}`);
     return { outcome: "discarded" };
   }

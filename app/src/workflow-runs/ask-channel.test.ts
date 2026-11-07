@@ -163,7 +163,12 @@ describe("where a question is shown", () => {
 });
 
 function harness(
-  options: { ticket?: boolean; provider?: Partial<IntegrationProvider> } = {},
+  options: {
+    ticket?: boolean;
+    provider?: Partial<IntegrationProvider>;
+    /** The run is discarded by the time the channel looks (#921). */
+    discarded?: boolean;
+  } = {},
 ) {
   type Call = (...call: unknown[]) => Promise<unknown>;
   const commentOnIssue = vi.fn<Call>(async () => ({
@@ -187,6 +192,7 @@ function harness(
     }),
     listSteps: async () => (options.ticket === false ? [opened(12)] : []),
     memberLogins: async () => ["alice", "bob"],
+    isDiscarded: async () => options.discarded === true,
     runLink: async () => "https://app.example/w/acme/workflows/wf-1/runs/run-1",
   });
   const input = run(
@@ -456,6 +462,74 @@ describe("a question that was never posted, and one that was stopped (#920)", ()
         ASKED,
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("a run that is discarded (#921)", () => {
+  // #921-T92
+  it("edits the open question as discarded and takes both labels off when the discard frees the ticket", async () => {
+    const { channel, input, updateIssueComment, changeIssueLabels } = harness();
+
+    await channel.discarded(
+      input,
+      { step: step({ waitingOnCommentId: "9001" }), ask: ASKED },
+      { freeTicket: true },
+    );
+
+    expect(updateIssueComment).toHaveBeenCalledOnce();
+    const [, , commentId, body] = updateIssueComment.mock
+      .calls[0] as unknown as [unknown, unknown, string, string];
+    expect(commentId).toBe("9001");
+    expect(body).toContain(
+      "<!-- factory discarded run=run-1 step=plan q=1 -->",
+    );
+    expect(changeIssueLabels).toHaveBeenCalledWith(expect.anything(), REPO, 7, {
+      add: [],
+      remove: ["agent waiting", "agent working"],
+    });
+  });
+
+  // #921-T93
+  it("leaves the labels alone when another run still holds the ticket, and edits only its own question", async () => {
+    const { channel, input, updateIssueComment, changeIssueLabels } = harness();
+
+    await channel.discarded(
+      input,
+      { step: step({ waitingOnCommentId: "9001" }), ask: ASKED },
+      { freeTicket: false },
+    );
+    await channel.discarded(input, undefined, { freeTicket: false });
+
+    expect(updateIssueComment).toHaveBeenCalledOnce();
+    expect(changeIssueLabels).not.toHaveBeenCalled();
+  });
+
+  // #921-T94
+  it("does not put the working label back for an answer that came as the run was discarded", async () => {
+    const answered: StepAsk = {
+      ...ASKED,
+      state: "answered",
+      answer: {
+        text: "Network errors",
+        choice: 1,
+        by: "octocat",
+        via: "comment",
+        at: "2026-11-07T10:00:00.000Z",
+      },
+    };
+    const { channel, input, updateIssueComment, changeIssueLabels } = harness({
+      discarded: true,
+    });
+
+    await channel.answered(
+      input,
+      step({ waitingOnCommentId: "9001" }),
+      answered,
+    );
+
+    // The comment says it was answered; nobody works on the ticket for this run any more.
+    expect(updateIssueComment).toHaveBeenCalledOnce();
+    expect(changeIssueLabels).not.toHaveBeenCalled();
   });
 });
 

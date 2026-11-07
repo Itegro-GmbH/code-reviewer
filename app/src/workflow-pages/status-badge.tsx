@@ -60,10 +60,19 @@ function StatusBadge({
   label: string;
   hint?: string | undefined;
 }) {
-  const StatusIcon = ICON[status];
+  // A status a newer server wrote is none of these: a neutral symbol and tone, and the status as the label the caller found.
+  const StatusIcon: Icon | undefined = ICON[status];
   const badge = (
-    <Badge variant={TONE[status]} icon={false} data-status={status}>
-      <StatusIcon aria-hidden="true" weight="bold" />
+    <Badge
+      variant={TONE[status] ?? "neutral"}
+      icon={false}
+      data-status={status}
+    >
+      {StatusIcon === undefined ? (
+        <MinusIcon aria-hidden="true" weight="bold" />
+      ) : (
+        <StatusIcon aria-hidden="true" weight="bold" />
+      )}
       {label}
     </Badge>
   );
@@ -84,12 +93,13 @@ export function WorkflowRunStatusBadge({
   /** Add the focusable "?" that holds the description of the status. */
   hint?: boolean;
 }) {
-  const copy = RUN_STATUS_COPY[status];
+  const copy: (typeof RUN_STATUS_COPY)[typeof status] | undefined =
+    RUN_STATUS_COPY[status];
   return (
     <StatusBadge
       status={status}
-      label={copy.label}
-      hint={hint ? copy.description : undefined}
+      label={copy?.label ?? status}
+      hint={hint ? copy?.description : undefined}
     />
   );
 }
@@ -99,5 +109,7 @@ export function StepStatusBadge({
 }: {
   status: keyof typeof STEP_STATUS_COPY;
 }) {
-  return <StatusBadge status={status} label={STEP_STATUS_COPY[status].label} />;
+  const copy: (typeof STEP_STATUS_COPY)[typeof status] | undefined =
+    STEP_STATUS_COPY[status];
+  return <StatusBadge status={status} label={copy?.label ?? status} />;
 }

@@ -70,7 +70,7 @@ An answer you will see while fixing:
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
 | `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
-| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
+| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled`, not after a discard ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
 Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist). Lengths are counted in
 characters (an emoji is one), as the JSON Schema counts them.
@@ -742,14 +742,20 @@ Then, after the lock is released (a failure of any of these is logged and change
 4. The job of a turn that runs is asked to stop (`jobs.cancel_requested_at`; see [Implementer](implementer.md#cancelling-a-run-891)). A turn that still waits for a runner ends at once; a turn that runs is told by its next heartbeat, ends the agent the way
    it does when it is stopped, pushes what is committed, and reports `cancelled`; billing charges what the turn used. A step that was claimed and has no turn recorded yet has its turn found by its request id and asked to stop, and an instruction queued behind another turn
    of its session is discarded; a turn that starts after the discard is stopped by the one that started it. The engine ignores what these turns report.
-5. If a question was open, its comment is edited to say the run was discarded ("The agent had a question, and the run was discarded. No answer is needed.", marker `<!-- factory discarded run=… step=… q=… -->`), and the labels **`agent waiting` and `agent working`** are taken off the
-   ticket (or the pull request) the run is about, whatever state the run was in. The question stays as the agent asked it on the run page; nobody can answer it (an answer is refused with `WORKFLOW_RUN_NOT_WAITING`, a `/answer` comment finds no waiting run).
+5. If a question was open, its comment is edited to say the run was discarded ("The agent had a question, and the run was discarded. No answer is needed.", marker `<!-- factory discarded run=… step=… q=… -->`). The labels **`agent waiting` and `agent working`** are taken off the
+   ticket (or the pull request) the run is about only when the run was `running` or `waiting` **and no other run that goes on holds the same ticket**: a newer run on the ticket owns those labels. Discarding a run that was over edits nothing on the ticket (it has no open question
+   and no label of its own). The question stays as the agent asked it on the run page; nobody can answer it (an answer is refused with `WORKFLOW_RUN_NOT_WAITING`, a `/answer` comment finds no waiting run). An answer that was accepted in the moment of the discard
+   puts no `agent working` label back.
+6. The request to pause (`pauseRequestedAt`) is cleared: nothing is left to pause.
+
+The edits of step 5 are best effort and happen after the lock is released. **Repeating the discard** (`already_discarded`) tries them again, under the same rule, so a crash or a refusal of GitHub after the first call is repaired by clicking again; the outcome stays
+`already_discarded`. (A repeat tells a run that was going on from one that was over by `finishedAt`: a discard sets it to its own time only for a run that had none.)
 
 An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened): its step ends `discarded` and the call goes on. A discarded run **stays listed**, greyed, with its steps and what it cost; it keeps its `errorCode` when it had failed, so the page
 still says why. Nothing else is deleted: the branch the agent pushed stays on GitHub.
 
 **Legacy.** `cancelled` stays a valid status for the runs the cancel of #891 wrote (`cancelRequestedAt` set): nobody writes it any more, such a run is shown as before, and a run that carried the mark when this version started is ended by the engine as it always was
-(`cancelled`, `onFailure` after the agent has stopped). A run that is `cancelled` can be discarded.
+(`cancelled`, `onFailure` after the agent has stopped). Stopping the task of an agent step through the Implementer route (the task's own stop, not the run's) still ends the run `cancelled`, as before: the step's turn ends with the code `cancelled` and the machine finishes the run so. A run that is `cancelled` can be discarded.
 
 ### Pausing a run
 

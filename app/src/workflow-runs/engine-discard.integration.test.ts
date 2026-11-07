@@ -10,6 +10,7 @@ import {
   twoAgentSteps,
   type EngineHarness,
 } from "../test-support/workflow-engine-harness.ts";
+import type { StoredWorkflowRun } from "../db/repositories/workflow-runs-repository.ts";
 import { parseStepAsk } from "./ask.ts";
 import type { ActionCall } from "./connectors.ts";
 import type { AskChannel } from "./engine.ts";
@@ -42,11 +43,13 @@ function channel() {
     async cancelled(run, step) {
       calls.push(`cancelled ${step.stepId}`);
     },
-    async discarded(run, open) {
+    async discarded(run, open, { freeTicket }) {
       calls.push(
-        open === undefined
-          ? "discarded, no open question"
-          : `discarded ${open.step.stepId} q${String(open.ask.n)} on ${open.step.waitingOnCommentId ?? "no comment"}`,
+        `${
+          open === undefined
+            ? "discarded, no open question"
+            : `discarded ${open.step.stepId} q${String(open.ask.n)} on ${open.step.waitingOnCommentId ?? "no comment"}`
+        }, ticket ${freeTicket ? "freed" : "kept"}`,
       );
     },
   };
@@ -180,7 +183,10 @@ describe("discarding a run that waits for an answer", () => {
 
     expect(discarded.outcome).toBe("discarded");
     // The comment is the one the question was posted as (9001), and the call that edits it also takes the labels off.
-    expect(calls).toEqual(["asked plan q1", "discarded plan q1 on 9001"]);
+    expect(calls).toEqual([
+      "asked plan q1",
+      "discarded plan q1 on 9001, ticket freed",
+    ]);
     const state = await app.stateOf(runId);
     expect(state.run).toMatchObject({
       status: "discarded",
@@ -210,7 +216,7 @@ describe("discarding a run that waits for an answer", () => {
 
 describe("discarding a run that is over", () => {
   // #921-T75
-  it("discards a run that succeeded, keeps how it ended, and takes the labels off", async () => {
+  it("discards a run that succeeded, keeps how it ended, and leaves the ticket alone", async () => {
     const { asks, calls } = channel();
     const app = await startEngineHarness({ asks });
     const { workflow, runId } = await started(app);
@@ -235,7 +241,8 @@ describe("discarding a run that is over", () => {
       "succeeded",
       "succeeded",
     ]);
-    expect(calls).toEqual(["discarded, no open question"]);
+    // A run that was over has no label of its own: nothing is edited on the ticket.
+    expect(calls).toEqual([]);
   });
 
   // #921-T76
@@ -370,6 +377,123 @@ describe("what a discard leaves", () => {
   });
 });
 
+/** A run a label started for the ticket, as the engine writes it: the key is what keeps two of one workflow apart. */
+async function labeledRun(
+  app: EngineHarness,
+  base: StoredWorkflowRun,
+  key: string,
+) {
+  const created = await app.runs.createRun({
+    workflowId: base.workflowId,
+    workflowVersion: base.workflowVersion,
+    repositoryId: base.repositoryId,
+    baseBranch: "main",
+    triggerInput: "{}",
+    budgetMicroUsd: 1_000_000,
+    clientRequestId: `label-${key}`,
+    triggerKind: "ticket.labeled",
+    createdBy: null,
+    actorLogin: "octocat",
+    triggerKey: key,
+    ticketRef: "github:acme/widgets#12",
+  });
+  if (created.status !== "created") throw new Error("the run was refused");
+  return created.run;
+}
+
+describe("discarding an old run while a newer one holds the ticket", () => {
+  // #921-T100
+  it("leaves the labels of the run that goes on, and edits only the question of the run it discards", async () => {
+    const { asks, calls } = channel();
+    const app = await startEngineHarness({ asks });
+    // The first run is only the row the others are copied from: it is never advanced and is about no ticket.
+    const workflow = await app.saveWorkflow(twoAgentSteps());
+    const base = (await app.stateOf((await app.start(workflow.id)).run.id)).run;
+    const older = await labeledRun(app, base, "older");
+    await app.engine.advance(older.id);
+    await app.engine.jobEnded(
+      await app.finishTurn({ agentAsk: QUESTION, costUsd: 0.5 }),
+    );
+    expect((await app.stateOf(older.id)).run.status).toBe("waiting");
+    const newer = await labeledRun(app, base, "newer");
+
+    await app.service.discard(workflow.id, older.id);
+
+    expect(calls.at(-1)).toBe("discarded plan q1 on 9001, ticket kept");
+    expect((await app.stateOf(newer.id)).run.status).toBe("running");
+  });
+
+  // #921-T101
+  it("touches nothing on the ticket when the run it discards was over, whoever holds the ticket", async () => {
+    const { asks, calls } = channel();
+    const app = await startEngineHarness({ asks });
+    // The first run is only the row the others are copied from: it is never advanced and is about no ticket.
+    const workflow = await app.saveWorkflow(twoAgentSteps());
+    const base = (await app.stateOf((await app.start(workflow.id)).run.id)).run;
+    const older = await labeledRun(app, base, "older");
+    await app.engine.advance(older.id);
+    await app.engine.jobEnded(
+      await app.finishTurn({ agentResult: { summary: "Plan." } }),
+    );
+    await app.engine.jobEnded(await app.finishTurn());
+    expect((await app.stateOf(older.id)).run.status).toBe("succeeded");
+    await labeledRun(app, base, "newer");
+
+    await app.service.discard(workflow.id, older.id);
+
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("repeating a discard", () => {
+  // #921-T102
+  it("retries the cleanup of the ticket that a failure left undone, and keeps saying it was discarded already", async () => {
+    const calls: string[] = [];
+    let refuse = true;
+    const { asks } = channel();
+    const app = await startEngineHarness({
+      asks: {
+        ...asks,
+        async discarded(run, open, options) {
+          calls.push(
+            `${open?.step.stepId ?? "none"} ${options.freeTicket ? "freed" : "kept"}`,
+          );
+          if (refuse) throw new Error("github down");
+        },
+      },
+    });
+    const { workflow, runId } = await started(app);
+    await app.engine.jobEnded(
+      await app.finishTurn({ agentAsk: QUESTION, costUsd: 0.5 }),
+    );
+
+    const first = await app.service.discard(workflow.id, runId);
+    refuse = false;
+    const again = await app.service.discard(workflow.id, runId);
+
+    expect([first.outcome, again.outcome]).toEqual([
+      "discarded",
+      "already_discarded",
+    ]);
+    expect(calls).toEqual(["plan freed", "plan freed"]);
+  });
+
+  // #921-T103
+  it("does not touch the ticket again for a run that was over when it was discarded", async () => {
+    const { asks, calls } = channel();
+    const app = await startEngineHarness({ asks });
+    const { workflow, runId } = await started(app);
+    await app.engine.jobEnded(
+      await app.finishTurn({ ok: false, errorCode: "timeout" }),
+    );
+
+    await app.service.discard(workflow.id, runId);
+    await app.service.discard(workflow.id, runId);
+
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("pausing a run after its current step", () => {
   // #921-T81
   it("lets the step that runs finish, starts no further step, and starts it when the run is resumed", async () => {
@@ -404,6 +528,21 @@ describe("pausing a run after its current step", () => {
     ]);
     // The turn of the next step waits for a runner.
     expect(await app.waitingJobs()).toHaveLength(1);
+  });
+
+  // #921-T104
+  it("drops the request to pause when the run is discarded", async () => {
+    const app = await startEngineHarness();
+    const { workflow, runId } = await started(app);
+    await app.service.pause(workflow.id, runId);
+    expect((await app.stateOf(runId)).run.pauseRequestedAt).not.toBeNull();
+
+    await app.service.discard(workflow.id, runId);
+
+    expect((await app.stateOf(runId)).run).toMatchObject({
+      status: "discarded",
+      pauseRequestedAt: null,
+    });
   });
 
   // #921-T82

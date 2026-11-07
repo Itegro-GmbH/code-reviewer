@@ -271,8 +271,8 @@ export type RunLock = {
    */
   requestCancel(): Promise<boolean>;
   /**
-   * #921: the run is discarded, whatever it was: `running`, `waiting` or over. It becomes `discarded` with `discarded_at`, keeps the end it
-   * had (`finished_at` and the code of a failure) or gets one now, and so frees its ticket. Returns whether this call wrote it; a run that
+   * #921: the run is discarded, whatever it was: `running`, `waiting` or over. It becomes `discarded` with `discarded_at` and no request to
+   * pause after the current step (nothing is left to pause), keeps the end it had (`finished_at` and the code of a failure) or gets one now, and so frees its ticket. Returns whether this call wrote it; a run that
    * is discarded already is not written again. The steps are the caller's to end (`finishStep`), before this.
    */
   discardRun(): Promise<boolean>;
@@ -334,6 +334,14 @@ export type WorkflowRunsRepository = {
    * opened), the one that began to wait last first; at most `limit`.
    */
   listWaitingWithoutTicket(
+    repositoryId: string,
+    limit: number,
+  ): Promise<StoredWorkflowRun[]>;
+  /**
+   * #921: the runs of a repository that go on (`running` or `waiting`), newest first; at most `limit`. A discard looks at them to see whether
+   * another run holds the ticket of the one it discards.
+   */
+  listActiveOnRepository(
     repositoryId: string,
     limit: number,
   ): Promise<StoredWorkflowRun[]>;
@@ -682,6 +690,20 @@ export function createWorkflowRunsRepository(
         .where("ticket_ref", "=", ticketRef)
         .where("status", "=", "waiting")
         .orderBy("updated_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return rows.map(runFrom);
+    },
+
+    async listActiveOnRepository(repositoryId, limit) {
+      const rows = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("status", "in", ["running", "waiting"])
+        .orderBy("created_at", "desc")
         .orderBy("id")
         .limit(limit)
         .execute();
@@ -1048,6 +1070,7 @@ export function createWorkflowRunsRepository(
               .set((eb) => ({
                 status: "discarded",
                 discarded_at: at,
+                pause_requested_at: null,
                 finished_at: eb.fn.coalesce("finished_at", eb.val(at)),
                 updated_at: at,
               }))
@@ -1061,6 +1084,7 @@ export function createWorkflowRunsRepository(
               ...lock.run,
               status: "discarded",
               discardedAt: at,
+              pauseRequestedAt: null,
               finishedAt: discarded.finished_at,
               updatedAt: at,
             };

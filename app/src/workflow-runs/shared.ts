@@ -100,6 +100,8 @@ function askChannelFor(workspaceId: string) {
       return connectorTargetOf(workspaceId, run.repositoryId);
     },
     listSteps: (runId) => runs.listSteps(runId),
+    isDiscarded: async (runId) =>
+      (await runs.getRun(runId))?.status === "discarded",
     memberLogins: () =>
       createWorkspaceMembersRepository(db, workspaceId).githubLogins(),
     async runLink(run) {

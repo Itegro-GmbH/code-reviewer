@@ -2416,6 +2416,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // #921: B's repository holds no run of A that goes on.
+    name: "workflowRuns.listActiveOnRepository",
+    run: (a, b) => a.workflowRuns.listActiveOnRepository(b.repository.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     // #920: B's agent step is nobody's but B's: the delivery id that names it (the prefix of B's workspace, the request id the engine
     // gave it) vouches for nothing when A asks, whichever job it is asked about.
     name: "workflowRuns.isAgentStepDelivery",
