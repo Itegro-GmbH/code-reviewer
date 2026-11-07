@@ -305,6 +305,21 @@ export const PAGE_COPY = {
   stepCreated: "This was created by the step.",
   profile: "Profile",
   openRun: "Open the run",
+  askHeading: "The agent asks",
+  askChoose: "Answer",
+  askAnswerLabel: "Your answer",
+  askNoteLabel:
+    "A note to go with the answer (or a text of your own, instead of an option)",
+  askSend: "Send answer",
+  askSending: "Sending the answer",
+  askSent:
+    "The answer was sent. The run goes on: the agent gets it as its next instruction, and this page updates by itself.",
+  askWaitingHint:
+    "The run waits for as long as it takes. You can also answer on the ticket with /answer.",
+  askAnswered: "Answered",
+  askAnsweredBy: "Answered by",
+  askViaPage: "on this page",
+  askViaComment: "in a comment",
   cancelRun: "Cancel run",
   cancelling: "Stopping the run",
   cancelHint:

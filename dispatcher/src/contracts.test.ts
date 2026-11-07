@@ -335,10 +335,7 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
         "examples/implementer/ImplementerAgentResult.json",
       ],
       // #920
-      [
-        "ImplementerAgentAsk",
-        "examples/implementer/ImplementerAgentAsk.json",
-      ],
+      ["ImplementerAgentAsk", "examples/implementer/ImplementerAgentAsk.json"],
       // #838
       ["ImplementerResume", "examples/implementer/ImplementerResume.json"],
     ] as const) {

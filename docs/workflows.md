@@ -637,7 +637,7 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 Every agent turn ends with one of two things: **`done`**, its result, or **`ask`**, a question for a person. The agent hands in the question through the same finish tool,
 `factory-submit --ask` (the JSON `{"question": "...", "options": ["...", "..."], "context": "..."}` on standard input; `options` and `context` are optional) or
 `submit_result({ "ask": { "question": "...", "options": [...], "context": "..." } })`; the last call of a turn wins. A question is at most 2000 characters, at most 10 options of at most
-200 characters, and a context of at most 4000. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
+200 characters, and a context of at most 4000. Only a step that has a result schema (its own `result`, or the default of its profile version) has the finish tool, so only such a step can ask. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
 the claim feature `implementer_ask` cannot either: its turn runs as before, ending with a result or failing, and the agent is not told that `ask` exists. `ask` is not a failure: `onFailure` is not touched.
 
 What the engine does when a turn ends with a question:
@@ -658,7 +658,34 @@ It costs what a turn costs, against what is left of the budget; if less than one
 
 Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
 
-Where the question is shown outside the run page: on the ticket of the run (`ticket_ref`), else on its pull request, else nowhere (only the run page shows it).
+**Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (the issue of its `ticket` input or of the label that started it; TODO(#923): `ticket_ref` once the ticket mirror is there),
+else on the **pull request** an action step of the run opened, else nowhere. There it is a comment of the GitHub App of the workspace:
+
+```
+<!-- factory ask run=<run id> step=<step id> q=<n> -->
+The agent has a question and waits for the answer:
+
+**Retry which failures?**
+
+1. Network errors only
+2. Network errors and 5xx answers
+
+Reply with `/answer <n>` (a note may follow) or answer in the factory: https://…/w/acme/workflows/…/runs/…
+
+@alice @bob
+```
+
+The first line is the hidden marker (`q` counts the questions of the step); a question without options says "Reply with `/answer <your answer>`". The question, the options and the context are the agent's text: defused
+(no mention, no link that reaches somebody, no direction marks) and bounded, like every text an agent writes into a comment. The people asked are the members of the workspace that have a GitHub login (the first 10;
+there is no project of members yet). The ticket also gets the label **`agent waiting`** and loses **`agent working`**. Posting is best effort: a comment or a label GitHub refuses does not stop the run, and the question is on
+the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one).
+
+**The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
+own tables (a run of the workspace that waits on that ticket or pull request, the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
+no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. The comment of the question is then edited
+to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the
+name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
+[`app/src/webhooks/README.md`](../app/src/webhooks/README.md).
 
 ### Cancelling a run
 
@@ -1118,6 +1145,9 @@ not exist.
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
+  - **A question** (#920). A step whose agent asked shows the question, the numbered options and the context as plain text, and, while the run waits, a button for each option, a field for a note or a text of your
+    own, and **Send answer** (`POST .../runs/<runId>/answer`). Once answered it shows who answered what and from where (this page or a comment). A waiting run is polled like a running one, so an answer given on the ticket shows up
+    here, and **Cancel run** works while it waits.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
     - *reported*: the runner reported the cost;
     - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;

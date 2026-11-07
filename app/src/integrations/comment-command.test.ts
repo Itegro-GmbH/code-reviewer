@@ -5,7 +5,7 @@
 // and `/review` never carries arguments. The parser runs on every comment before anything is known
 // about the commenter, so a hostile comment must not make it slow.
 import { describe, expect, it } from "vitest";
-import { parseCommentCommand } from "./comment-command.ts";
+import { parseAnswerCommand, parseCommentCommand } from "./comment-command.ts";
 
 describe("reading a comment as a command", () => {
   // #203-T01
@@ -119,6 +119,62 @@ describe("reading hostile comments", () => {
     parseCommentCommand(`${" ".repeat(BIG)}/review`);
     parseCommentCommand(`${" ".repeat(BIG)}no command`);
 
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+});
+
+describe("reading a comment as an answer (#920)", () => {
+  // #920-T100
+  it("reads /answer with an option, with an option and a note, and with a text", () => {
+    expect(parseAnswerCommand("/answer 2")).toEqual({ choice: 2, raw: "2" });
+    expect(parseAnswerCommand("/answer 2 and log it")).toEqual({
+      choice: 2,
+      text: "and log it",
+      raw: "2 and log it",
+    });
+    expect(parseAnswerCommand("/answer Use Redis, not memcached.")).toEqual({
+      raw: "Use Redis, not memcached.",
+    });
+    expect(
+      parseAnswerCommand("  \n/ANSWER   3\nwith a note\nover lines "),
+    ).toEqual({
+      choice: 3,
+      text: "with a note\nover lines",
+      raw: "3\nwith a note\nover lines",
+    });
+  });
+
+  // #920-T100
+  it("reads nothing from a comment that only mentions the command or says nothing after it", () => {
+    for (const body of [
+      "",
+      "/answer",
+      "/answer   \n ",
+      "/answers 1",
+      "/answer-all 1",
+      "please /answer 1",
+      "> /answer 1",
+      "`/answer 1`",
+      "//answer 1",
+      "/review",
+    ])
+      expect(parseAnswerCommand(body), body).toBeNull();
+  });
+
+  // #920-T100
+  it("keeps a number that is part of a text as a choice with a note, so the caller can tell (0 and long numbers are text)", () => {
+    expect(parseAnswerCommand("/answer 0")).toEqual({ raw: "0" });
+    expect(parseAnswerCommand("/answer 1234 things")).toEqual({
+      raw: "1234 things",
+    });
+    expect(parseAnswerCommand("/answer 12")).toEqual({ choice: 12, raw: "12" });
+  });
+
+  // #920-T100
+  it("is quick for a hostile comment", () => {
+    const start = performance.now();
+    parseAnswerCommand(`/answer ${"1 ".repeat(100_000)}`);
+    parseAnswerCommand(`/answer${" ".repeat(100_000)}x`);
     expect(performance.now() - start).toBeLessThan(500);
   });
 });

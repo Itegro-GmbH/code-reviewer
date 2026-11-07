@@ -49,6 +49,10 @@ export const WEBHOOK_ACCEPTED_OUTCOMES = [
   "workflow_runs_started",
   /** An issue got a label (#845) and no workflow of the workspace starts for it (no workflow with the label, or the repository is not an active one). */
   "no_workflow_matched",
+  /** A comment `/answer ...` (#920) answered the question a workflow run waits for. */
+  "ticket_answered",
+  /** A comment `/answer ...` (#920) that no waiting run takes: none waits on this ticket, or the answer cannot be used, or somebody answered first. */
+  "no_answer_taken",
   "installation_changed",
   /** An installation that no workspace has linked: noted as unclaimed, nothing was created. */
   "installation_unclaimed",

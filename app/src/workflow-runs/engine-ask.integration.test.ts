@@ -9,6 +9,7 @@ import {
   twoAgentSteps,
   type EngineHarness,
 } from "../test-support/workflow-engine-harness.ts";
+import { sha } from "../test-support/jobs.ts";
 import { parseStepAsk } from "./ask.ts";
 import type { AskChannel } from "./engine.ts";
 
@@ -18,10 +19,14 @@ const QUESTION = {
   context: "client.ts tells the two apart.",
 };
 
+const REPO = "acme/widgets";
+
 async function started(app: EngineHarness) {
   const workflow = await app.saveWorkflow(twoAgentSteps());
   const { run } = await app.start(workflow.id);
   await app.engine.advance(run.id);
+  // The agent pushed its branch before it asked: the turn that goes on starts from its tip, which the Implementer reads from GitHub.
+  app.h.fake.addBranch(REPO, `workflow/${run.id}/plan`, sha("c"));
   return { workflow, runId: run.id };
 }
 
@@ -301,6 +306,7 @@ describe("a turn that ends with a question", () => {
     });
     const { run } = await app.start(workflow.id);
     await app.engine.advance(run.id);
+    app.h.fake.addBranch(REPO, `workflow/${run.id}/plan`, sha("c"));
     // The asking turn costs the whole budget (the run's budget is one dollar).
     await endTurn(app, { agentAsk: QUESTION, costUsd: 1 });
 

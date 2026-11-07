@@ -44,6 +44,7 @@ import {
   STEP_KIND_COPY,
   TRIGGER_COPY,
 } from "./messages.ts";
+import { AskBlock } from "./ask-block.tsx";
 import { StepStatusBadge, WorkflowRunStatusBadge } from "./status-badge.tsx";
 import {
   actionResultOf,
@@ -313,12 +314,18 @@ function Step({
   repeated,
   workspaceSlug,
   repository,
+  workflowId,
+  runId,
+  api,
 }: {
   step: StepView;
   /** The step ran more than once in this run (the rounds of a loop): its round is told. */
   repeated: boolean;
   workspaceSlug: string;
   repository: string | undefined;
+  workflowId: string;
+  runId: string;
+  api: WorkflowRunsApi;
 }) {
   const duration = stepDurationMs(step);
   const failure = describeStepFailure(step.errorCode, step.errorMessage);
@@ -386,6 +393,8 @@ function Step({
           </Link>
         </p>
       ) : null}
+      {/* #920: the question the step asked, and the way to answer while it waits. */}
+      <AskBlock step={step} workflowId={workflowId} runId={runId} api={api} />
       {step.kind === "agent" ? (
         <AgentOutcome step={step} repository={repository} />
       ) : step.kind === "action" ? (
@@ -578,6 +587,9 @@ export function WorkflowRunDetail({
                 )}
                 workspaceSlug={workspaceSlug}
                 repository={repository}
+                workflowId={workflowId}
+                runId={run.id}
+                api={api}
               />
             ))}
           </ol>

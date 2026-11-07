@@ -14,6 +14,7 @@ import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-r
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
+import { createWorkspacesRepository } from "../db/repositories/workspaces-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { runAfterResponse } from "../dispatch/shared.ts";
 import { startQueuedFollowUps } from "../implementer/follow-up-shared.ts";
@@ -24,8 +25,16 @@ import {
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
+import { loadAuthConfig } from "../auth/config.ts";
+import { workspacePath } from "../workspaces/paths.ts";
+import { createGithubAskChannel } from "./ask-channel.ts";
+import { MENTIONS_MAX } from "./ask-comment.ts";
+import { createTicketAnswers, type TicketAnswers } from "./ticket-answers.ts";
 import { createConnectorRegistry } from "./connectors.ts";
-import { createGithubConnectors } from "./github-connectors.ts";
+import {
+  createGithubConnectors,
+  type GithubActionTarget,
+} from "./github-connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
 import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
@@ -41,34 +50,64 @@ import {
  * The actions this server can do: the three GitHub actions, through the GitHub App of the workspace. They need rights of the App the
  * owner grants (Issues and Pull requests: read and write); where the App lacks one, the step ends as `github_permission_missing`.
  */
+async function connectorTargetOf(
+  workspaceId: string,
+  repositoryId: string,
+): Promise<GithubActionTarget | undefined> {
+  const db = getDatabase();
+  const repository = await createRepositoriesRepository(db, workspaceId).get(
+    repositoryId,
+  );
+  if (repository === undefined) return undefined;
+  const integration = await createIntegrationsRepository(db, workspaceId).get(
+    repository.integrationId,
+  );
+  if (integration === undefined || integration.status !== "active")
+    return undefined;
+  return {
+    provider: integrationRegistry.resolve(integration.type),
+    integration,
+    repo: {
+      integrationId: repository.integrationId,
+      externalId: repository.externalId,
+      fullName: repository.fullName,
+      url: repository.url,
+    },
+  };
+}
+
 const connectors = createConnectorRegistry(
   createGithubConnectors({
-    async targetOf(call) {
-      const db = getDatabase();
-      const repository = await createRepositoriesRepository(
-        db,
-        call.workspaceId,
-      ).get(call.repository.id);
-      if (repository === undefined) return undefined;
-      const integration = await createIntegrationsRepository(
-        db,
-        call.workspaceId,
-      ).get(repository.integrationId);
-      if (integration === undefined || integration.status !== "active")
-        return undefined;
-      return {
-        provider: integrationRegistry.resolve(integration.type),
-        integration,
-        repo: {
-          integrationId: repository.integrationId,
-          externalId: repository.externalId,
-          fullName: repository.fullName,
-          url: repository.url,
-        },
-      };
-    },
+    targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
   }),
 );
+
+/**
+ * Where the questions of agents are shown for one workspace (#920): the ticket of the run, else its pull request, through the GitHub App of the
+ * workspace. The members of the workspace that have a GitHub login are the ones asked.
+ */
+function askChannelFor(workspaceId: string) {
+  const db = getDatabase();
+  const runs = createWorkflowRunsRepository(db, workspaceId);
+  return createGithubAskChannel({
+    async targetOf(run) {
+      return connectorTargetOf(workspaceId, run.repositoryId);
+    },
+    listSteps: (runId) => runs.listSteps(runId),
+    memberLogins: () =>
+      createWorkspaceMembersRepository(db, workspaceId).githubLogins(
+        MENTIONS_MAX,
+      ),
+    async runLink(run) {
+      const workspace = await createWorkspacesRepository(db).get(workspaceId);
+      const path = workspacePath(
+        workspace?.slug ?? workspaceId,
+        `/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`,
+      );
+      return new URL(path, loadAuthConfig(process.env).baseUrl).href;
+    },
+  });
+}
 
 /** The engine of one workspace. */
 export function workflowEngineFor(workspaceId: string): WorkflowEngine {
@@ -77,6 +116,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
   const jobs = createJobsRepository(db, workspaceId);
   const turns = createImplementerRepository(db, workspaceId);
   return createWorkflowEngine({
+    asks: askChannelFor(workspaceId),
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     members: createWorkspaceMembersRepository(db, workspaceId),
@@ -163,6 +203,30 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
       }
     },
     // The first steps run after the response: starting a turn asks GitHub several times.
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * What takes the answer a comment `/answer ...` gives (#920): finds the run of the workspace that waits on the ticket or the pull request and
+ * answers it. The turn that goes on starts after the response, as the first steps of a run do.
+ */
+export function ticketAnswersFor(workspaceId: string): TicketAnswers {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  const runs = createWorkflowRunsRepository(db, workspaceId);
+  return createTicketAnswers({
+    async activeRepository(repo) {
+      const repository = await repositories.findByExternalId(
+        repo.integrationId,
+        repo.externalId,
+      );
+      return repository?.active === true ? { id: repository.id } : undefined;
+    },
+    listWaiting: (repositoryId) => runs.listWaiting(repositoryId, 20),
+    listSteps: (runId) => runs.listSteps(runId),
+    engine: workflowEngineFor(workspaceId),
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });

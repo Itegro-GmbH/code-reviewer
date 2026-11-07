@@ -466,7 +466,13 @@ def test_the_example_of_the_agent_ask_is_valid_in_the_result_and_in_the_runners_
     result = _result()
     result["implementer"]["agentAsk"] = value
     assert _accepts("RunnerResult", result)
-    for bad in ([], {"question": ""}, {"question": "q", "answer": "x"}, {"options": ["a"]}):
+    refused: list[object] = [
+        [],
+        {"question": ""},
+        {"question": "q", "answer": "x"},
+        {"options": ["a"]},
+    ]
+    for bad in refused:
         result["implementer"]["agentAsk"] = bad
         assert not _accepts("RunnerResult", result), bad
 

@@ -14,6 +14,7 @@ import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
   type WebhookHandler,
+  type TicketAnswerTaker,
   type WorkflowStarter,
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
@@ -43,7 +44,11 @@ export function getJobQueueReviewTriggerIntake(
  * on an issue in one workspace (#845); the route passes it in, because the engine depends on this folder and not the other way round.
  */
 export function getGithubAppWebhookHandler(
-  options: { workflowsFor?: (workspaceId: string) => WorkflowStarter } = {},
+  options: {
+    workflowsFor?: (workspaceId: string) => WorkflowStarter;
+    /** #920: what takes the answer of a comment `/answer ...` in one workspace. */
+    answersFor?: (workspaceId: string) => TicketAnswerTaker;
+  } = {},
 ): WebhookHandler {
   const db = getDatabase();
   return createGithubAppWebhookHandler({
@@ -62,6 +67,9 @@ export function getGithubAppWebhookHandler(
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),
+      ...(options.answersFor === undefined
+        ? {}
+        : { answers: options.answersFor(workspaceId) }),
     }),
     automatic: {},
     logger: consoleWebhookLogger,

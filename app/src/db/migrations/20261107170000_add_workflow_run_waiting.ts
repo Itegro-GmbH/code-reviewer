@@ -8,8 +8,9 @@
 //  - `workflow_step_runs.ask`: JSON text, the question of a step that asked and what became of it (`workflow-runs/ask.ts`); null for every
 //    step that exists. `workflow_step_runs.waiting_on_comment_id`: the id of the comment that carries the question on the ticket or the
 //    pull request, once it is posted; null otherwise;
-//  - one run waits for one ticket as well as it runs for it: the partial unique index on (`workflow_id`, `trigger_key`) counts a `waiting`
-//    run. The new index is built before the old one is dropped, so there is never a moment without the rule.
+//  - one run waits for one ticket as well as it runs for it: a second partial unique index on (`workflow_id`, `trigger_key`) counts a `waiting`
+//    run next to a `running` one. The old index (`running` only) stays: it is the rule of the migration before, which is taken back with its
+//    own `down`, and the new one holds everything it holds and more, so the two never disagree.
 //
 // Expand only, safe for the live database and for the version that is still running:
 //  - the old version never writes `waiting`, `ask` or the comment id and never reads them; a run it advances is `running` as ever. A run the
@@ -56,9 +57,6 @@ export const migration: Migration = {
       where status in ('running', 'waiting') and trigger_key is not null`.execute(
       db,
     );
-    await sql`drop index if exists workflow_runs_trigger_running_unique`.execute(
-      db,
-    );
 
     await sql`alter table workflow_step_runs drop constraint if exists workflow_step_runs_status_check`.execute(
       db,
@@ -88,9 +86,6 @@ export const migration: Migration = {
   },
 
   async down(db) {
-    await sql`create unique index if not exists workflow_runs_trigger_running_unique
-      on workflow_runs (workflow_id, trigger_key)
-      where status = 'running' and trigger_key is not null`.execute(db);
     await sql`drop index if exists workflow_runs_trigger_active_unique`.execute(
       db,
     );

@@ -8,7 +8,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../ui/json-request.ts";
-import type { RunView } from "../workflow-runs/service.ts";
+import type { RunView, StepView } from "../workflow-runs/service.ts";
 import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
 import {
   COST_BASIS_COPY,
@@ -835,6 +835,183 @@ describe("stopping a run", () => {
     expect(
       container.querySelector("[data-slot=run-cancel-failure]")?.textContent,
     ).toContain("no longer exists");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+  });
+});
+
+describe("a question of the agent (#920)", () => {
+  const ASK = {
+    n: 1,
+    state: "open" as const,
+    question: "Retry which failures? <b>now</b>",
+    options: ["Network errors", "Network errors and 5xx answers"],
+    context: "client.ts tells the two apart.",
+  };
+  const waiting = (ask: NonNullable<StepView["ask"]> = ASK) =>
+    run({
+      status: "waiting",
+      steps: [
+        step({
+          status: "waiting",
+          finishedAt: null,
+          costUsd: 0.5,
+          ask,
+        }),
+      ],
+    });
+  const answering = (answers: RequestResult<{ run: RunView }>[]) => {
+    const answer = vi.fn(
+      async () => answers.shift() ?? failure("UNEXPECTED_RESPONSE"),
+    );
+    return {
+      run: vi.fn(async () => ok(waiting())),
+      answer,
+    } as unknown as WorkflowRunsApi & { answer: typeof answer };
+  };
+
+  // #920-T150
+  it("shows a waiting run in words, the question as text with its numbered options and context, and keeps polling", async () => {
+    const api = answering([]);
+    const { container } = renderRun(waiting(), api);
+
+    expect(
+      screen.getByText("Waiting for an answer", {
+        selector: "[data-status=waiting] *",
+      }),
+    ).toBeTruthy();
+    const block = container.querySelector("[data-slot=step-ask]");
+    expect(
+      block?.querySelector("[data-slot=step-ask-question]")?.textContent,
+    ).toBe("Retry which failures? <b>now</b>");
+    // The question is the agent's text: markup in it is text, never an element.
+    expect(block?.querySelector("b")).toBeNull();
+    expect(
+      [...container.querySelectorAll("[data-slot=step-ask-option]")].map(
+        (li) => li.textContent,
+      ),
+    ).toEqual([
+      "Network errorsAnswer 1",
+      "Network errors and 5xx answersAnswer 2",
+    ]);
+    expect(block?.textContent).toContain("client.ts tells the two apart.");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(api.run).toHaveBeenCalled();
+  });
+
+  // #920-T151
+  it("sends the option with the note, and says the answer was sent", async () => {
+    const api = answering([{ ok: true, data: { run: run() } }]);
+    const { container } = renderRun(waiting(), api);
+    const note = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(note, "and log it");
+      note.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 2" }).click();
+    });
+
+    expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      choice: 2,
+      text: "and log it",
+    });
+    expect(container.querySelector("[data-slot=step-ask-sent]")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Answer 2" })).toBeNull();
+  });
+
+  // #920-T152
+  it("sends a text of its own when it is not empty, and not before", async () => {
+    const api = answering([{ ok: true, data: { run: run() } }]);
+    renderRun(
+      waiting({ n: 1, state: "open", question: "Which backoff?" }),
+      api,
+    );
+    const send = screen.getByRole("button", { name: "Send answer" });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    const note = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(note, "Exponential.");
+      note.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Send answer" }).click();
+    });
+
+    expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      text: "Exponential.",
+    });
+  });
+
+  // #920-T153
+  it("tells a refusal in words and keeps the form", async () => {
+    const api = answering([
+      {
+        ok: false,
+        status: 409,
+        code: "WORKFLOW_RUN_NOT_WAITING",
+        issues: [],
+      },
+    ]);
+    const { container } = renderRun(waiting(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=step-ask-failure]")?.textContent,
+    ).toContain("does not wait for an answer any more");
+    expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
+  });
+
+  // #920-T154
+  it("shows who answered what and from where once it is answered, without a form", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            status: "running",
+            ask: {
+              ...ASK,
+              state: "resumed",
+              answer: {
+                text: "Network errors and 5xx answers",
+                choice: 2,
+                by: "octocat",
+                via: "comment",
+                at: "2026-11-07T10:00:00.000Z",
+              },
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(
+      container.querySelector("[data-slot=step-ask-answer]")?.textContent,
+    ).toBe(
+      "Answered by octocat (in a comment): Network errors and 5xx answers",
+    );
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Answer/ })).toBeNull();
+  });
+
+  // #920-T155
+  it("has the button to cancel a run that waits", () => {
+    renderRun(waiting());
+
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 });

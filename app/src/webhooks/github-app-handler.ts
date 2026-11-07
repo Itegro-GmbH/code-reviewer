@@ -44,6 +44,7 @@ import type {
   IntegrationType,
   IssueLabeled,
   PullRequestRef,
+  TicketAnswer,
 } from "../integrations/types.ts";
 import {
   WebhookPayloadError,
@@ -119,6 +120,21 @@ export type WorkflowStarter = {
   }>;
 };
 
+/**
+ * What takes the answer a comment `/answer ...` gives to the question a workflow run waits for (#920): `TicketAnswers` of
+ * `src/workflow-runs/`, which this module does not import, as for `WorkflowStarter`.
+ */
+export type TicketAnswerTaker = {
+  answer(
+    deliveryId: string,
+    answer: TicketAnswer,
+  ): Promise<
+    | { outcome: "answered"; runId: string }
+    | { outcome: "no_run" }
+    | { outcome: "not_taken"; reason: "refused" | "not_waiting" }
+  >;
+};
+
 /** The collaborators that act inside one workspace. */
 export type WorkspaceCollaborators = {
   /** Which repositories of the workspace are reviewed at all. */
@@ -137,6 +153,8 @@ export type WorkspaceCollaborators = {
    * nothing (`ignored`).
    */
   workflows?: WorkflowStarter;
+  /** Takes the answer of a comment `/answer ...` (#920). Left out where a server has no workflow engine: such a comment is then `ignored`. */
+  answers?: TicketAnswerTaker;
 };
 
 export type GithubAppWebhookDeps = {
@@ -377,9 +395,8 @@ export function createGithubAppWebhookHandler(
     if (integration === undefined) return "unknown_installation";
 
     // From here on the delivery is the business of the workspace the installation is linked to.
-    const { projects, settingsFor, intake, workflows } = deps.workspace(
-      integration.workspaceId,
-    );
+    const { projects, settingsFor, intake, workflows, answers } =
+      deps.workspace(integration.workspaceId);
 
     // A label on an issue starts the workflows that wait for exactly this label (#845). Nobody is asked whether they may label: GitHub
     // decides that. The repository must be an active one of the workspace (a project is not needed). The runs are written under the id
@@ -393,6 +410,20 @@ export function createGithubAppWebhookHandler(
       return started.started + started.existing > 0
         ? "workflow_runs_started"
         : "no_workflow_matched";
+    }
+
+    // A comment `/answer ...` by somebody with write access (#920) answers the question the run of the workspace that waits on this ticket or
+    // pull request asks. The repository must be an active one of the workspace (a project is not needed); which run it is, is the app's to find.
+    // The delivery stays claimed only when the answer was taken: a comment that came before the question is answered by a redelivery.
+    if (event.kind === "ticket_answer") {
+      if (answers === undefined) return "ignored";
+      const taken = await answers.answer(deliveryId, event.answer);
+      logger.info(
+        `[webhook] delivery=${deliveryId} number=${event.answer.number} answer: ${taken.outcome}${taken.outcome === "not_taken" ? ` (${taken.reason})` : ""}`,
+      );
+      return taken.outcome === "answered"
+        ? "ticket_answered"
+        : "no_answer_taken";
     }
 
     // A closed pull request starts nothing; the jobs still waiting for it are dropped. Only for a

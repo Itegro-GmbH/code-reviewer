@@ -30,6 +30,8 @@ export type WorkspaceMembersRepository = {
   list(): Promise<Member[]>;
   /** One member, or undefined when the user does not belong to this workspace. */
   get(userId: string): Promise<Member | undefined>;
+  /** #920: the GitHub logins of the members that have one, in the order they joined, at most `limit`: whom a question is addressed to. */
+  githubLogins(limit: number): Promise<string[]>;
   /** How many Owners the workspace has. */
   countOwners(): Promise<number>;
   /**
@@ -104,6 +106,20 @@ export function createWorkspaceMembersRepository(
         .orderBy("workspace_members.user_id")
         .execute();
       return rows.map(toMember);
+    },
+
+    async githubLogins(limit) {
+      const rows = await db
+        .selectFrom("workspace_members")
+        .innerJoin("users", "users.id", "workspace_members.user_id")
+        .select("users.github_login as login")
+        .where("workspace_members.workspace_id", "=", workspaceId)
+        .where("users.github_login", "is not", null)
+        .orderBy("workspace_members.created_at")
+        .orderBy("workspace_members.user_id")
+        .limit(limit)
+        .execute();
+      return rows.flatMap((row) => (row.login === null ? [] : [row.login]));
     },
 
     async get(userId) {

@@ -164,7 +164,19 @@ export interface IntegrationProvider {
     issueNumber: number,
     body: string,
     options?: { signal?: AbortSignal; marker?: string; since?: string },
-  ): Promise<{ url: string; existing: boolean }>;
+  ): Promise<{ url: string; existing: boolean; id?: string }>;
+
+  /**
+   * Only where the app can edit its own comment (#920): replaces the body of the comment `commentId` below an issue or pull request, with
+   * a token limited to this repository and the issue permission. Rejects like `commentOnIssue`; 404 when the comment is gone.
+   */
+  updateIssueComment?(
+    integration: Integration,
+    repo: RepoRef,
+    commentId: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
 
   /**
    * Only where the app can label (#844, `github.issue.labels`): adds and removes labels of an issue or pull request, as the app,

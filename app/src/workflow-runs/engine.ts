@@ -575,17 +575,23 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       );
       return { kind: "asked", stepRun: waiting };
     }
+    // A step that asked before was charged for its earlier turns when they ended (`askStep`): the step ends with the sum, and only the
+    // turn that just ended is added to the run (`finishStep`).
+    const total = Math.min(
+      (step.costMicroUsd ?? 0) + cost,
+      MICRO_USD_COLUMN_MAX,
+    );
     await lock.finishStep(
       step.id,
       outcome.ok
         ? {
             status: "succeeded",
             output: JSON.stringify(outcome.output),
-            costMicroUsd: cost,
+            costMicroUsd: total,
             costBasis: outcome.costBasis,
           }
         : failed(outcome.code, outcome.message, {
-            costMicroUsd: cost,
+            costMicroUsd: total,
             costBasis: outcome.costBasis,
           }),
     );
@@ -1550,6 +1556,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       ),
     );
     if (attached !== true) {
+      // Another look at the same run attached the very same turn first (the request id makes one turn): nothing is orphaned.
+      const current = (await deps.runs.listSteps(run.id)).find(
+        (row) => row.id === step.id,
+      );
+      if (current?.jobId === jobId) return;
       log(
         `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${jobId}`,
       );

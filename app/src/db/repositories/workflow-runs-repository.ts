@@ -258,6 +258,11 @@ export type WorkflowRunsRepository = {
   listSteps(runId: string): Promise<StoredStepRun[]>;
   /** The step an Implementer job belongs to, if a workflow started it. */
   findStepByJob(jobId: string): Promise<StoredStepRun | undefined>;
+  /** #920: the runs of a repository that wait for an answer, the one that began to wait last first; at most `limit`. */
+  listWaiting(
+    repositoryId: string,
+    limit: number,
+  ): Promise<StoredWorkflowRun[]>;
   /**
    * Runs `work` with the run's row locked, or answers `undefined` when the run is not this workspace's. Two callers for one run take
    * turns; what the first wrote is what the second reads.
@@ -489,6 +494,20 @@ export function createWorkflowRunsRepository(
     },
 
     listSteps: (runId) => stepsOf(db, runId),
+
+    async listWaiting(repositoryId, limit) {
+      const rows = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("status", "=", "waiting")
+        .orderBy("updated_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return rows.map(runFrom);
+    },
 
     async findStepByJob(jobId) {
       const row = await db

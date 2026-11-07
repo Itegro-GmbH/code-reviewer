@@ -589,7 +589,10 @@ export function createWorkflowRunService(
         throw invalid("text must be a text.");
       const found = await deps.runs.getRun(runId);
       if (found === undefined || found.workflowId !== workflowId)
-        throw notFound();
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_FOUND",
+          "There is no such run of this workflow.",
+        );
       if (deps.engine === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_NOT_WAITING",

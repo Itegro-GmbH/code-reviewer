@@ -1167,6 +1167,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #920: the members of A that have a GitHub login: none of the seeded ones has one, and B's are not A's.
+    name: "members.githubLogins",
+    run: (a) => a.members.githubLogins(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     name: "members.countOwners",
     run: (a) => a.members.countOwners(),
     expectAnswer: (answer) => expect(answer).toBe(1),
@@ -2286,6 +2292,17 @@ const CASES: Case[] = [
     run: (a, b) =>
       a.workflowRuns.lockRun(b.workflowRun.id, async () => "worked"),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // #920: B's repository holds no run of A that waits.
+    name: "workflowRuns.listWaiting",
+    run: (a, b) => a.workflowRuns.listWaiting(b.repository.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.recordAskComment",
+    run: (a, b) => a.workflowRuns.recordAskComment(b.workflowStep.id, "9001"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "workflowRuns.claimStep",

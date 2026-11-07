@@ -127,7 +127,7 @@ describe("the workflow run waiting migration", () => {
       run("run-2", { status: "waiting", finished: true }).execute(db),
     ).rejects.toThrow(/workflow_runs_end_check/);
     await expect(
-      run("run-3", { status: "paused" }).execute(db),
+      run("run-3", { status: "paused", finished: true }).execute(db),
     ).rejects.toThrow(/workflow_runs_status_check/);
     await expect(
       sql`update workflow_step_runs set status = 'paused' where id = 'plan'`.execute(
@@ -175,13 +175,14 @@ describe("the workflow run waiting migration", () => {
       db,
     );
     await run("run-5", { status: "running", key: "r-1#7" }).execute(db);
+    // The index of the migration before stays next to the new one.
     expect(
       (
-        await sql`select 1 from pg_indexes where indexname = 'workflow_runs_trigger_running_unique'`.execute(
+        await sql`select indexname from pg_indexes where indexname in ('workflow_runs_trigger_running_unique', 'workflow_runs_trigger_active_unique')`.execute(
           db,
         )
       ).rows,
-    ).toHaveLength(0);
+    ).toHaveLength(2);
     await db.destroy();
   });
 
@@ -205,7 +206,7 @@ describe("the workflow run waiting migration", () => {
     );
     expect(rows).toHaveLength(0);
     await expect(
-      run("run-2", { status: "waiting" }).execute(db),
+      run("run-2", { status: "waiting", finished: true }).execute(db),
     ).rejects.toThrow(/workflow_runs_status_check/);
     await expect(
       run("run-3", { status: "running", key: "r-1#7" }).execute(db),
