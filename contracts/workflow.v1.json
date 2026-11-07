@@ -41,6 +41,13 @@
           "type": "number",
           "exclusiveMinimum": 0
         },
+        "turnTimeLimitMinutes": {
+          "description": "How long one agent turn of the workflow may run, in whole minutes (#918): 15 to 60, 60 when left out (the Dispatcher stops an Implementer VM at 3600 seconds). A turn that is still running at the limit is cut. The cost of a turn is not set here: it is capped by what is left of `budgetUsd`.",
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 60,
+          "default": 60
+        },
         "steps": {
           "$ref": "#/$defs/Steps"
         },

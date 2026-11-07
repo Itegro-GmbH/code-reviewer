@@ -121,7 +121,7 @@ export function documentOf(
     description: content.description,
     model: content.model,
     instructions: content.instructions,
-    costLimitCents: content.costLimitCents,
+    // #918: `costLimitCents` is deprecated and ignored by a workflow; a stored version may still hold one, and it is not shown.
     canPush: content.canPush,
     defaultResult:
       content.defaultResult === null
@@ -145,7 +145,7 @@ export function createProfileService({
     const shape = validateProfile(body);
     const errors: ProfileIssue[] = [...shape.errors];
     if (shape.profile === undefined) return { ...shape, errors };
-    const { model, costLimitCents } = shape.profile;
+    const { model, costLimitCents = null } = shape.profile;
     if (costLimitCents !== null) {
       const maximum = await operatorCostLimitCents();
       if (costLimitCents > maximum)
@@ -210,7 +210,7 @@ export function createProfileService({
     description: profile.description,
     model: profile.model,
     instructions: profile.instructions,
-    costLimitCents: profile.costLimitCents,
+    costLimitCents: profile.costLimitCents ?? null,
     canPush: profile.canPush,
     defaultResult:
       profile.defaultResult === null

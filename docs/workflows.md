@@ -22,7 +22,7 @@ at a step that ran before on every path, the types of the values that flow, the 
 
 1. Write the document.
 2. `POST /api/w/<slug>/workflows/validate` with the document as the body. The answer is `200` with `{"valid": false, "errors": [...]}` or
-   `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "steps": 6}`. Nothing is stored.
+   `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "turnTimeLimitMinutes": 60, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,
    environments, connectors). The list is sorted by path, so fix them all, then validate again. It holds **200 errors at most**: the check
@@ -68,6 +68,7 @@ An answer you will see while fixing:
 | `triggers` | yes (or `trigger`) | The triggers that start the workflow, 1 to 10, each with pre-steps of its own ([The triggers](#the-triggers-and-their-pre-steps)). |
 | `trigger` | no | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
+| `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
 | `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
@@ -752,14 +753,29 @@ data: it can be put into a text (an instruction, a comment), never into a target
 ### The budget over all steps
 
 A run has a budget: `budgetUsd` of the document (20 when left out), held to the operator's maximum (100 USD today) once more at the start. Every agent
-step gets as its cost limit **at most what is left of the budget**, in whole cents, and not more than the limit of its profile version or the operator's
-maximum per task. A turn is charged what the runner reported. **A turn whose cost is not known** (the runner reported none, as with a model of the
+step gets as its cost limit **what is left of the budget**, in whole cents, held to the operator's maximum per task. The `costLimitCents` of a profile
+version is **not read** (#918): the cost of a turn is the lane's, not the profile's. A turn is charged what the runner reported. **A turn whose cost is not known** (the runner reported none, as with a model of the
 workspace's own key that has no price) is charged by its token counts at the price of the model in the catalog, never above its cap; with no token counts or
 no price in the catalog it is charged **the whole cap it ran under**, so a run never spends more than its budget. That is conservative on purpose: with
 an unpriced model a workflow of two agent steps with a budget of 1 USD can end after step one with `budget_exhausted`, because step one was charged the
 whole of it. The engine logs `[workflow-runs] cost not reported run=… step=… charged=estimated|limit` for each such step. A price in the catalog, or a
 model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs. The basis a step was charged on (`reported`, `estimated`, or `limit` for the whole cap) is kept with
 the step and shown on the [run page](#the-run-page).
+
+### The limits of a lane
+
+The limits belong to the workflow (the lane), not to the profile: the budget above and the time of a turn.
+
+- **`turnTimeLimitMinutes`** (15 to 60, 60 when left out) is how long **one agent turn** of the run may run. The engine copies it into every turn it starts
+  (`implementer_turns.time_limit_minutes`, also for a `session.continue` turn), and the claim hands it to the Worker as its `limits.timeLimitSeconds`: the
+  runner holds the turn to it, keeps the last minutes of it for the final commit and the push, and ends the turn with `timeout`. The app is the backstop: a turn
+  still running **ten minutes after its limit** is failed with `timeout` by the queue (`IMPLEMENTER_RUNTIME_GRACE_MS` in `app/src/db/job-limits.ts`); a turn without a
+  limit of its own (one started from the Implementer form, or written before the field existed) keeps 3600 seconds and the 70 minutes.
+- **The Dispatcher is the ceiling, so 60 minutes is the most.** It stops the VM of an Implementer turn at its own timeout (`DISPATCHER_WORKER_CONFIG.implementer.timeoutSeconds`,
+  3600 seconds), and the runner holds a turn to the smaller of its limit and that timeout ([`dispatcher.md`](dispatcher.md)). A limit above 60 would be cut by the
+  Dispatcher without the final commit and push, so the validator refuses it. A longer limit needs the Dispatcher to follow the limit of the job instead of a
+  constant of its own (follow-up, not part of #918); only then can the maximum be raised.
+- **There is no cost limit in the profile for a lane.** The most a turn may cost is what is left of `budgetUsd`.
 
 ### Control at run time
 
@@ -788,8 +804,8 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
   a session of its own). The engine does not start a new task but a follow-up turn of that session, the same path as the "Continue" form of the Runs page
   ([`implementer.md`](implementer.md#follow-ups)): **no second turn starts while one runs** (the instruction waits behind it, one at most), the request id of the step makes it
   idempotent, and the turn keeps the model, the environment, the profile and the **result schema** of the session's last turn. So a step that goes on in the session of **another**
-  step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is the smaller of what is left of
-  the budget and the limit of the session's last turn.
+  step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is what is left of
+  the budget, and its time limit is the `turnTimeLimitMinutes` of the document.
 - **Failures inside a loop.** A step that fails, a budget that cannot pay the next agent step and a condition that cannot be told end the **whole run** at once as `failed`
   (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **no pull request is opened**. What the run does then is
   [`onFailure`](#onfailure-at-run-time): the example comments on the issue and swaps the label; a workflow without `onFailure` leaves the issue as it is and the only signals are the run page and the
@@ -1200,6 +1216,7 @@ Beyond the form:
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |
 | `budget_above_maximum` | `budgetUsd` above the operator's maximum. | Lower it to the maximum the message names. |
+| `invalid_value` (at `/turnTimeLimitMinutes`) | `turnTimeLimitMinutes` is not a whole number from 15 to 60. | Use a whole number of minutes in that range, or leave it out for 60. |
 
 ### Of the routes (`error`)
 

@@ -66,5 +66,7 @@ deleted: hidden from the list, no new version, free name, versions kept.
 - **`json.ts`** holds the one `isRecord` and `jsonTypeName`, and the length of a text in characters (code points), which is how the JSON Schema counts. A message
   repeats at most 64 characters of what the user wrote (`shown` in `issues.ts`), and so do a path and a name in `available`.
 - **The operator's maximum budget** is `BUDGET_OPERATOR_MAX_USD` (100) in `limits.ts`, passed into the validator; there is no operator setting for it yet.
+- **`turnTimeLimitMinutes`** (#918) is a whole number from `TURN_TIME_LIMIT_MINUTES_MIN` (15) to `TURN_TIME_LIMIT_MINUTES_MAX` (60), `TURN_TIME_LIMIT_MINUTES_DEFAULT` (60) when left out
+  (`invalid_value` out of range, `wrong_type` for a non-number); the validator returns it beside `budgetUsd`, and the engine copies it into every turn it starts.
 - **Saving**: the name of the workflow is the `name` of the document, and every save is a new version, an identical document too. The stored text is the JSON that
   was validated. `who saved a version` is kept as text, without a foreign key (history survives the merge that retires an imported operator).

@@ -69,6 +69,7 @@ function lastTurn(): StoredImplementerTurn {
     instruction: "First.",
     modelChoice: { entryId: "entry-1" },
     costLimitCents: 200,
+    timeLimitMinutes: null,
     jobId: "job-1",
     createdBy: "user-1",
     createdAt: T0.toISOString(),
