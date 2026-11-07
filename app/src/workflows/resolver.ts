@@ -20,6 +20,8 @@ export type ProfileVersionFacts = {
   managedModel?: boolean;
   /** The harness the version runs with (#854, #856); left out: OpenCode. */
   harness?: string;
+  /** The environment of the workspace the version runs in (#919); left out or null: a version saved before it, whose step names the environment. */
+  environmentId?: string | null;
 };
 
 export type ProfileInfo = {
@@ -34,6 +36,8 @@ export type ProfileInfo = {
 };
 
 export type EnvironmentInfo = {
+  /** The id a profile version names its environment by (#919); left out: no profile can point at it. */
+  id?: string;
   name: string;
   /** #854: a runner environment is a customer's runner with labels; left out: a platform VM. */
   kind?: "hosted" | "runner";

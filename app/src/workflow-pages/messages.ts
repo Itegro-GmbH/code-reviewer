@@ -119,6 +119,8 @@ const STEP_FAILURE_TEXT: Record<
   profile_not_found:
     "The profile of the step no longer exists, is archived, or has no such version.",
   environment_not_found: "The environment of the step does not exist.",
+  environment_mismatch:
+    "The step names another environment than its profile runs in.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:

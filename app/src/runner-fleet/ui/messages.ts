@@ -24,7 +24,7 @@ export const PAGE_COPY = {
   empty: "No runner yet. Owners and Admins can add one.",
   kindsTitle: "Two kinds, one protocol",
   kindsHint:
-    "Both talk the Runner API. Which of them a profile runs on is chosen per profile later (#919); until then its harness decides.",
+    "Both talk the Runner API. A profile says on which of them it runs: the Runs on field of the profile, an environment of the workspace.",
   hostedName: "Hosted sandbox",
   hostedDescription:
     "A fresh sandbox of the platform for every run: nothing to install.",

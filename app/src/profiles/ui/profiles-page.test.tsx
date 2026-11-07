@@ -18,9 +18,16 @@ import {
   nextVersionBody,
   profileRowOf,
   ProfilesPageContent,
+  type EnvironmentOption,
 } from "./profiles-page.tsx";
 
 afterEach(cleanup);
+
+/** The environments of the workspace: a hosted one and a runner. */
+const ENVIRONMENTS: readonly EnvironmentOption[] = [
+  { name: "node", kind: "hosted" },
+  { name: "laptop", kind: "runner" },
+];
 
 function view(overrides: Partial<ProfileView> = {}): ProfileView {
   return {
@@ -31,6 +38,7 @@ function view(overrides: Partial<ProfileView> = {}): ProfileView {
     updatedAt: "2026-11-02T10:00:00.000Z",
     archivedAt: null,
     documentVersion: 2,
+    environmentGone: false,
     versions: [],
     document: {
       name: "implementer",
@@ -40,6 +48,7 @@ function view(overrides: Partial<ProfileView> = {}): ProfileView {
       canPush: true,
       defaultResult: null,
       harness: "opencode",
+      environment: "node",
     },
     ...overrides,
   };
@@ -77,10 +86,12 @@ describe("the list of profiles", () => {
                 name: "reviewer",
                 canPush: false,
                 harness: "claude-code",
+                environment: "laptop",
               },
             }),
           ),
         ]}
+        environments={ENVIRONMENTS}
         api={fakeApi().api}
       />,
     );
@@ -93,13 +104,64 @@ describe("the list of profiles", () => {
     expect(
       within(first).getByText("opencode · anthropic · claude-sonnet-5-5"),
     ).toBeTruthy();
+    // Where it runs is the profile's own environment, with its kind (#919).
+    expect(within(first).getByText("node")).toBeTruthy();
     expect(within(first).getByText("Hosted sandbox")).toBeTruthy();
-    // The runner is not a field of the profile: the cell says it comes from the harness.
-    expect(within(first).getByText("from harness")).toBeTruthy();
     expect(within(first).getByText("may push")).toBeTruthy();
     const second = screen.getByRole("row", { name: /reviewer/ });
+    expect(within(second).getByText("laptop")).toBeTruthy();
     expect(within(second).getByText("Your runner")).toBeTruthy();
     expect(within(second).getByText("read-only")).toBeTruthy();
+  });
+
+  // #919-T09
+  it("says a profile saved before profiles had an environment has none", () => {
+    render(
+      <ProfilesPageContent
+        workspaceSlug="acme"
+        profiles={[
+          profileRowOf(
+            view({ document: { ...view().document, environment: null } }),
+          ),
+        ]}
+        environments={ENVIRONMENTS}
+        api={fakeApi().api}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: /implementer/ });
+    expect(within(row).getByText("Not set")).toBeTruthy();
+    expect(
+      within(row).getByText("Saved before profiles had an environment"),
+    ).toBeTruthy();
+  });
+
+  // #919-T09b
+  it("says the environment of a profile was removed, not that the version had none", () => {
+    render(
+      <ProfilesPageContent
+        workspaceSlug="acme"
+        profiles={[
+          profileRowOf(
+            view({
+              environmentGone: true,
+              document: { ...view().document, environment: null },
+            }),
+          ),
+        ]}
+        environments={ENVIRONMENTS}
+        api={fakeApi().api}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: /implementer/ });
+    expect(
+      within(row).getByText("Environment removed – choose another"),
+    ).toBeTruthy();
+    expect(within(row).queryByText("Not set")).toBeNull();
+    expect(
+      within(row).queryByText("Saved before profiles had an environment"),
+    ).toBeNull();
   });
 
   // #925
@@ -108,6 +170,7 @@ describe("the list of profiles", () => {
       <ProfilesPageContent
         workspaceSlug="acme"
         profiles={[]}
+        environments={ENVIRONMENTS}
         api={fakeApi().api}
       />,
     );
@@ -123,6 +186,7 @@ describe("the drawer of a profile", () => {
       <ProfilesPageContent
         workspaceSlug="acme"
         profiles={[profileRowOf(view())]}
+        environments={ENVIRONMENTS}
         api={api}
       />,
     );
@@ -144,19 +208,21 @@ describe("the drawer of a profile", () => {
       (within(dialog).getByLabelText("Instructions") as HTMLTextAreaElement)
         .value,
     ).toBe("Work in small steps.");
-    for (const label of [
-      "Model",
-      "API key",
-      "Runs on",
-      "May end a turn with a question",
-    ])
+    // Runs on is a field of the profile since #919; the key is read from the model and not editable.
+    expect(
+      (within(dialog).getByLabelText("Runs on") as HTMLSelectElement).disabled,
+    ).toBe(false);
+    expect(
+      (within(dialog).getByLabelText("Runs on") as HTMLSelectElement).value,
+    ).toBe("node");
+    for (const label of ["Model", "API key", "May end a turn with a question"])
       expect(
         (within(dialog).getByLabelText(label) as HTMLInputElement).disabled,
         label,
       ).toBe(true);
     expect(
       within(dialog).getAllByText(/comes later/i).length,
-    ).toBeGreaterThanOrEqual(3);
+    ).toBeGreaterThanOrEqual(2);
     expect(
       (
         within(dialog).getByRole("button", {
@@ -189,8 +255,205 @@ describe("the drawer of a profile", () => {
       instructions: "Ask before you push.",
       canPush: false,
       harness: "opencode",
+      environment: "node",
     });
     expect(body).not.toHaveProperty("costLimitCents");
+  });
+
+  // #919-T10
+  it("reads the key from the model: a model of the workspace's own key, a managed one, the login of the runner", async () => {
+    const own = await openDrawer(fakeApi().api);
+    const key = await within(own.dialog).findByLabelText("API key");
+    expect((key as HTMLSelectElement).value).toBe("Your own key · anthropic");
+    cleanup();
+
+    const managed = fakeApi(
+      view({ document: { ...view().document, model: { entryId: "entry-1" } } }),
+    );
+    const second = await openDrawer(managed.api);
+    expect(
+      (
+        (await within(second.dialog).findByLabelText(
+          "API key",
+        )) as HTMLSelectElement
+      ).value,
+    ).toBe("Platform key (managed model)");
+    cleanup();
+
+    const claude = fakeApi(
+      view({
+        document: {
+          ...view().document,
+          harness: "claude-code",
+          environment: "laptop",
+          model: { provider: "claude-code", model: "sonnet" },
+        },
+      }),
+    );
+    const third = await openDrawer(claude.api);
+    expect(
+      (
+        (await within(third.dialog).findByLabelText(
+          "API key",
+        )) as HTMLSelectElement
+      ).value,
+    ).toBe("Login of the runner (your subscription)");
+  });
+
+  // #919-T11
+  it("saves the environment that was chosen", async () => {
+    const { api, saveVersion } = fakeApi(
+      view({
+        document: {
+          ...view().document,
+          model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+        },
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+
+    await user.selectOptions(runsOn, "laptop");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save as new version" }),
+    );
+
+    await waitFor(() => expect(saveVersion).toHaveBeenCalledTimes(1));
+    expect(saveVersion.mock.calls[0]?.[1]).toMatchObject({
+      environment: "laptop",
+    });
+  });
+
+  // #919-T14b
+  it("says the environment was removed and asks for another one, saving only after one is chosen", async () => {
+    const { api, saveVersion } = fakeApi(
+      view({
+        environmentGone: true,
+        document: { ...view().document, environment: null },
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+
+    expect((runsOn as HTMLSelectElement).value).toBe("");
+    expect(
+      within(dialog).getByText("Environment removed – choose another"),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/saved before profiles had/)).toBeNull();
+    const save = within(dialog).getByRole("button", {
+      name: "Save as new version",
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    await user.selectOptions(runsOn, "node");
+    await user.click(save);
+
+    await waitFor(() => expect(saveVersion).toHaveBeenCalledTimes(1));
+  });
+
+  // #919-T12b
+  it("says one problem for a harness of a runner with a managed model, not two that contradict each other", async () => {
+    const { api } = fakeApi(
+      view({
+        document: {
+          ...view().document,
+          harness: "claude-code",
+          model: { entryId: "entry-1" },
+        },
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+    const combined =
+      /needs your own runner and your own key; the model is managed/;
+
+    for (const name of ["node", "laptop"]) {
+      await user.selectOptions(runsOn, name);
+      expect(within(dialog).getAllByText(combined)).toHaveLength(1);
+      expect(
+        within(dialog).queryByText(/Choose a hosted environment/),
+      ).toBeNull();
+      expect(
+        within(dialog).queryByText(
+          /Choose an environment that runs on a runner/,
+        ),
+      ).toBeNull();
+    }
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Save as new version",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  // #919-T12
+  it("does not save a harness that needs a runner on a hosted environment, and says why", async () => {
+    const { api, saveVersion } = fakeApi();
+    const { user, dialog } = await openDrawer(api);
+    const harness = await within(dialog).findByLabelText("Harness");
+
+    await user.selectOptions(harness, "claude-code");
+
+    expect(
+      within(dialog).getByText(/This harness runs only on a runner/),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Save as new version",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(saveVersion).not.toHaveBeenCalled();
+  });
+
+  // #919-T13
+  it("does not save a managed model on a runner environment, and says why", async () => {
+    const { api } = fakeApi(
+      view({ document: { ...view().document, model: { entryId: "entry-1" } } }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+
+    await user.selectOptions(runsOn, "laptop");
+
+    expect(
+      within(dialog).getByText(/model of this profile is a managed one/),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Save as new version",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  // #919-T14
+  it("asks for an environment when the version has none, and saves only after one is chosen", async () => {
+    const { api, saveVersion } = fakeApi(
+      view({ document: { ...view().document, environment: null } }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+
+    expect((runsOn as HTMLSelectElement).value).toBe("");
+    expect(within(dialog).getByText(/saved before profiles had/)).toBeTruthy();
+    const save = within(dialog).getByRole("button", {
+      name: "Save as new version",
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    await user.selectOptions(runsOn, "node");
+    expect(save.disabled).toBe(false);
+    await user.click(save);
+
+    await waitFor(() => expect(saveVersion).toHaveBeenCalledTimes(1));
+    expect(saveVersion.mock.calls[0]?.[1]).toMatchObject({
+      environment: "node",
+    });
   });
 
   // #925
@@ -251,6 +514,7 @@ describe("the drawer of a profile", () => {
         ...view().document,
         canPush: false,
         harness: "claude-code",
+        environment: "laptop",
       },
     });
     const { api, saveVersion } = fakeApi();
@@ -335,6 +599,7 @@ describe("the body of the next version", () => {
       harness: "claude-code",
       instructions: "x",
       canPush: false,
+      environment: "laptop",
     });
 
     expect(body).toMatchObject({
@@ -342,6 +607,7 @@ describe("the body of the next version", () => {
       harness: "claude-code",
       canPush: false,
       instructions: "x",
+      environment: "laptop",
     });
     expect(body).not.toHaveProperty("costLimitCents");
   });
@@ -359,6 +625,7 @@ describe("the body of the next version", () => {
       harness: "claude-code",
       instructions: "x",
       canPush: false,
+      environment: "laptop",
     });
 
     expect(body).not.toHaveProperty("costLimitCents");

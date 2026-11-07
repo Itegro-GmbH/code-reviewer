@@ -139,6 +139,50 @@ describe("the workflow service", () => {
     expect((await b.validate(document)).valid).toBe(true);
   });
 
+  // #919-T48
+  it("says the environment of a profile version that belongs to another workspace is not in this one", async () => {
+    const { a, b, db, idA, idB } = await setup();
+    const [foreign] = await createImplementerEnvironmentsRepository(
+      db,
+      idB,
+    ).listSummaries();
+    if (foreign === undefined) throw new Error("expected an environment");
+    // Seeded directly: the profile service would never save an id that is not one of the workspace.
+    const created = await createProfilesRepository(db, idA).create(
+      {
+        name: "crossed",
+        content: { ...PROFILE_CONTENT, environmentId: foreign.id },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!created.ok) throw new Error("the profile was not created");
+    await createProfilesRepository(db, idB).create(
+      {
+        name: "crossed",
+        content: { ...PROFILE_CONTENT, environmentId: foreign.id },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    const document = tiny();
+    const step = (document.steps as Array<Record<string, unknown>>)[0]!;
+    step.profile = "crossed";
+    delete step.environment;
+
+    const refused = await a.validate(document);
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/profile",
+        code: "environment_unknown",
+        available: ["node"],
+      }),
+    ]);
+    // In the workspace the environment belongs to, the same profile is fine.
+    expect((await b.validate(document)).valid).toBe(true);
+  });
+
   // #833-M1-T202
   it("refuses to save an invalid document with the same errors as validate, and stores nothing", async () => {
     const { a } = await setup();

@@ -259,13 +259,15 @@ describe("the two kinds of environment", () => {
     expect(screen.queryByText(/Billed from the balance/i)).toBeNull();
   });
 
-  // #925
-  it("does not claim a profile picks its runner yet", async () => {
+  // #919
+  it("says that a profile picks its runner, with its Runs on field", async () => {
     show(fakeApi().api, false);
     await screen.findByText("Hosted sandbox");
 
-    expect(screen.queryByText(/A profile says on which/)).toBeNull();
-    expect(screen.getByText(/#919/)).toBeTruthy();
+    expect(
+      screen.getByText(/A profile says on which of them it runs/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/#919/)).toBeNull();
   });
 });
 
