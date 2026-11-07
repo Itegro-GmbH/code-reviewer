@@ -79,7 +79,7 @@ export type QueuedInstruction = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
-  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  /** #918: the minutes the turn may run (15 to 60), from the workflow that started it; left out or null: the platform's 60. */
   timeLimitMinutes?: number | null;
   environment: TurnEnvironment | null;
   /** #854: the runner environment, never together with `environment`; left out or null for none. */
@@ -200,7 +200,7 @@ export type NewImplementerTask = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
-  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  /** #918: the minutes the turn may run (15 to 60), from the workflow that started it; left out or null: the platform's 60. */
   timeLimitMinutes?: number | null;
   createdBy: string;
   /** A copy of the environment chosen at submit (#818); left out or null for none. */
@@ -235,7 +235,7 @@ export type NewFollowUpTurn = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
-  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  /** #918: the minutes the turn may run (15 to 60), from the workflow that started it; left out or null: the platform's 60. */
   timeLimitMinutes?: number | null;
   environment: TurnEnvironment | null;
   /** #854: the runner environment, never together with `environment`; left out or null for none. */

@@ -245,7 +245,7 @@ const WORKFLOW_CASES: Case[] = [
   ["a budget of zero", (d) => (d.budgetUsd = 0)],
   ["a budget that is a text", (d) => (d.budgetUsd = "20")],
   ["a turn time limit under 15 minutes", (d) => (d.turnTimeLimitMinutes = 14)],
-  ["a turn time limit over 120 minutes", (d) => (d.turnTimeLimitMinutes = 121)],
+  ["a turn time limit over 60 minutes", (d) => (d.turnTimeLimitMinutes = 61)],
   [
     "a turn time limit that is not whole",
     (d) => (d.turnTimeLimitMinutes = 30.5),

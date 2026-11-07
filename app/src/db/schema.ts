@@ -1218,7 +1218,7 @@ export interface ImplementerTurnsTable {
     string | null
   >;
   /**
-   * #918: the minutes the turn may run (15 to 120), copied from the `turnTimeLimitMinutes` of the workflow that started it. Null for a
+   * #918: the minutes the turn may run (15 to 60), copied from the `turnTimeLimitMinutes` of the workflow that started it. Null for a
    * turn no workflow started and for every turn written before: those keep `IMPLEMENTER_TIME_LIMIT_SECONDS`.
    */
   time_limit_minutes: ColumnType<

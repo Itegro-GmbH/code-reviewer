@@ -46,7 +46,7 @@ import { DRAWER_COPY, HARNESS_LABEL, PROFILES_COPY } from "./messages.ts";
 
 const loadProfile = (api: ProfilesApi, id: string) => api.get(id);
 
-/** What the drawer saves: the document of the open version with the three fields the page edits replaced. */
+/** What the drawer saves: the document of the open version with the three fields the page edits replaced. It carries no cost limit (#918): the lane owns the limits. */
 export function nextVersionBody(
   profile: ProfileView,
   edit: { harness: ProfileHarness; instructions: string; canPush: boolean },
@@ -57,9 +57,6 @@ export function nextVersionBody(
     description: document.description,
     model: document.model,
     instructions: edit.instructions,
-    ...(document.costLimitCents === null
-      ? {}
-      : { costLimitCents: document.costLimitCents }),
     canPush: edit.canPush,
     ...(document.defaultResult === null
       ? {}

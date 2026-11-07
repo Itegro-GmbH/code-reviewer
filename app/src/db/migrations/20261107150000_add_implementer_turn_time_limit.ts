@@ -32,7 +32,7 @@ export const migration: Migration = {
       db,
     );
     await sql`alter table implementer_turns add constraint implementer_turns_time_limit_check
-      check (time_limit_minutes is null or time_limit_minutes between 15 and 120) not valid`.execute(
+      check (time_limit_minutes is null or time_limit_minutes between 15 and 60) not valid`.execute(
       db,
     );
     await sql`alter table implementer_turns validate constraint implementer_turns_time_limit_check`.execute(

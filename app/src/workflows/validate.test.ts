@@ -1964,21 +1964,21 @@ describe("the turn time limit", () => {
         .turnTimeLimitMinutes,
     ).toBe(15);
     expect(
-      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 120)))
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 60)))
         .turnTimeLimitMinutes,
-    ).toBe(120);
+    ).toBe(60);
   });
 
   // #918-T02
-  it("refuses a limit out of 15 to 120 or not a whole number as invalid_value", () => {
-    for (const value of [14, 121, 0, -5, 30.5])
+  it("refuses a limit out of 15 to 60 or not a whole number as invalid_value", () => {
+    for (const value of [14, 61, 120, 0, -5, 30.5])
       expect(
         codes(change(tiny(), (d) => (d.turnTimeLimitMinutes = value))),
       ).toEqual([["/turnTimeLimitMinutes", "invalid_value"]]);
     expect(
       run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 14))).errors[0]
         ?.message,
-    ).toContain("15 to 120");
+    ).toContain("15 to 60");
   });
 
   // #918-T03

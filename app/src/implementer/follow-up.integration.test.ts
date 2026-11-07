@@ -161,6 +161,60 @@ describe("a follow-up on an idle session", () => {
     });
   });
 
+  // #918-T13
+  it("inherits the cost cap and the time limit of the last turn when a manual continue names neither", async () => {
+    const f = await startImplementerHarness();
+    const first = await f.service.startTask(
+      USER,
+      f.body({ costLimitCents: undefined }),
+      { costCapCents: 120, timeLimitMinutes: 30 },
+    );
+    await endTurn(f, first.sessionId, first.runId);
+    pushBranch(f.h, "implementer/abc123");
+
+    await f.service.continueSession(USER, first.sessionId, ask());
+
+    expect(
+      await createImplementerRepository(f.h.db, f.h.workspaceId).lastTurn(
+        first.sessionId,
+      ),
+    ).toMatchObject({ number: 2, costLimitCents: 120, timeLimitMinutes: 30 });
+  });
+
+  // #918-T14
+  it("does not read the cost limit of a profile version it switches to: the limit of the last turn stays", async () => {
+    const f = await startImplementerHarness();
+    const made = await f.profiles.create(
+      {
+        name: "reviewer",
+        content: {
+          description: "Reads a branch.",
+          model: { entryId: "entry-1" },
+          instructions: "Review only.",
+          costLimitCents: 250,
+          canPush: false,
+          defaultResult: null,
+        },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!made.ok) throw new Error("seeding failed");
+    const first = await idleSession(f);
+
+    await f.service.continueSession(
+      USER,
+      first.sessionId,
+      ask({ profile: "reviewer" }),
+    );
+
+    expect(
+      await createImplementerRepository(f.h.db, f.h.workspaceId).lastTurn(
+        first.sessionId,
+      ),
+    ).toMatchObject({ number: 2, costLimitCents: null });
+  });
+
   // #841-T03 (owner decision 7)
   it("copies the environment of the last turn, also when it was changed or deleted since, and takes another when asked", async () => {
     const f = await startImplementerHarness();

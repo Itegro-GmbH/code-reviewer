@@ -15,9 +15,12 @@ export const LOOP_NESTING_MAX = 2;
 export const TRIGGERS_MAX = 10;
 /** Workflow budget in USD when the document names none. */
 export const BUDGET_DEFAULT_USD = 20;
-/** The time one agent turn of a workflow may run, in minutes (#918): the bounds of `turnTimeLimitMinutes` and what a document without it gets. */
+/**
+ * The time one agent turn of a workflow may run, in minutes (#918): the bounds of `turnTimeLimitMinutes` and what a document without it gets.
+ * The maximum is the 3600 seconds the Dispatcher gives the VM of an Implementer turn: more would be cut without the final push.
+ */
 export const TURN_TIME_LIMIT_MINUTES_MIN = 15;
-export const TURN_TIME_LIMIT_MINUTES_MAX = 120;
+export const TURN_TIME_LIMIT_MINUTES_MAX = 60;
 export const TURN_TIME_LIMIT_MINUTES_DEFAULT = 60;
 /** What the operator allows a workflow to spend, until the operator can set it (the service takes it as a parameter). */
 export const BUDGET_OPERATOR_MAX_USD = 100;

@@ -148,7 +148,7 @@ function repeatOf(
   task: StartInput,
 ): StartedTask {
   const { session, turn } = earlier;
-  // With a profile the model and the cost limit are the version's, not the body's: only the profile is compared.
+  // With a profile the model is the version's, not the body's, and the cost limit is the operator's maximum: only the profile is compared.
   const sameChoices =
     task.profile !== null ||
     (turn.costLimitCents === task.costLimitCents &&
@@ -330,7 +330,8 @@ export function createImplementerService(
       }
 
       // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
-      // whatever is done to it afterwards. Its model and cost limit take the place of the body's, and are checked like the body's.
+      // whatever is done to it afterwards. Its model takes the place of the body's and is checked like it. Its cost limit is not read (#918):
+      // the cap is the operator's maximum, as for a version that never had one (`claim.ts`: `costLimitCents ?? operatorCents`).
       let profile: TurnProfile | null = null;
       let profileResult: string | null = null;
       let model: ModelChoice;
@@ -343,9 +344,7 @@ export function createImplementerService(
         const copied = await copyProfile(deps.profiles, task.profile);
         profile = copied.profile;
         model = copied.model;
-        // #918: a workflow caps the turn with what is left of its budget; that is the limit, and the version's own is not read.
-        costLimitCents =
-          options.costCapCents === undefined ? copied.costLimitCents : null;
+        costLimitCents = null;
         profileResult = copied.defaultResult;
       }
 

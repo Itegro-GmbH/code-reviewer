@@ -976,16 +976,16 @@ describe("the hard timeout of a turn with a time limit of its own", () => {
   });
 
   // #918-T07
-  it("holds a turn of a 120 minute limit past the 70 minutes of the platform", async () => {
+  it("holds a turn of a 45 minute limit for 55 minutes, not for the 70 of a turn without a limit", async () => {
     const t = await start({ limits: { leaseMs: 300 * MINUTE } });
-    const long = await t.turn({ timeLimitMinutes: 120 });
+    const long = await t.turn({ timeLimitMinutes: 45 });
     await t.fixture.queue.claimNext("r", IMPLEMENTER);
 
-    t.fixture.clock.advance(129 * MINUTE);
+    t.fixture.clock.advance(54 * MINUTE);
     await t.fixture.queue.expireStaleJobs();
     expect((await t.fixture.queue.get(long.job.id))?.status).toBe("running");
 
-    t.fixture.clock.advance(2 * MINUTE); // 131
+    t.fixture.clock.advance(2 * MINUTE); // 56
     await t.fixture.queue.expireStaleJobs();
     expect((await t.fixture.queue.get(long.job.id))?.errorCode).toBe("timeout");
   });

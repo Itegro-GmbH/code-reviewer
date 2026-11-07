@@ -19,10 +19,10 @@ the life of the profile).
   Implementer is reproducible as the profile `{"name": "implementer", "model": ..., "canPush": true}`: a task started with it is identical (the prompt text is
   byte for byte the same; `runner/tests/unit/test_implementer_prompts.py`).
 - **The version is copied into the turn** (`implementer_turns.profile_*`, no foreign key), like the environment: changing or archiving a profile never reaches a
-  task that has started, and the claim reads the turn alone. The model choice and the cost limit are the turn's existing columns, filled from the version.
+  task that has started, and the claim reads the turn alone. The model choice is the turn's existing column, filled from the version; the version's cost limit is not copied (#918).
 - **The name never changes.** A workflow refers to a profile by name and version; a rename would make `reviewer@2` mean something else. Another name is another profile.
 - **The cost limit is deprecated (#918).** Limits belong to the lane: the cost of a workflow's turn is what is left of its budget, and `StartTaskOptions.costCapCents` makes it the
-  limit without reading the version's. A body may still carry `costLimitCents` (validated, stored in `cost_limit_cents`), `documentOf` does not show it, and only a task started by hand reads it.
+  limit without reading the version's. A body may still carry `costLimitCents` (validated, stored in `cost_limit_cents`), `documentOf` does not show it, and no task reads it: a task started by hand has the operator's maximum as its cap.
 - **The model and the cost limit are checked twice**: when a version is saved (so a typo is refused with an answer an AI can act on) and when a task starts (the
   catalog and the operator's maximum can change; a saved version is history and is not re-checked on read).
 - **API only for the Implementer form.** `POST .../implementer/tasks` takes `profile`; the Implementer form has no picker yet. The Profiles page (#925, `ui/`) lists the profiles and opens one in a drawer: harness, instructions and the push right are saved as the next version (the model is carried over unchanged); the key, the runner, the question right and the model's picker are shown disabled with a hint until the format has a place for them. With a

@@ -285,7 +285,6 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
       const copied = await copyProfile(deps.profiles, input.profile);
       profile = copied.profile;
       model = copied.model;
-      costLimitCents = copied.costLimitCents;
       resultSchema = resultOfProfile(copied.defaultResult);
     }
 

@@ -122,7 +122,7 @@ export type EnqueueImplementerTurnInput = {
   modelChoice: ModelChoice;
   /** The customer's cost limit for the turn in cents; null when none was asked for. */
   costLimitCents: number | null;
-  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  /** #918: the minutes the turn may run (15 to 60), from the workflow that started it; left out or null: the platform's 60. */
   timeLimitMinutes?: number | null;
   /** A copy of the environment the person chose (#818), made by the service from the workspace's own; null for none. */
   environment?: TurnEnvironment | null;
@@ -161,7 +161,7 @@ export type EnqueueFollowUpTurnInput = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
-  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  /** #918: the minutes the turn may run (15 to 60), from the workflow that started it; left out or null: the platform's 60. */
   timeLimitMinutes?: number | null;
   environment?: TurnEnvironment | null;
   /** #854: the runner environment, never together with `environment`. */

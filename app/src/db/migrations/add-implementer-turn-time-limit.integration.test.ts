@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // #918: the turn time limit migration is expand only. It adds one nullable column (`time_limit_minutes`) to `implementer_turns` with a
-// check of 15 to 120, so every turn written before reads null, and it can be taken back.
+// check of 15 to 60, so every turn written before reads null, and it can be taken back.
 import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
@@ -20,7 +20,7 @@ const check = sql<{
 
 describe("the implementer turn time limit migration", () => {
   // #918-M01
-  it("adds a nullable integer column held to 15 to 120 minutes", async () => {
+  it("adds a nullable integer column held to 15 to 60 minutes", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(db, migrationProvider);
 
@@ -29,7 +29,7 @@ describe("the implementer turn time limit migration", () => {
     ]);
     const definition = (await check.execute(db)).rows[0]?.definition ?? "";
     expect(definition).toContain("15");
-    expect(definition).toContain("120");
+    expect(definition).toContain("60");
     await db.destroy();
   });
 
