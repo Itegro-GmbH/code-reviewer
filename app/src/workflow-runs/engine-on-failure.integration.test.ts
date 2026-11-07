@@ -79,7 +79,7 @@ describe("the steps of onFailure", () => {
   });
 
   // #902-T71
-  it("comment after a member stopped the run, once the agent has stopped, and end it cancelled", async () => {
+  it("comment after a run that carries the mark of the stop of #891, once the agent has stopped, and end it cancelled", async () => {
     const comments = recorder();
     const app = await startEngineHarness({ connectors: [comments.connector] });
     const workflow = await app.saveWorkflow(withCleanup());
@@ -87,7 +87,7 @@ describe("the steps of onFailure", () => {
     await app.engine.advance(run.id);
     const lease = await app.claimTurn();
 
-    await app.service.cancel(workflow.id, run.id);
+    await app.runs.lockRun(run.id, (lock) => lock.requestCancel());
     await app.engine.advance(run.id);
     expect(comments.calls).toHaveLength(0);
     expect((await app.stateOf(run.id)).run.status).toBe("running");

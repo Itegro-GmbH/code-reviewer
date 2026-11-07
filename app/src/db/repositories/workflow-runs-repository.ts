@@ -20,9 +20,13 @@ import type {
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 
-/** `waiting` (#920): a step's turn ended with a question and nobody has answered yet; nothing else of the run runs. */
+/**
+ * `waiting` (#920): a step's turn ended with a question and nobody has answered yet; nothing else of the run runs. `discarded` (#921): a
+ * member discarded the run, whatever state it was in; it is over and free of its ticket. `cancelled` is the stop of #891, kept for the
+ * rows it wrote.
+ */
 export type WorkflowRunStatus =
-  "running" | "waiting" | "succeeded" | "failed" | "cancelled";
+  "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "discarded";
 export type StepRunStatus =
   "pending" | "running" | "waiting" | "succeeded" | "failed" | "skipped";
 /** `if` and `loop` are written by the engine when it decides them: the row holds the decision as its output (#846). */
@@ -67,6 +71,10 @@ export type StoredWorkflowRun = {
   actorLogin: string;
   /** #891: when a member asked for the run to stop; null when nobody did. The run stays `running` until its turn has ended. */
   cancelRequestedAt: string | null;
+  /** #921: when a member discarded the run (`status` is `discarded`); null for any other run. */
+  discardedAt: string | null;
+  /** #921: when a member asked the run to stop after its current step; no new step starts until it is resumed. Null otherwise. */
+  pauseRequestedAt: string | null;
   /**
    * #902: how the run ends and why, as JSON text, once the steps of `onFailure` have begun; null before, and for a workflow without them.
    * The run stays `running` until they are over.
@@ -263,6 +271,17 @@ export type RunLock = {
    */
   requestCancel(): Promise<boolean>;
   /**
+   * #921: the run is discarded, whatever it was: `running`, `waiting` or over. It becomes `discarded` with `discarded_at` and no request to
+   * pause after the current step (nothing is left to pause), keeps the end it had (`finished_at` and the code of a failure) or gets one now, and so frees its ticket. Returns whether this call wrote it; a run that
+   * is discarded already is not written again. The steps are the caller's to end (`finishStep`), before this.
+   */
+  discardRun(): Promise<boolean>;
+  /**
+   * #921: marks (`paused: true`) or unmarks the run as one to stop after its current step. Only a `running` or `waiting` run takes either.
+   * Returns whether it changed.
+   */
+  setPause(paused: boolean): Promise<boolean>;
+  /**
    * #902: stores how the run ends (`failure`, JSON text) and keeps it `running`, unless that was done before. Returns whether this call stored
    * it. A run that is over takes none.
    */
@@ -335,6 +354,14 @@ export type WorkflowRunsRepository = {
     limit: number,
   ): Promise<StoredWorkflowRun[]>;
   /**
+   * #921: the runs of a repository that go on (`running` or `waiting`), newest first; at most `limit`. A discard looks at them to see whether
+   * another run holds the ticket of the one it discards.
+   */
+  listActiveOnRepository(
+    repositoryId: string,
+    limit: number,
+  ): Promise<StoredWorkflowRun[]>;
+  /**
    * Runs `work` with the run's row locked, or answers `undefined` when the run is not this workspace's. Two callers for one run take
    * turns; what the first wrote is what the second reads.
    */
@@ -384,6 +411,8 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     createdBy: row.created_by,
     actorLogin: row.actor_login,
     cancelRequestedAt: row.cancel_requested_at,
+    discardedAt: row.discarded_at,
+    pauseRequestedAt: row.pause_requested_at,
     failure: row.failure,
     ticketRef: row.ticket_ref,
     createdAt: row.created_at,
@@ -543,6 +572,8 @@ export function createWorkflowRunsRepository(
         created_by: input.createdBy,
         actor_login: input.actorLogin,
         cancel_requested_at: null,
+        discarded_at: null,
+        pause_requested_at: null,
         failure: null,
         ticket_ref: input.ticketRef ?? null,
         created_at: at,
@@ -744,6 +775,20 @@ export function createWorkflowRunsRepository(
         .where("ticket_ref", "=", ticketRef)
         .where("status", "=", "waiting")
         .orderBy("updated_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return rows.map(runFrom);
+    },
+
+    async listActiveOnRepository(repositoryId, limit) {
+      const rows = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("status", "in", ["running", "waiting"])
+        .orderBy("created_at", "desc")
         .orderBy("id")
         .limit(limit)
         .execute();
@@ -1101,6 +1146,52 @@ export function createWorkflowRunsRepository(
               .executeTakeFirst();
             if (marked === undefined) return false;
             lock.run = { ...lock.run, cancelRequestedAt: at, updatedAt: at };
+            return true;
+          },
+          async discardRun() {
+            const at = formatTimestamp(now());
+            const discarded = await trx
+              .updateTable("workflow_runs")
+              .set((eb) => ({
+                status: "discarded",
+                discarded_at: at,
+                pause_requested_at: null,
+                finished_at: eb.fn.coalesce("finished_at", eb.val(at)),
+                updated_at: at,
+              }))
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "!=", "discarded")
+              .returning(["finished_at"])
+              .executeTakeFirst();
+            if (discarded === undefined) return false;
+            lock.run = {
+              ...lock.run,
+              status: "discarded",
+              discardedAt: at,
+              pauseRequestedAt: null,
+              finishedAt: discarded.finished_at,
+              updatedAt: at,
+            };
+            return true;
+          },
+          async setPause(paused) {
+            const at = formatTimestamp(now());
+            const changed = await trx
+              .updateTable("workflow_runs")
+              .set({ pause_requested_at: paused ? at : null, updated_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "in", ["running", "waiting"])
+              .where("pause_requested_at", paused ? "is" : "is not", null)
+              .returning("id")
+              .executeTakeFirst();
+            if (changed === undefined) return false;
+            lock.run = {
+              ...lock.run,
+              pauseRequestedAt: paused ? at : null,
+              updatedAt: at,
+            };
             return true;
           },
           async beginFailure(failure) {

@@ -104,7 +104,14 @@ export function WorkflowRunsList({
             {data.runs.map((run) => {
               const failure = describeRunFailure(run.errorCode);
               return (
-                <TableRow key={run.id} data-run-id={run.id}>
+                <TableRow
+                  key={run.id}
+                  data-run-id={run.id}
+                  // #921: a discarded run stays listed, greyed.
+                  className={
+                    run.status === "discarded" ? "opacity-60" : undefined
+                  }
+                >
                   <TableCell className="align-top whitespace-normal">
                     <Link
                       href={runPath(run.id)}

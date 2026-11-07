@@ -737,105 +737,195 @@ describe("while the run runs", () => {
   });
 });
 
-describe("stopping a run", () => {
-  const cancelling = (
-    answers: RequestResult<{ run: RunView; outcome: string }>[],
-  ) => {
-    const cancel = vi.fn(
-      async () =>
-        answers.shift() ??
-        ({
-          ok: false,
-          status: 500,
-          code: "UNEXPECTED_RESPONSE",
-          issues: [],
-        } as RequestResult<{ run: RunView; outcome: string }>),
-    );
+describe("discarding, pausing and resuming a run (#921)", () => {
+  type Answer = RequestResult<{ run: RunView; outcome: string }>;
+  const controlling = (answers: Answer[]) => {
+    const next = async () =>
+      answers.shift() ??
+      ({
+        ok: false,
+        status: 500,
+        code: "UNEXPECTED_RESPONSE",
+        issues: [],
+      } as Answer);
+    const discard = vi.fn(next);
+    const pause = vi.fn(next);
+    const resume = vi.fn(next);
     return {
       run: vi.fn(async () => failure("UNEXPECTED_RESPONSE")),
-      cancel,
-    } as unknown as WorkflowRunsApi & { cancel: typeof cancel };
+      discard,
+      pause,
+      resume,
+    } as unknown as WorkflowRunsApi & {
+      discard: typeof discard;
+      pause: typeof pause;
+      resume: typeof resume;
+    };
   };
+  const DISCARDED_AT = "2026-11-05T10:03:00.000Z";
 
-  // #891-T60
-  it("offers to cancel a run that runs, asks the route and says the run is stopping", async () => {
-    const api = cancelling([
+  // #921-T100
+  it("offers to discard a run that runs, asks the route and shows the run discarded at once", async () => {
+    const api = controlling([
       {
         ok: true,
         data: {
-          run: run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
-          outcome: "requested",
+          run: run({
+            status: "discarded",
+            discardedAt: DISCARDED_AT,
+            finishedAt: DISCARDED_AT,
+            updatedAt: DISCARDED_AT,
+          }),
+          outcome: "discarded",
         },
       },
     ]);
     const { container } = renderRun(run(), api);
 
-    const button = screen.getByRole("button", { name: "Cancel run" });
     await act(async () => {
-      button.click();
+      screen.getByRole("button", { name: "Discard this run" }).click();
     });
 
-    expect(api.cancel).toHaveBeenCalledWith("wf-1", "run-1");
-    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(api.discard).toHaveBeenCalledWith("wf-1", "run-1");
     expect(
-      container.querySelector("[data-slot=run-cancel-requested]")?.textContent,
-    ).toContain("stopping");
+      screen.queryByRole("button", { name: "Discard this run" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Pause after this step" }),
+    ).toBeNull();
+    expect(
+      container.querySelector("[data-slot=run-discarded]")?.textContent,
+    ).toContain("no longer active");
+    expect(screen.getAllByText("Discarded").length).toBeGreaterThan(0);
   });
 
-  // #891-T60
-  it("shows a run that is already stopping as stopping, without the button", () => {
-    const { container } = renderRun(
-      run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+  // #921-T101
+  it("offers to discard a run that has ended too, but not to pause it", async () => {
+    const api = controlling([]);
+    renderRun(
+      run({
+        status: "succeeded",
+        finishedAt: "2026-11-05T10:04:00.000Z",
+      }),
+      api,
     );
 
-    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
     expect(
-      container.querySelector("[data-slot=run-cancel-requested]"),
-    ).not.toBeNull();
+      screen.getByRole("button", { name: "Discard this run" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Pause after this step" }),
+    ).toBeNull();
   });
 
-  // #891-T61
-  it("has no button for a run that has ended, and shows a cancelled run in words", () => {
+  // #921-T102
+  it("shows a discarded run without any button, in words", () => {
     const { container } = renderRun(
       run({
-        status: "cancelled",
-        cancelRequestedAt: "2026-11-05T10:03:00.000Z",
-        finishedAt: "2026-11-05T10:04:00.000Z",
+        status: "discarded",
+        discardedAt: DISCARDED_AT,
+        finishedAt: DISCARDED_AT,
         steps: [
           step({
             status: "failed",
-            errorCode: "cancelled",
+            errorCode: "discarded",
             output: null,
-            finishedAt: "2026-11-05T10:04:00.000Z",
+            finishedAt: DISCARDED_AT,
           }),
         ],
       }),
     );
 
-    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
-    expect(screen.getAllByText("Cancelled").length).toBeGreaterThan(0);
+    for (const name of ["Discard this run", "Pause after this step", "Resume"])
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    expect(container.querySelector("[data-slot=run-discarded]")).not.toBeNull();
     expect(container.querySelector("[data-slot=run-failure]")).toBeNull();
     expect(
       container.querySelector("[data-slot=step-failure]")?.textContent,
-    ).toContain("stopped the run");
-    expect(container.textContent).not.toContain("cancelled");
+    ).toContain("stopped using this run");
   });
 
-  // #891-T62
-  it("says why when the stop could not be asked for, and keeps the button", async () => {
-    const api = cancelling([
+  // #921-T103
+  it("pauses a run that runs and offers to resume it", async () => {
+    const api = controlling([
+      {
+        ok: true,
+        data: {
+          run: run({
+            pauseRequestedAt: DISCARDED_AT,
+            updatedAt: DISCARDED_AT,
+          }),
+          outcome: "changed",
+        },
+      },
+      {
+        ok: true,
+        data: {
+          run: run({
+            pauseRequestedAt: null,
+            updatedAt: "2026-11-05T10:05:00.000Z",
+          }),
+          outcome: "changed",
+        },
+      },
+    ]);
+    const { container } = renderRun(run(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Pause after this step" }).click();
+    });
+
+    expect(api.pause).toHaveBeenCalledWith("wf-1", "run-1");
+    expect(container.querySelector("[data-slot=run-paused]")).not.toBeNull();
+    await act(async () => {
+      screen.getByRole("button", { name: "Resume" }).click();
+    });
+    expect(api.resume).toHaveBeenCalledWith("wf-1", "run-1");
+    expect(container.querySelector("[data-slot=run-paused]")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Pause after this step" }),
+    ).toBeTruthy();
+  });
+
+  // #921-T104
+  it("shows a run that is paused already with the resume button", () => {
+    const { container } = renderRun(run({ pauseRequestedAt: DISCARDED_AT }));
+
+    expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+    expect(container.querySelector("[data-slot=run-paused]")).not.toBeNull();
+  });
+
+  // #921-T105
+  it("says that a run of before the discard that was asked to stop is stopping, and still offers to discard it", () => {
+    const { container } = renderRun(
+      run({ cancelRequestedAt: "2026-11-05T10:03:00.000Z" }),
+    );
+
+    expect(
+      container.querySelector("[data-slot=run-cancel-requested]"),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Discard this run" }),
+    ).toBeTruthy();
+  });
+
+  // #921-T106
+  it("says why when the discard could not be made, and keeps the button", async () => {
+    const api = controlling([
       { ok: false, status: 404, code: "WORKFLOW_RUN_NOT_FOUND", issues: [] },
     ]);
     const { container } = renderRun(run(), api);
 
     await act(async () => {
-      screen.getByRole("button", { name: "Cancel run" }).click();
+      screen.getByRole("button", { name: "Discard this run" }).click();
     });
 
     expect(
       container.querySelector("[data-slot=run-cancel-failure]")?.textContent,
     ).toContain("no longer exists");
-    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Discard this run" }),
+    ).toBeTruthy();
   });
 });
 
@@ -1072,9 +1162,14 @@ describe("a question of the agent (#920)", () => {
   });
 
   // #920-T155
-  it("has the button to cancel a run that waits", () => {
+  it("has the buttons to discard and to pause a run that waits", () => {
     renderRun(waiting());
 
-    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Discard this run" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Pause after this step" }),
+    ).toBeTruthy();
   });
 });

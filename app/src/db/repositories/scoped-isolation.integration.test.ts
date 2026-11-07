@@ -2412,6 +2412,20 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #921: the lock of B's run is not A's to take, so A cannot discard it.
+    name: "workflowRuns.lockRun discardRun",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, (lock) => lock.discardRun()),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // #921: nor pause it.
+    name: "workflowRuns.lockRun setPause",
+    run: (a, b) =>
+      a.workflowRuns.lockRun(b.workflowRun.id, (lock) => lock.setPause(true)),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     // #920: B's ticket holds no run of A that waits.
     name: "workflowRuns.listWaitingForTicket",
     run: (a, b) =>
@@ -2442,6 +2456,12 @@ const CASES: Case[] = [
     // #920: B's repository holds no run of A that waits.
     name: "workflowRuns.listWaitingWithoutTicket",
     run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #921: B's repository holds no run of A that goes on.
+    name: "workflowRuns.listActiveOnRepository",
+    run: (a, b) => a.workflowRuns.listActiveOnRepository(b.repository.id, 10),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {

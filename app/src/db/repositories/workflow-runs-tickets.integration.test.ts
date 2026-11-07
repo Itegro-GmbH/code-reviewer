@@ -253,10 +253,30 @@ describe("the runs that wait for an answer (#920)", () => {
       ),
     ).toEqual([noTicket.id]);
     expect(running.status).toBe("running");
+    // #921: the runs that go on in a repository are the running and the waiting ones, whatever their ticket.
+    expect(
+      (await runs.listActiveOnRepository(older.repositoryId, 10)).map(
+        (found) => found.id,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        older.id,
+        newer.id,
+        running.id,
+        other.id,
+        noTicket.id,
+      ]),
+    );
+    expect(
+      await runs.listActiveOnRepository(older.repositoryId, 2),
+    ).toHaveLength(2);
     // Another workspace sees none of them.
     expect(await otherRuns.listWaitingForTicket(REF, 10)).toEqual([]);
     expect(
       await otherRuns.listWaitingWithoutTicket(older.repositoryId, 10),
+    ).toEqual([]);
+    expect(
+      await otherRuns.listActiveOnRepository(older.repositoryId, 10),
     ).toEqual([]);
   });
 });

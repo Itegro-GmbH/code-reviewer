@@ -67,6 +67,8 @@ function harness(options: {
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     finishedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
   };
   const waiting: StoredStepRun = {
     id: "step-0",

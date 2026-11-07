@@ -1399,6 +1399,18 @@ export interface WorkflowRunsTable {
     string | null | undefined,
     string | null
   >;
+  /** #921: when a member discarded the run (`status` is then `discarded`); null for every other run. */
+  discarded_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #921: when a member asked the run to stop after its current step; the engine starts no new step until it is resumed (null again). */
+  pause_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */

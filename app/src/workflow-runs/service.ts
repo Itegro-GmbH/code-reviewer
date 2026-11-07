@@ -105,8 +105,12 @@ export type RunSummaryView = {
   triggerId: string | null;
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
-  /** When a member asked for the run to stop (#891), or null. A run that runs and has this is stopping: it ends `cancelled` when its turn has. */
+  /** When a member asked for the run to stop (#891), or null. Legacy: only runs of before #921 have it; a member discards a run now. */
   cancelRequestedAt: string | null;
+  /** When a member discarded the run (#921), or null; the status is then `discarded`. */
+  discardedAt: string | null;
+  /** When a member asked the run to stop after its current step (#921), or null. No new step starts until it is resumed. */
+  pauseRequestedAt: string | null;
   /** Who started it or put the label on, by their login on the platform. Display only: it decides nothing. */
   actorLogin: string;
   budgetUsd: number;
@@ -126,13 +130,19 @@ export type RunView = RunSummaryView & {
 export type StartedRun = { run: RunView; created: boolean };
 
 /**
- * What stopping a run came to (#891). `requested`: the run is marked; its turn stops at its runner's next heartbeat and the run ends `cancelled`
- * when it has. `already_requested`: it was marked before. `already_ended`: the run is over, however it ended; nothing changed.
+ * What discarding a run came to (#921). `discarded`: the run was active or over and is `discarded` now. `already_discarded`: it was
+ * discarded before; nothing changed.
  */
-export type CancelledRun = {
+export type DiscardedRun = {
   run: RunView;
-  outcome: "requested" | "already_requested" | "already_ended";
+  outcome: "discarded" | "already_discarded";
 };
+
+/**
+ * What pausing or resuming a run came to (#921). `changed`: the run is marked as one to pause after its current step (or the mark is gone).
+ * `unchanged`: it was so already, or the run is over, and nothing changed.
+ */
+export type PausedRun = { run: RunView; outcome: "changed" | "unchanged" };
 
 export type WorkflowRunService = {
   /** Starts a run of the workflow by hand. Throws a `WorkflowRunError`. */
@@ -143,11 +153,21 @@ export type WorkflowRunService = {
   ): Promise<StartedRun>;
   get(workflowId: string, runId: string): Promise<RunView>;
   /**
-   * #891: stops a run. Whoever may start one may (the route's right). It marks the run and tells the engine, which asks the turn that runs to
-   * stop; the engine ends the run `cancelled` once the turn has ended, so no step starts any more and the steps that did not start are skipped.
-   * A repeat and a run that is over change nothing and say so. Throws `WORKFLOW_RUN_NOT_FOUND`.
+   * #921: discards a run, whatever state it is in (running, waiting, or over). Whoever may start a run may. The run is `discarded` at once and
+   * frees its ticket; a turn that runs is asked to stop, the comment of an open question says it was discarded, the labels `agent working`
+   * and `agent waiting` come off, and `onFailure` does not run. A repeat changes nothing and says so. Throws `WORKFLOW_RUN_NOT_FOUND`.
+   * The cancel route of #891 forwards here (`cancel` is the same call).
    */
-  cancel(workflowId: string, runId: string): Promise<CancelledRun>;
+  discard(workflowId: string, runId: string): Promise<DiscardedRun>;
+  /** #891, forwarded (#921): the same as `discard`. */
+  cancel(workflowId: string, runId: string): Promise<DiscardedRun>;
+  /**
+   * #921: asks a run that is active to stop after its current step: the step that runs goes on, and none starts until `resume`. A run that is
+   * over or paused already changes nothing and says so. Throws `WORKFLOW_RUN_NOT_FOUND`.
+   */
+  pause(workflowId: string, runId: string): Promise<PausedRun>;
+  /** #921: takes the pause off: the engine starts the next step. */
+  resume(workflowId: string, runId: string): Promise<PausedRun>;
   /**
    * #920: answers the question the run waits for, from the page of the run: an option by its number (from 1) and/or a text. Whoever may start
    * a run may answer one. The answer is recorded with the person's GitHub login, or with none (`by: null`) for an account without one: an
@@ -167,8 +187,8 @@ export type WorkflowRunService = {
 
 export type WorkflowRunServiceDependencies = {
   runs: WorkflowRunsRepository;
-  /** #920: the engine that takes the answer. Left out: the service has no `answer`, as before. */
-  engine?: Pick<WorkflowEngine, "answer">;
+  /** #920: the engine that takes the answer, and (#921) discards a run. Left out: the service has neither `answer` nor `discard`. */
+  engine?: Pick<WorkflowEngine, "answer" | "discard">;
   workflows: Pick<WorkflowsRepository, "get">;
   /** The projects of the workspace (#922): the lane's project says which repository its runs may work in. */
   projects: Pick<ProjectsRepository, "getById">;
@@ -239,6 +259,8 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     status: run.status,
     errorCode: run.errorCode,
     cancelRequestedAt: run.cancelRequestedAt,
+    discardedAt: run.discardedAt,
+    pauseRequestedAt: run.pauseRequestedAt,
     actorLogin: run.actorLogin,
     budgetUsd: usd(run.budgetMicroUsd),
     spentUsd: usd(run.spentMicroUsd),
@@ -414,6 +436,55 @@ export function createWorkflowRunService(
 
   async function view(run: StoredWorkflowRun): Promise<RunView> {
     return viewOf(run, await deps.runs.listSteps(run.id));
+  }
+
+  /** The run of this workflow. Throws `WORKFLOW_RUN_NOT_FOUND` for none, or one of another workflow. */
+  async function ofWorkflow(
+    workflowId: string,
+    runId: string,
+  ): Promise<StoredWorkflowRun> {
+    const found = await deps.runs.getRun(runId);
+    if (found === undefined || found.workflowId !== workflowId)
+      throw new WorkflowRunError(
+        "WORKFLOW_RUN_NOT_FOUND",
+        "There is no such run of this workflow.",
+      );
+    return found;
+  }
+
+  async function discard(
+    workflowId: string,
+    runId: string,
+  ): Promise<DiscardedRun> {
+    checkId(workflowId);
+    await ofWorkflow(workflowId, runId);
+    if (deps.engine === undefined)
+      throw new Error("the run service has no engine to discard with");
+    // The engine does it under the lock of the run: of two calls one discards, the other finds the run discarded.
+    const done = await deps.engine.discard(runId);
+    return {
+      run: await view(await ofWorkflow(workflowId, runId)),
+      outcome: done.outcome === "discarded" ? "discarded" : "already_discarded",
+    };
+  }
+
+  async function setPause(
+    workflowId: string,
+    runId: string,
+    paused: boolean,
+  ): Promise<PausedRun> {
+    checkId(workflowId);
+    const found = await ofWorkflow(workflowId, runId);
+    // Under the lock of the run, like every decision about it: of two calls one marks the run, the other finds the mark.
+    const changed = await deps.runs.lockRun(runId, (lock) =>
+      lock.setPause(paused),
+    );
+    // A resumed run is looked at at once; the first kick may also have been lost.
+    if (!paused) deps.kick(runId);
+    return {
+      run: await view((await deps.runs.getRun(runId)) ?? found),
+      outcome: changed === true ? "changed" : "unchanged",
+    };
   }
 
   return {
@@ -598,34 +669,11 @@ export function createWorkflowRunService(
       return view(run);
     },
 
-    async cancel(workflowId, runId) {
-      checkId(workflowId);
-      const found = await deps.runs.getRun(runId);
-      if (found === undefined || found.workflowId !== workflowId)
-        throw new WorkflowRunError(
-          "WORKFLOW_RUN_NOT_FOUND",
-          "There is no such run of this workflow.",
-        );
-      // #920: a run that waits for an answer is stopped too: nobody can answer it any more.
-      if (found.status !== "running" && found.status !== "waiting")
-        return { run: await view(found), outcome: "already_ended" };
-      // Under the lock of the run, like every decision about it: of two calls one marks the run, the other finds the mark.
-      const marked = await deps.runs.lockRun(runId, (lock) =>
-        lock.requestCancel(),
-      );
-      // Always, also for a repeat: the first kick may have been lost, and the engine does nothing twice.
-      deps.kick(runId);
-      const current = (await deps.runs.getRun(runId)) ?? found;
-      return {
-        run: await view(current),
-        outcome:
-          marked === true
-            ? "requested"
-            : current.status === "running" || current.status === "waiting"
-              ? "already_requested"
-              : "already_ended",
-      };
-    },
+    discard,
+    // #891: the old route and its method are the same call as a discard.
+    cancel: discard,
+    pause: (workflowId, runId) => setPause(workflowId, runId, true),
+    resume: (workflowId, runId) => setPause(workflowId, runId, false),
 
     async answer(user, workflowId, runId, body) {
       checkId(workflowId);

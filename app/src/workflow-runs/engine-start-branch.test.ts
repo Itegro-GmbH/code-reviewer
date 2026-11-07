@@ -92,6 +92,8 @@ function harness(branch: string | undefined, turnTimeLimitMinutes?: number) {
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
     failure: null,
     ticketRef: null,
     createdAt: NOW.toISOString(),
