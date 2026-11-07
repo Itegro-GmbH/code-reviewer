@@ -68,8 +68,18 @@ function boardStatusChange(
   if (contentType !== "Issue" && contentType !== "PullRequest")
     return ignored(`the board item is a ${contentType}, not an issue`);
   const nodeId = field<string>(payload, "projects_v2_item.content_node_id");
-  if (action === "deleted" || action === "archived")
-    return change({ kind: "board_status_changed", nodeId, status: null });
+  // The delivery of these four carries no status, and the ticket may be on other boards: the mirror asks where it stands now.
+  if (
+    action === "deleted" ||
+    action === "archived" ||
+    action === "created" ||
+    action === "restored"
+  )
+    return change({
+      kind: "board_item_reread",
+      nodeId,
+      removed: action === "deleted" || action === "archived",
+    });
   if (action !== "edited")
     return ignored(`the board item action "${action}" carries no status`);
   const fieldChange = rawField(payload, "changes.field_value");

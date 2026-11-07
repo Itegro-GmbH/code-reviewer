@@ -464,6 +464,16 @@ export type GithubAppClient = {
     next: string | null;
   }>;
   /**
+   * The status the project boards give one issue or pull request now, by its node id (#932): the status on the first board that has one,
+   * null for a ticket on no board or without a status. A board the token may not read is `available: false`, not a failure.
+   */
+  readTrackerBoardStatus(
+    installationId: string,
+    scope: JobTokenScope,
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+  /**
    * Mints a fresh installation access token, never from the cache, limited to the given repositories
    * and permissions. The one place a token for a job is created. Refuses (without a request) a scope
    * with no repository or no permission, and a token GitHub reports as broader than asked for.
@@ -546,6 +556,28 @@ const BOARDS_QUERY =
   "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
 const BOARD_ITEMS_QUERY =
   'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
+
+const BOARD_STATUS_FIELDS =
+  'projectItems(first:20,includeArchived:false){nodes{fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}';
+const BOARD_STATUS_QUERY = `query($id:ID!){node(id:$id){... on Issue{${BOARD_STATUS_FIELDS}} ... on PullRequest{${BOARD_STATUS_FIELDS}}}}`;
+
+/** The status of the first board item of a ticket that has one; null when it has none; undefined when the answer is not that of a ticket. */
+function boardStatusOf(
+  data: Record<string, unknown>,
+): string | null | undefined {
+  const { node } = data;
+  if (node === null) return null;
+  if (!isRecord(node)) return undefined;
+  if (!isRecord(node.projectItems)) return undefined;
+  const { nodes } = node.projectItems;
+  if (!Array.isArray(nodes)) return undefined;
+  for (const item of nodes as unknown[]) {
+    if (!isRecord(item) || !isRecord(item.fieldValueByName)) continue;
+    const { name } = item.fieldValueByName;
+    if (typeof name === "string" && name !== "") return name;
+  }
+  return null;
+}
 
 /** The ids of the boards a `BOARDS_QUERY` answer lists; null when the answer is not that. */
 function boardIdsOf(data: Record<string, unknown>): string[] | null {
@@ -2559,6 +2591,45 @@ export function createGithubAppClient(
                   ? `${index + 1}:`
                   : null;
             return { available: true, items: page.items, next };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
+
+    async readTrackerBoardStatus(installationId, scope, nodeId, signal) {
+      checkInstallationId(installationId);
+      if (nodeId === "" || nodeId.length > 200)
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The node id of the ticket is not usable.",
+        );
+      const unavailable = { available: false, status: null };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            const data = await graphql(
+              token,
+              BOARD_STATUS_QUERY,
+              { id: nodeId },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const status = boardStatusOf(data);
+            if (status === undefined) return unavailable;
+            return { available: true, status };
           },
           signal,
         );

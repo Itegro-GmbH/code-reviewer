@@ -62,7 +62,8 @@ come from two sources, and both write the same shape:
 | `pull_request`, any action (`opened`, `closed`, merged, `review_requested`, `synchronize`, `edited`, ...) | The ticket of the pull request is written; `opened`, `reopened` and `synchronize` clear its checks (they belong to a commit), a closed pull request has none; the issues it closes (before and now) are linked again |
 | `issue_comment`, `created` or `edited` | The ticket (issue or pull request) is written from the delivery: the time of its last change moves. A deleted comment changes nothing. The comments themselves, and the markers of a question of a run, are not stored: the ask of a run is read from the run |
 | `sub_issues` | `parent_number` of the sub-issue is set, or emptied (as of the time of the sub-issue in the delivery, `sub_issue.updated_at`) |
-| `projects_v2_item` | `board_status` of the item's ticket is set to the new **Status**, or emptied when the item left the board. The item is found by the node id of its content, in any repository of the workspace |
+| `projects_v2_item`, `edited` (field Status) | `board_status` of the item's ticket is set to the new **Status**, or emptied when the new value is none. The item is found by the node id of its content, in any repository of the workspace |
+| `projects_v2_item`, `created`, `restored`, `archived`, `deleted` | These deliveries carry no status, and the ticket can be on **more than one board**, so the app asks GitHub where the ticket stands now (the first board item of the ticket, not archived, that has a Status) and stores that: a ticket that left one board keeps the status another board gives it, and one that is added or restored shows its status at once. Nothing is stored when the boards cannot be read, except that an `archived` or `deleted` item empties the status |
 | `check_suite` | For each open pull request the suite lists (same repository), the app asks GitHub for the check suites of the commit and stores their state (`checks_state`) |
 
 What a delivery does not carry stays as it was: a ticket written again keeps its `board_status`, its `pull_requests` and its
@@ -92,6 +93,18 @@ page (`tracker_sync_state.cursor`), so a call that ends early (the request has a
 continued by the next call, which answers `202` while there is more to read and `200` when the cache is complete. A sync that has not
 moved for an hour (counted from the last page that was saved, `tracker_sync_state.updated_at`, not from its start) starts again from the
 beginning.
+
+**The nightly resync** (#932). A delivery can be missed (a GitHub App that does not subscribe to `issues`, `sub_issues` or `check_suite`, a delivery GitHub gave up on)
+and nothing flags it, so once a night (`GET /api/internal/tracker-resync`, `app/vercel.json`, `CRON_SECRET`) every **active project** is synced
+with the same code as **Resync**. Projects are taken the one synced longest ago first; one project's failure is logged (its repository id and the
+code of the failure) and the others go on. The run has a budget of four minutes: a sync it ends in the middle of keeps its position and the next
+run continues it, and the projects it did not reach come first the next night. A deployment without the factory (`implementer`) reads the mirror
+nowhere: the route answers `skipped` and asks GitHub for nothing. The answer is counts only (`projects`, `done`, `partial`, `failed`, `deferred`).
+
+**What tells that a sync is overdue.** The list answers `sync: { lastFullSyncAt, inProgress, lastWriteAt }`. `lastWriteAt` is when a row was last written
+(by a delivery or by a sync): a `lastWriteAt` that is not after `lastFullSyncAt` means no delivery has arrived since the last full sync, which
+for a repository that has activity is the sign of a missed subscription. The hint and the Resync button in the project's Setup are left to the
+rework of the project pages (#922); they read these two times.
 
 **One sync at a time.** Starting a sync is one atomic step in the database (`claimSync`: an insert that updates only when there is no sync,
 the last one ended, it has not moved for an hour or its cursor is unreadable). Of two calls at the same time one starts, the other
@@ -159,7 +172,7 @@ list has no field for it.
 (#922) the route is addressed by the repository; `/projects/<id>/issues` will be a thin alias.
 
 - `state`: `open` (the default), `closed` or `all`; `limit` (1 to 200, default 100) and `offset`. The newest change comes first.
-- The answer is `{ repositoryId, repo, items, sync: { lastFullSyncAt, inProgress } }`. An item has the fields of the table above
+- The answer is `{ repositoryId, repo, items, sync: { lastFullSyncAt, inProgress, lastWriteAt } }`. An item has the fields of the table above
   (`number`, `kind`, `state`, `stateReason`, `type`, `title`, `bodyExcerpt`, `labels`, `assignees`, `boardStatus`, `parentNumber`,
   `pullRequests`, `checksState`, `updatedAt`, `syncedAt`), the address of the ticket on GitHub (`url`), and `lane` and `costUsd`.
 - A query that cannot be used is `400 TRACKER_REQUEST_INVALID` with `issues: [{ path, code, message, available }]`: `path` names the

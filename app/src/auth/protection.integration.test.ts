@@ -88,6 +88,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/repository-sync",
   // The same cron, once a minute: the sweep of a hosted deployment, a 404 outside serverless mode (#328).
   "/api/internal/dispatch-sweep",
+  // The nightly resync of the ticket mirror (#932): the same credential.
+  "/api/internal/tracker-resync",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",

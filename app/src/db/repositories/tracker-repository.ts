@@ -116,6 +116,13 @@ export type TrackerRepository = {
     repositoryId: string,
     number: number,
   ): Promise<TrackerItem | undefined>;
+  /** The cached item the provider's id names, in any repository of the workspace; undefined for none and for a tombstone. */
+  findItemByNode(nodeId: string): Promise<TrackerItem | undefined>;
+  /**
+   * When the cache of the repository was last written (the newest `syncedAt` of its rows, a tombstone included): by a delivery or by a
+   * sync. After the end of a full sync (`lastFullSyncAt`) it says whether a delivery has arrived since; null for no row.
+   */
+  newestWriteAt(repositoryId: string): Promise<string | null>;
   /** The items of the repository, the newest change first. */
   listItems(
     repositoryId: string,
@@ -323,6 +330,27 @@ export function createTrackerRepository(
         .where("deleted_at", "is", null)
         .executeTakeFirst();
       return row === undefined ? undefined : itemFrom(row);
+    },
+
+    async findItemByNode(nodeId) {
+      const row = await db
+        .selectFrom("tracker_items")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("node_id", "=", nodeId)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return row === undefined ? undefined : itemFrom(row);
+    },
+
+    async newestWriteAt(repositoryId) {
+      const row = await db
+        .selectFrom("tracker_items")
+        .select((eb) => eb.fn.max("synced_at").as("newest"))
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .executeTakeFirst();
+      return row?.newest ?? null;
     },
 
     async listItems(repositoryId, filter) {

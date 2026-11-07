@@ -408,9 +408,11 @@ describe("the rebuild rule", () => {
     const mirror = createTrackerMirror({
       repositories: {
         findByExternalId: async () => ({ id: "r-1", active: true }) as never,
+        get: async () => undefined,
       },
       projects: { hasActiveProject: async () => true },
       tracker: kept,
+      boardStatusOf: async () => ({ available: false, status: null }),
       checksStateOf: async () => "failure",
     });
     const repo = {

@@ -421,6 +421,18 @@ export interface IntegrationProvider {
   ): Promise<TrackerPage>;
 
   /**
+   * Only together with `parseTrackerChange`: the status the project boards give a ticket now, by the platform's id of the ticket
+   * (#932): the status on the first board that has one, or null when the ticket is on no board or has no status. `available: false`
+   * when the app may not read boards. Rejects when the platform cannot be asked.
+   */
+  readBoardStatus?(
+    integration: Integration,
+    repo: RepoRef,
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+
+  /**
    * Only together with `parseTrackerChange`: the state of the checks of a commit as the platform names it (`success`, `failure`,
    * `in_progress`, ...), or null when it has none. The same rule as the sync uses for each open pull request.
    */
