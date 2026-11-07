@@ -18,5 +18,10 @@ Rules that hold here:
 - **Nothing is stored.** The list is read when it is asked for. The reads are `workflow_runs` (a run that `waits`, an answered ask, the pull request an
   action step opened) and `tracker_items` (the title, the label, who a review is asked from).
 - **Only the pull requests of lanes.** A review is a ToDo only for a pull request a run opened; a pull request of a person is not.
-- **A review needs a ToDo.** The review route looks the ToDo up for the caller first, so it reviews nothing else.
+- **A review needs a ToDo.** The review route looks the ToDo up for the caller first (and checks GitHub's live `requested_reviewers`), so it
+  reviews nothing else. A request that names logins is acted on by those logins only; the fan-out of a lane (`project members`) by any member.
+- **An action leaves no ToDo behind.** After a review the caller's request is taken away on GitHub and in the mirror; when that fails the
+  mirror remembers the login (`review_acted_by`) and the list hides the review from it.
+- **The reads are bounded and narrowed in SQL.** 200 rows per kind, newest first; a project's list is narrowed by its repositories inside the
+  query; the steps of all runs come in one query; the text matches are served by partial indexes.
 - **`src/workflow-runs/` does not import this folder**; this folder reads the question's words and the place of a run from there.

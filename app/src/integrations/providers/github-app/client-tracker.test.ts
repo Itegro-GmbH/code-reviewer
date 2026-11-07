@@ -249,7 +249,11 @@ describe("the checks of the full sync", () => {
         return {
           json: [
             // #924-T04: the list says who a review is asked from
-            { ...pull(7), requested_reviewers: [{ login: "carol" }] },
+            {
+              ...pull(7),
+              requested_reviewers: [{ login: "carol" }],
+              updated_at: "2026-11-07T08:30:00Z",
+            },
             pull(8),
           ],
         };
@@ -276,8 +280,19 @@ describe("the checks of the full sync", () => {
 
     expect(page).toEqual({
       pullRequests: [
-        { number: 7, checksState: "failure", reviewRequestedFrom: ["carol"] },
-        { number: 8, checksState: "failure", reviewRequestedFrom: [] },
+        {
+          number: 7,
+          checksState: "failure",
+          reviewRequestedFrom: ["carol"],
+          // #924-T10: the time the list read, which a newer delivery is compared with; the epoch when the entry says none
+          updatedAt: "2026-11-07T08:30:00.000Z",
+        },
+        {
+          number: 8,
+          checksState: "failure",
+          reviewRequestedFrom: [],
+          updatedAt: "1970-01-01T00:00:00.000Z",
+        },
       ],
       last: true,
     });

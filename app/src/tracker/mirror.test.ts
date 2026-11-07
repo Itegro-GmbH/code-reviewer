@@ -98,6 +98,41 @@ describe("applying a change of a ticket to the mirror", () => {
     });
   });
 
+  // #924-T09
+  it("forgets who acted on a review when the commit changes or the pull request is over, and not for another change", async () => {
+    const { tracker, changed } = setup();
+    const asked = { reviewRequestedFrom: ["alice"] };
+    await changed(
+      pullRequest(7, [], { ...asked, updatedAt: "2026-11-06T10:00:00.000Z" }),
+    );
+    await tracker.markReviewActed("r-1", 7, "alice");
+
+    await changed(
+      pullRequest(7, [], {
+        ...asked,
+        title: "Renamed",
+        updatedAt: "2026-11-06T10:01:00.000Z",
+      }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual(["alice"]);
+
+    await changed(
+      pullRequest(7, [], { ...asked, updatedAt: "2026-11-06T10:02:00.000Z" }),
+      true,
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([]);
+
+    await tracker.markReviewActed("r-1", 7, "alice");
+    await changed(
+      pullRequest(7, [], {
+        ...asked,
+        state: "closed",
+        updatedAt: "2026-11-06T10:03:00.000Z",
+      }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([]);
+  });
+
   // #923-T22
   it("keeps the parent of an issue when the delivery does not say, and sets or empties it when it does", async () => {
     const { tracker, changed } = setup();

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// #924: the migration adds `tracker_items.review_requested_from`, null for every row that exists (read as nobody until a delivery or the
-// sync says who is asked), bounded in size. Expand only; `down` takes it back.
+// #924: the migration adds `tracker_items.review_requested_from` (null for every row that exists, read as nobody until a delivery or the
+// sync says who is asked) and `review_acted_by` (who acted on a review ToDo while the request stood), both bounded in size. Expand only;
+// `down` takes them back.
 import { sql } from "kysely";
 import type { MigrationProvider } from "kysely/migration";
 import { describe, expect, it } from "vitest";
@@ -28,7 +29,8 @@ function upTo(include: (name: string) => boolean): MigrationProvider {
 const column = sql<{
   name: string;
 }>`select column_name as name from information_schema.columns
-  where table_schema = 'public' and table_name = 'tracker_items' and column_name = 'review_requested_from'`;
+  where table_schema = 'public' and table_name = 'tracker_items'
+    and column_name in ('review_requested_from', 'review_acted_by') order by column_name`;
 
 describe("the column of who a review is asked from", () => {
   // #924-T06
@@ -63,13 +65,23 @@ describe("the column of who a review is asked from", () => {
 
     const rows = await sql<{
       review_requested_from: string | null;
-    }>`select review_requested_from from tracker_items`.execute(db);
-    expect(rows.rows).toEqual([{ review_requested_from: null }]);
-    await sql`update tracker_items set review_requested_from = '["ada"]'`.execute(
+      review_acted_by: string | null;
+    }>`select review_requested_from, review_acted_by from tracker_items`.execute(
+      db,
+    );
+    expect(rows.rows).toEqual([
+      { review_requested_from: null, review_acted_by: null },
+    ]);
+    await sql`update tracker_items set review_requested_from = '["ada"]', review_acted_by = '["ada"]'`.execute(
       db,
     );
     await expect(
       sql`update tracker_items set review_requested_from = ${"x".repeat(4097)}`.execute(
+        db,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      sql`update tracker_items set review_acted_by = ${"x".repeat(4097)}`.execute(
         db,
       ),
     ).rejects.toThrow();
@@ -89,6 +101,7 @@ describe("the column of who a review is asked from", () => {
 
     await migration.up(db);
     expect((await column.execute(db)).rows).toEqual([
+      { name: "review_acted_by" },
       { name: "review_requested_from" },
     ]);
     await db.destroy();

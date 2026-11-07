@@ -286,6 +286,11 @@ export type PullRequestRef = {
   draft: boolean;
   state: PullRequestState;
   author: TriggerActor;
+  /**
+   * #924: the logins a review is asked from now (`requested_reviewers`; teams are not read), once each. Left out when the answer carries
+   * no such list: the reader then knows nothing about it.
+   */
+  requestedReviewers?: string[];
 };
 
 /**
@@ -394,6 +399,8 @@ export type TrackerPage =
         checksState: string | null;
         /** #924: the logins a review of the pull request is asked from. */
         reviewRequestedFrom: string[];
+        /** #924: the provider's time of the last change of the pull request, as the list read it (what a newer delivery is compared with). */
+        updatedAt: string;
       }[];
       last: boolean;
     }

@@ -2437,10 +2437,17 @@ const CASES: Case[] = [
   },
   {
     // #924: the seeded workspaces have no run that waits, no answered question and no pull request a lane opened; what the three read
-    // for the ToDos stays inside the workspace (`todos.integration.test.ts` proves it with rows in both).
+    // for the ToDos stays inside the workspace (`todos/service.integration.test.ts` proves it with rows in both).
     name: "workflowRuns.listWaiting",
     run: (a) => a.workflowRuns.listWaiting(10),
     expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #924: the steps of B's run are not read for A, only an empty list answers for the id.
+    name: "workflowRuns.listStepsOfRuns",
+    run: (a, b) => a.workflowRuns.listStepsOfRuns([b.workflowRun.id]),
+    expectAnswer: (answer) =>
+      expect([...(answer as Map<string, unknown[]>).values()]).toEqual([[]]),
   },
   {
     name: "workflowRuns.listAnsweredAskSteps",
@@ -2574,7 +2581,27 @@ const CASES: Case[] = [
     // #924: who a review is asked from is B's to write.
     name: "tracker.setReviewRequestedFrom",
     run: (a, b) =>
-      a.tracker.setReviewRequestedFrom(b.repository.id, 1, ["intruder"]),
+      a.tracker.setReviewRequestedFrom(
+        b.repository.id,
+        1,
+        ["intruder"],
+        "2999-01-01T00:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.removeReviewRequested",
+    run: (a, b) => a.tracker.removeReviewRequested(b.repository.id, 1, "ada"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.markReviewActed",
+    run: (a, b) => a.tracker.markReviewActed(b.repository.id, 1, "intruder"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.clearReviewActed",
+    run: (a, b) => a.tracker.clearReviewActed(b.repository.id, 1),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {

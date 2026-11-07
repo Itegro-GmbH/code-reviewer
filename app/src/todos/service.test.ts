@@ -42,6 +42,8 @@ function run(
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
     failure: null,
     createdAt: T(0),
     updatedAt: T(5),
@@ -127,6 +129,7 @@ function item(number: number, over: Partial<TrackerItem> = {}): TrackerItem {
     closes: [],
     checksState: null,
     reviewRequestedFrom: [],
+    reviewActedBy: [],
     updatedAt: T(3),
     syncedAt: T(3),
     ...over,
@@ -142,9 +145,19 @@ type World = {
   members?: string[];
   /** Lanes: id → name and project. Default: one lane of project p-1. */
   lanes?: Record<string, { name: string; projectId: string | null }>;
+  /** The lanes whose document asks `reviewers: "project members"`; the others name their reviewers. */
+  fanOut?: string[];
 };
 
-function service(world: World = {}) {
+/** What the service asked the runs repository, to prove how often and with which narrowing. */
+type Asked = {
+  waiting: (readonly string[] | undefined)[];
+  steps: (readonly string[])[];
+  answered: (readonly string[] | undefined)[];
+  pullRequests: (readonly string[] | undefined)[];
+};
+
+function service(world: World = {}, asked?: Asked) {
   const lanes = world.lanes ?? {
     "wf-1": { name: "Implement", projectId: "p-1" },
   };
@@ -214,6 +227,32 @@ function service(world: World = {}) {
       },
     },
     workflows: {
+      async getVersion(id, version) {
+        const document = world.fanOut?.includes(id)
+          ? {
+              steps: [
+                {
+                  action: "ticket.requestReview",
+                  inputs: { reviewers: "project members" },
+                },
+              ],
+            }
+          : {
+              steps: [
+                {
+                  action: "ticket.requestReview",
+                  inputs: { reviewers: ["bob"] },
+                },
+              ],
+            };
+        return {
+          workflowId: id,
+          version,
+          document: JSON.stringify(document),
+          createdBy: "u-1",
+          createdAt: T(0),
+        };
+      },
       async list() {
         return Object.entries(lanes).map(([id, lane]) => ({
           id,
@@ -229,17 +268,35 @@ function service(world: World = {}) {
       },
     },
     runs: {
-      async listWaiting() {
-        return world.waiting ?? [];
+      async listWaiting(_limit, repositoryIds) {
+        asked?.waiting.push(repositoryIds);
+        return (world.waiting ?? []).filter(
+          (candidate) =>
+            repositoryIds === undefined ||
+            repositoryIds.includes(candidate.repositoryId),
+        );
       },
-      async listSteps(runId) {
-        return world.steps?.[runId] ?? [];
+      async listStepsOfRuns(runIds) {
+        asked?.steps.push(runIds);
+        return new Map(
+          runIds.map((runId) => [runId, world.steps?.[runId] ?? []]),
+        );
       },
-      async listAnsweredAskSteps() {
-        return world.answered ?? [];
+      async listAnsweredAskSteps(_limit, repositoryIds) {
+        asked?.answered.push(repositoryIds);
+        return (world.answered ?? []).filter(
+          ({ run: candidate }) =>
+            repositoryIds === undefined ||
+            repositoryIds.includes(candidate.repositoryId),
+        );
       },
-      async listPullRequestSteps() {
-        return world.prSteps ?? [];
+      async listPullRequestSteps(_limit, repositoryIds) {
+        asked?.pullRequests.push(repositoryIds);
+        return (world.prSteps ?? []).filter(
+          ({ run: candidate }) =>
+            repositoryIds === undefined ||
+            repositoryIds.includes(candidate.repositoryId),
+        );
       },
     },
     tracker: {
@@ -434,22 +491,113 @@ describe("the reviews that are asked for", () => {
   });
 
   // #924-T21
-  it("shows a review that is asked from another member to every member, and one that is asked from nobody here to nobody", async () => {
+  it("shows a review that is asked from another member to every member only when the lane asked `project members`, and one asked from nobody here to nobody", async () => {
     const todos = service({
-      prSteps: [opened(7), opened(8)],
+      fanOut: ["wf-fan"],
+      lanes: {
+        "wf-1": { name: "Implement", projectId: "p-1" },
+        "wf-fan": { name: "Fan out", projectId: "p-1" },
+      },
+      prSteps: [
+        opened(7),
+        {
+          run: run("run-8", {
+            status: "succeeded",
+            ticketRef: null,
+            workflowId: "wf-fan",
+          }),
+          step: prStep("run-8", 8),
+        },
+        {
+          run: run("run-9", {
+            status: "succeeded",
+            ticketRef: null,
+            workflowId: "wf-fan",
+          }),
+          step: prStep("run-9", 9),
+        },
+      ],
       items: [
+        // asked by name: only bob can act on it
         item(7, { kind: "pull_request", reviewRequestedFrom: ["bob"] }),
-        item(8, { kind: "pull_request", reviewRequestedFrom: ["outsider"] }),
+        // the fan-out of the lane: any member can
+        item(8, { kind: "pull_request", reviewRequestedFrom: ["bob", "dave"] }),
+        item(9, { kind: "pull_request", reviewRequestedFrom: ["outsider"] }),
       ],
     });
 
     const alice = await todos.list({ githubLogin: "alice" });
+    const bob = await todos.list({ githubLogin: "bob" });
     const stranger = await todos.list({ githubLogin: null });
 
     expect(alice.reviews.map((r) => [r.number, r.audience])).toEqual([
-      [7, "members"],
+      [8, "members"],
     ]);
-    expect(stranger.reviews.map((r) => r.number)).toEqual([7]);
+    expect(bob.reviews.map((r) => [r.number, r.audience]).sort()).toEqual([
+      [7, "you"],
+      [8, "you"],
+    ]);
+    expect(stranger.reviews.map((r) => r.number)).toEqual([8]);
+  });
+
+  // #924-T24
+  it("lets only the logins that are named act on a request that names logins: carol cannot act on a pull request asked of bob", async () => {
+    const todos = service({
+      members: ["alice", "bob", "carol"],
+      prSteps: [opened(7)],
+      items: [item(7, { kind: "pull_request", reviewRequestedFrom: ["bob"] })],
+    });
+
+    expect(
+      await todos.findReview({ githubLogin: "carol" }, "r-1", 7),
+    ).toBeUndefined();
+    expect(
+      await todos.findReview({ githubLogin: null }, "r-1", 7),
+    ).toBeUndefined();
+    expect(
+      await todos.findReview({ githubLogin: "Bob" }, "r-1", 7),
+    ).toMatchObject({ number: 7, audience: "you" });
+  });
+
+  // #924-T25
+  it("lets any member find the fan-out of a lane that asked `project members`", async () => {
+    const todos = service({
+      members: ["alice", "bob", "carol"],
+      fanOut: ["wf-1"],
+      prSteps: [opened(7)],
+      items: [item(7, { kind: "pull_request", reviewRequestedFrom: ["bob"] })],
+    });
+
+    expect(
+      await todos.findReview({ githubLogin: "carol" }, "r-1", 7),
+    ).toMatchObject({ number: 7, audience: "members" });
+  });
+
+  // #924-T26
+  it("hides a review from the login that acted on it while GitHub still holds the request, and keeps it for the others", async () => {
+    const todos = service({
+      members: ["alice", "bob", "carol"],
+      fanOut: ["wf-1"],
+      prSteps: [opened(7)],
+      items: [
+        item(7, {
+          kind: "pull_request",
+          reviewRequestedFrom: ["alice", "bob"],
+          reviewActedBy: ["Alice"],
+        }),
+      ],
+    });
+
+    expect((await todos.list({ githubLogin: "alice" })).reviews).toEqual([]);
+    expect(
+      await todos.findReview({ githubLogin: "alice" }, "r-1", 7),
+    ).toBeUndefined();
+    expect(
+      (await todos.list({ githubLogin: "bob" })).reviews.map((r) => r.number),
+    ).toEqual([7]);
+    expect(
+      (await todos.list({ githubLogin: "carol" })).reviews.map((r) => r.number),
+    ).toEqual([7]);
   });
 
   // #924-T22
@@ -558,6 +706,53 @@ describe("the done list", () => {
     expect(done.at(-1)).toMatchObject({ kind: "question", at: T(6) });
   });
 
+  // #924-T32
+  it("applies the audience of the reviews to the pull requests that are over: a request by name is done by that person only", async () => {
+    const closed = (number: number, workflowId: string) => ({
+      run: run(`run-${String(number)}`, {
+        status: "succeeded",
+        ticketRef: null,
+        workflowId,
+      }),
+      step: prStep(`run-${String(number)}`, number),
+    });
+    const todos = service({
+      members: ["alice", "bob", "carol"],
+      fanOut: ["wf-fan"],
+      lanes: {
+        "wf-1": { name: "Implement", projectId: "p-1" },
+        "wf-fan": { name: "Fan out", projectId: "p-1" },
+      },
+      prSteps: [closed(7, "wf-1"), closed(8, "wf-fan"), closed(9, "wf-1")],
+      items: [
+        item(7, {
+          kind: "pull_request",
+          state: "closed",
+          reviewRequestedFrom: ["bob"],
+        }),
+        item(8, {
+          kind: "pull_request",
+          state: "closed",
+          reviewRequestedFrom: ["bob"],
+        }),
+        item(9, {
+          kind: "pull_request",
+          state: "closed",
+          reviewRequestedFrom: ["outsider"],
+        }),
+      ],
+    });
+
+    const numbers = async (githubLogin: string | null) =>
+      (await todos.list({ githubLogin })).done
+        .map((entry) => (entry.kind === "review" ? entry.number : -1))
+        .sort();
+
+    expect(await numbers("bob")).toEqual([7, 8]);
+    expect(await numbers("carol")).toEqual([8]);
+    expect(await numbers(null)).toEqual([8]);
+  });
+
   // #924-T31
   it("skips an ask whose answer cannot be read", async () => {
     const broken = answered("run-1", 1);
@@ -566,6 +761,118 @@ describe("the done list", () => {
     });
 
     expect((await todos.list({ githubLogin: "alice" })).done).toEqual([]);
+  });
+});
+
+describe("the queries behind the lists", () => {
+  const nothing = (): Asked => ({
+    waiting: [],
+    steps: [],
+    answered: [],
+    pullRequests: [],
+  });
+
+  // #924-T50
+  it("reads the steps of all waiting runs in one query, not one per run", async () => {
+    const asked = nothing();
+    const todos = service(
+      {
+        waiting: [run("run-1"), run("run-2"), run("run-3")],
+        steps: {
+          "run-1": [step("run-1")],
+          "run-2": [step("run-2")],
+          "run-3": [step("run-3")],
+        },
+      },
+      asked,
+    );
+
+    const list = await todos.list({ githubLogin: "alice" });
+
+    expect(list.questions).toHaveLength(3);
+    // one for the questions; the answered questions and the pull requests of lanes that are none add none
+    expect(asked.steps).toEqual([["run-1", "run-2", "run-3"]]);
+  });
+
+  // #924-T51
+  it("reads the places of the answered questions with one query too", async () => {
+    const asked = nothing();
+    const answeredStep = (runId: string, minute: number) => ({
+      run: run(runId, { status: "running" }),
+      step: step(runId, {
+        status: "succeeded",
+        ask: {
+          n: 1,
+          state: "resumed",
+          question: "q?",
+          answer: { text: "a", by: "alice", via: "ui", at: T(minute) },
+        },
+      }),
+    });
+    const todos = service(
+      { answered: [answeredStep("run-1", 1), answeredStep("run-2", 2)] },
+      asked,
+    );
+
+    await todos.list({ githubLogin: "alice" });
+
+    expect(asked.steps).toEqual([["run-2", "run-1"]]);
+  });
+
+  // #924-T52
+  it("narrows the queries to the repository of the project, so the rows of another project cannot push its ToDos past the cap", async () => {
+    const asked = nothing();
+    const todos = service(
+      {
+        waiting: [
+          run("run-1"),
+          run("run-2", { workflowId: "wf-2", repositoryId: "r-2" }),
+        ],
+        steps: { "run-1": [step("run-1")], "run-2": [step("run-2")] },
+        lanes: {
+          "wf-1": { name: "Implement", projectId: "p-1" },
+          "wf-2": { name: "Fix", projectId: "p-2" },
+        },
+      },
+      asked,
+    );
+
+    const second = await todos.list(
+      { githubLogin: "alice" },
+      { projectId: "p-2" },
+    );
+
+    expect(second.questions.map((todo) => todo.runId)).toEqual(["run-2"]);
+    expect(asked.waiting).toEqual([["r-2"]]);
+    expect(asked.answered).toEqual([["r-2"]]);
+    expect(asked.pullRequests).toEqual([["r-2"]]);
+    // the steps are read for the runs that were found, which are the project's only
+    expect(asked.steps).toEqual([["run-2"]]);
+  });
+
+  // #924-T53
+  it("does not narrow the lists of the whole workspace, and looks only at the repository of a review that is acted on", async () => {
+    const asked = nothing();
+    const todos = service(
+      {
+        prSteps: [
+          {
+            run: run("run-1", { status: "succeeded", ticketRef: null }),
+            step: prStep("run-1", 7),
+          },
+        ],
+        items: [
+          item(7, { kind: "pull_request", reviewRequestedFrom: ["alice"] }),
+        ],
+      },
+      asked,
+    );
+
+    await todos.list({ githubLogin: "alice" });
+    await todos.findReview({ githubLogin: "alice" }, "r-1", 7);
+
+    expect(asked.waiting).toEqual([undefined]);
+    expect(asked.pullRequests).toEqual([undefined, ["r-1"]]);
   });
 });
 

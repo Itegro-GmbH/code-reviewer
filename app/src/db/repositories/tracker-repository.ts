@@ -52,6 +52,11 @@ export type TrackerItem = {
   checksState: string | null;
   /** #924: the logins a review of the pull request is asked from (the provider's `requested_reviewers`); empty for an issue and for none. */
   reviewRequestedFrom: string[];
+  /**
+   * #924: the logins that acted on the review ToDo of the pull request while the provider still holds their request; the list hides the
+   * review from them. Only the logins that are still asked are kept, and a new commit clears it.
+   */
+  reviewActedBy: string[];
   /** The provider's time of the last change. */
   updatedAt: string;
   /** When the row was last written from the provider. */
@@ -162,12 +167,31 @@ export type TrackerRepository = {
     number: number,
     state: string | null,
   ): Promise<boolean>;
-  /** #924: who a review of the pull request is asked from (the full sync reads it from the list of the open pull requests). */
+  /**
+   * #924: who a review of the pull request is asked from (the full sync reads it from the list of the open pull requests), as of `at`,
+   * the provider's time of the pull request in that list: a pull request a delivery changed after `at` keeps what the delivery said,
+   * like `upsertItem`. Answers whether the row was written.
+   */
   setReviewRequestedFrom(
     repositoryId: string,
     number: number,
     logins: readonly string[],
+    at: string,
   ): Promise<boolean>;
+  /** #924: takes one login (compared without regard to case) out of who a review is asked from, right after its request was taken away. */
+  removeReviewRequested(
+    repositoryId: string,
+    number: number,
+    login: string,
+  ): Promise<boolean>;
+  /** #924: remembers that this login acted on the review ToDo of the pull request while its request stands. */
+  markReviewActed(
+    repositoryId: string,
+    number: number,
+    login: string,
+  ): Promise<boolean>;
+  /** #924: forgets who acted: the pull request has a new commit, so a request that stands is for that commit. */
+  clearReviewActed(repositoryId: string, number: number): Promise<boolean>;
   /** #924: the items of the repository with these numbers (at most 200 are looked at), in no particular order. */
   listItemsByNumbers(
     repositoryId: string,
@@ -242,6 +266,7 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     closes: decodeJson<number[]>(row.closes),
     checksState: row.checks_state,
     reviewRequestedFrom: loginsFrom(row.review_requested_from),
+    reviewActedBy: loginsFrom(row.review_acted_by),
     updatedAt: row.updated_at,
     syncedAt: row.synced_at,
   };
@@ -283,6 +308,71 @@ export function createTrackerRepository(
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
+
+  /** Keeps of `review_acted_by` only the logins that are asked now: a request that was taken away and comes back is a new ToDo. */
+  const pruneReviewActed = async (
+    repositoryId: string,
+    number: number,
+    asked: readonly string[],
+  ): Promise<void> => {
+    const row = await db
+      .selectFrom("tracker_items")
+      .select("review_acted_by")
+      .where("workspace_id", "=", workspaceId)
+      .where("repository_id", "=", repositoryId)
+      .where("number", "=", number)
+      .executeTakeFirst();
+    if (row === undefined || row.review_acted_by === null) return;
+    const acted = loginsFrom(row.review_acted_by);
+    const askedNow = new Set(asked.map((login) => login.toLowerCase()));
+    const kept = acted.filter((login) => askedNow.has(login.toLowerCase()));
+    if (kept.length === acted.length) return;
+    await own(repositoryId, number)
+      .set({ review_acted_by: kept.length === 0 ? null : encodeJson(kept) })
+      .execute();
+  };
+
+  /** Changes the two lists of a pull request in one transaction, so that two members acting at once do not lose each other's change. */
+  const changeReviewLists = async (
+    repositoryId: string,
+    number: number,
+    change: (lists: { requested: string[]; acted: string[] }) => {
+      requested: string[];
+      acted: string[];
+    },
+  ): Promise<boolean> => {
+    const run = async (executor: Kysely<Database>): Promise<boolean> => {
+      const row = await executor
+        .selectFrom("tracker_items")
+        .select(["review_requested_from", "review_acted_by"])
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("number", "=", number)
+        .where("deleted_at", "is", null)
+        .where("kind", "=", "pull_request")
+        .forUpdate()
+        .executeTakeFirst();
+      if (row === undefined) return false;
+      const next = change({
+        requested: loginsFrom(row.review_requested_from),
+        acted: loginsFrom(row.review_acted_by),
+      });
+      await executor
+        .updateTable("tracker_items")
+        .set({
+          review_requested_from: encodeJson(next.requested),
+          review_acted_by:
+            next.acted.length === 0 ? null : encodeJson(next.acted),
+          synced_at: formatTimestamp(now()),
+        })
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("number", "=", number)
+        .execute();
+      return true;
+    };
+    return db.isTransaction ? run(db) : db.transaction().execute(run);
+  };
 
   const getSyncState: TrackerRepository["getSyncState"] = async (
     repositoryId,
@@ -347,7 +437,15 @@ export function createTrackerRepository(
             else excluded.updated_at > tracker_items.updated_at
           end
         returning tracker_items.number`.execute(db);
-      if (written.rows.length > 0) return true;
+      if (written.rows.length > 0) {
+        if (item.reviewRequestedFrom !== undefined)
+          await pruneReviewActed(
+            repositoryId,
+            item.number,
+            item.reviewRequestedFrom,
+          );
+        return true;
+      }
       // A delivery older than the row (or a repository that is not ours): nothing is replaced, but the row was seen, so a full sync
       // that is reading keeps it.
       await own(repositoryId, item.number).set({ synced_at: at }).execute();
@@ -432,7 +530,7 @@ export function createTrackerRepository(
       return Number(result.numUpdatedRows) > 0;
     },
 
-    async setReviewRequestedFrom(repositoryId, number, logins) {
+    async setReviewRequestedFrom(repositoryId, number, logins, at) {
       const result = await own(repositoryId, number)
         .set({
           review_requested_from: encodeJson([...logins]),
@@ -440,6 +538,38 @@ export function createTrackerRepository(
         })
         .where("deleted_at", "is", null)
         .where("kind", "=", "pull_request")
+        .where("updated_at", "<=", at)
+        .executeTakeFirst();
+      const written = Number(result.numUpdatedRows) > 0;
+      if (written) await pruneReviewActed(repositoryId, number, logins);
+      return written;
+    },
+
+    removeReviewRequested(repositoryId, number, login) {
+      const same = (other: string) =>
+        other.toLowerCase() === login.toLowerCase();
+      return changeReviewLists(repositoryId, number, (lists) => ({
+        requested: lists.requested.filter((other) => !same(other)),
+        acted: lists.acted.filter((other) => !same(other)),
+      }));
+    },
+
+    markReviewActed(repositoryId, number, login) {
+      return changeReviewLists(repositoryId, number, (lists) => ({
+        requested: lists.requested,
+        acted: lists.acted.some(
+          (other) => other.toLowerCase() === login.toLowerCase(),
+        )
+          ? lists.acted
+          : [...lists.acted, login],
+      }));
+    },
+
+    async clearReviewActed(repositoryId, number) {
+      const result = await own(repositoryId, number)
+        .set({ review_acted_by: null })
+        .where("deleted_at", "is", null)
+        .where("review_acted_by", "is not", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
     },

@@ -68,8 +68,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // (the migration places the lanes that exist, but not at the time an older migration's test seeds them); null for every row that exists.
   projects: ["ticket_source"],
   workflows: ["project_id"],
-  // #924: who a review of a pull request is asked from; null for every row that exists.
-  tracker_items: ["review_requested_from"],
+  // #924: who a review of a pull request is asked from, and who acted on it while the request stood; null for every row that exists.
+  tracker_items: ["review_requested_from", "review_acted_by"],
   // #920: the question a step ended with and the comment that carries it; null for every step that exists.
   workflow_step_runs: ["ask", "waiting_on_comment_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.

@@ -8,14 +8,20 @@
 //  - The review is idempotent: its marker names the pull request, the commit and the person, so a repeat finds the review that is there
 //    and posts nothing twice (`already_there`). A new commit is a new review.
 //  - GitHub does not let an App approve or ask for changes on a pull request it opened itself, and a lane opens its pull requests as the
-//    App. That refusal is not an error here: the decision is written as a comment of the App with the same attribution and the same
-//    marker (`commented`), so the record is on the pull request either way.
+//    App. That refusal (its 422 "can not approve your own pull request") is not an error here: the decision is written as a comment of
+//    the App with the same attribution and the same marker (`commented`), so the record is on the pull request either way. Any other
+//    refusal is a failure, logged by its code only.
+//  - The App's review does not satisfy the request of the person, so GitHub keeps it. After the review (or the comment) the request of
+//    the caller is taken away (`removeReviewers`) and the mirror row is updated at once. When that fails, or there was no request of the
+//    caller to take away, the action is remembered in the mirror row (`markReviewActed`) so the ToDo does not stay as if nothing had
+//    happened; a new commit or a new request is a new ToDo. A failure of this bookkeeping never fails the review that was posted.
 //  - Asking for changes does not start a turn of the implementer session: the session of the run has ended by the time a pull request
 //    is reviewed, and continuing it on a fresh sandbox is the resumable session of the cockpit (#915), not part of this action.
 import { IntegrationError } from "../integrations/errors.ts";
 import type { GithubActionTarget } from "../workflow-runs/github-connectors.ts";
 import { safeText } from "../workflow-runs/ask-comment.ts";
 import { TodosError, type TodosRequestIssue } from "./errors.ts";
+import type { TrackerRepository } from "../db/repositories/tracker-repository.ts";
 import type { TodosService, TodoViewer } from "./service.ts";
 
 export const REVIEW_DECISIONS = ["approve", "request_changes"] as const;
@@ -141,6 +147,8 @@ export function readReviewInput(
 
 export type ReviewActionsDependencies = {
   todos: Pick<TodosService, "findReview">;
+  /** The mirror rows: who is asked is updated right after a request is taken away, and the action is remembered when it cannot be. */
+  tracker: Pick<TrackerRepository, "removeReviewRequested" | "markReviewActed">;
   /** The connection and the repository of a repository id; undefined when the repository or its connection is gone. */
   targetOf(repositoryId: string): Promise<GithubActionTarget | undefined>;
   /** Receives the line about a failure of GitHub (its code only). Default: console.error. */
@@ -152,6 +160,9 @@ export type ReviewActions = {
   submit(viewer: TodoViewer, input: ReviewInput): Promise<ReviewOutcome>;
 };
 
+/** What GitHub says when a review is refused because the App opened the pull request itself ("Can not approve your own pull request"). */
+const OWN_PULL_REQUEST = /\bown pull request\b/i;
+
 const WORDS: Record<ReviewDecision, string> = {
   approve: "Approved",
   request_changes: "Changes requested",
@@ -161,6 +172,61 @@ export function createReviewActions(
   deps: ReviewActionsDependencies,
 ): ReviewActions {
   const log = deps.log ?? ((line: string) => console.error(line));
+  const codeOf = (error: unknown) =>
+    error instanceof IntegrationError
+      ? error.code
+      : error instanceof Error
+        ? error.name
+        : "unknown";
+
+  /**
+   * After a review (or its comment) was posted: takes the request of the caller away and says so in the mirror, or, when that cannot be
+   * done, remembers that the caller acted. Never throws: the review stands whatever happens here.
+   */
+  async function settle(
+    target: Pick<GithubActionTarget, "provider" | "integration" | "repo">,
+    input: ReviewInput,
+    login: string,
+    requested: boolean,
+  ): Promise<void> {
+    // Nothing of a person without a login can be taken away or remembered: an email never goes onto a pull request.
+    if (login === "") return;
+    const { provider, integration, repo } = target;
+    try {
+      let removed = false;
+      if (requested) {
+        try {
+          if (provider.removeReviewers === undefined)
+            throw new Error("not supported");
+          await provider.removeReviewers(integration, repo, input.number, [
+            login,
+          ]);
+          removed = true;
+        } catch (error) {
+          log(
+            `[todos] taking the review request of pull request ${String(input.number)} away failed (${codeOf(error)})`,
+          );
+        }
+      }
+      if (removed)
+        await deps.tracker.removeReviewRequested(
+          input.repositoryId,
+          input.number,
+          login,
+        );
+      else
+        await deps.tracker.markReviewActed(
+          input.repositoryId,
+          input.number,
+          login,
+        );
+    } catch (error) {
+      log(
+        `[todos] the mirror of pull request ${String(input.number)} could not be updated after the review (${codeOf(error)})`,
+      );
+    }
+  }
+
   return {
     async submit(viewer, input) {
       const todo = await deps.todos.findReview(
@@ -204,6 +270,22 @@ export function createReviewActions(
             "TODOS_REVIEW_NOT_REQUESTED",
             "The pull request is not open any more.",
           );
+        // The mirror may be behind: the request must still stand on GitHub (a list that is missing says nothing, and the mirror stands).
+        const live = pullRequest.requestedReviewers?.map((name) =>
+          name.toLowerCase(),
+        );
+        if (
+          live !== undefined &&
+          !(todo.audience === "you"
+            ? live.includes(login.toLowerCase())
+            : todo.requestedFrom.some((name) =>
+                live.includes(name.toLowerCase()),
+              ))
+        )
+          throw new TodosError(
+            "TODOS_REVIEW_NOT_REQUESTED",
+            "GitHub no longer asks for this review.",
+          );
         const marker = `<!-- factory todo-review pr=${String(input.number)} sha=${pullRequest.headSha} by=${login === "" ? "member" : login} event=${input.decision} -->`;
         const note = safeText(input.comment, REVIEW_COMMENT_MAX_CHARS);
         const body = [
@@ -211,6 +293,17 @@ export function createReviewActions(
           `Review by ${by}: ${WORDS[input.decision]}`,
           ...(note === "" ? [] : ["", note]),
         ].join("\n");
+        const done = async <T extends ReviewOutcome>(
+          outcome: T,
+        ): Promise<T> => {
+          await settle(
+            { provider, integration, repo },
+            input,
+            login,
+            live?.includes(login.toLowerCase()) ?? true,
+          );
+          return outcome;
+        };
         try {
           const submitted = await submitReview(
             integration,
@@ -225,14 +318,16 @@ export function createReviewActions(
             },
             { lookForEarlier: true },
           );
-          return {
+          return await done({
             outcome: submitted.outcome,
             reviewId: submitted.reviewId,
-          };
+          });
         } catch (error) {
           if (
             !(error instanceof IntegrationError) ||
-            error.code !== "INTEGRATION_REQUEST_REFUSED"
+            error.code !== "INTEGRATION_REQUEST_REFUSED" ||
+            error.detail === null ||
+            !OWN_PULL_REQUEST.test(error.detail)
           )
             throw error;
         }
@@ -247,11 +342,11 @@ export function createReviewActions(
           ].join("\n"),
           { marker },
         );
-        return { outcome: "commented", url: commented.url };
+        return await done({ outcome: "commented", url: commented.url });
       } catch (error) {
         if (error instanceof TodosError) throw error;
         log(
-          `[todos] review of pull request ${String(input.number)} failed (${error instanceof IntegrationError ? error.code : error instanceof Error ? error.name : "unknown"})`,
+          `[todos] review of pull request ${String(input.number)} failed (${codeOf(error)})`,
         );
         throw new TodosError(
           "TODOS_REVIEW_FAILED",

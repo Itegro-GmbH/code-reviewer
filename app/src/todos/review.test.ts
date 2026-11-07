@@ -21,7 +21,24 @@ const INPUT: ReviewInput = {
   decision: "approve",
   comment: "",
 };
-const TODO = { number: 7, repositoryId: "r-1" } as ReviewTodo;
+const TODO = {
+  number: 7,
+  repositoryId: "r-1",
+  requestedFrom: ["alice"],
+  audience: "you",
+} as ReviewTodo;
+/** A review asked of the members by a fan-out: any member may answer. */
+const FAN_OUT = {
+  number: 7,
+  repositoryId: "r-1",
+  requestedFrom: ["alice", "bob"],
+  audience: "members",
+} as ReviewTodo;
+const OWN_PULL_REQUEST = new IntegrationError(
+  "INTEGRATION_REQUEST_REFUSED",
+  "GitHub answered 422 for POST /repos/{owner}/{repo}/pulls/{n}/reviews.",
+  { detail: "Can not approve your own pull request" },
+);
 
 function setup(
   options: {
@@ -29,15 +46,25 @@ function setup(
     submit?: IntegrationProvider["submitReviewVerdict"];
     state?: "open" | "closed";
     target?: boolean;
+    /** The reviewers GitHub says are asked now; `undefined`: the answer carries no list. */
+    requested?: string[] | undefined;
+    removeReviewers?: IntegrationProvider["removeReviewers"] | null;
+    comment?: IntegrationProvider["commentOnIssue"];
   } = {},
 ) {
   const submit =
     options.submit ??
     vi.fn(async () => ({ outcome: "submitted" as const, reviewId: "5001" }));
-  const commentOnIssue = vi.fn(async () => ({
-    url: "https://github.test/acme/widgets/pull/7#issuecomment-1",
-    existing: false,
-  }));
+  const commentOnIssue =
+    options.comment ??
+    vi.fn(async () => ({
+      url: "https://github.test/acme/widgets/pull/7#issuecomment-1",
+      existing: false,
+    }));
+  const removeReviewers =
+    options.removeReviewers === undefined
+      ? vi.fn(async () => ({ requested: [] as string[] }))
+      : options.removeReviewers;
   const getPullRequest = vi.fn(async () => ({
     number: 7,
     title: "Add widget caching",
@@ -48,12 +75,22 @@ function setup(
     draft: false,
     state: options.state ?? "open",
     author: { login: "app[bot]", externalId: "9" },
+    ...("requested" in options
+      ? options.requested === undefined
+        ? {}
+        : { requestedReviewers: options.requested }
+      : { requestedReviewers: ["alice", "bob"] }),
   }));
+  const tracker = {
+    removeReviewRequested: vi.fn(async () => true),
+    markReviewActed: vi.fn(async () => true),
+  };
   const log = vi.fn();
   const actions = createReviewActions({
     todos: {
       findReview: vi.fn(async () => ("todo" in options ? options.todo : TODO)),
     },
+    tracker,
     targetOf: async () =>
       options.target === false
         ? undefined
@@ -62,13 +99,22 @@ function setup(
               submitReviewVerdict: submit,
               commentOnIssue,
               getPullRequest,
+              ...(removeReviewers === null ? {} : { removeReviewers }),
             } as unknown as IntegrationProvider,
             integration: { id: "i-1" } as Integration,
             repo: REPO,
           },
     log,
   });
-  return { actions, submit, commentOnIssue, getPullRequest, log };
+  return {
+    actions,
+    submit,
+    commentOnIssue,
+    getPullRequest,
+    removeReviewers,
+    tracker,
+    log,
+  };
 }
 
 describe("a review from the list", () => {
@@ -111,7 +157,7 @@ describe("a review from the list", () => {
 
   // #924-T71
   it("never writes an email: a person without a GitHub login is a member of the workspace", async () => {
-    const { actions, submit } = setup();
+    const { actions, submit } = setup({ todo: FAN_OUT });
 
     await actions.submit({ githubLogin: null }, INPUT);
 
@@ -142,10 +188,7 @@ describe("a review from the list", () => {
   it("writes the decision as a comment of the App when GitHub refuses a review of the App's own pull request", async () => {
     const { actions, commentOnIssue } = setup({
       submit: vi.fn(async () => {
-        throw new IntegrationError(
-          "INTEGRATION_REQUEST_REFUSED",
-          "Can not approve your own pull request",
-        );
+        throw OWN_PULL_REQUEST;
       }),
     });
 
@@ -212,6 +255,193 @@ describe("a review from the list", () => {
     expect((failure as Error).message).not.toContain("SECRET-VALUE");
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("INTEGRATION_ACCESS_UNAVAILABLE"),
+    );
+    expect(String(log.mock.calls[0]?.[0])).not.toContain("SECRET-VALUE");
+  });
+});
+
+describe("what a review leaves behind on the pull request", () => {
+  const own = () =>
+    vi.fn(async () => {
+      throw OWN_PULL_REQUEST;
+    });
+
+  // #924-T77
+  it("takes the caller's request away after the review, and the mirror row with it", async () => {
+    const { actions, removeReviewers, tracker } = setup();
+
+    await actions.submit({ githubLogin: "alice" }, INPUT);
+
+    expect(removeReviewers).toHaveBeenCalledTimes(1);
+    const call = (removeReviewers as ReturnType<typeof vi.fn>).mock
+      .calls[0] as unknown[];
+    expect(call[2]).toBe(7);
+    expect(call[3]).toEqual(["alice"]);
+    expect(tracker.removeReviewRequested).toHaveBeenCalledWith(
+      "r-1",
+      7,
+      "alice",
+    );
+    expect(tracker.markReviewActed).not.toHaveBeenCalled();
+  });
+
+  // #924-T78
+  it("does the same after the comment fallback, which is how a lane's own pull request is answered", async () => {
+    const { actions, removeReviewers, tracker } = setup({ submit: own() });
+
+    const outcome = await actions.submit({ githubLogin: "alice" }, INPUT);
+
+    expect(outcome.outcome).toBe("commented");
+    expect(removeReviewers).toHaveBeenCalledTimes(1);
+    expect(tracker.removeReviewRequested).toHaveBeenCalledWith(
+      "r-1",
+      7,
+      "alice",
+    );
+  });
+
+  // #924-T79
+  it("remembers the action in the mirror when the request cannot be taken away, so the ToDo does not stay as if nothing happened", async () => {
+    const { actions, tracker, log } = setup({
+      removeReviewers: vi.fn(async () => {
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_UNAVAILABLE",
+          "token SECRET-VALUE rejected",
+        );
+      }),
+    });
+
+    expect(await actions.submit({ githubLogin: "alice" }, INPUT)).toEqual({
+      outcome: "submitted",
+      reviewId: "5001",
+    });
+
+    expect(tracker.markReviewActed).toHaveBeenCalledWith("r-1", 7, "alice");
+    expect(tracker.removeReviewRequested).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("INTEGRATION_ACCESS_UNAVAILABLE"),
+    );
+    expect(String(log.mock.calls[0]?.[0])).not.toContain("SECRET-VALUE");
+  });
+
+  // #924-T80
+  it("remembers the action too when the provider cannot take a request away, and when the caller was not asked by name", async () => {
+    const noRemoval = setup({ removeReviewers: null });
+    const notNamed = setup({ todo: FAN_OUT, requested: ["bob"] });
+
+    await noRemoval.actions.submit({ githubLogin: "alice" }, INPUT);
+    await notNamed.actions.submit({ githubLogin: "alice" }, INPUT);
+
+    expect(noRemoval.tracker.markReviewActed).toHaveBeenCalledWith(
+      "r-1",
+      7,
+      "alice",
+    );
+    // nothing to take away: alice has no request of her own, only the fan-out shows her the pull request
+    expect(notNamed.removeReviewers).not.toHaveBeenCalled();
+    expect(notNamed.tracker.markReviewActed).toHaveBeenCalledWith(
+      "r-1",
+      7,
+      "alice",
+    );
+  });
+
+  // #924-T81
+  it("does not fail a posted review because the mirror could not be written", async () => {
+    const { actions, tracker, log } = setup();
+    tracker.removeReviewRequested.mockRejectedValue(new Error("db down"));
+
+    expect(await actions.submit({ githubLogin: "alice" }, INPUT)).toEqual({
+      outcome: "submitted",
+      reviewId: "5001",
+    });
+    expect(log).toHaveBeenCalled();
+  });
+
+  // #924-T82
+  it("leaves a person without a GitHub login alone: nothing of theirs to take away or to remember", async () => {
+    const { actions, removeReviewers, tracker } = setup({ todo: FAN_OUT });
+
+    await actions.submit({ githubLogin: null }, INPUT);
+
+    expect(removeReviewers).not.toHaveBeenCalled();
+    expect(tracker.markReviewActed).not.toHaveBeenCalled();
+  });
+});
+
+describe("what is checked live before a review is given", () => {
+  // #924-T83
+  it("refuses a review whose request GitHub no longer holds, also for an open pull request", async () => {
+    const taken = setup({ requested: ["bob"] });
+    const none = setup({ requested: [] });
+
+    await expect(
+      taken.actions.submit({ githubLogin: "alice" }, INPUT),
+    ).rejects.toMatchObject({ code: "TODOS_REVIEW_NOT_REQUESTED" });
+    await expect(
+      none.actions.submit({ githubLogin: "alice" }, INPUT),
+    ).rejects.toMatchObject({ code: "TODOS_REVIEW_NOT_REQUESTED" });
+    expect(taken.submit).not.toHaveBeenCalled();
+  });
+
+  // #924-T84
+  it("lets any member answer a fan-out as long as one of the asked members is still asked, and trusts a mirror when GitHub sends no list", async () => {
+    const stillAsked = setup({ todo: FAN_OUT, requested: ["bob"] });
+    const unknown = setup({ requested: undefined });
+
+    await stillAsked.actions.submit({ githubLogin: "carol" }, INPUT);
+    await unknown.actions.submit({ githubLogin: "alice" }, INPUT);
+
+    expect(stillAsked.submit).toHaveBeenCalledTimes(1);
+    expect(unknown.submit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("which refusal of GitHub is the App's own pull request", () => {
+  // #924-T85
+  it.each([
+    ["Can not approve your own pull request"],
+    ["Can not request changes on your own pull request"],
+  ])("takes %s for the case of the comment fallback", async (detail) => {
+    const { actions } = setup({
+      submit: vi.fn(async () => {
+        throw new IntegrationError("INTEGRATION_REQUEST_REFUSED", "refused", {
+          detail,
+        });
+      }),
+    });
+
+    expect(
+      (await actions.submit({ githubLogin: "alice" }, INPUT)).outcome,
+    ).toBe("commented");
+  });
+
+  // #924-T86
+  it("fails any other 422 with its code logged and no text of GitHub, and writes no comment", async () => {
+    const { actions, commentOnIssue, log } = setup({
+      submit: vi.fn(async () => {
+        throw new IntegrationError("INTEGRATION_REQUEST_REFUSED", "refused", {
+          detail: "Unprocessable: commit_id SECRET-VALUE is not part of it",
+        });
+      }),
+    });
+    const withoutText = setup({
+      submit: vi.fn(async () => {
+        throw new IntegrationError("INTEGRATION_REQUEST_REFUSED", "refused");
+      }),
+    });
+
+    await expect(
+      actions.submit({ githubLogin: "alice" }, INPUT),
+    ).rejects.toMatchObject({ code: "TODOS_REVIEW_FAILED" });
+    await expect(
+      withoutText.actions.submit({ githubLogin: "alice" }, INPUT),
+    ).rejects.toMatchObject({ code: "TODOS_REVIEW_FAILED" });
+
+    expect(commentOnIssue).not.toHaveBeenCalled();
+    expect(withoutText.commentOnIssue).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("INTEGRATION_REQUEST_REFUSED"),
     );
     expect(String(log.mock.calls[0]?.[0])).not.toContain("SECRET-VALUE");
   });

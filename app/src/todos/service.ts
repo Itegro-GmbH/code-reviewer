@@ -7,11 +7,15 @@
 //  - A question needs the run, not the label: the label `agent waiting` is a hint of the App that a repository may refuse, and a question
 //    that nobody sees because a label failed would never be answered. The ticket (title, address, whether it carries the label) is
 //    added from the mirror when the mirror has it.
-//  - A review is for the person the provider says is asked (the GitHub login of the viewer), and for every member of the workspace when
-//    a member is asked: `reviewers: "project members"` of the lane (#917) asks all of them, and any of them may answer. A pull request of
-//    nobody's lane is not a ToDo, whoever is asked.
+//  - A review is for the person the provider says is asked (the GitHub login of the viewer) and for nobody else: a request that names
+//    logins can only be acted on by those logins. The one exception is the fan-out of the lane, `reviewers: "project members"` (#917),
+//    which asks the members and which any member may answer. A pull request of nobody's lane is not a ToDo, whoever is asked. A person who
+//    acted on a review while GitHub still held their request (the App's review does not satisfy it, and taking it away can fail) does not
+//    see it again (`reviewActedBy` of the mirror row).
 //  - The done list is bounded (`DONE_MAX`): the asks that were answered last and the pull requests of a lane that ended while a review was
-//    still asked from somebody (GitHub drops the request once a review is submitted, so what it still holds at the end was never done).
+//    still asked from the viewer (or from the members by a fan-out).
+//  - Every list is read newest first and bounded (`LOOK_AT_MAX` per kind of row); a list narrowed to a project is narrowed inside the
+//    queries, by the repositories of the project, so the rows of another project cannot use up the bound.
 import type {
   StoredStepRun,
   StoredWorkflowRun,
@@ -26,6 +30,7 @@ import {
   type StepAsk,
 } from "../workflow-runs/ask.ts";
 import { LABEL_WAITING } from "../workflow-runs/ask-comment.ts";
+import { PROJECT_MEMBERS } from "../workflows/connectors.ts";
 import {
   placeOf,
   pullRequestNumberOf,
@@ -35,7 +40,10 @@ import { TodosError } from "./errors.ts";
 
 /** How many entries the done list holds. */
 export const DONE_MAX = 20;
-/** How many waiting runs, answered asks and pull requests of lanes are looked at: more than a person can answer. */
+/**
+ * How many waiting runs, answered asks and pull requests of lanes are looked at, the newest first: more than a person can answer. The
+ * bound is per kind of row and, for a list of one project, per project: the queries are narrowed to the project's repositories first.
+ */
 const LOOK_AT_MAX = 200;
 const MICRO = 1_000_000;
 
@@ -155,11 +163,12 @@ export type TodosService = {
 
 export type TodosServiceDependencies = {
   projects: Pick<ProjectService, "listProjects">;
-  workflows: Pick<WorkflowsRepository, "list">;
+  /** `getVersion` is read to tell the fan-out of a lane (`reviewers: "project members"`) from a request that names logins. */
+  workflows: Pick<WorkflowsRepository, "list" | "getVersion">;
   runs: Pick<
     WorkflowRunsRepository,
     | "listWaiting"
-    | "listSteps"
+    | "listStepsOfRuns"
     | "listAnsweredAskSteps"
     | "listPullRequestSteps"
   >;
@@ -173,6 +182,8 @@ type Known = {
   repositories: Map<string, { url: string; fullName: string }>;
   /** The active project of a repository. */
   projectOfRepository: Map<string, string>;
+  /** The repositories of each project, active or not. */
+  repositoriesOfProject: Map<string, string[]>;
   /** Every project of the workspace, active or not. */
   projectIds: Set<string>;
   /** The lanes by id. */
@@ -181,12 +192,26 @@ type Known = {
 
 const lower = (login: string) => login.toLowerCase();
 
+/** Whether a lane's document has `reviewers: "project members"` anywhere in it (whatever the shape of its steps). */
+function mentionsProjectMembers(value: unknown, depth = 0): boolean {
+  if (depth > 20 || typeof value !== "object" || value === null) return false;
+  if (
+    !Array.isArray(value) &&
+    (value as { reviewers?: unknown }).reviewers === PROJECT_MEMBERS
+  )
+    return true;
+  return Object.values(value).some((child) =>
+    mentionsProjectMembers(child, depth + 1),
+  );
+}
+
 export function createTodosService(
   deps: TodosServiceDependencies,
 ): TodosService {
   async function known(): Promise<Known> {
     const repositories = new Map<string, { url: string; fullName: string }>();
     const projectOfRepository = new Map<string, string>();
+    const repositoriesOfProject = new Map<string, string[]>();
     const projectIds = new Set<string>();
     for (const entry of await deps.projects.listProjects()) {
       repositories.set(entry.repository.id, {
@@ -195,6 +220,10 @@ export function createTodosService(
       });
       if (entry.project === null) continue;
       projectIds.add(entry.project.id);
+      repositoriesOfProject.set(entry.project.id, [
+        ...(repositoriesOfProject.get(entry.project.id) ?? []),
+        entry.repository.id,
+      ]);
       if (entry.project.active)
         projectOfRepository.set(entry.repository.id, entry.project.id);
     }
@@ -204,7 +233,13 @@ export function createTodosService(
         name: workflow.name,
         projectId: workflow.projectId,
       });
-    return { repositories, projectOfRepository, projectIds, lanes };
+    return {
+      repositories,
+      projectOfRepository,
+      repositoriesOfProject,
+      projectIds,
+      lanes,
+    };
   }
 
   function whereOf(run: StoredWorkflowRun, facts: Known): Where {
@@ -293,6 +328,7 @@ export function createTodosService(
   async function questions(
     facts: Known,
     inScope: (where: Where) => boolean,
+    repositoryIds: readonly string[] | undefined,
   ): Promise<QuestionTodo[]> {
     const open: {
       run: StoredWorkflowRun;
@@ -300,9 +336,16 @@ export function createTodosService(
       ask: StepAsk;
       place: Place | undefined;
     }[] = [];
-    for (const run of await deps.runs.listWaiting(LOOK_AT_MAX)) {
-      if (!inScope(whereOf(run, facts))) continue;
-      const steps = await deps.runs.listSteps(run.id);
+    const waitingRuns = (
+      await deps.runs.listWaiting(LOOK_AT_MAX, repositoryIds)
+    ).filter((run) => inScope(whereOf(run, facts)));
+    // The steps of all the runs in one query.
+    const stepsOf =
+      waitingRuns.length === 0
+        ? new Map<string, StoredStepRun[]>()
+        : await deps.runs.listStepsOfRuns(waitingRuns.map((run) => run.id));
+    for (const run of waitingRuns) {
+      const steps = stepsOf.get(run.id) ?? [];
       const waiting = openQuestion(steps);
       if (waiting === undefined) continue;
       open.push({ run, ...waiting, place: placeOf(run, steps) });
@@ -335,13 +378,14 @@ export function createTodosService(
   }
 
   /** The pull requests the lanes opened: each once (the newest run that opened it), with the run. */
-  async function lanePullRequests(): Promise<
-    { run: StoredWorkflowRun; number: number }[]
-  > {
+  async function lanePullRequests(
+    repositoryIds: readonly string[] | undefined,
+  ): Promise<{ run: StoredWorkflowRun; number: number }[]> {
     const seen = new Set<string>();
     const found: { run: StoredWorkflowRun; number: number }[] = [];
     for (const { run, step } of await deps.runs.listPullRequestSteps(
       LOOK_AT_MAX,
+      repositoryIds,
     )) {
       const number = pullRequestNumberOf([step]);
       if (number === undefined) continue;
@@ -353,12 +397,36 @@ export function createTodosService(
     return found;
   }
 
+  /** Whether the document of the lane asks `reviewers: "project members"` anywhere: the fan-out, which any member may answer. */
+  const fanOutCache = new Map<string, Promise<boolean>>();
+  function asksProjectMembers(run: StoredWorkflowRun): Promise<boolean> {
+    const key = `${run.workflowId}@${String(run.workflowVersion)}`;
+    let known = fanOutCache.get(key);
+    if (known === undefined) {
+      known = (async () => {
+        const version = await deps.workflows.getVersion(
+          run.workflowId,
+          run.workflowVersion,
+        );
+        if (version === undefined) return false;
+        try {
+          return mentionsProjectMembers(JSON.parse(version.document));
+        } catch {
+          return false;
+        }
+      })();
+      fanOutCache.set(key, known);
+    }
+    return known;
+  }
+
   async function reviews(
     facts: Known,
     viewer: TodoViewer,
     inScope: (where: Where) => boolean,
+    repositoryIds: readonly string[] | undefined,
   ): Promise<{ open: ReviewTodo[]; finished: DoneTodo[] }> {
-    const opened = (await lanePullRequests()).filter(({ run }) =>
+    const opened = (await lanePullRequests(repositoryIds)).filter(({ run }) =>
       inScope(whereOf(run, facts)),
     );
     const mirror = await ticketsOf(
@@ -380,6 +448,16 @@ export function createTodosService(
         item.reviewRequestedFrom.length === 0
       )
         continue;
+      const asked = item.reviewRequestedFrom.map(lower);
+      // The viewer is asked by name, or the lane asked the members and one of them is asked: nobody else can act on the request.
+      const byName = you !== undefined && asked.includes(you);
+      const audience: ReviewTodo["audience"] | undefined = byName
+        ? "you"
+        : asked.some((login) => members.has(login)) &&
+            (await asksProjectMembers(run))
+          ? "members"
+          : undefined;
+      if (audience === undefined) continue;
       const where = whereOf(run, facts);
       const lane = laneOf(run, facts);
       const url = addressOf(facts, run.repositoryId, "pull_request", number);
@@ -397,14 +475,9 @@ export function createTodosService(
         });
         continue;
       }
-      const asked = item.reviewRequestedFrom.map(lower);
-      const audience =
-        you !== undefined && asked.includes(you)
-          ? "you"
-          : asked.some((login) => members.has(login))
-            ? "members"
-            : undefined;
-      if (audience === undefined) continue;
+      // Acted on while GitHub still holds the request: not a ToDo of this person any more.
+      if (you !== undefined && item.reviewActedBy.map(lower).includes(you))
+        continue;
       open.push({
         kind: "review",
         id: `review:${run.repositoryId}:${String(number)}`,
@@ -426,6 +499,7 @@ export function createTodosService(
   async function answered(
     facts: Known,
     inScope: (where: Where) => boolean,
+    repositoryIds: readonly string[] | undefined,
   ): Promise<DoneTodo[]> {
     const candidates: {
       run: StoredWorkflowRun;
@@ -434,6 +508,7 @@ export function createTodosService(
     }[] = [];
     for (const { run, step } of await deps.runs.listAnsweredAskSteps(
       LOOK_AT_MAX,
+      repositoryIds,
     )) {
       const ask = parseStepAsk(step.ask);
       if (ask === undefined || ask.answer === undefined) continue;
@@ -449,10 +524,17 @@ export function createTodosService(
             : 0,
       )
       .slice(0, DONE_MAX);
+    // The places of the newest answers, with the steps of all their runs in one query.
+    const stepsOf =
+      newest.length === 0
+        ? new Map<string, StoredStepRun[]>()
+        : await deps.runs.listStepsOfRuns([
+            ...new Set(newest.map(({ run }) => run.id)),
+          ]);
     const places = new Map<string, Place | undefined>();
     for (const { run } of newest)
       if (!places.has(run.id))
-        places.set(run.id, placeOf(run, await deps.runs.listSteps(run.id)));
+        places.set(run.id, placeOf(run, stepsOf.get(run.id) ?? []));
     const mirror = await ticketsOf(
       newest.flatMap(({ run }) => {
         const place = places.get(run.id);
@@ -492,10 +574,15 @@ export function createTodosService(
         );
       const inScope = (where: Where) =>
         scope === undefined || where.projectId === scope.projectId;
+      // A project's lists are read for the repositories of the project (inside the queries), then checked for the lane's project.
+      const repositoryIds =
+        scope === undefined
+          ? undefined
+          : (facts.repositoriesOfProject.get(scope.projectId) ?? []);
       const [asked, review, answers] = await Promise.all([
-        questions(facts, inScope),
-        reviews(facts, viewer, inScope),
-        answered(facts, inScope),
+        questions(facts, inScope, repositoryIds),
+        reviews(facts, viewer, inScope, repositoryIds),
+        answered(facts, inScope, repositoryIds),
       ]);
       return {
         projectId: scope?.projectId ?? null,
@@ -509,7 +596,7 @@ export function createTodosService(
 
     async findReview(viewer, repositoryId, number) {
       const facts = await known();
-      const { open } = await reviews(facts, viewer, () => true);
+      const { open } = await reviews(facts, viewer, () => true, [repositoryId]);
       return open.find(
         (review) =>
           review.repositoryId === repositoryId && review.number === number,

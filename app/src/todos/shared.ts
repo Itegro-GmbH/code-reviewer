@@ -32,6 +32,7 @@ export function todosServiceFor(workspaceId: string): TodosService {
 export function reviewActionsFor(workspaceId: string): ReviewActions {
   return createReviewActions({
     todos: todosServiceFor(workspaceId),
+    tracker: createTrackerRepository(getDatabase(), workspaceId),
     targetOf: (repositoryId) => connectorTargetOf(workspaceId, repositoryId),
   });
 }

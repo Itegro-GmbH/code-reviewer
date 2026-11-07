@@ -1464,6 +1464,8 @@ export interface TrackerItemsTable {
   board_seen_at: string | null;
   /** #924: JSON text, the logins a review of the pull request is asked from; null when the mirror was not told (read as nobody). */
   review_requested_from: string | null;
+  /** #924: JSON text, the logins that acted on a review ToDo of the pull request while the provider still holds their request; null for none. */
+  review_acted_by: string | null;
 }
 
 /** #923: where the full sync of a repository's tickets stands. */

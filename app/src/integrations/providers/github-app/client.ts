@@ -318,6 +318,20 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<string[]>;
   /**
+   * Takes the review requests of these GitHub users back (#924; `DELETE .../pulls/{n}/requested_reviewers`), with a token limited to
+   * `scope`. Answers the logins that are still requested afterwards, as GitHub spells them. A login that is not requested is no error
+   * for the caller to handle: GitHub's 422 for it rejects like any other. 404 when there is no such pull request. Aborts like
+   * `getPullRequest`.
+   */
+  removePullRequestReviewers(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    prNumber: number,
+    reviewers: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<string[]>;
+  /**
    * Requests a review of a pull request from these GitHub users (#917; `POST .../pulls/{n}/requested_reviewers`), with a token limited
    * to `scope`. Answers the logins that are requested afterwards, as GitHub spells them. A user who has already been asked stays
    * asked, so it can be done twice. GitHub refuses the whole request when one of them cannot review (not a collaborator, the author of
@@ -445,6 +459,8 @@ export type GithubAppClient = {
       number: number;
       checksState: string | null;
       reviewRequestedFrom: string[];
+      /** The provider's time of the last change of the pull request, as the list read it (#924). */
+      updatedAt: string;
     }[];
     last: boolean;
   }>;
@@ -545,6 +561,13 @@ function shapeError(call: string): GithubAppError {
     "GITHUB_APP_REQUEST_FAILED",
     `GitHub answered ${call} in an unexpected format.`,
   );
+}
+
+/** The provider's time of the last change of a pull request of a list, as ISO text; the epoch for an entry that says none, so that no delivery counts as older. */
+function updatedAtOf(entry: unknown): string {
+  const text = isRecord(entry) ? entry.updated_at : undefined;
+  const at = typeof text === "string" ? Date.parse(text) : Number.NaN;
+  return new Date(Number.isNaN(at) ? 0 : at).toISOString();
 }
 
 function checkPage(page: number): void {
@@ -2069,6 +2092,40 @@ export function createGithubAppClient(
       );
     },
 
+    async removePullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(prNumber);
+      for (const login of reviewers) checkLogin(login);
+      const path = `${repoPath(repoFullName)}/pulls/${prNumber}/requested_reviewers`;
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(
+            token,
+            "DELETE",
+            path,
+            { reviewers },
+            signal,
+          );
+          const left = requestedReviewersOf(json);
+          if (left === undefined)
+            throw shapeError(
+              "DELETE /repos/{owner}/{repo}/pulls/{n}/requested_reviewers",
+            );
+          return left;
+        },
+        signal,
+      );
+    },
+
     async requestPullRequestReviewers(
       installationId,
       scope,
@@ -2530,6 +2587,7 @@ export function createGithubAppClient(
             number: number;
             checksState: string | null;
             reviewRequestedFrom: string[];
+            updatedAt: string;
           }[] = [];
           for (const entry of json) {
             const pr = toPullRequestRef(entry);
@@ -2542,6 +2600,7 @@ export function createGithubAppClient(
             pullRequests.push({
               number: pr.number,
               reviewRequestedFrom: requestedReviewersOf(entry) ?? [],
+              updatedAt: updatedAtOf(entry),
               checksState: await readCommitChecks(
                 token,
                 path,

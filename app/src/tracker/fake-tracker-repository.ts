@@ -28,6 +28,12 @@ type Row = TrackerItem & {
   boardSeenAt: string | null;
 };
 
+/** Of the logins that acted, the ones that are asked (compared without regard to case). */
+const keepAsked = (acted: readonly string[], asked: readonly string[]) =>
+  acted.filter((login) =>
+    asked.some((other) => other.toLowerCase() === login.toLowerCase()),
+  );
+
 export function createFakeTrackerRepository(
   now: () => Date = () => new Date(),
 ): FakeTrackerRepository {
@@ -77,6 +83,10 @@ export function createFakeTrackerRepository(
         checksState: before?.checksState ?? null,
         reviewRequestedFrom:
           item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
+        reviewActedBy: keepAsked(
+          before?.reviewActedBy ?? [],
+          item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
+        ),
         parentNumber:
           item.parentNumber === undefined
             ? (before?.parentNumber ?? null)
@@ -168,14 +178,50 @@ export function createFakeTrackerRepository(
       });
       return true;
     },
-    async setReviewRequestedFrom(repositoryId, number, logins) {
+    async setReviewRequestedFrom(repositoryId, number, logins, at) {
       const item = visible(repositoryId, number);
       if (item === undefined || item.kind !== "pull_request") return false;
+      if (item.updatedAt > at) return false;
       items.set(key(repositoryId, number), {
         ...item,
         reviewRequestedFrom: [...logins],
+        reviewActedBy: keepAsked(item.reviewActedBy, logins),
         syncedAt: stamp(),
       });
+      return true;
+    },
+    async removeReviewRequested(repositoryId, number, login) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      const other = (candidate: string) =>
+        candidate.toLowerCase() !== login.toLowerCase();
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewRequestedFrom: item.reviewRequestedFrom.filter(other),
+        reviewActedBy: item.reviewActedBy.filter(other),
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async markReviewActed(repositoryId, number, login) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      if (
+        !item.reviewActedBy.some(
+          (candidate) => candidate.toLowerCase() === login.toLowerCase(),
+        )
+      )
+        items.set(key(repositoryId, number), {
+          ...item,
+          reviewActedBy: [...item.reviewActedBy, login],
+          syncedAt: stamp(),
+        });
+      return true;
+    },
+    async clearReviewActed(repositoryId, number) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.reviewActedBy.length === 0) return false;
+      items.set(key(repositoryId, number), { ...item, reviewActedBy: [] });
       return true;
     },
     async listItemsByNumbers(repositoryId, numbers) {

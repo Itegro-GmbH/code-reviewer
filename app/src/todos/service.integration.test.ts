@@ -28,6 +28,7 @@ async function workspaceWith(
   db: Kysely<Database>,
   workspaceId: string,
   tag: string,
+  laneName = "Implement",
 ) {
   const integration = await createIntegrationsRepository(
     db,
@@ -48,7 +49,9 @@ async function workspaceWith(
       url: `https://github.test/acme/${tag}`,
     },
   ]);
-  const [repository] = await repositories.list();
+  const repository = (await repositories.list()).find(
+    (candidate) => candidate.fullName === `acme/${tag}`,
+  );
   if (repository === undefined) throw new Error("seeding failed");
   const projects = createProjectService({
     projects: createProjectsRepository(db, workspaceId),
@@ -57,7 +60,7 @@ async function workspaceWith(
   const workflows = createWorkflowsRepository(db, workspaceId, { now });
   const created = await workflows.create(
     {
-      name: "Implement",
+      name: laneName,
       document: "{}",
       createdBy: "u-1",
       projectId: project.id,
@@ -65,13 +68,32 @@ async function workspaceWith(
     100,
   );
   if (!created.ok) throw new Error("seeding failed");
+  // A lane that asks the members for the review (the fan-out any member may answer), next to the one that names nobody.
+  const fanOutLane = await workflows.create(
+    {
+      name: `${laneName} and ask the members`,
+      document: JSON.stringify({
+        steps: [
+          {
+            id: "ask",
+            action: "ticket.requestReview",
+            inputs: { reviewers: "project members" },
+          },
+        ],
+      }),
+      createdBy: "u-1",
+      projectId: project.id,
+    },
+    100,
+  );
+  if (!fanOutLane.ok) throw new Error("seeding failed");
   const runs = createWorkflowRunsRepository(db, workspaceId, { now });
   const tracker = createTrackerRepository(db, workspaceId, { now });
   let n = 0;
-  const newRun = async (ticket: number | null) => {
+  const newRun = async (ticket: number | null, fanOut = false) => {
     n += 1;
     const made = await runs.createRun({
-      workflowId: created.workflow.id,
+      workflowId: (fanOut ? fanOutLane : created).workflow.id,
       workflowVersion: 1,
       repositoryId: repository.id,
       baseBranch: "main",
@@ -134,8 +156,8 @@ async function workspaceWith(
     return run;
   };
   /** A run that opened the pull request `number` (an action step with its output). */
-  const openPullRequest = async (number: number) => {
-    const run = await newRun(null);
+  const openPullRequest = async (number: number, fanOut = false) => {
+    const run = await newRun(null, fanOut);
     const step = await startStep(run.id, {
       position: 0,
       stepId: "open",
@@ -171,6 +193,7 @@ async function workspaceWith(
     addItem,
     openPullRequest,
     todos,
+    tracker,
   };
 }
 
@@ -251,12 +274,41 @@ describe("the ToDos of a workspace", () => {
     expect(
       list.reviews.map((review) => [review.number, review.audience]),
     ).toEqual([[7, "you"]]);
-    // somebody else of the workspace is asked: any member may answer, so a person who is not asked sees it as the members' review
+    // the lane names the person: nobody else can act on it, a member or not
+    for (const login of ["bob", "carol", null])
+      expect((await alpha.todos.list({ githubLogin: login })).reviews).toEqual(
+        [],
+      );
+  });
+
+  // #924-T95
+  it("shows the fan-out of a lane that asked `project members` to any member, and a person who acted on it no more", async () => {
+    const { alpha } = await setup();
+    await alpha.addItem(9, {
+      kind: "pull_request",
+      reviewRequestedFrom: ["alice", "bob"],
+    });
+    await alpha.openPullRequest(9, true);
+
+    const seenBy = async (githubLogin: string | null) =>
+      (await alpha.todos.list({ githubLogin })).reviews.map((review) => [
+        review.number,
+        review.audience,
+      ]);
+    expect(await seenBy("alice")).toEqual([[9, "you"]]);
+    expect(await seenBy("carol")).toEqual([[9, "members"]]);
     expect(
-      (await alpha.todos.list({ githubLogin: "carol" })).reviews.map(
-        (review) => review.audience,
+      await alpha.todos.findReview(
+        { githubLogin: "carol" },
+        alpha.repository.id,
+        9,
       ),
-    ).toEqual(["members"]);
+    ).toMatchObject({ audience: "members" });
+
+    await alpha.tracker.markReviewActed(alpha.repository.id, 9, "alice");
+
+    expect(await seenBy("alice")).toEqual([]);
+    expect(await seenBy("bob")).toEqual([[9, "you"]]);
   });
 
   // #924-T92
@@ -294,6 +346,46 @@ describe("the ToDos of a workspace", () => {
         at: "2026-11-07T08:40:00.000Z",
       }),
     ]);
+  });
+
+  // #924-T96
+  it("narrows the reads of the runs to the repositories of a project inside the query, so the rows of another project cannot fill the bound", async () => {
+    const { db } = await setup();
+    const workspaceId = await defaultWorkspaceId(db);
+    const first = await workspaceWith(db, workspaceId, "gamma", "Gamma lane");
+    const second = await workspaceWith(db, workspaceId, "delta", "Delta lane");
+    const older = await first.ask(1, QUESTION);
+    // the other project's runs are newer and more numerous than the bound of one
+    await second.ask(2, { ...QUESTION, askedAt: "2026-11-07T08:50:00.000Z" });
+    await second.ask(3, { ...QUESTION, askedAt: "2026-11-07T08:51:00.000Z" });
+    await first.openPullRequest(7);
+    await second.openPullRequest(8);
+    await second.openPullRequest(9);
+
+    expect(
+      (await first.runs.listWaiting(1, [first.repository.id])).map(
+        (run) => run.id,
+      ),
+    ).toEqual([older.id]);
+    expect(await first.runs.listWaiting(1, [])).toEqual([]);
+    expect(
+      (await first.runs.listPullRequestSteps(1, [first.repository.id])).map(
+        ({ run }) => run.repositoryId,
+      ),
+    ).toEqual([first.repository.id]);
+    expect(
+      (await first.runs.listPullRequestSteps(10)).map(
+        ({ run }) => run.repositoryId,
+      ),
+    ).toHaveLength(3);
+    const waiting = await first.runs.listWaiting(10);
+    const steps = await first.runs.listStepsOfRuns(
+      waiting.map((run) => run.id),
+    );
+    expect([...steps.keys()].sort()).toEqual(
+      waiting.map((run) => run.id).sort(),
+    );
+    for (const list of steps.values()) expect(list).toHaveLength(1);
   });
 
   // #924-T93

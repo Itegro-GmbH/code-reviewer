@@ -12,7 +12,12 @@
 // batch is rolled back (`MIGRATION_FAILED`) and the deployment can be run again. The size check is added `not valid` and validated
 // afterwards (the column is null in every row).
 //
-// `down` drops the column (the next sync fills it again from the provider).
+// The same migration adds `review_acted_by` (JSON text `["login", ...]`, null for none): the logins that acted on a review ToDo of the
+// pull request while the provider still holds their request (the App's review does not satisfy a person's request, and taking the
+// request away can fail). The ToDo list hides the review from them; a write that says who is asked drops the logins no longer asked, and
+// a new commit clears the list, so a new request or a new head is a new ToDo.
+//
+// `down` drops the columns (the next sync fills the first one again from the provider).
 import { sql } from "kysely";
 import type { Migration } from "kysely/migration";
 
@@ -42,10 +47,30 @@ export const migration: Migration = {
       db,
     );
 
+    await sql`alter table tracker_items add column if not exists review_acted_by text`.execute(
+      db,
+    );
+    await sql`alter table tracker_items drop constraint if exists tracker_items_review_acted_by_check`.execute(
+      db,
+    );
+    await sql`alter table tracker_items add constraint tracker_items_review_acted_by_check
+      check (review_acted_by is null or char_length(review_acted_by) <= 4096) not valid`.execute(
+      db,
+    );
+    await sql`alter table tracker_items validate constraint tracker_items_review_acted_by_check`.execute(
+      db,
+    );
+
     await sql`select set_config('lock_timeout', ${before}, true)`.execute(db);
   },
 
   async down(db) {
+    await sql`alter table tracker_items drop constraint if exists tracker_items_review_acted_by_check`.execute(
+      db,
+    );
+    await sql`alter table tracker_items drop column if exists review_acted_by`.execute(
+      db,
+    );
     await sql`alter table tracker_items drop constraint if exists tracker_items_review_requested_from_check`.execute(
       db,
     );

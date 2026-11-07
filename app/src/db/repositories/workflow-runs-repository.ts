@@ -9,7 +9,7 @@
 // (a job that ended and the sweep that noticed it, two Workers reporting the same result) take turns and the second finds what the first
 // did. Nothing here knows what a step means; the engine (src/workflow-runs/) decides, the repository stores.
 import "server-only";
-import { type Kysely, type Selectable } from "kysely";
+import { sql, type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import { clientRequestIdOf } from "../implementer-job-shape.ts";
@@ -309,21 +309,35 @@ export type WorkflowRunsRepository = {
    */
   summarizeTickets(ticketRefs: readonly string[]): Promise<TicketRunSummary[]>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
-  /** #924: the runs of the workspace that wait for an answer, the one that began to wait last first; at most `limit`. */
-  listWaiting(limit: number): Promise<StoredWorkflowRun[]>;
+  /**
+   * #924: the runs of the workspace that wait for an answer, the one that began to wait last first; at most `limit`. With `repositoryIds`
+   * only the runs on those repositories (the project's), so the runs of another project cannot fill the `limit`.
+   */
+  listWaiting(
+    limit: number,
+    repositoryIds?: readonly string[],
+  ): Promise<StoredWorkflowRun[]>;
+  /** #924: the steps of these runs of the workspace in one query, in the order of the steps; a run with none has an empty list. */
+  listStepsOfRuns(
+    runIds: readonly string[],
+  ): Promise<Map<string, StoredStepRun[]>>;
   /**
    * #924: the newest steps (at most `limit`) whose question has an answer (`ask.state` is `answered` or `resumed`), each with its run. The
-   * time of an answer is in the question (`ask.answer.at`); the caller orders by it.
+   * time of an answer is in the question (`ask.answer.at`); the caller orders by it. Read from the partial index of the answered steps
+   * (`20261107220000_todo_list_indexes`). With `repositoryIds` only the steps of runs on those repositories.
    */
   listAnsweredAskSteps(
     limit: number,
+    repositoryIds?: readonly string[],
   ): Promise<{ run: StoredWorkflowRun; step: StoredStepRun }[]>;
   /**
    * #924: the newest succeeded action steps (at most `limit`) whose output names a pull request (`/pull/<n>`), each with its run: the pull
-   * requests a lane opened. The caller reads the number from the output.
+   * requests a lane opened. The caller reads the number from the output. Read from the partial index of those steps. With `repositoryIds`
+   * only the steps of runs on those repositories.
    */
   listPullRequestSteps(
     limit: number,
+    repositoryIds?: readonly string[],
   ): Promise<{ run: StoredWorkflowRun; step: StoredStepRun }[]>;
   /** #920: whether the workspace has any run, in any state, on the repository. */
   hasRunOnRepository(repositoryId: string): Promise<boolean>;
@@ -719,12 +733,16 @@ export function createWorkflowRunsRepository(
 
     listSteps: (runId) => stepsOf(db, runId),
 
-    async listWaiting(limit) {
-      const rows = await db
+    async listWaiting(limit, repositoryIds) {
+      if (repositoryIds?.length === 0) return [];
+      let query = db
         .selectFrom("workflow_runs")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
-        .where("status", "=", "waiting")
+        .where("status", "=", "waiting");
+      if (repositoryIds !== undefined)
+        query = query.where("repository_id", "in", repositoryIds);
+      const rows = await query
         .orderBy("updated_at", "desc")
         .orderBy("id")
         .limit(limit)
@@ -732,19 +750,44 @@ export function createWorkflowRunsRepository(
       return rows.map(runFrom);
     },
 
-    async listAnsweredAskSteps(limit) {
-      const steps = await db
+    async listStepsOfRuns(runIds) {
+      const found = new Map<string, StoredStepRun[]>(
+        runIds.map((runId) => [runId, []]),
+      );
+      if (runIds.length === 0) return found;
+      const rows = await db
         .selectFrom("workflow_step_runs")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
-        .where("ask", "is not", null)
-        // A first look in SQL (the JSON text of `serializeAsk` has no spaces); the caller reads the question and decides.
-        .where((where) =>
-          where.or([
-            where("ask", "like", '%"state":"answered"%'),
-            where("ask", "like", '%"state":"resumed"%'),
-          ]),
-        )
+        .where("run_id", "in", [...new Set(runIds)])
+        .orderBy("run_id")
+        .orderBy("position")
+        .execute();
+      for (const row of rows) found.get(row.run_id)?.push(stepFrom(row));
+      return found;
+    },
+
+    async listAnsweredAskSteps(limit, repositoryIds) {
+      if (repositoryIds?.length === 0) return [];
+      let query = db
+        .selectFrom("workflow_step_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        // The predicate of `workflow_step_runs_answered_ask_index`, as constants (the JSON text of `serializeAsk` has no spaces); the
+        // caller reads the question and decides.
+        .where(
+          sql<boolean>`ask is not null
+            and (ask like '%"state":"answered"%' or ask like '%"state":"resumed"%')`,
+        );
+      if (repositoryIds !== undefined)
+        query = query.where("run_id", "in", (runs) =>
+          runs
+            .selectFrom("workflow_runs")
+            .select("id")
+            .where("workspace_id", "=", workspaceId)
+            .where("repository_id", "in", repositoryIds),
+        );
+      const steps = await query
         .orderBy("created_at", "desc")
         .orderBy("id")
         .limit(limit)
@@ -752,14 +795,25 @@ export function createWorkflowRunsRepository(
       return withRuns(steps);
     },
 
-    async listPullRequestSteps(limit) {
-      const steps = await db
+    async listPullRequestSteps(limit, repositoryIds) {
+      if (repositoryIds?.length === 0) return [];
+      let query = db
         .selectFrom("workflow_step_runs")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
-        .where("kind", "=", "action")
-        .where("status", "=", "succeeded")
-        .where("output", "like", "%/pull/%")
+        // The predicate of `workflow_step_runs_pull_request_index`, as constants.
+        .where(
+          sql<boolean>`kind = 'action' and status = 'succeeded' and output like '%/pull/%'`,
+        );
+      if (repositoryIds !== undefined)
+        query = query.where("run_id", "in", (runs) =>
+          runs
+            .selectFrom("workflow_runs")
+            .select("id")
+            .where("workspace_id", "=", workspaceId)
+            .where("repository_id", "in", repositoryIds),
+        );
+      const steps = await query
         .orderBy("created_at", "desc")
         .orderBy("id")
         .limit(limit)

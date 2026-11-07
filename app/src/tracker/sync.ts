@@ -251,6 +251,7 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
               repository.id,
               pullRequest.number,
               pullRequest.reviewRequestedFrom,
+              pullRequest.updatedAt,
             );
           }
           next = page.last

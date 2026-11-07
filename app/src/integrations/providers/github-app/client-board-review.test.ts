@@ -650,3 +650,80 @@ describe("moving an issue on a board", () => {
     expect(adds.calls()).toHaveLength(2);
   });
 });
+
+describe("taking review requests back", () => {
+  // #924-T210
+  it("deletes the request of a login with a token for pull requests only and answers who is still asked", async () => {
+    const { client, seen, calls } = setup((entry) =>
+      entry.path === REVIEWS_PATH
+        ? { json: { requested_reviewers: [{ login: "Bob" }] } }
+        : undefined,
+    );
+
+    const left = await client.removePullRequestReviewers(
+      "4242",
+      REVIEW,
+      "acme/widgets",
+      12,
+      ["alice"],
+    );
+
+    expect(left).toEqual(["Bob"]);
+    expect(calls()).toEqual([
+      { method: "DELETE", path: REVIEWS_PATH, body: { reviewers: ["alice"] } },
+    ]);
+    expect(seen[0]?.body).toMatchObject({
+      repository_ids: [7001],
+      permissions: { pull_requests: "write", metadata: "read" },
+    });
+    expect(seen.at(-1)?.path).toBe("/installation/token");
+  });
+
+  // #924-T211
+  it("refuses a login that is no GitHub user name before it sends anything, and an answer that is not a pull request", async () => {
+    const refused = setup(() => undefined);
+    const odd = setup((entry) =>
+      entry.path === REVIEWS_PATH ? { json: { unexpected: true } } : undefined,
+    );
+
+    const error = await failureOf(
+      refused.client.removePullRequestReviewers(
+        "4242",
+        REVIEW,
+        "acme/widgets",
+        12,
+        ["../admin"],
+      ),
+    );
+    const shape = await failureOf(
+      odd.client.removePullRequestReviewers(
+        "4242",
+        REVIEW,
+        "acme/widgets",
+        12,
+        ["alice"],
+      ),
+    );
+
+    expect(error.code).toBe("GITHUB_APP_REQUEST_FAILED");
+    expect(refused.seen).toEqual([]);
+    expect(shape.code).toBe("GITHUB_APP_REQUEST_FAILED");
+  });
+
+  // #924-T212
+  it("rejects like the other calls when GitHub refuses (a 422 for a login that was not asked)", async () => {
+    const { client } = setup((entry) =>
+      entry.path === REVIEWS_PATH
+        ? { status: 422, json: { message: "Review request not found." } }
+        : undefined,
+    );
+
+    const error = await failureOf(
+      client.removePullRequestReviewers("4242", REVIEW, "acme/widgets", 12, [
+        "alice",
+      ]),
+    );
+
+    expect(error.status).toBe(422);
+  });
+});

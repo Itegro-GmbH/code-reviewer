@@ -47,6 +47,7 @@ export type FakeGithubAppClientData = {
       number: number;
       checksState: string | null;
       reviewRequestedFrom?: string[];
+      updatedAt?: string;
     }[][]
   >;
   /** What `readChecksState` answers, by "owner/name@sha" (#923); a commit not listed has no checks. */
@@ -83,6 +84,10 @@ export type FakeGithubAppClientData = {
   reviewersFailure?: Error;
   /** The logins `requestPullRequestReviewers` answers (#917). Default: the ones asked for. */
   reviewersAfter?: string[];
+  /** Makes `removePullRequestReviewers` reject with this error (#924). */
+  removeReviewersFailure?: Error;
+  /** The logins `removePullRequestReviewers` answers as still requested (#924). Default: none. */
+  removeReviewersAfter?: string[];
   /** Makes `moveIssueOnBoard` reject with this error (#917). */
   boardFailure?: Error;
   /** What `moveIssueOnBoard` answers (#917). Default: moved to the status asked for. */
@@ -427,6 +432,27 @@ export function fakeGithubAppClient(
       if (data.reviewersFailure) throw data.reviewersFailure;
       return data.reviewersAfter ?? [...reviewers];
     },
+    async removePullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      signal,
+    ) {
+      record(
+        "removePullRequestReviewers",
+        installationId,
+        scope,
+        repoFullName,
+        prNumber,
+        reviewers,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.removeReviewersFailure) throw data.removeReviewersFailure;
+      return data.removeReviewersAfter ?? [];
+    },
     async moveIssueOnBoard(
       installationId,
       scope,
@@ -551,6 +577,7 @@ export function fakeGithubAppClient(
         pullRequests: (pages[page - 1] ?? []).map((pullRequest) => ({
           ...pullRequest,
           reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
+          updatedAt: pullRequest.updatedAt ?? new Date(0).toISOString(),
         })),
         last: page >= pages.length,
       };

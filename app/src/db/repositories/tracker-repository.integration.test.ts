@@ -110,6 +110,7 @@ describe("the tickets of the mirror", () => {
       closes: [],
       checksState: null,
       reviewRequestedFrom: [],
+      reviewActedBy: [],
       updatedAt: "2026-11-06T10:02:00.000Z",
       syncedAt: expect.any(String),
     });
@@ -143,18 +144,19 @@ describe("the tickets of the mirror", () => {
       first.id,
       item(7, { kind: "pull_request", reviewRequestedFrom: ["carol"] }),
     );
-    expect(await tracker.setReviewRequestedFrom(first.id, 8, ["dave"])).toBe(
-      true,
-    );
-    expect(await tracker.setReviewRequestedFrom(first.id, 12, ["dave"])).toBe(
-      false,
-    );
-    expect(await tracker.setReviewRequestedFrom(first.id, 99, ["dave"])).toBe(
-      false,
-    );
-    expect(await tracker.setReviewRequestedFrom(second.id, 8, ["dave"])).toBe(
-      false,
-    );
+    const at = "2999-01-01T00:00:00.000Z";
+    expect(
+      await tracker.setReviewRequestedFrom(first.id, 8, ["dave"], at),
+    ).toBe(true);
+    expect(
+      await tracker.setReviewRequestedFrom(first.id, 12, ["dave"], at),
+    ).toBe(false);
+    expect(
+      await tracker.setReviewRequestedFrom(first.id, 99, ["dave"], at),
+    ).toBe(false);
+    expect(
+      await tracker.setReviewRequestedFrom(second.id, 8, ["dave"], at),
+    ).toBe(false);
 
     const listed = await tracker.listItemsByNumbers(first.id, [7, 8, 12, 99]);
     expect(
@@ -168,6 +170,117 @@ describe("the tickets of the mirror", () => {
     ]);
     expect(await tracker.listItemsByNumbers(first.id, [])).toEqual([]);
     expect(await tracker.listItemsByNumbers(second.id, [7])).toEqual([]);
+  });
+
+  // #924-T81
+  it("leaves a pull request a newer delivery changed alone when the full sync writes who is asked, like a write of the item does", async () => {
+    const { tracker, first } = await setup();
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["carol"],
+        updatedAt: "2026-11-06T10:30:00.000Z",
+      }),
+    );
+
+    // the list was read before the delivery that put carol there
+    expect(
+      await tracker.setReviewRequestedFrom(
+        first.id,
+        7,
+        ["alice"],
+        "2026-11-06T10:29:59.000Z",
+      ),
+    ).toBe(false);
+    expect((await tracker.getItem(first.id, 7))?.reviewRequestedFrom).toEqual([
+      "carol",
+    ]);
+    // read at the same time or later: the list is the newer word
+    expect(
+      await tracker.setReviewRequestedFrom(
+        first.id,
+        7,
+        ["alice"],
+        "2026-11-06T10:30:00.000Z",
+      ),
+    ).toBe(true);
+    expect((await tracker.getItem(first.id, 7))?.reviewRequestedFrom).toEqual([
+      "alice",
+    ]);
+  });
+
+  // #924-T82
+  it("takes a request out of the row, remembers who acted while a request stands, drops that when the request goes, and clears it for a new commit", async () => {
+    const { tracker, first, second } = await setup();
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: ["Alice", "bob"] }),
+    );
+    const read = async () => {
+      const row = await tracker.getItem(first.id, 7);
+      return [row?.reviewRequestedFrom, row?.reviewActedBy];
+    };
+
+    // taking a request away is case-blind and drops what that login acted on too
+    expect(await tracker.markReviewActed(first.id, 7, "bob")).toBe(true);
+    expect(await tracker.markReviewActed(first.id, 7, "BOB")).toBe(true);
+    expect(await read()).toEqual([["Alice", "bob"], ["bob"]]);
+    expect(await tracker.removeReviewRequested(first.id, 7, "alice")).toBe(
+      true,
+    );
+    expect(await read()).toEqual([["bob"], ["bob"]]);
+
+    // a write that says who is asked keeps the acted logins that are still asked, and drops the others
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["bob", "carol"],
+        updatedAt: "2026-11-06T10:31:00.000Z",
+      }),
+    );
+    expect(await read()).toEqual([["bob", "carol"], ["bob"]]);
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["carol"],
+        updatedAt: "2026-11-06T10:32:00.000Z",
+      }),
+    );
+    expect(await read()).toEqual([["carol"], []]);
+
+    // a write that says nothing about it leaves it, a new commit clears it
+    await tracker.markReviewActed(first.id, 7, "carol");
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        title: "Renamed",
+        updatedAt: "2026-11-06T10:33:00.000Z",
+      }),
+    );
+    expect(await read()).toEqual([["carol"], ["carol"]]);
+    expect(await tracker.clearReviewActed(first.id, 7)).toBe(true);
+    expect(await read()).toEqual([["carol"], []]);
+    expect(await tracker.clearReviewActed(first.id, 7)).toBe(false);
+
+    // only a pull request of the repository, and the full sync drops the acted logins that are no longer asked
+    await tracker.markReviewActed(first.id, 7, "carol");
+    await tracker.setReviewRequestedFrom(
+      first.id,
+      7,
+      [],
+      "2999-01-01T00:00:00.000Z",
+    );
+    expect(await read()).toEqual([[], []]);
+    await tracker.upsertItem(first.id, item(12));
+    expect(await tracker.markReviewActed(first.id, 12, "carol")).toBe(false);
+    expect(await tracker.markReviewActed(second.id, 7, "carol")).toBe(false);
+    expect(await tracker.removeReviewRequested(second.id, 7, "carol")).toBe(
+      false,
+    );
   });
 
   // #923-T88

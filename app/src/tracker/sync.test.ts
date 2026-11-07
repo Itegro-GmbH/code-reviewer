@@ -54,6 +54,8 @@ type GitHub = {
     number: number;
     checksState: string | null;
     reviewRequestedFrom?: string[];
+    /** The time of the pull request in the list; default: later than every delivery of the fixtures. */
+    updatedAt?: string;
   }[][];
   /** Pages of board items; null: the app may not read boards. */
   board: { nodeId: string; status: string | null }[][] | null;
@@ -135,6 +137,7 @@ function provider(github: GitHub) {
             (pullRequest) => ({
               ...pullRequest,
               reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
+              updatedAt: pullRequest.updatedAt ?? at(59),
             }),
           ),
           last: step.page >= github.checks.length,
@@ -230,6 +233,40 @@ describe("the full sync of the ticket mirror", () => {
       startedAt: null,
       lastFullSyncAt: expect.any(String),
     });
+  });
+
+  // #924-T08
+  it("does not overwrite who a review is asked from with a list that is older than what a delivery said", async () => {
+    // the list the sync reads was taken before that delivery: it shows the request of ada, which carol's delivery replaced
+    const { tracker, run } = setup({
+      ...GITHUB,
+      checks: [
+        [
+          {
+            number: 7,
+            checksState: "failure",
+            reviewRequestedFrom: ["ada"],
+            updatedAt: at(10),
+          },
+        ],
+      ],
+    });
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["carol"],
+        updatedAt: at(30),
+      }),
+    });
+
+    await run();
+
+    expect((await tracker.getItem("r-1", 7))?.reviewRequestedFrom).toEqual([
+      "carol",
+    ]);
   });
 
   // #923-T33
