@@ -37,7 +37,6 @@ function view(overrides: Partial<ProfileView> = {}): ProfileView {
       description: "Writes the change",
       model: { provider: "anthropic", model: "claude-sonnet-5-5" },
       instructions: "Work in small steps.",
-      costLimitCents: 500,
       canPush: true,
       defaultResult: null,
       harness: "opencode",
@@ -190,8 +189,8 @@ describe("the drawer of a profile", () => {
       instructions: "Ask before you push.",
       canPush: false,
       harness: "opencode",
-      costLimitCents: 500,
     });
+    expect(body).not.toHaveProperty("costLimitCents");
   });
 
   // #925
@@ -318,7 +317,7 @@ describe("the drawer of a profile", () => {
 
 describe("the body of the next version", () => {
   // #925
-  it("keeps the cost limit and the default result of the version it starts from", () => {
+  it("keeps the default result of the version it starts from and carries no cost limit", () => {
     const defaultResult: NonNullable<ProfileView["document"]["defaultResult"]> =
       {
         type: "object",
@@ -328,7 +327,6 @@ describe("the body of the next version", () => {
     const profile = view({
       document: {
         ...view().document,
-        costLimitCents: 750,
         defaultResult,
       },
     });
@@ -340,20 +338,19 @@ describe("the body of the next version", () => {
     });
 
     expect(body).toMatchObject({
-      costLimitCents: 750,
       defaultResult,
       harness: "claude-code",
       canPush: false,
       instructions: "x",
     });
+    expect(body).not.toHaveProperty("costLimitCents");
   });
 
   // #925
-  it("leaves out the fields the version has none of, so they stay unset", () => {
+  it("leaves out the default result the version has none of, so it stays unset", () => {
     const profile = view({
       document: {
         ...view().document,
-        costLimitCents: null,
         defaultResult: null,
       },
     });

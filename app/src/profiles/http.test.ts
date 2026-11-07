@@ -30,7 +30,6 @@ const VIEW: ProfileView = {
     description: "",
     model: { entryId: "e" },
     instructions: "",
-    costLimitCents: null,
     canPush: false,
     defaultResult: null,
     harness: "opencode",

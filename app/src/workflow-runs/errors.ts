@@ -107,6 +107,8 @@ export const STEP_FAILURE_CODES = [
   "github_permission_missing",
   /** GitHub has no such issue, pull request or repository, or the installation is gone. */
   "github_not_found",
+  /** `ticket.setStatus` (#917): the board has no status of that name; the message lists the statuses it has. */
+  "board_status_unknown",
   /** GitHub refused what was asked for its content: no commits between the branches, an archived repository, an unusable value. */
   "github_validation",
   /** GitHub's rate limit was reached; the action is not repeated. */

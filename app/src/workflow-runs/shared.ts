@@ -28,7 +28,6 @@ import type { Job } from "../jobs/job-types.ts";
 import { loadAuthConfig } from "../auth/config.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { createGithubAskChannel } from "./ask-channel.ts";
-import { MENTIONS_MAX } from "./ask-comment.ts";
 import { createTicketAnswers, type TicketAnswers } from "./ticket-answers.ts";
 import { createConnectorRegistry } from "./connectors.ts";
 import {
@@ -47,8 +46,9 @@ import {
 } from "./service.ts";
 
 /**
- * The actions this server can do: the three GitHub actions, through the GitHub App of the workspace. They need rights of the App the
- * owner grants (Issues and Pull requests: read and write); where the App lacks one, the step ends as `github_permission_missing`.
+ * The actions this server can do: the GitHub actions, through the GitHub App of the workspace. They need rights of the App the
+ * owner grants (Issues and Pull requests: read and write, and for `ticket.setStatus` the opt-in Projects permission); where the App
+ * lacks one, the step ends as `github_permission_missing`.
  */
 async function connectorTargetOf(
   workspaceId: string,
@@ -79,6 +79,12 @@ async function connectorTargetOf(
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    // The members of the workspace are the people of its projects until a project has members of its own (#922).
+    projectMembers: (call) =>
+      createWorkspaceMembersRepository(
+        getDatabase(),
+        call.workspaceId,
+      ).githubLogins(),
   }),
 );
 
@@ -95,9 +101,7 @@ function askChannelFor(workspaceId: string) {
     },
     listSteps: (runId) => runs.listSteps(runId),
     memberLogins: () =>
-      createWorkspaceMembersRepository(db, workspaceId).githubLogins(
-        MENTIONS_MAX,
-      ),
+      createWorkspaceMembersRepository(db, workspaceId).githubLogins(),
     async runLink(run) {
       const workspace = await createWorkspacesRepository(db).get(workspaceId);
       const path = workspacePath(

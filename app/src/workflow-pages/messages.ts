@@ -131,6 +131,8 @@ const STEP_FAILURE_TEXT: Record<
     "The GitHub App of this workspace lacks a permission this action needs, or its installation is suspended. The owner of the GitHub installation has to grant the permission and accept the change; then run the workflow again.",
   github_not_found:
     "GitHub has no such issue, pull request or repository, or the GitHub installation of this workspace no longer exists.",
+  board_status_unknown:
+    "The board of the project has no status of that name. Use one of the statuses of its Status field.",
   github_validation:
     "GitHub refused what the action asked for: for example there are no commits between the branches, the repository is archived, or a value is not accepted.",
   github_rate_limited:

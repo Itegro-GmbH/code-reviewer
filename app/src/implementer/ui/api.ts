@@ -48,8 +48,6 @@ export type ProfileDetail = {
   documentVersion: number;
   document: {
     model: ModelChoice;
-    /** Whole US cents; null: the operator's maximum alone applies. */
-    costLimitCents: number | null;
     /** Whether a turn of this profile may push branches. */
     canPush: boolean;
   };

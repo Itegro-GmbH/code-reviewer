@@ -15,7 +15,7 @@ import {
   type InputSpec,
 } from "../workflows/connectors.ts";
 import { ISSUE_NUMBER_MAX } from "../workflows/limits.ts";
-import type { ValueType } from "../workflows/value-type.ts";
+import { STRING, type ValueType } from "../workflows/value-type.ts";
 import { renderText, resolveValue, type RunValues } from "./templates.ts";
 
 /** What a connector is told about a call. */
@@ -66,6 +66,7 @@ export function createConnectorRegistry(
 export const CONNECTOR_FAILURE_CODES = [
   "github_permission_missing",
   "github_not_found",
+  "board_status_unknown",
   "github_validation",
   "github_rate_limited",
   "github_unavailable",
@@ -108,6 +109,15 @@ function issueNumber(value: unknown, input: string): number {
   return number;
 }
 
+/** Whether a list is among the shapes the input takes (a list, or a text or list). */
+function holdsList(type: ValueType): boolean {
+  return (
+    type.kind === "list" ||
+    (type.kind === "oneOf" &&
+      type.options.some((option) => option.kind === "list"))
+  );
+}
+
 /** A value held to the type the spec states for the input; the issue (an object with a number, or a number) is reduced to its number. */
 function coerce(
   value: unknown,
@@ -126,8 +136,17 @@ function coerce(
       return value;
     case "integer":
       return issueNumber(value, input);
-    case "oneOf":
-      return issueNumber(value, input);
+    case "oneOf": {
+      // An input that is a text or a list of texts (`reviewers`, #917); the other oneOf is the issue: an object with a number, or a number.
+      const list = type.options.find((option) => option.kind === "list");
+      if (list === undefined) return issueNumber(value, input);
+      return coerce(
+        value,
+        typeof value === "string" ? STRING : list,
+        input,
+        textRequired,
+      );
+    }
     case "list":
       if (
         !Array.isArray(value) ||
@@ -164,12 +183,14 @@ export function resolveActionInputs(
     const resolved =
       typeof raw === "string" && input.type.kind === "string"
         ? renderText(raw, values, undefined, {
-            defuse: true,
+            // An input with no root (`target: []`: a board, a status) is a name looked up on the provider by exact equality: it is
+            // never a text that is written anywhere, so nothing is put into it.
+            defuse: input.target?.length !== 0,
             plain: name === "title",
           })
         : typeof raw === "string"
           ? resolveValue(raw, values)
-          : Array.isArray(raw) && input.type.kind === "list"
+          : Array.isArray(raw) && holdsList(input.type)
             ? raw.map((entry: unknown) =>
                 typeof entry === "string" ? resolveValue(entry, values) : entry,
               )

@@ -15,6 +15,9 @@ import {
   NAME_MAX_LENGTH,
   RESULT_ENUM_VALUES_MAX,
   RESULT_PROPERTIES_MAX,
+  TURN_TIME_LIMIT_MINUTES_DEFAULT,
+  TURN_TIME_LIMIT_MINUTES_MAX,
+  TURN_TIME_LIMIT_MINUTES_MIN,
 } from "../../src/workflows/limits.ts";
 import { validateResultSchema } from "../../src/workflows/result-schema.ts";
 import { createResolver } from "../../src/workflows/resolver.ts";
@@ -76,10 +79,18 @@ describe("the workflow contract", () => {
       "IssueLabelsAction",
       "TicketCommentAction",
       "TicketLabelsAction",
+      "TicketSetStatusAction",
+      "TicketRequestReviewAction",
+      "PullRequestCommentAction",
     ]) {
       const def = defs[name] as Json;
       const properties = def.properties as Record<string, Json>;
-      byConnector.set((properties.connector as Json).const as string, def);
+      const connector = properties.connector as Json;
+      // A definition names its connector as a constant, or as a list when it is also known by another name (#917).
+      for (const connectorName of (connector.enum ?? [
+        connector.const,
+      ]) as string[])
+        byConnector.set(connectorName, def);
     }
 
     expect([...byConnector.keys()].sort()).toEqual(
@@ -142,6 +153,13 @@ describe("the workflow contract", () => {
     });
     const objectProps = ((resultDefs.ObjectSchema as Json).properties as Json)
       .properties as Json;
+    expect(
+      ((defs.Workflow as Json).properties as Json).turnTimeLimitMinutes,
+    ).toMatchObject({
+      minimum: TURN_TIME_LIMIT_MINUTES_MIN,
+      maximum: TURN_TIME_LIMIT_MINUTES_MAX,
+      default: TURN_TIME_LIMIT_MINUTES_DEFAULT,
+    });
     expect(objectProps.maxProperties).toBe(RESULT_PROPERTIES_MAX);
     const enumDef = ((resultDefs.StringSchema as Json).properties as Json)
       .enum as Json;
@@ -234,6 +252,13 @@ const WORKFLOW_CASES: Case[] = [
   ],
   ["a budget of zero", (d) => (d.budgetUsd = 0)],
   ["a budget that is a text", (d) => (d.budgetUsd = "20")],
+  ["a turn time limit under 15 minutes", (d) => (d.turnTimeLimitMinutes = 14)],
+  ["a turn time limit over 60 minutes", (d) => (d.turnTimeLimitMinutes = 61)],
+  [
+    "a turn time limit that is not whole",
+    (d) => (d.turnTimeLimitMinutes = 30.5),
+  ],
+  ["a turn time limit that is a text", (d) => (d.turnTimeLimitMinutes = "60")],
   ["a description that is a number", (d) => (d.description = 5)],
   // The single `trigger` of the format before #916 (#916): the same forms, without `id` and `steps`.
   ["a trigger of an unknown kind", legacy({ kind: "cron" })],

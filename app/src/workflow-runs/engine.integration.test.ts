@@ -43,6 +43,7 @@ async function turnOfJob(app: EngineHarness, jobId: string) {
     .select([
       "implementer_turns.instruction",
       "implementer_turns.cost_limit_cents",
+      "implementer_turns.time_limit_minutes",
       "implementer_turns.profile_name",
       "implementer_turns.profile_version",
       "implementer_turns.profile_can_push",
@@ -647,8 +648,8 @@ describe("the budget over all steps", () => {
     expect(second.capMicroUsd).toBe(700_000);
   });
 
-  // #844-T71
-  it("takes the smaller of the budget, the limit of the profile and the operator's maximum", async () => {
+  // #844-T71, #918-T14
+  it("takes the smaller of the budget and the operator's maximum, and never the limit of the profile", async () => {
     const app = await startEngineHarness({ operatorCostLimitCents: 400 });
     const document = {
       ...twoAgentSteps(),
@@ -667,8 +668,26 @@ describe("the budget over all steps", () => {
 
     const [step] = (await app.stateOf(runId)).steps;
     if (step?.jobId == null) throw new Error("no job");
-    // The profile `reviewer` limits a turn to 300 cents; the budget (2000) and the operator (400) are higher.
-    expect((await turnOfJob(app, step.jobId)).cost_limit_cents).toBe(300);
+    // The budget is 2000 cents and the operator's maximum 400; a limit the profile version holds is not read.
+    expect((await turnOfJob(app, step.jobId)).cost_limit_cents).toBe(400);
+  });
+
+  // #918-T15
+  it("copies the turnTimeLimitMinutes of the document into the turn of every agent step, 60 minutes when it names none", async () => {
+    const limited = await startEngineHarness();
+    const run = await started(limited, {
+      ...twoAgentSteps(),
+      turnTimeLimitMinutes: 15,
+    });
+    const [first] = (await limited.stateOf(run.runId)).steps;
+    if (first?.jobId == null) throw new Error("no job");
+    expect((await turnOfJob(limited, first.jobId)).time_limit_minutes).toBe(15);
+
+    const plain = await startEngineHarness();
+    const other = await started(plain, twoAgentSteps());
+    const [step] = (await plain.stateOf(other.runId)).steps;
+    if (step?.jobId == null) throw new Error("no job");
+    expect((await turnOfJob(plain, step.jobId)).time_limit_minutes).toBe(60);
   });
 
   // #844-T72

@@ -178,6 +178,18 @@ export const CLAIM_RELEASE_REASONS = [
  */
 export const IMPLEMENTER_TIME_LIMIT_SECONDS = 3600;
 
+/**
+ * #918: how long this turn may run, in seconds: the `turnTimeLimitMinutes` of the workflow that started it (copied into the turn), else
+ * the constant above for a turn no workflow started and for one written before the field existed.
+ */
+export function timeLimitSecondsOf(turn: {
+  timeLimitMinutes: number | null;
+}): number {
+  return turn.timeLimitMinutes === null
+    ? IMPLEMENTER_TIME_LIMIT_SECONDS
+    : turn.timeLimitMinutes * 60;
+}
+
 /** When the platform does not say how long to wait. */
 export const DEFAULT_RETRY_AFTER_SECONDS = 30;
 const MAX_RETRY_AFTER_SECONDS = 900;
@@ -377,6 +389,8 @@ export type Checked = {
     startBranch: string | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
+    /** #918: how long the turn may run, in seconds (`timeLimitSecondsOf`). */
+    timeLimitSeconds: number;
     /** #818: the environment the turn copied when it started; null for a task without one. */
     environment: {
       name: string;
@@ -1100,6 +1114,7 @@ export async function checkJob(
         baseBranch: turn.session.baseBranch,
         startBranch: turn.session.startBranch,
         cloneUrl,
+        timeLimitSeconds: timeLimitSecondsOf(turn.turn),
         environment:
           turn.turn.environment === null
             ? null
@@ -1373,7 +1388,7 @@ export async function buildJobInput(
               : { startBranch: implementer.startBranch }),
             branch: implementer.branch,
             instruction: implementer.instruction,
-            limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+            limits: { timeLimitSeconds: implementer.timeLimitSeconds },
             cost,
             modelEntry,
             // #818: only a script travels to the Worker, and only to one that reads it (the refusal above).
@@ -1658,7 +1673,7 @@ async function prepareSubscription(
         : { startBranch: turn.session.startBranch }),
       branch: turn.session.branch,
       instruction: turn.turn.instruction,
-      limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+      limits: { timeLimitSeconds: timeLimitSecondsOf(turn.turn) },
       subscription: {
         model: choice.model,
         maxBudgetUsd: (cents / 100).toFixed(2),

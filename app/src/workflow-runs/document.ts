@@ -4,7 +4,13 @@
 // change, so the engine only needs the shape it walks; it still reads the stored text defensively and answers `undefined` for text that
 // is not that shape, which fails the run with `document_unusable` instead of throwing.
 import { isRecord } from "../workflows/json.ts";
-import { BUDGET_DEFAULT_USD, LOOP_ROUNDS_MAX } from "../workflows/limits.ts";
+import {
+  BUDGET_DEFAULT_USD,
+  LOOP_ROUNDS_MAX,
+  TURN_TIME_LIMIT_MINUTES_DEFAULT,
+  TURN_TIME_LIMIT_MINUTES_MAX,
+  TURN_TIME_LIMIT_MINUTES_MIN,
+} from "../workflows/limits.ts";
 import {
   TRIGGER_KINDS,
   canonicalTriggerKind,
@@ -35,6 +41,8 @@ export type RunTrigger = {
 export type RunDocument = {
   triggers: RunTrigger[];
   budgetUsd: number;
+  /** How long one agent turn of the run may run, in minutes (#918); the default when the document names none. */
+  turnTimeLimitMinutes: number;
   /** The nodes of the workflow, in the order they run; of a document made `forTrigger` the pre-steps of that trigger come first. */
   steps: RunNode[];
   /** The steps that run once after the run ended `failed` or `cancelled` (#902); empty when the workflow has none. */
@@ -92,9 +100,19 @@ export function readRunDocument(text: string): RunDocument | undefined {
     (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0)
   )
     return undefined;
+  const turnLimit = parsed.turnTimeLimitMinutes;
+  if (
+    turnLimit !== undefined &&
+    (typeof turnLimit !== "number" ||
+      !Number.isInteger(turnLimit) ||
+      turnLimit < TURN_TIME_LIMIT_MINUTES_MIN ||
+      turnLimit > TURN_TIME_LIMIT_MINUTES_MAX)
+  )
+    return undefined;
   return {
     triggers,
     budgetUsd: budget ?? BUDGET_DEFAULT_USD,
+    turnTimeLimitMinutes: turnLimit ?? TURN_TIME_LIMIT_MINUTES_DEFAULT,
     steps: nodes,
     onFailure: failureNodes,
   };

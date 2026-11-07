@@ -38,6 +38,7 @@ function turn(
     instruction: "Work.",
     modelChoice: { entryId: "entry-1" },
     costLimitCents: null,
+    timeLimitMinutes: null,
     jobId: "job-1",
     createdBy: "user-1",
     createdAt: "2026-11-05T10:00:00.000Z",

@@ -35,9 +35,11 @@ import {
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   COMMENT_READ_TOKEN_PERMISSIONS,
+  BOARD_STATUS_TOKEN_PERMISSIONS,
   ISSUE_ACTION_TOKEN_PERMISSIONS,
   NOTICE_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  REVIEW_REQUEST_TOKEN_PERMISSIONS,
   VERDICT_TOKEN_PERMISSIONS,
   jobTokenRepositoryIds,
   toImplementerAccessError,
@@ -504,6 +506,42 @@ export function createGithubAppProvider(
             signal,
           ),
         };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async requestReviewers(integration, repo, prNumber, reviewers, options) {
+      try {
+        return {
+          requested: await (
+            await getClient()
+          ).requestPullRequestReviewers(
+            integration.externalId,
+            actionScope(integration, repo, REVIEW_REQUEST_TOKEN_PERMISSIONS),
+            repo.fullName,
+            prNumber,
+            reviewers,
+            options,
+          ),
+        };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async setTicketStatus(integration, repo, issueNumber, move, signal) {
+      try {
+        return await (
+          await getClient()
+        ).moveIssueOnBoard(
+          integration.externalId,
+          actionScope(integration, repo, BOARD_STATUS_TOKEN_PERMISSIONS),
+          repo.fullName,
+          issueNumber,
+          move,
+          signal,
+        );
       } catch (error) {
         throw toActionError(error);
       }

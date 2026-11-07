@@ -22,7 +22,7 @@ at a step that ran before on every path, the types of the values that flow, the 
 
 1. Write the document.
 2. `POST /api/w/<slug>/workflows/validate` with the document as the body. The answer is `200` with `{"valid": false, "errors": [...]}` or
-   `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "steps": 6}`. Nothing is stored.
+   `{"valid": true, "errors": [], "truncated": false, "budgetUsd": 20, "turnTimeLimitMinutes": 60, "steps": 6}`. Nothing is stored.
 3. Read **every** error. Each has a `path` (a JSON pointer into your document), a `code` (stable: branch on it), a `message` (the cause in a
    sentence) and, where a name was wrong, `available`: the names that exist at that point (steps in reach, fields of a step, profiles,
    environments, connectors). The list is sorted by path, so fix them all, then validate again. It holds **200 errors at most**: the check
@@ -68,6 +68,7 @@ An answer you will see while fixing:
 | `triggers` | yes (or `trigger`) | The triggers that start the workflow, 1 to 10, each with pre-steps of its own ([The triggers](#the-triggers-and-their-pre-steps)). |
 | `trigger` | no | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
+| `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
 | `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
@@ -160,7 +161,7 @@ Other triggers (Jira) come later. Who may set the label is decided by GitHub, no
 no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. Several repositories in one run are a later
 extension.
 
-The inputs that decide **what the workflow acts on** are *targets*: `issue`, `head`, `base`, the labels `add` and `remove` of an action, and
+The inputs that decide **what the workflow acts on** are *targets*: `issue`, `ticket`, `pullRequest`, `head`, `base`, the labels `add` and `remove` and the `reviewers` of an action, the `board` and `status` of `ticket.setStatus`, and
 the `environment` of an agent step. An agent's result is data, never a command, and so is what whoever opened the issue wrote (its title, body
 and labels): anyone who can open an issue could steer a run through them. So a target takes only
 
@@ -173,6 +174,9 @@ and labels): anyone who can open an issue could steer a run through them. So a t
 | `add`, `remove` | label names | an input of a manual trigger: `{{trigger.input.label}}` as an entry, or `{{trigger.input.labels}}` as the whole list |
 | `base` | a branch name | `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`) |
 | `head` | a branch name | `{{<agent step>.branch}}`, the branch of an agent step that may push (a fact the platform made) |
+| `pullRequest` | a positive whole number, 1 to 2147483647 | `{{<step id>.number}}` of an earlier `pullRequest.open` (or `github.pullRequest.open`) action (the pull request the platform opened), or an input of a manual trigger declared `integer` |
+| `reviewers` | `"project members"` or a list of GitHub logins | an input of a manual trigger: `{{trigger.input.reviewer}}` as an entry, or `{{trigger.input.reviewers}}` as the whole list |
+| `board`, `status` | the number of a GitHub Project (`"7"`) or its node id, and the name of an option of its Status field | nothing: a literal only |
 | `environment` | the name of an environment | nothing: a literal only |
 
 Everything else (a result field of an agent, a field of an action or a loop, `previous.…`, `trigger.issue.title`, `.body` or `.labels`, text
@@ -218,19 +222,39 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 
 | `connector` | Inputs (`*` needed) | Yields |
 | --- | --- | --- |
-| `github.pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url` |
-| `github.issue.comment` | `issue`\* (a positive whole number, `{{trigger.issue}}` or `{{trigger.issue.number}}`, or a manual input declared `integer`), `body`\* | `url` |
-| `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`) | `labels` (the labels the issue has now) |
-| `ticket.comment` | `ticket`\* (as `issue`: a number, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`, …), `body`\* | `url` |
-| `ticket.labels` | `ticket`\*, `add`, `remove` as `github.issue.labels` | `labels` |
+| `ticket.comment` | `ticket`\* (a positive whole number, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`, `{{trigger.issue}}`, or a manual input declared `integer`), `body`\* | `url`, `existing` |
+| `ticket.labels` | `ticket`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`) | `labels` (the labels the ticket has now) |
+| `ticket.setStatus` | `ticket`\*, `board`\* (the number or node id of the GitHub Project that holds the board, a literal), `status`\* (a literal option name of the board's Status field) | `status` |
+| `ticket.requestReview` | `pullRequest`\* (a number, `{{<step id>.number}}` of a `pullRequest.open` step, or a manual input declared `integer`), `reviewers`\* (`"project members"` or a list of GitHub logins) | `requested` (the logins asked) |
+| `pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url`, `existing` |
+| `pullRequest.comment` | `pullRequest`\*, `body`\* | `url`, `existing` |
+| `github.pullRequest.open` | as `pullRequest.open` | as `pullRequest.open` |
+| `github.issue.comment` | `issue`\* (as `ticket`), `body`\* | `url`, `existing` |
+| `github.issue.labels` | `issue`\*, `add`, `remove` as `ticket.labels` | `labels` |
 
-`ticket.comment` and `ticket.labels` are the provider-neutral names of the two actions on a ticket (#916): GitHub is the provider so far, and they
-do what `github.issue.comment` and `github.issue.labels` do, on the issue of the run's repository. They are allowed in `onFailure` like those.
+Connectors are named by what they do, not by the provider; the provider is the one of the run's repository (GitHub so far). The `github.*` names are
+**aliases** that saved lanes keep using (#916, #917): `ticket.comment` is `github.issue.comment`, `ticket.labels` is `github.issue.labels` and
+`pullRequest.open` is `github.pullRequest.open`, each with the same inputs and outputs (`ticket` where the old name says `issue`). `pullRequest.comment`
+writes below a pull request, the way `ticket.comment` does below an issue. The aliases are allowed in `onFailure` as before (`ticket.comment`, `ticket.labels`,
+`github.issue.comment`, `github.issue.labels`), and so is `pullRequest.comment`, which is a comment too (`ticket.setStatus` and `ticket.requestReview` are not).
 
-The action works on the repository of the run. `head`, `base`, `issue`, `ticket`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
+`ticket.setStatus` writes the **Status field of a GitHub Project** (projects_v2) of the repository's owner: the issue is put into the column `status` names and, when it
+is not on the board yet, added to it first. `board` is named on the action for now (the project that is connected to a board comes with #922, which moves it there). The option
+name is looked up **when the step runs**: a board without such an option ends the step with `board_status_unknown`, and the message names the options it has. A board that
+is not found among the owner's projects ends it with `github_not_found`; a board named by its node id must belong to the repository's owner, else it is not found as well. `board` and `status` are names that are looked up
+by equality, so nothing is put into them (no mention of a person is defused in a status such as `Needs @design`). GraphQL errors that come with partial data never read as moved: the step ends when the card was not added or the status not set. The App needs the opt-in **Projects** permission (see [GitHub actions](#github-actions) and `docs/github-app.md`); without
+it the step ends with `github_permission_missing`. The validator holds `board` to the number of a Project or its `PVT_…` node id and `status` to a literal that is not blank (`invalid_value`).
+
+`ticket.requestReview` asks for a review of a pull request, usually the one a `pullRequest.open` step opened: `{{open.number}}`. `"project members"` asks the members of the
+workspace that have a GitHub login (until a project has members of its own, #922), in the order they joined. They are asked **one by one until GitHub has accepted 15 of them**: the ones that cannot review that pull
+request (GitHub says they are not a collaborator of the repository, or the author) are left out, and so the first 15 members are not simply taken. Any other refusal (a closed pull request, say) ends the step.
+When none of them could be asked the step ends with `github_validation` and says why, instead of yielding an empty `requested`. A list of logins is asked as written, and GitHub's refusal of one of them
+(`github_validation`) ends the step. At most 15 people. Any other text than `"project members"` is `invalid_value` with `available: ["project members"]`.
+
+The action works on the repository of the run. `head`, `base`, `issue`, `ticket`, `pullRequest`, `reviewers`, `board`, `status`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
 a label trigger an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
 again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). The engine runs an action
-through a connector it has: the three GitHub connectors run on a server that has the GitHub App, and a step whose connector is not there ends with
+through a connector it has: the GitHub connectors run on a server that has the GitHub App, and a step whose connector is not there ends with
 `connector_unavailable` (see [Engine](#engine) and [GitHub actions](#github-actions)).
 
 ### Control: `if` and `loop`
@@ -253,7 +277,7 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 `onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
 (`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
 
-- **What they may be.** An `action` of `ticket.comment` or `ticket.labels` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+- **What they may be.** An `action` of `ticket.comment`, `ticket.labels` or `pullRequest.comment` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
   `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
 - **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
@@ -784,14 +808,29 @@ data: it can be put into a text (an instruction, a comment), never into a target
 ### The budget over all steps
 
 A run has a budget: `budgetUsd` of the document (20 when left out), held to the operator's maximum (100 USD today) once more at the start. Every agent
-step gets as its cost limit **at most what is left of the budget**, in whole cents, and not more than the limit of its profile version or the operator's
-maximum per task. A turn is charged what the runner reported. **A turn whose cost is not known** (the runner reported none, as with a model of the
+step gets as its cost limit **what is left of the budget**, in whole cents, held to the operator's maximum per task. The `costLimitCents` of a profile
+version is **not read** (#918): the cost of a turn is the lane's, not the profile's. A turn is charged what the runner reported. **A turn whose cost is not known** (the runner reported none, as with a model of the
 workspace's own key that has no price) is charged by its token counts at the price of the model in the catalog, never above its cap; with no token counts or
 no price in the catalog it is charged **the whole cap it ran under**, so a run never spends more than its budget. That is conservative on purpose: with
 an unpriced model a workflow of two agent steps with a budget of 1 USD can end after step one with `budget_exhausted`, because step one was charged the
 whole of it. The engine logs `[workflow-runs] cost not reported run=… step=… charged=estimated|limit` for each such step. A price in the catalog, or a
 model that reports its cost, avoids it. When the budget cannot pay one cent for the next agent step, the run ends with `budget_exhausted`; an action step costs nothing and still runs. The basis a step was charged on (`reported`, `estimated`, or `limit` for the whole cap) is kept with
 the step and shown on the [run page](#the-run-page).
+
+### The limits of a lane
+
+The limits belong to the workflow (the lane), not to the profile: the budget above and the time of a turn.
+
+- **`turnTimeLimitMinutes`** (15 to 60, 60 when left out) is how long **one agent turn** of the run may run. The engine copies it into every turn it starts
+  (`implementer_turns.time_limit_minutes`, also for a `session.continue` turn), and the claim hands it to the Worker as its `limits.timeLimitSeconds`: the
+  runner holds the turn to it, keeps the last minutes of it for the final commit and the push, and ends the turn with `timeout`. The app is the backstop: a turn
+  still running **ten minutes after its limit** is failed with `timeout` by the queue (`IMPLEMENTER_RUNTIME_GRACE_MS` in `app/src/db/job-limits.ts`); a turn without a
+  limit of its own (one started from the Implementer form, or written before the field existed) keeps 3600 seconds and the 70 minutes.
+- **The Dispatcher is the ceiling, so 60 minutes is the most.** It stops the VM of an Implementer turn at its own timeout (`DISPATCHER_WORKER_CONFIG.implementer.timeoutSeconds`,
+  3600 seconds), and the runner holds a turn to the smaller of its limit and that timeout ([`dispatcher.md`](dispatcher.md)). A limit above 60 would be cut by the
+  Dispatcher without the final commit and push, so the validator refuses it. A longer limit needs the Dispatcher to follow the limit of the job instead of a
+  constant of its own (follow-up, not part of #918); only then can the maximum be raised.
+- **There is no cost limit in the profile for a lane.** The most a turn may cost is what is left of `budgetUsd`.
 
 ### Control at run time
 
@@ -820,8 +859,8 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
   a session of its own). The engine does not start a new task but a follow-up turn of that session, the same path as the "Continue" form of the Runs page
   ([`implementer.md`](implementer.md#follow-ups)): **no second turn starts while one runs** (the instruction waits behind it, one at most), the request id of the step makes it
   idempotent, and the turn keeps the model, the environment, the profile and the **result schema** of the session's last turn. So a step that goes on in the session of **another**
-  step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is the smaller of what is left of
-  the budget and the limit of the session's last turn.
+  step must declare the same `result` as that step, else it ends with `agent_start_failed` before anything is started. The cost limit of the turn is what is left of
+  the budget, and its time limit is the `turnTimeLimitMinutes` of the document.
 - **Failures inside a loop.** A step that fails, a budget that cannot pay the next agent step and a condition that cannot be told end the **whole run** at once as `failed`
   (`step_failed`, `budget_exhausted`, `condition_failed`): the steps after the loop do not run, so in "Issue to PR" **no pull request is opened**. What the run does then is
   [`onFailure`](#onfailure-at-run-time): the example comments on the issue and swaps the label; a workflow without `onFailure` leaves the issue as it is and the only signals are the run page and the
@@ -870,19 +909,19 @@ When the last one is over, the run ends with the stored status and error code (`
 ### Actions
 
 An action step is a **connector**: an interface (`name`, `run(call)`) and a registry the engine asks. The inputs are the node's, with references resolved and
-held to the connector's types again. The three connectors of the format (`github.pullRequest.open`, `github.issue.comment`, `github.issue.labels`)
+held to the connector's types again. The connectors of the format (`pullRequest.open`, `pullRequest.comment`, `ticket.comment`, `ticket.labels`, `ticket.setStatus`, `ticket.requestReview` and the `github.*` aliases)
 are real connectors of the GitHub App ([GitHub actions](#github-actions)); a step whose connector is not available ends with
 `connector_unavailable` and the run with `step_failed`. The engine's own tests use a fake connector.
 
 **A call takes 60 seconds at most** (`ACTION_TIMEOUT_MS`), which is well under the two minutes after which a step that was claimed and has no outcome is taken
 for abandoned (`STEP_STALE_MS`). A call that takes longer ends its step with `action_timeout` and is not repeated (it may have happened); the call gets an
-`AbortSignal` that is aborted then. **A connector keeps to it** (the three GitHub connectors do): it passes `call.signal` to every request it makes and sets no longer
+`AbortSignal` that is aborted then. **A connector keeps to it** (the GitHub connectors do): it passes `call.signal` to every request it makes and sets no longer
 time limit or retry of its own. A connector that outlasts the limit could otherwise run twice, once for the engine that waits for it and once for the
 one that took the step over. Use `call.idempotencyKey` for what the platform supports.
 
 ### GitHub actions
 
-The three connectors act through the **GitHub App of the workspace**, on **the repository of the run** and nothing else: the repository is never an input, so
+The connectors act through the **GitHub App of the workspace**, on **the repository of the run** and nothing else: the repository is never an input, so
 no value (a branch, a reference, an agent's text) can name another one. Each makes its requests with a token of its own, limited to that
 repository and to the one permission it needs, and switched off afterwards. The inputs are data: they are cleaned and bounded here, after the
 references are resolved.
@@ -892,8 +931,12 @@ references are resolved.
 | `github.pullRequest.open` | Pull requests: Read and write and Contents: Read-only | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts. |
 | `github.issue.comment` | Issues: Read and write | Not by GitHub (it has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which keeps a comment from being written twice. As a second guard the comment ends with an invisible marker `<!-- wf-<runId>-<position> -->`, and the comments of the issue that changed since the step began (five minutes earlier, for the clocks) are looked at for the App's own comment with it before one is written (`existing: true`, the url of that comment). That holds **within one run** only; see "After a timeout or an error of GitHub's own". |
 | `github.issue.labels` | Issues: Read and write | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards. |
+| `ticket.setStatus` | Projects: Read and write (an organization permission, **opt-in**: the App holds it only when its owner asked for it) and Issues: Read-only | Yes: the issue is added to the board if it is not on it (adding it twice finds its card) and the Status is set to the option named, the same value twice. The option must exist; one is never created. Through GitHub's GraphQL API, as Projects have no REST API for it. Projects of a user (not an organization) cannot be written with an installation token. |
+| `ticket.requestReview` | Pull requests: Read and write | Yes: a person who has been asked stays asked. `requested` is the logins GitHub lists as asked afterwards. |
+| `pullRequest.comment` | Issues: Read and write | As `github.issue.comment`: the same marker and the same search; GitHub files the comments of a pull request under issues. |
+| `pullRequest.open`, `ticket.comment`, `ticket.labels` | as the `github.*` connector each one is an alias of | as that connector |
 
-GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too.
+GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too. Every connector asks for the narrowest token of its own, one entry each in `WORKFLOW_ACTION_TOKEN_PERMISSIONS` (`job-access.ts`), the aliases with the permissions of the connector they stand for.
 
 `github.pullRequest.open` needs **Pull requests: Read and write** and, besides, **Contents: Read-only** (the App's installation holds it for the agent's branch already): its token asks for
 `pull_requests: write`, `contents: read` and `metadata: read`. Without the contents GitHub cannot resolve the head and base refs and answers 422 "head invalid" for a branch that exists (#913).
@@ -912,13 +955,14 @@ for example "GitHub said: PullRequest head invalid."): it is GitHub's own, so it
 | What GitHub answered | Code |
 | --- | --- |
 | The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended | `github_permission_missing` |
-| 404 for the issue or pull request; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
-| 422: no commits between head and base, a branch that does not exist, any other value it does not accept (GitHub's reason follows the generic sentence); 403 for an archived repository | `github_validation` |
+| 404 for the issue or pull request; no such Project among the owner's projects; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
+| The board has no option of the name the step asks for (`ticket.setStatus`), the message lists the options | `board_status_unknown` |
+| 422: no commits between head and base, a branch that does not exist, a reviewer that cannot review the pull request, any other value it does not accept (GitHub's reason follows the generic sentence); 403 for an archived repository | `github_validation` |
 | 429, or 403 with a rate-limit header, or 403 without one whose message names a rate limit (GitHub's secondary limit answers like that) | `github_rate_limited` |
 | 403 for any other reason (no permission, no rate limit, no archived repository) | `action_failed` (the message names the call and the status; it does not send the owner to the App's settings) |
 | 5xx, no connection, no answer in time | `github_unavailable` |
 
-**Outputs.** `github.pullRequest.open` answers `{ number, url, existing }`, `github.issue.comment` `{ url, existing }`, `github.issue.labels` `{ labels }`.
+**Outputs.** `pullRequest.open` (`github.pullRequest.open`) answers `{ number, url, existing }`, `ticket.comment` and `pullRequest.comment` (`github.issue.comment`) `{ url, existing }`, `ticket.labels` (`github.issue.labels`) `{ labels }`, `ticket.setStatus` `{ status }` and `ticket.requestReview` `{ requested }`.
 `existing` is `true` when the action found what it would have made (an open pull request for the head and base, the App's own comment with the marker of the step) and
 made nothing. The `url` of an output is **always a page of the repository of the run** (`<repository url>/pull/<n>`, `<repository url>/issues/<n>#issuecomment-<id>`):
 GitHub's answer counts only when it is parsed as an address with the same origin as the repository, no user or password in it, and a path below the repository's own (`/owner/repo/…`, compared per path segment, so `…/repo/../x` and `…/repo-other/…` do not pass). If GitHub's answer holds another address, the connector reports the repository's own address for the pull request or the issue instead of it, so a run page
@@ -1092,6 +1136,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `action_failed` | step | The connector failed for a reason that has no code of its own; the step says "The action failed." and the cause is in the log of the engine. |
 | `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
 | `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
+| `board_status_unknown` | step | `ticket.setStatus`: the board has no status of that name; the message lists the statuses it has. |
 | `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
 | `github_rate_limited` | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated. |
 | `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
@@ -1226,11 +1271,12 @@ Beyond the form:
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
-| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |
 | `budget_above_maximum` | `budgetUsd` above the operator's maximum. | Lower it to the maximum the message names. |
+| `invalid_value` (at `/turnTimeLimitMinutes`) | `turnTimeLimitMinutes` is not a whole number from 15 to 60. | Use a whole number of minutes in that range, or leave it out for 60. |
 
 ### Of the routes (`error`)
 

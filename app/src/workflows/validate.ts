@@ -22,6 +22,9 @@ import {
   NESTING_DEPTH_MAX,
   STEPS_MAX,
   TRIGGERS_MAX,
+  TURN_TIME_LIMIT_MINUTES_DEFAULT,
+  TURN_TIME_LIMIT_MINUTES_MAX,
+  TURN_TIME_LIMIT_MINUTES_MIN,
 } from "./limits.ts";
 import {
   IssueSink,
@@ -62,6 +65,8 @@ export type ValidationResult = {
   truncated: boolean;
   /** The budget the workflow runs with: its own, or the default when it names none. Set when `valid`. */
   budgetUsd?: number;
+  /** The time one agent turn may run, in minutes: its own, or the default when the document names none (#918). Set when `valid`. */
+  turnTimeLimitMinutes?: number;
   /** How many steps the document has, counted through branches and loop bodies. */
   steps: number;
 };
@@ -73,6 +78,7 @@ const DOCUMENT_KEYS = [
   "trigger",
   "triggers",
   "budgetUsd",
+  "turnTimeLimitMinutes",
   "steps",
   "onFailure",
 ];
@@ -540,6 +546,39 @@ function checkBudget(
   return value;
 }
 
+function checkTurnTimeLimit(
+  value: unknown,
+  report: Report,
+): number | undefined {
+  const path = "/turnTimeLimitMinutes";
+  if (value === undefined) return TURN_TIME_LIMIT_MINUTES_DEFAULT;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    report(
+      issue(
+        path,
+        "wrong_type",
+        "'turnTimeLimitMinutes' is a whole number of minutes.",
+      ),
+    );
+    return undefined;
+  }
+  if (
+    !Number.isInteger(value) ||
+    value < TURN_TIME_LIMIT_MINUTES_MIN ||
+    value > TURN_TIME_LIMIT_MINUTES_MAX
+  ) {
+    report(
+      issue(
+        path,
+        "invalid_value",
+        `'turnTimeLimitMinutes' is a whole number of minutes from ${TURN_TIME_LIMIT_MINUTES_MIN} to ${TURN_TIME_LIMIT_MINUTES_MAX}; it is ${value}.`,
+      ),
+    );
+    return undefined;
+  }
+  return value;
+}
+
 /** What `trigger.*` holds for one trigger; unknown where the trigger itself failed the check, so one mistake is reported once. */
 function triggerType(trigger: CheckedTrigger): Binding["type"] {
   if (trigger.kind === undefined) return { kind: "unknown" };
@@ -641,6 +680,10 @@ export function validateWorkflow(
   const budget = checkBudget(
     document.budgetUsd,
     options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
+    report,
+  );
+  const turnTimeLimit = checkTurnTimeLimit(
+    document.turnTimeLimitMinutes,
     report,
   );
 
@@ -789,6 +832,9 @@ export function validateWorkflow(
     steps: stepCount,
     ...(errors.length === 0 && budget !== undefined
       ? { budgetUsd: budget }
+      : {}),
+    ...(errors.length === 0 && turnTimeLimit !== undefined
+      ? { turnTimeLimitMinutes: turnTimeLimit }
       : {}),
   };
 }
