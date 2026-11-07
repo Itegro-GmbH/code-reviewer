@@ -10,7 +10,12 @@ import type {
 } from "../integrations/types.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
 import { createTrackerMirror } from "./mirror.ts";
-import { createTrackerSync, readCursor, STALE_AFTER_MS } from "./sync.ts";
+import {
+  createTrackerSync,
+  readCursor,
+  RESUME_STALE_AFTER_MS,
+  STALE_AFTER_MS,
+} from "./sync.ts";
 
 const INTEGRATION = { id: "i-1", workspaceId: "w-1" } as Integration;
 const REPOSITORY = {
@@ -461,9 +466,11 @@ describe("the rebuild rule", () => {
     const mirror = createTrackerMirror({
       repositories: {
         findByExternalId: async () => ({ id: "r-1", active: true }) as never,
+        get: async () => undefined,
       },
       projects: { hasActiveProject: async () => true },
       tracker: kept,
+      boardStatusOf: async () => ({ available: false, status: null }),
       checksStateOf: async () => "failure",
     });
     const repo = {
@@ -721,5 +728,143 @@ describe("what a sync leaves alone when it cannot know", () => {
 
     expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Review");
     expect((await tracker.getItem("r-1", 3))?.boardStatus).toBe("Todo");
+  });
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+describe("a sync the nightly run continues (#932)", () => {
+  // #932-R30
+  it("continues an unfinished sync a day later when asked to resume, and keeps the time the sync began", async () => {
+    const { tracker, remote, run } = setup();
+    await run({ maxPages: 1 });
+    const under = await tracker.getSyncState("r-1");
+
+    clock += DAY_MS;
+    await run({ maxPages: 1, resume: true });
+
+    expect(remote.steps.map((step) => JSON.stringify(step))).toEqual([
+      '{"phase":"issues","page":1}',
+      `{"phase":"issues","page":1,"since":"${at(3)}"}`,
+    ]);
+    expect((await tracker.getSyncState("r-1"))?.startedAt).toBe(
+      under?.startedAt,
+    );
+  });
+
+  // #932-R31
+  it("starts again after a day when not asked to resume: the sync of a request is abandoned after an hour", async () => {
+    const { remote, run } = setup();
+    await run({ maxPages: 1 });
+
+    clock += DAY_MS;
+    await run({ maxPages: 1 });
+
+    expect(remote.steps.at(-1)).toEqual({ phase: "issues", page: 1 });
+  });
+
+  // #932-R32
+  it("starts again when the sync did not move for longer than a resume waits", async () => {
+    const { remote, run } = setup();
+    await run({ maxPages: 1 });
+
+    clock += RESUME_STALE_AFTER_MS + 1;
+    await run({ maxPages: 1, resume: true });
+
+    expect(remote.steps.at(-1)).toEqual({ phase: "issues", page: 1 });
+  });
+
+  // #932-R33
+  it("completes over several nights and then applies the rebuild rule from the time the sync began, not from the last night", async () => {
+    const { tracker, remote, run } = setup();
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(99, { title: "Deleted on GitHub while no delivery arrived" }),
+    });
+
+    // One page a night: the issues of the first nights are written before the sync ends.
+    let progress = await run({ maxPages: 1, resume: true });
+    let nights = 1;
+    while (progress.status === "partial") {
+      clock += DAY_MS;
+      progress = await run({ maxPages: 1, resume: true });
+      nights += 1;
+      expect(nights).toBeLessThan(20);
+    }
+
+    expect(nights).toBeGreaterThan(3);
+    // Item 3 was written on the first night, the others later: only the one GitHub does not have is removed.
+    expect(progress).toMatchObject({ status: "done", removed: 1 });
+    expect(tracker.rows().map((row) => row.number)).toEqual([3, 7, 8, 12, 13]);
+    expect(remote.steps.filter((step) => step.phase === "issues")[0]).toEqual({
+      phase: "issues",
+      page: 1,
+    });
+  });
+});
+
+describe("the checks of a sync that is cut in the middle (#932)", () => {
+  const PULL_REQUESTS: GitHub = {
+    pageSize: 5,
+    issues: [
+      item(7, { kind: "pull_request", nodeId: "PR_7", updatedAt: at(1) }),
+      item(8, { kind: "pull_request", nodeId: "PR_8", updatedAt: at(2) }),
+      item(9, {
+        kind: "pull_request",
+        nodeId: "PR_9",
+        state: "closed",
+        stateReason: "merged",
+        updatedAt: at(3),
+      }),
+    ],
+    checks: [
+      [{ number: 7, checksState: "failure" }],
+      [{ number: 8, checksState: "success" }],
+    ],
+    board: [[]],
+  };
+
+  async function seeded() {
+    const context = setup(PULL_REQUESTS);
+    for (const number of [7, 8, 9]) {
+      await context.tracker.upsertItem("r-1", {
+        provider: "github",
+        repo: "acme/widgets",
+        ...item(number, {
+          kind: "pull_request",
+          nodeId: `PR_${number}`,
+          updatedAt: at(0),
+        }),
+      });
+      await context.tracker.setChecksState("r-1", number, "pending");
+    }
+    return context;
+  }
+
+  // #932-R34
+  it("leaves the checks of the pull requests it has not reached unchanged", async () => {
+    const { tracker, run } = await seeded();
+
+    // The issues page, then the first page of the checks: the second page is still to come.
+    const progress = await run({ maxPages: 2 });
+
+    expect(progress).toMatchObject({ status: "partial", next: "checks" });
+    expect((await tracker.getItem("r-1", 7))?.checksState).toBe("failure");
+    expect((await tracker.getItem("r-1", 8))?.checksState).toBe("pending");
+    expect((await tracker.getItem("r-1", 9))?.checksState).toBe("pending");
+  });
+
+  // #932-R35
+  it("reads the rest on the next call and forgets the checks of what is not an open pull request at the end of the checks", async () => {
+    const { tracker, run } = await seeded();
+    await run({ maxPages: 2 });
+
+    const progress = await run();
+
+    expect(progress).toMatchObject({ status: "done" });
+    expect((await tracker.getItem("r-1", 8))?.checksState).toBe("success");
+    // Closed: GitHub does not list it among the pull requests with checks.
+    expect((await tracker.getItem("r-1", 9))?.checksState).toBeNull();
   });
 });

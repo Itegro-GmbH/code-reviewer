@@ -44,9 +44,17 @@ const pullRequest = (
     ...overrides,
   });
 
-function setup(options: { project?: boolean; active?: boolean } = {}) {
+type BoardRead = { available: boolean; status: string | null };
+
+function setup(
+  options: { project?: boolean; active?: boolean; board?: BoardRead } = {},
+) {
   const tracker = createFakeTrackerRepository();
   const checksStateOf = vi.fn(async () => "failure" as string | null);
+  const boardStatusOf = vi.fn(
+    async (): Promise<BoardRead> =>
+      options.board ?? { available: true, status: null },
+  );
   const mirror = createTrackerMirror({
     repositories: {
       async findByExternalId(integrationId, externalId) {
@@ -54,9 +62,22 @@ function setup(options: { project?: boolean; active?: boolean } = {}) {
           ? ({ id: "r-1", active: options.active ?? true } as never)
           : undefined;
       },
+      async get(id) {
+        return id === "r-1"
+          ? ({
+              id: "r-1",
+              integrationId: "i-1",
+              externalId: "7001",
+              fullName: "acme/widgets",
+              url: "https://github.com/acme/widgets",
+              active: options.active ?? true,
+            } as never)
+          : undefined;
+      },
     },
     projects: { hasActiveProject: async () => options.project ?? true },
     tracker,
+    boardStatusOf,
     checksStateOf,
   });
   const changed = (item: TrackerItemFields, resetChecks = false) =>
@@ -66,7 +87,7 @@ function setup(options: { project?: boolean; active?: boolean } = {}) {
       item,
       resetChecks,
     });
-  return { tracker, mirror, checksStateOf, changed };
+  return { tracker, mirror, checksStateOf, boardStatusOf, changed };
 }
 
 describe("applying a change of a ticket to the mirror", () => {
@@ -255,6 +276,132 @@ describe("applying a change of a ticket to the mirror", () => {
         status: "Done",
       }),
     ).toBe("not_mirrored");
+  });
+
+  // #932-T01
+  it.each([
+    ["created", false],
+    ["restored", false],
+    ["archived", true],
+    ["deleted", true],
+  ])(
+    "asks the boards where the ticket stands when an item is %s, and stores what they say",
+    async (_action, removed) => {
+      const { tracker, mirror, boardStatusOf, changed } = setup({
+        board: { available: true, status: "In Review" },
+      });
+      await changed(issue(12));
+      await tracker.setBoardStatusByNode("I_12", "Todo");
+
+      expect(
+        await mirror.apply(INTEGRATION, {
+          kind: "board_item_reread",
+          nodeId: "I_12",
+          removed,
+        }),
+      ).toBe("updated");
+
+      // One question, about the repository the ticket is cached in.
+      expect(boardStatusOf).toHaveBeenCalledExactlyOnceWith(
+        INTEGRATION,
+        REPO,
+        "I_12",
+      );
+      expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Review");
+    },
+  );
+
+  // #932-T02
+  it("empties the status of an item that left its only board, and keeps the status another board gives", async () => {
+    const none = setup({ board: { available: true, status: null } });
+    await none.changed(issue(12));
+    await none.tracker.setBoardStatusByNode("I_12", "Todo");
+    await none.mirror.apply(INTEGRATION, {
+      kind: "board_item_reread",
+      nodeId: "I_12",
+      removed: true,
+    });
+    expect((await none.tracker.getItem("r-1", 12))?.boardStatus).toBeNull();
+
+    // Deleted from one board while it is on another: that board still names a status, and the ticket keeps it.
+    const other = setup({ board: { available: true, status: "Done" } });
+    await other.changed(issue(12));
+    await other.tracker.setBoardStatusByNode("I_12", "Todo");
+    await other.mirror.apply(INTEGRATION, {
+      kind: "board_item_reread",
+      nodeId: "I_12",
+      removed: true,
+    });
+    expect((await other.tracker.getItem("r-1", 12))?.boardStatus).toBe("Done");
+  });
+
+  // #932-T03
+  it("empties the status of an item that left the board when the boards cannot be read, and leaves a created or restored one alone", async () => {
+    const { tracker, mirror, changed } = setup({
+      board: { available: false, status: null },
+    });
+    await changed(issue(12));
+    await tracker.setBoardStatusByNode("I_12", "Todo");
+
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: false,
+      }),
+    ).toBe("not_mirrored");
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Todo");
+
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: true,
+      }),
+    ).toBe("updated");
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBeNull();
+  });
+
+  // #932-T04
+  it("asks nothing for a ticket it does not hold or a repository without an active project", async () => {
+    const held = setup();
+    expect(
+      await held.mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_nobody",
+        removed: false,
+      }),
+    ).toBe("not_mirrored");
+
+    const off = setup({ project: false });
+    await off.changed(issue(12));
+    expect(
+      await off.mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: false,
+      }),
+    ).toBe("not_mirrored");
+
+    expect(held.boardStatusOf).not.toHaveBeenCalled();
+    expect(off.boardStatusOf).not.toHaveBeenCalled();
+  });
+
+  // #932-T05
+  it("fails the delivery when GitHub cannot be asked, so that it is redelivered", async () => {
+    const { tracker, mirror, boardStatusOf, changed } = setup();
+    boardStatusOf.mockRejectedValueOnce(new Error("GitHub is down"));
+    await changed(issue(12));
+    await tracker.setBoardStatusByNode("I_12", "Todo");
+
+    await expect(
+      mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: true,
+      }),
+    ).rejects.toThrow("GitHub is down");
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Todo");
   });
 
   // #923-T28

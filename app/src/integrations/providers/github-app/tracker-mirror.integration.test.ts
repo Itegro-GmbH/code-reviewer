@@ -68,6 +68,14 @@ async function setup() {
     repositories,
     projects,
     tracker,
+    async boardStatusOf(i, repo, nodeId) {
+      return (
+        (await provider.readBoardStatus?.(i, repo, nodeId)) ?? {
+          available: false,
+          status: null,
+        }
+      );
+    },
     async checksStateOf(i, repo, headSha) {
       return (await provider.readChecksState?.(i, repo, headSha)) ?? null;
     },

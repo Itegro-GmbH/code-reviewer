@@ -434,15 +434,57 @@ describe("the tickets of the mirror", () => {
     expect((await tracker.getItem(second.id, 12))?.boardStatus).toBe("Done");
   });
 
+  // #932-T22
+  it("finds a cached item by the node id in any repository of the workspace, never a tombstone", async () => {
+    const { tracker, first, second } = await setup();
+    await tracker.upsertItem(first.id, item(12));
+    await tracker.upsertItem(
+      second.id,
+      item(5, { repo: "acme/repo-2", nodeId: "N_other" }),
+    );
+
+    expect(await tracker.findItemByNode("N_other")).toMatchObject({
+      repositoryId: second.id,
+      number: 5,
+    });
+    expect(await tracker.findItemByNode("N_unknown")).toBeUndefined();
+
+    await tracker.deleteItem(first.id, 12, "2999-01-01T00:00:00.000Z");
+    expect(await tracker.findItemByNode("N_12")).toBeUndefined();
+  });
+
+  // #932-T23
+  it("says when the cache of a repository was last written: the newest row, a tombstone included, null for none", async () => {
+    const { tracker, first, second } = await setup();
+    expect(await tracker.newestWriteAt(first.id)).toBeNull();
+
+    await tracker.upsertItem(first.id, item(12));
+    const afterFirst = await tracker.newestWriteAt(first.id);
+    await tracker.upsertItem(first.id, item(13));
+    const afterSecond = await tracker.newestWriteAt(first.id);
+    await tracker.deleteItem(first.id, 12, "2999-01-01T00:00:00.000Z");
+
+    expect(afterFirst).not.toBeNull();
+    expect(afterSecond && afterFirst && afterSecond > afterFirst).toBe(true);
+    // Another repository's rows do not count.
+    expect(await tracker.newestWriteAt(second.id)).toBeNull();
+  });
+
   // #923-T94
-  it("sets and forgets the checks of a pull request", async () => {
+  it("sets the checks of a pull request, and forgets those of what is not an open pull request", async () => {
     const { tracker, first } = await setup();
     await tracker.upsertItem(first.id, item(7, { kind: "pull_request" }));
+    await tracker.upsertItem(
+      first.id,
+      item(8, { kind: "pull_request", state: "closed" }),
+    );
 
     expect(await tracker.setChecksState(first.id, 7, "failure")).toBe(true);
+    expect(await tracker.setChecksState(first.id, 8, "success")).toBe(true);
+    await tracker.clearChecksStatesOfClosed(first.id);
+    // #932: an open pull request keeps what the sync wrote; the sync wrote none for a pull request it did not read.
     expect((await tracker.getItem(first.id, 7))?.checksState).toBe("failure");
-    await tracker.clearChecksStates(first.id);
-    expect((await tracker.getItem(first.id, 7))?.checksState).toBeNull();
+    expect((await tracker.getItem(first.id, 8))?.checksState).toBeNull();
     expect(await tracker.setChecksState(first.id, 99, "failure")).toBe(false);
   });
 

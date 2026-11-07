@@ -229,7 +229,7 @@ describe("what a delivery says about the ticket mirror", () => {
   });
 
   // #923-T17
-  it("sets the board status of an item from the Status field, and empties it when the item leaves", () => {
+  it("sets the board status of an item from the Status field", () => {
     expect(parse("projects_v2_item.edited")).toEqual({
       kind: "change",
       change: {
@@ -238,19 +238,50 @@ describe("what a delivery says about the ticket mirror", () => {
         status: "In Progress",
       },
     });
-    expect(parse("projects_v2_item.deleted")).toEqual({
-      kind: "change",
-      change: {
-        kind: "board_status_changed",
-        nodeId: "I_kwDOAAA12",
-        status: null,
-      },
-    });
     expect(
       parse("projects_v2_item.edited.other-field", "projects_v2_item"),
     ).toMatchObject({
       kind: "ignored",
     });
+  });
+
+  // #932-T06
+  it.each([
+    ["created", false],
+    ["restored", false],
+    ["archived", true],
+    ["deleted", true],
+  ])(
+    "asks for the status again when a board item is %s: the delivery names none, and the ticket may be on other boards",
+    (action, removed) => {
+      expect(
+        parseTrackerChange({
+          integrationId: "i-1",
+          eventName: "projects_v2_item",
+          payload: {
+            ...(webhookFixture("projects_v2_item.deleted") as object),
+            action,
+          },
+        }),
+      ).toEqual({
+        kind: "change",
+        change: { kind: "board_item_reread", nodeId: "I_kwDOAAA12", removed },
+      });
+    },
+  );
+
+  // #932-T07
+  it("ignores the board item actions that carry no status and move no ticket", () => {
+    expect(
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "projects_v2_item",
+        payload: {
+          ...(webhookFixture("projects_v2_item.deleted") as object),
+          action: "reordered",
+        },
+      }),
+    ).toMatchObject({ kind: "ignored" });
   });
 
   // #923-T18

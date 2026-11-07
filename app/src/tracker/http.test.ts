@@ -15,7 +15,7 @@ const LIST = {
   repositoryId: "r-1",
   repo: "acme/widgets",
   items: [],
-  sync: { lastFullSyncAt: null, inProgress: false },
+  sync: { lastFullSyncAt: null, inProgress: false, lastWriteAt: null },
 };
 const PROGRESS = {
   status: "done" as const,

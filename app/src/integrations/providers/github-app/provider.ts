@@ -926,6 +926,27 @@ export function createGithubAppProvider(
       }
     },
 
+    async readBoardStatus(integration, repo, nodeId, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      try {
+        return await (
+          await getClient()
+        ).readTrackerBoardStatus(
+          integration.externalId,
+          { repositoryIds, permissions: TRACKER_BOARD_TOKEN_PERMISSIONS },
+          nodeId,
+          signal,
+        );
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
     async listBoards(integration, repo, signal) {
       const repositoryIds = jobTokenRepositoryIds(repo.externalId);
       if (repo.integrationId !== integration.id || repositoryIds === null)
