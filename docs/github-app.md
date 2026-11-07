@@ -305,7 +305,7 @@ instance admin.
 Anybody can install a public App, so an installation is **not** reviewed until a workspace has linked it
 (`docs/decisions/0001-editions-setup-and-accounts.md`, section 2.9). An Owner or Admin of the workspace does that:
 
-1. Open the workspace's **Settings**, tab **Integrations**, and press **Connect GitHub**. GitHub shows the App's installation page.
+1. Open the workspace's **Connections** page (in the factory: **Settings**, tab **Integrations**) and press **Connect GitHub**. GitHub shows the App's installation page.
 2. Pick the account or organization, and choose **Only select repositories**. Select the repositories the team
    wants reviewed. Granting "All repositories" is possible but not recommended. Confirm the permission list GitHub
    shows and press Install.
@@ -314,7 +314,7 @@ Anybody can install a public App, so an installation is **not** reviewed until a
    are the owner of the personal account, or an owner of the organization. A member of an organization who is not
    an owner cannot connect its installation, and neither can somebody who only has access to a repository.
    (If you are not allowed to install the App on an organization, GitHub asks its owners instead; once they
-   approved, use **Link an existing installation** on the Integrations tab.)
+   approved, use **Link an existing installation** on the Connections page.)
 4. The repositories of the installation appear under **Projects** of that workspace, and in no other. An
    installation belongs to one workspace only.
 
