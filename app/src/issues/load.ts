@@ -40,6 +40,7 @@ export async function loadIssuesPage(
     if (!(error instanceof TrackerError)) throw error;
   }
   const lanes: StartLane[] = [];
+  // One read per lane: the list does not carry the documents. A project has a handful of lanes, and a lane whose read fails is skipped.
   for (const workflow of (await deps.workflows.list(projectId)).workflows) {
     if (workflow.archivedAt !== null) continue;
     try {

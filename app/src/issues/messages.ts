@@ -26,7 +26,6 @@ export const BOARD_COPY = {
   noLane: "No lane",
   step: (step: string) => `at ${step}`,
   noBoardStatus: "not on a board",
-  openIssue: (number: number) => `Open issue #${String(number)}`,
   updateFailed:
     "Updating failed. The list shows the last data it got; it keeps trying.",
   updating: "Updating the list",
@@ -48,6 +47,10 @@ export const TILES_COPY = {
     name: "Spent on these issues",
     note: "all runs of the issues listed",
   },
+  scopeAll: (issues: number) =>
+    `Counted over all ${String(issues)} issues of the repository.`,
+  scopeLimited: (tickets: number) =>
+    `Counted over the ${String(tickets)} tickets that changed last; older ones are not included.`,
 } as const;
 
 export const WAITS_COPY = {
@@ -67,7 +70,6 @@ export const WAITS_COPY = {
 export const DRAWER_COPY = {
   description: "Details of this issue, in GitHub's own words.",
   openOnGitHub: "Open on GitHub",
-  close: "Close",
   state: "State",
   type: "Type",
   noType: "none",
@@ -87,7 +89,6 @@ export const DRAWER_COPY = {
   openRun: "Open the run",
   effort: "Effort",
   spent: "Spent",
-  noRuns: "No run has cost anything yet.",
   runtime: "Running for",
   questions: "Questions",
   rounds: "Rounds",
@@ -105,7 +106,6 @@ export const DRAWER_COPY = {
   lanePage: "Lane",
   updatedAt: "Changed in GitHub",
   syncedAt: "Read from GitHub",
-  body: "Description",
   stateReason: (reason: string) => `(${reason})`,
 } as const;
 
@@ -122,9 +122,6 @@ export const START_LANE_COPY = {
   start: "Start",
   starting: "Starting the lane",
   cancel: "Cancel",
-  started: "The run has started.",
-  openRun: "Open the run",
-  other: "This lane also asks for more than a ticket and cannot start here.",
 } as const;
 
 function formatUsdLimit(usd: number): string {

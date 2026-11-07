@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { ticket, ticketList } from "./test-fixtures.ts";
 import {
+  boardSettled,
   boardTiles,
   formatSince,
   formatUsd,
@@ -23,17 +24,35 @@ const running = {
   status: "running" as const,
 };
 
+type Pulls = Record<number, "open" | "closed" | "merged">;
+
+function listWith(issue: ReturnType<typeof ticket>, pulls: Pulls = {}) {
+  return ticketList([
+    issue,
+    ...Object.entries(pulls).map(([number, state]) =>
+      ticket(Number(number), {
+        kind: "pull_request",
+        state: state === "open" ? "open" : "closed",
+        stateReason: state === "merged" ? "merged" : null,
+      }),
+    ),
+  ]);
+}
+
+const waits = (issue: ReturnType<typeof ticket>, pulls: Pulls = {}) =>
+  waitsFor(listWith(issue, pulls), issue);
+
 describe("what an issue waits for", () => {
   // #925-T01
   it("is a start for an open issue nothing is going on for and no pull request is linked to", () => {
-    expect(waitsFor(REPO, ticket(1))).toEqual({ kind: "start" });
+    expect(waits(ticket(1))).toEqual({ kind: "start" });
   });
 
   // #925-T02
   it("is an answer, with the run page's coordinates, while its lane waits for one", () => {
     const item = ticket(2, { lane: { ...running, status: "waiting" } });
 
-    expect(waitsFor(REPO, item)).toEqual({
+    expect(waits(item)).toEqual({
       kind: "answer",
       workflowId: "wf-1",
       runId: "run-1",
@@ -41,10 +60,10 @@ describe("what an issue waits for", () => {
   });
 
   // #925-T03
-  it("is a review of the first linked pull request on GitHub when no lane works on the issue", () => {
-    const item = ticket(3, { pullRequests: [9, 10] });
+  it("is a review of the linked pull request on GitHub when it is open and no lane works on the issue", () => {
+    const item = ticket(3, { pullRequests: [9] });
 
-    expect(waitsFor(REPO, item)).toEqual({
+    expect(waits(item, { 9: "open" })).toEqual({
       kind: "review",
       url: "https://github.com/acme/widgets/pull/9",
     });
@@ -52,16 +71,51 @@ describe("what an issue waits for", () => {
 
   // #925-T04
   it("is nothing while a lane runs, and nothing for a closed issue", () => {
-    expect(waitsFor(REPO, ticket(4, { lane: running }))).toBeUndefined();
-    expect(waitsFor(REPO, ticket(5, { state: "closed" }))).toBeUndefined();
+    expect(waits(ticket(4, { lane: running }))).toBeUndefined();
+    expect(waits(ticket(5, { state: "closed" }))).toBeUndefined();
   });
 
   // #925-T05
   it("makes no link from a repository name that is not owner/name", () => {
     expect(pullRequestUrl("not a repository", 1)).toBeUndefined();
-    expect(waitsFor("not a repository", ticket(6, { pullRequests: [1] }))).toBe(
-      undefined,
-    );
+    const item = ticket(6, { pullRequests: [1] });
+    expect(
+      waitsFor(
+        ticketList([item, ticket(1, { kind: "pull_request" })], {
+          repo: "not a repository",
+        }),
+        item,
+      ),
+    ).toBe(undefined);
+  });
+
+  // #925-T40
+  it("is a start, not a review, when the linked pull request was closed without merging or was merged", () => {
+    const item = ticket(7, { pullRequests: [11, 12] });
+
+    expect(waits(item, { 11: "closed", 12: "merged" })).toEqual({
+      kind: "start",
+    });
+  });
+
+  // #925-T41
+  it("reviews the newest open pull request when an old one was closed and a newer one is open", () => {
+    const item = ticket(8, { pullRequests: [20, 25, 22] });
+
+    expect(waits(item, { 20: "open", 22: "closed", 25: "open" })).toEqual({
+      kind: "review",
+      url: "https://github.com/acme/widgets/pull/25",
+    });
+    expect(waits(item, { 20: "closed", 22: "closed", 25: "closed" })).toEqual({
+      kind: "start",
+    });
+  });
+
+  // #925-T42
+  it("does not count a linked pull request the list does not hold as open: its state is unknown", () => {
+    const item = ticket(9, { pullRequests: [30] });
+
+    expect(waits(item)).toEqual({ kind: "start" });
   });
 });
 
@@ -89,10 +143,14 @@ describe("the list", () => {
       ticket(4, { pullRequests: [8] }),
       ticket(5, { state: "closed", costUsd: 2 }),
       ticket(6, { kind: "pull_request", costUsd: 100 }),
+      ticket(8, { kind: "pull_request" }),
+      // A closed pull request is nothing to review: this issue waits for a start, not for the person.
+      ticket(9, { pullRequests: [10] }),
+      ticket(10, { kind: "pull_request", state: "closed" }),
     ]);
 
     expect(boardTiles(list)).toEqual({
-      open: 4,
+      open: 5,
       working: 2,
       waiting: 2,
       spentUsd: 3.75,
@@ -107,6 +165,24 @@ describe("the list", () => {
     expect(
       ticketUrl(REPO, ticket(1, { url: "https://evil.example/acme/widgets" })),
     ).toBeUndefined();
+  });
+});
+
+describe("when the board stops asking quickly", () => {
+  // #925-T48
+  it("asks quickly only while a lane runs: a lane that waits for an answer is settled until somebody answers", () => {
+    const waiting = { ...running, status: "waiting" as const };
+
+    expect(boardSettled(ticketList([ticket(1)]))).toBe(true);
+    expect(boardSettled(ticketList([ticket(1, { lane: waiting })]))).toBe(true);
+    expect(
+      boardSettled(
+        ticketList([
+          ticket(1, { lane: waiting }),
+          ticket(2, { lane: running }),
+        ]),
+      ),
+    ).toBe(false);
   });
 });
 

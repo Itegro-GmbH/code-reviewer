@@ -7,7 +7,7 @@
 // the run page until the ToDo answer panel, #924, exists) or Review (the pull request on GitHub). The server renders the first list and the
 // board asks again while a lane is on an issue (and slowly otherwise), the way the runs list does.
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Button } from "../components/button.tsx";
 import { NativeSelect } from "../components/native-select.tsx";
 import { StatusRegion } from "../components/status-region.tsx";
@@ -40,10 +40,12 @@ import {
   type IssuesApi,
 } from "./api.ts";
 import { IssueDrawer } from "./issue-drawer.tsx";
+import { useReturnFocus } from "./return-focus.ts";
 import { BOARD_COPY, TILES_COPY, WAITS_COPY } from "./messages.ts";
 import { StartLaneDialog } from "./start-lane-dialog.tsx";
 import type { StartLane } from "./start-lanes.ts";
 import {
+  boardSettled,
   boardTiles,
   formatUsd,
   issuesOf,
@@ -145,6 +147,13 @@ function BoardTable({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** What the tiles count: the issues of the list the board holds, which is not always all of the repository's. */
+function tilesScope(list: TicketList): string {
+  return list.items.length >= ISSUES_LISTED
+    ? TILES_COPY.scopeLimited(list.items.length)
+    : TILES_COPY.scopeAll(issuesOf(list).length);
+}
+
 function Tiles({ list }: { list: TicketList | null }) {
   const tiles = list === null ? null : boardTiles(list);
   const cells = [
@@ -163,18 +172,23 @@ function Tiles({ list }: { list: TicketList | null }) {
     },
   ];
   return (
-    <ul className="m-0 grid list-none grid-cols-2 gap-3 p-0 lg:grid-cols-4">
-      {cells.map((tile) => (
-        <li
-          key={tile.name}
-          className="flex flex-col gap-1 rounded-2xl border border-border bg-surface p-4"
-        >
-          <span className="text-sm text-muted-foreground">{tile.name}</span>
-          <span className="font-mono text-3xl leading-9">{tile.value}</span>
-          <span className="text-xs text-muted-foreground">{tile.note}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-2">
+      <ul className="m-0 grid list-none grid-cols-2 gap-3 p-0 lg:grid-cols-4">
+        {cells.map((tile) => (
+          <li
+            key={tile.name}
+            className="flex flex-col gap-1 rounded-2xl border border-border bg-surface p-4"
+          >
+            <span className="text-sm text-muted-foreground">{tile.name}</span>
+            <span className="font-mono text-3xl leading-9">{tile.value}</span>
+            <span className="text-xs text-muted-foreground">{tile.note}</span>
+          </li>
+        ))}
+      </ul>
+      {list === null ? null : (
+        <p className="m-0 text-xs text-muted-foreground">{tilesScope(list)}</p>
+      )}
+    </div>
   );
 }
 
@@ -206,18 +220,30 @@ function LiveBoard({
   const { data, failed, failureCode, stopped } = useLiveSnapshot({
     initial,
     fetchLatest: () => api.list(projectId),
-    isSettled: (list) => issuesOf(list).every((item) => item.lane === null),
+    isSettled: boardSettled,
     activeIntervalMs: ISSUES_POLL.activeMs,
     idleIntervalMs: ISSUES_POLL.idleMs,
   });
   const [filter, setFilter] = useState<Filter>("open");
   const [opened, setOpened] = useState<number | null>(null);
   const [starting, setStarting] = useState<number | null>(null);
+  const drawerFocus = useReturnFocus();
+  const startFocus = useReturnFocus();
   const issues = issuesOf(data);
   const shown =
     filter === "open" ? issues.filter((item) => item.state === "open") : issues;
-  const openedItem =
+  // The list is the issues that changed last: an issue can fall out of it while its drawer is open. The drawer then keeps the last data
+  // it had instead of closing under the person's hands.
+  const found =
     opened === null ? undefined : issues.find((item) => item.number === opened);
+  const [lastOpened, setLastOpened] = useState<TicketListItem | undefined>(
+    undefined,
+  );
+  if (found !== undefined && found !== lastOpened) setLastOpened(found);
+  const openedItem =
+    opened === null
+      ? undefined
+      : (found ?? (lastOpened?.number === opened ? lastOpened : undefined));
   return (
     <div className="flex flex-col gap-8">
       <Tiles list={data} />
@@ -274,12 +300,18 @@ function LiveBoard({
               <IssueRow
                 key={item.number}
                 workspaceSlug={workspaceSlug}
-                repo={data.repo}
+                list={data}
                 item={item}
                 mayStart={mayStart}
                 hasLanes={lanes.length > 0}
-                onOpen={() => setOpened(item.number)}
-                onStart={() => setStarting(item.number)}
+                onOpen={(button) => {
+                  drawerFocus.remember(button);
+                  setOpened(item.number);
+                }}
+                onStart={(button) => {
+                  startFocus.remember(button);
+                  setStarting(item.number);
+                }}
               />
             ))
           )}
@@ -298,6 +330,7 @@ function LiveBoard({
         list={data}
         item={openedItem}
         onClose={() => setOpened(null)}
+        onCloseAutoFocus={drawerFocus.onCloseAutoFocus}
         {...(apiProp === undefined ? {} : { api: apiProp })}
       />
       <StartLaneDialog
@@ -308,6 +341,7 @@ function LiveBoard({
         onOpenChange={(open) => {
           if (!open) setStarting(null);
         }}
+        onCloseAutoFocus={startFocus.onCloseAutoFocus}
         {...(runsApi === undefined ? {} : { api: runsApi })}
       />
     </div>
@@ -325,7 +359,7 @@ function SyncLine({ data }: { data: TicketList }) {
 
 function IssueRow({
   workspaceSlug,
-  repo,
+  list,
   item,
   mayStart,
   hasLanes,
@@ -333,22 +367,21 @@ function IssueRow({
   onStart,
 }: {
   workspaceSlug: string;
-  repo: string;
+  list: TicketList;
   item: TicketListItem;
   mayStart: boolean;
   hasLanes: boolean;
-  onOpen: () => void;
-  onStart: () => void;
+  onOpen: (button: HTMLElement) => void;
+  onStart: (button: HTMLElement) => void;
 }) {
-  const address = ticketUrl(repo, item);
+  const address = ticketUrl(list.repo, item);
   return (
     <TableRow data-issue={item.number}>
       <TableCell className="min-w-0 align-top whitespace-normal">
         <div className="flex flex-col gap-1">
           <button
             type="button"
-            onClick={onOpen}
-            aria-label={BOARD_COPY.openIssue(item.number)}
+            onClick={(event) => onOpen(event.currentTarget)}
             className="cursor-pointer border-0 bg-transparent p-0 text-left font-semibold break-words text-foreground"
           >
             <span className="font-mono text-muted-foreground">
@@ -411,7 +444,7 @@ function IssueRow({
         <WaitsCell
           workspaceSlug={workspaceSlug}
           number={item.number}
-          waits={waitsFor(repo, item)}
+          waits={waitsFor(list, item)}
           mayStart={mayStart}
           hasLanes={hasLanes}
           onStart={onStart}
@@ -434,8 +467,9 @@ function WaitsCell({
   waits: WaitsFor | undefined;
   mayStart: boolean;
   hasLanes: boolean;
-  onStart: () => void;
+  onStart: (button: HTMLElement) => void;
 }) {
+  const reasonId = useId();
   if (waits === undefined)
     return <span className="text-muted-foreground">{WAITS_COPY.none}</span>;
   if (waits.kind === "answer")
@@ -470,18 +504,31 @@ function WaitsCell({
     : !hasLanes
       ? WAITS_COPY.noLanes
       : undefined;
+  // A refused Start stays focusable (`aria-disabled`, not `disabled`) so a keyboard or screen reader user reaches it and hears why.
   return (
     <span className="inline-flex flex-col gap-1">
       <Button
         size="sm"
         variant="secondary"
-        onClick={onStart}
-        disabled={reason !== undefined}
+        onClick={(event) => {
+          if (reason === undefined) onStart(event.currentTarget);
+        }}
+        aria-disabled={reason === undefined ? undefined : true}
+        aria-describedby={reason === undefined ? undefined : reasonId}
         aria-label={WAITS_COPY.startLabel(number)}
-        title={reason}
+        className={
+          reason === undefined
+            ? undefined
+            : "cursor-not-allowed opacity-50 hover:translate-y-0"
+        }
       >
         {WAITS_COPY.start}
       </Button>
+      {reason === undefined ? null : (
+        <span id={reasonId} className="max-w-48 text-xs text-muted-foreground">
+          {reason}
+        </span>
+      )}
     </span>
   );
 }

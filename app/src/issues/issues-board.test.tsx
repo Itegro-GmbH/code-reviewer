@@ -168,7 +168,7 @@ describe("the Issues tab", () => {
     board();
 
     await userEvent.click(
-      within(rowOf(4)).getByRole("button", { name: "Open issue #4" }),
+      within(rowOf(4)).getByRole("button", { name: "#4 Ready to merge" }),
     );
 
     const drawer = await screen.findByRole("dialog", {
@@ -198,21 +198,30 @@ describe("the Issues tab", () => {
   });
 
   // #925-T37
-  it("disables Start with the reason for a person who may not start, and for a project without a lane", () => {
+  it("keeps a refused Start focusable and says why in words a screen reader reads, for a person who may not start and for a project without a lane", async () => {
     board({ mayStart: false });
     const denied = within(rowOf(1)).getByRole("button", {
       name: "Start a lane on issue #1",
     }) as HTMLButtonElement;
-    expect(denied.disabled).toBe(true);
-    expect(denied.title).toMatch(/may start/);
+    expect(denied.disabled).toBe(false);
+    expect(denied.getAttribute("aria-disabled")).toBe("true");
+    expect(
+      document.getElementById(denied.getAttribute("aria-describedby") ?? "")
+        ?.textContent,
+    ).toMatch(/may start/);
+    await userEvent.click(denied);
+    expect(screen.queryByRole("dialog")).toBeNull();
     cleanup();
 
     board({ lanes: [] });
     const none = within(rowOf(1)).getByRole("button", {
       name: "Start a lane on issue #1",
     }) as HTMLButtonElement;
-    expect(none.disabled).toBe(true);
-    expect(none.title).toMatch(/no lane/);
+    expect(none.getAttribute("aria-disabled")).toBe("true");
+    expect(
+      document.getElementById(none.getAttribute("aria-describedby") ?? "")
+        ?.textContent,
+    ).toMatch(/no lane/);
   });
 
   // #925-T38
@@ -231,5 +240,107 @@ describe("the Issues tab", () => {
     board({ initial: ticketList([ticket(5, { state: "closed" })]) });
 
     expect(screen.getByText("No open issues")).toBeTruthy();
+  });
+
+  // #925-T43
+  it("returns the focus to the row's button when the drawer closes, with Escape and with its close button", async () => {
+    board();
+    const opener = within(rowOf(4)).getByRole("button", {
+      name: "#4 Ready to merge",
+    });
+
+    await userEvent.click(opener);
+    await screen.findByRole("dialog", { name: /Ready to merge/ });
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(opener);
+
+    await userEvent.click(opener);
+    const drawer = await screen.findByRole("dialog", {
+      name: /Ready to merge/,
+    });
+    await userEvent.click(
+      within(drawer).getByRole("button", { name: "Close" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(opener);
+  });
+
+  // #925-T44
+  it("returns the focus to the Start button when the start dialog is cancelled or closed with Escape", async () => {
+    board();
+    const opener = within(rowOf(1)).getByRole("button", {
+      name: "Start a lane on issue #1",
+    });
+
+    await userEvent.click(opener);
+    await screen.findByRole("dialog", { name: "Start a lane on issue #1" });
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(opener);
+
+    await userEvent.click(opener);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Start a lane on issue #1",
+    });
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(opener);
+  });
+
+  // #925-T45
+  it("offers Review only for an open pull request: a closed one leaves Start", () => {
+    board({
+      initial: ticketList([
+        ticket(4, { pullRequests: [14] }),
+        ticket(14, { kind: "pull_request", state: "closed" }),
+      ]),
+    });
+
+    expect(within(rowOf(4)).queryByRole("link", { name: /Review/ })).toBeNull();
+    expect(
+      within(rowOf(4)).getByRole("button", {
+        name: "Start a lane on issue #4",
+      }),
+    ).toBeTruthy();
+  });
+
+  // #925-T46
+  it("keeps the drawer on the issue when a later list no longer holds it", async () => {
+    const { rerender } = board();
+    await userEvent.click(
+      within(rowOf(4)).getByRole("button", { name: "#4 Ready to merge" }),
+    );
+    await screen.findByRole("dialog", { name: /Ready to merge/ });
+
+    rerender(
+      <IssuesBoard
+        workspaceSlug="acme"
+        repositoryId="repo-1"
+        projectId="p-1"
+        initial={ticketList([ticket(1, { title: "Add caching" })])}
+        lanes={[LANE]}
+        mayStart
+        api={api}
+      />,
+    );
+
+    expect(screen.getByRole("dialog", { name: /Ready to merge/ })).toBeTruthy();
+  });
+
+  // #925-T47
+  it("says on the tiles that they count the issues loaded, and how many of the repository's that are", () => {
+    board();
+    expect(screen.getByText(/Counted over all 5 issues/)).toBeTruthy();
+    cleanup();
+
+    board({
+      initial: ticketList(
+        Array.from({ length: 200 }, (_, index) => ticket(index + 1)),
+      ),
+    });
+    expect(screen.getByText(/200 tickets that changed last/)).toBeTruthy();
   });
 });

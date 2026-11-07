@@ -44,11 +44,27 @@ export function ticketUrl(
 }
 
 /**
- * What the issue waits for: an answer when its lane asks one; a review when it is open, no lane works on it and a pull request is linked;
- * a start when it is open and nothing is going on or linked. A closed issue, and one a lane is working on, waits for nothing.
+ * The pull request of the issue that a person can review: the newest (highest number) of its linked pull requests that is open. A pull
+ * request the list does not hold has no known state, so it does not count as open: the list holds the tickets that changed last, and an
+ * old linked pull request outside of it is most likely over.
+ */
+export function openPullRequestOf(
+  list: TicketList,
+  item: TicketListItem,
+): number | undefined {
+  const open = item.pullRequests.filter(
+    (number) => pullRequestOf(list, number)?.state === "open",
+  );
+  return open.length === 0 ? undefined : Math.max(...open);
+}
+
+/**
+ * What the issue waits for: an answer when its lane asks one; a review when it is open, no lane works on it and a linked pull request is
+ * open; a start when it is open and nothing is going on and no pull request is open. A closed issue, and one a lane is working on, waits
+ * for nothing.
  */
 export function waitsFor(
-  repo: string,
+  list: TicketList,
   item: TicketListItem,
 ): WaitsFor | undefined {
   if (item.lane?.status === "waiting")
@@ -58,12 +74,15 @@ export function waitsFor(
       runId: item.lane.runId,
     };
   if (item.lane !== null || item.state !== "open") return undefined;
-  const [first] = item.pullRequests;
-  if (first !== undefined) {
-    const url = pullRequestUrl(repo, first);
-    return url === undefined ? undefined : { kind: "review", url };
-  }
-  return { kind: "start" };
+  const pull = openPullRequestOf(list, item);
+  if (pull === undefined) return { kind: "start" };
+  const url = pullRequestUrl(list.repo, pull);
+  return url === undefined ? undefined : { kind: "review", url };
+}
+
+/** Nothing changes quickly any more: no lane is running (a lane that waits for an answer changes when somebody answers). */
+export function boardSettled(list: TicketList): boolean {
+  return issuesOf(list).every((item) => item.lane?.status !== "running");
 }
 
 export function boardTiles(list: TicketList): BoardTiles {
@@ -72,7 +91,7 @@ export function boardTiles(list: TicketList): BoardTiles {
     open: issues.filter((item) => item.state === "open").length,
     working: issues.filter((item) => item.lane !== null).length,
     waiting: issues.filter((item) => {
-      const kind = waitsFor(list.repo, item)?.kind;
+      const kind = waitsFor(list, item)?.kind;
       return kind === "answer" || kind === "review";
     }).length,
     spentUsd: issues.reduce((sum, item) => sum + item.costUsd, 0),

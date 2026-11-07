@@ -142,6 +142,24 @@ describe("the issue drawer", () => {
       within(drawer).getByRole("heading", { name: "History" }),
     ).toBeTruthy();
     expect(within(drawer).getByText("round 2")).toBeTruthy();
+    // A run that waits for an answer is not "running for" anything: its clock would count the wait.
+    expect(within(drawer).queryByText("Running for")).toBeNull();
+  });
+
+  // #925-T49
+  it("says how long a run that is going has been going, while it runs", async () => {
+    const view = run({
+      id: "run-1",
+      status: "running",
+      createdAt: "2026-11-05T11:00:00.000Z",
+      steps: [step({ id: "implement", position: 0, status: "running" })],
+    });
+    open(
+      ticket(12, { lane: { ...LANE, status: "running" } }),
+      apiWith({ ok: true, data: { run: view } }),
+    );
+
+    expect(await screen.findByText("Running for")).toBeTruthy();
   });
 
   // #925-T28

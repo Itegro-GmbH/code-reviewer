@@ -45,6 +45,7 @@ export function StartLaneDialog({
   issueNumber,
   lanes,
   onOpenChange,
+  onCloseAutoFocus,
   api: apiProp,
 }: {
   workspaceSlug: string;
@@ -54,6 +55,8 @@ export function StartLaneDialog({
   issueNumber: number | null;
   lanes: readonly StartLane[];
   onOpenChange: (open: boolean) => void;
+  /** Where the focus goes when the dialog has closed (the Start button, see `useReturnFocus`). */
+  onCloseAutoFocus?: (event: Event) => void;
   /** Only tests pass this. */
   api?: WorkflowRunsApi;
 }) {
@@ -118,7 +121,9 @@ export function StartLaneDialog({
         onOpenChange(open);
       }}
     >
-      <DialogContent>
+      <DialogContent
+        {...(onCloseAutoFocus === undefined ? {} : { onCloseAutoFocus })}
+      >
         <DialogHeader>
           <DialogTitle>{START_LANE_COPY.title(issueNumber ?? 0)}</DialogTitle>
           <DialogDescription>{START_LANE_COPY.description}</DialogDescription>

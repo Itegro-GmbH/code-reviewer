@@ -5,6 +5,7 @@
 // issue as the ticket. No machine, profile or model is asked.
 import {
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -225,5 +226,37 @@ describe("the start dialog", () => {
     await userEvent.keyboard("{Escape}");
 
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  // #925-T50
+  it("sends one request for a double click on Start", async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    const start = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(
+      <StartLaneDialog
+        workspaceSlug="acme"
+        repo="acme/widgets"
+        issueNumber={7}
+        lanes={[LANE]}
+        onOpenChange={() => undefined}
+        api={apiWith(start as unknown as WorkflowRunsApi["start"])}
+      />,
+    );
+    const button = screen.getByRole("button", { name: START_LANE_COPY.start });
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(
+      screen.getByRole("button", { name: START_LANE_COPY.starting }),
+    );
+
+    expect(start).toHaveBeenCalledTimes(1);
+    finish({ ok: true, data: { run: run({ id: "run-9" }) } });
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledTimes(1));
   });
 });

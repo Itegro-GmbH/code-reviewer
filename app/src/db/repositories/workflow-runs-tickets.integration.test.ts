@@ -190,6 +190,77 @@ describe("the runs of a ticket", () => {
     ]);
   });
 
+  // #925-T01
+  it("leaves a discarded run out, and names the newest of a running and a newer waiting run", async () => {
+    const { runs, run, db, workflowId } = await setup();
+    const older = await run(REF, 0);
+    const newer = await run(REF, 0);
+    const discarded = await run(REF, 0);
+    await db
+      .updateTable("workflow_runs")
+      .set({ status: "waiting" })
+      .where("id", "=", newer.id)
+      .execute();
+    await db
+      .updateTable("workflow_runs")
+      .set({ status: "discarded", discarded_at: "2026-11-07T09:30:00.000Z" })
+      .where("id", "=", discarded.id)
+      .execute();
+
+    const [summary] = await runs.summarizeTickets([REF]);
+
+    expect(older.id).not.toBe(newer.id);
+    expect(summary?.activeRun).toEqual({
+      runId: newer.id,
+      workflowId,
+      workflowName: "Issue to PR",
+      stepId: null,
+      status: "waiting",
+    });
+  });
+
+  // #925-T01
+  it("shows the step that runs, then the one that waits for the answer, then the next one that is pending", async () => {
+    const { runs, run, db } = await setup();
+    const made = await run(REF, 0);
+    await runs.lockRun(made.id, async (lock) => {
+      for (const [position, stepId] of ["first", "second", "third"].entries())
+        await lock.addStep({
+          position,
+          stepId,
+          kind: "agent",
+          round: 1,
+          profile: null,
+          capMicroUsd: null,
+        });
+    });
+    const setStep = (stepId: string, status: "running" | "waiting") =>
+      db
+        .updateTable("workflow_step_runs")
+        .set(
+          status === "waiting"
+            ? {
+                status,
+                ask: JSON.stringify({ state: "open", question: "Which?" }),
+              }
+            : { status },
+        )
+        .where("run_id", "=", made.id)
+        .where("step_id", "=", stepId)
+        .execute();
+    const stepOf = async () =>
+      (await runs.summarizeTickets([REF]))[0]?.activeRun?.stepId;
+
+    // Only pending steps: the first of them.
+    expect(await stepOf()).toBe("first");
+    // A waiting step comes before a pending one that is earlier.
+    await setStep("second", "waiting");
+    expect(await stepOf()).toBe("second");
+    // A running step comes before a waiting one.
+    await setStep("third", "running");
+    expect(await stepOf()).toBe("third");
+  });
+
   // #923-T109
   it("has no active run for a ticket whose runs have ended, and says nothing of a ticket without a run", async () => {
     const { runs, run, db } = await setup();

@@ -111,6 +111,7 @@ export function IssueDrawer({
   list,
   item,
   onClose,
+  onCloseAutoFocus,
   api: apiProp,
 }: {
   workspaceSlug: string;
@@ -120,25 +121,34 @@ export function IssueDrawer({
   /** The issue shown; the drawer is open while it is set. */
   item: TicketListItem | undefined;
   onClose: () => void;
+  /** Where the focus goes when the drawer has closed (the row's button, see `useReturnFocus`). */
+  onCloseAutoFocus?: (event: Event) => void;
   /** Only tests pass this. */
   api?: IssuesApi;
 }) {
   const [defaultApi] = useState(() => browserIssuesApi(workspaceSlug));
   const api = apiProp ?? defaultApi;
   const run = useLaneRun(api, item?.lane ?? null);
+  // The drawer slides out after the issue is unset: it keeps showing the last issue until it is gone.
+  const [last, setLast] = useState(item);
+  if (item !== undefined && item !== last) setLast(item);
+  const shown = item ?? last;
   return (
     <Sheet
       open={item !== undefined}
       onOpenChange={(open) => !open && onClose()}
     >
-      <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-        {item === undefined ? null : (
+      <SheetContent
+        className="w-full overflow-y-auto sm:max-w-xl"
+        {...(onCloseAutoFocus === undefined ? {} : { onCloseAutoFocus })}
+      >
+        {shown === undefined ? null : (
           <DrawerBody
             workspaceSlug={workspaceSlug}
             repositoryId={repositoryId}
             projectId={projectId}
             list={list}
-            item={item}
+            item={shown}
             run={run}
           />
         )}
@@ -416,7 +426,9 @@ function Effort({ item, run }: { item: TicketListItem; run: RunState }) {
         <Field label={DRAWER_COPY.spent}>
           <span className="font-mono">{formatUsd(item.costUsd)}</span>
         </Field>
-        {run.kind === "ready" && run.run.finishedAt === null ? (
+        {run.kind === "ready" &&
+        run.run.finishedAt === null &&
+        run.run.status !== "waiting" ? (
           <Field label={DRAWER_COPY.runtime}>
             {formatSince(run.run.createdAt, new Date())}
           </Field>
