@@ -17,6 +17,9 @@ export const PROJECT_COPY = {
   waiting: (value: number | null) =>
     value === null ? "Waits for you –" : `${count(value)} wait for you`,
   newProject: "New project",
+  noneTitle: "No project yet",
+  noneDescription:
+    "The repositories of the GitHub App are listed under New project. Pick one as the ticket source to turn it into a project.",
 } as const;
 
 export const NEW_PROJECT_COPY = {
@@ -69,7 +72,8 @@ export const LANES_COPY = {
   emptyTitle: "No lanes yet",
   emptyDescription:
     "A lane is written through the API for now (docs/workflows.md). The lanes of the workspace are listed here.",
-  note: "Lanes are shared by the whole workspace until they belong to a project.",
+  note: "Lanes are shared by the whole workspace until they belong to a project (#922).",
+  allLink: "All lanes of the workspace",
   taskNote:
     "Until a lane can be started from an issue, a task goes to the agent by hand:",
   taskLink: "send a task",

@@ -98,7 +98,7 @@ test.describe("the pages of the app shell", () => {
   });
 
   // #925
-  test("@smoke a project opens its runs and its setup, and its own address opens the review settings where there is no factory", async ({
+  test("@smoke a project's own address opens the review settings where there is no factory, and the cockpit tabs do not exist", async ({
     page,
   }) => {
     await signInThroughTheForm(page, account);
@@ -108,48 +108,33 @@ test.describe("the pages of the app shell", () => {
       page.getByRole("heading", { level: 1, name: REPOSITORY }),
     ).toBeVisible();
     await expect(page).toHaveURL(/\/projects\/[^/]+\/review$/);
+    await expect(page.getByRole("navigation", { name: "Project" })).toHaveCount(
+      0,
+    );
     const repositoryPath = page.url().replace(/\/review$/, "");
 
-    await page.goto(`${repositoryPath}/setup`);
-    await expect(
-      page.getByRole("heading", { level: 1, name: REPOSITORY }),
-    ).toBeVisible();
-    const tabs = page.getByRole("navigation", { name: "Project" });
-    await expect(tabs.getByRole("link")).toHaveText(["Runs", "Setup"]);
-    await expect(tabs.getByRole("link", { name: "Setup" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    await expect(
-      page.getByRole("heading", { level: 2, name: "Ticket source" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: "Open the review settings" }),
-    ).toBeVisible();
-
-    await tabs.getByRole("link", { name: "Runs" }).click();
-    await expect(page).toHaveURL(/\/projects\/[^/]+\/runs$/);
-    await expect(tabs.getByRole("link", { name: "Runs" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-  });
-
-  // #925
-  test("a project of another workspace or one that does not exist is the page that is not found, on every tab", async ({
-    page,
-  }) => {
-    await signInThroughTheForm(page, account);
-    const slug = /\/w\/([a-z0-9-]+)\//.exec(page.url())?.[1] ?? "default";
-
-    for (const tab of ["runs", "setup"]) {
-      // The data sits behind the layout's Suspense, so the response is already streaming and its status stays 200: what is
-      // proven is the page, not the status.
-      await page.goto(`/w/${slug}/projects/no-such-project/${tab}`);
+    for (const tab of ["runs", "setup", "lanes", "todos"]) {
+      await page.goto(`${repositoryPath}/${tab}`);
 
       await expect(
         page.getByRole("heading", { level: 1, name: "Page not found" }),
       ).toBeVisible();
     }
+  });
+
+  // #925
+  test("a project of another workspace or one that does not exist is the page that is not found", async ({
+    page,
+  }) => {
+    await signInThroughTheForm(page, account);
+    const slug = /\/w\/([a-z0-9-]+)\//.exec(page.url())?.[1] ?? "default";
+
+    // The data sits behind the layout's Suspense, so the response is already streaming and its status stays 200: what is
+    // proven is the page, not the status.
+    await page.goto(`/w/${slug}/projects/no-such-project/review`);
+
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Page not found" }),
+    ).toBeVisible();
   });
 });

@@ -104,7 +104,14 @@ test.describe("a provider of the catalog for Dynamic Review", () => {
 
     // The providers of the catalog, searchable, next to the two cards of the registry.
     await page.getByRole("link", { name: "Settings" }).first().click();
-    await page.getByRole("link", { name: "LLM", exact: true }).first().click();
+    await page
+      .getByRole("navigation", { name: "Settings sections" })
+      .getByRole("link", { name: "Integrations", exact: true })
+      .click();
+    await page
+      .getByRole("navigation", { name: "Integrations pages" })
+      .getByRole("link", { name: "LLM", exact: true })
+      .click();
     await expect(
       page.getByRole("heading", { level: 2, name: "Other providers" }),
     ).toBeVisible();

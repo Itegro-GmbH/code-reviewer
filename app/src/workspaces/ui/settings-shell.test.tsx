@@ -52,7 +52,18 @@ describe("the settings tabs", () => {
 
   // #282-T01
   it("has no Plan page unless the workspace has entitlements", () => {
-    expect(tabs({ current: "billing" })).not.toContain("Billing");
+    expect(tabs({ current: "" })).not.toContain("Billing");
+  });
+
+  // #925
+  it("lists and marks the tab of the page that is open even where nothing else would list it", () => {
+    expect(tabs({ current: "plan" })).toContain("Billing");
+
+    expect(
+      screen
+        .getByRole("link", { name: "Billing" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
   });
 
   // #282-T01

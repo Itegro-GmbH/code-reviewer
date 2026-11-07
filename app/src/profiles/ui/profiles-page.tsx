@@ -112,7 +112,8 @@ export function ProfilesPageContent({
   );
   const api = apiProp ?? defaultApi;
   const [openId, setOpenId] = useState<string | null>(null);
-  const [versions, setVersions] = useState<Record<string, number>>({});
+  // What a save answered, by profile id: the list row and the drawer show it without asking the server again.
+  const [saved, setSaved] = useState<Record<string, ProfileView>>({});
 
   return (
     <section aria-labelledby="profiles-heading" className="flex flex-col gap-3">
@@ -148,8 +149,11 @@ export function ProfilesPageContent({
             {profiles.map((profile) => (
               <ProfileRow
                 key={profile.id}
-                profile={profile}
-                version={versions[profile.id] ?? profile.version}
+                profile={
+                  saved[profile.id] === undefined
+                    ? profile
+                    : profileRowOf(saved[profile.id]!)
+                }
                 onOpen={() => setOpenId(profile.id)}
               />
             ))}
@@ -159,9 +163,10 @@ export function ProfilesPageContent({
       <ProfileDrawer
         api={api}
         profileId={openId}
+        saved={openId === null ? undefined : saved[openId]}
         onClose={() => setOpenId(null)}
-        onSaved={(id, version) =>
-          setVersions((current) => ({ ...current, [id]: version }))
+        onSaved={(view) =>
+          setSaved((current) => ({ ...current, [view.id]: view }))
         }
       />
     </section>
@@ -170,11 +175,9 @@ export function ProfilesPageContent({
 
 function ProfileRow({
   profile,
-  version,
   onOpen,
 }: {
   profile: ProfileRowData;
-  version: number;
   onOpen: () => void;
 }) {
   return (
@@ -187,18 +190,25 @@ function ProfileRow({
         >
           <span className="font-semibold break-words">{profile.name}</span>
           <span className="text-xs text-muted-foreground">
-            {PROFILES_COPY.version(version)}
+            {PROFILES_COPY.version(profile.version)}
           </span>
         </button>
       </TableCell>
       <TableCell className="whitespace-normal break-words">
         {profile.harness} · {profile.model}
       </TableCell>
-      {/* Where a profile runs is a choice per profile that comes later; every harness has its own place today. */}
-      <TableCell>
-        {profile.harness === "claude-code"
-          ? PROFILES_COPY.runnerOwn
-          : PROFILES_COPY.hostedSandbox}
+      {/* Where a profile runs is a choice per profile that comes later (#919); today the harness decides, and the cell says so. */}
+      <TableCell className="whitespace-normal">
+        <span className="flex flex-col gap-0.5">
+          <span>
+            {profile.harness === "claude-code"
+              ? PROFILES_COPY.runnerOwn
+              : PROFILES_COPY.hostedSandbox}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            {PROFILES_COPY.fromHarness}
+          </span>
+        </span>
       </TableCell>
       <TableCell className="text-muted-foreground">
         {profile.canPush ? PROFILES_COPY.mayPush : PROFILES_COPY.readOnly}
@@ -214,31 +224,47 @@ function ProfileRow({
 function ProfileDrawer({
   api,
   profileId,
+  saved,
   onClose,
   onSaved,
 }: {
   api: ProfilesApi;
   profileId: string | null;
+  /** What the last save of the open profile answered; it wins over a read that is older. */
+  saved: ProfileView | undefined;
   onClose: () => void;
-  onSaved: (id: string, version: number) => void;
+  onSaved: (profile: ProfileView) => void;
 }) {
   const [loaded, reload] = useRequest(api, profileId, loadProfile);
+  // The notice lives here: the body starts again from every new version, and the notice must outlast that.
+  const [notice, setNotice] = useState<string | null>(null);
+  const shown =
+    loaded.state === "ready"
+      ? saved !== undefined && saved.version >= loaded.data.profile.version
+        ? saved
+        : loaded.data.profile
+      : null;
   return (
     <Sheet
       open={profileId !== null}
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (open) return;
+        setNotice(null);
+        onClose();
       }}
     >
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
-        {loaded.state === "ready" ? (
+        {shown !== null ? (
           <DrawerBody
             // A new version of the same profile starts the form again from what was saved.
-            key={`${loaded.data.profile.id}:${String(loaded.data.profile.version)}`}
+            key={`${shown.id}:${String(shown.version)}`}
             api={api}
-            profile={loaded.data.profile}
-            onSaved={onSaved}
-            onReload={reload}
+            profile={shown}
+            notice={notice}
+            onSaved={(profile) => {
+              setNotice(DRAWER_COPY.saved(profile.version));
+              onSaved(profile);
+            }}
           />
         ) : (
           <>
@@ -267,26 +293,24 @@ function ProfileDrawer({
 function DrawerBody({
   api,
   profile,
+  notice,
   onSaved,
-  onReload,
 }: {
   api: ProfilesApi;
   profile: ProfileView;
-  onSaved: (id: string, version: number) => void;
-  onReload: () => void;
+  notice: string | null;
+  onSaved: (profile: ProfileView) => void;
 }) {
   const { document } = profile;
   const [harness, setHarness] = useState<ProfileHarness>(document.harness);
   const [instructions, setInstructions] = useState(document.instructions);
   const [canPush, setCanPush] = useState(document.canPush);
   const [pending, setPending] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const idPrefix = `profile-${profile.id}`;
 
   const save = useCallback(async () => {
     setPending(true);
-    setNotice(null);
     setProblem(null);
     const result = await api.saveVersion(
       profile.id,
@@ -302,10 +326,8 @@ function DrawerBody({
       );
       return;
     }
-    setNotice(DRAWER_COPY.saved(result.data.profile.version));
-    onSaved(profile.id, result.data.profile.version);
-    onReload();
-  }, [api, profile, harness, instructions, canPush, onSaved, onReload]);
+    onSaved(result.data.profile);
+  }, [api, profile, harness, instructions, canPush, onSaved]);
 
   const modelText = modelTextOf(document.model);
   return (
@@ -434,7 +456,7 @@ function DrawerBody({
             <AlertDescription>{problem}</AlertDescription>
           </Alert>
         ) : null}
-        <StatusRegion>{notice ?? ""}</StatusRegion>
+        <StatusRegion>{problem === null ? (notice ?? "") : ""}</StatusRegion>
         <div className="flex flex-wrap gap-2">
           <Button
             loading={pending}

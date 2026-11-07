@@ -89,6 +89,11 @@ export function ProjectsPageContent({
 }) {
   // One attention region for the whole page (#173): the configuration hints and the workspace's LLM
   // hint are rows of the same strip instead of two separate notice regions.
+  const activationBlocked = data.config.githubApp.configured
+    ? null
+    : audience === "operator"
+      ? ACTIVATION_BLOCKED_TEXT
+      : ACTIVATION_BLOCKED_TEXT_FOR_MEMBERS;
   const notices: AttentionNotice[] = [
     ...describeConfigNotices(product, data.config, audience),
     ...(llmNotice === null ? [] : [llmNotice]),
@@ -110,6 +115,7 @@ export function ProjectsPageContent({
                     repositoryId,
                     fullName,
                   }))}
+                blockedReason={activationBlocked}
                 {...(api === undefined ? {} : { api })}
               />
             </div>
@@ -127,13 +133,7 @@ export function ProjectsPageContent({
           canConnect={canConnect}
           canStartReview={canStartReview}
           view={data.list}
-          activationBlocked={
-            data.config.githubApp.configured
-              ? null
-              : audience === "operator"
-                ? ACTIVATION_BLOCKED_TEXT
-                : ACTIVATION_BLOCKED_TEXT_FOR_MEMBERS
-          }
+          activationBlocked={activationBlocked}
           {...(api === undefined ? {} : { api })}
           {...(manualReviewApi === undefined ? {} : { manualReviewApi })}
         />

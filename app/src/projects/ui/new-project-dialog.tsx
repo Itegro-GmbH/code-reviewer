@@ -4,7 +4,8 @@
 // The "New project" dialog (#925, prototype): one ticket source and an optional board. A project is a repository of the GitHub App for
 // now, so the ticket source is the choice of a repository that is not a project yet, and "Create" switches it on (the route that
 // the project switch uses) and opens its cockpit. The board has no backend yet (the ticket source, #923) and is shown disabled with
-// its hint. Only an Admin or an Owner may create a project (`manage_projects`); the page leaves the button out for a Member.
+// its hint. Only an Admin or an Owner may create a project (`manage_projects`); the page leaves the button out for a Member. Where the GitHub
+// App is not configured nothing can be switched on: the button is disabled and the reason stands next to it (`blockedReason`, the text of the project switch).
 import { useRouter } from "next/navigation";
 import { useId, useMemo, useState } from "react";
 import { Button } from "../../components/button.tsx";
@@ -31,11 +32,14 @@ export type NewProjectChoice = { repositoryId: string; fullName: string };
 export function NewProjectDialog({
   workspaceSlug,
   choices,
+  blockedReason = null,
   api: apiProp,
 }: {
   workspaceSlug: string;
   /** The repositories that are not a project yet and can be read. */
   choices: readonly NewProjectChoice[];
+  /** Why no project can be created now (the GitHub App is not configured); the button is disabled and says so. */
+  blockedReason?: string | null;
   /** Only tests pass this. */
   api?: ProjectsApi;
 }) {
@@ -49,6 +53,7 @@ export function NewProjectDialog({
   const sourceId = useId();
   const boardId = useId();
   const boardHintId = useId();
+  const blockedId = useId();
   const [open, setOpen] = useState(false);
   const [repositoryId, setRepositoryId] = useState("");
   const [pending, setPending] = useState(false);
@@ -68,6 +73,17 @@ export function NewProjectDialog({
     router.push(projectPath(workspaceSlug, repositoryId));
   }
 
+  if (blockedReason !== null)
+    return (
+      <div className="flex flex-col items-end gap-1">
+        <Button disabled aria-describedby={blockedId}>
+          {PROJECT_COPY.newProject}
+        </Button>
+        <p id={blockedId} className="text-xs text-muted-foreground">
+          {blockedReason}
+        </p>
+      </div>
+    );
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>

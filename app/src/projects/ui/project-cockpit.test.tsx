@@ -2,12 +2,11 @@
 
 // @vitest-environment jsdom
 // The frame of a project's cockpit (#925): the repository as the title with its state, the trail back to the projects, and the five tabs
-// of the factory as links with the current one marked; a deployment without the factory lists only Runs and Setup. The tabs' contents
-// show the empty states of the prototype where the data comes later.
+// of the factory as links with the current one marked. The tabs' contents show the empty states of the prototype where the data comes later.
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ProjectRowView } from "./list-view.ts";
-import { ProjectCockpit, cockpitTabsFor } from "./project-cockpit.tsx";
+import { ProjectCockpit } from "./project-cockpit.tsx";
 import {
   IssuesTab,
   LanesTab,
@@ -32,7 +31,7 @@ describe("the cockpit frame", () => {
   // #925
   it("has the title, the state, the trail and the five tabs of the factory as links, the current one marked", () => {
     render(
-      <ProjectCockpit workspaceSlug="acme" row={ROW} tab="lanes" factory>
+      <ProjectCockpit workspaceSlug="acme" row={ROW} tab="lanes">
         <p>content</p>
       </ProjectCockpit>,
     );
@@ -66,24 +65,9 @@ describe("the cockpit frame", () => {
   });
 
   // #925
-  it("lists only Runs and Setup in a deployment without the factory", () => {
-    expect(cockpitTabsFor(false).map((tab) => tab.label)).toEqual([
-      "Runs",
-      "Setup",
-    ]);
-    expect(cockpitTabsFor(true)).toHaveLength(5);
-  });
-
-  // #925
   it("shows the count of open ToDos on the ToDos tab once there is one", () => {
     render(
-      <ProjectCockpit
-        workspaceSlug="acme"
-        row={ROW}
-        tab=""
-        factory
-        todoCount={3}
-      >
+      <ProjectCockpit workspaceSlug="acme" row={ROW} tab="" todoCount={3}>
         <p>content</p>
       </ProjectCockpit>,
     );
@@ -135,6 +119,11 @@ describe("the tabs", () => {
     ).toBe("/w/acme/workflows/wf-1");
     expect(screen.getByText(/shared by the whole workspace/)).toBeTruthy();
     expect(
+      screen
+        .getByRole("link", { name: "All lanes of the workspace" })
+        .getAttribute("href"),
+    ).toBe("/w/acme/workflows");
+    expect(
       screen.getByRole("link", { name: "send a task" }).getAttribute("href"),
     ).toBe("/w/acme/implementer");
   });
@@ -144,6 +133,9 @@ describe("the tabs", () => {
     render(<LanesTab workspaceSlug="acme" lanes={[]} />);
 
     expect(screen.getByText("No lanes yet")).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "All lanes of the workspace" }),
+    ).toBeTruthy();
   });
 
   // #925

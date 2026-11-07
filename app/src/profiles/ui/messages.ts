@@ -23,6 +23,7 @@ export const PROFILES_COPY = {
   readOnly: "read-only",
   hostedSandbox: "Hosted sandbox",
   runnerOwn: "Your runner",
+  fromHarness: "from harness",
   none: "–",
   version: (version: number) => `v${String(version)}`,
 } as const;

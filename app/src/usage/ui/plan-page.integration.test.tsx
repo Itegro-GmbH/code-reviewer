@@ -99,7 +99,8 @@ describe("the plan page file", () => {
     expect(markup).toContain("2 of 5");
     expect(markup).toContain("0 of 2");
     expect(markup).toContain("62 % of the usage limit used");
-    expect(markup).toContain(">Plan</a>");
+    // The Plan page is the only page of the Billing tab, so the navigation lists it as the tab.
+    expect(markup).toContain(">Billing</a>");
     expect(markup).not.toMatch(/6200000|10000000|6\.2|\$|USD/);
   });
 

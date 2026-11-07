@@ -95,6 +95,8 @@ describe("the list of profiles", () => {
       within(first).getByText("opencode · anthropic · claude-sonnet-5-5"),
     ).toBeTruthy();
     expect(within(first).getByText("Hosted sandbox")).toBeTruthy();
+    // The runner is not a field of the profile: the cell says it comes from the harness.
+    expect(within(first).getByText("from harness")).toBeTruthy();
     expect(within(first).getByText("may push")).toBeTruthy();
     const second = screen.getByRole("row", { name: /reviewer/ });
     expect(within(second).getByText("Your runner")).toBeTruthy();
@@ -193,6 +195,54 @@ describe("the drawer of a profile", () => {
   });
 
   // #925
+  it("says the version it saved, in the drawer that stays open", async () => {
+    const { api } = fakeApi();
+    const { user, dialog } = await openDrawer(api);
+    await within(dialog).findByLabelText("Instructions");
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save as new version" }),
+    );
+
+    expect(await within(dialog).findByText("Saved as version 3.")).toBeTruthy();
+    expect(within(dialog).getByText("Profile · v3")).toBeTruthy();
+    // The save is answered with the new version: nothing is read again.
+    expect(api.get).toHaveBeenCalledTimes(1);
+  });
+
+  // #925
+  it("shows the saved harness, rights and version in the row of the list", async () => {
+    const saved = view({
+      version: 3,
+      document: {
+        ...view().document,
+        canPush: false,
+        harness: "claude-code",
+      },
+    });
+    const { api, saveVersion } = fakeApi();
+    saveVersion.mockResolvedValueOnce({ ok: true, data: { profile: saved } });
+    const { user, dialog } = await openDrawer(api);
+    await within(dialog).findByLabelText("Instructions");
+    // The open drawer hides the page behind it from the accessibility tree.
+    const row = screen.getByRole("row", { name: /implementer/, hidden: true });
+    expect(within(row).getByText("v2")).toBeTruthy();
+    expect(within(row).getByText("Hosted sandbox")).toBeTruthy();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save as new version" }),
+    );
+    await within(dialog).findByText("Saved as version 3.");
+
+    expect(within(row).getByText("v3")).toBeTruthy();
+    expect(
+      within(row).getByText("claude-code · anthropic · claude-sonnet-5-5"),
+    ).toBeTruthy();
+    expect(within(row).getByText("Your runner")).toBeTruthy();
+    expect(within(row).getByText("read-only")).toBeTruthy();
+  });
+
+  // #925
   it("says the profile has a newer version when the save conflicts, and keeps the form", async () => {
     const { api } = fakeApi();
     api.saveVersion.mockResolvedValueOnce({
@@ -233,6 +283,37 @@ describe("the drawer of a profile", () => {
 });
 
 describe("the body of the next version", () => {
+  // #925
+  it("keeps the cost limit and the default result of the version it starts from", () => {
+    const defaultResult: NonNullable<ProfileView["document"]["defaultResult"]> =
+      {
+        type: "object",
+        required: ["findings"],
+        properties: { findings: { type: "array", items: { type: "string" } } },
+      };
+    const profile = view({
+      document: {
+        ...view().document,
+        costLimitCents: 750,
+        defaultResult,
+      },
+    });
+
+    const body = nextVersionBody(profile, {
+      harness: "claude-code",
+      instructions: "x",
+      canPush: false,
+    });
+
+    expect(body).toMatchObject({
+      costLimitCents: 750,
+      defaultResult,
+      harness: "claude-code",
+      canPush: false,
+      instructions: "x",
+    });
+  });
+
   // #925
   it("leaves out the fields the version has none of, so they stay unset", () => {
     const profile = view({

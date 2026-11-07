@@ -3,9 +3,15 @@
 // The projects of the factory as cards (#925, prototype board "2 Projects"): the repository, the ticket source in its own words
 // ("Issues of <repository>"), the open issues, the lanes that are running and what waits for the person. A project is a repository
 // of the GitHub App for now; the open issues and the lanes come with the ticket source (#923) and the lanes (#922), until then a card
-// says "–" for them. Repository names are untrusted GitHub text and are rendered as text; a long one wraps instead of widening the card.
+// says "–" for them. Only a repository that is switched on is a project and gets a card; the others are what "New project" offers. Repository names are untrusted GitHub text and are rendered as text; a long one wraps instead of widening the card.
 import Link from "next/link";
 import { Badge } from "../../components/ui/badge.tsx";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "../../components/ui/empty.tsx";
 import { workspacePath } from "../../workspaces/paths.ts";
 import { NoRepositories } from "./no-repositories.tsx";
 import type { ProjectListView, ProjectRowView } from "./list-view.ts";
@@ -77,18 +83,28 @@ export function ProjectCards({
         canConnect={canConnect}
       />
     );
+  const projects = view.rows.filter((row) => row.switchedOn);
+  if (projects.length === 0)
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyTitle>{PROJECT_COPY.noneTitle}</EmptyTitle>
+          <EmptyDescription>{PROJECT_COPY.noneDescription}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
   return (
     <section aria-labelledby="projects-heading" className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 id="projects-heading" className="text-lg leading-7 font-semibold">
-          {PROJECT_COPY.allProjects(view.rows.length)}
+          {PROJECT_COPY.allProjects(projects.length)}
         </h2>
         <p className="text-sm text-muted-foreground">
           {PROJECT_COPY.allProjectsHint}
         </p>
       </div>
       <ul className="m-0 grid list-none grid-cols-1 gap-4 p-0 md:grid-cols-2">
-        {view.rows.map((row) => (
+        {projects.map((row) => (
           <ProjectCard
             key={row.repositoryId}
             workspaceSlug={workspaceSlug}

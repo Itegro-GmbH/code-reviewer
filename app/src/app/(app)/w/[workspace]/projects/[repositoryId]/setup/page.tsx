@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConfigStatusFor } from "@/config-status/shared";
+import { requireImplementerCapability } from "@/implementer/shared";
 import { projectServiceFor } from "@/projects/shared";
 import { SETUP_COPY } from "@/projects/ui/cockpit-messages";
 import { loadProjectRow } from "@/projects/ui/list-view";
@@ -20,10 +21,12 @@ import { CockpitFrame } from "../cockpit-frame";
 export const metadata: Metadata = { title: "Project · Setup" };
 
 // The setup of one project (#925): its ticket source (one, in its own words), the switch that turns the project on, the re-read of the
-// repositories from GitHub and the way to the review settings. The switch and the re-read are the ones of the old project list.
+// repositories from GitHub and the way to the review settings. The switch and the re-read are the ones of the old project list. Only in a
+// deployment with the capability `implementer`: elsewhere the project list has these controls.
 export default async function ProjectSetupPage({
   params,
 }: PageProps<"/w/[workspace]/projects/[repositoryId]/setup">) {
+  requireImplementerCapability();
   const { workspace: slug, repositoryId } = await params;
   const { workspace, role, user } = await requireWorkspace(slug);
   return (

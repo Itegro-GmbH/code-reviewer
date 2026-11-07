@@ -68,6 +68,42 @@ describe("the project cards", () => {
   });
 
   // #925
+  it("shows a card only for a repository that is switched on, and says so when none is", () => {
+    const { rerender } = render(
+      <ProjectCards
+        workspaceSlug="acme"
+        canConnect
+        view={{
+          rows: [
+            row(),
+            row({
+              repositoryId: "repo-2",
+              fullName: "acme/api",
+              status: "inactive",
+              switchedOn: false,
+            }),
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { level: 2, name: "All projects · 1" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /acme\/api/ })).toBeNull();
+
+    rerender(
+      <ProjectCards
+        workspaceSlug="acme"
+        canConnect
+        view={{ rows: [row({ status: "inactive", switchedOn: false })] }}
+      />,
+    );
+    expect(screen.getByText("No project yet")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: /acme\/widgets/ })).toBeNull();
+  });
+
+  // #925
   it("encodes the id of the repository in the address of the cockpit", () => {
     render(
       <ProjectCards
@@ -212,6 +248,24 @@ describe("the New project dialog", () => {
 
     expect(await within(dialog).findByRole("alert")).toBeTruthy();
     expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  // #925
+  it("is disabled with the reason beside it when the GitHub App is not configured", () => {
+    render(
+      <NewProjectDialog
+        workspaceSlug="acme"
+        choices={[{ repositoryId: "repo-2", fullName: "acme/api" }]}
+        blockedReason="The GitHub App is not configured."
+        api={fakeApi().api}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "New project" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.getAttribute("aria-describedby")).toBe(
+      screen.getByText("The GitHub App is not configured.").id,
+    );
   });
 
   // #925

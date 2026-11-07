@@ -146,7 +146,7 @@ test.describe("a multi-tenant instance", () => {
     await expect(page.getByRole("heading", { name: "Instance" })).toHaveCount(
       0,
     );
-    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    const nav = page.getByRole("navigation", { name: "General pages" });
     await nav.getByRole("link", { name: "Advanced" }).click();
     await expect(page).toHaveURL(/\/w\/closing-time\/settings\/advanced$/);
     await expect(page.getByRole("button")).toContainText(["Delete workspace…"]);

@@ -175,6 +175,11 @@ export function LanesTab({
           </TableBody>
         </Table>
       )}
+      <p className="text-sm">
+        <Link href={workspacePath(workspaceSlug, "/workflows")}>
+          {LANES_COPY.allLink}
+        </Link>
+      </p>
       <p className="text-xs text-muted-foreground">{LANES_COPY.note}</p>
       <p className="text-sm text-muted-foreground">
         {LANES_COPY.taskNote}{" "}

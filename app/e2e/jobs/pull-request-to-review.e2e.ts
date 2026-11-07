@@ -368,7 +368,14 @@ test.describe("a pull request on its way to a review comment", () => {
     });
     await signInThroughTheForm(page, account);
     await page.getByRole("link", { name: "Settings", exact: true }).click();
-    await page.getByRole("link", { name: "LLM", exact: true }).click();
+    await page
+      .getByRole("navigation", { name: "Settings sections" })
+      .getByRole("link", { name: "Integrations", exact: true })
+      .click();
+    await page
+      .getByRole("navigation", { name: "Integrations pages" })
+      .getByRole("link", { name: "LLM", exact: true })
+      .click();
     await expect(page).toHaveURL(/\/w\/default\/settings\/llm$/);
     const form = page.getByRole("form", { name: "OpenRouter LLM key" });
     await form.getByLabel("API key").fill(WORKSPACE_KEY);

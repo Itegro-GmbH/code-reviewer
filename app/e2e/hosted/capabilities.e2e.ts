@@ -95,12 +95,14 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       `/api/w/${slug}/environments`,
       `/api/w/${slug}/environments/x`,
       `/w/${slug}/environments`,
-      // The shell of the factory (#925): the ToDos and the profiles, the count on the sidebar link, and the ToDos and lanes tabs of a project.
+      // The shell of the factory (#925): the ToDos and the profiles, the count on the sidebar link, and the tabs of a project's cockpit.
       `/w/${slug}/todos`,
       `/api/w/${slug}/todos/count`,
       `/w/${slug}/profiles`,
       `/w/${slug}/projects/x/todos`,
       `/w/${slug}/projects/x/lanes`,
+      `/w/${slug}/projects/x/runs`,
+      `/w/${slug}/projects/x/setup`,
       // The pages of the workflows (#873).
       `/w/${slug}/workflows`,
       `/w/${slug}/workflows/x`,
@@ -129,9 +131,11 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
     // What the deployment has is there, and nothing of billing is offered.
     await page.goto(`/w/${slug}/projects`);
     await expect(page.getByRole("link", { name: "Runs" })).toBeVisible();
-    await page.goto(`/w/${slug}/settings`);
+    await page.goto(`/w/${slug}/settings/integrations`);
     await expect(
-      page.getByRole("link", { name: "Review defaults" }),
+      page
+        .getByRole("navigation", { name: "Integrations pages" })
+        .getByRole("link", { name: "Review defaults" }),
     ).toBeVisible();
     await expect(page.getByRole("link", { name: "Billing" })).toHaveCount(0);
     await page.goto("/admin");

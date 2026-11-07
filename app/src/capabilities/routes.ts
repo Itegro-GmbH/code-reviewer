@@ -171,11 +171,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/runs/[[...rest]]", class: "review" },
   { route: "/w/[workspace]/projects", class: "review" },
   { route: "/w/[workspace]/projects/[repositoryId]", class: "review" },
-  // The tabs of a project's cockpit (#925): the runs and the setup exist wherever there are projects, the issues are the project's own
-  // address (which opens the review settings where there is no factory), the ToDos and the lanes are the factory's.
+  // The review settings of a project (#925: they were the project's own address; where there is no factory that address still opens them).
   { route: "/w/[workspace]/projects/[repositoryId]/review", class: "review" },
-  { route: "/w/[workspace]/projects/[repositoryId]/runs", class: "review" },
-  { route: "/w/[workspace]/projects/[repositoryId]/setup", class: "review" },
   { route: "/w/[workspace]/runs", class: "review" },
   { route: "/w/[workspace]/runs/[id]", class: "review" },
   { route: "/w/[workspace]/settings/review-defaults", class: "review" },
@@ -228,13 +225,21 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
-  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, and the ToDos and lanes tabs of
-  // a project.
+  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, and the tabs of a project's
+  // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory).
   { route: "/api/w/[workspace]/todos/count", class: "implementer" },
   { route: "/w/[workspace]/todos", class: "implementer" },
   { route: "/w/[workspace]/profiles", class: "implementer" },
   {
     route: "/w/[workspace]/projects/[repositoryId]/lanes",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/runs",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/setup",
     class: "implementer",
   },
   {

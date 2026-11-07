@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
+import { requireImplementerCapability } from "@/implementer/shared";
 import { projectServiceFor } from "@/projects/shared";
 import { RunsList } from "@/runs/ui/runs-list";
 import { loadRunsPage } from "@/runs/ui/runs-page";
@@ -10,11 +11,13 @@ import { CockpitFrame } from "../cockpit-frame";
 
 export const metadata: Metadata = { title: "Project · Runs" };
 
-// The runs of one project (#925): the list of the Runs page, for this repository only. The status filter of the address stays (`?status=`).
+// The runs of one project (#925): the list of the Runs page, for this repository only. The status filter of the address stays (`?status=`). Only in a
+// deployment with the capability `implementer`: elsewhere the Runs page has the repository filter.
 export default async function ProjectRunsPage({
   params,
   searchParams,
 }: PageProps<"/w/[workspace]/projects/[repositoryId]/runs">) {
+  requireImplementerCapability();
   const { workspace: slug, repositoryId } = await params;
   const { workspace } = await requireWorkspace(slug);
   return (

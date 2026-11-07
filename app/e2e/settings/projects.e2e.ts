@@ -239,8 +239,13 @@ test.describe("the project list and the settings pages", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "General" }),
     ).toBeVisible();
-    // The review defaults are their own sub-page (#178).
+    // The review defaults are their own sub-page (#178), a page of the Integrations tab (#925).
     await page
+      .getByRole("navigation", { name: "Settings sections" })
+      .getByRole("link", { name: "Integrations", exact: true })
+      .click();
+    await page
+      .getByRole("navigation", { name: "Integrations pages" })
       .getByRole("link", { name: "Review defaults", exact: true })
       .click();
     await expect(

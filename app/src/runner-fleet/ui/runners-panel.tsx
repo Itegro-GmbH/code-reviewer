@@ -30,6 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../../components/ui/alert-dialog.tsx";
+import { useCapabilities } from "../../capabilities/context.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { useRequest } from "../../implementer/ui/use-request.ts";
 import { formatUtc } from "../../ui/format-time.ts";
@@ -45,12 +46,18 @@ import {
 
 const loadList = (api: RunnerFleetApi) => api.list();
 
-/** The two kinds of environment of the prototype: both talk the Runner API, and a profile says on which of them it runs. */
-const RUNNER_KINDS = [
+/** The two kinds of environment of the prototype: both talk the Runner API. The hosted one is billed only where billing is on. */
+const runnerKinds = (billing: boolean) => [
   {
     name: PAGE_COPY.hostedName,
-    description: PAGE_COPY.hostedDescription,
-    capabilities: ["Provided per run", "opencode", "Billed from the balance"],
+    description: billing
+      ? `${PAGE_COPY.hostedDescription} ${PAGE_COPY.hostedBilling}`
+      : PAGE_COPY.hostedDescription,
+    capabilities: [
+      "Provided per run",
+      "opencode",
+      ...(billing ? [PAGE_COPY.hostedBillingTag] : []),
+    ],
   },
   {
     name: PAGE_COPY.ownName,
@@ -61,7 +68,7 @@ const RUNNER_KINDS = [
       "Claude Code on your subscription",
     ],
   },
-] as const;
+];
 
 export function RunnersPanel({
   workspaceSlug,
@@ -121,6 +128,7 @@ function Runners({
   workspaceSlug: string;
 }) {
   const product = useProductIdentity();
+  const billing = useCapabilities().has("billing");
   const [runners, setRunners] = useState(initial.runners);
   const [token, setToken] = useState<NewTokenView | null>(null);
   const [toRevoke, setToRevoke] = useState<RunnerView | null>(null);
@@ -199,7 +207,7 @@ function Runners({
           <p className="text-sm text-muted-foreground">{PAGE_COPY.kindsHint}</p>
         </div>
         <ul className="m-0 grid list-none grid-cols-1 gap-4 p-0 md:grid-cols-2">
-          {RUNNER_KINDS.map((kind) => (
+          {runnerKinds(billing).map((kind) => (
             <li
               key={kind.name}
               className="flex flex-col gap-2 rounded-2xl border border-border bg-card px-6 py-4"
@@ -243,7 +251,13 @@ function Runners({
           if (!open) setToken(null);
         }}
       >
-        <DialogContent aria-label={PAGE_COPY.tokenTitle}>
+        {/* The token is shown once: a click beside the dialog or Escape must not throw it away. */}
+        <DialogContent
+          aria-label={PAGE_COPY.tokenTitle}
+          showCloseButton={false}
+          onInteractOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle>{PAGE_COPY.tokenTitle}</DialogTitle>
             <DialogDescription>{PAGE_COPY.tokenNote}</DialogDescription>
@@ -269,7 +283,7 @@ function Runners({
             </>
           )}
           <DialogFooter>
-            <Button variant="secondary" onClick={() => setToken(null)}>
+            <Button onClick={() => setToken(null)}>
               {PAGE_COPY.tokenDismiss}
             </Button>
           </DialogFooter>

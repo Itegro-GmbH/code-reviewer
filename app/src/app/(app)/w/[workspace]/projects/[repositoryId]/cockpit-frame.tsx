@@ -2,7 +2,6 @@
 
 import { notFound } from "next/navigation";
 import type { ReactNode } from "react";
-import { getCapabilities } from "@/capabilities/shared";
 import { projectServiceFor } from "@/projects/shared";
 import type { CockpitTab } from "@/projects/ui/cockpit-messages";
 import { loadProjectRow } from "@/projects/ui/list-view";
@@ -29,12 +28,7 @@ export async function CockpitFrame({
   });
   if (row === undefined) notFound();
   return (
-    <ProjectCockpit
-      workspaceSlug={workspaceSlug}
-      row={row}
-      tab={tab}
-      factory={getCapabilities().has("implementer")}
-    >
+    <ProjectCockpit workspaceSlug={workspaceSlug} row={row} tab={tab}>
       {children}
     </ProjectCockpit>
   );

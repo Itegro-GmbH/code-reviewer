@@ -24,10 +24,12 @@ export const PAGE_COPY = {
   empty: "No runner yet. Owners and Admins can add one.",
   kindsTitle: "Two kinds, one protocol",
   kindsHint:
-    "Both talk the Runner API. A profile says on which of them it runs.",
+    "Both talk the Runner API. Which of them a profile runs on is chosen per profile later (#919); until then its harness decides.",
   hostedName: "Hosted sandbox",
   hostedDescription:
-    "A fresh sandbox of the platform for every run: nothing to install, billed from the balance of the workspace.",
+    "A fresh sandbox of the platform for every run: nothing to install.",
+  hostedBilling: "Billed from the balance of the workspace.",
+  hostedBillingTag: "Billed from the balance",
   ownName: "Your own runner",
   ownDescription:
     "A machine of yours that connects from your network and takes the jobs of this workspace. Claude Code runs only here, on your subscription.",
@@ -41,7 +43,7 @@ export const PAGE_COPY = {
   tokenRunOn: "Run on the machine",
   tokenCommandLabel: "Command",
   tokenExpires: "Valid until",
-  tokenDismiss: "Done",
+  tokenDismiss: "I copied it",
   revoke: "Revoke",
   revokeTitle: "Revoke this runner?",
   revokeNote:

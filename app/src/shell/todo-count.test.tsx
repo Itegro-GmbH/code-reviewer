@@ -2,7 +2,7 @@
 
 // @vitest-environment jsdom
 // The count on the sidebar's ToDos link (#925): a number only when there is one, never an error.
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TodoCount } from "./todo-count.tsx";
 
@@ -10,6 +10,12 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/** Lets the pending fetch and its handlers run to the end, so an assertion of "nothing" is made after the answer, not before it. */
+const settled = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 
 describe("the count on the ToDos link", () => {
   const answer = (body: unknown, ok = true) =>
@@ -40,7 +46,7 @@ describe("the count on the ToDos link", () => {
   });
 
   // #925
-  it("shows nothing when the count cannot be read, and no error", async () => {
+  it("shows nothing when the read throws, and no error", async () => {
     const fetchMock = vi.fn(async () => {
       throw new Error("offline");
     });
@@ -50,12 +56,22 @@ describe("the count on the ToDos link", () => {
     );
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await settled();
+
     expect(container.textContent).toBe("");
-    vi.stubGlobal("fetch", answer({}, false));
-    cleanup();
-    const second = render(
+  });
+
+  // #925
+  it("shows nothing when the route answers with an error, even if the body has a number", async () => {
+    const fetchMock = answer({ open: 5 }, false);
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(
       <TodoCount workspaceSlug="acme" pathname="/w/acme/runs" />,
     );
-    expect(second.container.textContent).toBe("");
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await settled();
+
+    expect(container.textContent).toBe("");
   });
 });

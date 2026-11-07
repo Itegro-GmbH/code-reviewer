@@ -80,7 +80,9 @@ function SettingsLinks({
   advanced,
 }: SettingsNavProps & { advanced: boolean }) {
   const capabilities = useCapabilities();
+  // The page that is open is always listed, even where its capability or flag would hide it (a bookmarked address), so its tab is marked.
   const listed = SETTINGS_SECTIONS.filter((section) => {
+    if (section.segment === current) return true;
     if (
       section.capability !== undefined &&
       !capabilities.has(section.capability)
