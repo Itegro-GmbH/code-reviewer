@@ -112,6 +112,12 @@ export function StartLaneDialog({
     );
   }
 
+  // The dialog fades out after the issue is unset: its title keeps the last number until it is gone.
+  const [lastNumber, setLastNumber] = useState(issueNumber);
+  if (issueNumber !== null && issueNumber !== lastNumber)
+    setLastNumber(issueNumber);
+  const shownNumber = issueNumber ?? lastNumber ?? 0;
+
   return (
     <Dialog
       open={issueNumber !== null}
@@ -125,7 +131,7 @@ export function StartLaneDialog({
         {...(onCloseAutoFocus === undefined ? {} : { onCloseAutoFocus })}
       >
         <DialogHeader>
-          <DialogTitle>{START_LANE_COPY.title(issueNumber ?? 0)}</DialogTitle>
+          <DialogTitle>{START_LANE_COPY.title(shownNumber)}</DialogTitle>
           <DialogDescription>{START_LANE_COPY.description}</DialogDescription>
         </DialogHeader>
         {lanes.length === 0 ? (

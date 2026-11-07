@@ -128,11 +128,11 @@ export function IssueDrawer({
 }) {
   const [defaultApi] = useState(() => browserIssuesApi(workspaceSlug));
   const api = apiProp ?? defaultApi;
-  const run = useLaneRun(api, item?.lane ?? null);
-  // The drawer slides out after the issue is unset: it keeps showing the last issue until it is gone.
+  // The drawer slides out after the issue is unset: it keeps showing the last issue, and its run, until it is gone.
   const [last, setLast] = useState(item);
   if (item !== undefined && item !== last) setLast(item);
   const shown = item ?? last;
+  const run = useLaneRun(api, shown?.lane ?? null);
   return (
     <Sheet
       open={item !== undefined}
