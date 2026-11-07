@@ -1520,14 +1520,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         {
           instruction: answerInstruction(ask, ask.answer),
           clientRequestId: requestId,
-          costLimitCents: Math.max(
-            1,
-            Math.min(
-              capCents(left),
-              read.ended.turn.costLimitCents ?? Number.MAX_SAFE_INTEGER,
-            ),
-          ),
         },
+        // #918: the cost of a turn is what is left of the lane's budget; the time limit is the one of the turn before (the default of a follow-up).
+        { costCapCents: capCents(left) },
       );
       // Nobody else queues in this session while the run waits; if the Implementer says otherwise, the next look asks again.
       if (continued.runId === null) return;
