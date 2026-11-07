@@ -377,7 +377,11 @@ describe("what a discard leaves", () => {
   });
 });
 
-/** A run a label started for the ticket, as the engine writes it: the key is what keeps two of one workflow apart. */
+/**
+ * A run about ticket #12, as the engine writes it: the key is what keeps two of one workflow apart. It starts from the trigger of the base
+ * run (the test workflow has no label trigger, and a run whose trigger the document lacks fails as `document_unusable`); the ticket is
+ * what the ticket reference names.
+ */
 async function labeledRun(
   app: EngineHarness,
   base: StoredWorkflowRun,
@@ -388,12 +392,13 @@ async function labeledRun(
     workflowVersion: base.workflowVersion,
     repositoryId: base.repositoryId,
     baseBranch: "main",
-    triggerInput: "{}",
+    triggerInput: base.triggerInput,
     budgetMicroUsd: 1_000_000,
     clientRequestId: `label-${key}`,
-    triggerKind: "ticket.labeled",
-    createdBy: null,
-    actorLogin: "octocat",
+    triggerKind: base.triggerKind,
+    ...(base.triggerId === null ? {} : { triggerId: base.triggerId }),
+    createdBy: base.createdBy,
+    actorLogin: base.actorLogin,
     triggerKey: key,
     ticketRef: "github:acme/widgets#12",
   });
@@ -486,6 +491,8 @@ describe("repeating a discard", () => {
     await app.engine.jobEnded(
       await app.finishTurn({ ok: false, errorCode: "timeout" }),
     );
+    // The harness clock stands still; a real discard comes later than the end of the run.
+    app.advanceClock(1000);
 
     await app.service.discard(workflow.id, runId);
     await app.service.discard(workflow.id, runId);
