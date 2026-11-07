@@ -43,7 +43,13 @@ export type FakeGithubAppClientData = {
   /** The pages `readTrackerChecks` answers, by "owner/name" (#923). */
   trackerCheckPages?: Record<
     string,
-    { number: number; checksState: string | null }[][]
+    {
+      number: number;
+      checksState: string | null;
+      reviewRequestedFrom?: string[];
+      headSha?: string;
+      updatedAt?: string;
+    }[][]
   >;
   /** What `readChecksState` answers, by "owner/name@sha" (#923); a commit not listed has no checks. */
   trackerChecks?: Record<string, string | null>;
@@ -81,6 +87,10 @@ export type FakeGithubAppClientData = {
   reviewersFailure?: Error;
   /** The logins `requestPullRequestReviewers` answers (#917). Default: the ones asked for. */
   reviewersAfter?: string[];
+  /** Makes `removePullRequestReviewers` reject with this error (#924). */
+  removeReviewersFailure?: Error;
+  /** The logins `removePullRequestReviewers` answers as still requested (#924). Default: none. */
+  removeReviewersAfter?: string[];
   /** Makes `moveIssueOnBoard` reject with this error (#917). */
   boardFailure?: Error;
   /** What `moveIssueOnBoard` answers (#917). Default: moved to the status asked for. */
@@ -425,6 +435,27 @@ export function fakeGithubAppClient(
       if (data.reviewersFailure) throw data.reviewersFailure;
       return data.reviewersAfter ?? [...reviewers];
     },
+    async removePullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      signal,
+    ) {
+      record(
+        "removePullRequestReviewers",
+        installationId,
+        scope,
+        repoFullName,
+        prNumber,
+        reviewers,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.removeReviewersFailure) throw data.removeReviewersFailure;
+      return data.removeReviewersAfter ?? [];
+    },
     async moveIssueOnBoard(
       installationId,
       scope,
@@ -546,7 +577,11 @@ export function fakeGithubAppClient(
       if (data.trackerFailure) throw data.trackerFailure;
       const pages = data.trackerCheckPages?.[repoFullName] ?? [];
       return {
-        pullRequests: pages[page - 1] ?? [],
+        pullRequests: (pages[page - 1] ?? []).map((pullRequest) => ({
+          ...pullRequest,
+          headSha: pullRequest.headSha ?? "head-1",
+          updatedAt: pullRequest.updatedAt ?? new Date(0).toISOString(),
+        })),
         last: page >= pages.length,
       };
     },

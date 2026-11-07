@@ -228,7 +228,11 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/runners",
   "/api/w/[workspace]/runners/tokens",
   "/api/w/[workspace]/runners/[runnerId]/revoke",
+  "/api/w/[workspace]/todos",
   "/api/w/[workspace]/todos/count",
+  // The ToDos of a project and a review given from the list (#924).
+  "/api/w/[workspace]/projects/[projectId]/todos",
+  "/api/w/[workspace]/todos/reviews",
   // The profiles of the agents (#843).
   "/api/w/[workspace]/profiles",
   "/api/w/[workspace]/profiles/[profileId]",

@@ -533,6 +533,25 @@ export function createGithubAppProvider(
       }
     },
 
+    async removeReviewers(integration, repo, prNumber, reviewers, signal) {
+      try {
+        return {
+          requested: await (
+            await getClient()
+          ).removePullRequestReviewers(
+            integration.externalId,
+            actionScope(integration, repo, REVIEW_REQUEST_TOKEN_PERMISSIONS),
+            repo.fullName,
+            prNumber,
+            reviewers,
+            signal,
+          ),
+        };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
     async setTicketStatus(integration, repo, issueNumber, move, signal) {
       try {
         return await (

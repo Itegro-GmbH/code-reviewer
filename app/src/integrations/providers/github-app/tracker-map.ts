@@ -10,6 +10,7 @@ import { TRACKER_EXCERPT_CHARS, type TrackerItemFields } from "../../types.ts";
 const TITLE_MAX_CHARS = 1000;
 const LABELS_MAX = 100;
 const ASSIGNEES_MAX = 20;
+const REVIEWERS_MAX = 50;
 /** GitHub's own limit on the issues one pull request closes is far below this; the cap keeps a crafted description bounded. */
 const CLOSES_MAX = 50;
 
@@ -48,6 +49,20 @@ function sameRepositoryIssue(url: string, repoFullName: string): number | null {
   return (match[1] as string).toLowerCase() === repoFullName.toLowerCase()
     ? Number(match[2])
     : null;
+}
+
+/**
+ * The logins a review of a pull request is asked from (`requested_reviewers` of the object of a webhook and of the list of pull requests;
+ * teams are not read), once each. `undefined` when the object has no such list: it says nothing about the reviewers.
+ */
+export function requestedReviewersOf(json: unknown): string[] | undefined {
+  if (!isRecord(json) || !Array.isArray(json.requested_reviewers))
+    return undefined;
+  const logins = new Set<string>();
+  for (const user of json.requested_reviewers as unknown[])
+    if (isRecord(user) && typeof user.login === "string" && user.login !== "")
+      logins.add(user.login);
+  return [...logins].slice(0, REVIEWERS_MAX);
 }
 
 type ItemOptions = {
@@ -121,6 +136,9 @@ export function toTrackerItem(
         ? sameRepositoryIssue(json.parent_issue_url, repoFullName)
         : null;
 
+  // Only the object of a pull request carries the reviewers (the `pull_request` key of an issue is a stub without them).
+  const reviewers = isPullRequest ? requestedReviewersOf(json) : undefined;
+
   return {
     number: json.number,
     nodeId: json.node_id,
@@ -134,6 +152,7 @@ export function toTrackerItem(
     assignees: assignees.slice(0, ASSIGNEES_MAX),
     ...(parentNumber === undefined ? {} : { parentNumber }),
     closes: isPullRequest ? closedIssueNumbers(body, repoFullName) : [],
+    ...(reviewers === undefined ? {} : { reviewRequestedFrom: reviewers }),
     updatedAt: new Date(Date.parse(json.updated_at)).toISOString(),
   };
 }

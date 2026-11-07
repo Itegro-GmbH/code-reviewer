@@ -170,6 +170,10 @@ describe("the events of the ticket mirror, against Postgres", () => {
     expect((await tracker.getItem(repository.id, 7))?.checksState).toBe(
       "failure",
     );
+    // #924-T02: who a review is asked from is stored, and a delivery without the list leaves it
+    expect(
+      (await tracker.getItem(repository.id, 7))?.reviewRequestedFrom,
+    ).toEqual(["carol"]);
 
     expect(await deliver("pull_request.closed.merged.mirror")).toBe("updated");
     expect(await tracker.getItem(repository.id, 7)).toMatchObject({

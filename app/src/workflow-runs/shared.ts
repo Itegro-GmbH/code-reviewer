@@ -53,7 +53,7 @@ import {
  * owner grants (Issues and Pull requests: read and write, and for `ticket.setStatus` the opt-in Projects permission); where the App
  * lacks one, the step ends as `github_permission_missing`.
  */
-async function connectorTargetOf(
+export async function connectorTargetOf(
   workspaceId: string,
   repositoryId: string,
 ): Promise<GithubActionTarget | undefined> {

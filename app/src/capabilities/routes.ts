@@ -256,6 +256,13 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/todos/count", class: "implementer" },
+  // The ToDos of a workspace and of one project, read from the runs and the ticket mirror (#924), and a review given from the list.
+  { route: "/api/w/[workspace]/todos", class: "implementer", exact: true },
+  { route: "/api/w/[workspace]/todos/reviews", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    class: "implementer",
+  },
   { route: "/w/[workspace]/todos", class: "implementer" },
   { route: "/w/[workspace]/profiles", class: "implementer" },
   {

@@ -850,6 +850,45 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #924: every member reads the ToDos of their own workspace (the questions and the reviews of its lanes); nothing of another.
+    name: "GET todos",
+    route: "/api/w/[workspace]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/todos",
+    params: () => ({}),
+    file: "todos/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #924: the ToDos of one project, by its own id; the project of the other workspace is not found.
+    name: "GET projects/[projectId]/todos",
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/projects/${ids.projectId}/todos`,
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/todos/route.ts",
+    implementer: true,
+  },
+  {
+    // #924: a review given from the list; a pull request of the other workspace's repository is no ToDo here, and nothing is posted.
+    name: "POST todos/reviews",
+    route: "/api/w/[workspace]/todos/reviews",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/todos/reviews",
+    body: (ids) => ({
+      repositoryId: ids.repositoryId,
+      number: 7,
+      decision: "approve",
+    }),
+    params: () => ({}),
+    file: "todos/reviews/route.ts",
+    implementer: true,
+  },
+  {
     // #925: every member reads how many ToDos of their own workspace are open (the count on the sidebar link); nothing of another.
     name: "GET todos/count",
     route: "/api/w/[workspace]/todos/count",
