@@ -38,6 +38,7 @@ import { createBillingNotificationsRepository } from "./billing-notifications-re
 import { createBillingWorkspaceSettingsRepository } from "./billing-workspace-settings-repository.ts";
 import { createImplementerEnvironmentsRepository } from "./implementer-environments-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
+import { createTrackerRepository } from "./tracker-repository.ts";
 import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
@@ -77,6 +78,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     workflowRuns: createWorkflowRunsRepository(db, workspaceId),
+    tracker: createTrackerRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
     runners: createRunnersRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
@@ -111,6 +113,45 @@ function noticeKeyOf(repositoryId: string) {
 }
 const NOTICE_OPTIONS = { leaseMs: 60_000, maxAttempts: 3 };
 const CHECK_LEASE = { leaseMs: 60_000, maxAttempts: 5 };
+
+/** How many rows the ticket mirror holds in all workspaces together (or in one): a write that inserted a row it must not shows here. */
+async function trackerRowCounts(db: Kysely<Database>, workspaceId?: string) {
+  const items = await db
+    .selectFrom("tracker_items")
+    .select((eb) => eb.fn.countAll<string>().as("n"))
+    .$if(workspaceId !== undefined, (qb) =>
+      qb.where("workspace_id", "=", workspaceId ?? ""),
+    )
+    .executeTakeFirstOrThrow();
+  const states = await db
+    .selectFrom("tracker_sync_state")
+    .select((eb) => eb.fn.countAll<string>().as("n"))
+    .$if(workspaceId !== undefined, (qb) =>
+      qb.where("workspace_id", "=", workspaceId ?? ""),
+    )
+    .executeTakeFirstOrThrow();
+  return { items: Number(items.n), syncStates: Number(states.n) };
+}
+
+/** The ticket every seeded workspace has: number 1 in its repository, a pull request, so that it can hold checks. */
+function trackerItem(tag: string) {
+  return {
+    provider: "github",
+    repo: `acme/${tag}`,
+    number: 1,
+    nodeId: `node-repo-${tag}`,
+    kind: "pull_request" as const,
+    state: "open" as const,
+    stateReason: null,
+    type: null,
+    title: `Ticket of ${tag}`,
+    bodyExcerpt: "",
+    labels: [],
+    assignees: [],
+    closes: [],
+    updatedAt: "2026-11-06T10:00:00.000Z",
+  };
+}
 
 /** One workspace with an integration, a repository, a project, a job and a setting. */
 async function seed(
@@ -493,6 +534,7 @@ async function seed(
     clientRequestId: `run-${tag}`,
     createdBy: `user-${tag}`,
     actorLogin: "octocat",
+    ticketRef: `github:acme/${tag}#1`,
   });
   const workflowStep = await repos.workflowRuns.lockRun(
     workflowRun.run.id,
@@ -507,6 +549,14 @@ async function seed(
       }),
   );
   if (workflowStep === undefined) throw new Error("seeding failed");
+  // A ticket in every workspace (#923), with a board status and checks, and the state of a sync that is under way.
+  await repos.tracker.upsertItem(repository.id, trackerItem(tag));
+  await repos.tracker.setBoardStatusByNode(`node-repo-${tag}`, "In Progress");
+  await repos.tracker.setChecksState(repository.id, 1, "success");
+  await repos.tracker.saveSyncState(repository.id, {
+    cursor: '{"phase":"issues","page":2}',
+    startedAt: "2026-11-06T09:00:00.000Z",
+  });
   // A profile with a second version (#843) in every workspace, under the same name.
   const profileContent = {
     description: "",
@@ -746,6 +796,19 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
       .execute(),
+    trackerItems: await db
+      .selectFrom("tracker_items")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("repository_id")
+      .orderBy("number")
+      .execute(),
+    trackerSyncState: await db
+      .selectFrom("tracker_sync_state")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("repository_id")
+      .execute(),
     agentProfiles: await db
       .selectFrom("profiles")
       .selectAll()
@@ -801,6 +864,8 @@ type Case = {
   run: (a: Repos, b: Seeded, db: Kysely<Database>) => Promise<unknown>;
   /** Checks the answer: it is "not found" in the way that method says so, or holds only A's data. */
   expectAnswer: (answer: unknown, a: Seeded, b: Seeded) => void;
+  /** The call erases workspace A itself, so A's own rows of the mirror are gone afterwards and only those. */
+  removesRowsOfA?: true;
 };
 
 /** The session and turn of the workspace that was seeded with a task. */
@@ -1950,6 +2015,7 @@ const CASES: Case[] = [
         deletedAt: new Date("2026-10-23T12:00:00.000Z"),
       }),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+    removesRowsOfA: true,
   },
   // implementer sessions (#751-T02): B's session, turn and branch are not A's to read, extend or change
   {
@@ -2268,6 +2334,13 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // B's ticket is no ticket of A: the run of B, its cost and its lane are not A's to read (#923).
+    name: "workflowRuns.summarizeTickets",
+    run: (a, b) =>
+      a.workflowRuns.summarizeTickets([b.workflowRun.ticketRef ?? "none"]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     name: "workflowRuns.findStepByJob",
     run: (a, b) => a.workflowRuns.findStepByJob(b.job.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
@@ -2319,6 +2392,118 @@ const CASES: Case[] = [
         errorMessage: null,
       }),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // ticket mirror (#923-T86): B's tickets and the state of B's sync are not A's to read, write, link or remove
+  {
+    // The same number as B's ticket: the write finds B's row and must leave it alone.
+    name: "tracker.upsertItem",
+    run: (a, b) =>
+      a.tracker.upsertItem(b.repository.id, {
+        ...trackerItem("hijacked"),
+        number: 1,
+        nodeId: `node-${b.externalRepositoryId}`,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // A number B does not have: nothing is inserted into B's repository under A's workspace id.
+    name: "tracker.upsertItem (a new number)",
+    run: (a, b) =>
+      a.tracker.upsertItem(b.repository.id, {
+        ...trackerItem("hijacked"),
+        number: 2,
+        nodeId: "node-hijacked-2",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.getItem",
+    run: (a, b) => a.tracker.getItem(b.repository.id, 1),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.listItems",
+    run: (a, b) =>
+      a.tracker.listItems(b.repository.id, { state: "open", limit: 10 }),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "tracker.deleteItem",
+    run: (a, b) =>
+      a.tracker.deleteItem(b.repository.id, 1, "2999-01-01T00:00:00.000Z"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.setBoardStatusByNode",
+    run: (a, b) =>
+      a.tracker.setBoardStatusByNode(`node-${b.externalRepositoryId}`, "Done"),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
+    name: "tracker.setParent",
+    run: (a, b) =>
+      a.tracker.setParent(b.repository.id, 1, 5, "2999-01-01T00:00:00.000Z"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.setChecksState",
+    run: (a, b) => a.tracker.setChecksState(b.repository.id, 1, "failure"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.linkPullRequests",
+    run: (a, b) => a.tracker.linkPullRequests(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.clearBoardStatusesNotSeenSince",
+    run: (a, b) =>
+      a.tracker.clearBoardStatusesNotSeenSince(
+        b.repository.id,
+        "2999-01-01T00:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.clearChecksStates",
+    run: (a, b) => a.tracker.clearChecksStates(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.removeNotWrittenSince",
+    run: (a, b) =>
+      a.tracker.removeNotWrittenSince(
+        b.repository.id,
+        "2999-01-01T00:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
+    name: "tracker.getSyncState",
+    run: (a, b) => a.tracker.getSyncState(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // B's sync is under way and moving: A cannot start one over it, and is told nothing about it.
+    name: "tracker.claimSync",
+    run: (a, b) =>
+      a.tracker.claimSync(b.repository.id, {
+        cursor: '{"phase":"issues","page":1}',
+        startedAt: "2026-11-06T12:00:00.000Z",
+        staleBefore: "2999-01-01T00:00:00.000Z",
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ claimed: false, state: undefined }),
+  },
+  {
+    // B's repository id is the key of B's state: A's write finds it and must leave it alone.
+    name: "tracker.saveSyncState",
+    run: (a, b) =>
+      a.tracker.saveSyncState(b.repository.id, {
+        cursor: null,
+        lastFullSyncAt: "2026-11-06T12:00:00.000Z",
+      }),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   // profiles (#843-T70): B's profiles and versions are not A's to read, find, start from or save over
   {
@@ -2624,13 +2809,57 @@ describe("two workspaces", () => {
     async (_name, testCase) => {
       const { db, a, b, reposA } = await twoWorkspaces();
       const before = await rowsOf(db, b.workspaceId);
+      const counts = await trackerRowCounts(db);
+      const own = await trackerRowCounts(db, a.workspaceId);
 
       const answer = await testCase.run(reposA, b, db);
 
       testCase.expectAnswer(answer, a, b);
       expect(await rowsOf(db, b.workspaceId)).toEqual(before);
+      // And nothing was added to the mirror under A's id in the repository of B (or anywhere); erasing A takes A's rows and no others.
+      expect(await trackerRowCounts(db)).toEqual(
+        testCase.removesRowsOfA === true
+          ? {
+              items: counts.items - own.items,
+              syncStates: counts.syncStates - own.syncStates,
+            }
+          : counts,
+      );
     },
   );
+
+  // #923-R27
+  it("insert nothing into the mirror for a repository of the other workspace, whatever the table already holds", async () => {
+    const { db, b, reposA } = await twoWorkspaces();
+    // B has no sync state at all: a write of A that inserted would create one.
+    await db
+      .deleteFrom("tracker_sync_state")
+      .where("workspace_id", "=", b.workspaceId)
+      .execute();
+    const counts = await trackerRowCounts(db);
+
+    expect(
+      await reposA.tracker.upsertItem(b.repository.id, {
+        ...trackerItem("hijacked"),
+        number: 2,
+        nodeId: "node-hijacked-2",
+      }),
+    ).toBe(false);
+    await reposA.tracker.saveSyncState(b.repository.id, {
+      cursor: '{"phase":"issues","page":1}',
+    });
+    expect(
+      await reposA.tracker.claimSync(b.repository.id, {
+        cursor: '{"phase":"issues","page":1}',
+        startedAt: "2026-11-06T12:00:00.000Z",
+        staleBefore: "2999-01-01T00:00:00.000Z",
+      }),
+    ).toEqual({ claimed: false, state: undefined });
+
+    expect(await trackerRowCounts(db)).toEqual(counts);
+    expect(counts.syncStates).toBeGreaterThan(0);
+    expect(await reposA.tracker.getSyncState(b.repository.id)).toBeUndefined();
+  });
 
   // DM-06
   it("have a table row for every method of every scoped repository", async () => {

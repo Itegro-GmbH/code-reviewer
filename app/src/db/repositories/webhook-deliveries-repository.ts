@@ -64,6 +64,8 @@ export const WEBHOOK_DELIVERY_OUTCOMES = [
   "workflow_runs_started",
   /** An issue got a label and no workflow starts for it (not final: a workflow saved later is started by a redelivery). */
   "no_workflow_matched",
+  /** The ticket mirror took something from the delivery (#923). */
+  "tracker_updated",
   /** The installation or its repositories were synchronized. */
   "installation_changed",
   /** An installation no workspace has linked: noted as unclaimed, nothing was created (not final: it can be redelivered). */
@@ -75,6 +77,7 @@ export type WebhookDeliveryOutcome = (typeof WEBHOOK_DELIVERY_OUTCOMES)[number];
 export const WEBHOOK_DELIVERY_FINAL_OUTCOMES = [
   "trigger_enqueued",
   "workflow_runs_started",
+  "tracker_updated",
   "installation_changed",
 ] as const satisfies readonly WebhookDeliveryOutcome[];
 

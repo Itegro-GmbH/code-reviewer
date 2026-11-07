@@ -11,7 +11,18 @@ export type ProjectDeactivatedEvent = {
   repositoryId: string;
 };
 
+export type ProjectActivatedEvent = {
+  projectId: string;
+  repositoryId: string;
+};
+
 export interface ProjectHooks {
+  /**
+   * Called after a project was created or switched on again (not when it was on already), outside the transaction: what it does must
+   * never fail the activation, so a rejection is logged and dropped. The ticket mirror starts its first full sync here (#923).
+   */
+  onProjectActivated?(event: ProjectActivatedEvent): Promise<void>;
+
   /**
    * Called in the transaction that switched the project off, so everything it writes commits or
    * rolls back together with the deactivation. Use `executor` for every query, never the outer

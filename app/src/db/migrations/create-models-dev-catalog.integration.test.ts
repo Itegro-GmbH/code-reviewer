@@ -19,6 +19,8 @@ const NEW_TABLES = [
 ];
 
 const LATER_TABLES = [
+  "tracker_items",
+  "tracker_sync_state",
   "model_enablements",
   "model_price_confirmations",
   "billing_profiles",

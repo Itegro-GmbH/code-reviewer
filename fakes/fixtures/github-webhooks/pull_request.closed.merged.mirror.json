@@ -1,0 +1,68 @@
+{
+  "action": "closed",
+  "pull_request": {
+    "number": 7,
+    "node_id": "PR_kwDOAAA7",
+    "title": "Add widget caching",
+    "body": "Closes #12\nFixes acme/widgets#13 and resolves other/repo#99",
+    "html_url": "https://github.com/acme/widgets/pull/7",
+    "state": "closed",
+    "draft": false,
+    "merged": true,
+    "merged_at": "2026-11-06T11:30:00Z",
+    "labels": [
+      {
+        "id": 9003,
+        "node_id": "LA_3",
+        "name": "agent",
+        "color": "5319e7"
+      }
+    ],
+    "assignees": [],
+    "updated_at": "2026-11-06T11:30:00Z",
+    "user": {
+      "login": "alice",
+      "id": 1001,
+      "type": "User"
+    },
+    "head": {
+      "sha": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+      "ref": "feature/caching",
+      "repo": {
+        "id": 7001,
+        "full_name": "acme/widgets"
+      }
+    },
+    "base": {
+      "sha": "a0b1c2d3e4f5061728394a5b6c7d8e9f00112233",
+      "ref": "main",
+      "repo": {
+        "id": 7001,
+        "full_name": "acme/widgets"
+      }
+    }
+  },
+  "repository": {
+    "id": 7001,
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": true,
+    "html_url": "https://github.com/acme/widgets",
+    "owner": {
+      "login": "acme",
+      "id": 5001,
+      "type": "Organization"
+    },
+    "default_branch": "main"
+  },
+  "installation": {
+    "id": 4242,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+  },
+  "sender": {
+    "login": "bob",
+    "id": 1002,
+    "type": "User"
+  },
+  "number": 7
+}

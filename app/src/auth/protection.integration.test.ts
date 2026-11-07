@@ -245,6 +245,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/plan",
   "/api/w/[workspace]/plan-handoff",
   "/api/w/[workspace]/members/[userId]",
+  "/api/w/[workspace]/repositories/[repositoryId]/issues",
+  "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
   "/api/w/[workspace]/repositories/[repositoryId]/project",
   "/api/w/[workspace]/repositories/[repositoryId]/project/settings",
   "/api/w/[workspace]/repositories/[repositoryId]/pull-requests",

@@ -70,6 +70,8 @@ export type StoredWorkflowRun = {
    * The run stays `running` until they are over.
    */
   failure: string | null;
+  /** #923: the ticket the run is about (`github:owner/repo#128`); null when it is about none. */
+  ticketRef: string | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
@@ -121,6 +123,24 @@ export type NewWorkflowRun = {
    * `busy` with the run that holds it. Left out for a run by hand.
    */
   triggerKey?: string;
+  /** #923: the ticket the run is about (`github:owner/repo#128`); left out for a run that is about none. */
+  ticketRef?: string;
+};
+
+/** What the runs of one ticket add up to (#923): the money they spent and the run that is going on for it, if one is. */
+export type TicketRunSummary = {
+  ticketRef: string;
+  /** The sum of `spentMicroUsd` over every run of the ticket, whatever its status. */
+  spentMicroUsd: number;
+  /** The newest `running` run of the ticket; null when none is running. */
+  activeRun: {
+    runId: string;
+    /** The name of the workflow: the lane. */
+    workflowName: string;
+    /** The step that runs now, or the next one that waits; null before the first step is written. */
+    stepId: string | null;
+    status: WorkflowRunStatus;
+  } | null;
 };
 
 export type CreateRunOutcome =
@@ -217,6 +237,11 @@ export type WorkflowRunsRepository = {
   ): Promise<StoredWorkflowRun | undefined>;
   /** The runs of one workflow, newest first. */
   listRuns(workflowId: string, limit: number): Promise<StoredWorkflowRun[]>;
+  /**
+   * What the runs of each of these tickets (`github:owner/repo#128`) add up to (#923); a ticket without a run is not in the answer.
+   * Read at the moment of the question, never stored.
+   */
+  summarizeTickets(ticketRefs: readonly string[]): Promise<TicketRunSummary[]>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
   /** The step an Implementer job belongs to, if a workflow started it. */
   findStepByJob(jobId: string): Promise<StoredStepRun | undefined>;
@@ -266,6 +291,7 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     actorLogin: row.actor_login,
     cancelRequestedAt: row.cancel_requested_at,
     failure: row.failure,
+    ticketRef: row.ticket_ref,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -382,6 +408,7 @@ export function createWorkflowRunsRepository(
         actor_login: input.actorLogin,
         cancel_requested_at: null,
         failure: null,
+        ticket_ref: input.ticketRef ?? null,
         created_at: at,
         updated_at: at,
         finished_at: null,
@@ -444,6 +471,83 @@ export function createWorkflowRunsRepository(
         .limit(limit)
         .execute();
       return rows.map(runFrom);
+    },
+
+    async summarizeTickets(ticketRefs) {
+      if (ticketRefs.length === 0) return [];
+      const runs = await db
+        .selectFrom("workflow_runs")
+        .select([
+          "id",
+          "ticket_ref",
+          "workflow_id",
+          "status",
+          "spent_micro_usd",
+          "created_at",
+        ])
+        .where("workspace_id", "=", workspaceId)
+        .where("ticket_ref", "in", [...ticketRefs])
+        .execute();
+      if (runs.length === 0) return [];
+      const workflowIds = [...new Set(runs.map((run) => run.workflow_id))];
+      const names = new Map(
+        (
+          await db
+            .selectFrom("workflows")
+            .select(["id", "name"])
+            .where("workspace_id", "=", workspaceId)
+            .where("id", "in", workflowIds)
+            .execute()
+        ).map((row) => [row.id, row.name]),
+      );
+      const running = runs.filter((run) => run.status === "running");
+      const steps =
+        running.length === 0
+          ? []
+          : await db
+              .selectFrom("workflow_step_runs")
+              .select(["run_id", "step_id", "status", "position"])
+              .where("workspace_id", "=", workspaceId)
+              .where(
+                "run_id",
+                "in",
+                running.map((run) => run.id),
+              )
+              .where("status", "in", ["running", "pending"])
+              .orderBy("position")
+              .execute();
+      const stepOf = (runId: string): string | null => {
+        const own = steps.filter((step) => step.run_id === runId);
+        return (
+          (own.find((step) => step.status === "running") ?? own[0])?.step_id ??
+          null
+        );
+      };
+      const summaries = new Map<string, TicketRunSummary>();
+      for (const run of runs) {
+        const ref = run.ticket_ref as string;
+        const summary = summaries.get(ref) ?? {
+          ticketRef: ref,
+          spentMicroUsd: 0,
+          activeRun: null,
+        };
+        summary.spentMicroUsd += run.spent_micro_usd;
+        summaries.set(ref, summary);
+      }
+      // The newest running run of a ticket is its active one.
+      for (const run of [...running].sort((a, b) =>
+        a.created_at < b.created_at ? 1 : -1,
+      )) {
+        const summary = summaries.get(run.ticket_ref as string);
+        if (summary === undefined || summary.activeRun !== null) continue;
+        summary.activeRun = {
+          runId: run.id,
+          workflowName: names.get(run.workflow_id) ?? "",
+          stepId: stepOf(run.id),
+          status: "running",
+        };
+      }
+      return [...summaries.values()];
     },
 
     listSteps: (runId) => stepsOf(db, runId),
