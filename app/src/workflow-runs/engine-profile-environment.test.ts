@@ -59,6 +59,7 @@ function harness(options: {
     clientRequestId: "request-1",
     triggerKind: "github.issueLabeled",
     triggerId: null,
+    ticketRef: null,
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
