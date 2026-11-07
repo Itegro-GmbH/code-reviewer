@@ -141,15 +141,16 @@ describe("the pages with real data", () => {
         api={NO_POLL}
       />,
     );
-    // The Start form is behind "Run now" (#926). The manual trigger of the test workflow asks for the repository and a topic.
-    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
-    expect(screen.getByLabelText("Repository")).toBeTruthy();
-    expect(screen.getByLabelText("topic")).toBeTruthy();
     expect(
       screen
         .getAllByRole("link", { name: /Open the run/ })[0]
         ?.getAttribute("href"),
     ).toBe(`/w/acme/workflows/${workflow.id}/runs/${runId}`);
+    // The Start form is behind "Run now" (#926), in a modal dialog that hides the rest of the page from the accessibility tree, so
+    // the runs are checked first. The manual trigger of the test workflow asks for the repository and a topic.
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
+    expect(screen.getByLabelText("Repository")).toBeTruthy();
+    expect(screen.getByLabelText("topic")).toBeTruthy();
   });
 
   // #873-T73
