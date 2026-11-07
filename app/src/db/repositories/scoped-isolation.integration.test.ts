@@ -114,15 +114,21 @@ function noticeKeyOf(repositoryId: string) {
 const NOTICE_OPTIONS = { leaseMs: 60_000, maxAttempts: 3 };
 const CHECK_LEASE = { leaseMs: 60_000, maxAttempts: 5 };
 
-/** How many rows the ticket mirror holds in all workspaces together: a write that inserted a row it must not shows here. */
-async function trackerRowCounts(db: Kysely<Database>) {
+/** How many rows the ticket mirror holds in all workspaces together (or in one): a write that inserted a row it must not shows here. */
+async function trackerRowCounts(db: Kysely<Database>, workspaceId?: string) {
   const items = await db
     .selectFrom("tracker_items")
     .select((eb) => eb.fn.countAll<string>().as("n"))
+    .$if(workspaceId !== undefined, (qb) =>
+      qb.where("workspace_id", "=", workspaceId ?? ""),
+    )
     .executeTakeFirstOrThrow();
   const states = await db
     .selectFrom("tracker_sync_state")
     .select((eb) => eb.fn.countAll<string>().as("n"))
+    .$if(workspaceId !== undefined, (qb) =>
+      qb.where("workspace_id", "=", workspaceId ?? ""),
+    )
     .executeTakeFirstOrThrow();
   return { items: Number(items.n), syncStates: Number(states.n) };
 }
@@ -858,6 +864,8 @@ type Case = {
   run: (a: Repos, b: Seeded, db: Kysely<Database>) => Promise<unknown>;
   /** Checks the answer: it is "not found" in the way that method says so, or holds only A's data. */
   expectAnswer: (answer: unknown, a: Seeded, b: Seeded) => void;
+  /** The call erases workspace A itself, so A's own rows of the mirror are gone afterwards and only those. */
+  removesRowsOfA?: true;
 };
 
 /** The session and turn of the workspace that was seeded with a task. */
@@ -2007,6 +2015,7 @@ const CASES: Case[] = [
         deletedAt: new Date("2026-10-23T12:00:00.000Z"),
       }),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+    removesRowsOfA: true,
   },
   // implementer sessions (#751-T02): B's session, turn and branch are not A's to read, extend or change
   {
@@ -2801,13 +2810,21 @@ describe("two workspaces", () => {
       const { db, a, b, reposA } = await twoWorkspaces();
       const before = await rowsOf(db, b.workspaceId);
       const counts = await trackerRowCounts(db);
+      const own = await trackerRowCounts(db, a.workspaceId);
 
       const answer = await testCase.run(reposA, b, db);
 
       testCase.expectAnswer(answer, a, b);
       expect(await rowsOf(db, b.workspaceId)).toEqual(before);
-      // And nothing was added to the mirror under A's id in the repository of B (or anywhere).
-      expect(await trackerRowCounts(db)).toEqual(counts);
+      // And nothing was added to the mirror under A's id in the repository of B (or anywhere); erasing A takes A's rows and no others.
+      expect(await trackerRowCounts(db)).toEqual(
+        testCase.removesRowsOfA === true
+          ? {
+              items: counts.items - own.items,
+              syncStates: counts.syncStates - own.syncStates,
+            }
+          : counts,
+      );
     },
   );
 
