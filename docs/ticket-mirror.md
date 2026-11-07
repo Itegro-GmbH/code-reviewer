@@ -1,0 +1,143 @@
+# Ticket mirror
+
+The ticket mirror is a **read cache** of the issues and pull requests of a project's repository, kept in two tables
+(`tracker_items`, `tracker_sync_state`). It exists so that the project board, the issue drawer and the runs can show tickets
+without asking GitHub for each of them. It is part of the cockpit of epic #915 and shows what GitHub says; it decides nothing.
+
+**The rule: the mirror can be rebuilt from GitHub at any time and is never the source of truth.** Everything in it is a copy.
+Deleting both tables (or one row, or the whole database of a new region) and running **Resync** gives the same rows that the
+webhooks had written, and a ticket changed on GitHub is changed here by the next delivery or the next resync, never by us. The app
+never writes a ticket to GitHub through the mirror; a change of a ticket (a comment, a label, a pull request) goes to GitHub first
+and comes back as a delivery.
+
+- [What is stored](#what-is-stored)
+- [How rows get there](#how-rows-get-there)
+- [The rebuild rule](#the-rebuild-rule)
+- [What is read at the time of the question](#what-is-read-at-the-time-of-the-question)
+- [The API](#the-api)
+- [What the mirror does not do](#what-the-mirror-does-not-do)
+
+## What is stored
+
+One row per issue or pull request, per repository (`repository_id` and `number` are the key). The values are **as GitHub delivers
+them**: no status, type or label is mapped to a vocabulary of ours.
+
+| Column | Content |
+|---|---|
+| `workspace_id`, `repository_id`, `project_id` | The owner. `project_id` is empty until a project is the ticket source (#922); until then the rows are keyed by the repository |
+| `provider`, `repo`, `number`, `node_id` | `github`, `owner/name`, the number, and GitHub's global id (a board item names its ticket by it) |
+| `kind` | `issue` or `pull_request` |
+| `state`, `state_reason` | `open` or `closed`; GitHub's reason (`completed`, `not_planned`, `reopened`). A merged pull request is `closed` with the reason `merged`, the one value that is not GitHub's word for an issue |
+| `type` | The issue type of the organization (`Bug`, `Task`, ...), as named; empty for none and for a pull request |
+| `title`, `body_excerpt` | The title and the first 500 characters of the description. Text of whoever wrote the ticket: only ever shown as text |
+| `labels`, `assignees` | JSON: `[{ "name", "color" }]` and `[{ "login" }]` |
+| `board_status` | The **Status** of the item on an organization's project board, as the board names it; empty when the item is on none, or the App may not read boards ([The project board](github-app.md#the-project-board)) |
+| `parent_number` | The issue this one is a sub-issue of, in the same repository |
+| `pull_requests`, `closes` | For an issue, the numbers of the pull requests that close it; for a pull request, the issues it closes. A pull request closes an issue when its description says so with GitHub's keywords (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved` followed by `#12` or `owner/repo#12` of the same repository). `pull_requests` is computed from the `closes` of the cached pull requests |
+| `checks_state` | The state of the checks of an open pull request, in GitHub's words: the worst conclusion of its check suites (`failure`, `timed_out`, `startup_failure`, `action_required`, `cancelled`, `stale`), else `in_progress` or `queued`, else `success`, else `neutral` or `skipped`. Empty when it has no suite |
+| `updated_at`, `synced_at` | GitHub's time of the last change, and when we last wrote the row |
+
+`tracker_sync_state` holds, per repository, the position of a full sync that is under way (`cursor`, `started_at`) and when the last
+one ended (`last_full_sync_at`).
+
+`workflow_runs.ticket_ref` (`github:owner/repo#128`) names the ticket a run is about. The label trigger sets it; the migration filled
+it for the runs it had started before.
+
+## How rows get there
+
+A repository is mirrored while it has an **active project**, the same rule that decides which repositories are reviewed. Its rows
+come from two sources, and both write the same shape:
+
+**Webhooks** (`docs/github-app.md`, "Events"; the code is `integrations/providers/github-app/tracker-events.ts` and
+`src/tracker/mirror.ts`). Each delivery is read by the provider into one change, which the mirror applies:
+
+| Event and action | Effect on the cache |
+|---|---|
+| `issues`, any action | The ticket is written (created or replaced); `deleted` and `transferred` remove it |
+| `pull_request`, any action (`opened`, `closed`, merged, `review_requested`, `synchronize`, `edited`, ...) | The ticket of the pull request is written; `opened`, `reopened` and `synchronize` clear its checks (they belong to a commit), a closed pull request has none; the issues it closes (before and now) are linked again |
+| `issue_comment`, `created` or `edited` | The ticket (issue or pull request) is written from the delivery: the time of its last change moves. A deleted comment changes nothing. The comments themselves, and the markers of a question of a run, are not stored: the ask of a run is read from the run |
+| `sub_issues` | `parent_number` of the sub-issue is set, or emptied |
+| `projects_v2_item` | `board_status` of the item's ticket is set to the new **Status**, or emptied when the item left the board. The item is found by the node id of its content, in any repository of the workspace |
+| `check_suite` | For each open pull request the suite lists (same repository), the app asks GitHub for the check suites of the commit and stores their state (`checks_state`) |
+
+What a delivery does not carry stays as it was: a ticket written again keeps its `board_status`, its `pull_requests` and its
+`checks_state`. A delivery the mirror cannot use (a repository without a project, a ticket it does not hold) is not an error. A
+delivery that only the mirror reads fails with a 5xx if the cache cannot be written (GitHub redelivers it); a delivery that also starts a
+review or a workflow never fails because of the mirror (the failure is logged by its code).
+
+**The full sync** reads everything from GitHub and writes it. It starts when a project is created, and on demand: **Resync** in the
+project's setup, or `POST /api/w/<slug>/repositories/<id>/issues/sync`. It reads, one page of one phase at a time:
+
+1. **issues**: every issue and pull request, any state, oldest first (`GET /repos/{owner}/{repo}/issues?state=all`, 100 per page).
+   Sub-issues come with it (`parent_issue_url` of each issue); a pull request comes with its `merged_at`;
+2. **checks**: the open pull requests (30 per page) and, for each, the check suites of its head commit;
+3. **board**: the items of the project boards of the repository with their **Status** (GraphQL, the one place REST has nothing; a
+   board the App may not read is skipped).
+
+The token of each read is minted for it and limited to one repository and to read access (`issues`, `pull_requests`, `checks` and
+`metadata`; `organization_projects` and `metadata` for the board). The sync is **resumable**: the phase and page are saved after each
+page (`tracker_sync_state.cursor`), so a call that ends early (the request has about twenty seconds, GitHub did not answer) is
+continued by the next call, which answers `202` while there is more to read and `200` when the cache is complete. A sync that has
+not moved for an hour starts again from the beginning.
+
+## The rebuild rule
+
+When the last phase of a full sync is over:
+
+1. every ticket **not written since the sync began** is removed: GitHub does not have it any more (a deleted or transferred issue whose
+   delivery was missed);
+2. the pull requests of every issue are computed again from the `closes` of the pull requests;
+3. `last_full_sync_at` is set and the cursor is cleared.
+
+Because the sync reads the same fields the webhooks read, with the same functions (`tracker-map.ts`: the same rule for the closing
+keywords, the merged state and the state of the checks), **a cache that was deleted and synced holds what a cache kept current by
+the webhooks holds**: that is the test of the rule (`src/tracker/sync.test.ts`, "the rebuild rule"). The things only a delivery can say are the exception, and
+the sync says them by reading: the board status of an item whose board change was not delivered, and the checks of a pull request from a
+fork, which GitHub's `check_suite` delivery does not attribute to the pull request.
+
+To rebuild by hand: `delete from tracker_items; delete from tracker_sync_state;`, then press **Resync** for each project. Nothing else
+depends on the tables: the runs, their costs and the project keep working while the cache is empty, and the issue list shows the
+tickets as they arrive.
+
+## What is read at the time of the question
+
+The list adds two things that are **never stored** (they are read from `workflow_runs` when the list is asked for, by `ticket_ref`):
+
+- `lane`: the run that is going on for the ticket (the newest running one): its id, the name of its workflow, its current step and its
+  status; `null` when no run is going on;
+- `costUsd`: the sum of what all runs of the ticket spent so far, whatever their status.
+
+The ask of a run (a question the run put to a person) is read from the run in the same way; the engine has no such step yet, so the
+list has no field for it.
+
+## The API
+
+`GET /api/w/<slug>/repositories/<repositoryId>/issues?state=open` (every member of the workspace). Until projects are the ticket source
+(#922) the route is addressed by the repository; `/projects/<id>/issues` will be a thin alias.
+
+- `state`: `open` (the default), `closed` or `all`; `limit` (1 to 200, default 100) and `offset`. The newest change comes first.
+- The answer is `{ repositoryId, repo, items, sync: { lastFullSyncAt, inProgress } }`. An item has the fields of the table above
+  (`number`, `kind`, `state`, `stateReason`, `type`, `title`, `bodyExcerpt`, `labels`, `assignees`, `boardStatus`, `parentNumber`,
+  `pullRequests`, `checksState`, `updatedAt`, `syncedAt`), the address of the ticket on GitHub (`url`), and `lane` and `costUsd`.
+- A query that cannot be used is `400 TRACKER_REQUEST_INVALID` with `issues: [{ path, code, message, available }]`: `path` names the
+  parameter, `code` is `invalid` or `out_of_range`, and `available` lists the values that would have been accepted for a name out of a
+  closed set (`state`).
+- Other codes: `TRACKER_REPOSITORY_NOT_FOUND` (404), `TRACKER_PROJECT_NOT_ACTIVE` (409, the repository has no active project).
+
+`POST /api/w/<slug>/repositories/<repositoryId>/issues/sync` (members who may change the project's settings) runs the full sync as above and answers
+`{ status, next, written, removed, boardAvailable }`: `200` with `status: "done"`, or `202` with `status: "partial"` and the phase `next`
+reads when it is asked again. `TRACKER_INTEGRATION_UNAVAILABLE` (409) says the installation is suspended or removed;
+`TRACKER_SYNC_FAILED` (503) says GitHub could not be asked, and the sync stands where it was.
+
+## What the mirror does not do
+
+- **It does not map.** GitHub's `Status`, type and reason are shown as they come; there is no list of statuses of ours.
+- **It is no source of truth.** A ticket is never created or changed from it; a field is never read from it to decide something that
+  matters (an agent step reads the ticket from GitHub).
+- **It does not hold comments**, the diff of a pull request or the history of a ticket.
+- **It holds one repository's tickets.** A sub-issue or a closing keyword that points to another repository is left out.
+- **A repository without a project is not mirrored**, and a project that is switched off keeps its rows until a resync after it is
+  switched on again; they are not served while it is off.
+
+Code: `app/src/tracker/` (the mirror, the sync, the list and its routes), `app/src/db/repositories/tracker-repository.ts` (the only SQL),
+`app/src/integrations/providers/github-app/` (`tracker-events.ts`, `tracker-map.ts` and the three reads of the client).

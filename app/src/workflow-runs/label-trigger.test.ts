@@ -106,7 +106,7 @@ function harness(
           actorLogin: input.actorLogin,
           cancelRequestedAt: null,
           failure: null,
-          ticketRef: null,
+          ticketRef: input.ticketRef ?? null,
           createdAt: "2026-11-05T10:00:00.000Z",
           updatedAt: "2026-11-05T10:00:00.000Z",
           finishedAt: null,
@@ -169,6 +169,19 @@ describe("which workflows a label starts", () => {
       clientRequestId: "gh-delivery-1-wf-1",
     });
     expect(kicked).toEqual(["run-1"]);
+  });
+
+  // #923-T85
+  it("names the ticket the run is about, in the form the ticket mirror reads it by", async () => {
+    const { trigger, created } = harness([
+      { id: "wf-1", document: workflowDocument(READY) },
+    ]);
+
+    await trigger.start("delivery-1", LABELED);
+
+    expect(created[0]?.ticketRef).toBe(
+      `github:${LABELED.repo.fullName}#${LABELED.issue.number}`,
+    );
   });
 
   // #845-T11

@@ -124,7 +124,7 @@ export const migration: Migration = {
       .addColumn("updated_at", "text", (column) => column.notNull())
       .addCheckConstraint(
         "tracker_sync_state_cursor_check",
-        sql`cursor is null or char_length(cursor) <= 4096`,
+        sql`"cursor" is null or char_length("cursor") <= 4096`,
       )
       .execute();
     await sql`create index tracker_sync_state_workspace_index

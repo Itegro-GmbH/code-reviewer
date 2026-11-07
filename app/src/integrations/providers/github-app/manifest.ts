@@ -57,8 +57,19 @@ export const ACCOUNT_PERMISSIONS = { emails: "read" } as const;
  */
 export const ORGANIZATION_PERMISSIONS = { members: "read" } as const;
 
-/** The events a person ticks. `installation` and `installation_repositories` are always sent. */
-export const SUBSCRIBED_EVENTS = ["pull_request", "issue_comment"] as const;
+/**
+ * The events a person ticks. `installation` and `installation_repositories` are always sent. `issues`, `sub_issues` and `check_suite`
+ * feed the ticket mirror (#923) and need no permission the App does not hold already (Issues, Checks). `projects_v2_item` is not in the
+ * list: it needs the organization permission "Projects", which no App holds yet and which the portal would then report as missing for
+ * every App that exists; whoever uses the project board ticks it by hand (`docs/github-app.md`, "The project board").
+ */
+export const SUBSCRIBED_EVENTS = [
+  "pull_request",
+  "issue_comment",
+  "issues",
+  "sub_issues",
+  "check_suite",
+] as const;
 
 /** Every permission the manifest asks for, in the flat form of `default_permissions`. */
 export const MANIFEST_PERMISSIONS: Readonly<Record<string, "read" | "write">> =

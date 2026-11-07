@@ -474,10 +474,10 @@ function boardPageOf(data: Record<string, unknown>): {
 } | null {
   const { node } = data;
   if (!isRecord(node) || !isRecord(node.items)) return null;
-  const { items, pageInfo } = node.items;
-  if (!Array.isArray(items) || !isRecord(pageInfo)) return null;
+  const { nodes, pageInfo } = node.items;
+  if (!Array.isArray(nodes) || !isRecord(pageInfo)) return null;
   const result: { nodeId: string; status: string | null }[] = [];
-  for (const item of items as unknown[]) {
+  for (const item of nodes as unknown[]) {
     if (!isRecord(item) || !isRecord(item.content)) continue;
     if (typeof item.content.id !== "string") continue;
     const value = item.fieldValueByName;
@@ -2009,8 +2009,10 @@ export function createGithubAppClient(
               after === null || separator < 0
                 ? 0
                 : Number(after.slice(0, separator));
-            const cursor =
-              after === null || separator < 0 ? null : after.slice(separator + 1);
+            // "<index>:" is the start of that board: no cursor within it yet.
+            const within =
+              after === null || separator < 0 ? "" : after.slice(separator + 1);
+            const cursor = within === "" ? null : within;
             if (!Number.isInteger(index) || index < 0 || index >= BOARDS_MAX)
               return { available: true, items: [], next: null };
 

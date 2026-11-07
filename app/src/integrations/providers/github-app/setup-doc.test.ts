@@ -21,7 +21,10 @@ import {
   REPOSITORY_PERMISSIONS,
   SUBSCRIBED_EVENTS,
 } from "./manifest.ts";
-import { WEBHOOK_READ_FIELDS } from "./webhook-fields.ts";
+import {
+  TRACKER_WEBHOOK_FIELDS,
+  WEBHOOK_READ_FIELDS,
+} from "./webhook-fields.ts";
 import { getProductIdentity } from "../../../product-identity/current.ts";
 
 const PRODUCT = getProductIdentity();
@@ -141,7 +144,15 @@ describe("the GitHub App setup guide", () => {
       (row) => row[1],
     );
 
-    expect(listed.sort()).toEqual(Object.keys(WEBHOOK_READ_FIELDS).sort());
+    // The events of the reviews and workflows, and those only the ticket mirror reads (#923).
+    expect(listed.sort()).toEqual(
+      [
+        ...new Set([
+          ...Object.keys(WEBHOOK_READ_FIELDS),
+          ...Object.keys(TRACKER_WEBHOOK_FIELDS),
+        ]),
+      ].sort(),
+    );
   });
 
   // CR-38-T01
