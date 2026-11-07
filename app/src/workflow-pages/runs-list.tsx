@@ -64,7 +64,10 @@ export function WorkflowRunsList({
     initial,
     fetchLatest: () => api.list(workflowId),
     isSettled: (snapshot) =>
-      snapshot.runs.every((run) => run.status !== "running"),
+      // A run that waits for an answer (#920) changes when somebody answers, on this page or on the ticket.
+      snapshot.runs.every(
+        (run) => run.status !== "running" && run.status !== "waiting",
+      ),
     activeIntervalMs: WORKFLOW_RUN_POLL_MS,
     idleIntervalMs: null,
   });

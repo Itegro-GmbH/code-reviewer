@@ -111,6 +111,10 @@ export type ImplementerJob = {
   environment?: ImplementerEnvironment;
   profile?: ImplementerProfile;
   resultSchema?: ImplementerResultSchema;
+  /**
+   * #920: the turn may end with a question instead of a result: the finish tool offers `ask`. Sent only with `resultSchema` and only to a caller that named the claim feature `implementer_ask`; absent means false.
+   */
+  canAsk?: boolean;
   resume?: ImplementerResume;
 };
 /**
@@ -1041,6 +1045,7 @@ export interface ImplementerResult {
   checkedOut?: string | null;
   resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
+  agentAsk?: ImplementerAgentAsk;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -1082,6 +1087,39 @@ export interface ImplementerNetworkReport {
  */
 export interface ImplementerAgentResult {
   [k: string]: unknown;
+}
+/**
+ * #920: the question the agent ended the turn with instead of a result, in `ImplementerResult.agentAsk`. Present only for a turn that carried `canAsk` and handed in no result: the runner reads the file the finish tool wrote once the agent's container is gone, holds it to its bounds and takes the secrets out of every text. A turn with a question succeeds (`ok` true, no `errorCode`) and has no `agentResult`; the workflow engine puts the step into `waiting` and shows the question to people, and the answer starts the next turn of the same session. Data of an untrusted writer: shown as plain text, never a command. `options` is left out when there are none.
+ */
+export interface ImplementerAgentAsk {
+  question: string;
+  /**
+   * @minItems 1
+   * @maxItems 10
+   */
+  options?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+  context?: string;
 }
 export interface RunnerUsage {
   model: string | null;

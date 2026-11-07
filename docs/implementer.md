@@ -1580,6 +1580,18 @@ re-checks the stored value with `checkResultValue` against the turn's stored sch
 after its secrets were taken out or in the app, is left out and the turn ends `no_result`; the branches, the commits, the files and the usage are kept. The
 same holds in the app for a report of success from a turn with a schema that carries no result: it is recorded `no_result`.
 
+**A turn that ends with a question instead of a result (#920).** A turn of a workflow step can end with `ask` instead of `done`: the agent calls
+`factory-submit --ask` (the question as JSON on standard input: `question`, optional `options` and `context`) or the tool `finish_submit_result` with only `ask`; the last call wins, and a result
+takes a question away and the other way round (the tool deletes the file of the other). The question is written to `/work/result/ask.json`, next to the result file, and is read exactly like the
+result: in a reader, after the agent's container is gone, bounded (32 KiB, then the bounds of `check_ask`: a closed object, a question of at most 2000 characters, at most 10 options of at most 200,
+a context of at most 4000), cleaned of the job's secrets and reported as `implementer.agentAsk`; the app bounds it again and takes the secrets out once more. A turn with a question **succeeds** (`ok`, no
+`errorCode`), has no `agentResult` and is not `no_result`: the sandbox is shut down as after a result, what the agent committed is pushed all the same, and the session snapshot is kept. The agent is offered
+`ask` only when the job says `implementer.canAsk` (the app sends it with a result schema, only for a turn a workflow step started (a plain task or follow-up has nobody to answer, so it never gets it: the request ids that start with `wf-` are the engine's alone, a request body that names one is refused with `IMPLEMENTER_REQUEST_INVALID`, `clientRequestId` `request_id_reserved`, and the claim also checks that the job is the one the step holds), to a Worker that names the claim feature `implementer_ask`; any other Worker runs the turn as before and never offers
+it) and the schema has no field named `ask`; the prompt then has a paragraph about it (the same for every schema, so the prompt cache still hits). The tool then has the property `ask` next to the fields of the
+result and none of its fields is required by the parameters: a call is the result or `{ask: …}` alone, and the tool checks which. A result that fits wins if both files exist (only a hand-written file can
+make that). The workflow engine turns the question into a waiting step ([`workflows.md`](workflows.md#a-question-done-or-ask-920)); the answer is the instruction of the next turn of the same session. A turn
+that ends with neither gets the reminder and ends `no_result` as before.
+
 **An agent that ends without a valid result** gets **one reminder** (`RESULT_REMINDER_PROMPT`), in the same session, like the message for a dirty
 working tree, and also for a profile that may not push, since the reminder is about the result and not about git. The order is: the task, the reminder
 (no valid result), the message for a dirty tree (a profile that may push). A turn that has no time for it (less than 20 s) says so in its notes. Then the

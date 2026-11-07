@@ -13,6 +13,10 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   WORKFLOW_RUN_TRIGGER_UNKNOWN: 404,
   WORKFLOW_RUN_TICKET_NOT_FOUND: 404,
   WORKFLOW_RUN_WORKFLOW_ARCHIVED: 409,
+  /** #920: the run does not wait for an answer (never did, was answered before, or was asked to stop). */
+  WORKFLOW_RUN_NOT_WAITING: 409,
+  /** #920: the answer was written for another question than the one that waits (it was answered, and the step asked again). */
+  WORKFLOW_RUN_QUESTION_CHANGED: 409,
   WORKFLOW_RUN_REQUEST_REUSED: 409,
   WORKFLOW_RUN_BODY_TOO_LARGE: 413,
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: 415,
@@ -21,6 +25,8 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT: 422,
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED: 422,
   WORKFLOW_RUN_INPUT_INVALID: 422,
+  /** #920: the answer is empty, too long, or names an option the question does not have. */
+  WORKFLOW_RUN_ANSWER_INVALID: 422,
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: 500,
   WORKFLOW_RUN_GITHUB_UNAVAILABLE: 503,
 } as const;

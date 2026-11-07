@@ -693,6 +693,46 @@ describe("commenting on an issue", () => {
   });
 });
 
+describe("editing a comment of the App (#920)", () => {
+  // #920-T160
+  it("replaces the body of the comment with a token for issues of this repository only", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 7, title: "Cache the widgets" });
+    const comment = await client.createIssueComment(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      7,
+      "The agent has a question.",
+    );
+
+    await client.updateIssueComment(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      comment.id,
+      "Answered by @octocat: yes.",
+    );
+
+    expect(
+      fake.issueComments("acme/widgets", 7).map((entry) => entry.body),
+    ).toEqual(["Answered by @octocat: yes."]);
+  });
+
+  // #920-T161
+  it("is 404 for a comment that is gone and refuses an id that is no number", async () => {
+    const { client } = await setup();
+
+    const missing = await failureOf(
+      client.updateIssueComment("4242", ISSUES, "acme/widgets", "424242", "x"),
+    );
+    expect(missing.code).toBe("GITHUB_APP_NOT_FOUND");
+    await expect(
+      client.updateIssueComment("4242", ISSUES, "acme/widgets", "../x", "x"),
+    ).rejects.toThrow();
+  });
+});
+
 describe("a comment that GitHub refuses at the call", () => {
   // #844-T352
   it("is 403 with the permission missing when the token lacks the right, and a rate limit when the text says so", async () => {

@@ -7,7 +7,10 @@
 // runner would send (`finishTurn`).
 import type { ActionConnector } from "../workflow-runs/connectors.ts";
 import { createConnectorRegistry } from "../workflow-runs/connectors.ts";
-import { createWorkflowEngine } from "../workflow-runs/engine.ts";
+import {
+  createWorkflowEngine,
+  type AskChannel,
+} from "../workflow-runs/engine.ts";
 import { createTurnReader } from "../workflow-runs/turn-reader.ts";
 import type { TokenPrice } from "../workflow-runs/turn-facts.ts";
 import {
@@ -97,6 +100,8 @@ export type TurnReport = {
   tokens?: { prompt: number; completion: number };
   /** What the finish tool stored; none when the turn has no schema or the agent never called it. */
   agentResult?: JsonValue;
+  /** #920: the question the turn ended with instead of a result. */
+  agentAsk?: JsonValue;
   pushed?: boolean;
   commits?: string[];
   headCommit?: string | null;
@@ -107,6 +112,8 @@ export type TurnReport = {
 export async function startEngineHarness(
   options: {
     connectors?: readonly ActionConnector[];
+    /** #920: where a question is shown and an answer acknowledged. */
+    asks?: AskChannel;
     operatorCostLimitCents?: number;
     maxBudgetUsd?: number;
     /** The catalog price of the model of a turn; left out: no turn has a price. */
@@ -198,6 +205,7 @@ export async function startEngineHarness(
     jobs,
     turns: turnReader,
     connectors: createConnectorRegistry(options.connectors ?? []),
+    ...(options.asks === undefined ? {} : { asks: options.asks }),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     now,
     ...(options.actionTimeoutMs === undefined
@@ -209,6 +217,7 @@ export async function startEngineHarness(
   const kicked: string[] = [];
   const service: WorkflowRunService = createWorkflowRunService({
     runs,
+    engine,
     workflows,
     projects,
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
@@ -334,6 +343,7 @@ export async function startEngineHarness(
         ...(report.agentResult === undefined
           ? {}
           : { agentResult: report.agentResult }),
+        ...(report.agentAsk === undefined ? {} : { agentAsk: report.agentAsk }),
       },
     };
     const outcome =

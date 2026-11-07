@@ -94,6 +94,17 @@ result and hand it in again. Hand it in only when the work is done, and end your
 it was accepted. A turn that ends without an accepted result has failed.
 """
 
+# #920: only for a turn that may end with a question. Same text for every schema, like `_RESULT`.
+_ASK = """\
+If you cannot go on without the answer of a person (a decision only they can make, or something \
+the repository does not tell you), do not guess: hand in a question instead of the result. Call \
+`finish_submit_result` with only `ask` (a `question`, optionally `options`, a short list of \
+answers to choose from, and `context`), or run `factory-submit --ask` with that object as JSON on \
+its standard input. Then end your turn without doing anything else. The answer comes as the next \
+instruction, in the same session, and you carry on from there. Ask only what blocks you, and ask \
+once.
+"""
+
 # Before the text of a profile version: where the rules of the system end and its own text begins.
 _PROFILE_HEADING = "# Instructions of this profile"
 
@@ -109,6 +120,7 @@ def instructions_text(
     can_push: bool = True,
     profile_instructions: str = "",
     with_result: bool = False,
+    with_ask: bool = False,
 ) -> str:
     """The runner's addition to the stock prompt. `with_setup` is a turn whose environment has a
     setup script: only then there is something the setup left in the repository to tell about.
@@ -127,6 +139,7 @@ def instructions_text(
         + _RULES_AFTER_PUSH
         + (f"\n{_SETUP_LEFTOVERS}" if with_setup else "")
         + (f"\n{_RESULT}" if with_result else "")
+        + (f"\n{_ASK}" if with_result and with_ask else "")
         + _CLOSING
     )
     if profile_instructions == "":

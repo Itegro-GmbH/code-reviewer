@@ -455,6 +455,28 @@ def test_the_runner_refuses_a_result_schema_it_cannot_make_a_tool_from(schema: A
     assert refused.value.code is ErrorCode.INVALID_JOB
 
 
+# #920-T07
+def test_the_example_of_the_agent_ask_is_valid_in_the_result_and_in_the_runners_own_check() -> None:
+    from code_reviewer_runner.implementer import finish_tool
+    from code_reviewer_runner.implementer.report import agent_ask_ok
+
+    value = _load(EXAMPLES / "ImplementerAgentAsk.json")
+    assert _accepts("ImplementerAgentAsk", value)
+    assert finish_tool.check_ask(value) == [] and agent_ask_ok(value)
+    result = _result()
+    result["implementer"]["agentAsk"] = value
+    assert _accepts("RunnerResult", result)
+    refused: list[object] = [
+        [],
+        {"question": ""},
+        {"question": "q", "answer": "x"},
+        {"options": ["a"]},
+    ]
+    for bad in refused:
+        result["implementer"]["agentAsk"] = bad
+        assert not _accepts("RunnerResult", result), bad
+
+
 # #843-T50
 def test_the_example_of_the_agent_result_is_valid_in_the_result_and_fits_the_example_schema() -> (
     None

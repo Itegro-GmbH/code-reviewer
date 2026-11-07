@@ -40,6 +40,7 @@ import { createImplementerEnvironmentsRepository } from "./implementer-environme
 import { createWorkflowsRepository } from "./workflows-repository.ts";
 import { createTrackerRepository } from "./tracker-repository.ts";
 import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
+import { implementerDeliveryId } from "../implementer-job-shape.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
@@ -552,6 +553,20 @@ async function seed(
       }),
   );
   if (workflowStep === undefined) throw new Error("seeding failed");
+  // An agent step too (#920): the workflow engine started its turn under the reserved request id.
+  const workflowAgentStep = await repos.workflowRuns.lockRun(
+    workflowRun.run.id,
+    (lock) =>
+      lock.addStep({
+        position: 1,
+        stepId: "think",
+        kind: "agent",
+        round: 1,
+        profile: null,
+        capMicroUsd: null,
+      }),
+  );
+  if (workflowAgentStep === undefined) throw new Error("seeding failed");
   // A ticket in every workspace (#923), with a board status and checks, and the state of a sync that is under way.
   await repos.tracker.upsertItem(repository.id, trackerItem(tag));
   await repos.tracker.setBoardStatusByNode(`node-repo-${tag}`, "In Progress");
@@ -612,6 +627,7 @@ async function seed(
     project,
     workflowRun: workflowRun.run,
     workflowStep,
+    workflowAgentStep,
     agentProfile: secondProfileVersion.profile,
     implementer: started,
     topUpIntentId: topUpIntent.id,
@@ -2394,6 +2410,47 @@ const CASES: Case[] = [
     run: (a, b) =>
       a.workflowRuns.lockRun(b.workflowRun.id, async () => "worked"),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // #920: B's ticket holds no run of A that waits.
+    name: "workflowRuns.listWaitingForTicket",
+    run: (a, b) =>
+      a.workflowRuns.listWaitingForTicket(
+        b.workflowRun.ticketRef ?? "none",
+        10,
+      ),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #920: B's repository holds no run of A that waits.
+    name: "workflowRuns.listWaitingWithoutTicket",
+    run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #920: B's agent step is nobody's but B's: the delivery id that names it (the prefix of B's workspace, the request id the engine
+    // gave it) vouches for nothing when A asks, whichever job it is asked about.
+    name: "workflowRuns.isAgentStepDelivery",
+    run: (a, b) =>
+      a.workflowRuns.isAgentStepDelivery(
+        implementerDeliveryId(
+          b.workspaceId,
+          `wf-${b.workflowRun.id}-${String(b.workflowAgentStep.position)}`,
+        ),
+        b.job.id,
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // #920: B's repository holds no run of A.
+    name: "workflowRuns.hasRunOnRepository",
+    run: (a, b) => a.workflowRuns.hasRunOnRepository(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "workflowRuns.recordAskComment",
+    run: (a, b) => a.workflowRuns.recordAskComment(b.workflowStep.id, "9001"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "workflowRuns.claimStep",

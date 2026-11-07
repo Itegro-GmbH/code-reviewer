@@ -1,0 +1,5 @@
+{
+  "question": "The ticket asks for a retry, but the client has two failure modes. Which one should be retried?",
+  "options": ["Only network errors", "Network errors and 5xx answers"],
+  "context": "client.ts distinguishes a refused connection from a 5xx answer; only the first is safe to repeat."
+}

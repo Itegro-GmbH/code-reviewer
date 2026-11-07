@@ -809,3 +809,84 @@ describe("a run a member asked to stop", () => {
     ).toEqual({ move: "idle" });
   });
 });
+
+describe("a run that waits for an answer (#920)", () => {
+  const asked = (patch: Partial<MachineStep> = {}) =>
+    step("plan", { status: "waiting", ...patch });
+
+  // #920-T30
+  it("does nothing while it waits, however long", () => {
+    expect(
+      nextMove(
+        state({
+          runStatus: "waiting",
+          steps: [asked({ startedAt: at(10 * 24 * 3600) })],
+        }),
+      ),
+    ).toEqual({ move: "idle" });
+  });
+
+  // #920-T31
+  it("ends the waiting step when a stop was asked for, and only then", () => {
+    expect(
+      nextMove(
+        state({
+          runStatus: "waiting",
+          cancelRequested: true,
+          steps: [asked()],
+        }),
+      ),
+    ).toEqual({ move: "cancel_waiting", position: 0 });
+  });
+
+  // #920-T32
+  it("starts the turn that goes on once the answer is on the step", () => {
+    expect(
+      nextMove(
+        state({
+          steps: [step("plan", { status: "running", answerPending: true })],
+        }),
+      ),
+    ).toEqual({ move: "resume_turn", position: 0 });
+  });
+
+  // #920-T33
+  it("reads the job again once that turn is attached, like any running step", () => {
+    expect(
+      nextMove(state({ steps: [step("plan", { status: "running" })] })),
+    ).toEqual({ move: "read_job", position: 0 });
+  });
+
+  // #920-T34
+  it("starts the turn of an answered step first when a stop was asked for, so that no turn is left without a step", () => {
+    expect(
+      nextMove(
+        state({
+          cancelRequested: true,
+          steps: [step("plan", { status: "running", answerPending: true })],
+        }),
+      ),
+    ).toEqual({ move: "resume_turn", position: 0 });
+  });
+
+  // #920-T35
+  it("replays a waiting step as the step that is not over, so nothing after it is written", () => {
+    expect(replay(state().nodes, [asked()]).stop).toEqual({
+      kind: "open",
+      index: 0,
+    });
+  });
+
+  // #920-T36
+  it("is not a failure for onFailure: a waiting run is not ended", () => {
+    expect(
+      nextMove(
+        state({
+          runStatus: "waiting",
+          onFailure: [action("notify")],
+          steps: [asked()],
+        }),
+      ),
+    ).toEqual({ move: "idle" });
+  });
+});

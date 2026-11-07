@@ -445,9 +445,10 @@ export function createGithubAppProvider(
             return {
               url: `${repo.url}/issues/${String(issueNumber)}#issuecomment-${found.id}`,
               existing: true,
+              id: found.id,
             };
         }
-        const { url } = await client.createIssueComment(
+        const { url, id } = await client.createIssueComment(
           integration.externalId,
           scope,
           repo.fullName,
@@ -455,7 +456,24 @@ export function createGithubAppProvider(
           body,
           signal,
         );
-        return { url, existing: false };
+        return { url, existing: false, id };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async updateIssueComment(integration, repo, commentId, body, signal) {
+      try {
+        await (
+          await getClient()
+        ).updateIssueComment(
+          integration.externalId,
+          actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
+          repo.fullName,
+          commentId,
+          body,
+          signal,
+        );
       } catch (error) {
         throw toActionError(error);
       }
