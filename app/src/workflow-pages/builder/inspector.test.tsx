@@ -229,6 +229,39 @@ describe("an agent step", () => {
     expect(screen.getByLabelText("Environment")).toBeTruthy();
   });
 
+  // #926-T37b
+  it("removes the environment from the step when the field is cleared, so the profile's runner applies (#919)", () => {
+    const lane = shippedLane();
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={{
+          ...lane,
+          steps: [
+            {
+              id: "a",
+              kind: "agent",
+              profile: "reviewer",
+              environment: "node",
+              session: "new",
+              instruction: "x",
+            },
+          ],
+        }}
+        pointer="/steps/0"
+        seen={seen}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Environment"), {
+      target: { value: "" },
+    });
+    const step = getAt(seen.mock.lastCall?.[0] as Doc, "/steps/0") as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(step, "environment")).toBe(false);
+  });
+
   // #926-T38
   it("edits the result schema as a table", () => {
     const seen = vi.fn();

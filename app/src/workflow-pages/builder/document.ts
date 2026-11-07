@@ -367,27 +367,9 @@ export type NodeDefaults = {
   profile?: string;
 };
 
-function firstEnvironment(doc: Doc): string | undefined {
-  const find = (entries: unknown): string | undefined => {
-    if (!Array.isArray(entries)) return undefined;
-    for (const entry of entries as unknown[]) {
-      if (!isRecord(entry)) continue;
-      if (entry.kind === "agent" && typeof entry.environment === "string")
-        return entry.environment;
-      for (const key of CHILD_LISTS) {
-        const inner = find(entry[key]);
-        if (inner !== undefined) return inner;
-      }
-    }
-    return undefined;
-  };
-  return find(doc.steps);
-}
-
 /**
  * A new step, as small as the format allows and not yet valid where only the person knows (an empty instruction, an empty condition):
- * the validator says what is missing. An agent step gets an `environment` only when the document already uses them (#919 takes them
- * away), copied from the first agent step.
+ * the validator says what is missing. A new agent step names no `environment`: its profile says where it runs (#919).
  */
 export function newNode(
   doc: Doc,
@@ -396,12 +378,10 @@ export function newNode(
 ): Doc {
   switch (kind) {
     case "agent": {
-      const environment = firstEnvironment(doc);
       return {
         id: uniqueId(doc, "agent"),
         kind: "agent",
         profile: defaults.profile ?? "",
-        ...(environment === undefined ? {} : { environment }),
         session: "new",
         instruction: "",
       };

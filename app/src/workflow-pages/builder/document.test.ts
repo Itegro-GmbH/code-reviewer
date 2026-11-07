@@ -170,7 +170,7 @@ describe("editing", () => {
   });
 
   // #926-T08
-  it("gives a new step an id nobody has and the environment the document already uses", () => {
+  it("gives a new step an id nobody has and no environment, since the profile says where it runs (#919)", () => {
     const lane = shippedLane();
     expect(uniqueId(lane, "agent")).toBe("agent");
     expect(uniqueId(lane, "fix")).toBe("fix2");
@@ -178,9 +178,9 @@ describe("editing", () => {
     expect(agent).toMatchObject({
       kind: "agent",
       profile: "reviewer",
-      environment: "node",
       session: "new",
     });
+    expect(agent).not.toHaveProperty("environment");
     const bare = newNode({ steps: [] }, "agent");
     expect(bare).not.toHaveProperty("environment");
     expect(newNode(lane, "loop")).toMatchObject({

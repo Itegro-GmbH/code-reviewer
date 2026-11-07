@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The inspector (#926): the fields of the selected node, by kind, and what the validator found at it. Every field writes straight into the
-// document; there is no draft of a field. Variable chips and the picker are the next issue (#927): a field is plain text with `{{…}}`.
+// document; a list field keeps the text being typed as a draft only while it parses to the value in the document. Variable chips and the picker are the next issue (#927): a field is plain text with `{{…}}`.
 import { useState, type Ref } from "react";
 import { Button } from "../../components/button.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
@@ -304,9 +304,13 @@ function AgentFields(props: FieldsProps) {
           label="Environment"
           value={textOf(node.environment)}
           target="literal"
-          hint="The name of an environment of the workspace. Goes away when profiles carry where they run."
+          hint="Deprecated: the profile says where it runs (#919). Clear the field to use the profile's runner."
           onChange={(environment) =>
-            onChange(patchNode(doc, pointer, { environment }))
+            onChange(
+              patchNode(doc, pointer, {
+                environment: environment === "" ? undefined : environment,
+              }),
+            )
           }
         />
       ) : null}
