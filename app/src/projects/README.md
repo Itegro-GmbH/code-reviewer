@@ -171,10 +171,13 @@ trigger and a manual start work only within the project's repository. A project 
 
 `POST /api/w/:workspace/projects` (Admin or Owner, `manage_projects`; only with the capability `implementer`) takes `{ repositoryId, board?: { projectV2Id } | null, lanes?: ["issue-to-pr", "review-a-pull-request"] }`,
 switches the repository on with its ticket source and copies the built-in lanes (`src/workflows/built-in-lanes.ts`); it answers `201 { project, lanes: [{ key, ok, workflowId | code }] }` (a copy that fails altogether is `LANE_COPY_FAILED` for every lane, and the project stays). The tickets are also
+`GET /api/w/:workspace/projects/:projectId/issues`, the same answer as the issues of the repository.
+
 `PUT /api/w/:workspace/projects/:projectId` (#937; Admin or Owner, `manage_projects`, like creating a project and reading its boards; capability `implementer`; Resync stays with `change_project_settings`) takes `{ board: { projectV2Id } | null }` and nothing else: it sets, changes or clears the board of the ticket
 source after the same check against the repository's boards (`board-request.ts`, `create-http.ts` `setBoard`, `ProjectService.setBoard`, `ProjectsRepository.setTicketBoard`); `PROJECT_NOT_FOUND` (404) for an unknown project. The Setup tab (`ui/ticket-board-picker.tsx`, `ui/resync-tickets.tsx`,
 `ui/sync-staleness.ts`, calls in `ui/setup-api.ts`, words in `ui/setup-messages.ts`) offers the picker, "Resync" and the hint that the tickets may be out of date (last full sync older than `STALE_SYNC_DAYS` = 3 and no delivery since).
-`GET /api/w/:workspace/projects/:projectId/issues`, the same answer as the issues of the repository. How the lanes and the trigger use the project: [`docs/workflows.md`](../../../docs/workflows.md#lanes-belong-to-a-project).
+
+How the lanes and the trigger use the project: [`docs/workflows.md`](../../../docs/workflows.md#lanes-belong-to-a-project).
 
 ## The cockpit (#925)
 
