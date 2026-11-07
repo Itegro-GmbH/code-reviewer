@@ -7,11 +7,6 @@
 //   { "repositoryId": "<id of a repository of the workspace>",
 //     "board": { "projectV2Id": "PVT_…" } | null,          // optional; the board of the GitHub Project, read from the repository
 //     "lanes": ["issue-to-pr", "review-a-pull-request"] }  // optional; built-in lanes copied into the new project
-import {
-  BUILT_IN_LANE_KEYS,
-  isBuiltInLaneKey,
-  type BuiltInLaneKey,
-} from "../workflows/built-in-lanes.ts";
 import type { NewProjectIssue } from "./errors.ts";
 
 const FIELDS = ["repositoryId", "board", "lanes"] as const;
@@ -23,7 +18,8 @@ const BOARD_ID = /^PVT_[A-Za-z0-9_-]{1,200}$/;
 export type NewProjectRequest = {
   repositoryId: string;
   board: { projectV2Id: string } | null;
-  lanes: BuiltInLaneKey[];
+  /** The names of built-in lanes, each at most once, as `laneKeys` has them. */
+  lanes: string[];
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -33,8 +29,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const shown = (value: string): string =>
   value.replace(/[^\x20-\x7e]/g, "?").slice(0, 40);
 
+/**
+ * `laneKeys` are the names of the built-in lanes there are (the workflows module owns them; this module does not import it).
+ */
 export function readNewProjectRequest(
   body: unknown,
+  laneKeys: readonly string[],
 ):
   | { ok: true; request: NewProjectRequest }
   | { ok: false; issues: NewProjectIssue[] } {
@@ -117,33 +117,31 @@ export function readNewProjectRequest(
     }
   }
 
-  const lanesRead: BuiltInLaneKey[] = [];
+  const lanesRead: string[] = [];
   if (lanes !== undefined) {
     if (!Array.isArray(lanes))
       issues.push({
         path: "lanes",
         code: "wrong_type",
         message: "lanes must be a list of the names of built-in lanes.",
-        available: [...BUILT_IN_LANE_KEYS],
+        available: [...laneKeys],
       });
     else
       (lanes as unknown[]).forEach((lane, index) => {
         const path = `lanes/${String(index)}`;
-        if (!isBuiltInLaneKey(lane))
+        if (typeof lane !== "string" || !laneKeys.includes(lane))
           issues.push({
             path,
             code: "unknown_lane",
             message: `There is no built-in lane ${typeof lane === "string" ? shown(lane) : "of that kind"}.`,
-            available: [...BUILT_IN_LANE_KEYS],
+            available: [...laneKeys],
           });
         else if (lanesRead.includes(lane))
           issues.push({
             path,
             code: "duplicate_lane",
             message: `The lane ${lane} is named twice.`,
-            available: BUILT_IN_LANE_KEYS.filter(
-              (key) => !lanesRead.includes(key),
-            ),
+            available: laneKeys.filter((key) => !lanesRead.includes(key)),
           });
         else lanesRead.push(lane);
       });

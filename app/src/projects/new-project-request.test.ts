@@ -2,7 +2,10 @@
 
 // #922: the body of a new project is held to its shape; every problem has a path, a code, a message and, for a closed set, `available`.
 import { describe, expect, it } from "vitest";
-import { readNewProjectRequest } from "./new-project-request.ts";
+import { readNewProjectRequest as read } from "./new-project-request.ts";
+
+const LANES = ["issue-to-pr", "review-a-pull-request"];
+const readNewProjectRequest = (body: unknown) => read(body, LANES);
 
 const BOARD = "PVT_kwDOAbc123";
 
@@ -35,7 +38,7 @@ describe("the body of a new project", () => {
   // #922-T11
   it("reports every problem with its path and what would have been accepted", () => {
     const result = readNewProjectRequest({
-      board: { projectV2Id: "not-a-board", color: "red" },
+      board: { projectV2Id: "not-a-board", color: "tint" },
       lanes: ["issue-to-pr", "issue-to-pr", "nothing"],
       extra: 1,
     });

@@ -8,10 +8,15 @@
 import { after, connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { boardsFor, laneCopierFor } from "@/projects/create-shared";
+import { boardsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
+import {
+  BUILT_IN_LANE_KEYS,
+  isBuiltInLaneKey,
+} from "@/workflows/built-in-lanes";
+import { workflowServiceFor } from "@/workflows/shared";
 
 /** How long the first sync may read before it stops and waits for the next "Resync". */
 const FIRST_SYNC_BUDGET_MS = 20_000;
@@ -47,7 +52,13 @@ export async function POST(
         },
       ),
       boards: boardsFor(access.workspace.id),
-      copyLanes: laneCopierFor(access.workspace.id),
+      laneKeys: BUILT_IN_LANE_KEYS,
+      copyLanes: (user, projectId, keys) =>
+        workflowServiceFor(access.workspace.id).copyBuiltIn(
+          user,
+          projectId,
+          keys.filter(isBuiltInLaneKey),
+        ),
     }).create(request),
   );
 }

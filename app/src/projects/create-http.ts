@@ -15,7 +15,6 @@ import type { StoredProject } from "../db/repositories/projects-repository.ts";
 import { isCrossSite, isJsonRequest } from "../http/request-checks.ts";
 import type { BoardInfo } from "../integrations/provider.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
-import type { BuiltInLaneKey } from "../workflows/built-in-lanes.ts";
 import {
   PROJECT_ERROR_STATUS,
   ProjectError,
@@ -37,18 +36,20 @@ export type BoardsAnswer =
 
 /** What copying one built-in lane into the new project came to (`WorkflowService.copyBuiltIn`). */
 export type LaneCopy =
-  | { key: BuiltInLaneKey; ok: true; workflow: { id: string; name: string } }
-  | { key: BuiltInLaneKey; ok: false; code: string };
+  | { key: string; ok: true; workflow: { id: string; name: string } }
+  | { key: string; ok: false; code: string };
 
 export type NewProjectDependencies = {
   /** The signed in user, or a throw that ends the request. Called first, on every request. */
   requireUser: () => Promise<SessionUser>;
   service: Pick<ProjectService, "createProject">;
   boards(repositoryId: string): Promise<BoardsAnswer>;
+  /** The names of the built-in lanes a new project may copy (the workflows module owns them). */
+  laneKeys: readonly string[];
   copyLanes(
     user: SessionUser,
     projectId: string,
-    keys: readonly BuiltInLaneKey[],
+    keys: readonly string[],
   ): Promise<LaneCopy[]>;
 };
 
@@ -104,6 +105,7 @@ export function createNewProjectHandlers({
   requireUser,
   service,
   boards,
+  laneKeys,
   copyLanes,
 }: NewProjectDependencies): NewProjectHandlers {
   /** The boards of a repository, or the `ProjectError` that says why there are none to look at. */
@@ -139,7 +141,7 @@ export function createNewProjectHandlers({
             "PROJECT_CROSS_SITE_REQUEST",
             "The request does not come from this site.",
           );
-        const read = readNewProjectRequest(await readBody(request));
+        const read = readNewProjectRequest(await readBody(request), laneKeys);
         if (!read.ok) return refusal("PROJECT_REQUEST_INVALID", read.issues);
         const { repositoryId, board, lanes } = read.request;
 

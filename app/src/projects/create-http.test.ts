@@ -72,6 +72,7 @@ function setup(
     requireUser,
     service: { createProject },
     boards,
+    laneKeys: ["issue-to-pr", "review-a-pull-request"],
     copyLanes,
   });
   const post = (body: unknown, headers: Record<string, string> = {}): Request =>

@@ -7,7 +7,7 @@
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { boardsFor, laneCopierFor } from "@/projects/create-shared";
+import { boardsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
 
@@ -23,7 +23,9 @@ export async function GET(
       requireUser: () => Promise.resolve(access.user),
       service: projectServiceFor(access.workspace.id),
       boards: boardsFor(access.workspace.id),
-      copyLanes: laneCopierFor(access.workspace.id),
+      // Listing boards copies no lane.
+      laneKeys: [],
+      copyLanes: async () => [],
     }).boards(request, repositoryId),
   );
 }
