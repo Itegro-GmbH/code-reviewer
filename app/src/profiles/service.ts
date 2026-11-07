@@ -12,12 +12,13 @@ import type {
   StoredProfile,
   StoredProfileVersion,
 } from "../db/repositories/profiles-repository.ts";
+import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
 import {
   CLAUDE_CODE_HARNESS,
   OPENCODE_HARNESS,
 } from "../runner-identity/harness.ts";
-import { issue } from "../workflows/issues.ts";
+import { issue, listNames, shown } from "../workflows/issues.ts";
 import type { ResultSchema } from "../workflows/result-schema.ts";
 import { ProfileError, type ProfileIssue } from "./errors.ts";
 import {
@@ -91,6 +92,8 @@ export type ProfileServiceDependencies = {
   profiles: ProfilesRepository;
   /** The rule of the Implementer form for a model, as the claim applies it. */
   models: Pick<ImplementerModels, "check">;
+  /** #919: the environments of the workspace: the one a profile runs in is named by its name and stored by its id. */
+  environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   /** The most profiles a workspace may hold: `PROFILES_PER_WORKSPACE_MAX`. */
@@ -114,6 +117,8 @@ function summaryOf(profile: StoredProfile): ProfileSummaryView {
 export function documentOf(
   name: string,
   version: StoredProfileVersion,
+  /** The name of the environment the version runs in; null when it names none or the environment is gone. */
+  environment: string | null = null,
 ): ProfileDocument {
   const { content } = version;
   return {
@@ -128,20 +133,26 @@ export function documentOf(
         ? null
         : (JSON.parse(content.defaultResult) as ResultSchema),
     harness: content.harness ?? OPENCODE_HARNESS,
+    environment,
   };
 }
 
 export function createProfileService({
   profiles,
   models,
+  environments,
   operatorCostLimitCents,
   profilesMax = PROFILES_PER_WORKSPACE_MAX,
   archivedMax = ARCHIVED_PROFILES_PER_WORKSPACE_MAX,
 }: ProfileServiceDependencies): ProfileService {
   /** The validator's verdict, with what only the world knows added once the body has the right shape. */
-  async function check(
-    body: unknown,
-  ): Promise<Omit<ProfileCheck, "errors"> & { errors: ProfileIssue[] }> {
+  async function check(body: unknown): Promise<
+    Omit<ProfileCheck, "errors"> & {
+      errors: ProfileIssue[];
+      /** The id of the environment the valid body names. */
+      environmentId?: string;
+    }
+  > {
     const shape = validateProfile(body);
     const errors: ProfileIssue[] = [...shape.errors];
     if (shape.profile === undefined) return { ...shape, errors };
@@ -167,8 +178,58 @@ export function createProfileService({
         code: "model_not_allowed",
         message: `This workspace cannot run that model (reason: ${reason}). GET /api/w/<workspace>/implementer/models lists the models it can.`,
       });
-    if (errors.length === shape.errors.length) return { ...shape, errors };
+    const environment = await findEnvironment(shape.profile.environment);
+    if (environment.kind === "unknown")
+      errors.push(
+        issue(
+          "/environment",
+          "environment_unknown",
+          `There is no environment ${shown(shape.profile.environment ?? "")} in this workspace. Environments: ${listNames(environment.names)}.`,
+          environment.names,
+        ),
+      );
+    else {
+      // #854, #919: a runner works with its owner's own key, and a harness other than OpenCode exists only on a runner.
+      if (environment.kind === "runner" && "entryId" in model)
+        errors.push(
+          issue(
+            "/environment",
+            "runner_needs_own_key",
+            `The environment ${shown(environment.name)} runs on a runner, which works with the workspace's own key, but the model is a managed one (an entry of the catalog). Choose a model of your own key, or an environment of the platform.`,
+          ),
+        );
+      if (
+        environment.kind === "hosted" &&
+        shape.profile.harness !== OPENCODE_HARNESS
+      )
+        errors.push(
+          issue(
+            "/environment",
+            "harness_needs_runner",
+            `The harness ${shown(shape.profile.harness)} exists only on a runner, and the environment ${shown(environment.name)} is one of the platform. Choose an environment that runs on a runner.`,
+          ),
+        );
+    }
+    if (errors.length === shape.errors.length && environment.kind !== "unknown")
+      return { ...shape, errors, environmentId: environment.id };
     return { valid: false, errors, truncated: shape.truncated };
+  }
+
+  /** The environment a body names, by name (case ignored), or the names that exist. */
+  async function findEnvironment(
+    name: string | null,
+  ): Promise<
+    | { kind: "hosted" | "runner"; id: string; name: string }
+    | { kind: "unknown"; names: string[] }
+  > {
+    const known = await environments.listSummaries();
+    const found = known.find(
+      (candidate) =>
+        candidate.name.toLowerCase() === (name ?? "").toLowerCase(),
+    );
+    return found === undefined
+      ? { kind: "unknown", names: known.map((e) => e.name) }
+      : { kind: found.kind, id: found.id, name: found.name };
   }
 
   async function viewOf(
@@ -176,10 +237,17 @@ export function createProfileService({
     shown: StoredProfileVersion,
   ): Promise<ProfileView> {
     const versions = await profiles.listVersions(profile.id);
+    const environmentId = shown.content.environmentId ?? null;
+    const environment =
+      environmentId === null
+        ? null
+        : ((await environments.listSummaries()).find(
+            (candidate) => candidate.id === environmentId,
+          )?.name ?? null);
     return {
       ...summaryOf(profile),
       documentVersion: shown.version,
-      document: documentOf(profile.name, shown),
+      document: documentOf(profile.name, shown, environment),
       versions: versions.map((v) => ({
         version: v.version,
         savedAt: v.createdAt,
@@ -187,16 +255,22 @@ export function createProfileService({
     };
   }
 
-  /** The checked profile, or the refusal with every problem. */
-  async function acceptable(body: unknown): Promise<ProfileDocument> {
+  /** The checked profile with the id of its environment, or the refusal with every problem. */
+  async function acceptable(
+    body: unknown,
+  ): Promise<{ profile: ProfileDocument; environmentId: string }> {
     const result = await check(body);
-    if (!result.valid || result.profile === undefined)
+    if (
+      !result.valid ||
+      result.profile === undefined ||
+      result.environmentId === undefined
+    )
       throw new ProfileError(
         "PROFILE_INVALID",
         "The profile does not pass the validator.",
         { errors: result.errors, truncated: result.truncated },
       );
-    return result.profile;
+    return { profile: result.profile, environmentId: result.environmentId };
   }
 
   const notFound = (): ProfileError =>
@@ -206,7 +280,7 @@ export function createProfileService({
     if (id.length === 0 || id.length > PROFILE_ID_MAX_LENGTH) throw notFound();
   }
 
-  const contentOf = (profile: ProfileDocument) => ({
+  const contentOf = (profile: ProfileDocument, environmentId: string) => ({
     description: profile.description,
     model: profile.model,
     instructions: profile.instructions,
@@ -217,6 +291,7 @@ export function createProfileService({
         ? null
         : JSON.stringify(profile.defaultResult),
     harness: profile.harness,
+    environmentId,
   });
 
   return {
@@ -252,11 +327,11 @@ export function createProfileService({
     },
 
     async create(user, body) {
-      const profile = await acceptable(body);
+      const { profile, environmentId } = await acceptable(body);
       const created = await profiles.create(
         {
           name: profile.name,
-          content: contentOf(profile),
+          content: contentOf(profile, environmentId),
           createdBy: user.id,
         },
         profilesMax,
@@ -304,7 +379,7 @@ export function createProfileService({
           "PROFILE_ARCHIVED",
           "The profile is archived and takes no new version.",
         );
-      const profile = await acceptable(body);
+      const { profile, environmentId } = await acceptable(body);
       if (existing.profile.name !== profile.name)
         throw new ProfileError(
           "PROFILE_NAME_CHANGED",
@@ -322,7 +397,7 @@ export function createProfileService({
       const saved = await profiles.saveVersion(
         id,
         {
-          content: contentOf(profile),
+          content: contentOf(profile, environmentId),
           createdBy: user.id,
           ...(expectedVersion === undefined ? {} : { expectedVersion }),
         },

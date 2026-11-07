@@ -99,6 +99,7 @@ import { migration as addUsageRecordCostBasis } from "./20261106012000_add_usage
 import { migration as addImplementerSessionStartBranch } from "./20261106130000_add_implementer_session_start_branch.ts";
 import { migration as addWorkflowRunTriggerId } from "./20261107110000_add_workflow_run_trigger_id.ts";
 import { migration as addImplementerTurnTimeLimit } from "./20261107150000_add_implementer_turn_time_limit.ts";
+import { migration as addProfileEnvironment } from "./20261107180000_add_profile_environment.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -225,6 +226,7 @@ const migrations: Record<string, Migration> = {
     addImplementerSessionStartBranch,
   "20261107110000_add_workflow_run_trigger_id": addWorkflowRunTriggerId,
   "20261107150000_add_implementer_turn_time_limit": addImplementerTurnTimeLimit,
+  "20261107180000_add_profile_environment": addProfileEnvironment,
 };
 
 export const migrationProvider: MigrationProvider = {

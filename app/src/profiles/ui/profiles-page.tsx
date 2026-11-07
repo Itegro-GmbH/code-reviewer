@@ -46,10 +46,18 @@ import { DRAWER_COPY, HARNESS_LABEL, PROFILES_COPY } from "./messages.ts";
 
 const loadProfile = (api: ProfilesApi, id: string) => api.get(id);
 
-/** What the drawer saves: the document of the open version with the three fields the page edits replaced. It carries no cost limit (#918): the lane owns the limits. */
+/** An environment of the workspace as the page offers it: the name a profile names, and whether it is a hosted VM or a runner. */
+export type EnvironmentOption = { name: string; kind: "hosted" | "runner" };
+
+/** What the drawer saves: the document of the open version with the four fields the page edits replaced. It carries no cost limit (#918): the lane owns the limits. */
 export function nextVersionBody(
   profile: ProfileView,
-  edit: { harness: ProfileHarness; instructions: string; canPush: boolean },
+  edit: {
+    harness: ProfileHarness;
+    instructions: string;
+    canPush: boolean;
+    environment: string;
+  },
 ): Record<string, unknown> {
   const { document } = profile;
   return {
@@ -62,7 +70,33 @@ export function nextVersionBody(
       ? {}
       : { defaultResult: document.defaultResult }),
     harness: edit.harness,
+    environment: edit.environment,
   };
+}
+
+/** Where the key comes from, read from the model of the profile and its harness. */
+export function keySourceOf(
+  model: ProfileView["document"]["model"],
+  harness: ProfileHarness,
+): string {
+  if (harness === "claude-code") return DRAWER_COPY.keyRunnerLogin;
+  return "entryId" in model
+    ? DRAWER_COPY.keyManaged
+    : DRAWER_COPY.keyOwn(model.provider);
+}
+
+/** Why a harness, a model and an environment do not fit together, or null when they do (the server checks the same). */
+export function fitProblemOf(
+  profile: ProfileView,
+  harness: ProfileHarness,
+  environment: EnvironmentOption | undefined,
+): string | null {
+  if (environment === undefined) return null;
+  if (environment.kind === "hosted" && harness !== "opencode")
+    return DRAWER_COPY.runsOnNeedsRunner;
+  if (environment.kind === "runner" && "entryId" in profile.document.model)
+    return DRAWER_COPY.runsOnNeedsOwnKey;
+  return null;
 }
 
 /** What a row of the list shows of a profile: its name, its current version and what that version says. */
@@ -73,6 +107,8 @@ export type ProfileRowData = {
   harness: ProfileHarness;
   /** The model as one line: the catalog entry or `provider · model`. */
   model: string;
+  /** The name of the environment the profile runs in; null for a version saved before profiles had one. */
+  environment: string | null;
   canPush: boolean;
 };
 
@@ -89,6 +125,7 @@ export function profileRowOf(view: ProfileView): ProfileRowData {
     version: view.version,
     harness: view.document.harness,
     model: modelTextOf(view.document.model),
+    environment: view.document.environment,
     canPush: view.document.canPush,
   };
 }
@@ -96,10 +133,13 @@ export function profileRowOf(view: ProfileView): ProfileRowData {
 export function ProfilesPageContent({
   workspaceSlug,
   profiles,
+  environments,
   api: apiProp,
 }: {
   workspaceSlug: string;
   profiles: readonly ProfileRowData[];
+  /** The environments of the workspace: what a profile can run on. */
+  environments: readonly EnvironmentOption[];
   /** Only tests pass this. */
   api?: ProfilesApi;
 }) {
@@ -151,6 +191,7 @@ export function ProfilesPageContent({
                     ? profile
                     : profileRowOf(saved[profile.id]!)
                 }
+                environments={environments}
                 onOpen={() => setOpenId(profile.id)}
               />
             ))}
@@ -159,6 +200,7 @@ export function ProfilesPageContent({
       )}
       <ProfileDrawer
         api={api}
+        environments={environments}
         profileId={openId}
         saved={openId === null ? undefined : saved[openId]}
         onClose={() => setOpenId(null)}
@@ -172,11 +214,16 @@ export function ProfilesPageContent({
 
 function ProfileRow({
   profile,
+  environments,
   onOpen,
 }: {
   profile: ProfileRowData;
+  environments: readonly EnvironmentOption[];
   onOpen: () => void;
 }) {
+  const kind = environments.find(
+    (candidate) => candidate.name === profile.environment,
+  )?.kind;
   return (
     <TableRow data-profile-id={profile.id}>
       <TableCell className="whitespace-normal">
@@ -194,16 +241,17 @@ function ProfileRow({
       <TableCell className="whitespace-normal break-words">
         {profile.harness} · {profile.model}
       </TableCell>
-      {/* Where a profile runs is a choice per profile that comes later (#919); today the harness decides, and the cell says so. */}
       <TableCell className="whitespace-normal">
         <span className="flex flex-col gap-0.5">
-          <span>
-            {profile.harness === "claude-code"
-              ? PROFILES_COPY.runnerOwn
-              : PROFILES_COPY.hostedSandbox}
+          <span className="break-words">
+            {profile.environment ?? PROFILES_COPY.noEnvironment}
           </span>
           <span className="text-xs text-muted-foreground">
-            {PROFILES_COPY.fromHarness}
+            {profile.environment === null
+              ? PROFILES_COPY.noEnvironmentHint
+              : kind === "runner"
+                ? PROFILES_COPY.runnerOwn
+                : PROFILES_COPY.hostedSandbox}
           </span>
         </span>
       </TableCell>
@@ -220,12 +268,14 @@ function ProfileRow({
 
 function ProfileDrawer({
   api,
+  environments,
   profileId,
   saved,
   onClose,
   onSaved,
 }: {
   api: ProfilesApi;
+  environments: readonly EnvironmentOption[];
   profileId: string | null;
   /** What the last save of the open profile answered; it wins over a read that is older. */
   saved: ProfileView | undefined;
@@ -256,6 +306,7 @@ function ProfileDrawer({
             // A new version of the same profile starts the form again from what was saved.
             key={`${shown.id}:${String(shown.version)}`}
             api={api}
+            environments={environments}
             profile={shown}
             notice={notice}
             onSaveStart={() => setNotice(null)}
@@ -290,12 +341,14 @@ function ProfileDrawer({
 
 function DrawerBody({
   api,
+  environments,
   profile,
   notice,
   onSaveStart,
   onSaved,
 }: {
   api: ProfilesApi;
+  environments: readonly EnvironmentOption[];
   profile: ProfileView;
   notice: string | null;
   /** A save begins: the notice of the one before is no longer true. */
@@ -306,6 +359,8 @@ function DrawerBody({
   const [harness, setHarness] = useState<ProfileHarness>(document.harness);
   const [instructions, setInstructions] = useState(document.instructions);
   const [canPush, setCanPush] = useState(document.canPush);
+  // A version saved before profiles had an environment starts with none chosen.
+  const [environment, setEnvironment] = useState(document.environment ?? "");
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const idPrefix = `profile-${profile.id}`;
@@ -316,7 +371,7 @@ function DrawerBody({
     onSaveStart();
     const result = await api.saveVersion(
       profile.id,
-      nextVersionBody(profile, { harness, instructions, canPush }),
+      nextVersionBody(profile, { harness, instructions, canPush, environment }),
       profile.version,
     );
     setPending(false);
@@ -329,9 +384,23 @@ function DrawerBody({
       return;
     }
     onSaved(result.data.profile);
-  }, [api, profile, harness, instructions, canPush, onSaveStart, onSaved]);
+  }, [
+    api,
+    profile,
+    harness,
+    instructions,
+    canPush,
+    environment,
+    onSaveStart,
+    onSaved,
+  ]);
 
   const modelText = modelTextOf(document.model);
+  const chosen = environments.find(
+    (candidate) => candidate.name === environment,
+  );
+  const fitProblem = fitProblemOf(profile, harness, chosen);
+  const keySource = keySourceOf(document.model, harness);
   return (
     <>
       <SheetHeader>
@@ -387,10 +456,10 @@ function DrawerBody({
             id={`${idPrefix}-key`}
             disabled
             aria-describedby={`${idPrefix}-key-hint`}
-            value=""
+            value={keySource}
             onChange={() => undefined}
           >
-            <option value="">{DRAWER_COPY.keyValue}</option>
+            <option value={keySource}>{keySource}</option>
           </NativeSelect>
           <p
             id={`${idPrefix}-key-hint`}
@@ -414,18 +483,24 @@ function DrawerBody({
           <Label htmlFor={`${idPrefix}-runs-on`}>{DRAWER_COPY.runsOn}</Label>
           <NativeSelect
             id={`${idPrefix}-runs-on`}
-            disabled
             aria-describedby={`${idPrefix}-runs-on-hint`}
-            value=""
-            onChange={() => undefined}
+            value={environment}
+            onChange={(event) => setEnvironment(event.target.value)}
           >
-            <option value="">{PROFILES_COPY.hostedSandbox}</option>
+            <option value="">{DRAWER_COPY.runsOnNone}</option>
+            {environments.map((candidate) => (
+              <option key={candidate.name} value={candidate.name}>
+                {candidate.name} · {DRAWER_COPY.runsOnKind(candidate.kind)}
+              </option>
+            ))}
           </NativeSelect>
           <p
             id={`${idPrefix}-runs-on-hint`}
             className="text-xs text-muted-foreground"
           >
-            {DRAWER_COPY.runsOnHint}
+            {environments.length === 0
+              ? DRAWER_COPY.noEnvironments
+              : DRAWER_COPY.runsOnHint}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -453,6 +528,15 @@ function DrawerBody({
             {DRAWER_COPY.mayAskHint}
           </p>
         </div>
+        {fitProblem !== null ? (
+          <Alert variant="destructive">
+            <AlertDescription>{fitProblem}</AlertDescription>
+          </Alert>
+        ) : environment === "" && environments.length > 0 ? (
+          <Alert variant="info" role="status">
+            {DRAWER_COPY.runsOnRequired}
+          </Alert>
+        ) : null}
         {problem !== null ? (
           <Alert variant="destructive">
             <AlertDescription>{problem}</AlertDescription>
@@ -463,6 +547,7 @@ function DrawerBody({
           <Button
             loading={pending}
             loadingLabel={DRAWER_COPY.saving}
+            disabled={environment === "" || fitProblem !== null}
             onClick={() => void save()}
           >
             {DRAWER_COPY.save}

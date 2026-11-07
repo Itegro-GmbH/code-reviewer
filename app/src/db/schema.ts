@@ -1499,6 +1499,8 @@ export interface ProfileVersionsTable {
   default_result: string | null;
   /** #856: `opencode` or `claude-code`; null reads as OpenCode (a version saved before harnesses were stored). */
   harness: string | null;
+  /** #919: the environment of the workspace the version runs in; null for a version saved before it (its step names the environment). No foreign key: an environment may be removed. */
+  environment_id: string | null;
   created_by: string;
   created_at: string;
 }

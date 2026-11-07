@@ -4,6 +4,7 @@
 // (the model, the operator's maximum), an invalid one is refused with the full list and nothing is stored, every save is a new
 // version, the name never changes, an older version stays readable, and a workspace never sees the profiles of another.
 import { describe, expect, it } from "vitest";
+import type { EnvironmentSummary } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createTestDatabase } from "../test-support/test-database.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
@@ -16,10 +17,34 @@ import { createProfileService } from "./service.ts";
 
 const USER = { id: "u-1" };
 
+/** The environments of the workspace the tests run in: a hosted one and one that runs on a runner. */
+const ENVIRONMENTS: EnvironmentSummary[] = [
+  {
+    id: "env-node",
+    name: "node",
+    kind: "hosted",
+    vcpus: 2,
+    labels: [],
+    hasScript: false,
+    networkMode: "off",
+  },
+  {
+    id: "env-laptop",
+    name: "Laptop",
+    kind: "runner",
+    vcpus: null,
+    labels: ["laptop"],
+    hasScript: false,
+    networkMode: "off",
+  },
+];
+const environmentsOf = { listSummaries: async () => [...ENVIRONMENTS] };
+
 const REVIEWER = {
   name: "reviewer",
   description: "Reads a branch.",
   model: { entryId: "entry-1" },
+  environment: "node",
   instructions: "Review only.",
   canPush: false,
   defaultResult: {
@@ -36,7 +61,7 @@ async function setup() {
   const idA = await defaultWorkspaceId(db);
   const idB = await addWorkspace(db, "other");
   const refusals = new Map<string, string>();
-  const state = { maximumCents: 500 };
+  const state = { maximumCents: 500, ownKey: false };
   const serviceFor = (
     workspaceId: string,
     options: { archivedMax?: number } = {},
@@ -48,8 +73,11 @@ async function setup() {
           "entryId" in choice
             ? ((refusals.get(choice.entryId) as "entry_unknown" | undefined) ??
               null)
-            : "wrong_key_mode",
+            : state.ownKey
+              ? null
+              : "wrong_key_mode",
       },
+      environments: environmentsOf,
       operatorCostLimitCents: async () => state.maximumCents,
       ...options,
     });
@@ -157,6 +185,7 @@ describe("the profile service", () => {
     const created = await a.create(USER, {
       name: "plain",
       model: { entryId: "entry-1" },
+      environment: "node",
       canPush: true,
     });
 
@@ -168,7 +197,136 @@ describe("the profile service", () => {
       canPush: true,
       defaultResult: null,
       harness: "opencode",
+      environment: "node",
     });
+  });
+
+  // #919-T03
+  it("refuses a new profile without an environment with missing_field and stores nothing", async () => {
+    const { a } = await setup();
+    const without: Record<string, unknown> = { ...REVIEWER };
+    delete without.environment;
+
+    const failure = await failureOf(a.create(USER, without));
+
+    expect(failure.code).toBe("PROFILE_INVALID");
+    expect(failure.errors).toEqual([
+      expect.objectContaining({ path: "", code: "missing_field" }),
+    ]);
+    expect((await a.list()).profiles).toEqual([]);
+  });
+
+  // #919-T04
+  it("names the environments that exist for one that does not", async () => {
+    const { a } = await setup();
+
+    const result = await a.validate({ ...REVIEWER, environment: "nope" });
+
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        path: "/environment",
+        code: "environment_unknown",
+        available: ["node", "Laptop"],
+      }),
+    ]);
+  });
+
+  // #919-T05
+  it("takes the environment by name, whatever the case, stores its id and reads the name back", async () => {
+    const { a, db, state } = await setup();
+    state.ownKey = true;
+
+    const created = await a.create(USER, {
+      ...REVIEWER,
+      environment: "laptop",
+      model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+    });
+
+    expect(created.document.environment).toBe("Laptop");
+    const stored = await db
+      .selectFrom("profile_versions")
+      .select("environment_id")
+      .where("profile_id", "=", created.id)
+      .executeTakeFirstOrThrow();
+    expect(stored.environment_id).toBe("env-laptop");
+  });
+
+  // #919-T06
+  it("keeps a managed model out of a runner environment and a harness of a runner out of a hosted one", async () => {
+    const { a } = await setup();
+
+    const managed = await a.validate({ ...REVIEWER, environment: "Laptop" });
+    const harness = await a.validate({
+      ...REVIEWER,
+      harness: "claude-code",
+      model: { provider: "claude-code", model: "sonnet" },
+    });
+
+    expect(managed.errors).toEqual([
+      expect.objectContaining({
+        path: "/environment",
+        code: "runner_needs_own_key",
+      }),
+    ]);
+    expect(harness.errors).toEqual([
+      expect.objectContaining({
+        path: "/environment",
+        code: "harness_needs_runner",
+      }),
+    ]);
+    expect(
+      (
+        await a.validate({
+          ...REVIEWER,
+          environment: "Laptop",
+          harness: "claude-code",
+          model: { provider: "claude-code", model: "sonnet" },
+        })
+      ).valid,
+    ).toBe(true);
+  });
+
+  // #919-T07
+  it("reads a version saved before profiles had an environment with none, and wants one in the next", async () => {
+    const { a, db, idA } = await setup();
+    const created = await createProfilesRepository(db, idA).create(
+      {
+        name: "old",
+        createdBy: USER.id,
+        content: {
+          description: "",
+          model: { entryId: "entry-1" },
+          instructions: "",
+          costLimitCents: null,
+          canPush: true,
+          defaultResult: null,
+        },
+      },
+      10,
+    );
+    if (!created.ok) throw new Error("expected the profile to be created");
+
+    const read = await a.get(created.profile.id);
+    const failure = await failureOf(
+      a.update(USER, created.profile.id, {
+        ...REVIEWER,
+        name: "old",
+        environment: undefined,
+      }),
+    );
+    const saved = await a.update(USER, created.profile.id, {
+      ...REVIEWER,
+      name: "old",
+    });
+
+    expect(read.document.environment).toBeNull();
+    expect(failure.errors).toEqual([
+      expect.objectContaining({ path: "", code: "missing_field" }),
+    ]);
+    expect(saved.document.environment).toBe("node");
+    expect(
+      (await a.get(created.profile.id, 1)).document.environment,
+    ).toBeNull();
   });
 
   // #843-T85
@@ -330,6 +488,7 @@ describe("the profile service", () => {
     const small = createProfileService({
       profiles: createProfilesRepository(db, idA),
       models: { check: async () => null },
+      environments: environmentsOf,
       operatorCostLimitCents: async () => 500,
       profilesMax: 1,
     });

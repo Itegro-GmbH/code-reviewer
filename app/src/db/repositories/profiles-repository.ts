@@ -56,6 +56,8 @@ export type ProfileContent = {
   defaultResult: string | null;
   /** #856: the harness the version runs with; left out when it is written, OpenCode is meant. Always set when it is read. */
   harness?: ProfileHarness;
+  /** #919: the environment of the workspace the version runs in; null for a version saved before it (its step names the environment). */
+  environmentId?: string | null;
 };
 
 export type StoredProfileVersion = {
@@ -111,6 +113,8 @@ export type ProfileVersionFactsRow = {
   managedModel: boolean;
   /** #856: the harness the version runs with. */
   harness: ProfileHarness;
+  /** #919: the environment the version runs in; null for a version saved before it. */
+  environmentId: string | null;
 };
 
 export type ProfilesRepository = {
@@ -182,6 +186,7 @@ function contentFrom(row: Selectable<ProfileVersionsTable>): ProfileContent {
     canPush: row.can_push === 1,
     defaultResult: row.default_result,
     harness: harnessOf(row.harness),
+    environmentId: row.environment_id,
   };
 }
 
@@ -233,6 +238,7 @@ export function createProfilesRepository(
     can_push: content.canPush ? 1 : 0,
     default_result: content.defaultResult,
     harness: content.harness ?? OPENCODE_HARNESS,
+    environment_id: content.environmentId ?? null,
     created_by: createdBy,
     created_at: timestamp,
   });
@@ -338,6 +344,7 @@ export function createProfilesRepository(
           "default_result",
           "model_choice",
           "harness",
+          "environment_id",
         ])
         .where("workspace_id", "=", workspaceId)
         .where((eb) =>
@@ -360,6 +367,7 @@ export function createProfilesRepository(
         defaultResult: row.default_result,
         managedModel: "entryId" in decodeModelChoice(row.model_choice),
         harness: harnessOf(row.harness),
+        environmentId: row.environment_id,
       }));
     },
 

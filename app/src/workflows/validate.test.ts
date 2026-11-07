@@ -140,9 +140,10 @@ describe("the plan's example, broken in one place at a time", () => {
       [["/steps/2/when/equals/1", "condition_value_not_in_enum"]],
     ],
     [
-      "an agent without an environment",
+      // #919: the environment is optional; a profile version saved before it has none, so its step needs one.
+      "an agent without an environment on a profile that names none",
       (d) => delete (body(d)[1] as Json).environment,
-      [["/steps/1/body/1/environment", "missing_field"]],
+      [["/steps/1/body/1/environment", "environment_required"]],
     ],
     [
       "an environment that does not exist",
@@ -580,7 +581,7 @@ describe("the agent step", () => {
     codes(change(base, (d) => edit(agentSteps(d)[0] as Json)));
 
   // #833-M1-T52
-  it("needs profile, environment and instruction, and refuses a field it does not know", () => {
+  it("needs profile and instruction, and refuses a field it does not know", () => {
     expect(
       first((s) => {
         delete s.profile;
@@ -589,7 +590,6 @@ describe("the agent step", () => {
         s.model = "x";
       }),
     ).toEqual([
-      ["/steps/0/environment", "missing_field"],
       ["/steps/0/instruction", "missing_field"],
       ["/steps/0/model", "unknown_field"],
       ["/steps/0/profile", "missing_field"],

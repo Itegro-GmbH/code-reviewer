@@ -45,6 +45,8 @@ export const PROFILE_FIELDS = [
   "defaultResult",
   /** #854, #856: the harness the agent runs with: `opencode` (left out) or `claude-code`, which runs on a runner on the login of its device. */
   "harness",
+  /** #919: the environment of the workspace the profile runs in, by name: where the agent works. Required in a new version. */
+  "environment",
 ] as const;
 
 /** The cost limit of a turn in whole US cents: what the Implementer form takes (`REVIEW_SETTING_LIMITS.maxCostCents`). */
@@ -69,6 +71,11 @@ export type ProfileDocument = {
   defaultResult: ResultSchema | null;
   /** #856: the harness the agent runs with; a profile that names none runs OpenCode. */
   harness: ProfileHarness;
+  /**
+   * #919: the name of the environment of the workspace the profile runs in (a hosted VM or a runner). A version saved before it has none
+   * (null), and its workflow steps name the environment instead; a body always has one.
+   */
+  environment: string | null;
 };
 
 export type ProfileCheck = {
@@ -315,6 +322,40 @@ export function validateProfile(body: unknown): ProfileCheck {
       );
   }
 
+  // #919: where the agent works. Whether the environment exists, and whether it fits the model and the harness, needs the workspace:
+  // the service says it.
+  const environment = body.environment;
+  let environmentName: string | undefined;
+  if (environment === undefined || environment === null)
+    report(
+      issue(
+        "",
+        "missing_field",
+        'The field "environment" is required: the name of an environment of the workspace the profile runs in, like "node" (a hosted environment or one that runs on a runner). GET .../implementer/environments lists them.',
+      ),
+    );
+  else if (typeof environment !== "string")
+    report(
+      issue(
+        "/environment",
+        "wrong_type",
+        `The environment is the name of an environment of the workspace, a text, not ${jsonTypeName(environment)}.`,
+      ),
+    );
+  else if (
+    environment.trim() === "" ||
+    environment.length > MODEL_FIELD_MAX_LENGTH ||
+    CONTROL_OR_NEWLINE.test(environment)
+  )
+    report(
+      issue(
+        "/environment",
+        "invalid_value",
+        `${shown(environment)} is not the name of an environment. Use the name of an environment of the workspace, one line.`,
+      ),
+    );
+  else environmentName = environment;
+
   const push = body.canPush;
   if (push === undefined)
     report(
@@ -366,6 +407,7 @@ export function validateProfile(body: unknown): ProfileCheck {
           canPush: push as boolean,
           defaultResult,
           harness: harnessName,
+          environment: environmentName as string,
         } satisfies ProfileDocument)
       : undefined;
   return finish(errors, profile);

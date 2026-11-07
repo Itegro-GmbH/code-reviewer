@@ -4,6 +4,7 @@
 // operator's maximum cost. The capability check (`requireImplementerCapability`) is the Implementer's, in `../implementer/shared.ts`;
 // the profiles are part of the factory.
 import "server-only";
+import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { implementerModelsFor } from "../implementer/shared.ts";
@@ -16,6 +17,7 @@ export function profileServiceFor(workspaceId: string): ProfileService {
   return createProfileService({
     profiles: createProfilesRepository(db, workspaceId),
     models: implementerModelsFor(workspaceId),
+    environments: createImplementerEnvironmentsRepository(db, workspaceId),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
   });
 }
