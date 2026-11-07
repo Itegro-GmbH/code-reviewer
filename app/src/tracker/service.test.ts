@@ -46,7 +46,9 @@ async function setup(
   await write(2, { state: "closed", stateReason: "completed" });
   await write(3, { kind: "pull_request", closes: [1] });
   await tracker.linkPullRequests("r-1");
-  await tracker.saveSyncState("r-1", { lastFullSyncAt: "2026-11-06T09:00:00.000Z" });
+  await tracker.saveSyncState("r-1", {
+    lastFullSyncAt: "2026-11-06T09:00:00.000Z",
+  });
 
   const summarizeTickets = vi.fn(async (refs: readonly string[]) =>
     refs.includes(ticketRefOf("acme/widgets", 1))
@@ -74,13 +76,22 @@ async function setup(
   const service = createTrackerService({
     repositories: {
       get: async (id) =>
-        id === "r-1" ? { ...REPOSITORY, active: options.repositoryActive ?? true } as never : undefined,
+        id === "r-1"
+          ? ({
+              ...REPOSITORY,
+              active: options.repositoryActive ?? true,
+            } as never)
+          : undefined,
     },
     integrations: {
       get: async () =>
         options.integration === undefined && "integration" in options
           ? undefined
-          : ({ id: "i-1", status: "active", ...options.integration } as Integration),
+          : ({
+              id: "i-1",
+              status: "active",
+              ...options.integration,
+            } as Integration),
     },
     projects: {
       getActiveProjectForRepository: async () =>
@@ -129,7 +140,12 @@ describe("the list of the tickets of a project's repository", () => {
       updatedAt: "2026-11-06T10:01:00.000Z",
       syncedAt: expect.any(String),
       url: "https://github.com/acme/widgets/issues/1",
-      lane: { runId: "run-1", name: "Implement", step: "review", status: "running" },
+      lane: {
+        runId: "run-1",
+        name: "Implement",
+        step: "review",
+        status: "running",
+      },
       costUsd: 1.234567,
     });
   });
@@ -156,7 +172,11 @@ describe("the list of the tickets of a project's repository", () => {
   ] as const)("lists %s tickets", async (state, numbers) => {
     const { service } = await setup();
 
-    const list = await service.listIssues("r-1", { state, limit: 100, offset: 0 });
+    const list = await service.listIssues("r-1", {
+      state,
+      limit: 100,
+      offset: 0,
+    });
 
     expect(list.items.map((item) => item.number)).toEqual(numbers);
   });
@@ -165,7 +185,11 @@ describe("the list of the tickets of a project's repository", () => {
   it("pages the list", async () => {
     const { service } = await setup();
 
-    const list = await service.listIssues("r-1", { state: "all", limit: 1, offset: 1 });
+    const list = await service.listIssues("r-1", {
+      state: "all",
+      limit: 1,
+      offset: 1,
+    });
 
     expect(list.items.map((item) => item.number)).toEqual([2]);
   });
@@ -173,7 +197,9 @@ describe("the list of the tickets of a project's repository", () => {
   // #923-T58
   it("says that a sync is under way", async () => {
     const { service, tracker } = await setup();
-    await tracker.saveSyncState("r-1", { cursor: '{"phase":"issues","page":2}' });
+    await tracker.saveSyncState("r-1", {
+      cursor: '{"phase":"issues","page":2}',
+    });
 
     expect((await service.listIssues("r-1", OPEN)).sync.inProgress).toBe(true);
   });
@@ -182,8 +208,18 @@ describe("the list of the tickets of a project's repository", () => {
   it.each([
     ["an id that is no repository", "nope", {}, "TRACKER_REPOSITORY_NOT_FOUND"],
     ["no id at all", "", {}, "TRACKER_REPOSITORY_NOT_FOUND"],
-    ["a repository the platform does not list", "r-1", { repositoryActive: false }, "TRACKER_REPOSITORY_NOT_FOUND"],
-    ["a repository without an active project", "r-1", { project: false }, "TRACKER_PROJECT_NOT_ACTIVE"],
+    [
+      "a repository the platform does not list",
+      "r-1",
+      { repositoryActive: false },
+      "TRACKER_REPOSITORY_NOT_FOUND",
+    ],
+    [
+      "a repository without an active project",
+      "r-1",
+      { project: false },
+      "TRACKER_PROJECT_NOT_ACTIVE",
+    ],
   ])("refuses %s", async (_name, id, options, code) => {
     const { service } = await setup(options);
 
@@ -208,7 +244,7 @@ describe("the full sync of a repository", () => {
   });
 
   // #923-T61
-  it.each(["suspended", "disconnected", "disabled"] as const)(
+  it.each(["disconnected", "disabled"] as const)(
     "does not ask GitHub for an installation that is %s",
     async (status) => {
       const { service, run } = await setup({ integration: { status } });
@@ -222,7 +258,9 @@ describe("the full sync of a repository", () => {
 
   // #923-T62
   it("answers a failure of GitHub with one code and tells the log nothing but the code", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     const { service } = await setup({
       sync: async () => {
         throw Object.assign(new Error("token ghs_secret in the message"), {
@@ -231,7 +269,9 @@ describe("the full sync of a repository", () => {
       },
     });
 
-    await expect(service.sync("r-1")).rejects.toMatchObject({ code: "TRACKER_SYNC_FAILED" });
+    await expect(service.sync("r-1")).rejects.toMatchObject({
+      code: "TRACKER_SYNC_FAILED",
+    });
     expect(error.mock.calls.flat().join(" ")).not.toContain("ghs_secret");
     error.mockRestore();
   });

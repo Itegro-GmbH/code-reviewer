@@ -47,6 +47,7 @@ import type {
   IntegrationType,
   IssueLabeled,
   PullRequestRef,
+  TrackerChange,
 } from "../integrations/types.ts";
 import {
   WebhookPayloadError,
@@ -66,7 +67,6 @@ import {
 } from "./automatic-review-policy.ts";
 import { isCommandAllowed } from "../review-settings/effective.ts";
 import type { ReviewTriggerIntake } from "./review-trigger-intake.ts";
-import type { TrackerMirror } from "../tracker/mirror.ts";
 
 /** 1 MiB. GitHub's own limit is 25 MB, but the payloads this app reads are a few kilobytes. */
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
@@ -137,6 +137,17 @@ export type WorkflowStarter = {
   }>;
 };
 
+/**
+ * What writes a change of a ticket into the ticket mirror (#923): `TrackerMirror` of `src/tracker/`, which this module does not import
+ * (the mirror's wiring reaches the projects, which reach this folder; the route wires the two together).
+ */
+export type TrackerWriter = {
+  apply(
+    integration: Integration,
+    change: TrackerChange,
+  ): Promise<"updated" | "not_mirrored">;
+};
+
 /** The collaborators that act inside one workspace. */
 export type WorkspaceCollaborators = {
   /** Which repositories of the workspace are reviewed at all. */
@@ -156,7 +167,7 @@ export type WorkspaceCollaborators = {
    */
   workflows?: WorkflowStarter;
   /** The ticket mirror of the workspace (#923). Left out where a server has none: the events it follows are then used for what else they do. */
-  tracker?: TrackerMirror;
+  tracker?: TrackerWriter;
 };
 
 export type GithubAppWebhookDeps = {

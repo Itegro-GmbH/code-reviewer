@@ -59,7 +59,11 @@ describe("the query of the list", () => {
 
   // #923-T64
   it("takes state, limit and offset", () => {
-    expect(readTicketQuery(new URL("https://x.test/i?state=all&limit=200&offset=40"))).toEqual({
+    expect(
+      readTicketQuery(
+        new URL("https://x.test/i?state=all&limit=200&offset=40"),
+      ),
+    ).toEqual({
       ok: true,
       value: { state: "all", limit: 200, offset: 40 },
     });
@@ -80,15 +84,25 @@ describe("the query of the list", () => {
           message: 'state "merged" is not one of open, closed, all.',
           available: ["open", "closed", "all"],
         },
-        { path: "limit", code: "out_of_range", message: "limit must be between 1 and 200." },
-        { path: "offset", code: "invalid", message: "offset must be a whole number." },
+        {
+          path: "limit",
+          code: "out_of_range",
+          message: "limit must be between 1 and 200.",
+        },
+        {
+          path: "offset",
+          code: "invalid",
+          message: "offset must be a whole number.",
+        },
       ],
     });
   });
 
   // #923-T66
   it("refuses a limit above the maximum and a text that is no number", () => {
-    const query = readTicketQuery(new URL("https://x.test/i?limit=201&offset=abc"));
+    const query = readTicketQuery(
+      new URL("https://x.test/i?limit=201&offset=abc"),
+    );
 
     expect(query).toMatchObject({
       ok: false,
@@ -111,7 +125,11 @@ describe("GET issues", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual(LIST);
     expect(requireUser).toHaveBeenCalledTimes(1);
-    expect(service.listIssues).toHaveBeenCalledWith("r-1", { state: "all", limit: 100, offset: 0 });
+    expect(service.listIssues).toHaveBeenCalledWith("r-1", {
+      state: "all",
+      limit: 100,
+      offset: 0,
+    });
   });
 
   // #923-T68
@@ -123,7 +141,13 @@ describe("GET issues", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
       error: "TRACKER_REQUEST_INVALID",
-      issues: [{ path: "state", code: "invalid", available: ["open", "closed", "all"] }],
+      issues: [
+        {
+          path: "state",
+          code: "invalid",
+          available: ["open", "closed", "all"],
+        },
+      ],
     });
     expect(service.listIssues).not.toHaveBeenCalled();
   });
@@ -166,7 +190,9 @@ describe("POST issues/sync", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(PROGRESS);
-    expect(service.sync).toHaveBeenCalledWith("r-1", { deadline: 1_000 + SYNC_BUDGET_MS });
+    expect(service.sync).toHaveBeenCalledWith("r-1", {
+      deadline: 1_000 + SYNC_BUDGET_MS,
+    });
   });
 
   // #923-T72
@@ -178,17 +204,25 @@ describe("POST issues/sync", () => {
     const response = await handlers.sync(post(), "r-1");
 
     expect(response.status).toBe(202);
-    expect(await response.json()).toMatchObject({ status: "partial", next: "checks" });
+    expect(await response.json()).toMatchObject({
+      status: "partial",
+      next: "checks",
+    });
   });
 
   // #923-T73
   it("refuses a request from another site before anything is done", async () => {
     const { handlers, service } = setup();
 
-    const response = await handlers.sync(post({ "sec-fetch-site": "cross-site" }), "r-1");
+    const response = await handlers.sync(
+      post({ "sec-fetch-site": "cross-site" }),
+      "r-1",
+    );
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "TRACKER_CROSS_SITE_REQUEST" });
+    expect(await response.json()).toEqual({
+      error: "TRACKER_CROSS_SITE_REQUEST",
+    });
     expect(service.sync).not.toHaveBeenCalled();
   });
 

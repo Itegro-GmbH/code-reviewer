@@ -6,7 +6,11 @@
 // behind. Only a repository with an active project is mirrored, the same rule that decides which repositories are reviewed.
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type { TrackerRepository } from "../db/repositories/tracker-repository.ts";
-import type { Integration, RepoRef, TrackerChange } from "../integrations/types.ts";
+import type {
+  Integration,
+  RepoRef,
+  TrackerChange,
+} from "../integrations/types.ts";
 
 /** The provider the cache rows name; the only kind of integration there is. */
 export const TRACKER_PROVIDER = "github";
@@ -18,7 +22,10 @@ export type TrackerMirror = {
    * Writes the change. Throws what the database or the provider throws (a delivery that fails is redelivered; for a delivery that is
    * more than the mirror, the webhook handler logs the failure and goes on).
    */
-  apply(integration: Integration, change: TrackerChange): Promise<MirrorOutcome>;
+  apply(
+    integration: Integration,
+    change: TrackerChange,
+  ): Promise<MirrorOutcome>;
 };
 
 export type TrackerMirrorDependencies = {
@@ -62,7 +69,9 @@ export function createTrackerMirror(
       repo.externalId,
     );
     if (stored === undefined || !stored.active) return undefined;
-    if (!(await deps.projects.hasActiveProject(integration.id, repo.externalId)))
+    if (
+      !(await deps.projects.hasActiveProject(integration.id, repo.externalId))
+    )
       return undefined;
     return stored.id;
   }
@@ -72,8 +81,10 @@ export function createTrackerMirror(
       // A board belongs to the organization: its item is found by the node id of its content, in whichever repository of the
       // workspace holds the ticket.
       if (change.kind === "board_status_changed")
-        return (await tracker.setBoardStatusByNode(change.nodeId, change.status)) >
-          0
+        return (await tracker.setBoardStatusByNode(
+          change.nodeId,
+          change.status,
+        )) > 0
           ? "updated"
           : "not_mirrored";
 
@@ -94,7 +105,10 @@ export function createTrackerMirror(
             if (change.resetChecks || item.state === "closed")
               await tracker.setChecksState(repositoryId, item.number, null);
             // The issues the pull request closed before and the ones it closes now list it, or do not any more.
-            const affected = new Set([...(before?.closes ?? []), ...item.closes]);
+            const affected = new Set([
+              ...(before?.closes ?? []),
+              ...item.closes,
+            ]);
             if (affected.size > 0)
               await tracker.linkPullRequests(repositoryId, [...affected]);
           }
@@ -120,7 +134,11 @@ export function createTrackerMirror(
           for (const number of change.pullRequests) {
             const item = await tracker.getItem(repositoryId, number);
             // Only an open pull request has checks that matter.
-            if (item === undefined || item.kind !== "pull_request" || item.state !== "open")
+            if (
+              item === undefined ||
+              item.kind !== "pull_request" ||
+              item.state !== "open"
+            )
               continue;
             // One question per delivery: the suites of a commit are the same for every pull request that has it as head.
             state ??= await deps.checksStateOf(

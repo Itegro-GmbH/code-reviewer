@@ -432,7 +432,10 @@ export function fakeGithubAppClient(
       record("readTrackerChecks", installationId, scope, repoFullName, page);
       if (data.trackerFailure) throw data.trackerFailure;
       const pages = data.trackerCheckPages?.[repoFullName] ?? [];
-      return { pullRequests: pages[page - 1] ?? [], last: page >= pages.length };
+      return {
+        pullRequests: pages[page - 1] ?? [],
+        last: page >= pages.length,
+      };
     },
     async readChecksState(installationId, scope, repoFullName, headSha) {
       record("readChecksState", installationId, scope, repoFullName, headSha);
@@ -443,7 +446,8 @@ export function fakeGithubAppClient(
       record("readTrackerBoard", installationId, scope, repoFullName, after);
       if (data.trackerFailure) throw data.trackerFailure;
       const pages = data.trackerBoardPages?.[repoFullName];
-      if (pages === undefined) return { available: false, items: [], next: null };
+      if (pages === undefined)
+        return { available: false, items: [], next: null };
       const index = after === null ? 0 : Number(after);
       return {
         available: true,

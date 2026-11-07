@@ -74,12 +74,18 @@ describe("applying a change of a ticket to the mirror", () => {
   it("writes a ticket and replaces it when it changes, keeping what other deliveries said", async () => {
     const { tracker, changed } = setup();
 
-    expect(await changed(issue(12, { labels: [{ name: "a", color: "1" }] }))).toBe(
-      "updated",
-    );
+    expect(
+      await changed(issue(12, { labels: [{ name: "a", color: "1" }] })),
+    ).toBe("updated");
     await tracker.setBoardStatusByNode("I_12", "In Progress");
     await tracker.setParent("r-1", 12, 3);
-    await changed(issue(12, { title: "Renamed", state: "closed", stateReason: "completed" }));
+    await changed(
+      issue(12, {
+        title: "Renamed",
+        state: "closed",
+        stateReason: "completed",
+      }),
+    );
 
     expect(await tracker.getItem("r-1", 12)).toMatchObject({
       provider: TRACKER_PROVIDER,
@@ -132,7 +138,9 @@ describe("applying a change of a ticket to the mirror", () => {
     expect((await tracker.getItem("r-1", 7))?.checksState).toBeNull();
 
     await tracker.setChecksState("r-1", 7, "failure");
-    await changed(pullRequest(7, [], { state: "closed", stateReason: "merged" }));
+    await changed(
+      pullRequest(7, [], { state: "closed", stateReason: "merged" }),
+    );
     expect((await tracker.getItem("r-1", 7))?.checksState).toBeNull();
   });
 
@@ -152,12 +160,27 @@ describe("applying a change of a ticket to the mirror", () => {
     const { tracker, mirror, changed } = setup();
     await changed(issue(12));
 
-    await mirror.apply(INTEGRATION, { kind: "parent_changed", repo: REPO, child: 12, parent: 3 });
+    await mirror.apply(INTEGRATION, {
+      kind: "parent_changed",
+      repo: REPO,
+      child: 12,
+      parent: 3,
+    });
     expect((await tracker.getItem("r-1", 12))?.parentNumber).toBe(3);
-    await mirror.apply(INTEGRATION, { kind: "parent_changed", repo: REPO, child: 12, parent: null });
+    await mirror.apply(INTEGRATION, {
+      kind: "parent_changed",
+      repo: REPO,
+      child: 12,
+      parent: null,
+    });
     expect((await tracker.getItem("r-1", 12))?.parentNumber).toBeNull();
     expect(
-      await mirror.apply(INTEGRATION, { kind: "parent_changed", repo: REPO, child: 99, parent: 3 }),
+      await mirror.apply(INTEGRATION, {
+        kind: "parent_changed",
+        repo: REPO,
+        child: 99,
+        parent: 3,
+      }),
     ).toBe("not_mirrored");
   });
 
@@ -167,15 +190,27 @@ describe("applying a change of a ticket to the mirror", () => {
     await changed(issue(12));
 
     expect(
-      await mirror.apply(INTEGRATION, { kind: "board_status_changed", nodeId: "I_12", status: "Done" }),
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: "Done",
+      }),
     ).toBe("updated");
     expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Done");
     expect(
-      await mirror.apply(INTEGRATION, { kind: "board_status_changed", nodeId: "I_12", status: null }),
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: null,
+      }),
     ).toBe("updated");
     expect((await tracker.getItem("r-1", 12))?.boardStatus).toBeNull();
     expect(
-      await mirror.apply(INTEGRATION, { kind: "board_status_changed", nodeId: "I_nobody", status: "Done" }),
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_nobody",
+        status: "Done",
+      }),
     ).toBe("not_mirrored");
   });
 
@@ -221,7 +256,10 @@ describe("applying a change of a ticket to the mirror", () => {
   // #923-T30
   it.each([
     ["a repository without an active project", { project: false }],
-    ["a repository that the platform does not list any more", { active: false }],
+    [
+      "a repository that the platform does not list any more",
+      { active: false },
+    ],
   ])("mirrors nothing of %s", async (_name, options) => {
     const { tracker, changed } = setup(options);
 

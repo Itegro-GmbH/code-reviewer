@@ -116,10 +116,7 @@ export type TrackerRepository = {
   /** Removes the item; answers whether there was one. */
   deleteItem(repositoryId: string, number: number): Promise<boolean>;
   /** Sets the board status of the item the board names by its node id (any repository of the workspace); answers how many rows changed. */
-  setBoardStatusByNode(
-    nodeId: string,
-    status: string | null,
-  ): Promise<number>;
+  setBoardStatusByNode(nodeId: string, status: string | null): Promise<number>;
   /** Sets the parent of an issue; answers whether the issue is cached. */
   setParent(
     repositoryId: string,

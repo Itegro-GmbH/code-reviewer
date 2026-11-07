@@ -41,7 +41,9 @@ function scripted(answers: (call: Call) => Answer | undefined) {
       method: init?.method ?? "GET",
       path: url.pathname + url.search,
       body:
-        typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined,
+        typeof init?.body === "string"
+          ? (JSON.parse(init.body) as unknown)
+          : undefined,
     };
     calls.push(call);
     const json = (value: unknown, status = 200) =>
@@ -107,14 +109,24 @@ describe("the issues of the full sync", () => {
         ? {
             json: [
               ISSUE,
-              { ...ISSUE, number: 13, node_id: "I_13", pull_request: { merged_at: null } },
+              {
+                ...ISSUE,
+                number: 13,
+                node_id: "I_13",
+                pull_request: { merged_at: null },
+              },
               { no: "ticket" },
             ],
           }
         : undefined,
     );
 
-    const page = await client.readTrackerIssues("4242", READ, "acme/widgets", 1);
+    const page = await client.readTrackerIssues(
+      "4242",
+      READ,
+      "acme/widgets",
+      1,
+    );
 
     expect(page.last).toBe(true);
     expect(page.items.map((item) => [item.number, item.kind])).toEqual([
@@ -135,12 +147,22 @@ describe("the issues of the full sync", () => {
   // #923-T76
   it("says a full page is not the last, and refuses a page outside what a list may have", async () => {
     const { client } = scripted(() => ({
-      json: Array.from({ length: 100 }, (_, i) => ({ ...ISSUE, number: i + 1, node_id: `I_${i}` })),
+      json: Array.from({ length: 100 }, (_, i) => ({
+        ...ISSUE,
+        number: i + 1,
+        node_id: `I_${i}`,
+      })),
     }));
 
-    expect((await client.readTrackerIssues("4242", READ, "acme/widgets", 2)).last).toBe(false);
-    await expect(client.readTrackerIssues("4242", READ, "acme/widgets", 0)).rejects.toBeInstanceOf(GithubAppError);
-    await expect(client.readTrackerIssues("4242", READ, "acme/widgets", 101)).rejects.toBeInstanceOf(GithubAppError);
+    expect(
+      (await client.readTrackerIssues("4242", READ, "acme/widgets", 2)).last,
+    ).toBe(false);
+    await expect(
+      client.readTrackerIssues("4242", READ, "acme/widgets", 0),
+    ).rejects.toBeInstanceOf(GithubAppError);
+    await expect(
+      client.readTrackerIssues("4242", READ, "acme/widgets", 101),
+    ).rejects.toBeInstanceOf(GithubAppError);
   });
 
   // #923-T77
@@ -179,7 +201,9 @@ describe("the checks of the full sync", () => {
     const { client, calls } = scripted((call) => {
       if (call.path.startsWith("/repos/acme/widgets/pulls?"))
         return { json: [pull(7), pull(8)] };
-      if (call.path.startsWith(`/repos/acme/widgets/commits/${SHA}/check-suites`))
+      if (
+        call.path.startsWith(`/repos/acme/widgets/commits/${SHA}/check-suites`)
+      )
         return {
           json: {
             check_suites: [
@@ -191,7 +215,12 @@ describe("the checks of the full sync", () => {
       return undefined;
     });
 
-    const page = await client.readTrackerChecks("4242", READ, "acme/widgets", 1);
+    const page = await client.readTrackerChecks(
+      "4242",
+      READ,
+      "acme/widgets",
+      1,
+    );
 
     expect(page).toEqual({
       pullRequests: [
@@ -212,7 +241,9 @@ describe("the checks of the full sync", () => {
         : undefined,
     );
 
-    expect(await client.readChecksState("4242", READ, "acme/widgets", SHA)).toBeNull();
+    expect(
+      await client.readChecksState("4242", READ, "acme/widgets", SHA),
+    ).toBeNull();
     await expect(
       client.readChecksState("4242", READ, "acme/widgets", "../../etc"),
     ).rejects.toBeInstanceOf(GithubAppError);
@@ -220,7 +251,11 @@ describe("the checks of the full sync", () => {
 });
 
 describe("the board of the full sync", () => {
-  const boards = { data: { repository: { projectsV2: { nodes: [{ id: "PVT_1" }, { id: "PVT_2" }] } } } };
+  const boards = {
+    data: {
+      repository: { projectsV2: { nodes: [{ id: "PVT_1" }, { id: "PVT_2" }] } },
+    },
+  };
   const items = (names: (string | null)[], hasNextPage: boolean) => ({
     data: {
       node: {
@@ -244,10 +279,19 @@ describe("the board of the full sync", () => {
     const { client, calls } = scripted((call) => {
       if (call.path !== "/graphql") return undefined;
       const query = (call.body as { query: string }).query;
-      return { json: query.includes("projectsV2") ? boards : items(["In Progress", null], false) };
+      return {
+        json: query.includes("projectsV2")
+          ? boards
+          : items(["In Progress", null], false),
+      };
     });
 
-    const page = await client.readTrackerBoard("4242", BOARD, "acme/widgets", null);
+    const page = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      null,
+    );
 
     expect(page).toEqual({
       available: true,
@@ -269,18 +313,39 @@ describe("the board of the full sync", () => {
     const seen: unknown[] = [];
     const { client } = scripted((call) => {
       if (call.path !== "/graphql") return undefined;
-      const body = call.body as { query: string; variables: Record<string, unknown> };
+      const body = call.body as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
       if (body.query.includes("projectsV2")) return { json: boards };
       seen.push(body.variables);
       // Only the first page of the first board has a next page.
       return {
-        json: items(["Done"], body.variables.project === "PVT_1" && body.variables.after === null),
+        json: items(
+          ["Done"],
+          body.variables.project === "PVT_1" && body.variables.after === null,
+        ),
       };
     });
 
-    const first = await client.readTrackerBoard("4242", BOARD, "acme/widgets", null);
-    const second = await client.readTrackerBoard("4242", BOARD, "acme/widgets", first.next);
-    const last = await client.readTrackerBoard("4242", BOARD, "acme/widgets", "1:");
+    const first = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      null,
+    );
+    const second = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      first.next,
+    );
+    const last = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      "1:",
+    );
 
     expect(first.next).toBe("0:cursor-1");
     expect(second.next).toBe("1:");
@@ -294,12 +359,22 @@ describe("the board of the full sync", () => {
 
   // #923-T82
   it.each([
-    ["GraphQL answers with errors", () => ({ json: { errors: [{ type: "FORBIDDEN" }] } })],
-    ["the repository has no boards the token can see", () => ({ json: { data: { repository: null } } })],
+    [
+      "GraphQL answers with errors",
+      () => ({ json: { errors: [{ type: "FORBIDDEN" }] } }),
+    ],
+    [
+      "the repository has no boards the token can see",
+      () => ({ json: { data: { repository: null } } }),
+    ],
   ])("is not available when %s, and fails nothing", async (_name, answer) => {
-    const { client } = scripted((call) => (call.path === "/graphql" ? answer() : undefined));
+    const { client } = scripted((call) =>
+      call.path === "/graphql" ? answer() : undefined,
+    );
 
-    expect(await client.readTrackerBoard("4242", BOARD, "acme/widgets", null)).toEqual({
+    expect(
+      await client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+    ).toEqual({
       available: false,
       items: [],
       next: null,
@@ -310,11 +385,19 @@ describe("the board of the full sync", () => {
   it("is not available when GitHub refuses the token for the board permission", async () => {
     const { client } = scripted((call) =>
       /\/access_tokens$/.test(call.path)
-        ? { status: 422, json: { message: "The permissions requested are not granted to this installation." } }
+        ? {
+            status: 422,
+            json: {
+              message:
+                "The permissions requested are not granted to this installation.",
+            },
+          }
         : undefined,
     );
 
-    expect(await client.readTrackerBoard("4242", BOARD, "acme/widgets", null)).toEqual({
+    expect(
+      await client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+    ).toEqual({
       available: false,
       items: [],
       next: null,

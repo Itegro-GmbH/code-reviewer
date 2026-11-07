@@ -65,8 +65,12 @@ export function createFakeTrackerRepository(
     },
     async listItems(repositoryId, filter) {
       return rowsOf(repositoryId)
-        .filter((item) => filter.state === undefined || item.state === filter.state)
-        .filter((item) => filter.kind === undefined || item.kind === filter.kind)
+        .filter(
+          (item) => filter.state === undefined || item.state === filter.state,
+        )
+        .filter(
+          (item) => filter.kind === undefined || item.kind === filter.kind,
+        )
         .sort((a, b) =>
           a.updatedAt === b.updatedAt
             ? b.number - a.number
@@ -117,7 +121,8 @@ export function createFakeTrackerRepository(
           ...issue,
           pullRequests: rowsOf(repositoryId)
             .filter(
-              (pr) => pr.kind === "pull_request" && pr.closes.includes(issue.number),
+              (pr) =>
+                pr.kind === "pull_request" && pr.closes.includes(issue.number),
             )
             .map((pr) => pr.number)
             .sort((a, b) => a - b),
@@ -126,11 +131,17 @@ export function createFakeTrackerRepository(
     },
     async clearBoardStatuses(repositoryId) {
       for (const item of rowsOf(repositoryId))
-        items.set(key(repositoryId, item.number), { ...item, boardStatus: null });
+        items.set(key(repositoryId, item.number), {
+          ...item,
+          boardStatus: null,
+        });
     },
     async clearChecksStates(repositoryId) {
       for (const item of rowsOf(repositoryId))
-        items.set(key(repositoryId, item.number), { ...item, checksState: null });
+        items.set(key(repositoryId, item.number), {
+          ...item,
+          checksState: null,
+        });
     },
     async removeNotWrittenSince(repositoryId, before) {
       let removed = 0;
@@ -149,9 +160,12 @@ export function createFakeTrackerRepository(
       states.set(repositoryId, {
         repositoryId,
         projectId: before?.projectId ?? null,
-        cursor: state.cursor === undefined ? (before?.cursor ?? null) : state.cursor,
+        cursor:
+          state.cursor === undefined ? (before?.cursor ?? null) : state.cursor,
         startedAt:
-          state.startedAt === undefined ? (before?.startedAt ?? null) : state.startedAt,
+          state.startedAt === undefined
+            ? (before?.startedAt ?? null)
+            : state.startedAt,
         lastFullSyncAt:
           state.lastFullSyncAt === undefined
             ? (before?.lastFullSyncAt ?? null)
@@ -163,7 +177,11 @@ export function createFakeTrackerRepository(
       return [...items.values()].sort((a, b) => a.number - b.number);
     },
     snapshot() {
-      return this.rows().map(({ syncedAt: _syncedAt, ...rest }) => rest);
+      return this.rows().map((row) => {
+        const copy: Partial<TrackerItem> = { ...row };
+        delete copy.syncedAt;
+        return copy as Omit<TrackerItem, "syncedAt">;
+      });
     },
     clear() {
       items.clear();

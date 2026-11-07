@@ -53,11 +53,20 @@ const GITHUB: GitHub = {
   issues: [
     [
       item(3, { type: "Epic" }),
-      item(12, { type: "Task", parentNumber: 3, labels: [{ name: "ready", color: "0e8a16" }] }),
+      item(12, {
+        type: "Task",
+        parentNumber: 3,
+        labels: [{ name: "ready", color: "0e8a16" }],
+      }),
     ],
     [
       item(13, { state: "closed", stateReason: "completed" }),
-      item(7, { kind: "pull_request", nodeId: "PR_7", closes: [12], title: "Fix 12" }),
+      item(7, {
+        kind: "pull_request",
+        nodeId: "PR_7",
+        closes: [12],
+        title: "Fix 12",
+      }),
     ],
     [
       item(8, {
@@ -70,7 +79,10 @@ const GITHUB: GitHub = {
     ],
   ],
   checks: [[{ number: 7, checksState: "failure" }]],
-  board: [[{ nodeId: "N_12", status: "In Progress" }], [{ nodeId: "N_3", status: "Todo" }]],
+  board: [
+    [{ nodeId: "N_12", status: "In Progress" }],
+    [{ nodeId: "N_3", status: "Todo" }],
+  ],
 };
 
 function provider(github: GitHub) {
@@ -123,7 +135,12 @@ function setup(github: GitHub = GITHUB) {
   const tracker = createFakeTrackerRepository(tick);
   const remote = provider(github);
   const sync = createTrackerSync({ tracker, provider: remote.port, now: tick });
-  return { tracker, remote, sync, run: (options = {}) => sync.run(INTEGRATION, REPOSITORY, options) };
+  return {
+    tracker,
+    remote,
+    sync,
+    run: (options = {}) => sync.run(INTEGRATION, REPOSITORY, options),
+  };
 }
 
 describe("the full sync of the ticket mirror", () => {
@@ -155,9 +172,15 @@ describe("the full sync of the ticket mirror", () => {
       boardStatus: "In Progress",
       pullRequests: [7],
     });
-    expect(await tracker.getItem("r-1", 13)).toMatchObject({ pullRequests: [8] });
-    expect(await tracker.getItem("r-1", 7)).toMatchObject({ checksState: "failure" });
-    expect(await tracker.getItem("r-1", 3)).toMatchObject({ boardStatus: "Todo" });
+    expect(await tracker.getItem("r-1", 13)).toMatchObject({
+      pullRequests: [8],
+    });
+    expect(await tracker.getItem("r-1", 7)).toMatchObject({
+      checksState: "failure",
+    });
+    expect(await tracker.getItem("r-1", 3)).toMatchObject({
+      boardStatus: "Todo",
+    });
     expect(await tracker.getSyncState("r-1")).toMatchObject({
       cursor: null,
       startedAt: null,
@@ -170,14 +193,24 @@ describe("the full sync of the ticket mirror", () => {
     const { tracker, remote, run } = setup();
 
     const first = await run({ maxPages: 2 });
-    expect(first).toMatchObject({ status: "partial", next: "issues", written: 4 });
-    expect(readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null)).toEqual({
+    expect(first).toMatchObject({
+      status: "partial",
+      next: "issues",
+      written: 4,
+    });
+    expect(
+      readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
+    ).toEqual({
       phase: "issues",
       page: 3,
     });
 
     const second = await run({ maxPages: 2 });
-    expect(second).toMatchObject({ status: "partial", next: "board", written: 1 });
+    expect(second).toMatchObject({
+      status: "partial",
+      next: "board",
+      written: 1,
+    });
 
     const third = await run({ maxPages: 5 });
     expect(third).toMatchObject({ status: "done", next: null });
@@ -199,7 +232,11 @@ describe("the full sync of the ticket mirror", () => {
 
     const progress = await run({ deadline: clock });
 
-    expect(progress).toMatchObject({ status: "partial", next: "issues", written: 0 });
+    expect(progress).toMatchObject({
+      status: "partial",
+      next: "issues",
+      written: 0,
+    });
     expect(tracker.rows()).toEqual([]);
     expect((await tracker.getSyncState("r-1"))?.cursor).not.toBeNull();
   });
@@ -211,7 +248,9 @@ describe("the full sync of the ticket mirror", () => {
 
     await expect(run()).rejects.toThrow("boom");
     expect(tracker.rows().map((row) => row.number)).toEqual([3, 12]);
-    expect(readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null)).toEqual({
+    expect(
+      readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
+    ).toEqual({
       phase: "issues",
       page: 2,
     });
@@ -287,7 +326,9 @@ describe("the full sync of the ticket mirror", () => {
     await run({ maxPages: 1 });
 
     expect(remote.steps.at(-1)).toEqual({ phase: "issues", page: 1 });
-    expect(readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null)).toEqual({
+    expect(
+      readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
+    ).toEqual({
       phase: "issues",
       page: 2,
     });
@@ -312,12 +353,19 @@ describe("the full sync of the ticket mirror", () => {
     const sync = createTrackerSync({
       tracker,
       provider: {
-        readTrackerPage: async () => ({ phase: "board", available: true, items: [], next: null }),
+        readTrackerPage: async () => ({
+          phase: "board",
+          available: true,
+          items: [],
+          next: null,
+        }),
       },
       now: tick,
     });
 
-    await expect(sync.run(INTEGRATION, REPOSITORY)).rejects.toThrow(/another phase/);
+    await expect(sync.run(INTEGRATION, REPOSITORY)).rejects.toThrow(
+      /another phase/,
+    );
   });
 });
 
@@ -350,7 +398,11 @@ describe("the rebuild rule", () => {
         });
     for (const page of GITHUB.board ?? [])
       for (const { nodeId, status } of page)
-        await mirror.apply(INTEGRATION, { kind: "board_status_changed", nodeId, status });
+        await mirror.apply(INTEGRATION, {
+          kind: "board_status_changed",
+          nodeId,
+          status,
+        });
     await mirror.apply(INTEGRATION, {
       kind: "checks_changed",
       repo,
@@ -362,7 +414,11 @@ describe("the rebuild rule", () => {
 
     // The table is deleted; the sync fills it again.
     const rebuilt = createFakeTrackerRepository(tick);
-    const sync = createTrackerSync({ tracker: rebuilt, provider: provider(GITHUB).port, now: tick });
+    const sync = createTrackerSync({
+      tracker: rebuilt,
+      provider: provider(GITHUB).port,
+      now: tick,
+    });
     await sync.run(INTEGRATION, REPOSITORY);
 
     expect(rebuilt.snapshot()).toEqual(before);

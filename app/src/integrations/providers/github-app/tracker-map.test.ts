@@ -66,11 +66,16 @@ describe("the ticket of a GitHub issue", () => {
   it("reads the parent only when it is an issue of the same repository, and says nothing when the field is absent", () => {
     const own = (url: unknown) =>
       toTrackerItem({ ...ISSUE, parent_issue_url: url }, "Acme/Widgets");
-    const { parent_issue_url: _omitted, ...without } = ISSUE;
+    const without: Record<string, unknown> = { ...ISSUE };
+    delete without.parent_issue_url;
 
     expect(own(null)?.parentNumber).toBeNull();
-    expect(own("https://api.github.com/repos/other/repo/issues/3")?.parentNumber).toBeNull();
-    expect(own("https://api.github.com/repos/acme/widgets/issues/9")?.parentNumber).toBe(9);
+    expect(
+      own("https://api.github.com/repos/other/repo/issues/3")?.parentNumber,
+    ).toBeNull();
+    expect(
+      own("https://api.github.com/repos/acme/widgets/issues/9")?.parentNumber,
+    ).toBe(9);
     expect(toTrackerItem(without, "acme/widgets")).not.toHaveProperty(
       "parentNumber",
     );
@@ -88,7 +93,12 @@ describe("the ticket of a GitHub issue", () => {
       "acme/widgets",
     );
     const webhook = toTrackerItem(
-      { ...ISSUE, state: "open", merged: false, body: "Closes #1, resolves #2" },
+      {
+        ...ISSUE,
+        state: "open",
+        merged: false,
+        body: "Closes #1, resolves #2",
+      },
       "acme/widgets",
       { pullRequest: true },
     );
@@ -153,12 +163,32 @@ describe("the state of the checks of a commit", () => {
   // #923-T08
   it.each([
     ["no suite", [], null],
-    ["a suite that failed beats one that runs", [running("in_progress"), done("failure"), done("success")], "failure"],
-    ["the worst conclusion decides", [done("cancelled"), done("timed_out")], "timed_out"],
-    ["a suite that is not done beats a success", [done("success"), running("queued")], "queued"],
-    ["in progress beats queued", [running("queued"), running("in_progress")], "in_progress"],
+    [
+      "a suite that failed beats one that runs",
+      [running("in_progress"), done("failure"), done("success")],
+      "failure",
+    ],
+    [
+      "the worst conclusion decides",
+      [done("cancelled"), done("timed_out")],
+      "timed_out",
+    ],
+    [
+      "a suite that is not done beats a success",
+      [done("success"), running("queued")],
+      "queued",
+    ],
+    [
+      "in progress beats queued",
+      [running("queued"), running("in_progress")],
+      "in_progress",
+    ],
     ["a success beats neutral", [done("neutral"), done("success")], "success"],
-    ["neutral when nothing else", [done("skipped"), done("neutral")], "skipped"],
+    [
+      "neutral when nothing else",
+      [done("skipped"), done("neutral")],
+      "skipped",
+    ],
   ])("is decided by %s", (_name, suites, expected) => {
     expect(checksStateOf(suites)).toBe(expected);
   });
@@ -167,13 +197,18 @@ describe("the state of the checks of a commit", () => {
   it("reads the suites of GitHub's answer, and refuses an answer that is not one", () => {
     expect(
       toCheckSuites({
-        check_suites: [{ status: "completed", conclusion: "success" }, { status: "queued" }],
+        check_suites: [
+          { status: "completed", conclusion: "success" },
+          { status: "queued" },
+        ],
       }),
     ).toEqual([
       { status: "completed", conclusion: "success" },
       { status: "queued", conclusion: null },
     ]);
-    expect(toCheckSuites({ check_suites: [{ conclusion: "success" }] })).toBeNull();
+    expect(
+      toCheckSuites({ check_suites: [{ conclusion: "success" }] }),
+    ).toBeNull();
     expect(toCheckSuites([])).toBeNull();
   });
 });

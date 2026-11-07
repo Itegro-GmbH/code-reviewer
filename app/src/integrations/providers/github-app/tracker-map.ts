@@ -5,10 +5,7 @@
 // vocabulary of our own: the state, the reason and the type are GitHub's words. Returns null for an object that lacks what the mirror
 // needs, so the caller can report an unexpected answer instead of caching garbage.
 import { isRecord } from "./guards.ts";
-import {
-  TRACKER_EXCERPT_CHARS,
-  type TrackerItemFields,
-} from "../../types.ts";
+import { TRACKER_EXCERPT_CHARS, type TrackerItemFields } from "../../types.ts";
 
 const TITLE_MAX_CHARS = 1000;
 const LABELS_MAX = 100;
@@ -23,7 +20,8 @@ function cut(text: string, max: number): string {
 
 // GitHub's keywords that close an issue when a pull request with them merges: close(s/d), fix(es/ed), resolve(s/d), then `#12` or
 // `owner/repo#12`. A reference to another repository is not counted: the mirror holds one repository's tickets.
-const CLOSING = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[ \t]+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
+const CLOSING =
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[ \t]+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
 
 /** The issues of `repoFullName` a pull request description closes, ascending, without duplicates. */
 export function closedIssueNumbers(
@@ -76,7 +74,8 @@ export function toTrackerItem(
   )
     return null;
 
-  const isPullRequest = options.pullRequest === true || isRecord(json.pull_request);
+  const isPullRequest =
+    options.pullRequest === true || isRecord(json.pull_request);
   const nested = isRecord(json.pull_request) ? json.pull_request : {};
   const merged =
     isPullRequest &&
@@ -186,7 +185,8 @@ export function toCheckSuites(json: unknown): CheckSuiteFacts[] | null {
     if (!isRecord(suite) || typeof suite.status !== "string") return null;
     suites.push({
       status: suite.status,
-      conclusion: typeof suite.conclusion === "string" ? suite.conclusion : null,
+      conclusion:
+        typeof suite.conclusion === "string" ? suite.conclusion : null,
     });
   }
   return suites;

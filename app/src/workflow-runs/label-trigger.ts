@@ -211,7 +211,10 @@ export function createLabelTrigger(
             clientRequestId: labelRequestId(deliveryId, workflow.id),
             triggerKind: LABEL_TRIGGER_KIND,
             triggerKey,
-            ticketRef: labelTicketRef(labeled.repo.fullName, labeled.issue.number),
+            ticketRef: labelTicketRef(
+              labeled.repo.fullName,
+              labeled.issue.number,
+            ),
             createdBy: null,
             actorLogin,
           });

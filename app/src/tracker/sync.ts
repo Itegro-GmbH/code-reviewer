@@ -198,7 +198,10 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
         }
 
         // The last phase is over: the rebuild rule.
-        const removed = await tracker.removeNotWrittenSince(repository.id, began);
+        const removed = await tracker.removeNotWrittenSince(
+          repository.id,
+          began,
+        );
         await tracker.linkPullRequests(repository.id);
         await tracker.saveSyncState(repository.id, {
           cursor: null,

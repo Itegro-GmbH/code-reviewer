@@ -7,21 +7,21 @@ import { describe, expect, it, vi } from "vitest";
 import {
   webhookDelivery,
   webhookFixture,
-} from "../../../fakes/github/webhooks.ts";
-import { fakeGithubAppClient } from "../integrations/providers/github-app/fake-client.ts";
-import { loadGithubAppConfig } from "../integrations/providers/github-app/config.ts";
-import { createGithubAppProvider } from "../integrations/providers/github-app/provider.ts";
-import type { TrackerChange } from "../integrations/types.ts";
-import { fakeIntegration } from "../test-support/fake-integration-provider.ts";
+} from "../../../../../fakes/github/webhooks.ts";
+import { fakeGithubAppClient } from "./fake-client.ts";
+import { loadGithubAppConfig } from "./config.ts";
+import { createGithubAppProvider } from "./provider.ts";
+import type { TrackerChange } from "../../types.ts";
+import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import {
   TEST_WEBHOOK_SECRET,
   testGithubAppEnv,
-} from "../test-support/github-app.ts";
-import type { TrackerMirror } from "../tracker/mirror.ts";
+} from "../../../test-support/github-app.ts";
+import type { TrackerMirror } from "../../../tracker/mirror.ts";
 import {
   createGithubAppWebhookHandler,
   type WorkflowStarter,
-} from "./github-app-handler.ts";
+} from "../../../webhooks/github-app-handler.ts";
 
 const integration = fakeIntegration({
   id: "integration-1",
@@ -54,17 +54,22 @@ function setup(
         released.push(id);
       },
     } as never,
-    sync: { handleInstallationChange: async () => ({ outcome: "unclaimed" }) } as never,
+    sync: {
+      handleInstallationChange: async () => ({ outcome: "unclaimed" }),
+    } as never,
     workspace: () => ({
       projects: { hasActiveProject: async () => true },
       settingsFor: async () => undefined,
       intake: {} as never,
       ...(options.mirror === undefined ? {} : { tracker: options.mirror }),
-      ...(options.workflows === undefined ? {} : { workflows: options.workflows }),
+      ...(options.workflows === undefined
+        ? {}
+        : { workflows: options.workflows }),
     }),
     automatic: {},
     logger: {
       info: (line: string) => logs.push(line),
+      warn: (line: string) => logs.push(line),
       error: (line: string) => logs.push(line),
     },
   });
@@ -98,27 +103,38 @@ describe("the events only the ticket mirror reads", () => {
     ["sub_issues", "sub_issues.sub_issue_added", "parent_changed"],
     ["projects_v2_item", "projects_v2_item.edited", "board_status_changed"],
     ["check_suite", "check_suite.completed", "checks_changed"],
-  ])("%s updates the mirror and is answered tracker_updated", async (event, fixture, kind) => {
-    const recorded = mirror();
-    const { send, completed } = setup({ mirror: recorded.port });
+  ])(
+    "%s updates the mirror and is answered tracker_updated",
+    async (event, fixture, kind) => {
+      const recorded = mirror();
+      const { send, completed } = setup({ mirror: recorded.port });
 
-    const answer = await send(event, webhookFixture(fixture));
+      const answer = await send(event, webhookFixture(fixture));
 
-    expect(answer).toEqual({ status: 202, body: { status: "accepted", outcome: "tracker_updated" } });
-    expect(recorded.changes.map((change) => change.kind)).toEqual([kind]);
-    expect(completed).toEqual(["tracker_updated"]);
-  });
+      expect(answer).toEqual({
+        status: 202,
+        body: { status: "accepted", outcome: "tracker_updated" },
+      });
+      expect(recorded.changes.map((change) => change.kind)).toEqual([kind]);
+      expect(completed).toEqual(["tracker_updated"]);
+    },
+  );
 
   // #923-T45
   it("answers ignored when the mirror takes nothing from the delivery", async () => {
     const { send } = setup({ mirror: mirror("not_mirrored").port });
 
-    expect(await send("check_suite", webhookFixture("check_suite.completed"))).toMatchObject({
+    expect(
+      await send("check_suite", webhookFixture("check_suite.completed")),
+    ).toMatchObject({
       status: 202,
       body: { outcome: "ignored" },
     });
     expect(
-      await send("check_suite", webhookFixture("check_suite.completed.no-pull-request")),
+      await send(
+        "check_suite",
+        webhookFixture("check_suite.completed.no-pull-request"),
+      ),
     ).toMatchObject({ body: { outcome: "ignored" } });
   });
 
@@ -126,7 +142,9 @@ describe("the events only the ticket mirror reads", () => {
   it("is ignored by a server that has no mirror", async () => {
     const { send } = setup();
 
-    expect(await send("check_suite", webhookFixture("check_suite.completed"))).toMatchObject({
+    expect(
+      await send("check_suite", webhookFixture("check_suite.completed")),
+    ).toMatchObject({
       status: 202,
       body: { outcome: "ignored" },
     });
@@ -137,14 +155,22 @@ describe("the events only the ticket mirror reads", () => {
     const { send, released, completed, logs } = setup({
       mirror: {
         apply: async () => {
-          throw Object.assign(new Error("connection string with secret"), { code: "ECONNRESET" });
+          throw Object.assign(new Error("connection string with secret"), {
+            code: "ECONNRESET",
+          });
         },
       },
     });
 
-    const answer = await send("check_suite", webhookFixture("check_suite.completed"));
+    const answer = await send(
+      "check_suite",
+      webhookFixture("check_suite.completed"),
+    );
 
-    expect(answer).toEqual({ status: 503, body: { error: "WEBHOOK_PROCESSING_FAILED" } });
+    expect(answer).toEqual({
+      status: 503,
+      body: { error: "WEBHOOK_PROCESSING_FAILED" },
+    });
     expect(released).toHaveLength(1);
     expect(completed).toEqual([]);
     expect(logs.join("\n")).toContain("ECONNRESET");
@@ -160,13 +186,17 @@ describe("the events only the ticket mirror reads", () => {
     });
     const handler = createGithubAppWebhookHandler({
       registry: { resolve: () => provider } as never,
-      integrations: { findByExternalId: async () => ({ ...integration, status: "disabled" }) },
+      integrations: {
+        findByExternalId: async () => ({ ...integration, status: "disabled" }),
+      },
       deliveries: {
         claim: async () => ({ status: "claimed", token: "t" }),
         complete: async () => undefined,
         release: async () => undefined,
       } as never,
-      sync: { handleInstallationChange: async () => ({ outcome: "unclaimed" }) } as never,
+      sync: {
+        handleInstallationChange: async () => ({ outcome: "unclaimed" }),
+      } as never,
       workspace: () => ({
         projects: { hasActiveProject: async () => true },
         settingsFor: async () => undefined,
@@ -174,7 +204,11 @@ describe("the events only the ticket mirror reads", () => {
         tracker: recorded.port,
       }),
       automatic: {},
-      logger: { info: () => undefined, error: () => undefined },
+      logger: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
     });
 
     const response = await handler(
@@ -185,7 +219,9 @@ describe("the events only the ticket mirror reads", () => {
       }),
     );
 
-    expect((await response.json()) as { outcome: string }).toMatchObject({ outcome: "integration_disabled" });
+    expect((await response.json()) as { outcome: string }).toMatchObject({
+      outcome: "integration_disabled",
+    });
     expect(recorded.changes).toEqual([]);
   });
 });
@@ -199,13 +235,21 @@ describe("the events the ticket mirror shares with the reviews and the workflows
     const answer = await send("issues", webhookFixture("issues.edited.mirror"));
 
     expect(answer.body.outcome).toBe("tracker_updated");
-    expect(recorded.changes).toMatchObject([{ kind: "item_changed", item: { number: 12 } }]);
+    expect(recorded.changes).toMatchObject([
+      { kind: "item_changed", item: { number: 12 } },
+    ]);
   });
 
   // #923-T50
   it("still starts the workflows of a label that the mirror has also heard", async () => {
     const recorded = mirror();
-    const start = vi.fn(async () => ({ matched: 1, started: 1, existing: 0, skipped: 0, busy: 0 }));
+    const start = vi.fn(async () => ({
+      matched: 1,
+      started: 1,
+      existing: 0,
+      skipped: 0,
+      busy: 0,
+    }));
     const { send } = setup({ mirror: recorded.port, workflows: { start } });
 
     const answer = await send("issues", {
@@ -221,9 +265,19 @@ describe("the events the ticket mirror shares with the reviews and the workflows
 
   // #923-T51
   it("never lets a failure of the mirror stop what else the delivery does", async () => {
-    const start = vi.fn(async () => ({ matched: 1, started: 1, existing: 0, skipped: 0, busy: 0 }));
+    const start = vi.fn(async () => ({
+      matched: 1,
+      started: 1,
+      existing: 0,
+      skipped: 0,
+      busy: 0,
+    }));
     const { send, logs } = setup({
-      mirror: { apply: async () => { throw new Error("database down"); } },
+      mirror: {
+        apply: async () => {
+          throw new Error("database down");
+        },
+      },
       workflows: { start },
     });
 
@@ -236,7 +290,11 @@ describe("the events the ticket mirror shares with the reviews and the workflows
 
     expect(labeled.body.outcome).toBe("workflow_runs_started");
     expect(edited).toMatchObject({ status: 202, body: { outcome: "ignored" } });
-    expect(logs.filter((line) => line.includes("ticket mirror could not be updated"))).toHaveLength(2);
+    expect(
+      logs.filter((line) =>
+        line.includes("ticket mirror could not be updated"),
+      ),
+    ).toHaveLength(2);
   });
 
   // #923-T52
@@ -249,7 +307,9 @@ describe("the events the ticket mirror shares with the reviews and the workflows
 
     expect(answer.status).toBe(202);
     expect(recorded.changes).toEqual([]);
-    expect(logs.join("\n")).toContain("the ticket mirror takes nothing from it");
+    expect(logs.join("\n")).toContain(
+      "the ticket mirror takes nothing from it",
+    );
   });
 
   // #923-T53
@@ -263,7 +323,11 @@ describe("the events the ticket mirror shares with the reviews and the workflows
     );
 
     expect(recorded.changes).toMatchObject([
-      { kind: "item_changed", resetChecks: true, item: { number: 7, kind: "pull_request" } },
+      {
+        kind: "item_changed",
+        resetChecks: true,
+        item: { number: 7, kind: "pull_request" },
+      },
     ]);
     // The project has no settings in this setup: the review path ran after the mirror and said so.
     expect(answer.body.outcome).toBe("project_not_active");

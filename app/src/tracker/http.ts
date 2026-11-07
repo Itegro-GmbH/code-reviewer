@@ -88,7 +88,9 @@ function whole(
 /** The query of the list as the service takes it, or the parameters that cannot be used. */
 export function readTicketQuery(
   url: URL,
-): { ok: true; value: TicketQuery } | { ok: false; issues: TrackerRequestIssue[] } {
+):
+  | { ok: true; value: TicketQuery }
+  | { ok: false; issues: TrackerRequestIssue[] } {
   const issues: TrackerRequestIssue[] = [];
   const stateText = url.searchParams.get("state");
   let state: TicketQuery["state"] = "open";
@@ -135,9 +137,12 @@ export function createTrackerRouteHandlers({
       const query = readTicketQuery(new URL(request.url));
       if (!query.ok) return refusal("TRACKER_REQUEST_INVALID", query.issues);
       try {
-        return Response.json(await service.listIssues(repositoryId, query.value), {
-          headers: NO_STORE,
-        });
+        return Response.json(
+          await service.listIssues(repositoryId, query.value),
+          {
+            headers: NO_STORE,
+          },
+        );
       } catch (error) {
         if (error instanceof TrackerError) return refusal(error.code);
         throw error;
@@ -147,8 +152,7 @@ export function createTrackerRouteHandlers({
     async sync(request, repositoryId) {
       await requireUser();
       // A change of state: never from another site.
-      if (isCrossSite(request))
-        return refusal("TRACKER_CROSS_SITE_REQUEST");
+      if (isCrossSite(request)) return refusal("TRACKER_CROSS_SITE_REQUEST");
       try {
         const progress = await service.sync(repositoryId, {
           deadline: now() + SYNC_BUDGET_MS,

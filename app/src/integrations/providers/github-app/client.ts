@@ -492,7 +492,8 @@ function boardPageOf(data: Record<string, unknown>): {
   return {
     items: result,
     hasNextPage: pageInfo.hasNextPage === true,
-    endCursor: typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null,
+    endCursor:
+      typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null,
   };
 }
 
@@ -1959,7 +1960,9 @@ export function createGithubAppClient(
           for (const entry of json) {
             const pr = toPullRequestRef(entry);
             if (pr === null) {
-              warn("A pull request of the list could not be read and was left out.");
+              warn(
+                "A pull request of the list could not be read and was left out.",
+              );
               continue;
             }
             pullRequests.push({
@@ -1978,7 +1981,13 @@ export function createGithubAppClient(
       );
     },
 
-    async readChecksState(installationId, scope, repoFullName, headSha, signal) {
+    async readChecksState(
+      installationId,
+      scope,
+      repoFullName,
+      headSha,
+      signal,
+    ) {
       checkInstallationId(installationId);
       const path = repoPath(repoFullName);
       return withScopedToken(
@@ -2042,11 +2051,12 @@ export function createGithubAppClient(
             if (data === null) return unavailable;
             const page = boardPageOf(data);
             if (page === null) return unavailable;
-            const next = page.endCursor !== null && page.hasNextPage
-              ? `${index}:${page.endCursor}`
-              : index + 1 < boards.length
-                ? `${index + 1}:`
-                : null;
+            const next =
+              page.endCursor !== null && page.hasNextPage
+                ? `${index}:${page.endCursor}`
+                : index + 1 < boards.length
+                  ? `${index + 1}:`
+                  : null;
             return { available: true, items: page.items, next };
           },
           signal,

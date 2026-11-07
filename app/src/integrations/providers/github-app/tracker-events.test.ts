@@ -160,7 +160,11 @@ describe("what a delivery says about the ticket mirror", () => {
     };
 
     expect(
-      parseTrackerChange({ integrationId: "i-1", eventName: "sub_issues", payload }),
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "sub_issues",
+        payload,
+      }),
     ).toMatchObject({ kind: "ignored" });
   });
 
@@ -182,7 +186,9 @@ describe("what a delivery says about the ticket mirror", () => {
         status: null,
       },
     });
-    expect(parse("projects_v2_item.edited.other-field", "projects_v2_item")).toMatchObject({
+    expect(
+      parse("projects_v2_item.edited.other-field", "projects_v2_item"),
+    ).toMatchObject({
       kind: "ignored",
     });
   });
@@ -198,18 +204,28 @@ describe("what a delivery says about the ticket mirror", () => {
         pullRequests: [7],
       },
     });
-    expect(parse("check_suite.completed.no-pull-request", "check_suite")).toMatchObject({
+    expect(
+      parse("check_suite.completed.no-pull-request", "check_suite"),
+    ).toMatchObject({
       kind: "ignored",
     });
   });
 
   // #923-T19
   it("names the fields of a payload that lacks them, never their values", () => {
-    const payload = webhookFixture("check_suite.completed") as Record<string, unknown>;
-    const { repository: _repository, ...without } = payload;
+    const payload = webhookFixture("check_suite.completed") as Record<
+      string,
+      unknown
+    >;
+    const without = { ...payload };
+    delete without.repository;
 
     expect(
-      parseTrackerChange({ integrationId: "i-1", eventName: "check_suite", payload: without }),
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "check_suite",
+        payload: without,
+      }),
     ).toEqual({
       kind: "invalid_payload",
       reason: expect.stringContaining("repository.id"),
@@ -218,7 +234,10 @@ describe("what a delivery says about the ticket mirror", () => {
       parseTrackerChange({
         integrationId: "i-1",
         eventName: "issues",
-        payload: { ...webhookFixture("issues.edited.mirror"), issue: { number: 3, node_id: "x", updated_at: "now" } },
+        payload: {
+          ...webhookFixture("issues.edited.mirror"),
+          issue: { number: 3, node_id: "x", updated_at: "now" },
+        },
       }),
     ).toMatchObject({ kind: "invalid_payload" });
   });
@@ -226,7 +245,11 @@ describe("what a delivery says about the ticket mirror", () => {
   // #923-T20
   it("is none of the business of an event it does not follow", () => {
     expect(
-      parseTrackerChange({ integrationId: "i-1", eventName: "push", payload: {} }),
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "push",
+        payload: {},
+      }),
     ).toEqual({
       kind: "ignored",
       reason: 'the event "push" is not used by the ticket mirror',

@@ -72,7 +72,9 @@ function boardStatusChange(
     fieldChange === null ||
     (fieldChange as { field_name?: unknown }).field_name !== BOARD_STATUS_FIELD
   )
-    return ignored(`the board change is not one of the field ${BOARD_STATUS_FIELD}`);
+    return ignored(
+      `the board change is not one of the field ${BOARD_STATUS_FIELD}`,
+    );
   const to = (fieldChange as { to?: unknown }).to;
   const name =
     typeof to === "object" && to !== null
@@ -131,7 +133,9 @@ function checksChange(context: TrackerParseContext): TrackerChangeResult {
     return baseId === undefined || baseId === repositoryId ? [number] : [];
   });
   if (pullRequests.length === 0)
-    return ignored("the check suite belongs to no pull request of the repository");
+    return ignored(
+      "the check suite belongs to no pull request of the repository",
+    );
   return change({
     kind: "checks_changed",
     repo: repoOf(context),
@@ -154,17 +158,23 @@ export function parseTrackerChange(
     };
   const action = field<string>(payload, "action");
 
-  if (eventName === "projects_v2_item") return boardStatusChange(context, action);
+  if (eventName === "projects_v2_item")
+    return boardStatusChange(context, action);
   if (eventName === "sub_issues") return subIssueChange(context, action);
   if (eventName === "check_suite") {
     // `requested` and `rerequested` start a suite that is not done; `completed` ends it. Anything else says nothing about the state.
-    return action === "completed" || action === "requested" || action === "rerequested"
+    return action === "completed" ||
+      action === "requested" ||
+      action === "rerequested"
       ? checksChange(context)
       : ignored(`the check suite action "${action}" is not used`);
   }
 
   const repo = repoOf(context);
-  if (eventName === "issues" && (action === "deleted" || action === "transferred"))
+  if (
+    eventName === "issues" &&
+    (action === "deleted" || action === "transferred")
+  )
     return change({
       kind: "item_removed",
       repo,

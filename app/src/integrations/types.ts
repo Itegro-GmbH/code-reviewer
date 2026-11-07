@@ -309,7 +309,12 @@ export type TrackerChange =
   /** An issue was deleted or moved to another repository. */
   | { kind: "item_removed"; repo: RepoRef; number: number }
   /** A sub-issue got a parent (`parent` is its number), or lost it (null). */
-  | { kind: "parent_changed"; repo: RepoRef; child: number; parent: number | null }
+  | {
+      kind: "parent_changed";
+      repo: RepoRef;
+      child: number;
+      parent: number | null;
+    }
   /** An item of a project board got another status (`null`: it has none now, or left the board). */
   | { kind: "board_status_changed"; nodeId: string; status: string | null }
   /** The checks of a commit changed: the cache asks the platform for the state of these pull requests. */
