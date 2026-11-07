@@ -120,7 +120,39 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
             fullName: repository.fullName,
             url: repository.url,
           });
-        return { id: repository.id, defaultBranch: facts.defaultBranch };
+        return {
+          id: repository.id,
+          fullName: repository.fullName,
+          defaultBranch: facts.defaultBranch,
+        };
+      } catch {
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_GITHUB_UNAVAILABLE",
+          "GitHub could not be asked, or answered with something unusable.",
+        );
+      }
+    },
+    async readTicket(repositoryId, number) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined) return undefined;
+      const integration = await integrations.get(repository.integrationId);
+      if (integration === undefined || integration.status !== "active")
+        return undefined;
+      const provider = integrationRegistry.resolve(integration.type);
+      if (provider.readIssue === undefined) return undefined;
+      try {
+        return (
+          (await provider.readIssue(
+            integration,
+            {
+              integrationId: repository.integrationId,
+              externalId: repository.externalId,
+              fullName: repository.fullName,
+              url: repository.url,
+            },
+            number,
+          )) ?? undefined
+        );
       } catch {
         throw new WorkflowRunError(
           "WORKFLOW_RUN_GITHUB_UNAVAILABLE",

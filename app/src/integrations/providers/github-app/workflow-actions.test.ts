@@ -890,3 +890,50 @@ describe("the codes of a connector", () => {
     expect((error as ConnectorError).code).toBe("github_not_found");
   });
 });
+
+describe("ticket.labels and ticket.comment", () => {
+  // #916-T10
+  it("changes the labels of the ticket the way github.issue.labels changes those of an issue", async () => {
+    const { client, connector } = setup({ labelsAfter: ["agent implement"] });
+
+    const output = await connector("ticket.labels").run(
+      call({ ticket: 128, add: ["agent implement"] }),
+    );
+
+    expect(output).toEqual({ labels: ["agent implement"] });
+    const [changed] = client.calls.filter(
+      (c) => c.method === "changeIssueLabels",
+    );
+    expect(changed?.args.slice(2, 5)).toEqual([
+      "acme/widgets",
+      128,
+      { add: ["agent implement"], remove: [] },
+    ]);
+  });
+
+  // #916-T11
+  it("is idempotent like the issue action: a timeout of the labels does not warn that it may have happened", async () => {
+    const { connector } = setup();
+
+    expect(connector("ticket.labels").idempotent).toBe(true);
+    expect(connector("ticket.comment").idempotent).toBeUndefined();
+  });
+
+  // #916-T12
+  it("comments on the ticket under the marker of the step, and refuses a ticket that is no number", async () => {
+    const { client, connector } = setup();
+
+    const output = await connector("ticket.comment").run(
+      call({ ticket: 128, body: "Working on it." }),
+    );
+
+    expect(output).toMatchObject({ existing: false });
+    const [commented] = client.calls.filter(
+      (c) => c.method === "createIssueComment",
+    );
+    expect(commented?.args.slice(2, 4)).toEqual(["acme/widgets", 128]);
+    await expect(
+      connector("ticket.comment").run(call({ ticket: "x", body: "b" })),
+    ).rejects.toBeInstanceOf(ActionInputError);
+  });
+});

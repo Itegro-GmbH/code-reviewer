@@ -7,18 +7,19 @@ taken, the other is written as skipped) and `loop` (rounds, `until`, `maxRounds`
 The routes exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`), like the workflows and the Implementer; every
 member may use them (`start_implementer_task`: a run starts tasks).
 
-| File                                 | Role                                                                                                                                                                                                                   |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `machine.ts`                         | The state machine as a pure function: the state of a run (its steps, the budget, the clock) in, the one next move out. A function of the state, so a repeat finds `idle`. Also the failure phase of `onFailure` (#902) |
-| `engine.ts`                          | `createWorkflowEngine`: reads the state under the lock of the run, asks for the move, makes it; `advance(runId)` and `jobEnded(jobId)` (never throws)                                                                  |
-| `turn-facts.ts`, `turn-reader.ts`    | What an agent step yields once its turn is over: the result held to the stored schema again (`checkResultValue`), the facts, the cost; and the read of a turn                                                          |
-| `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                                                              |
-| `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec                                                     |
-| `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")                                                |
-| `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, and the bounded issue as the run's input                                                    |
-| `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                                                                             |
-| `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)                                                         |
-| `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                                                                        |
+| File                                 | Role                                                                                                                                                                                                                                |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `machine.ts`                         | The state machine as a pure function: the state of a run (its steps, the budget, the clock) in, the one next move out. A function of the state, so a repeat finds `idle`. Also the failure phase of `onFailure` (#902)              |
+| `engine.ts`                          | `createWorkflowEngine`: reads the state under the lock of the run, asks for the move, makes it; `advance(runId)` and `jobEnded(jobId)` (never throws)                                                                               |
+| `turn-facts.ts`, `turn-reader.ts`    | What an agent step yields once its turn is over: the result held to the stored schema again (`checkResultValue`), the facts, the cost; and the read of a turn                                                                       |
+| `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                                                                           |
+| `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec                                                                  |
+| `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")                                                             |
+| `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, through the `ticket.labeled` trigger whose label it is (#916), and the bounded ticket as the run's input |
+| `ticket.ts`                          | The ticket a run is about (#916): `{{trigger.ticket}}` as the steps read it, bounded, whether the webhook or the start API handed it over                                                                                           |
+| `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                                                                                          |
+| `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)                                                                      |
+| `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                                                                                     |
 
 The tables are `workflow_runs` and `workflow_step_runs` (migration `20261105130000_create_workflow_runs`; `20261105170000_add_workflow_step_cost_basis` adds where a step's cost comes from), written by
 `src/db/repositories/workflow-runs-repository.ts`, scoped to a workspace. `workflow-runs-sweep.ts` is the one instance-level read (the runs that run and were
@@ -26,15 +27,19 @@ not touched for a minute), classified in `scoping.test.ts`.
 
 ## Runs of a label (#845)
 
-A run is started by hand (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook): `workflow_runs.trigger_kind` says which. A run of a label has
-no `created_by` (the table holds that: only `manual` needs a user), its `actor_login` is the login of whoever put the label on (display only), and its `trigger_input` is
-`{issue, repo}`, which the engine reads as `trigger.issue` and `trigger.repo` (`valuesOf`; a run by hand has `trigger.input`). The Implementer session of an agent step needs an
+A run is started by hand or through the API (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook): `workflow_runs.trigger_kind` says which (`manual`, `api`,
+`ticket.labeled`, and `github.issueLabeled` on rows written before #916) and `trigger_id` which trigger of the document (#916: a workflow has several, each with pre-steps). The engine runs the
+pre-steps of that trigger and then the shared steps: `forTrigger` (`document.ts`) puts the pre-steps in front of the shared steps and the state machine walks the one list. A run of a label has
+no `created_by` (the table holds that: only `manual` and `api` need a user), its `actor_login` is the login of whoever put the label on (display only), and its `trigger_input` is
+`{ticket, issue, repo}`, which the engine reads as `trigger.ticket`, `trigger.issue` and `trigger.repo` (`triggerValueOf`); a run by hand or through the API stores `{input, ticket?}`, the ticket
+resolved through the provider when the run started (`readTicket`), read as `trigger.input` and `trigger.ticket`. A run written before #916 has no `trigger_id` and stored a run by hand's input as it
+was handed in; the engine reads both. `trigger.id` and `trigger.kind` are facts of every run. TODO(#923): `workflow_runs.ticket_ref` comes with the ticket mirror. The Implementer session of an agent step needs an
 account: the owner of the workflow (`sessionOwner`: the author of the workflow version the run uses, so whoever saves the workflow again takes over the runs that start afterwards), who must still be a member of the workspace (else the run ends with `workflow_owner_gone`, before its first step). A workflow has one running run for one issue at a time (`trigger_key`, a partial unique index; `createRun` answers `busy`). The title, body and labels of the issue are defused where they go into the text of an action (`templates.ts`). The rules and
 the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 
 ## How a run goes
 
-1. `POST .../workflows/:id/runs` (`service.start`): the body, a request id that made a run before, the workflow (exists, not archived), the trigger (manual),
+1. `POST .../workflows/:id/runs` (`service.start`): the body, a request id that made a run before, the workflow (exists, not archived), the trigger (a `manual` or `api` one, named in the body or the only one),
    the steps (only `agent` and `action`), the input against the trigger's schema, the repository of the workspace. Then `createRun` and `kick`, which
    runs `advance` after the response.
 2. `advance(runId)` loops: **lock the run row** (`select … for update`), build the state, `nextMove`, make the decision under the lock, and, for work that

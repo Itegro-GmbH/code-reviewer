@@ -4,9 +4,11 @@
 // exactly this label. The webhook (`src/webhooks/`) hands the issue over once the signature, the delivery id and the installation are
 // settled; this decides which workflows start and writes their runs. It serves ONE workspace.
 //
-//  - A workflow starts when its trigger is `github.issueLabeled` with exactly this label (the spelling GitHub reports; case counts) and
-//    the repository of the issue is an active repository of the workspace. The format has no repository of its own for an issue
-//    trigger: the run works on the repository the issue is in (`trigger.repo`), so every active repository of the workspace fits.
+//  - A workflow starts when one of its triggers is `ticket.labeled` (or `github.issueLabeled`, its name before #916) with exactly this
+//    label (the spelling GitHub reports; case counts) and the repository of the issue is an active repository of the workspace. The
+//    run starts through that trigger: its pre-steps run first, then the shared steps. A workflow with two triggers for one label
+//    starts once, through the first. The format has no repository of its own for a label trigger: the run works on the repository
+//    the ticket is in (`trigger.ticket.repo`), so every active repository of the workspace fits.
 //    A workflow with a step the engine does not run (a kind the validator refuses, so none that was saved) is left out and says so in
 //    the log: a run that ends halfway through, after its first action already changed the issue, is worse than none.
 //  - There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login
@@ -19,8 +21,9 @@
 //    off and put on again while the first run goes on starts nothing, so that a person (or a script) cannot start a run with a full
 //    budget as often as they like; when the run has ended, the next label starts the next one. The database holds it (a partial unique
 //    index), so two deliveries that race for it write one run. The skipped start is logged with its reason.
-//  - The run's input is the issue (`trigger.issue`: number, title, body, url, labels) and the repository (`trigger.repo`: fullName,
-//    owner, name, defaultBranch), stored bounded as the run's `trigger_input`. The texts are those of whoever opened the issue. They are
+//  - The run's input is the ticket (`trigger.ticket`: number, title, body, url, labels, type, assignees, repo), and for workflows
+//    written before #916 the same as `trigger.issue` (number, title, body, url, labels) and `trigger.repo` (fullName, owner, name,
+//    defaultBranch), stored bounded as the run's `trigger_input`. The texts are those of whoever opened the issue. They are
 //    data like any value: a text is never read as a reference (`templates.ts`), and where they go into the text of an action (a comment, a
 //    pull request) they are defused like what an agent wrote (`OUTSIDER_TRIGGER_FIELDS`).
 import type { IssueLabeled } from "../integrations/types.ts";
@@ -31,22 +34,16 @@ import type {
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { BUDGET_OPERATOR_MAX_USD } from "../workflows/limits.ts";
 import {
+  forTrigger,
   readRunDocument,
   runBudgetMicroUsd,
   unsupportedStep,
 } from "./document.ts";
-import {
-  ACTOR_LOGIN_MAX_CHARS,
-  ISSUE_BODY_MAX_CHARS,
-  ISSUE_LABEL_MAX_CHARS,
-  ISSUE_LABELS_MAX,
-  ISSUE_TITLE_MAX_CHARS,
-  ISSUE_URL_MAX_CHARS,
-} from "./limits.ts";
-import { cleanText } from "./templates.ts";
+import { ACTOR_LOGIN_MAX_CHARS, BRANCH_MAX_CHARS } from "./limits.ts";
+import { bounded, ticketValue, type TicketValue } from "./ticket.ts";
 
-export const LABEL_TRIGGER_KIND =
-  "github.issueLabeled" satisfies RunTriggerKind;
+/** What a run a label started is recorded as. Runs written before #916 say `github.issueLabeled`, the same trigger under its old name. */
+export const LABEL_TRIGGER_KIND = "ticket.labeled" satisfies RunTriggerKind;
 
 /** What one label put on one issue made of the workflows of the workspace. */
 export type LabelTriggerResult = {
@@ -98,19 +95,11 @@ export const labelRequestId = (
 ): string => `gh-${deliveryId}-${workflowId}`;
 
 /**
- * The text without what no text may hold (`cleanText`), at most `max` characters. A longer text is cut and says how long it was, so
- * that whoever reads it knows (`note`), within `max` as a whole.
+ * What the steps of a run a label started read: `trigger.ticket`, and `trigger.issue` and `trigger.repo` as workflows written before
+ * #916 read them. All bounded (`ticket.ts`).
  */
-function bounded(text: string, max: number, note: boolean): string {
-  const clean = cleanText(text);
-  const characters = Array.from(clean);
-  if (characters.length <= max) return clean;
-  const ending = note ? `… [cut: ${characters.length} characters]` : "…";
-  return `${characters.slice(0, max - ending.length).join("")}${ending}`;
-}
-
-/** The issue and the repository as the steps read them: `trigger.issue` and `trigger.repo`, bounded. */
 export function labelTriggerInput(labeled: IssueLabeled): {
+  ticket: TicketValue;
   issue: {
     number: number;
     title: string;
@@ -118,31 +107,22 @@ export function labelTriggerInput(labeled: IssueLabeled): {
     url: string;
     labels: string[];
   };
-  repo: {
-    fullName: string;
-    owner: string;
-    name: string;
-    defaultBranch: string;
-  };
+  repo: TicketValue["repo"];
 } {
-  const { fullName } = labeled.repo;
-  const slash = fullName.indexOf("/");
+  const ticket = ticketValue(
+    { ...labeled.issue },
+    { fullName: labeled.repo.fullName, defaultBranch: labeled.defaultBranch },
+  );
   return {
+    ticket,
     issue: {
-      number: labeled.issue.number,
-      title: bounded(labeled.issue.title, ISSUE_TITLE_MAX_CHARS, false),
-      body: bounded(labeled.issue.body, ISSUE_BODY_MAX_CHARS, true),
-      url: bounded(labeled.issue.url, ISSUE_URL_MAX_CHARS, false),
-      labels: labeled.issue.labels
-        .slice(0, ISSUE_LABELS_MAX)
-        .map((name) => bounded(name, ISSUE_LABEL_MAX_CHARS, false)),
+      number: ticket.number,
+      title: ticket.title,
+      body: ticket.body,
+      url: ticket.url,
+      labels: ticket.labels,
     },
-    repo: {
-      fullName,
-      owner: slash < 0 ? fullName : fullName.slice(0, slash),
-      name: slash < 0 ? fullName : fullName.slice(slash + 1),
-      defaultBranch: bounded(labeled.defaultBranch, 255, false),
-    },
+    repo: ticket.repo,
   };
 }
 
@@ -177,13 +157,17 @@ export function createLabelTrigger(
         workflow,
         current,
       } of await deps.workflows.listWithIssueTrigger()) {
-        const document = readRunDocument(current.document);
-        if (
-          document === undefined ||
-          document.trigger.kind !== LABEL_TRIGGER_KIND ||
-          document.trigger.label !== labeled.label
-        )
-          continue;
+        const read = readRunDocument(current.document);
+        const trigger = read?.triggers.find(
+          (candidate) =>
+            candidate.kind === "ticket.labeled" &&
+            candidate.label === labeled.label,
+        );
+        const document =
+          read === undefined || trigger === undefined
+            ? undefined
+            : forTrigger(read, { id: trigger.id, kind: trigger.kind });
+        if (document === undefined || trigger === undefined) continue;
         result.matched += 1;
         const unsupported = unsupportedStep(document);
         if (unsupported !== undefined) {
@@ -199,11 +183,12 @@ export function createLabelTrigger(
             workflowId: workflow.id,
             workflowVersion: current.version,
             repositoryId: repository.id,
-            baseBranch: bounded(labeled.defaultBranch, 255, false),
+            baseBranch: bounded(labeled.defaultBranch, BRANCH_MAX_CHARS, false),
             triggerInput,
             budgetMicroUsd: runBudgetMicroUsd(document, maxBudgetUsd),
             clientRequestId: labelRequestId(deliveryId, workflow.id),
             triggerKind: LABEL_TRIGGER_KIND,
+            triggerId: trigger.id,
             triggerKey,
             createdBy: null,
             actorLogin,

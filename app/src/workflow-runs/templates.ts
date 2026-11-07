@@ -65,7 +65,7 @@ function isOutsiderText(path: readonly string[]): boolean {
     return path[1] !== undefined && FAILURE_TEXT_FIELDS.has(path[1]);
   return (
     path[0] === "trigger" &&
-    path[1] === "issue" &&
+    (path[1] === "issue" || path[1] === "ticket") &&
     path[2] !== undefined &&
     OUTSIDER_TRIGGER_FIELDS.has(path[2])
   );

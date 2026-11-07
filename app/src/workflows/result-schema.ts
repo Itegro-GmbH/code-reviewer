@@ -29,6 +29,12 @@ import {
 } from "./issues.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
+  parseTicketRef,
+  TICKET_INPUT,
+  TICKET_PROVIDERS,
+  TICKET_TYPE,
+} from "./ticket-ref.ts";
+import {
   BOOLEAN,
   INTEGER,
   NUMBER,
@@ -48,6 +54,11 @@ export type StringNode = {
 export type NumberNode = { type: "number"; description?: string };
 export type IntegerNode = { type: "integer"; description?: string };
 export type BooleanNode = { type: "boolean"; description?: string };
+/**
+ * A reference to a ticket of a platform, like `github:owner/repo#128` (#916). Only the input of a trigger takes one, as a field of the
+ * input itself; the engine resolves it when the run starts and the steps read it as `{{trigger.ticket}}`.
+ */
+export type TicketNode = { type: "ticket"; description?: string };
 export type ArrayNode = {
   type: "array";
   description?: string;
@@ -62,7 +73,13 @@ export type ObjectNode = {
   additionalProperties?: false;
 };
 export type SchemaNode =
-  StringNode | NumberNode | IntegerNode | BooleanNode | ArrayNode | ObjectNode;
+  | StringNode
+  | NumberNode
+  | IntegerNode
+  | BooleanNode
+  | ArrayNode
+  | ObjectNode
+  | TicketNode;
 /** The root of a result schema is always an object. */
 export type ResultSchema = ObjectNode;
 
@@ -74,7 +91,12 @@ const NODE_TYPES = [
   "array",
   "object",
 ] as const;
-const KEYS: Record<(typeof NODE_TYPES)[number], readonly string[]> = {
+const TICKET_TYPE_NAME = "ticket";
+const KEYS: Record<
+  (typeof NODE_TYPES)[number] | typeof TICKET_TYPE_NAME,
+  readonly string[]
+> = {
+  ticket: ["type", "description"],
   string: ["type", "description", "maxLength", "enum"],
   number: ["type", "description"],
   integer: ["type", "description"],
@@ -95,6 +117,13 @@ const KEYS: Record<(typeof NODE_TYPES)[number], readonly string[]> = {
  * work for an answer that cannot show it: a schema of 200 KB can hold hundreds of thousands of problems.
  */
 class Walk {
+  /** The schema is the input of a trigger: a field of it may be a `ticket`. */
+  readonly allowTicket: boolean;
+
+  constructor(allowTicket: boolean) {
+    this.allowTicket = allowTicket;
+  }
+
   readonly issues: Issue[] = [];
   fields = 0;
   /** The cap was reached: there may be more problems than were collected. */
@@ -260,7 +289,23 @@ function properties(
         );
         continue;
       }
-      schemaNode(props[name], at, depth + 1, walk);
+      const child = props[name];
+      if (
+        walk.allowTicket &&
+        isRecord(child) &&
+        child.type === TICKET_TYPE_NAME &&
+        name !== TICKET_INPUT
+      ) {
+        walk.add(
+          issue(
+            pointer(at, "type"),
+            "invalid_value",
+            `The input that holds the ticket is called '${TICKET_INPUT}': steps read it as {{trigger.${TICKET_INPUT}}}.`,
+          ),
+        );
+        continue;
+      }
+      schemaNode(child, at, depth + 1, walk);
     }
   }
   const required = node.required;
@@ -339,21 +384,32 @@ function schemaNode(
     );
     return;
   }
-  if (
-    typeof type !== "string" ||
-    !(NODE_TYPES as readonly string[]).includes(type)
-  ) {
+  const known: readonly string[] = walk.allowTicket
+    ? [...NODE_TYPES, TICKET_TYPE_NAME]
+    : NODE_TYPES;
+  if (typeof type !== "string" || !known.includes(type)) {
     walk.add(
       issue(
         pointer(path, "type"),
         "invalid_value",
-        `'type' is ${typeof type === "string" ? shown(type) : jsonTypeName(type)}, which the format does not have. Lists are 'array', and a choice of names is a 'string' with 'enum'.`,
+        `'type' is ${typeof type === "string" ? shown(type) : jsonTypeName(type)}, which the format does not have.${type === TICKET_TYPE_NAME ? " A ticket is a field of the input of a trigger only." : " Lists are 'array', and a choice of names is a 'string' with 'enum'."}`,
+        known,
+      ),
+    );
+    return;
+  }
+  const kind = type as keyof typeof KEYS;
+  if (kind === TICKET_TYPE_NAME && depth !== 2) {
+    walk.add(
+      issue(
+        pointer(path, "type"),
+        "invalid_value",
+        "A ticket is a field of the input itself: not inside a list or an object.",
         NODE_TYPES,
       ),
     );
     return;
   }
-  const kind = type as (typeof NODE_TYPES)[number];
   for (const key of Object.keys(value))
     if (!walk.full && !KEYS[kind].includes(key))
       walk.add(
@@ -365,6 +421,7 @@ function schemaNode(
         ),
       );
   description(value, path, walk);
+  if (kind === "ticket") return;
   if (kind === "string") {
     cap(value, "maxLength", STRING_MAX_LENGTH_LIMIT, path, walk);
     enumeration(value, path, walk);
@@ -422,8 +479,9 @@ function depthIssue(path: string): Issue {
 export function validateResultSchema(
   value: unknown,
   base = "",
+  options: { allowTicket?: boolean } = {},
 ): { issues: Issue[]; schema?: ResultSchema; truncated: boolean } {
-  const walk = new Walk();
+  const walk = new Walk(options.allowTicket === true);
   if (!isRecord(value)) {
     return {
       issues: [
@@ -486,6 +544,8 @@ function typeOfNode(node: SchemaNode): ValueType {
       return listOf(typeOfNode(node.items));
     case "object":
       return objectTypeOf(node);
+    case "ticket":
+      return TICKET_TYPE;
   }
 }
 
@@ -542,6 +602,31 @@ export function checkResultValue(
               "invalid_value",
               `Not one of the allowed values.`,
               node.enum,
+            ),
+          );
+        return;
+      }
+      case "ticket": {
+        if (typeof at !== "string") {
+          issues.push(
+            issue(
+              path,
+              "wrong_type",
+              `Expected a ticket reference like github:owner/repo#128, got ${jsonTypeName(at)}.`,
+            ),
+          );
+          return;
+        }
+        const parsed = parseTicketRef(at);
+        if (!parsed.ok)
+          issues.push(
+            issue(
+              path,
+              "invalid_value",
+              parsed.problem.message,
+              parsed.problem.reason === "provider"
+                ? TICKET_PROVIDERS
+                : undefined,
             ),
           );
         return;

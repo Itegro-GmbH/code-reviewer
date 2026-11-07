@@ -25,8 +25,17 @@ export type StepRunStatus =
   "pending" | "running" | "succeeded" | "failed" | "skipped";
 /** `if` and `loop` are written by the engine when it decides them: the row holds the decision as its output (#846). */
 export type StepRunKind = "agent" | "action" | "if" | "loop";
-/** What started a run: a person by hand, or a label on an issue (#845). */
-export type RunTriggerKind = "manual" | "github.issueLabeled";
+/**
+ * What started a run: a person by hand (`manual`) or through the API (`api`), a label on a ticket (`ticket.labeled`; rows written before
+ * #916 say `github.issueLabeled`, the same trigger under its old name), or one of the reserved kinds no engine starts yet (#845, #916).
+ */
+export type RunTriggerKind =
+  | "manual"
+  | "api"
+  | "ticket.labeled"
+  | "github.issueLabeled"
+  | "pullRequest.pushed"
+  | "schedule";
 /**
  * Where the cost charged to a step comes from: the runner's figure, an estimate from the token counts, the cap the turn ran under, or
  * (#856) Claude Code's estimate for a turn on a customer device's login, which is not billed.
@@ -48,6 +57,8 @@ export type StoredWorkflowRun = {
   spentMicroUsd: number;
   clientRequestId: string;
   triggerKind: RunTriggerKind;
+  /** #916: the id of the trigger of the document that started the run; null for a run written before, found by the kind. */
+  triggerId: string | null;
   /** The person who started the run by hand; null for a run a trigger started. */
   createdBy: string | null;
   /** The login the run acts as and shows: the person who started it, or who put the label on. Display only. */
@@ -100,7 +111,9 @@ export type NewWorkflowRun = {
   clientRequestId: string;
   /** Left out: `manual`. */
   triggerKind?: RunTriggerKind;
-  /** Needed for `manual`, null for a run a trigger started (the database holds that rule). */
+  /** #916: the id of the trigger of the document that starts the run. */
+  triggerId?: string;
+  /** Needed for `manual` and `api`, null for a run a trigger started (the database holds that rule). */
   createdBy: string | null;
   actorLogin: string;
   /**
@@ -248,6 +261,7 @@ function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
     spentMicroUsd: row.spent_micro_usd,
     clientRequestId: row.client_request_id,
     triggerKind: row.trigger_kind as RunTriggerKind,
+    triggerId: row.trigger_id,
     createdBy: row.created_by,
     actorLogin: row.actor_login,
     cancelRequestedAt: row.cancel_requested_at,
@@ -362,6 +376,7 @@ export function createWorkflowRunsRepository(
         budget_micro_usd: input.budgetMicroUsd,
         client_request_id: input.clientRequestId,
         trigger_kind: input.triggerKind ?? "manual",
+        trigger_id: input.triggerId ?? null,
         trigger_key: input.triggerKey ?? null,
         created_by: input.createdBy,
         actor_login: input.actorLogin,

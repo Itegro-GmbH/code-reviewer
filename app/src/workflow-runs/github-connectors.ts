@@ -442,5 +442,26 @@ export function createGithubConnectors(
     },
   };
 
-  return [pullRequestOpen, issueComment, issueLabels];
+  // #916: the provider-neutral names of the two actions on a ticket. The ticket is the issue of the repository of the run, so each is the
+  // GitHub action with the same inputs and `ticket` where it has `issue`.
+  const onTicket = (
+    neutral: string,
+    connector: ActionConnector,
+  ): ActionConnector => ({
+    name: neutral,
+    ...(connector.idempotent === true ? { idempotent: true } : {}),
+    run: (call) =>
+      connector.run({
+        ...call,
+        inputs: { ...call.inputs, issue: call.inputs.ticket },
+      }),
+  });
+
+  return [
+    pullRequestOpen,
+    issueComment,
+    issueLabels,
+    onTicket("ticket.comment", issueComment),
+    onTicket("ticket.labels", issueLabels),
+  ];
 }

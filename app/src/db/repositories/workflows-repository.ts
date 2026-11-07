@@ -73,7 +73,8 @@ export type WorkflowsRepository = {
   /** The workflows of the workspace that are not archived, by name (case ignored), without their documents. */
   list(): Promise<StoredWorkflow[]>;
   /**
-   * The workflows that are not archived, with their current version, whose document names the trigger `github.issueLabeled` (#845).
+   * The workflows that are not archived, with their current version, whose document names the label trigger, `ticket.labeled` or its old
+   * name `github.issueLabeled` (#845, #916).
    * A text match, not a reading of the JSON: the caller reads the document and decides, a document that only mentions the name
    * (a description) comes back too.
    */
@@ -185,7 +186,12 @@ export function createWorkflowsRepository(
         .where("workflows.workspace_id", "=", workspaceId)
         .where("workflow_versions.workspace_id", "=", workspaceId)
         .where("workflows.archived_at", "is", null)
-        .where("workflow_versions.document", "like", '%"github.issueLabeled"%')
+        .where((eb) =>
+          eb.or([
+            eb("workflow_versions.document", "like", '%"ticket.labeled"%'),
+            eb("workflow_versions.document", "like", '%"github.issueLabeled"%'),
+          ]),
+        )
         .orderBy("workflows.created_at")
         .orderBy("workflows.id")
         .execute();

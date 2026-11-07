@@ -1,6 +1,6 @@
 # Agent workflows: format v1 and validator (#833, milestone 1)
 
-A workflow is a JSON document: a trigger and a list of steps. This folder is the **format**, the **validator** and the **API** behind it. There is
+A workflow is a JSON document: one or more triggers, each with pre-steps (#916), and a list of steps. This folder is the **format**, the **validator** and the **API** behind it. There is
 no engine here: this folder is pure (milestone 2 of the plan added the [profiles](../profiles/README.md) the steps refer to; the engine that runs a
 document is [`src/workflow-runs/`](../workflow-runs/README.md), milestone 3a; the label trigger and the review loop follow). What the format is, every error code and how an AI should use it: [`docs/workflows.md`](../../../docs/workflows.md). The two JSON
 Schemas are [`contracts/workflow.v1.json`](../../../contracts/workflow.v1.json) and
@@ -24,7 +24,8 @@ No database, no I/O: a document and a `WorkflowResolver` go in, a list of proble
 | `result-schema.ts`                                | The result schema subset: `validateResultSchema`, `objectTypeOf`, `checkResultValue` (the finish tool of M2 reuses the last one)                                                                                |
 | `value-type.ts`                                   | The types of values that flow, assignability                                                                                                                                                                    |
 | `failure.ts`                                      | `onFailure` (#902): the facts of the failure (`{{failure.*}}`), the connectors and node kinds its steps may use                                                                                                 |
-| `connectors.ts`, `triggers.ts`, `facts.ts`        | What the three actions take and yield, what each trigger hands over, the facts every agent step yields without the agent                                                                                        |
+| `connectors.ts`, `triggers.ts`, `facts.ts`        | What the actions take and yield, what each trigger hands over and what all of them do (`commonTriggerType`), the facts every agent step yields without the agent                                                |
+| `ticket-ref.ts`                                   | The `ticket` of a trigger (#916): `github:owner/repo#128`, the fields of `{{trigger.ticket}}`                                                                                                                   |
 | `resolver.ts`                                     | `WorkflowResolver`: which profiles (with the facts of the versions a document runs), environments and connectors exist, as plain data                                                                           |
 | `profile-refs.ts`                                 | Which profiles and versions a document names (an iterative walk), and the resolver's profile list built from the rows read for exactly those versions                                                           |
 | `issues.ts`, `limits.ts`                          | The issue shape and its stable codes (form codes are the ones the JSON Schema states too), the bounds                                                                                                           |
@@ -51,7 +52,11 @@ deleted: hidden from the list, no new version, free name, versions kept.
 - **A loop's own result** is `exit` and `rounds`; the plan's `{{fix.findings}}` is `{{review.findings}}` in version 1.
 - **`environment` is a name**, a literal only (names are unique in a workspace, case ignored): a reference is `target_from_untrusted_value`.
   `trigger.repo.defaultEnvironment` of the plan's example does not exist: nothing maps a repository to an environment yet.
-- **One repository per run.** The run's repository is `trigger.repo` (issue trigger) or the input `repo` a manual trigger must declare; no node names another one.
+- **One repository per run.** The run's repository is the ticket's (`trigger.ticket.repo`: a label trigger, or a manual or api trigger whose input declares `ticket`) or the input `repo` a manual trigger declares; no node names another one.
+- **Several triggers (#916).** `triggers` is a list, each entry with an `id` and `steps` (pre-steps); the single `trigger` of before is read as a list of one, `github.issueLabeled` as `ticket.labeled`. The pre-steps of a trigger see that
+  trigger's own values; the shared steps and `onFailure` see what **every** trigger yields (`commonTriggerType`; `Binding.triggers` names a trigger that lacks a value, `reference_not_in_scope`). Step ids are unique across the pre-steps of all
+  triggers and the shared steps, so the engine can walk the pre-steps and the shared steps as one list. `label_retriggers_workflow` holds for the shared steps and the pre-steps of a label trigger, not for a pre-step of another kind of trigger
+  (the bot's own writes start no run). `ticket` is a type of the input of a manual or api trigger only (`validateResultSchema(…, { allowTicket: true })`), a field of the input itself and called `ticket`.
   More than one repository per run is a later, additive extension.
 - **Targets** (`issue`, `head`, `base`, the labels, the `environment`) take a literal or one whole reference to a value the platform or the caller vouches for,
   and which one depends on the input (`TargetRoot` in `connectors.ts`: `issue`: `trigger.issue[.number]` or a manual `input.*`; labels: a manual `input.*`; `base`:

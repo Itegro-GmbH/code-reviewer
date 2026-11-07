@@ -21,7 +21,11 @@ export type WorkflowRunsApi = {
   /** Starts a run by hand. The same `clientRequestId` with the same input answers the run it made before. */
   start(
     workflowId: string,
-    body: { input: Record<string, unknown>; clientRequestId: string },
+    body: {
+      trigger?: string;
+      input: Record<string, unknown>;
+      clientRequestId: string;
+    },
   ): Promise<RequestResult<{ run: RunView }>>;
   /** Stops a run (#891). `requested`: it is told to stop; a repeat and a run that is over answer with their own outcome. */
   cancel(

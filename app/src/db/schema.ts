@@ -1358,8 +1358,10 @@ export interface WorkflowRunsTable {
   client_request_id: string;
   /** The person who started the run by hand; null for a run that a trigger started (#845). */
   created_by: string | null;
-  /** What started the run: `manual` or `github.issueLabeled` (#845). */
+  /** What started the run: `manual`, `api`, `ticket.labeled` (`github.issueLabeled` before #916), or a reserved kind (#845, #916). */
   trigger_kind: ColumnType<string, string | undefined, string>;
+  /** #916: the id of the trigger of the document that started the run; null for a run that started before, which the engine finds by the kind. */
+  trigger_id: ColumnType<string | null, string | null | undefined, never>;
   /** What a trigger started the run for (`<repository id>#<issue number>` for a label); null for a run by hand. One running run for each (workflow, key). */
   trigger_key: ColumnType<string | null, string | null | undefined, never>;
   /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */

@@ -198,8 +198,8 @@ describe("the plan's example, broken in one place at a time", () => {
       [["/steps/2/else/0/labels", "unknown_field"]],
     ],
     [
-      "a trigger that is a schedule",
-      (d) => (d.trigger = { kind: "schedule", cron: "0 * * * *" }),
+      "a trigger that is a webhook",
+      (d) => (d.trigger = { kind: "webhook", url: "x" }),
       [["/trigger/kind", "unknown_trigger_kind"]],
     ],
     [
@@ -239,6 +239,7 @@ describe("the document", () => {
           "name",
           "description",
           "trigger",
+          "triggers",
           "budgetUsd",
           "steps",
           "onFailure",
@@ -347,14 +348,21 @@ describe("the trigger", () => {
   // #833-M1-T40
   it("names the triggers that exist when the kind is wrong", () => {
     const result = run(
-      change(tiny(), (d) => (d.trigger = { kind: "schedule" })),
+      change(tiny(), (d) => (d.trigger = { kind: "webhook" })),
     );
 
     expect(result.errors).toEqual([
       expect.objectContaining({
         path: "/trigger/kind",
         code: "unknown_trigger_kind",
-        available: ["manual", "github.issueLabeled"],
+        available: [
+          "manual",
+          "api",
+          "ticket.labeled",
+          "pullRequest.pushed",
+          "schedule",
+          "github.issueLabeled",
+        ],
       }),
     ]);
   });
@@ -782,6 +790,8 @@ describe("the action", () => {
           "github.issue.comment",
           "github.issue.labels",
           "github.pullRequest.open",
+          "ticket.comment",
+          "ticket.labels",
         ],
       }),
     ]);

@@ -158,33 +158,39 @@ describe("the webhook: a label on an issue starts the workflows that wait for it
       workflowId: workflow.id,
       workflowVersion: 1,
       status: "running",
-      triggerKind: "github.issueLabeled",
+      // A workflow written with the single trigger of before is read as a list of one: `github.issueLabeled` is `ticket.labeled`.
+      triggerKind: "ticket.labeled",
+      triggerId: "labeled",
       createdBy: null,
       // Who put the label on, to be shown; the sender of the recorded delivery.
       actorLogin: "bob",
       baseBranch: "main",
       clientRequestId: labelRequestId("delivery-1", workflow.id),
     });
+    const repo = {
+      fullName: "acme/widgets",
+      owner: "acme",
+      name: "widgets",
+      defaultBranch: "main",
+    };
+    const issue = {
+      number: 12,
+      title: "Cache the widget list",
+      body: "The widget list is rebuilt on every request.\nCache it for a minute.",
+      url: "https://github.com/acme/widgets/issues/12",
+      labels: ["enhancement", READY],
+    };
     expect(JSON.parse(run?.triggerInput ?? "null")).toEqual({
-      issue: {
-        number: 12,
-        title: "Cache the widget list",
-        body: "The widget list is rebuilt on every request.\nCache it for a minute.",
-        url: "https://github.com/acme/widgets/issues/12",
-        labels: ["enhancement", READY],
-      },
-      repo: {
-        fullName: "acme/widgets",
-        owner: "acme",
-        name: "widgets",
-        defaultBranch: "main",
-      },
+      ticket: { ...issue, type: "", assignees: [], repo },
+      issue,
+      repo,
     });
     expect(kicked).toEqual([run?.id]);
     // The run as the routes and the run page show it: the real trigger and who put the label on, no starter.
     const view = await app.service.get(workflow.id, run?.id ?? "");
     expect(view).toMatchObject({
-      trigger: "github.issueLabeled",
+      trigger: "ticket.labeled",
+      triggerId: "labeled",
       actorLogin: "bob",
     });
     expect(view).not.toHaveProperty("createdBy");

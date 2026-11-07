@@ -41,6 +41,11 @@ export type Binding = {
   open?: boolean;
   /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
   agent?: { profile?: string; environment?: string };
+  /**
+   * Of `trigger` when the workflow has several triggers (#916): what each one yields. `type` is what ALL of them yield, the only part
+   * the steps after the triggers may read; a field that only some yield is `reference_not_in_scope`, naming a trigger that lacks it.
+   */
+  triggers?: readonly { id: string; type: ObjectType | { kind: "unknown" } }[];
 };
 
 export type LoopFrame = {
@@ -214,6 +219,18 @@ function whyNotReachable(
   };
 }
 
+/** The id of a trigger that does not yield `name` while another one does, or undefined (nobody yields it, or all do). */
+function whoLacks(
+  triggers: NonNullable<Binding["triggers"]>,
+  name: string,
+): string | undefined {
+  const yields = (type: ObjectType | { kind: "unknown" }): boolean =>
+    type.kind !== "object" || Object.hasOwn(type.fields, name);
+  if (!triggers.some((t) => t.type.kind === "object" && yields(t.type)))
+    return undefined;
+  return triggers.find((t) => !yields(t.type))?.id;
+}
+
 function descend(
   binding: Binding,
   rest: readonly string[],
@@ -251,6 +268,18 @@ function descend(
         );
       if (position === 0 && binding.open === true) return { type: UNKNOWN };
       const known = Object.keys(current.fields);
+      const lacking =
+        position === 0 && binding.triggers !== undefined
+          ? whoLacks(binding.triggers, name)
+          : undefined;
+      if (lacking !== undefined)
+        return fail(
+          context,
+          use,
+          "reference_not_in_scope",
+          `${shown(`${binding.id}.${name}`)} is not yielded by every trigger: the trigger ${shown(lacking)} has no ${shown(name)}. The steps after the triggers run for each of them and read only what all of them yield: ${listNames(known)}. Give ${shown(lacking)} a pre-step or an input that yields it, or leave the reference out.`,
+          known,
+        );
       return fail(
         context,
         use,

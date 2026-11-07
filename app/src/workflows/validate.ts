@@ -4,7 +4,12 @@
 // problems. It checks the form (the same form `contracts/workflow.v1.json` states), the ids, every reference against what ran before
 // it on every path, the types of the values that flow, the limits, and the profile, environment and connector names against a
 // resolver. It never throws on a document and never stops at the first problem; the list is sorted by path.
-import { checkSteps, type Checker, type StepState } from "./check-steps.ts";
+import {
+  checkSteps,
+  ID_PATTERN,
+  type Checker,
+  type StepState,
+} from "./check-steps.ts";
 import { FAILURE_ID, FAILURE_TYPE } from "./failure.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
@@ -16,6 +21,7 @@ import {
   NAME_MAX_LENGTH,
   NESTING_DEPTH_MAX,
   STEPS_MAX,
+  TRIGGERS_MAX,
 } from "./limits.ts";
 import {
   IssueSink,
@@ -30,8 +36,13 @@ import type { WorkflowResolver } from "./resolver.ts";
 import { validateResultSchema, type ResultSchema } from "./result-schema.ts";
 import { Scope, type Binding, type Env, type StepInfo } from "./scope.ts";
 import {
+  TICKET_INPUT,
   TRIGGER_FIELDS,
   TRIGGER_KINDS,
+  canonicalTriggerKind,
+  commonTriggerType,
+  declaresTicket,
+  legacyTriggerId,
   triggerOutput,
   type TriggerKind,
 } from "./triggers.ts";
@@ -60,6 +71,7 @@ const DOCUMENT_KEYS = [
   "name",
   "description",
   "trigger",
+  "triggers",
   "budgetUsd",
   "steps",
   "onFailure",
@@ -129,12 +141,30 @@ function indexSteps(
   return count;
 }
 
+const TRIGGER_ID_RESERVED = ["trigger", "previous"] as const;
+const CRON = /^[^\s]+( [^\s]+){4}$/;
+const CRON_MAX_LENGTH = 100;
+
 /**
- * A run works on one repository. An issue trigger brings it (`trigger.repo`); a manual one must declare it as the input `repo`, a
- * required text, which the caller hands in.
+ * A run works on one repository. A label trigger brings it (the ticket's); a manual or api one gets it from its input: a required
+ * `ticket` (the run works in the repository of the ticket) or, as before #916, a required text `repo` (owner/name).
  */
-function checkRepositoryInput(schema: ResultSchema, report: Report): void {
-  const where = "/trigger/input";
+function checkRepositoryInput(
+  schema: ResultSchema,
+  where: string,
+  report: Report,
+): void {
+  if (declaresTicket(schema)) {
+    if (!(schema.required ?? []).includes(TICKET_INPUT))
+      report(
+        issue(
+          where,
+          "repo_required",
+          `The input '${TICKET_INPUT}' is the ticket the run is about and the repository it works in: it must be in required.`,
+        ),
+      );
+    return;
+  }
   const repo = Object.hasOwn(schema.properties, "repo")
     ? schema.properties.repo
     : undefined;
@@ -143,7 +173,7 @@ function checkRepositoryInput(schema: ResultSchema, report: Report): void {
       issue(
         where,
         "repo_required",
-        "A run works on one repository. Declare the input 'repo' (a text, owner/name) in properties and in required: the caller names the repository.",
+        "A run works on one repository. Declare the input 'ticket' (type ticket, in required): the run works in the repository of the ticket. Or declare the input 'repo' (a text, owner/name) in properties and in required: the caller names the repository.",
       ),
     );
   else if (repo.type !== "string")
@@ -164,36 +194,51 @@ function checkRepositoryInput(schema: ResultSchema, report: Report): void {
     );
 }
 
-function checkTrigger(
-  value: unknown,
-  report: Report,
-): {
+/** A trigger as the validator holds it once its form is checked; what failed its own check is left out. */
+type CheckedTrigger = {
+  /** Pointer of the trigger node. */
+  path: string;
+  id: string;
   kind?: TriggerKind;
   input?: ResultSchema;
   inputInvalid?: boolean;
   label?: string;
-} {
-  const path = "/trigger";
-  if (value === undefined) {
-    report(
-      issue(
-        path,
-        "missing_field",
-        `'trigger' is required: {"kind": ${listNames([...TRIGGER_KINDS])}}.`,
-      ),
-    );
-    return {};
-  }
+  /** The pre-steps as written (not checked yet) and where they are. */
+  steps: unknown;
+  stepsPath: string;
+};
+
+/**
+ * One trigger node. `legacy` is the single `trigger` of a document written before #916: it has no `id` and no `steps`, and its pointers
+ * are the ones they always were.
+ */
+function checkTrigger(
+  value: unknown,
+  path: string,
+  legacy: boolean,
+  seenIds: Map<string, string>,
+  report: Report,
+): CheckedTrigger {
+  const checked: CheckedTrigger = {
+    path,
+    id: "",
+    steps: undefined,
+    stepsPath: pointer(path, "steps"),
+  };
   if (!isRecord(value)) {
     report(
       issue(
         path,
         "wrong_type",
-        `'trigger' is an object like {"kind": "manual"}, not ${jsonTypeName(value)}.`,
+        legacy
+          ? `'trigger' is an object like {"kind": "manual"}, not ${jsonTypeName(value)}.`
+          : `A trigger is an object like {"id": "manual", "kind": "manual", "input": …, "steps": […]}, not ${jsonTypeName(value)}.`,
       ),
     );
-    return {};
+    return checked;
   }
+  if (!legacy) checkTriggerId(value.id, path, seenIds, report, checked);
+  checked.steps = value.steps;
   const kind = value.kind;
   if (kind === undefined) {
     report(
@@ -204,7 +249,7 @@ function checkTrigger(
         TRIGGER_KINDS,
       ),
     );
-    return {};
+    return checked;
   }
   if (
     typeof kind !== "string" ||
@@ -218,10 +263,14 @@ function checkTrigger(
         TRIGGER_KINDS,
       ),
     );
-    return {};
+    return checked;
   }
   const trigger = kind as TriggerKind;
-  const allowed = ["kind", ...TRIGGER_FIELDS[trigger]];
+  checked.kind = trigger;
+  if (legacy) checked.id = legacyTriggerId(trigger);
+  const allowed = legacy
+    ? ["kind", ...TRIGGER_FIELDS[trigger]]
+    : ["id", "kind", ...TRIGGER_FIELDS[trigger], "steps"];
   for (const key of Object.keys(value))
     if (!allowed.includes(key))
       report(
@@ -232,7 +281,7 @@ function checkTrigger(
           allowed,
         ),
       );
-  if (trigger === "github.issueLabeled") {
+  if (canonicalTriggerKind(trigger) === "ticket.labeled") {
     const label = value.label;
     if (label === undefined)
       report(
@@ -256,28 +305,171 @@ function checkTrigger(
           `'label' has 1 to ${LABEL_MAX_LENGTH} characters and is not only spaces.`,
         ),
       );
-    else return { kind: trigger, label };
-    return { kind: trigger };
+    else checked.label = label;
+    return checked;
   }
-  if (value.input === undefined) {
+  if (trigger === "schedule") {
+    const cron = value.cron;
+    if (cron === undefined)
+      report(
+        issue(
+          pointer(path, "cron"),
+          "missing_field",
+          "'cron' is required: five fields separated by one space, like \"0 6 * * 1\". The schedule is reserved: it is checked, and no run starts from it yet.",
+        ),
+      );
+    else if (typeof cron !== "string")
+      report(issue(pointer(path, "cron"), "wrong_type", "'cron' is a text."));
+    else if (textLength(cron) > CRON_MAX_LENGTH || !CRON.test(cron))
+      report(
+        issue(
+          pointer(path, "cron"),
+          "invalid_value",
+          "'cron' has five fields (minute, hour, day of month, month, day of week) separated by one space.",
+        ),
+      );
+    return checked;
+  }
+  if (trigger === "manual" || trigger === "api") {
+    const where = pointer(path, "input");
+    if (value.input === undefined) {
+      report(
+        issue(
+          path,
+          "repo_required",
+          `A ${trigger} trigger needs 'input', a result schema for what the caller hands in. It must declare 'ticket' (type ticket, required: the run works in the repository of the ticket) or 'repo' (a required text, owner/name): the repository the run works on.`,
+        ),
+      );
+      return checked;
+    }
+    const result = validateResultSchema(value.input, where, {
+      allowTicket: true,
+    });
+    for (const found of result.issues) report(found);
+    if (result.schema !== undefined)
+      checkRepositoryInput(result.schema, where, report);
+    checked.input = result.schema;
+    checked.inputInvalid = result.schema === undefined;
+  }
+  return checked;
+}
+
+function checkTriggerId(
+  id: unknown,
+  path: string,
+  seen: Map<string, string>,
+  report: Report,
+  into: CheckedTrigger,
+): void {
+  const where = pointer(path, "id");
+  if (id === undefined) {
     report(
       issue(
-        path,
-        "repo_required",
-        "A manual trigger needs 'input', a result schema for what the caller hands in. It must declare 'repo' (a required text, owner/name): the repository the run works on.",
+        where,
+        "missing_field",
+        "'id' is required: a name for the trigger, unique among the triggers (the start API takes it as \"trigger\").",
       ),
     );
-    return { kind: trigger };
+    return;
   }
-  const checked = validateResultSchema(value.input, pointer(path, "input"));
-  for (const found of checked.issues) report(found);
-  if (checked.schema !== undefined)
-    checkRepositoryInput(checked.schema, report);
-  return {
-    kind: trigger,
-    input: checked.schema,
-    inputInvalid: checked.schema === undefined,
-  };
+  if (
+    typeof id !== "string" ||
+    !ID_PATTERN.test(id) ||
+    (TRIGGER_ID_RESERVED as readonly string[]).includes(id)
+  ) {
+    report(
+      issue(
+        where,
+        typeof id === "string" ? "invalid_value" : "wrong_type",
+        `'id' is a letter, then letters, digits, '_' or '-' (at most 64); 'trigger' and 'previous' are taken.`,
+      ),
+    );
+    return;
+  }
+  const first = seen.get(id);
+  if (first !== undefined)
+    report(
+      issue(
+        where,
+        "duplicate_id",
+        `The trigger id ${shown(id)} is already used by the trigger at ${first}. Every trigger needs its own id.`,
+      ),
+    );
+  else seen.set(id, path);
+  into.id = id;
+}
+
+function canonicalOf(trigger: CheckedTrigger): string | undefined {
+  return trigger.kind === undefined
+    ? undefined
+    : canonicalTriggerKind(trigger.kind);
+}
+
+/** `trigger` (one, as before #916) or `triggers` (several, each with pre-steps), as a list of triggers; both at once is refused. */
+function checkTriggers(
+  document: Record<string, unknown>,
+  report: Report,
+): CheckedTrigger[] {
+  const seen = new Map<string, string>();
+  if (document.triggers !== undefined) {
+    if (document.trigger !== undefined)
+      report(
+        issue(
+          "/trigger",
+          "invalid_value",
+          "A workflow has 'triggers' (a list) or the single 'trigger' of the older form, not both.",
+        ),
+      );
+    const list = document.triggers;
+    if (!Array.isArray(list)) {
+      report(
+        issue(
+          "/triggers",
+          "wrong_type",
+          `'triggers' is a list of triggers, not ${jsonTypeName(list)}.`,
+        ),
+      );
+      return [];
+    }
+    if (list.length === 0)
+      report(
+        issue(
+          "/triggers",
+          "invalid_value",
+          "'triggers' needs at least one trigger.",
+        ),
+      );
+    if (list.length > TRIGGERS_MAX)
+      report(
+        issue(
+          "/triggers",
+          "limit_exceeded",
+          `A workflow has ${TRIGGERS_MAX} triggers at most; this one has ${list.length}.`,
+        ),
+      );
+    return list
+      .slice(0, TRIGGERS_MAX)
+      .map((value: unknown, position) =>
+        checkTrigger(
+          value,
+          pointer("/triggers", position),
+          false,
+          seen,
+          report,
+        ),
+      );
+  }
+  if (document.trigger === undefined) {
+    report(
+      issue(
+        "/trigger",
+        "missing_field",
+        `'triggers' is required: a list of triggers, each {"id": …, "kind": ${listNames([...TRIGGER_KINDS])}}. (A single 'trigger' of the older form is read as a list of one.)`,
+      ),
+    );
+    return [];
+  }
+  return [checkTrigger(document.trigger, "/trigger", true, seen, report)];
 }
 
 function checkBudget(
@@ -308,17 +500,23 @@ function checkBudget(
   return value;
 }
 
-/** What `trigger.*` holds; unknown where the trigger itself failed the check, so one mistake is reported once. */
-function triggerType(
-  trigger: ReturnType<typeof checkTrigger>,
-): Binding["type"] {
+/** What `trigger.*` holds for one trigger; unknown where the trigger itself failed the check, so one mistake is reported once. */
+function triggerType(trigger: CheckedTrigger): Binding["type"] {
   if (trigger.kind === undefined) return { kind: "unknown" };
+  const full = triggerOutput({
+    id: trigger.id,
+    kind: trigger.kind,
+    ...(trigger.input === undefined ? {} : { input: trigger.input }),
+  });
   if (trigger.inputInvalid === true)
     return {
       kind: "object",
-      fields: { input: { type: { kind: "unknown" }, required: true } },
+      fields: {
+        ...full.fields,
+        input: { type: { kind: "unknown" }, required: true },
+      },
     };
-  return triggerOutput(trigger.kind, trigger.input);
+  return full;
 }
 
 /** Checks a workflow document. See the header for what is checked. */
@@ -398,15 +596,25 @@ export function validateWorkflow(
       );
   }
 
-  const trigger = checkTrigger(document.trigger, report);
+  const triggers = checkTriggers(document, report);
   const budget = checkBudget(
     document.budgetUsd,
     options.maxBudgetUsd ?? BUDGET_OPERATOR_MAX_USD,
     report,
   );
 
+  // One index for the pre-steps of every trigger and the shared steps: an id is used once in the whole document (#916).
   const index = new Map<string, StepInfo>();
-  let stepCount = indexSteps(document.steps, "/steps", [], index, report);
+  let stepCount = 0;
+  for (const trigger of triggers)
+    stepCount += indexSteps(
+      trigger.steps,
+      trigger.stepsPath,
+      [],
+      index,
+      report,
+    );
+  stepCount += indexSteps(document.steps, "/steps", [], index, report);
   if (document.onFailure !== undefined)
     stepCount += indexSteps(
       document.onFailure,
@@ -424,12 +632,74 @@ export function validateWorkflow(
       ),
     );
 
+  // The labels that start the workflow: a step may not add one of them, except in the pre-steps of a trigger that is no label trigger.
+  const retriggerLabels = triggers.flatMap((trigger) =>
+    trigger.label === undefined ? [] : [trigger.label.trim().toLowerCase()],
+  );
   const checker: Checker = {
     resolver,
     index,
     report,
     halted: sink.halted,
-    ...(trigger.label === undefined ? {} : { triggerLabel: trigger.label }),
+    retriggerLabels,
+  };
+  const state: StepState = {
+    depth: 0,
+    loopDepth: 0,
+    branches: [],
+    inLoopBody: false,
+    onFailure: false,
+  };
+  const bindingOf = (trigger: CheckedTrigger): Binding => ({
+    id: "trigger",
+    kind: "trigger",
+    type: triggerType(trigger),
+    unavailable: {},
+    ...(trigger.inputInvalid === true ? { open: true } : {}),
+  });
+  // The pre-steps of each trigger see that trigger's own values and run before the shared steps.
+  for (const trigger of triggers) {
+    if (!Array.isArray(trigger.steps) && trigger.steps === undefined) continue;
+    if (Array.isArray(trigger.steps) && trigger.steps.length === 0) continue;
+    const scope = new Scope();
+    scope.set("trigger", bindingOf(trigger));
+    const own: Checker =
+      canonicalOf(trigger) === "ticket.labeled"
+        ? {
+            ...checker,
+            retriggerLabels:
+              trigger.label === undefined
+                ? []
+                : [trigger.label.trim().toLowerCase()],
+          }
+        : { ...checker, retriggerLabels: [] };
+    checkSteps(
+      trigger.steps,
+      trigger.stepsPath,
+      own,
+      { scope, loops: [] },
+      state,
+    );
+  }
+  // What the shared steps may read of the trigger is what all of them yield.
+  const types = triggers.map((trigger) => triggerType(trigger));
+  const triggerBinding: Binding = {
+    id: "trigger",
+    kind: "trigger",
+    type:
+      triggers.length === 0 ? { kind: "unknown" } : commonTriggerType(types),
+    unavailable: {},
+    ...(triggers.some((trigger) => trigger.inputInvalid === true)
+      ? { open: true }
+      : {}),
+    ...(triggers.length > 1
+      ? {
+          triggers: triggers.map((trigger, position) => ({
+            id: trigger.id === "" ? `#${position + 1}` : trigger.id,
+            type: types[position] as Binding["type"],
+          })),
+        }
+      : {}),
   };
   if (document.steps === undefined)
     report(
@@ -440,22 +710,9 @@ export function validateWorkflow(
       ),
     );
   else {
-    const triggerBinding: Binding = {
-      id: "trigger",
-      kind: "trigger",
-      type: triggerType(trigger),
-      unavailable: {},
-    };
     const scope = new Scope();
     scope.set("trigger", triggerBinding);
     const env: Env = { scope, loops: [] };
-    const state: StepState = {
-      depth: 0,
-      loopDepth: 0,
-      branches: [],
-      inLoopBody: false,
-      onFailure: false,
-    };
     checkSteps(document.steps, "/steps", checker, env, state);
     // #902: the steps that run after a failure see the trigger, the facts of the failure and each other, none of the steps above.
     if (document.onFailure !== undefined) {

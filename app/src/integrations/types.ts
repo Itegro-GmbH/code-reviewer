@@ -136,6 +136,10 @@ export type IssueLabeled = {
     url: string;
     /** The names of all labels the issue has now, the new one included. */
     labels: string[];
+    /** The logins of the people the issue is assigned to; left out when it has none (#916). */
+    assignees?: string[];
+    /** GitHub's issue type (`Bug`); left out when the issue has none (#916). */
+    type?: string;
   };
   /** The label that was just put on. */
   label: string;

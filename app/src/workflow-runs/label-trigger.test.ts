@@ -102,6 +102,7 @@ function harness(
           spentMicroUsd: 0,
           clientRequestId: input.clientRequestId,
           triggerKind: input.triggerKind ?? "manual",
+          triggerId: input.triggerId ?? null,
           createdBy: input.createdBy,
           actorLogin: input.actorLogin,
           cancelRequestedAt: null,
@@ -162,12 +163,109 @@ describe("which workflows a label starts", () => {
       workflowVersion: 1,
       repositoryId: "repo-1",
       baseBranch: "main",
-      triggerKind: "github.issueLabeled",
+      triggerKind: "ticket.labeled",
+      triggerId: "labeled",
       createdBy: null,
       actorLogin: "bob",
       clientRequestId: "gh-delivery-1-wf-1",
     });
     expect(kicked).toEqual(["run-1"]);
+  });
+
+  // #916-T80
+  it("starts a workflow through the label trigger of its list of triggers, under the id of that trigger", async () => {
+    const { trigger, created } = harness([
+      {
+        id: "wf-1",
+        document: JSON.stringify({
+          version: 1,
+          name: "Lane",
+          triggers: [
+            {
+              id: "by-hand",
+              kind: "manual",
+              input: { type: "object", properties: {} },
+            },
+            {
+              id: "second",
+              kind: "ticket.labeled",
+              label: "other",
+              steps: [],
+            },
+            {
+              id: "labeled",
+              kind: "ticket.labeled",
+              label: "ready for agent",
+              steps: [],
+            },
+            {
+              id: "again",
+              kind: "github.issueLabeled",
+              label: "ready for agent",
+            },
+          ],
+          steps: STEPS,
+        }),
+      },
+    ]);
+
+    const result = await trigger.start("delivery-1", LABELED);
+
+    expect(result).toMatchObject({ matched: 1, started: 1 });
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      triggerKind: "ticket.labeled",
+      triggerId: "labeled",
+    });
+  });
+
+  // #916-T81
+  it("leaves a workflow out whose pre-steps for this label hold a step the engine does not run, and not one whose other trigger does", async () => {
+    const { trigger, created, lines } = harness([
+      {
+        id: "wf-1",
+        document: JSON.stringify({
+          version: 1,
+          name: "Lane",
+          triggers: [
+            {
+              id: "labeled",
+              kind: "ticket.labeled",
+              label: "ready for agent",
+              steps: [{ id: "each", kind: "forEach" }],
+            },
+          ],
+          steps: STEPS,
+        }),
+      },
+      {
+        id: "wf-2",
+        document: JSON.stringify({
+          version: 1,
+          name: "Lane",
+          triggers: [
+            {
+              id: "labeled",
+              kind: "ticket.labeled",
+              label: "ready for agent",
+            },
+            {
+              id: "other",
+              kind: "manual",
+              input: { type: "object", properties: {} },
+              steps: [{ id: "each", kind: "forEach" }],
+            },
+          ],
+          steps: STEPS,
+        }),
+      },
+    ]);
+
+    const result = await trigger.start("delivery-1", LABELED);
+
+    expect(result).toMatchObject({ matched: 2, started: 1, skipped: 1 });
+    expect(created.map((run) => run.workflowId)).toEqual(["wf-2"]);
+    expect(lines).toHaveLength(1);
   });
 
   // #845-T11
@@ -486,8 +584,24 @@ describe("which workflows a label starts", () => {
 
 describe("what a run of a label holds", () => {
   // #845-T20
-  it("is the issue and the repository, as the steps read them", () => {
+  it("is the ticket, and the issue and the repository as workflows written before #916 read them", () => {
+    const repo = {
+      fullName: "acme/widgets",
+      owner: "acme",
+      name: "widgets",
+      defaultBranch: "main",
+    };
     expect(labelTriggerInput(LABELED)).toEqual({
+      ticket: {
+        number: 12,
+        title: "Cache the widget list",
+        body: "Rebuilt on every request.",
+        url: "https://github.test/acme/widgets/issues/12",
+        labels: ["enhancement", "ready for agent"],
+        type: "",
+        assignees: [],
+        repo,
+      },
       issue: {
         number: 12,
         title: "Cache the widget list",
@@ -495,13 +609,24 @@ describe("what a run of a label holds", () => {
         url: "https://github.test/acme/widgets/issues/12",
         labels: ["enhancement", "ready for agent"],
       },
-      repo: {
-        fullName: "acme/widgets",
-        owner: "acme",
-        name: "widgets",
-        defaultBranch: "main",
+      repo,
+    });
+  });
+
+  // #916-T82
+  it("carries the assignees and the issue type the webhook had, bounded", () => {
+    const input = labelTriggerInput({
+      ...LABELED,
+      issue: {
+        ...LABELED.issue,
+        assignees: ["alice", ...Array.from({ length: 40 }, (_, i) => `u${i}`)],
+        type: "Bug",
       },
     });
+
+    expect(input.ticket.type).toBe("Bug");
+    expect(input.ticket.assignees).toHaveLength(20);
+    expect(input.ticket.assignees[0]).toBe("alice");
   });
 
   // #845-T21

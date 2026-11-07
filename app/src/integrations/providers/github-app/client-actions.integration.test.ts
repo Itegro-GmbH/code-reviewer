@@ -893,3 +893,80 @@ describe("changing labels", () => {
     ).toBe("GITHUB_APP_UNAVAILABLE");
   });
 });
+
+describe("reading an issue as a ticket", () => {
+  const READ: JobTokenScope = {
+    repositoryIds: [7001],
+    permissions: { issues: "read", metadata: "read" },
+  };
+
+  // #916-T01
+  it("reads the number, title, body, address, labels, assignees and issue type with a token that reads issues of this repository only", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", {
+      number: 128,
+      title: "Cache the widget list",
+      body: "Rebuilt on every request.",
+      labels: ["enhancement", "agent implement"],
+      assignees: ["alice", "bob"],
+      type: "Bug",
+    });
+
+    const ticket = await client.getIssue("4242", READ, "acme/widgets", 128);
+
+    expect(ticket).toEqual({
+      number: 128,
+      title: "Cache the widget list",
+      body: "Rebuilt on every request.",
+      url: expect.stringContaining("/acme/widgets/issues/128") as string,
+      labels: ["enhancement", "agent implement"],
+      assignees: ["alice", "bob"],
+      type: "Bug",
+    });
+    expect(fake.tokenRequests().at(-1)).toMatchObject({
+      repositoryIds: [7001],
+      permissions: { issues: "read", metadata: "read" },
+    });
+    expect(fake.revokedInstallationTokens()).toHaveLength(1);
+  });
+
+  // #916-T02
+  it("has an empty body, no assignees and an empty type for an issue that has none", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 5, title: "Plain" });
+
+    expect(
+      await client.getIssue("4242", READ, "acme/widgets", 5),
+    ).toMatchObject({ body: "", assignees: [], type: "", labels: [] });
+  });
+
+  // #916-T03
+  it("is null for a number that is no issue and for a pull request, which is no ticket", async () => {
+    const { client } = await setup();
+    const opened = await client.openPullRequest("4242", PULLS, "acme/widgets", {
+      head: "workflow/r1/work",
+      base: "main",
+      title: "T",
+    });
+
+    expect(await client.getIssue("4242", READ, "acme/widgets", 99)).toBeNull();
+    expect(
+      await client.getIssue("4242", READ, "acme/widgets", opened.number),
+    ).toBeNull();
+  });
+
+  // #916-T04
+  it("honors the abort signal and refuses a number that is no issue number before any request", async () => {
+    const { client } = await setup();
+    const aborted = new AbortController();
+    aborted.abort();
+
+    const stopped = await failureOf(
+      client.getIssue("4242", READ, "acme/widgets", 7, aborted.signal),
+    );
+    expect(stopped).toBeInstanceOf(GithubAppError);
+    await expect(
+      client.getIssue("4242", READ, "acme/widgets", 0),
+    ).rejects.toThrow();
+  });
+});

@@ -83,9 +83,9 @@ describe("a linear run of two agent steps", () => {
       budgetMicroUsd: 20_000_000,
       spentMicroUsd: 0,
     });
+    // A run started since #916 keeps the input under `input`, beside the ticket when there is one.
     expect(JSON.parse(state.run.triggerInput)).toEqual({
-      repo: "acme/widgets",
-      topic: "caching",
+      input: { repo: "acme/widgets", topic: "caching" },
     });
     expect(stepsOf(state)).toEqual([["plan", "running"]]);
     const [first] = state.steps;
@@ -990,7 +990,12 @@ describe("another workspace", () => {
     const otherService = createWorkflowRunService({
       runs: otherRuns,
       workflows: createWorkflowsRepository(app.h.db, otherId),
-      resolveRepository: async () => ({ id: "x", defaultBranch: "main" }),
+      resolveRepository: async () => ({
+        id: "x",
+        fullName: "acme/x",
+        defaultBranch: "main",
+      }),
+      readTicket: async () => undefined,
       kick: () => undefined,
     });
 

@@ -96,6 +96,19 @@ function labelNames(payload: unknown): string[] {
   });
 }
 
+/** The logins of the people an issue is assigned to; an entry that is not an object with a login is left out. */
+function assigneeLogins(payload: unknown): string[] {
+  const assignees = rawField(payload, "issue.assignees");
+  if (!Array.isArray(assignees)) return [];
+  return assignees.flatMap((entry: unknown) => {
+    const login =
+      typeof entry === "object" && entry !== null
+        ? (entry as { login?: unknown }).login
+        : undefined;
+    return typeof login === "string" && login !== "" ? [login] : [];
+  });
+}
+
 /**
  * `issues` (#845): only a label put on an open issue starts anything. A pull request is an issue to GitHub and arrives here too
  * (`issue.pull_request`); it is not one for the workflows. Only a sender of the type "User" starts one: a bot, our own App included,
@@ -125,6 +138,8 @@ function parseIssueEvent(
       reason: 'the "issues" payload lacks the expected fields: label.name',
     };
   const body = rawField(payload, "issue.body");
+  const assignees = assigneeLogins(payload);
+  const issueType = rawField(payload, "issue.type.name");
   return {
     kind: "issue_labeled",
     labeled: {
@@ -136,6 +151,10 @@ function parseIssueEvent(
         body: typeof body === "string" ? body : "",
         url: field<string>(payload, "issue.html_url"),
         labels: labelNames(payload),
+        ...(assignees.length === 0 ? {} : { assignees }),
+        ...(typeof issueType === "string" && issueType !== ""
+          ? { type: issueType }
+          : {}),
       },
       label,
       actor: actorOf(payload),

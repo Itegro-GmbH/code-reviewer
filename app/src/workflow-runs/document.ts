@@ -5,17 +5,59 @@
 // is not that shape, which fails the run with `document_unusable` instead of throwing.
 import { isRecord } from "../workflows/json.ts";
 import { BUDGET_DEFAULT_USD, LOOP_ROUNDS_MAX } from "../workflows/limits.ts";
+import {
+  TRIGGER_KINDS,
+  canonicalTriggerKind,
+  legacyTriggerId,
+  type CanonicalTriggerKind,
+  type TriggerKind,
+} from "../workflows/triggers.ts";
 import { MICRO_USD_COLUMN_MAX, MICRO_USD_PER_USD } from "./limits.ts";
 import type { MachineNode } from "./machine.ts";
 
-export type RunDocument = {
-  trigger: Record<string, unknown> & { kind: string };
-  budgetUsd: number;
-  /** The nodes of the workflow, in the order they run. */
-  steps: (Record<string, unknown> & { id: string; kind: string })[];
-  /** The steps that run once after the run ended `failed` or `cancelled` (#902); empty when the workflow has none. */
-  onFailure: (Record<string, unknown> & { id: string; kind: string })[];
+type RunNode = Record<string, unknown> & { id: string; kind: string };
+
+/**
+ * A trigger of the document (#916). A document written with the single `trigger` is read as a list of one, without pre-steps, and
+ * `github.issueLabeled` as `ticket.labeled`.
+ */
+export type RunTrigger = {
+  id: string;
+  kind: CanonicalTriggerKind;
+  /** `label` of a label trigger. */
+  label?: string;
+  /** `input` of a manual or api trigger, the result schema as written. */
+  input?: unknown;
+  /** The steps that run first when this trigger started the run, before the shared ones. */
+  steps: RunNode[];
 };
+
+export type RunDocument = {
+  triggers: RunTrigger[];
+  budgetUsd: number;
+  /** The nodes of the workflow, in the order they run; of a document made `forTrigger` the pre-steps of that trigger come first. */
+  steps: RunNode[];
+  /** The steps that run once after the run ended `failed` or `cancelled` (#902); empty when the workflow has none. */
+  onFailure: RunNode[];
+};
+
+function readTrigger(raw: unknown, legacy: boolean): RunTrigger | undefined {
+  if (!isRecord(raw) || typeof raw.kind !== "string") return undefined;
+  if (!(TRIGGER_KINDS as readonly string[]).includes(raw.kind))
+    return undefined;
+  const kind = raw.kind as TriggerKind;
+  const id = legacy ? legacyTriggerId(kind) : raw.id;
+  if (typeof id !== "string") return undefined;
+  const steps = raw.steps === undefined || legacy ? [] : readNodes(raw.steps);
+  if (steps === undefined) return undefined;
+  return {
+    id,
+    kind: canonicalTriggerKind(kind),
+    ...(typeof raw.label === "string" ? { label: raw.label } : {}),
+    ...(raw.input === undefined ? {} : { input: raw.input }),
+    steps,
+  };
+}
 
 export function readRunDocument(text: string): RunDocument | undefined {
   let parsed: unknown;
@@ -24,11 +66,21 @@ export function readRunDocument(text: string): RunDocument | undefined {
   } catch {
     return undefined;
   }
-  if (!isRecord(parsed) || !isRecord(parsed.trigger)) return undefined;
-  const { trigger, steps } = parsed;
-  if (typeof trigger.kind !== "string" || !Array.isArray(steps))
-    return undefined;
-  const nodes = readNodes(steps);
+  if (!isRecord(parsed) || !Array.isArray(parsed.steps)) return undefined;
+  const triggers: RunTrigger[] = [];
+  if (Array.isArray(parsed.triggers)) {
+    for (const raw of parsed.triggers as unknown[]) {
+      const trigger = readTrigger(raw, false);
+      if (trigger === undefined) return undefined;
+      triggers.push(trigger);
+    }
+  } else {
+    const trigger = readTrigger(parsed.trigger, true);
+    if (trigger === undefined) return undefined;
+    triggers.push(trigger);
+  }
+  if (triggers.length === 0) return undefined;
+  const nodes = readNodes(parsed.steps);
   if (nodes === undefined) return undefined;
   // A document without `onFailure` has none; one whose `onFailure` is not a list of nodes is not usable (the validator never saved one).
   const failureNodes =
@@ -41,11 +93,39 @@ export function readRunDocument(text: string): RunDocument | undefined {
   )
     return undefined;
   return {
-    trigger: trigger as RunDocument["trigger"],
+    triggers,
     budgetUsd: budget ?? BUDGET_DEFAULT_USD,
     steps: nodes,
     onFailure: failureNodes,
   };
+}
+
+/**
+ * The trigger a run was started by: the one with this id, or, for a run written before triggers had ids (`id` null), the first of that
+ * kind (`github.issueLabeled` is `ticket.labeled`). Undefined when the document has none.
+ */
+export function triggerOf(
+  document: RunDocument,
+  ref: { id: string | null; kind: string },
+): RunTrigger | undefined {
+  if (ref.id !== null) return document.triggers.find((t) => t.id === ref.id);
+  const kind = (TRIGGER_KINDS as readonly string[]).includes(ref.kind)
+    ? canonicalTriggerKind(ref.kind as TriggerKind)
+    : ref.kind;
+  return document.triggers.find((t) => t.kind === kind);
+}
+
+/**
+ * The document as a run started by `trigger` runs it: the pre-steps of that trigger, then the shared steps. The state machine walks
+ * this one list, so a pre-step is a step like any other. Undefined when the document has no such trigger.
+ */
+export function forTrigger(
+  document: RunDocument,
+  ref: { id: string | null; kind: string },
+): RunDocument | undefined {
+  const trigger = triggerOf(document, ref);
+  if (trigger === undefined) return undefined;
+  return { ...document, steps: [...trigger.steps, ...document.steps] };
 }
 
 /** A list of nodes as the engine walks them, or undefined when it is not a list of objects with an id and a kind. */

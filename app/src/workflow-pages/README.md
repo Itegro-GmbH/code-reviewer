@@ -10,14 +10,14 @@ This is a module of its own, and the engine imports nothing from it: the pages o
 The pages exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`) and are in the sidebar as **Workflows**. They sit in
 `src/app/(app)/w/[workspace]/workflows/`.
 
-| File                                   | Role                                                                                                                                                                     |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `pages.tsx`                            | The `load…` functions that gather a page's data from the services (an id of another workspace is `not_found`) and the `…Content` components that render it               |
-| `run-detail.tsx`                       | One run (client): status, budget, steps; polls while the run runs                                                                                                        |
-| `runs-list.tsx`, `workflows-list.tsx`  | The runs of a workflow (polls while one runs) and the workflows of a workspace                                                                                           |
-| `start-form.tsx`, `start-form-spec.ts` | The form for the manual trigger: the fields come from the `input` schema of the saved document; `clientRequestId` per input                                              |
-| `view.ts`, `github-link.ts`            | What the pages take from a run; `github-link.ts` is the one place a link is made from a step's output (`https://github.com/<repo of the run>/…`, checked with `new URL`) |
-| `messages.ts`                          | All the copy: a failure code becomes a sentence, never shown as the code; the cost bases and what they mean                                                              |
-| `api.ts`, `status-badge.tsx`           | The browser's calls to the run routes; the status badge                                                                                                                  |
+| File                                   | Role                                                                                                                                                                                               |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pages.tsx`                            | The `load…` functions that gather a page's data from the services (an id of another workspace is `not_found`) and the `…Content` components that render it                                         |
+| `run-detail.tsx`                       | One run (client): status, budget, steps; polls while the run runs                                                                                                                                  |
+| `runs-list.tsx`, `workflows-list.tsx`  | The runs of a workflow (polls while one runs) and the workflows of a workspace                                                                                                                     |
+| `start-form.tsx`, `start-form-spec.ts` | The form for a manual trigger (one for each when the document has several, #916): the fields come from the `input` schema of the saved document, a `ticket` is a text; `clientRequestId` per input |
+| `view.ts`, `github-link.ts`            | What the pages take from a run; `github-link.ts` is the one place a link is made from a step's output (`https://github.com/<repo of the run>/…`, checked with `new URL`)                           |
+| `messages.ts`                          | All the copy: a failure code becomes a sentence, never shown as the code; the cost bases and what they mean                                                                                        |
+| `api.ts`, `status-badge.tsx`           | The browser's calls to the run routes; the status badge                                                                                                                                            |
 
 Everything a step returned (an agent's result, what a connector got from GitHub) is data from outside: rendered as text, never as markup.

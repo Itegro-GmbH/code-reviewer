@@ -113,8 +113,10 @@ const ROOT_WORDS: Record<TargetRoot, string> = {
   input: "an input of the caller of a manual trigger, {{trigger.input.<name>}}",
   issue:
     "the issue that started the run, {{trigger.issue}} or {{trigger.issue.number}}",
+  ticket:
+    "the ticket the run is about, {{trigger.ticket}} or {{trigger.ticket.number}}",
   defaultBranch:
-    "the default branch of the repository, {{trigger.repo.defaultBranch}}",
+    "the default branch of the repository, {{trigger.repo.defaultBranch}} or {{trigger.ticket.repo.defaultBranch}}",
   branch: "the branch of an agent step that may push, {{<step id>.branch}}",
 };
 
@@ -142,17 +144,23 @@ function targetVerdict(
   const takes = (wanted: TargetRoot): boolean => target.roots.includes(wanted);
   if (root === "trigger") {
     if (field === "input") return takes("input") ? "ok" : "refused";
-    if (field === "issue")
-      return takes("issue") &&
-        (more.length === 0 || (more.length === 1 && more[0] === "number"))
+    const only = (names: readonly string[]): boolean =>
+      more.length === names.length && names.every((n, i) => more[i] === n);
+    if (
+      field === "ticket" &&
+      takes("defaultBranch") &&
+      only(["repo", "defaultBranch"])
+    )
+      return "ok";
+    if (field === "issue" || field === "ticket")
+      return takes(field) && (more.length === 0 || only(["number"]))
         ? "ok"
         : "refused";
-    return field === "repo" &&
-      takes("defaultBranch") &&
-      more.length === 1 &&
-      more[0] === "defaultBranch"
-      ? "ok"
-      : "refused";
+    if (field === "repo")
+      return takes("defaultBranch") && only(["defaultBranch"])
+        ? "ok"
+        : "refused";
+    return "refused";
   }
   if (root === "previous") return "refused";
   const binding = use.env.scope.get(root);
