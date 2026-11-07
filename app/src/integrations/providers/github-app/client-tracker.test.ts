@@ -265,7 +265,7 @@ describe("the checks of the full sync", () => {
       "4242",
       READ,
       "acme/widgets",
-      1,
+      0,
     );
 
     expect(page).toEqual({
@@ -274,9 +274,72 @@ describe("the checks of the full sync", () => {
         { number: 8, checksState: "failure" },
       ],
       last: true,
+      lastNumber: 8,
     });
     // One token for the whole page: the checks are read with the token of the list.
     expect(tokenRequests(calls)).toHaveLength(1);
+  });
+
+  // #937-T50
+  it("continues after the number it was given, over as many lists as it takes, and says where the next page continues", async () => {
+    const numbers = Array.from({ length: 140 }, (_, i) => i + 1);
+    const { client, calls } = scripted((call) => {
+      const listed = /^\/repos\/acme\/widgets\/pulls\?.*&page=(\d+)/.exec(
+        call.path,
+      );
+      if (listed !== null) {
+        const from = (Number(listed[1]) - 1) * 100;
+        return { json: numbers.slice(from, from + 100).map(pull) };
+      }
+      if (call.path.includes("/check-suites"))
+        return { json: { check_suites: [] } };
+      return undefined;
+    });
+
+    // 30 pull requests after number 95: they stand on the first and the second list.
+    const page = await client.readTrackerChecks(
+      "4242",
+      READ,
+      "acme/widgets",
+      95,
+    );
+
+    expect(page.pullRequests.map((pr) => pr.number)).toEqual(
+      numbers.slice(95, 125),
+    );
+    expect(page).toMatchObject({ last: false, lastNumber: 125 });
+    expect(
+      calls.filter((call) => call.path.startsWith("/repos/acme/widgets/pulls?"))
+        .length,
+    ).toBe(2);
+
+    const rest = await client.readTrackerChecks(
+      "4242",
+      READ,
+      "acme/widgets",
+      125,
+    );
+    expect(rest.pullRequests.map((pr) => pr.number)).toEqual(
+      numbers.slice(125),
+    );
+    expect(rest).toMatchObject({ last: true, lastNumber: 140 });
+  });
+
+  // #937-T51
+  it("ends with an empty last page when nothing is left after the number, and refuses a number that is none", async () => {
+    const { client } = scripted((call) =>
+      call.path.startsWith("/repos/acme/widgets/pulls?")
+        ? { json: [pull(7), pull(8)] }
+        : undefined,
+    );
+
+    expect(
+      await client.readTrackerChecks("4242", READ, "acme/widgets", 8),
+    ).toEqual({ pullRequests: [], last: true, lastNumber: null });
+    for (const bad of [-1, 1.5, Number.NaN])
+      await expect(
+        client.readTrackerChecks("4242", READ, "acme/widgets", bad),
+      ).rejects.toBeInstanceOf(GithubAppError);
   });
 
   // #923-T79
@@ -352,6 +415,83 @@ describe("the board of the full sync", () => {
       repository_ids: [7001],
       permissions: BOARD.permissions,
     });
+  });
+
+  // #937-T52
+  it("reads only the chosen board, without listing the boards of the repository, and continues within it by its cursor", async () => {
+    const { client, calls } = scripted((call) => {
+      if (call.path !== "/graphql") return undefined;
+      return { json: items(["In Progress"], true) };
+    });
+
+    const first = await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      null,
+      "PVT_9",
+    );
+    expect(first).toEqual({
+      available: true,
+      items: [{ nodeId: "I_0", status: "In Progress" }],
+      next: "0:cursor-1",
+    });
+    await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      "0:cursor-1",
+      "PVT_9",
+    );
+    // A position that names another board by its index starts the chosen board at its first page.
+    await client.readTrackerBoard(
+      "4242",
+      BOARD,
+      "acme/widgets",
+      "3:cursor-1",
+      "PVT_9",
+    );
+
+    const bodies = calls
+      .filter((call) => call.path === "/graphql")
+      .map((call) => call.body as { query: string; variables: unknown });
+    expect(bodies.every((body) => !body.query.includes("projectsV2"))).toBe(
+      true,
+    );
+    expect(bodies.map((body) => body.variables)).toEqual([
+      { project: "PVT_9", after: null, first: 100 },
+      { project: "PVT_9", after: "cursor-1", first: 100 },
+      { project: "PVT_9", after: null, first: 100 },
+    ]);
+  });
+
+  // #937-T53
+  it("is not available when the chosen board cannot be read, and ends after its last page", async () => {
+    const gone = scripted((call) =>
+      call.path === "/graphql" ? { json: { data: { node: null } } } : undefined,
+    );
+    expect(
+      await gone.client.readTrackerBoard(
+        "4242",
+        BOARD,
+        "acme/widgets",
+        null,
+        "PVT_gone",
+      ),
+    ).toEqual({ available: false, items: [], next: null });
+
+    const last = scripted((call) =>
+      call.path === "/graphql" ? { json: items(["Todo"], false) } : undefined,
+    );
+    expect(
+      await last.client.readTrackerBoard(
+        "4242",
+        BOARD,
+        "acme/widgets",
+        null,
+        "PVT_9",
+      ),
+    ).toMatchObject({ available: true, next: null });
   });
 
   // #923-T81
@@ -852,6 +992,74 @@ describe("the board status of one ticket (#932)", () => {
     };
     expect(body.variables).toEqual({ id: "I_12" });
     expect(body.query).toContain("includeArchived:false");
+  });
+
+  // #937-T54
+  it("answers the status of the chosen board only, whatever the other boards of the ticket say", async () => {
+    const onBoards = (
+      nodes: unknown[],
+      hasNextPage = false,
+    ): { json: unknown } => ({
+      json: {
+        data: { node: { projectItems: { pageInfo: { hasNextPage }, nodes } } },
+      },
+    });
+    const item = (project: string, name: string | null) => ({
+      project: { id: project },
+      fieldValueByName: name === null ? null : { name },
+    });
+    const ask = (answer: { json: unknown }, boardId?: string) =>
+      scripted((call) =>
+        call.path === "/graphql" ? answer : undefined,
+      ).client.readTrackerBoardStatus("4242", BOARD, "I_12", boardId);
+
+    const two = onBoards([item("PVT_2", "Done"), item("PVT_1", "In Review")]);
+    expect(await ask(two, "PVT_1")).toEqual({
+      available: true,
+      status: "In Review",
+    });
+    // Without a chosen board the first status wins, as before.
+    expect(await ask(two)).toEqual({ available: true, status: "Done" });
+    // On the chosen board with no status: none, even when another board has one.
+    expect(
+      await ask(
+        onBoards([item("PVT_2", "Done"), item("PVT_1", null)]),
+        "PVT_1",
+      ),
+    ).toEqual({ available: true, status: null });
+    // Not on the chosen board: none.
+    expect(await ask(onBoards([item("PVT_2", "Done")]), "PVT_1")).toEqual({
+      available: true,
+      status: null,
+    });
+    expect(await ask(onBoards([]), "PVT_1")).toEqual({
+      available: true,
+      status: null,
+    });
+    // The answer cannot say: more items than it holds, or an item GitHub could not give.
+    expect(await ask(onBoards([item("PVT_2", "Done")], true), "PVT_1")).toEqual(
+      { available: false, status: null },
+    );
+    expect(await ask(onBoards([item("PVT_2", "Done"), null]), "PVT_1")).toEqual(
+      { available: false, status: null },
+    );
+    // ... unless the chosen board is among the items it holds.
+    expect(await ask(onBoards([item("PVT_1", "Todo")], true), "PVT_1")).toEqual(
+      { available: true, status: "Todo" },
+    );
+  });
+
+  // #937-T55
+  it("asks for the board of each item next to its status", async () => {
+    const { client, calls } = scripted((call) =>
+      call.path === "/graphql" ? statuses(null) : undefined,
+    );
+    await client.readTrackerBoardStatus("4242", BOARD, "I_12", "PVT_1");
+    const body = calls.find((call) => call.path === "/graphql")?.body as {
+      query: string;
+    };
+    expect(body.query).toContain("project{id}");
+    expect(body.query).toContain("pageInfo{hasNextPage}");
   });
 
   // #932-T09

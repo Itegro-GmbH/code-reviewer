@@ -152,6 +152,7 @@ describe("the migrations of both epics", () => {
       "20261107180000_add_profile_environment",
       "20261107190000_project_ticket_source",
       "20261107200000_add_workflow_run_discard",
+      "20261107230000_add_tracker_items_write_index",
     ]);
   });
 

@@ -422,13 +422,15 @@ export interface IntegrationProvider {
 
   /**
    * Only together with `parseTrackerChange`: the status the project boards give a ticket now, by the platform's id of the ticket
-   * (#932): the status on the first board that has one, or null when the ticket is on no board or has no status. `available: false`
-   * when the app may not read boards. Rejects when the platform cannot be asked.
+   * (#932): the status on the first board that has one, or null when the ticket is on no board or has no status. `boardId` (#937): the
+   * platform's id of the board the project chose; then only the item of the ticket on that board counts, whatever the other boards say.
+   * `available: false` when the app may not read boards. Rejects when the platform cannot be asked.
    */
   readBoardStatus?(
     integration: Integration,
     repo: RepoRef,
     nodeId: string,
+    boardId?: string,
     signal?: AbortSignal,
   ): Promise<{ available: boolean; status: string | null }>;
 

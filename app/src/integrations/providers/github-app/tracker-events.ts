@@ -68,6 +68,12 @@ function boardStatusChange(
   if (contentType !== "Issue" && contentType !== "PullRequest")
     return ignored(`the board item is a ${contentType}, not an issue`);
   const nodeId = field<string>(payload, "projects_v2_item.content_node_id");
+  // The board the item is on, when the delivery names it: a project with its own board does not take the status of another one (#937).
+  const boardNodeId = rawField(payload, "projects_v2_item.project_node_id");
+  const projectId =
+    typeof boardNodeId === "string" && boardNodeId !== ""
+      ? { projectId: boardNodeId }
+      : {};
   // The delivery of these four carries no status, and the ticket may be on other boards: the mirror asks where it stands now.
   if (
     action === "deleted" ||
@@ -79,6 +85,7 @@ function boardStatusChange(
       kind: "board_item_reread",
       nodeId,
       removed: action === "deleted" || action === "archived",
+      ...projectId,
     });
   if (action !== "edited")
     return ignored(`the board item action "${action}" carries no status`);
@@ -100,6 +107,7 @@ function boardStatusChange(
     kind: "board_status_changed",
     nodeId,
     status: typeof name === "string" && name !== "" ? name : null,
+    ...projectId,
   });
 }
 

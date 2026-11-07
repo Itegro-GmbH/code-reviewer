@@ -18,7 +18,8 @@
 //    GitHub no longer has is removed). The rebuild counts from the start of the whole sync, not of the last night. A sync that has not
 //    moved for a week starts again from the first page.
 //  - A page in flight is aborted a little after the slice ends (`RESYNC_ABORT_GRACE_MS`) and never later than `RESYNC_HARD_LIMIT_MS`
-//    into the run, so a slow answer of GitHub cannot take the function past its limit and the counts line is always logged.
+//    into the run, so a slow answer of GitHub cannot take the function past its limit and the counts line is always logged. A project
+//    whose page was aborted that way counts `partial` (the sync stands where it was), not `failed`.
 //  - A deployment without the factory (`implementer`) reads the mirror nowhere: nothing is asked of GitHub there and the answer is `skipped`.
 //  - Overlapping runs are safe: the sync is claimed in the database, a second caller continues the sync that is there.
 // The answer carries counts only.
@@ -171,6 +172,11 @@ export async function resyncProjects(
         if (status === "done") counts.done += 1;
         else counts.partial += 1;
       } catch (error) {
+        // The slice's own end aborted the page in flight: the sync stands where it was and goes on tomorrow, which is `partial`, not a failure.
+        if (signal.aborted) {
+          counts.partial += 1;
+          continue;
+        }
         counts.failed += 1;
         const code = codeOf(error);
         if (RATE_LIMIT_CODES.has(code)) rateLimited.add(target.integrationId);
