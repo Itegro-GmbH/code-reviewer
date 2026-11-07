@@ -99,6 +99,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     "implementer_resume",
     # #909: the Worker reads `implementer.startBranch` and starts the work from that branch.
     "implementer_start_branch",
+    # #920: the Worker reads `implementer.canAsk` and offers the agent the question next to the
+    # result.
+    "implementer_ask",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

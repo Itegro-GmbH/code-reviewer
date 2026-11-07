@@ -106,6 +106,8 @@ function stepRow(
     output: "{}",
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 600_000).toISOString(),
     startedAt: new Date(NOW.getTime() - 600_000).toISOString(),
     finishedAt: new Date(NOW.getTime() - 500_000).toISOString(),
@@ -243,6 +245,10 @@ function harness(options: {
         );
       },
       attachTurn: vi.fn(),
+      askStep: vi.fn(),
+      answerStep: vi.fn(),
+      attachAnswerTurn: vi.fn(),
+      resumeRun: vi.fn(),
       async finishStep(id, outcome) {
         finishStep(id, outcome);
       },

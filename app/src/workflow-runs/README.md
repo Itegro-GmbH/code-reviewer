@@ -17,6 +17,7 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")                                                             |
 | `label-trigger.ts`                   | The label trigger (#845): which workflows a label on an issue starts, one run each under `gh-<delivery id>-<workflow id>`, through the `ticket.labeled` trigger whose label it is (#916), and the bounded ticket as the run's input |
 | `ticket.ts`                          | The ticket a run is about (#916): `{{trigger.ticket}}` as the steps read it, bounded, whether the webhook or the start API handed it over                                                                                           |
+| `ask.ts`                             | The question an agent step ended its turn with (#920): what is stored with the step (`workflow_step_runs.ask`), the answer to it (an option by number, a text, a note) and the instruction the turn that goes on gets               |
 | `document.ts`                        | The workflow document as the engine reads it (defensively)                                                                                                                                                                          |
 | `service.ts`, `http.ts`, `shared.ts` | The run service (start, get, list), the handlers behind the routes, the wiring of the running server (the hook of the runner API, the reconciler of the sweep)                                                                      |
 | `errors.ts`, `limits.ts`             | The stable codes (`WORKFLOW_RUN_*` for the routes, the lower case codes of a failed run or step) and the bounds                                                                                                                     |
@@ -51,6 +52,17 @@ the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 3. The end of a turn reaches the engine through `ReportDeps.turnEnded` (`runner-api/report.ts`, called where the write tokens are switched off), after the
    completion is stored. A hook that throws or rejects is caught and logged by its code; the completion is not affected. A job that ends without a report is
    found by `reconcileWorkflowRuns` (the sweep and the opportunistic maintenance), which calls `advance` for every run that waited a minute.
+
+## A question: `ask` (#920)
+
+A turn ends with `done` or with `ask` (`docs/workflows.md`, "A question: `done` or `ask`"). The runner reports a question as `implementer.agentAsk`; `turn-facts.ts` yields it as `asked` (bounded again, a result wins over it).
+`endAgentStep` then writes `askStep`: the step and the run become `waiting`, the question is stored with the step (`ask.ts`) and the cost of the turn is charged now (a step that asked before is charged the sum of its
+turns at the end, and `finishStep` adds only the difference). `nextMove` does nothing for a `waiting` run, however long, except `cancel_waiting` once a stop is asked for; `waiting` also holds the ticket's slot
+(`trigger_key`). The question is shown through the optional `AskChannel` of the engine (`asks`), after the lock is released.
+
+`engine.answer` (called by the answer route and the `/answer` comment) runs under the lock of the run: of two answers one wins. It puts the answer on the step (`state: "answered"`) and makes step and run `running` again;
+the machine's next move is `resume_turn`, which starts the next turn of the session the step's last turn ran in, with the question and the answer as its instruction, under the request id `wf-<run>-<position>-q<n>` (starting it
+twice makes one turn) and attaches it to the step (`attachAnswerTurn`; the earlier job is over). A stop asked for between the answer and that turn starts it first, so no turn is left without a step.
 
 ## `onFailure` (#902)
 

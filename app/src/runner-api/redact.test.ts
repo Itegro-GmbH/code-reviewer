@@ -232,6 +232,29 @@ describe("the implementer block of a result (#754)", () => {
     expect(cleaned?.filesChanged[2]?.path).toBe("src/plain.ts");
   });
 
+  // #920-T09
+  it("removes the secrets from the question the agent ended the turn with: the question, every option and the context", () => {
+    const agentAsk = {
+      question: `Is ${GHS} the right token?`,
+      options: [`yes: ${LLM_KEY}`, "no"],
+      context: `Bearer ${CAPABILITY} was in the log`,
+    };
+
+    const cleaned = redactResult(
+      { ...result, implementer: { ...block, agentAsk } },
+      [LLM_KEY],
+    ).implementer?.agentAsk;
+
+    const stored = JSON.stringify(cleaned);
+    for (const secret of [GHS, LLM_KEY, CAPABILITY, CAPABILITY.slice(4)])
+      expect(stored).not.toContain(secret);
+    expect(cleaned).toEqual({
+      question: `Is ${REDACTED} the right token?`,
+      options: [`yes: ${REDACTED}`, "no"],
+      context: `Bearer ${REDACTED} was in the log`,
+    });
+  });
+
   // #843-T133
   it("removes the secrets from every string and every key of the result the agent handed in, and nothing else", () => {
     const agentResult = {

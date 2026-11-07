@@ -52,6 +52,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // #891: when a member asked for the run to stop; null for every run that exists.
   // #916: the trigger of the document that started the run; null for every run that exists.
   workflow_runs: ["trigger_kind", "cancel_requested_at", "trigger_id"],
+  // #920: the question a step ended with and the comment that carries it; null for every step that exists.
+  workflow_step_runs: ["ask", "waiting_on_comment_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.

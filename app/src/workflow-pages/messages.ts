@@ -29,6 +29,11 @@ export const RUN_STATUS_COPY = {
     label: "Running",
     description: "The workflow is running. This page updates by itself.",
   },
+  waiting: {
+    label: "Waiting for an answer",
+    description:
+      "The agent asked a question and the run waits for an answer, as long as it takes. Answer on this page, or on the ticket with /answer. Nothing else runs meanwhile.",
+  },
   succeeded: {
     label: "Succeeded",
     description: "Every step finished.",
@@ -47,6 +52,7 @@ export const RUN_STATUS_COPY = {
 export const STEP_STATUS_COPY = {
   pending: { label: "Waiting" },
   running: { label: "Running" },
+  waiting: { label: "Waiting for an answer" },
   succeeded: { label: "Succeeded" },
   failed: { label: "Failed" },
   skipped: { label: "Skipped" },
@@ -351,6 +357,10 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
+  WORKFLOW_RUN_NOT_WAITING:
+    "This run does not wait for an answer any more: it was answered already, or it is being stopped.",
+  WORKFLOW_RUN_ANSWER_INVALID:
+    "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
     "GitHub could not be asked right now. Try again in a moment.",

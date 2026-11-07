@@ -55,6 +55,12 @@ function setup(overrides: Partial<WorkflowRunService> = {}) {
       calls.push(`get ${workflowId} ${runId}`),
       VIEW
     ),
+    answer: async (user, workflowId, runId, body) => (
+      calls.push(
+        `answer ${user.id} ${user.githubLogin} ${workflowId} ${runId} ${JSON.stringify(body)}`,
+      ),
+      { run: VIEW }
+    ),
     list: async (workflowId) => (
       calls.push(`list ${workflowId}`),
       { runs: [SUMMARY] }

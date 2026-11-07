@@ -73,3 +73,6 @@ export const TICKET_ASSIGNEE_MAX_CHARS = 100;
 export const TICKET_TYPE_MAX_CHARS = 100;
 /** The default branch of a repository as a run stores it (a Git ref component is at most 255 bytes). */
 export const BRANCH_MAX_CHARS = 255;
+
+/** #920: the most an answer to a question of an agent holds, in characters (a note after an option, or a free text). */
+export const ASK_ANSWER_MAX_CHARS = 4000;

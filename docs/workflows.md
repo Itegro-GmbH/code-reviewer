@@ -632,6 +632,34 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
 
+### A question: `done` or `ask` (#920)
+
+Every agent turn ends with one of two things: **`done`**, its result, or **`ask`**, a question for a person. The agent hands in the question through the same finish tool,
+`factory-submit --ask` (the JSON `{"question": "...", "options": ["...", "..."], "context": "..."}` on standard input; `options` and `context` are optional) or
+`submit_result({ "ask": { "question": "...", "options": [...], "context": "..." } })`; the last call of a turn wins. A question is at most 2000 characters, at most 10 options of at most
+200 characters, and a context of at most 4000. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
+the claim feature `implementer_ask` cannot either: its turn runs as before, ending with a result or failing, and the agent is not told that `ask` exists. `ask` is not a failure: `onFailure` is not touched.
+
+What the engine does when a turn ends with a question:
+
+- the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once. **The run waits as long as it
+  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`);
+- the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `state` and, once answered, `answer`) and shown on the run page. The agent's
+  sandbox is gone, as after `done`; the Implementer session and its snapshot stay;
+- one run per ticket, one open question per run: the run holds the ticket's slot (`trigger_key`) while it waits, so a second run for the same ticket is `busy`, not started.
+
+**The answer** starts a new turn of the same session with the question and the answer as its instruction; the step goes back to `running` and reads that turn like any other (it may end with `done` or ask again).
+It costs what a turn costs, against what is left of the budget; if less than one cent is left the step fails `budget_exhausted`. An answer is one of:
+
+- a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "choice": 2 }` (an option by its number, from 1), `{ "text": "..." }`, or both (the text is a note to the option); for
+  every member who may start a run (`start_implementer_task`). `202 { run }` when the step goes on, `409 WORKFLOW_RUN_NOT_WAITING` when nothing waits for an answer or it was answered before,
+  `422 WORKFLOW_RUN_ANSWER_INVALID` for an empty or too long answer or an option the question does not have (an answer is at most 4000 characters);
+- a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run, by somebody with write access to the repository (the check `/review` uses); bot comments never count.
+
+Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
+
+Where the question is shown outside the run page: on the ticket of the run (`ticket_ref`), else on its pull request, else nowhere (only the run page shows it).
+
 ### Cancelling a run
 
 `POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
@@ -660,7 +688,7 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label by itself: a workflow with [`onFailure`](#after-a-failure-onfailure) cleans up after the agent has stopped (the facts have `status` `cancelled`); without it the issue keeps `agent working` and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
 the run `cancelled` the same way, not `failed`.
 
-A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
+A run looks like this (a step is `pending` when written, `running` once claimed, `waiting` while its turn's question is not answered (#920), then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
 ```json
 {
@@ -671,7 +699,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
         "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
-        "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
+        "ask": null, "waitingOnCommentId": null, "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
   }
 }
@@ -1057,11 +1085,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
 | `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
+| `WORKFLOW_RUN_NOT_WAITING` | 409 | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped). |
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
+| `WORKFLOW_RUN_ANSWER_INVALID` | 422 | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
@@ -1084,7 +1114,7 @@ not exist.
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
-  - **Status.** `running`, `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+  - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.

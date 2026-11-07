@@ -19,10 +19,11 @@ import type {
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 
+/** `waiting` (#920): a step's turn ended with a question and nobody has answered yet; nothing else of the run runs. */
 export type WorkflowRunStatus =
-  "running" | "succeeded" | "failed" | "cancelled";
+  "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 export type StepRunStatus =
-  "pending" | "running" | "succeeded" | "failed" | "skipped";
+  "pending" | "running" | "waiting" | "succeeded" | "failed" | "skipped";
 /** `if` and `loop` are written by the engine when it decides them: the row holds the decision as its output (#846). */
 export type StepRunKind = "agent" | "action" | "if" | "loop";
 /**
@@ -99,6 +100,10 @@ export type StoredStepRun = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  /** #920: JSON text, the question the step's turn ended with and what became of it (`workflow-runs/ask.ts`); null for a step that never asked. */
+  ask: string | null;
+  /** #920: the id of the comment that carries the question on the ticket or the pull request; null before it is posted. */
+  waitingOnCommentId: string | null;
 };
 
 export type NewWorkflowRun = {
@@ -184,8 +189,41 @@ export type RunLock = {
     stepRunId: string,
     turn: { jobId: string; turnId: string | null },
   ): Promise<boolean>;
-  /** Ends a step that is not over yet; the money it cost is added to the run. */
+  /**
+   * Ends a step that is not over yet; the money it cost is added to the run (a step that asked before has been charged for its earlier
+   * turns already: `costMicroUsd` of its outcome is the whole of the step, and only what is more than it was charged is added).
+   */
   finishStep(stepRunId: string, outcome: StepOutcome): Promise<void>;
+  /**
+   * #920: the turn of a `running` step ended with a question. The step and the run become `waiting`, `ask` (JSON text) is stored, and the
+   * turn's cost is charged to the step and the run now, so that the budget sees it while nobody answers. Returns the step, or undefined
+   * when the step was not `running` or the run is not.
+   */
+  askStep(
+    stepRunId: string,
+    ask: string,
+    cost: { costMicroUsd: number; costBasis: StepCostBasis },
+  ): Promise<StoredStepRun | undefined>;
+  /** #920: a run that waits becomes `running` again, for the one move that ends it after a stop. Returns whether it was written. */
+  resumeRun(): Promise<boolean>;
+  /**
+   * #920: somebody answered. A `waiting` step becomes `running` again with `ask` (JSON text, now holding the answer), and its run becomes
+   * `running`. Only the one call that finds the step `waiting` writes; returns the step, or undefined for any other.
+   */
+  answerStep(
+    stepRunId: string,
+    ask: string,
+  ): Promise<StoredStepRun | undefined>;
+  /**
+   * #920: the turn that goes on after the answer. Replaces the job of a `running` step whose earlier job is `previousJobId` and stores `ask`
+   * (the question is then `resumed`). Returns whether it was written.
+   */
+  attachAnswerTurn(
+    stepRunId: string,
+    previousJobId: string,
+    turn: { jobId: string; turnId: string | null },
+    ask: string,
+  ): Promise<boolean>;
   finishRun(outcome: {
     status: "succeeded" | "failed" | "cancelled";
     errorCode: string | null;
@@ -242,6 +280,8 @@ export type WorkflowRunsRepository = {
     stepRunId: string,
     turn: { jobId: string; turnId: string | null },
   ): Promise<boolean>;
+  /** #920: records the comment that carries the question of a `waiting` step; returns whether it was written. */
+  recordAskComment(stepRunId: string, commentId: string): Promise<boolean>;
   /** Ends a step that is `running` and has no job (an action, or an agent step that could not be started); returns whether it was written. */
   settleOwnStep(stepRunId: string, outcome: StepOutcome): Promise<boolean>;
 };
@@ -297,6 +337,8 @@ function stepFrom(row: Selectable<WorkflowStepRunsTable>): StoredStepRun {
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    ask: row.ask,
+    waitingOnCommentId: row.waiting_on_comment_id,
   };
 }
 
@@ -409,7 +451,7 @@ export function createWorkflowRunsRepository(
                 .where("workspace_id", "=", workspaceId)
                 .where("workflow_id", "=", input.workflowId)
                 .where("trigger_key", "=", input.triggerKey)
-                .where("status", "=", "running")
+                .where("status", "in", ["running", "waiting"])
                 .executeTakeFirst();
         if (holder === undefined) throw error;
         return { status: "busy", run: runFrom(holder) };
@@ -565,14 +607,20 @@ export function createWorkflowRunsRepository(
               .set(endValues(outcome, at))
               .where("workspace_id", "=", workspaceId)
               .where("id", "=", stepRunId)
-              .where("status", "in", ["pending", "running"])
+              .where("status", "in", ["pending", "running", "waiting"])
               .returningAll()
               .executeTakeFirst();
             if (ended === undefined) return;
             const index = lock.steps.findIndex((step) => step.id === stepRunId);
+            // #920: what the step's earlier turns cost has been charged to the run when they ended with a question.
+            const charged =
+              index === -1 ? 0 : (lock.steps[index]?.costMicroUsd ?? 0);
             if (index !== -1) lock.steps[index] = stepFrom(ended);
-            const cost =
-              outcome.status === "skipped" ? 0 : (outcome.costMicroUsd ?? 0);
+            const cost = Math.max(
+              0,
+              (outcome.status === "skipped" ? 0 : (outcome.costMicroUsd ?? 0)) -
+                charged,
+            );
             if (cost > 0) {
               const spent = await trx
                 .updateTable("workflow_runs")
@@ -586,6 +634,105 @@ export function createWorkflowRunsRepository(
                 .executeTakeFirstOrThrow();
               lock.run = { ...lock.run, spentMicroUsd: spent.spent_micro_usd };
             } else await lock.touch();
+          },
+          async askStep(stepRunId, ask, cost) {
+            const at = formatTimestamp(now());
+            const index = lock.steps.findIndex((step) => step.id === stepRunId);
+            const charged =
+              (index === -1 ? 0 : lock.steps[index]?.costMicroUsd) ?? 0;
+            const total = charged + cost.costMicroUsd;
+            const waiting = await trx
+              .updateTable("workflow_step_runs")
+              .set({
+                status: "waiting",
+                ask,
+                waiting_on_comment_id: null,
+                cost_micro_usd: total,
+                cost_basis: cost.costBasis,
+              })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", stepRunId)
+              .where("status", "=", "running")
+              .returningAll()
+              .executeTakeFirst();
+            if (waiting === undefined) return undefined;
+            const spent = await trx
+              .updateTable("workflow_runs")
+              .set((eb) => ({
+                status: "waiting",
+                spent_micro_usd: eb("spent_micro_usd", "+", cost.costMicroUsd),
+                updated_at: at,
+              }))
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "=", "running")
+              .returning("spent_micro_usd")
+              .executeTakeFirst();
+            if (spent === undefined)
+              throw new Error("the run is not running: its step cannot wait");
+            const step = stepFrom(waiting);
+            if (index !== -1) lock.steps[index] = step;
+            lock.run = {
+              ...lock.run,
+              status: "waiting",
+              spentMicroUsd: spent.spent_micro_usd,
+              updatedAt: at,
+            };
+            return step;
+          },
+          async resumeRun() {
+            const at = formatTimestamp(now());
+            const resumed = await trx
+              .updateTable("workflow_runs")
+              .set({ status: "running", updated_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "=", "waiting")
+              .returning("id")
+              .executeTakeFirst();
+            if (resumed === undefined) return false;
+            lock.run = { ...lock.run, status: "running", updatedAt: at };
+            return true;
+          },
+          async answerStep(stepRunId, ask) {
+            const at = formatTimestamp(now());
+            const answered = await trx
+              .updateTable("workflow_step_runs")
+              .set({ status: "running", ask, started_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", stepRunId)
+              .where("status", "=", "waiting")
+              .returningAll()
+              .executeTakeFirst();
+            if (answered === undefined) return undefined;
+            await trx
+              .updateTable("workflow_runs")
+              .set({ status: "running", updated_at: at })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", runId)
+              .where("status", "=", "waiting")
+              .execute();
+            const step = stepFrom(answered);
+            const index = lock.steps.findIndex((row) => row.id === stepRunId);
+            if (index !== -1) lock.steps[index] = step;
+            lock.run = { ...lock.run, status: "running", updatedAt: at };
+            return step;
+          },
+          async attachAnswerTurn(stepRunId, previousJobId, turn, ask) {
+            const attached = await trx
+              .updateTable("workflow_step_runs")
+              .set({ job_id: turn.jobId, turn_id: turn.turnId, ask })
+              .where("workspace_id", "=", workspaceId)
+              .where("id", "=", stepRunId)
+              .where("status", "=", "running")
+              .where("job_id", "=", previousJobId)
+              .returningAll()
+              .executeTakeFirst();
+            if (attached === undefined) return false;
+            const index = lock.steps.findIndex((step) => step.id === stepRunId);
+            if (index !== -1) lock.steps[index] = stepFrom(attached);
+            await lock.touch();
+            return true;
           },
           async finishRun(outcome) {
             const at = formatTimestamp(now());
@@ -616,7 +763,7 @@ export function createWorkflowRunsRepository(
               .set({ cancel_requested_at: at, updated_at: at })
               .where("workspace_id", "=", workspaceId)
               .where("id", "=", runId)
-              .where("status", "=", "running")
+              .where("status", "in", ["running", "waiting"])
               .where("cancel_requested_at", "is", null)
               .returning("id")
               .executeTakeFirst();
@@ -686,6 +833,17 @@ export function createWorkflowRunsRepository(
         .where("id", "=", stepRunId)
         .where("status", "=", "running")
         .where("job_id", "is", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) === 1;
+    },
+
+    async recordAskComment(stepRunId, commentId) {
+      const result = await db
+        .updateTable("workflow_step_runs")
+        .set({ waiting_on_comment_id: commentId })
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", stepRunId)
+        .where("status", "in", ["waiting", "running"])
         .executeTakeFirst();
       return Number(result.numUpdatedRows) === 1;
     },

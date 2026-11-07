@@ -418,7 +418,7 @@ function CancelControl({
   const product = useProductIdentity();
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  if (run.status !== "running") return null;
+  if (run.status !== "running" && run.status !== "waiting") return null;
   if (requested)
     return (
       <p
@@ -489,7 +489,9 @@ export function WorkflowRunDetail({
   const { data, failed, failureCode, stopped } = useLiveSnapshot({
     initial,
     fetchLatest: () => api.run(workflowId, initial.run.id),
-    isSettled: (snapshot) => snapshot.run.status !== "running",
+    // A run that waits for an answer (#920) changes when somebody answers, on this page or on the ticket: it is polled like a running one.
+    isSettled: (snapshot) =>
+      snapshot.run.status !== "running" && snapshot.run.status !== "waiting",
     activeIntervalMs: WORKFLOW_RUN_POLL_MS,
     // A run that has ended does not change any more: no more requests.
     idleIntervalMs: null,

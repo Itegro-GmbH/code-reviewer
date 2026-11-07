@@ -1405,6 +1405,11 @@ export async function buildJobInput(
             ...(implementer.resultSchema === null
               ? {}
               : { resultSchema: implementer.resultSchema }),
+            // #920: the turn may end with a question; only a Worker that named `implementer_ask` is told, any other runs it as before.
+            ...(implementer.resultSchema !== null &&
+            features.includes("implementer_ask")
+              ? { canAsk: true }
+              : {}),
             // #841: only a follow-up turn carries `resume`, and only to a Worker that reads it (the refusal above).
             ...(implementer.resume === null
               ? {}
@@ -1670,6 +1675,10 @@ async function prepareSubscription(
       ...(turn.turn.resultSchema === null
         ? {}
         : { resultSchema: turn.turn.resultSchema }),
+      ...(turn.turn.resultSchema !== null &&
+      features.includes("implementer_ask")
+        ? { canAsk: true }
+        : {}),
       ...(resume === null
         ? {}
         : {

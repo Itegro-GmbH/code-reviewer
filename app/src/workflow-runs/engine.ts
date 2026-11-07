@@ -47,6 +47,14 @@ import {
   specOf,
   type ConnectorRegistry,
 } from "./connectors.ts";
+import {
+  answerInstruction,
+  parseStepAsk,
+  resolveAnswer,
+  serializeAsk,
+  type AnswerInput,
+  type StepAsk,
+} from "./ask.ts";
 import { conditionHolds } from "./conditions.ts";
 import { readStoredInput } from "./ticket.ts";
 import {
@@ -110,6 +118,12 @@ export type EngineDependencies = {
     findByRequest(clientRequestId: string): Promise<RequestedTurn | undefined>;
   };
   connectors: ConnectorRegistry;
+  /**
+   * #920: where a question of an agent goes and how an answer is acknowledged (the ticket or the pull request of the run). Left out: the
+   * question is shown on the run page only. Every call is made after the run's lock is released and a failure of one is logged and
+   * nothing more: the question is stored with the step, whatever happens to its comment.
+   */
+  asks?: AskChannel;
   /** The full name of the repository of a run, for the call of an action. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   now?: () => Date;
@@ -119,6 +133,35 @@ export type EngineDependencies = {
   log?: (line: string) => void;
 };
 
+/** What the engine asks of the place a question is shown (#920); the implementation is the GitHub one (`ask-channel.ts`). */
+export type AskChannel = {
+  /**
+   * The step began to wait: puts the question where people can answer it. Returns the id of the comment that carries it, or undefined when
+   * the run has no ticket or pull request to put it on.
+   */
+  asked(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<{ commentId: string } | undefined>;
+  /** The question was answered: marks its comment as answered and puts the labels back. */
+  answered(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<void>;
+};
+
+/** What `answer` came to. A refusal names why; the question stays open. */
+export type AnswerResult =
+  | { outcome: "answered"; step: StoredStepRun; ask: StepAsk }
+  /** The run does not wait for an answer (it never did, it was answered before, or it was asked to stop). */
+  | { outcome: "not_waiting" }
+  | {
+      outcome: "refused";
+      code: "answer_empty" | "answer_too_long" | "option_unknown";
+    };
+
 export type WorkflowEngine = {
   /** Takes the run as far as it can go: writes and does the next steps until it waits for a job, or is over. Idempotent. */
   advance(runId: string): Promise<void>;
@@ -127,6 +170,14 @@ export type WorkflowEngine = {
    * that ended the turn must not fail or slow down because of the engine.
    */
   jobEnded(jobId: string): Promise<void>;
+  /**
+   * #920: answers the question the run waits for. Under the lock of the run: of two answers one wins, the other finds the question
+   * answered. The step and the run are `running` again afterwards; the caller kicks `advance`, which starts the turn that goes on.
+   */
+  answer(
+    runId: string,
+    input: AnswerInput & { by: string | null; via: "comment" | "ui" },
+  ): Promise<AnswerResult>;
 };
 
 type Resolved = { name: string; version: number } | undefined;
@@ -152,6 +203,10 @@ type Prefetched = {
 
 type Decision =
   | { kind: "done" }
+  /** #920: the turn of this step ended with a question; the step and the run wait, and the question is shown after the lock is released. */
+  | { kind: "asked"; stepRun: StoredStepRun }
+  /** #920: a question was answered; the turn that goes on is started after the lock is released. */
+  | { kind: "resume"; stepRun: StoredStepRun }
   | { kind: "again" }
   | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean }
   /** #891: the run was asked to stop and the turn of this step still runs: its job is asked to stop, after the lock is released. */
@@ -309,6 +364,10 @@ function machineStepsOf(steps: readonly StoredStepRun[]): MachineStep[] {
       errorCode: step.errorCode,
       errorMessage: step.errorMessage,
       ...(taken === undefined ? {} : { taken }),
+      ...(step.status === "running" &&
+      parseStepAsk(step.ask)?.state === "answered"
+        ? { answerPending: true }
+        : {}),
     };
   });
 }
@@ -499,6 +558,23 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       log(
         `[workflow-runs] cost not reported run=${step.runId} step=${step.stepId} charged=${outcome.costBasis}`,
       );
+    if (outcome.ok && "asked" in outcome) {
+      const previous = parseStepAsk(step.ask);
+      const ask: StepAsk = {
+        ...outcome.asked,
+        n: (previous?.n ?? 0) + 1,
+        state: "open",
+      };
+      const waiting = await lock.askStep(step.id, serializeAsk(ask), {
+        costMicroUsd: cost,
+        costBasis: outcome.costBasis,
+      });
+      if (waiting === undefined) return "waiting";
+      log(
+        `[workflow-runs] run waiting run=${step.runId} step=${step.stepId} question=${String(ask.n)}`,
+      );
+      return { kind: "asked", stepRun: waiting };
+    }
     await lock.finishStep(
       step.id,
       outcome.ok
@@ -545,7 +621,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     };
     try {
       const run = await deps.runs.getRun(runId);
-      if (run === undefined || run.status !== "running") return pre;
+      if (
+        run === undefined ||
+        (run.status !== "running" && run.status !== "waiting")
+      )
+        return pre;
       const document = await documentOf(run);
       pre.document = { value: document };
       if (document === undefined) return pre;
@@ -584,7 +664,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
 
   async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
-    if (run.status !== "running") return { kind: "done" };
+    // #920: a run that waits for an answer does nothing, unless somebody asked it to stop.
+    if (
+      run.status !== "running" &&
+      !(run.status === "waiting" && run.cancelRequestedAt !== null)
+    )
+      return { kind: "done" };
     if (pre.document === undefined)
       return {
         kind: "fetch",
@@ -741,6 +826,26 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         const ended = await endAgentStep(lock, stepRun, pre);
         if (typeof ended === "object") return ended;
         return ended === "ended" ? { kind: "again" } : { kind: "done" };
+      }
+      case "resume_turn": {
+        const stepRun = lock.steps[move.position];
+        return stepRun === undefined
+          ? { kind: "done" }
+          : { kind: "resume", stepRun };
+      }
+      case "cancel_waiting": {
+        const stepRun = lock.steps[move.position];
+        if (stepRun === undefined) return { kind: "done" };
+        // The run waits for nobody now: the step ends cancelled and the run is `running` again for the one move that ends it.
+        await lock.finishStep(
+          stepRun.id,
+          failed(
+            "cancelled",
+            "The run was cancelled while the step waited for an answer.",
+          ),
+        );
+        await lock.resumeRun();
+        return { kind: "again" };
       }
       case "cancel_job": {
         const stepRun = lock.steps[move.position];
@@ -1304,6 +1409,166 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return deps.turns.findByRequest(requestIdOf(run, step));
   }
 
+  /** Shows the question of a step that began to wait where people can answer it. A failure is logged: the question is stored with the step. */
+  async function announce(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    const ask = parseStepAsk(step.ask);
+    if (deps.asks === undefined || ask === undefined) return;
+    try {
+      const posted = await deps.asks.asked(run, step, ask);
+      if (posted !== undefined)
+        await deps.runs.recordAskComment(step.id, posted.commentId);
+    } catch {
+      log(`[workflow-runs] ASK_NOT_SHOWN run=${run.id} step=${step.stepId}`);
+    }
+  }
+
+  /** Ends a step that has a job (so `settleOwnStep` is not for it) under the lock of the run. */
+  async function failStep(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    outcome: StepOutcome,
+  ): Promise<void> {
+    await deps.runs.lockRun(run.id, (lock) =>
+      lock.finishStep(step.id, outcome),
+    );
+  }
+
+  /**
+   * #920: starts the turn that goes on after an answer: the next turn of the session the step's last turn ran in, with the question and the
+   * answer as its instruction, under a request id of its own (`wf-<run>-<position>-q<n>`), so that starting it twice makes one turn. The
+   * step takes its job; the earlier one is over.
+   */
+  async function resumeAgent(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    const ask = parseStepAsk(step.ask);
+    if (
+      ask === undefined ||
+      ask.state !== "answered" ||
+      ask.answer === undefined ||
+      step.jobId === null
+    ) {
+      await failStep(
+        run,
+        step,
+        failed("turn_unreadable", "The question of this step cannot be read."),
+      );
+      return;
+    }
+    const previousJobId = step.jobId;
+    const read = await deps.turns.read(previousJobId);
+    if (read?.ended === undefined) {
+      await failStep(
+        run,
+        step,
+        failed(
+          "turn_unreadable",
+          "The session of the step to go on with cannot be read.",
+        ),
+      );
+      return;
+    }
+    const current = await deps.runs.getRun(run.id);
+    const left =
+      current === undefined
+        ? 0
+        : Math.max(0, current.budgetMicroUsd - current.spentMicroUsd);
+    if (left < MICRO_USD_PER_CENT) {
+      await failStep(
+        run,
+        step,
+        failed(
+          "budget_exhausted",
+          "The budget of the workflow cannot pay for the turn that goes on after the answer.",
+        ),
+      );
+      return;
+    }
+    const owner = await sessionOwner(run);
+    if ("missing" in owner) {
+      await failStep(
+        run,
+        step,
+        failed("agent_start_failed", ownerMissingText(owner)),
+      );
+      return;
+    }
+    const requestId = `${requestIdOf(run, step)}-q${String(ask.n)}`;
+    let jobId: string;
+    try {
+      const continued = await deps.implementer.continueSession(
+        owner,
+        read.ended.session.id,
+        {
+          instruction: answerInstruction(ask, ask.answer),
+          clientRequestId: requestId,
+          costLimitCents: Math.max(
+            1,
+            Math.min(
+              capCents(left),
+              read.ended.turn.costLimitCents ?? Number.MAX_SAFE_INTEGER,
+            ),
+          ),
+        },
+      );
+      // Nobody else queues in this session while the run waits; if the Implementer says otherwise, the next look asks again.
+      if (continued.runId === null) return;
+      jobId = continued.runId;
+    } catch (error) {
+      if (!(error instanceof ImplementerError)) throw error;
+      if (error.code === "IMPLEMENTER_SESSION_BUSY") {
+        const existing = await deps.turns.findByRequest(requestId);
+        if (existing === undefined) return;
+        jobId = existing.jobId;
+      } else {
+        const existing = await deps.turns.findByRequest(requestId);
+        if (existing === undefined) {
+          log(
+            `[workflow-runs] STEP_RESUME_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
+          );
+          await failStep(
+            run,
+            step,
+            failed("agent_start_failed", "The agent could not be started."),
+          );
+          return;
+        }
+        jobId = existing.jobId;
+      }
+    }
+    const turn = await deps.turns.read(jobId);
+    const attached = await deps.runs.lockRun(run.id, (lock) =>
+      lock.attachAnswerTurn(
+        step.id,
+        previousJobId,
+        { jobId, turnId: turn?.turnId ?? null },
+        serializeAsk({ ...ask, state: "resumed" }),
+      ),
+    );
+    if (attached !== true) {
+      log(
+        `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${jobId}`,
+      );
+      await deps.jobs.requestCancel(jobId);
+      return;
+    }
+    const latest = await deps.runs.getRun(run.id);
+    if (
+      latest === undefined ||
+      latest.cancelRequestedAt !== null ||
+      latest.status !== "running"
+    ) {
+      await deps.jobs.requestCancel(jobId);
+      log(
+        `[workflow-runs] STEP_TURN_CANCELLED run=${run.id} step=${step.stepId} job=${jobId}`,
+      );
+    }
+  }
+
   async function advance(runId: string): Promise<void> {
     for (let moves = 0; moves < MOVES_PER_CALL_MAX; moves += 1) {
       let latest: StoredWorkflowRun | undefined;
@@ -1325,6 +1590,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         await decision.read(pre);
       }
       if (decision === undefined || decision.kind === "done") return;
+      if (decision.kind === "asked") {
+        // A stop was asked for meanwhile: nobody is asked, and the next move ends the step.
+        if (latest?.cancelRequestedAt != null) continue;
+        // The run waits for as long as it takes: nothing else to do until the answer comes.
+        if (latest !== undefined) await announce(latest, decision.stepRun);
+        return;
+      }
+      if (decision.kind === "resume") {
+        if (latest !== undefined) await resumeAgent(latest, decision.stepRun);
+        continue;
+      }
       if (decision.kind === "cancel_job") {
         // Outside the lock: the queue takes its own. A turn that was waiting ends at once and the run goes on; one that runs is told by its
         // next heartbeat, and its end reaches the engine like any end of a turn.
@@ -1344,8 +1620,62 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  async function answer(
+    runId: string,
+    input: AnswerInput & { by: string | null; via: "comment" | "ui" },
+  ): Promise<AnswerResult> {
+    const done = await deps.runs.lockRun(
+      runId,
+      async (lock): Promise<AnswerResult & { run?: StoredWorkflowRun }> => {
+        if (
+          lock.run.status !== "waiting" ||
+          lock.run.cancelRequestedAt !== null
+        )
+          return { outcome: "not_waiting" };
+        const waiting = lock.steps.findLast(
+          (step) => step.status === "waiting",
+        );
+        const ask = parseStepAsk(waiting?.ask ?? null);
+        if (waiting === undefined || ask === undefined || ask.state !== "open")
+          return { outcome: "not_waiting" };
+        const resolved = resolveAnswer(ask, input);
+        if (!resolved.ok) return { outcome: "refused", code: resolved.code };
+        const answered: StepAsk = {
+          ...ask,
+          state: "answered",
+          answer: {
+            text: resolved.text,
+            ...(resolved.choice === undefined
+              ? {}
+              : { choice: resolved.choice }),
+            by: input.by,
+            via: input.via,
+            at: now().toISOString(),
+          },
+        };
+        const step = await lock.answerStep(waiting.id, serializeAsk(answered));
+        if (step === undefined) return { outcome: "not_waiting" };
+        return { outcome: "answered", step, ask: answered, run: lock.run };
+      },
+    );
+    if (done === undefined) return { outcome: "not_waiting" };
+    if (done.outcome === "answered" && done.run !== undefined && deps.asks) {
+      try {
+        await deps.asks.answered(done.run, done.step, done.ask);
+      } catch {
+        log(
+          `[workflow-runs] ASK_NOT_ACKNOWLEDGED run=${runId} step=${done.step.stepId}`,
+        );
+      }
+    }
+    return done.outcome === "answered"
+      ? { outcome: "answered", step: done.step, ask: done.ask }
+      : done;
+  }
+
   return {
     advance,
+    answer,
     async jobEnded(jobId) {
       try {
         const step = await deps.runs.findStepByJob(jobId);

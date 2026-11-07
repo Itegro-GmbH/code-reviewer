@@ -32,6 +32,48 @@ const result = (
   ...overrides,
 });
 
+describe("a turn that ended with a question (#920)", () => {
+  const asking = (): RunnerResult => {
+    const given = result();
+    return {
+      ...given,
+      implementer: {
+        ...(given.implementer as NonNullable<RunnerResult["implementer"]>),
+        agentAsk: { question: "Retry which failures?" },
+      },
+    };
+  };
+
+  // #920-T10
+  it("is a success without a result: the turn of a schema that asks is not a no_result, and the report is untouched", async () => {
+    const asked = vi.fn(() => Promise.resolve(true));
+    const given = asking();
+
+    expect(await withAgentResultOrNoResult(given, asked)).toBe(given);
+    expect(asked).not.toHaveBeenCalled();
+  });
+
+  // #920-T10
+  it("does not excuse a result that is over its bounds: the result goes and the question stays", async () => {
+    const given = result({ big: "x".repeat(300_000) });
+    const withBoth: RunnerResult = {
+      ...given,
+      implementer: {
+        ...(given.implementer as NonNullable<RunnerResult["implementer"]>),
+        agentAsk: { question: "q" },
+      },
+    };
+
+    const made = await withAgentResultOrNoResult(withBoth, () =>
+      Promise.resolve(true),
+    );
+
+    expect(made.implementer).not.toHaveProperty("agentResult");
+    expect(made.implementer).toHaveProperty("agentAsk");
+    expect(made).toMatchObject({ ok: true });
+  });
+});
+
 describe("the result of the agent at the completion of a turn (#843)", () => {
   // #843-T131
   it("leaves a result within the bounds alone and does not ask for the schema", async () => {

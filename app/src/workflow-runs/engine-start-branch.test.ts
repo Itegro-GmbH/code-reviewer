@@ -58,6 +58,8 @@ function stepRow(overrides: Partial<StoredStepRun>): StoredStepRun {
     output: JSON.stringify({ branch: IMPLEMENT_BRANCH }),
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     startedAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     finishedAt: null,

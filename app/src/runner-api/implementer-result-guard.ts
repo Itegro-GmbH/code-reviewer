@@ -30,6 +30,9 @@ export async function withAgentResultOrNoResult(
     delete rest.agentResult;
     kept = { ...result, implementer: rest };
   }
+  // #920: a turn that ended with a question is a success without a result; the engine asks the person, and the answer starts the next
+  // turn. The question was held to its bounds when the request was read.
+  if (kept.implementer?.agentAsk !== undefined) return kept;
   if (kept.errorCode !== null || !(await hasSchema())) return kept;
   return {
     ...kept,

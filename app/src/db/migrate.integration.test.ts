@@ -146,6 +146,7 @@ describe("the migrations of both epics", () => {
       "20261106012000_add_usage_record_cost_basis",
       "20261106130000_add_implementer_session_start_branch",
       "20261107110000_add_workflow_run_trigger_id",
+      "20261107170000_add_workflow_run_waiting",
     ]);
   });
 

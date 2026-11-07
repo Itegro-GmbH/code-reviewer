@@ -15,15 +15,20 @@ import pytest
 
 from code_reviewer_runner.implementer import finish_tool
 from code_reviewer_runner.implementer.finish_tool import (
+    MAX_ASK_BYTES,
     MAX_RESULT_BYTES,
+    ask_possible,
+    check_ask,
     check_schema,
     check_value,
     handle_message,
+    parse_ask,
     parse_result,
     problem_sentence,
     scan_bounds,
     serve,
     submit,
+    submit_ask,
     tool_definition,
 )
 
@@ -470,3 +475,160 @@ def test_the_mcp_mode_of_the_command_speaks_over_standard_input_and_output(tmp_p
     assert answers[2]["result"]["isError"] is True
     assert answers[3]["result"]["isError"] is False
     assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == RIGHT
+
+
+# -- #920: the question ------------------------------------------------------------------------
+
+ASK = {
+    "question": "Retry which failures?",
+    "options": ["Network", "Network and 5xx"],
+    "context": "x",
+}
+
+
+def run_asking(
+    tmp_path: Path, stdin: bytes, *arguments: str, enabled: bool = True
+) -> subprocess.CompletedProcess[bytes]:
+    schema_file = tmp_path / "schema.json"
+    schema_file.write_text(json.dumps(FINDINGS), encoding="utf-8")
+    marker = tmp_path / "ask-enabled"
+    if enabled:
+        marker.write_text("1\n", encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, "-I", finish_tool.__file__, *arguments],
+        input=stdin,
+        capture_output=True,
+        timeout=30,
+        env={
+            "FACTORY_RESULT_SCHEMA": str(schema_file),
+            "FACTORY_RESULT_FILE": str(tmp_path / "result.json"),
+            "FACTORY_ASK_FILE": str(tmp_path / "ask.json"),
+            "FACTORY_ASK_ENABLED_FILE": str(marker),
+        },
+        check=False,
+    )
+
+
+# #920-T10
+def test_a_question_that_fits_is_checked_and_kept_as_data() -> None:
+    parsed = parse_ask(json.dumps(ASK).encode())
+
+    assert parsed.value == ASK and parsed.problem is None
+
+
+# #920-T11
+def test_a_question_is_a_closed_object_with_bounds() -> None:
+    assert check_ask({"question": "ok"}) == []
+    codes = {(i.path, i.code) for i in check_ask({"question": " ", "options": ["a"] * 11, "x": 1})}
+    assert codes == {
+        ("/question", "limit_exceeded"),
+        ("/options", "limit_exceeded"),
+        ("/x", "unknown_field"),
+    }
+    assert [i.path for i in check_ask({"question": "q", "options": [3]})] == ["/options/0"]
+    assert parse_ask(b"x" * (MAX_ASK_BYTES + 1)).problem == "too_large"
+    assert parse_ask(b"[").problem == "not_json"
+
+
+# #920-T12
+def test_a_question_without_options_or_context_keeps_neither() -> None:
+    parsed = parse_ask(json.dumps({"question": "q", "options": [], "context": "  "}).encode())
+
+    assert parsed.value == {"question": "q"}
+
+
+# #920-T13
+def test_the_command_records_a_question_with_ask_and_takes_a_result_away(tmp_path: Path) -> None:
+    run_asking(tmp_path, json.dumps(RIGHT).encode())
+    assert (tmp_path / "result.json").exists()
+
+    asked = run_asking(tmp_path, json.dumps(ASK).encode(), "--ask")
+
+    assert asked.returncode == 0 and b"Question recorded" in asked.stdout
+    assert json.loads((tmp_path / "ask.json").read_text(encoding="utf-8")) == ASK
+    assert not (tmp_path / "result.json").exists(), "the last call wins"
+
+    run_asking(tmp_path, json.dumps(RIGHT).encode())
+    assert (tmp_path / "result.json").exists() and not (tmp_path / "ask.json").exists()
+
+
+# #920-T14
+def test_the_command_refuses_ask_for_a_turn_that_may_not_ask_and_a_wrong_question(
+    tmp_path: Path,
+) -> None:
+    refused = run_asking(tmp_path, json.dumps(ASK).encode(), "--ask", enabled=False)
+    assert refused.returncode == 2 and b"does not allow questions" in refused.stderr
+
+    wrong = run_asking(tmp_path, b'{"question": ""}', "--ask")
+    assert wrong.returncode == 2 and b"/question" in wrong.stderr
+    assert not (tmp_path / "ask.json").exists()
+
+
+# #920-T15
+def test_ask_is_offered_only_when_enabled_and_the_schema_has_no_field_of_that_name() -> None:
+    assert ask_possible(FINDINGS, enabled=True)
+    assert not ask_possible(FINDINGS, enabled=False)
+    own = {"type": "object", "properties": {"ask": {"type": "string"}}}
+    assert not ask_possible(own, enabled=True)
+
+
+# #920-T16
+def test_the_tool_has_an_ask_property_and_no_required_fields_when_it_may_ask() -> None:
+    plain = tool_definition(FINDINGS)
+    asking = tool_definition(FINDINGS, can_ask=True)
+
+    assert "ask" not in plain["inputSchema"]["properties"] and "required" in plain["inputSchema"]
+    parameters = asking["inputSchema"]
+    assert "ask" in parameters["properties"] and "required" not in parameters
+    assert parameters["properties"]["ask"]["required"] == ["question"]
+    assert "ask" in asking["description"]
+
+
+# #920-T17
+def test_the_mcp_tool_takes_a_question_alone_and_refuses_it_beside_a_result(
+    tmp_path: Path,
+) -> None:
+    result_path, ask_path = str(tmp_path / "result.json"), str(tmp_path / "ask.json")
+
+    def call(arguments: Any) -> dict[str, Any]:
+        answer = handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "submit_result", "arguments": arguments},
+            },
+            FINDINGS,
+            result_path,
+            ask_path,
+        )
+        assert answer is not None
+        return answer["result"]
+
+    mixed = call({"ask": ASK, **RIGHT})
+    assert mixed["isError"] is True and not (tmp_path / "ask.json").exists()
+    wrong = call({"ask": {"question": ""}})
+    assert wrong["isError"] is True and "/question" in wrong["content"][0]["text"]
+    asked = call({"ask": ASK})
+    assert asked["isError"] is False
+    assert json.loads((tmp_path / "ask.json").read_text(encoding="utf-8")) == ASK
+    assert call(RIGHT)["isError"] is False and not (tmp_path / "ask.json").exists()
+
+
+# #920-T18
+def test_without_ask_the_mcp_tool_treats_an_ask_property_as_an_unknown_field(
+    tmp_path: Path,
+) -> None:
+    answer = handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "submit_result", "arguments": {"ask": ASK}},
+        },
+        FINDINGS,
+        str(tmp_path / "result.json"),
+    )
+
+    assert answer is not None and answer["result"]["isError"] is True
+    assert submit_ask(b"{}", str(tmp_path / "ask.json"), str(tmp_path / "r.json"))[0] is False

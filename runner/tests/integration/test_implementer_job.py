@@ -112,6 +112,7 @@ def job_text(
     profile: dict[str, Any] | None = None,
     resume: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
+    can_ask: bool = False,
 ) -> str:
     document: dict[str, Any] = json.loads(EXAMPLE.read_text(encoding="utf-8"))
     if profile is not None:
@@ -120,6 +121,8 @@ def job_text(
         document["implementer"]["resume"] = resume
     if result_schema is not None:
         document["implementer"]["resultSchema"] = result_schema
+    if can_ask:
+        document["implementer"]["canAsk"] = True
     document["git"]["token"] = TOKEN
     document["llm"]["apiKey"] = KEY
     if cost_limit:
@@ -310,12 +313,24 @@ class FakeResults:
     Each read takes the next of `files` (the last one stays), and counts."""
 
     files: list[bytes | None] = field(default_factory=lambda: [None])
+    # #920: the question file, read the same way.
+    ask_files: list[bytes | None] = field(default_factory=lambda: [None])
     calls: list[int] = field(default_factory=lambda: [])
     # The events of the turn (`play` shares its list), so a read has its place in the order.
     events: list[str] = field(default_factory=lambda: [])
 
     def write(self, *files: bytes | None) -> None:
         self.files = list(files)
+
+    def write_ask(self, *files: bytes | None) -> None:
+        self.ask_files = list(files)
+
+    def read_ask(self, max_bytes: int) -> bytes | None:
+        self.events.append("read_ask")
+        current = self.ask_files[0]
+        if len(self.ask_files) > 1:
+            self.ask_files.pop(0)
+        return current
 
     def read_result(self, max_bytes: int) -> bytes | None:
         self.calls.append(max_bytes)
@@ -517,6 +532,7 @@ def play(
         resume_outcome: ResumeOutcome | None = None,
         result_schema: dict[str, Any] | None = None,
         results: "FakeResults | None" = None,
+        can_ask: bool = False,
     ) -> Turn:
         events: list[str] = []
         removals: list[tuple[str, ...]] = []
@@ -597,6 +613,7 @@ def play(
                     profile=profile,
                     resume=resume,
                     result_schema=result_schema,
+                    can_ask=can_ask,
                 )
             ),
             stdout=output,
@@ -2527,3 +2544,141 @@ def test_a_follow_up_job_with_the_old_fields_only_is_still_a_follow_up_without_a
         "mode": "summary_only",
         "reason": "no_snapshot",
     }
+
+
+# -- #920: a turn ends with a result or with a question -------------------------------------
+
+QUESTION = json.dumps(
+    {
+        "question": "Which failures should be retried?",
+        "options": ["Network errors only", "Network errors and 5xx answers"],
+        "context": "client.ts tells the two apart.",
+    }
+).encode()
+
+
+def asks(results: FakeResults, when: int, *files: bytes | None) -> Callable[..., str]:
+    """A turn whose agent commits and hands in the question `files` during its `when`th message."""
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        if len(agent.texts) - 1 == when:
+            results.write_ask(*files)
+        return commits_then_ends()(agent, check)
+
+    return script
+
+
+# #920-T01
+def test_a_turn_that_ends_with_ask_reports_the_question_and_succeeds_without_a_result(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(
+        asks(results, 0, QUESTION), result_schema=RESULT_SCHEMA, results=results, can_ask=True
+    )
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    assert valid_result(result)
+    block = result["implementer"]
+    assert block["agentAsk"] == json.loads(QUESTION)
+    assert "agentResult" not in block
+    assert turn.agent is not None and len(turn.agent.texts) == 1, (
+        "no reminder: the question was there"
+    )
+    # The sandbox ends like after a result, and what the agent committed is pushed all the same.
+    assert turn.git.pushes == [TIP]
+    assert "the turn ended with a question" in result["logTail"]
+
+
+# #920-T02
+def test_the_agent_of_a_turn_that_may_ask_gets_the_marker_and_the_words_about_ask(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(
+        asks(results, 0, QUESTION), result_schema=RESULT_SCHEMA, results=results, can_ask=True
+    )
+
+    assert turn.agent is not None
+    options = turn.agent.options
+    assert set(options["files"]) == {"factory-submit", "result-schema.json", "ask-enabled"}
+    _, text = options["instructions"]
+    assert "`factory-submit --ask`" in text
+
+
+# #920-T03
+def test_a_turn_that_may_not_ask_has_neither_the_marker_nor_the_words_and_ignores_a_question(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(asks(results, 0, QUESTION), result_schema=RESULT_SCHEMA, results=results)
+
+    assert turn.agent is not None
+    assert "ask-enabled" not in turn.agent.options["files"]
+    _, text = turn.agent.options["instructions"]
+    assert "--ask" not in text
+    assert turn.result["errorCode"] == "no_result" and "agentAsk" not in turn.result["implementer"]
+
+
+# #920-T04
+def test_a_question_that_does_not_fit_is_no_question_and_the_turn_ends_no_result(
+    play: Any,
+) -> None:
+    results = FakeResults()
+    wrong = json.dumps({"question": "", "answer": "x"}).encode()
+
+    turn = play(asks(results, 0, wrong), result_schema=RESULT_SCHEMA, results=results, can_ask=True)
+
+    assert turn.result["errorCode"] == "no_result"
+    assert "agentAsk" not in turn.result["implementer"]
+    assert turn.agent is not None and len(turn.agent.texts) == 2, "one reminder and no more"
+
+
+# #920-T05
+def test_a_result_that_fits_wins_over_a_question_and_the_job_secrets_are_taken_out_of_both(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        results.write(RIGHT_RESULT)
+        results.write_ask(QUESTION)
+        return commits_then_ends()(agent, check)
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results, can_ask=True)
+
+    block = turn.result["implementer"]
+    assert block["agentResult"] == json.loads(RIGHT_RESULT)
+    assert "agentAsk" not in block
+
+
+# #920-T06
+def test_a_question_has_the_secrets_of_the_job_taken_out(play: Any) -> None:
+    results = FakeResults()
+    leaking = json.dumps({"question": f"Is {TOKEN} right?"}).encode()
+
+    turn = play(
+        asks(results, 0, leaking), result_schema=RESULT_SCHEMA, results=results, can_ask=True
+    )
+
+    block = turn.result["implementer"]
+    assert TOKEN not in json.dumps(block)
+    assert "agentAsk" in block
+
+
+def test_can_ask_needs_a_result_schema_and_a_boolean() -> None:
+    from code_reviewer_runner.job import parse_implementer_input
+
+    document = json.loads(job_text(can_ask=True))
+    with pytest.raises(JobError):
+        parse_implementer_input(json.dumps(document))
+    document["implementer"]["resultSchema"] = RESULT_SCHEMA
+    document["implementer"]["canAsk"] = "yes"
+    with pytest.raises(JobError):
+        parse_implementer_input(json.dumps(document))
+    document["implementer"]["canAsk"] = True
+    assert parse_implementer_input(json.dumps(document)).implementer.can_ask is True

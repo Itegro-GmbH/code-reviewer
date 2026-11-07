@@ -101,6 +101,8 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
   const integrations = createIntegrationsRepository(db, workspaceId);
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
+    // #920: the engine that takes an answer from the page of the run.
+    engine: workflowEngineFor(workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();

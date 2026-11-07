@@ -1916,3 +1916,103 @@ describe("the result of a turn (#843)", () => {
     expect(turn.result_value).toBeNull();
   });
 });
+
+// #920: a turn that may end with a question. `implementer.canAsk` travels only with a result schema and only to a Worker that names the
+// feature that reads it; a turn that ends with a question succeeds, keeps no result and is not `no_result`.
+describe("a turn that ends with a question (#920)", () => {
+  const WITH_ASK = `${WORKER_FEATURES},implementer_result,implementer_ask`;
+  const WITHOUT_ASK = `${WORKER_FEATURES},implementer_result`;
+  const SCHEMA = {
+    type: "object" as const,
+    required: ["summary"],
+    properties: { summary: { type: "string" as const } },
+  };
+  const QUESTION = {
+    question: "Retry which failures?",
+    options: ["Network errors", "Network errors and 5xx answers"],
+  };
+
+  // #920-T80
+  it("tells a Worker that names the feature that the turn may ask, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA });
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(contract.check("RunnerJobInput", input).valid).toBe(true);
+    expect(input).toMatchObject({
+      implementer: { resultSchema: SCHEMA, canAsk: true },
+    });
+  });
+
+  // #920-T81
+  it("does not tell any other Worker, and does not refuse the turn: it runs as before", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA });
+
+    const { input } = await fetched(h, WITHOUT_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+    expect(input).toMatchObject({ implementer: { resultSchema: SCHEMA } });
+  });
+
+  // #920-T82
+  it("carries no canAsk for a turn without a result schema, whatever the Worker names", async () => {
+    const h = await start();
+    await h.turn();
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+  });
+
+  // #920-T83
+  it("completes with the question: a success, the question in the stored report, no result kept", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const { credential } = await fetched(h, WITH_ASK);
+
+    const response = await h.worker.result(
+      jobId,
+      credential,
+      turnResult({
+        implementer: { ...TURN_BLOCK, agentAsk: QUESTION } as never,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const job = await h.queue.get(jobId);
+    expect(job).toMatchObject({ status: "succeeded", errorCode: null });
+    expect(job?.result).toMatchObject({
+      implementer: { agentAsk: QUESTION },
+    });
+    const turn = await h.db
+      .selectFrom("implementer_turns")
+      .select(["result_value"])
+      .executeTakeFirstOrThrow();
+    expect(turn.result_value).toBeNull();
+  });
+
+  // #920-T84
+  it("leaves out a question that is over its bounds, and then the turn has neither: no_result", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const { credential } = await fetched(h, WITH_ASK);
+
+    await h.worker.result(
+      jobId,
+      credential,
+      turnResult({
+        implementer: {
+          ...TURN_BLOCK,
+          agentAsk: { question: "q".repeat(2001) },
+        } as never,
+      }),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "no_result",
+    });
+  });
+});
