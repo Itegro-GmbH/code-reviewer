@@ -205,6 +205,7 @@ describe("the round trip", () => {
     const fake = fakeBuilderApi(3);
     const api: BuilderApi = {
       validate: fake.api.validate,
+      scope: fake.api.scope,
       save: () =>
         Promise.resolve({
           ok: false,
@@ -336,6 +337,7 @@ describe("validation on every change", () => {
   // #926-T62
   it("says when the validator cannot be asked, and does not save", async () => {
     const api: BuilderApi = {
+      scope: fakeBuilderApi(3).api.scope,
       validate: () =>
         Promise.resolve({
           ok: false,
@@ -416,6 +418,7 @@ describe("saving and checking", () => {
     let calls = 0;
     const api: BuilderApi = {
       validate: fake.api.validate,
+      scope: fake.api.scope,
       save: (workflowId, document, expectedVersion) => {
         calls += 1;
         return new Promise((resolve) => {
@@ -502,5 +505,101 @@ describe("focus", () => {
         { level: 2 },
       ),
     );
+  });
+});
+
+describe("variables in the builder (#927)", () => {
+  // #927-T70
+  it("saves exactly what was typed or picked: the {{…}} text, never a rewritten form", async () => {
+    const { card, saved, scope } = open();
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/1/body/1"));
+    const field = screen.getByLabelText("Instruction") as HTMLTextAreaElement;
+    fireEvent.change(field, {
+      target: {
+        value: "Check {{ implement.summary }} and {{trigger.ticket.url}}: ",
+      },
+    });
+    field.setSelectionRange(field.value.length, field.value.length);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Insert a value into Instruction" }),
+    );
+    await screen.findByRole("listbox", { name: "Values" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Search values" }), {
+      target: { value: "ticket.title" },
+    });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search values" }), {
+      key: "Enter",
+    });
+    const typed =
+      "Check {{ implement.summary }} and {{trigger.ticket.url}}: {{trigger.ticket.title}}";
+    expect(field.value).toBe(typed);
+    expect(scope).toHaveBeenCalledWith(
+      expect.objectContaining({ version: 1 }),
+      { at: "/steps/1/body/1/instruction" },
+      "wf-1",
+      expect.any(AbortSignal),
+    );
+    const save = screen.getByRole("button", {
+      name: "Save as v4",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await screen.findByText("Saved.");
+    const body = saved[0] as Doc;
+    expect(getAt(body, "/steps/1/body/1/instruction")).toBe(typed);
+  });
+
+  // #927-T71
+  it("asks the scope route about the document as it stands, not as it was saved", async () => {
+    const { card, scope } = open();
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/0"));
+    fireEvent.change(screen.getByLabelText("Id"), {
+      target: { value: "begin" },
+    });
+    fireEvent.click(card("/steps/2"));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Insert a value into When operand 2",
+      }),
+    );
+    await screen.findByRole("listbox", { name: "Values" });
+    const asked = scope.mock.calls.at(-1)?.[0] as Doc;
+    expect(getAt(asked, "/steps/0/id")).toBe("begin");
+  });
+});
+
+describe("selection and focus after a removal (#938 leftover)", () => {
+  // #927-T72
+  it("selects the previous step and puts focus on its card, so both agree", async () => {
+    const { card } = open();
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/1"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove step" }));
+    expect(card("/steps/0").getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(card("/steps/0"));
+  });
+});
+
+describe("what the screen reader is told (#938 leftover)", () => {
+  // #927-T73
+  it("announces the result of a check and not that it is checking", async () => {
+    const { card } = open();
+    const live = () =>
+      document.querySelector("[role=status].sr-only") as HTMLElement;
+    await waitFor(() => expect(live().textContent).toMatch(/valid, 10 steps/));
+    const first = live().textContent;
+    fireEvent.click(card("/steps/0"));
+    fireEvent.change(screen.getByLabelText("Id"), {
+      target: { value: "begin" },
+    });
+    expect(screen.getByText("Checking…")).toBeTruthy();
+    expect(live().textContent).toBe(first);
+    expect(live().textContent).not.toMatch(/Checking/);
+    await screen.findByText(/^Valid/);
+    expect(
+      document.querySelector("[data-slot=validity] [role=status]"),
+    ).toBeNull();
   });
 });

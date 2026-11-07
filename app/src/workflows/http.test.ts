@@ -45,6 +45,10 @@ function setup(overrides: Partial<WorkflowService> = {}) {
       calls.push(`validate ${JSON.stringify(body)}`),
       { valid: true, errors: [], truncated: false, steps: 1, budgetUsd: 20 }
     ),
+    scope: async (body) => (
+      calls.push(`scope ${JSON.stringify(body)}`),
+      { at: "/steps/0", entries: [], truncated: false, sampled: false }
+    ),
     list: async (projectId) => (
       calls.push(`list ${projectId}`),
       { workflows: [VIEW], maximum: 100 }
@@ -92,6 +96,28 @@ describe("the workflow handlers", () => {
     await handlers.archive(new Request(url, { method: "DELETE" }), "wf-1");
 
     expect(requireUser).toHaveBeenCalledTimes(6);
+  });
+
+  // #927-T20
+  it("answers the scope lookup with no-store, after the user, and refuses another site", async () => {
+    const { handlers, calls, requireUser, json } = setup();
+
+    const answered = await handlers.scope(
+      json("POST", { document: {}, at: "/steps/0" }),
+    );
+    const cross = await handlers.scope(
+      json(
+        "POST",
+        { document: {}, at: "/steps/0" },
+        { "sec-fetch-site": "cross-site" },
+      ),
+    );
+
+    expect(requireUser).toHaveBeenCalledTimes(2);
+    expect(answered.headers.get("cache-control")).toBe("no-store");
+    expect(await answered.json()).toMatchObject({ at: "/steps/0" });
+    expect(calls).toEqual(['scope {"document":{},"at":"/steps/0"}']);
+    expect(cross.status).toBe(403);
   });
 
   // #833-M1-T181

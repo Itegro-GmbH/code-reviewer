@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The inspector (#926): the fields of the selected node, by kind, and what the validator found at it. Every field writes straight into the
-// document; a list field keeps the text being typed as a draft only while it parses to the value in the document. Variable chips and the picker are the next issue (#927): a field is plain text with `{{…}}`.
+// document; a list field keeps the text being typed as a draft only while it parses to the value in the document. A field that can
+// hold a reference is a `ReferenceControl` (#927): `{{…}}` typed or picked, shown as chips, stored as typed.
 import { useState, type Ref } from "react";
 import { Button } from "../../components/button.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
@@ -9,6 +10,7 @@ import { FormField } from "../../implementer/ui/form-field.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { canonicalJson, isRecord } from "../../workflows/json.ts";
 import { LOOP_ROUNDS_MAX } from "../../workflows/limits.ts";
+import { START_BRANCH_ROOTS } from "../../workflows/connectors.ts";
 import { TRIGGER_KINDS } from "../../workflows/triggers.ts";
 import {
   CONNECTOR_NAMES,
@@ -20,10 +22,13 @@ import {
   withConnector,
   type Control,
 } from "./action-fields.ts";
+import type { ReachLookup } from "./api.ts";
 import { ConditionEditor } from "./condition-editor.tsx";
 import { BUILDER_COPY, KIND_HELP } from "./copy.ts";
 import { SelectControl, Stepper, TextControl } from "./controls.tsx";
 import { describeNode } from "./describe.ts";
+import { ReachProvider } from "./reach-context.tsx";
+import { ReferenceControl } from "./reference-control.tsx";
 import {
   agentIds,
   canMove,
@@ -217,16 +222,18 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
   if (isRecord(instruction))
     return (
       <>
-        <TextControl
+        <ReferenceControl
           name="instruction-first"
           label="Instruction, first round"
+          at={`${pointer}/instruction/first`}
           value={textOf(instruction.first)}
           multiline
           onChange={(first) => patch({ ...instruction, first })}
         />
-        <TextControl
+        <ReferenceControl
           name="instruction-next"
           label="Instruction, next rounds"
+          at={`${pointer}/instruction/next`}
           value={textOf(instruction.next)}
           multiline
           hint="From round two on, previous.* has the values of the round before."
@@ -244,9 +251,10 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
     );
   return (
     <>
-      <TextControl
+      <ReferenceControl
         name="instruction"
         label="Instruction"
+        at={`${pointer}/instruction`}
         value={textOf(instruction)}
         multiline
         onChange={patch}
@@ -277,11 +285,12 @@ function AgentFields(props: FieldsProps) {
     <>
       <ProfileControl {...props} />
       <SessionControl {...props} />
-      <TextControl
+      <ReferenceControl
         name="branch"
         label="Start branch"
+        at={`${pointer}/branch`}
         value={textOf(node.branch)}
-        target
+        target={START_BRANCH_ROOTS}
         disabled={continued}
         placeholder="the base branch of the run"
         hint={
@@ -326,12 +335,13 @@ function AgentFields(props: FieldsProps) {
 
 /**
  * An action input as text. What is typed is kept as typed while it still stands for the value in the document (a list's newline at the
- * end, a space after a whole reference, `007`); the document gets the parsed value on every change. It lets go of the draft on blur, or
- * when the value was changed from elsewhere.
+ * end, a space after a whole reference, `007`); the document gets the parsed value on every change. It lets go of the draft on blur, when
+ * the value was changed from elsewhere, or as soon as the draft no longer stands for the value.
  */
 function ValueControl({
   name,
   label,
+  at,
   control,
   required,
   value,
@@ -342,26 +352,27 @@ function ValueControl({
 }: {
   name: string;
   label: string;
+  at: string;
   control: Control;
   required: boolean;
   value: unknown;
   multiline: boolean;
-  target?: boolean | "literal";
+  target?: readonly string[];
   placeholder?: string;
   onChange: (value: unknown) => void;
 }) {
   const [draft, setDraft] = useState<string | undefined>(undefined);
-  const shown =
+  const stands =
     draft !== undefined &&
     canonicalJson(valueOfText(control, draft, required)) ===
-      canonicalJson(value)
-      ? draft
-      : textOfValue(value);
+      canonicalJson(value);
+  if (draft !== undefined && !stands) setDraft(undefined);
   return (
-    <TextControl
+    <ReferenceControl
       name={name}
       label={label}
-      value={shown}
+      at={at}
+      value={stands ? draft : textOfValue(value)}
       multiline={multiline}
       {...(target === undefined ? {} : { target })}
       {...(placeholder === undefined ? {} : { placeholder })}
@@ -402,12 +413,6 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
         ? null
         : inputsOf(spec).map(([name, input]) => {
             const control = controlOf(name, input);
-            const target =
-              input.target === undefined
-                ? undefined
-                : input.target.length === 0
-                  ? "literal"
-                  : true;
             const label = `${name}${input.required ? "" : " (optional)"}`;
             if (control === "boolean")
               return (
@@ -440,6 +445,7 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
                 key={`${pointer}-${name}`}
                 name={name}
                 label={label}
+                at={pointer}
                 control={control}
                 required={input.required === true}
                 value={node[name]}
@@ -448,7 +454,9 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
                   control === "list" ||
                   control === "listOrText"
                 }
-                {...(target === undefined ? {} : { target })}
+                {...(input.target === undefined
+                  ? {}
+                  : { target: input.target })}
                 {...(control === "list" || control === "listOrText"
                   ? { placeholder: "one entry to a line, or one {{reference}}" }
                   : control === "numberOrText"
@@ -482,6 +490,7 @@ function LoopFields({ doc, pointer, node, onChange }: FieldsProps) {
         <span className="text-sm font-semibold">Until</span>
         <ConditionEditor
           label="Until"
+          at={`${pointer}/until`}
           value={node.until}
           onChange={(until) => onChange(patchNode(doc, pointer, { until }))}
         />
@@ -496,6 +505,7 @@ function IfFields({ doc, pointer, node, onChange }: FieldsProps) {
       <span className="text-sm font-semibold">When</span>
       <ConditionEditor
         label="When"
+        at={`${pointer}/when`}
         value={node.when}
         onChange={(when) => onChange(patchNode(doc, pointer, { when }))}
       />
@@ -508,6 +518,7 @@ export function Inspector({
   pointer,
   problems,
   profiles,
+  lookup,
   headingRef,
   onChange,
   onRemove,
@@ -517,6 +528,8 @@ export function Inspector({
   pointer: Pointer;
   problems: readonly Problem[];
   profiles: readonly ProfileOption[];
+  /** What the fields ask for the values they can reach: the builder binds it to its document and lane. */
+  lookup: ReachLookup;
   /** The builder moves focus here when a card is picked. */
   headingRef: Ref<HTMLHeadingElement>;
   onChange: Change;
@@ -546,75 +559,77 @@ export function Inspector({
     onChange,
   };
   return (
-    <section
-      aria-label="Inspector"
-      data-node={pointer}
-      className="flex flex-col gap-4 rounded-xl border border-line-strong bg-surface p-4"
-    >
-      <div className="flex flex-col gap-1">
-        <span className="text-xs font-semibold text-muted-foreground uppercase">
-          {described.kindLabel}
-        </span>
-        <h2
-          ref={headingRef}
-          tabIndex={-1}
-          className="text-base font-semibold break-words outline-none"
-        >
-          {described.title}
-        </h2>
-      </div>
-      <FormField
-        name="id"
-        label={BUILDER_COPY.idLabel}
-        hint={BUILDER_COPY.idHint}
+    <ReachProvider lookup={lookup}>
+      <section
+        aria-label="Inspector"
+        data-node={pointer}
+        className="flex flex-col gap-4 rounded-xl border border-line-strong bg-surface p-4"
       >
-        {(control) => (
-          <Input
-            {...control}
-            value={textOf(node.id)}
-            onChange={(event) =>
-              onChange(patchNode(doc, pointer, { id: event.target.value }))
-            }
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-semibold text-muted-foreground uppercase">
+            {described.kindLabel}
+          </span>
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-base font-semibold break-words outline-none"
+          >
+            {described.title}
+          </h2>
+        </div>
+        <FormField
+          name="id"
+          label={BUILDER_COPY.idLabel}
+          hint={BUILDER_COPY.idHint}
+        >
+          {(control) => (
+            <Input
+              {...control}
+              value={textOf(node.id)}
+              onChange={(event) =>
+                onChange(patchNode(doc, pointer, { id: event.target.value }))
+              }
+            />
+          )}
+        </FormField>
+        <p className="text-sm text-muted-foreground">{KIND_HELP[kind]}</p>
+        {kind === "trigger" ? <TriggerFields {...fields} /> : null}
+        {kind === "agent" ? <AgentFields {...fields} /> : null}
+        {kind === "action" ? <ActionFields {...fields} /> : null}
+        {kind === "loop" ? <LoopFields {...fields} /> : null}
+        {kind === "if" ? <IfFields {...fields} /> : null}
+        {problems.length === 0 ? null : (
+          <ProblemList
+            doc={doc}
+            problems={problems}
+            onChange={onChange}
+            heading={BUILDER_COPY.errorsHeading}
           />
         )}
-      </FormField>
-      <p className="text-sm text-muted-foreground">{KIND_HELP[kind]}</p>
-      {kind === "trigger" ? <TriggerFields {...fields} /> : null}
-      {kind === "agent" ? <AgentFields {...fields} /> : null}
-      {kind === "action" ? <ActionFields {...fields} /> : null}
-      {kind === "loop" ? <LoopFields {...fields} /> : null}
-      {kind === "if" ? <IfFields {...fields} /> : null}
-      {problems.length === 0 ? null : (
-        <ProblemList
-          doc={doc}
-          problems={problems}
-          onChange={onChange}
-          heading={BUILDER_COPY.errorsHeading}
-        />
-      )}
-      {isTriggerPointer(pointer) ? null : (
-        <div className="flex flex-wrap gap-2">
-          <Button variant="destructive" size="sm" onClick={onRemove}>
-            {BUILDER_COPY.remove}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!canMove(doc, pointer, -1)}
-            onClick={() => onMove(-1)}
-          >
-            {BUILDER_COPY.moveUp}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!canMove(doc, pointer, 1)}
-            onClick={() => onMove(1)}
-          >
-            {BUILDER_COPY.moveDown}
-          </Button>
-        </div>
-      )}
-    </section>
+        {isTriggerPointer(pointer) ? null : (
+          <div className="flex flex-wrap gap-2">
+            <Button variant="destructive" size="sm" onClick={onRemove}>
+              {BUILDER_COPY.remove}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!canMove(doc, pointer, -1)}
+              onClick={() => onMove(-1)}
+            >
+              {BUILDER_COPY.moveUp}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={!canMove(doc, pointer, 1)}
+              onClick={() => onMove(1)}
+            >
+              {BUILDER_COPY.moveDown}
+            </Button>
+          </div>
+        )}
+      </section>
+    </ReachProvider>
   );
 }

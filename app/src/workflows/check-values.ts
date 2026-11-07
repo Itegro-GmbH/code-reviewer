@@ -140,7 +140,7 @@ function refuseTarget(
 }
 
 /** Whether a reference is one a target input takes: `unresolved` when its step is not in reach, which the resolver reports. */
-function targetVerdict(
+export function targetVerdict(
   ref: { path: string[] },
   target: TargetCheck,
   use: Use,

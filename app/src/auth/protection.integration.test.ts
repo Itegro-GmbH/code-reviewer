@@ -210,6 +210,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows",
   "/api/w/[workspace]/workflows/[workflowId]",
   "/api/w/[workspace]/workflows/validate",
+  // The values a step can reach, for the picker of the lane builder (#927).
+  "/api/w/[workspace]/workflows/scope",
   // The runs of a workflow (#844).
   "/api/w/[workspace]/workflows/[workflowId]/runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",

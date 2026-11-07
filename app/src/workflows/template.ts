@@ -136,6 +136,52 @@ export function parseTemplate(text: string): ParsedTemplate {
   return { parts, problems };
 }
 
+/** A stretch of a text as it was written: plain text (escapes like `\\{{` kept), or one `{{…}}` with what it parses to. */
+export type TemplateSpan =
+  { text: string } | { source: string; ref: Reference };
+
+/**
+ * The text cut into plain stretches and the references in it, each with the source it was written with, so that joining the sources
+ * gives the text back exactly (the lane builder shows a reference as a chip and must not change what is stored). A `{{` that is not a
+ * well formed reference, or is never closed, stays plain text: the validator reports it, this only reads.
+ */
+export function scanTemplate(text: string): TemplateSpan[] {
+  const spans: TemplateSpan[] = [];
+  let literal = "";
+  let index = 0;
+  const flush = (): void => {
+    if (literal !== "") spans.push({ text: literal });
+    literal = "";
+  };
+  while (index < text.length) {
+    if (text.startsWith("\\{{", index)) {
+      literal += "\\{{";
+      index += 3;
+      continue;
+    }
+    if (!text.startsWith("{{", index)) {
+      literal += text[index];
+      index += 1;
+      continue;
+    }
+    const end = findEnd(text, index + 2);
+    if (typeof end !== "number") {
+      literal += text.slice(index);
+      break;
+    }
+    const source = text.slice(index, end + 2);
+    const parsed = parseReference(text.slice(index + 2, end));
+    if (typeof parsed === "string") literal += source;
+    else {
+      flush();
+      spans.push({ source, ref: parsed });
+    }
+    index = end + 2;
+  }
+  flush();
+  return spans;
+}
+
 /** The whole text is one reference, so the value keeps its type instead of becoming text. */
 export function isWholeReference(parsed: ParsedTemplate): boolean {
   return (

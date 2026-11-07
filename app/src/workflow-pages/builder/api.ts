@@ -7,6 +7,7 @@ import {
   type FetchLike,
   type RequestResult,
 } from "../../ui/json-request.ts";
+import type { ScopeAnswer } from "../../workflows/reach.ts";
 import { workspaceApiPath } from "../../workspaces/paths.ts";
 import type { Problem } from "./problems.ts";
 
@@ -27,12 +28,31 @@ export type SavedWorkflow = {
   versions: { version: number; savedAt: string }[];
 };
 
+/** What the picker asks for (#927): the values the node at `at` can reach; `targetRoots` for a field that takes one trusted value. */
+export type ScopeRequest = {
+  at: string;
+  targetRoots?: readonly string[];
+};
+
+/** The values a field can reach, asked of the current document of the builder; the builder fills in the document and the lane. */
+export type ReachLookup = (
+  request: ScopeRequest,
+  signal?: AbortSignal,
+) => Promise<RequestResult<ScopeAnswer>>;
+
 export type BuilderApi = {
   /** Checks a document; stores nothing. An invalid document is an answer (`valid: false`), not a failure. A `signal` cancels a check nobody waits for any more. */
   validate(
     document: unknown,
     signal?: AbortSignal,
   ): Promise<RequestResult<ValidateAnswer>>;
+  /** The values a node of a document can reach (`POST .../workflows/scope`); `workflowId` is the lane whose latest run gives the samples. */
+  scope(
+    document: unknown,
+    request: ScopeRequest,
+    workflowId: string,
+    signal?: AbortSignal,
+  ): Promise<RequestResult<ScopeAnswer>>;
   /** Saves the document as the next version, only if `expectedVersion` is still the current one. */
   save(
     workflowId: string,
@@ -52,6 +72,21 @@ export function createBuilderApi(
         "POST",
         workspaceApiPath(workspaceSlug, "/workflows/validate"),
         document,
+        signal,
+      ),
+    scope: (document, request, workflowId, signal) =>
+      requestJson<ScopeAnswer>(
+        fetchImpl,
+        "POST",
+        workspaceApiPath(workspaceSlug, "/workflows/scope"),
+        {
+          document,
+          at: request.at,
+          ...(request.targetRoots === undefined
+            ? {}
+            : { targetRoots: request.targetRoots }),
+          workflowId,
+        },
         signal,
       ),
     save: (workflowId, document, expectedVersion) =>

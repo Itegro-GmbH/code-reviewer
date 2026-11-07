@@ -12,10 +12,12 @@ import {
 } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAt, nodeAt, type Doc } from "./document.ts";
+import userEvent from "@testing-library/user-event";
+import { getAt, nodeAt, patchNode, type Doc } from "./document.ts";
 import { Inspector, type ProfileOption } from "./inspector.tsx";
 import { sortProblems, type Problem } from "./problems.ts";
-import { answerOf, shippedLane } from "./test-fixtures.ts";
+import type { ReachSamples } from "../../workflows/reach.ts";
+import { answerOf, reachLookupFor, shippedLane } from "./test-fixtures.ts";
 
 afterEach(cleanup);
 
@@ -30,6 +32,7 @@ function Harness({
   problems = [],
   profiles = PROFILES,
   seen,
+  samples,
   onRemove,
   onMove,
 }: {
@@ -38,6 +41,7 @@ function Harness({
   problems?: Problem[];
   profiles?: ProfileOption[];
   seen?: (doc: Doc) => void;
+  samples?: ReachSamples;
   onRemove?: () => void;
   onMove?: (direction: -1 | 1) => void;
 }) {
@@ -49,6 +53,7 @@ function Harness({
       pointer={pointer}
       problems={sorted.byNode.get(pointer) ?? []}
       profiles={profiles}
+      lookup={(request) => reachLookupFor(doc, samples)(request)}
       headingRef={{ current: null }}
       onChange={(next) => {
         seen?.(next);
@@ -608,5 +613,243 @@ describe("the errors of a node", () => {
       screen.getByText("Pick a step in the flow to edit it."),
     ).toBeTruthy();
     expect(screen.queryByText("budget_above_maximum")).toBeNull();
+  });
+});
+
+describe("references in the fields (#927)", () => {
+  const picker = () => screen.getByRole("dialog", { name: /^Values for / });
+  const references = () =>
+    within(picker())
+      .getAllByRole("option")
+      .map((option) => option.getAttribute("data-reference"));
+
+  // #927-T60
+  it("shows the reference of a target input as its one chip, and the rule of the field", () => {
+    render(<Harness start={shippedLane()} pointer="/steps/0" />);
+    const field = document.querySelector("[data-field=ticket]") as HTMLElement;
+    expect(within(field).getByText("Ticket · ticket")).toBeTruthy();
+    expect(
+      (
+        within(field).getByRole("button", {
+          name: "Insert a value into ticket",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(within(field).getByText(/exactly one value/)).toBeTruthy();
+    expect(value("ticket")).toBe("{{trigger.ticket}}");
+  });
+
+  // #927-T61
+  it("writes a picked value into the document exactly as {{…}} text, at the cursor", async () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={shippedLane()}
+        pointer="/steps/1/body/0"
+        seen={seen}
+        samples={{ trigger: { ticket: { title: "Crash" } } }}
+      />,
+    );
+    const field = screen.getByLabelText(
+      "Instruction, first round",
+    ) as HTMLTextAreaElement;
+    field.focus();
+    field.setSelectionRange(0, 0);
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Insert a value into Instruction, first round",
+      }),
+    );
+    await userEvent.click(
+      within(picker())
+        .getAllByRole("option")
+        .find(
+          (option) =>
+            option.getAttribute("data-reference") === "trigger.ticket.url",
+        )!,
+    );
+    const next = getAt(
+      seen.mock.lastCall?.[0] as Doc,
+      "/steps/1/body/0/instruction",
+    ) as { first: string };
+    expect(next.first.startsWith("{{trigger.ticket.url}}")).toBe(true);
+    expect(next.first).toBe(
+      `{{trigger.ticket.url}}${(shippedLane() as { steps: { body?: { instruction: { first: string } }[] }[] }).steps[1]!.body![0]!.instruction.first}`,
+    );
+  });
+
+  // #927-T62
+  it("offers previous.* in the next-round instruction of a loop step and not in an action outside a loop", async () => {
+    const { unmount } = render(
+      <Harness start={shippedLane()} pointer="/steps/1/body/0" />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Insert a value into Instruction, next rounds",
+      }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^This loop/ }));
+    expect(references()).toContain("previous.review.findings");
+    const next = within(picker())
+      .getAllByRole("option")
+      .find(
+        (option) =>
+          option.getAttribute("data-reference") === "previous.review.findings",
+      );
+    unmount();
+    expect(next).toBeTruthy();
+    render(<Harness start={shippedLane()} pointer="/steps/0" />);
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Insert a value into add (optional)",
+      }),
+    );
+    expect(screen.queryByRole("button", { name: /^This loop/ })).toBeNull();
+  });
+
+  // #927-T63
+  it("holds the start branch to its rule: a literal, or one value the field takes", async () => {
+    render(<Harness start={shippedLane()} pointer="/steps/1/body/1" />);
+    const field = document.querySelector("[data-field=branch]") as HTMLElement;
+    expect(
+      within(field).getByText("Steps before · implement.branch"),
+    ).toBeTruthy();
+    expect(within(field).getByText("target · one value")).toBeTruthy();
+    await userEvent.click(
+      within(field).getByRole("button", {
+        name: "Remove Steps before · implement.branch",
+      }),
+    );
+    await userEvent.click(
+      within(field).getByRole("button", {
+        name: "Insert a value into Start branch",
+      }),
+    );
+    await within(field).findByRole("listbox", { name: "Values" });
+    await userEvent.click(
+      within(picker()).getByRole("button", { name: /^All values/ }),
+    );
+    expect(references()).toEqual([
+      "trigger.ticket.repo.defaultBranch",
+      "implement.branch",
+    ]);
+  });
+
+  // #927-T64
+  it("picks into the operands of a condition, with what the if can reach", async () => {
+    const seen = vi.fn();
+    render(<Harness start={shippedLane()} pointer="/steps/2" seen={seen} />);
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Insert a value into When operand 2",
+      }),
+    );
+    await screen.findByRole("listbox", { name: "Values" });
+    await userEvent.type(
+      within(picker()).getByRole("combobox", { name: "Search values" }),
+      "rounds",
+    );
+    expect(references()).toContain("fix.rounds");
+    await userEvent.click(
+      within(picker())
+        .getAllByRole("option")
+        .find(
+          (option) => option.getAttribute("data-reference") === "fix.rounds",
+        )!,
+    );
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/steps/2/when")).toEqual({
+      equals: ["{{fix.exit}}", "until{{fix.rounds}}"],
+    });
+  });
+
+  // #927-T65
+  it("reads the scope of the body for the until of a loop", async () => {
+    render(<Harness start={shippedLane()} pointer="/steps/1" />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Insert a value into Until operand" }),
+    );
+    await screen.findByRole("listbox", { name: "Values" });
+    await userEvent.click(
+      screen.getByRole("button", { name: /^Steps before/ }),
+    );
+    expect(references()).toContain("review.findings");
+  });
+
+  // #927-T66
+  it("keeps a number operand as a draft: clearing and a lone minus do not write 0, and the number comes back on blur", () => {
+    const seen = vi.fn();
+    render(<Harness start={shippedLane()} pointer="/steps/2" seen={seen} />);
+    const when = () => getAt(seen.mock.lastCall?.[0] as Doc, "/steps/2/when");
+    fireEvent.change(screen.getByLabelText("When operand 2 type"), {
+      target: { value: "number" },
+    });
+    fireEvent.change(screen.getByLabelText("When operand 2"), {
+      target: { value: "12" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 12] });
+    const operand = screen.getByLabelText("When operand 2") as HTMLInputElement;
+    fireEvent.change(operand, { target: { value: "" } });
+    expect(operand.value).toBe("");
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 12] });
+    fireEvent.change(operand, { target: { value: "-" } });
+    expect(operand.value).toBe("-");
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 12] });
+    fireEvent.change(operand, { target: { value: "-4" } });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", -4] });
+    expect(operand.value).toBe("-4");
+    fireEvent.change(operand, { target: { value: "1." } });
+    expect(operand.value).toBe("1.");
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 1] });
+    fireEvent.blur(operand);
+    expect(operand.value).toBe("1");
+    fireEvent.change(operand, { target: { value: "" } });
+    fireEvent.blur(operand);
+    expect(operand.value).toBe("0");
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 0] });
+  });
+
+  // #927-T67
+  it("lets go of a list draft that no longer stands for the value, also while the field has focus", () => {
+    function Reset() {
+      const [doc, setDoc] = useState<Doc>(shippedLane());
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setDoc(patchNode(doc, "/steps/0", { add: ["z"] }))}
+          >
+            elsewhere z
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setDoc(patchNode(doc, "/steps/0", { add: ["a", "b"] }))
+            }
+          >
+            elsewhere a b
+          </button>
+          <Inspector
+            doc={doc}
+            pointer="/steps/0"
+            problems={[]}
+            profiles={PROFILES}
+            lookup={reachLookupFor(doc)}
+            headingRef={{ current: null }}
+            onChange={setDoc}
+            onRemove={() => {}}
+            onMove={() => {}}
+          />
+        </>
+      );
+    }
+    render(<Reset />);
+    const add = screen.getByLabelText("add (optional)") as HTMLTextAreaElement;
+    add.focus();
+    fireEvent.change(add, { target: { value: "a\n\nb" } });
+    expect(add.value).toBe("a\n\nb");
+    fireEvent.click(screen.getByRole("button", { name: "elsewhere z" }));
+    expect(add.value).toBe("z");
+    fireEvent.click(screen.getByRole("button", { name: "elsewhere a b" }));
+    expect(add.value).toBe("a\nb");
   });
 });
