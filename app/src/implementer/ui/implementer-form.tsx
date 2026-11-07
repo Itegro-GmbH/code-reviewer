@@ -807,28 +807,12 @@ export function ImplementerForm({
               />
             )}
           </FormField>
-        ) : (
-          <FormField
-            name="cost"
-            label={FORM_COPY.costLimit}
-            hint={FORM_COPY.profileCostHint}
-            error={errors.cost}
-          >
-            {(control) => (
-              <Input
-                {...control}
-                type="text"
-                readOnly
-                value={
-                  profileDocument === undefined
-                    ? FORM_COPY.loading
-                    : profileDocument.costLimitCents === null
-                      ? `${FORM_COPY.profileCostMaximum} (${costLimitPlaceholder(operatorMaximumCents)})`
-                      : `$${(profileDocument.costLimitCents / 100).toFixed(2)}`
-                }
-              />
-            )}
-          </FormField>
+        ) : // #918: a profile no longer shows a cost limit (a workflow's turn costs what is left of its budget), so there is no field
+        // for it; the sentence of the server stays for a task whose older profile version still holds one above the maximum.
+        errors.cost === undefined ? null : (
+          <Alert variant="destructive" role="alert">
+            {errors.cost}
+          </Alert>
         )}
       </fieldset>
       {started !== null ? (

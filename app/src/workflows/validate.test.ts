@@ -241,6 +241,7 @@ describe("the document", () => {
           "trigger",
           "triggers",
           "budgetUsd",
+          "turnTimeLimitMinutes",
           "steps",
           "onFailure",
         ],
@@ -1951,6 +1952,40 @@ describe("conditions", () => {
         }),
       ),
     ).toEqual([["/steps/1/then", "invalid_value"]]);
+  });
+});
+
+describe("the turn time limit", () => {
+  // #918-T01
+  it("falls back to 60 minutes when the workflow names none, and says so", () => {
+    expect(run(tiny()).turnTimeLimitMinutes).toBe(60);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 15)))
+        .turnTimeLimitMinutes,
+    ).toBe(15);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 120)))
+        .turnTimeLimitMinutes,
+    ).toBe(120);
+  });
+
+  // #918-T02
+  it("refuses a limit out of 15 to 120 or not a whole number as invalid_value", () => {
+    for (const value of [14, 121, 0, -5, 30.5])
+      expect(
+        codes(change(tiny(), (d) => (d.turnTimeLimitMinutes = value))),
+      ).toEqual([["/turnTimeLimitMinutes", "invalid_value"]]);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 14))).errors[0]
+        ?.message,
+    ).toContain("15 to 120");
+  });
+
+  // #918-T03
+  it("refuses a limit that is not a number", () => {
+    expect(
+      codes(change(tiny(), (d) => (d.turnTimeLimitMinutes = "60"))),
+    ).toEqual([["/turnTimeLimitMinutes", "wrong_type"]]);
   });
 });
 

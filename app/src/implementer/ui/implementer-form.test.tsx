@@ -1806,7 +1806,6 @@ const profileView = (
   documentVersion: base.version,
   document: {
     model: { provider: "moonshot", model: "kimi-k2" },
-    costLimitCents: 250,
     canPush: true,
     ...document,
   },
@@ -1818,7 +1817,6 @@ const PROFILE_VIEWS: Record<string, ProfileDetail> = {
   "p-impl": profileView(IMPLEMENTER_PROFILE),
   "p-rev": profileView(REVIEWER_PROFILE, {
     canPush: false,
-    costLimitCents: null,
     model: { provider: "deepseek", model: "deepseek-chat" },
   }),
 };
@@ -1890,7 +1888,7 @@ describe("the profile picker (#843)", () => {
   });
 
   // #843-T41
-  it("shows the model and the cost limit of the chosen profile, not editable, and sends the profile instead of both", async () => {
+  it("shows the model of the chosen profile, not editable, no cost limit, and sends the profile instead of the model", async () => {
     const user = userEvent.setup();
     const api = withProfiles();
     renderForm(api);
@@ -1902,8 +1900,7 @@ describe("the profile picker (#843)", () => {
       expect(control("Model")).toHaveProperty("value", "Kimi K2 (Moonshot)"),
     );
     expect(control("Model")).toHaveProperty("readOnly", true);
-    expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50");
-    expect(control(/^Cost limit/)).toHaveProperty("readOnly", true);
+    expect(screen.queryByLabelText(/^Cost limit/)).toBeNull();
     expect(screen.queryByLabelText("Provider")).toBeNull();
     expect(api.profile).toHaveBeenCalledWith("p-impl");
 
@@ -1921,7 +1918,7 @@ describe("the profile picker (#843)", () => {
   });
 
   // #843-T41
-  it("ignores what was typed in the cost field before the profile was chosen", async () => {
+  it("drops the cost field when a profile is chosen, and sends nothing of what was typed in it", async () => {
     const user = userEvent.setup();
     const api = withProfiles();
     renderForm(api);
@@ -1930,7 +1927,7 @@ describe("the profile picker (#843)", () => {
 
     await chooseOption(user, control("Profile"), /^implementer/);
     await waitFor(() =>
-      expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50"),
+      expect(screen.queryByLabelText(/^Cost limit/)).toBeNull(),
     );
     await user.click(startButton());
 
@@ -1941,7 +1938,7 @@ describe("the profile picker (#843)", () => {
   });
 
   // #843-T41
-  it("says the operator's maximum applies when the profile sets no cost limit", async () => {
+  it("has no cost limit field for a profile that sets none either", async () => {
     const user = userEvent.setup();
     renderForm(withProfiles());
     await fillInWithoutModel(user);
@@ -1949,11 +1946,12 @@ describe("the profile picker (#843)", () => {
     await chooseOption(user, control("Profile"), /^reviewer/);
 
     await waitFor(() =>
-      expect(control(/^Cost limit/)).toHaveProperty(
+      expect(control("Model")).toHaveProperty(
         "value",
-        "The operator's maximum (Max $5.00)",
+        "DeepSeek Chat (DeepSeek)",
       ),
     );
+    expect(screen.queryByLabelText(/^Cost limit/)).toBeNull();
     expect(control("Model")).toHaveProperty(
       "value",
       "DeepSeek Chat (DeepSeek)",
@@ -2163,7 +2161,7 @@ describe("the profile picker (#843)", () => {
   });
 
   // #843-T49
-  it("shows the sentence of the server at the cost limit when the limit of the profile is above the maximum", async () => {
+  it("shows the sentence of the server when the limit an older version of the profile holds is above the maximum", async () => {
     const user = userEvent.setup();
     const api = withProfiles({
       startTask: vi.fn<ImplementerApi["startTask"]>(() =>
@@ -2178,16 +2176,13 @@ describe("the profile picker (#843)", () => {
     await fillInWithoutModel(user);
     await chooseOption(user, control("Profile"), /^implementer/);
     await waitFor(() =>
-      expect(control(/^Cost limit/)).toHaveProperty("value", "$2.50"),
+      expect(control("Model")).toHaveProperty("readOnly", true),
     );
 
     await user.click(startButton());
 
     expect(await screen.findByText(/maximum of \$2\.00 per task/)).toBeTruthy();
-    expect(control(/^Cost limit/).getAttribute("aria-invalid")).toBe("true");
-    await waitFor(() =>
-      expect(document.activeElement).toBe(control(/^Cost limit/)),
-    );
+    expect(screen.queryByLabelText(/^Cost limit/)).toBeNull();
   });
 
   // #843-T50

@@ -35,7 +35,7 @@ unlaunched (`kind_not_allowed`). A job of the kind lives 3600 s by default (`DIS
 60 to 21600) where Diff and Dynamic keep `DISPATCHER_JOB_TIMEOUT_SECONDS`. **The app cannot read that setting** (#752): the
 hold it takes for a turn (`IMPLEMENTER_JOB_TIMEOUT_SECONDS` in `app/src/billing/hold.ts`) and the hard timeout at which the
 queue fails a running turn with `timeout` (`DEFAULT_IMPLEMENTER_MAX_RUNTIME_MS` in `app/src/db/job-limits.ts`, the default
-plus 10 minutes of grace) carry the default 3600. An operator who sets another `timeoutSeconds` gets a wrong hard timeout: a
+plus 10 minutes of grace) carry the default 3600. A turn that a workflow started carries its own limit (`implementer_turns.time_limit_minutes`, #918): the claim hands it to the Worker as `limits.timeLimitSeconds` and the queue fails the turn ten minutes after it; the Dispatcher's timeout stays the ceiling, so a limit above it is held to it. An operator who sets another `timeoutSeconds` gets a wrong hard timeout: a
 shorter value leaves a turn that the Dispatcher stopped `running` in the app until 70 minutes have passed, and a longer one
 has the app fail the turn with `timeout` at 70 minutes while its Worker still runs (and the hold too small); `billing-hold-pin.test.ts`
 pins the two constants to the default only. Change the constants with the setting. The Sandbox launcher advertises the engine only when the deployment serves the kind (an app of `DISPATCHER_APPS` names it, #765): a deployment without it advertises

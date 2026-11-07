@@ -541,7 +541,7 @@ database, including code-review.com's, which never reads the tables.
   a turn has produced them; `status` is `running` until a turn has ended, then `idle`.
 - `implementer_turns`: one instruction (`number` from 1, unique per session; this slice makes one). `job_id` is unique: **the status of a turn is the status of its
   job**, there is no second state machine. `model_choice` is JSON text of exactly `{entryId}` or `{provider, model}` (`implementer-model-choice.ts`; stored text of
-  another shape is `IMPLEMENTER_MODEL_CHOICE_UNREADABLE`, never a guess). `cost_limit_cents` is the customer's limit, null when none.
+  another shape is `IMPLEMENTER_MODEL_CHOICE_UNREADABLE`, never a guess). `cost_limit_cents` is the customer's limit, null when none. `time_limit_minutes` (#918, 15 to 120) is the time the turn may run, copied from the `turnTimeLimitMinutes` of the workflow that started it; null for a turn no workflow started, which keeps 3600 seconds.
 - Composite keys keep the workspaces apart in the database itself, like `repositories` and `jobs`: a session names its repository by `(repository_id,
 workspace_id)`, a turn its session and its job by `(session_id, workspace_id)` and `(job_id, workspace_id)`. The target on `jobs` is the unique index
   `jobs_id_workspace_unique`, the one change to an existing table.

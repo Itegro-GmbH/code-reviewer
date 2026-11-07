@@ -94,10 +94,16 @@ export type ImplementerService = FollowUps &
  */
 export type StartTaskOptions = {
   /**
-   * The most the task may cost, in whole US cents. It lowers the cost limit of the task (the profile version's, or none) and never
-   * raises it; it is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it instead of refused.
+   * The most the task may cost, in whole US cents. It is the cost limit of the task: the cost limit of the profile version is not read
+   * when it is given (#918). It is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it
+   * instead of refused.
    */
   costCapCents?: number;
+  /**
+   * #918: how many minutes the turn may run, from the `turnTimeLimitMinutes` of the workflow. Copied into the turn; the claim hands it
+   * to the Worker as its time limit. Left out: the platform's 60 minutes.
+   */
+  timeLimitMinutes?: number;
 };
 
 export type ImplementerServiceDependencies = FollowUpDependencies & {
@@ -337,7 +343,9 @@ export function createImplementerService(
         const copied = await copyProfile(deps.profiles, task.profile);
         profile = copied.profile;
         model = copied.model;
-        costLimitCents = copied.costLimitCents;
+        // #918: a workflow caps the turn with what is left of its budget; that is the limit, and the version's own is not read.
+        costLimitCents =
+          options.costCapCents === undefined ? copied.costLimitCents : null;
         profileResult = copied.defaultResult;
       }
 
@@ -396,6 +404,9 @@ export function createImplementerService(
           instruction: task.instruction,
           modelChoice: model,
           costLimitCents,
+          ...(options.timeLimitMinutes === undefined
+            ? {}
+            : { timeLimitMinutes: options.timeLimitMinutes }),
           environment,
           runnerEnvironment,
           profile,

@@ -322,8 +322,8 @@ describe("a task with a cost cap of the caller", () => {
     sessionId: string,
   ) => (await turnOf(app, sessionId)).cost_limit_cents;
 
-  // #844-T250
-  it("lowers the cost limit of the profile's version and never raises it", async () => {
+  // #844-T250, #918-T10
+  it("is the cost limit of the task, whatever the profile's version says, held to the operator's maximum", async () => {
     const app = await setup();
 
     const lower = await app.service.startTask(
@@ -343,7 +343,31 @@ describe("a task with a cost cap of the caller", () => {
     );
 
     expect(await limitOf(app, lower.sessionId)).toBe(150);
-    expect(await limitOf(app, higher.sessionId)).toBe(200);
+    // The version's 200 is not read: a cap above it is the limit, up to the operator's 500.
+    expect(await limitOf(app, higher.sessionId)).toBe(500);
+  });
+
+  // #918-T11
+  it("keeps the turn's time limit when the caller names one, and none when it does not", async () => {
+    const app = await setup();
+    const timed = async (sessionId: string) =>
+      (await turnOf(app, sessionId)).time_limit_minutes;
+
+    const lane = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
+      { costCapCents: 100, timeLimitMinutes: 15 },
+    );
+    const form = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", {
+        branch: "implementer/other",
+        clientRequestId: "request-2",
+      }),
+    );
+
+    expect(await timed(lane.sessionId)).toBe(15);
+    expect(await timed(form.sessionId)).toBeNull();
   });
 
   // #844-T251

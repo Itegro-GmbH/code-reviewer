@@ -202,6 +202,7 @@ describe("the workflow route files", () => {
       truncated: false,
       steps: 1,
       budgetUsd: 20,
+      turnTimeLimitMinutes: 60,
     });
     expect(bad.status).toBe(200);
     expect(await bad.json()).toMatchObject({

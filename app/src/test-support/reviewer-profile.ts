@@ -30,7 +30,6 @@ export const REVIEWER_PROFILE = {
     "Reads a branch and reports what is wrong. Changes nothing that leaves the container.",
   instructions:
     "You review code. Read the task and the work, run the tests if there are any, and report each problem as a finding. Do not change any file.",
-  costLimitCents: 300,
   canPush: false,
   defaultResult: FINDINGS_RESULT,
 } as const;

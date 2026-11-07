@@ -79,6 +79,8 @@ export type QueuedInstruction = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
+  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  timeLimitMinutes?: number | null;
   environment: TurnEnvironment | null;
   /** #854: the runner environment, never together with `environment`; left out or null for none. */
   runnerEnvironment?: TurnRunnerEnvironment | null;
@@ -169,6 +171,8 @@ export type StoredImplementerTurn = {
   modelChoice: ModelChoice;
   /** The customer's cost limit for the turn in cents; null when none was asked for. */
   costLimitCents: number | null;
+  /** #918: the minutes the turn may run, from the workflow that started it; null: the platform's 60. */
+  timeLimitMinutes: number | null;
   /** The job that runs the turn; its status is the turn's. */
   jobId: string;
   createdBy: string;
@@ -196,6 +200,8 @@ export type NewImplementerTask = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
+  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  timeLimitMinutes?: number | null;
   createdBy: string;
   /** A copy of the environment chosen at submit (#818); left out or null for none. */
   environment?: TurnEnvironment | null;
@@ -229,6 +235,8 @@ export type NewFollowUpTurn = {
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
+  /** #918: the minutes the turn may run (15 to 120), from the workflow that started it; left out or null: the platform's 60. */
+  timeLimitMinutes?: number | null;
   environment: TurnEnvironment | null;
   /** #854: the runner environment, never together with `environment`; left out or null for none. */
   runnerEnvironment?: TurnRunnerEnvironment | null;
@@ -463,6 +471,7 @@ function turnFrom(
     instruction: row.instruction,
     modelChoice: decodeModelChoice(row.model_choice),
     costLimitCents: row.cost_limit_cents,
+    timeLimitMinutes: row.time_limit_minutes,
     jobId: row.job_id,
     createdBy: row.created_by,
     createdAt: row.created_at,
@@ -573,6 +582,7 @@ export function createImplementerRepository(
         | "instruction"
         | "modelChoice"
         | "costLimitCents"
+        | "timeLimitMinutes"
         | "createdBy"
         | "environment"
         | "runnerEnvironment"
@@ -592,6 +602,7 @@ export function createImplementerRepository(
         instruction: task.instruction,
         model_choice: encodeModelChoice(task.modelChoice),
         cost_limit_cents: task.costLimitCents,
+        time_limit_minutes: task.timeLimitMinutes ?? null,
         job_id: input.jobId,
         created_by: task.createdBy,
         created_at: input.timestamp,

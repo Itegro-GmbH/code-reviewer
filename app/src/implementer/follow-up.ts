@@ -117,11 +117,24 @@ export type Continuation = {
   historyTokens: number | null;
 };
 
+/**
+ * What only code inside the app can ask for, never a request body (#918): the workflow engine goes on in a session with the rest of its
+ * budget as the cost limit and its own time limit for the turn.
+ */
+export type ContinueOptions = {
+  /** The cost limit of the turn in whole US cents: what is left of the budget, lowered to the operator's maximum instead of refused. */
+  costCapCents?: number;
+  /** How many minutes the turn may run; left out: those of the last turn. */
+  timeLimitMinutes?: number;
+};
+
 export type FollowUps = {
   continueSession(
     user: { id: string; githubLogin: string },
     sessionId: string,
     input: unknown,
+    /** What only code inside the app can ask for, never a request body (#918). */
+    options?: ContinueOptions,
   ): Promise<ContinuedSession>;
   /** Starts the queued instruction of an idle session, or discards it with the reason. Idempotent; never throws for the platform. */
   startQueued(sessionId: string): Promise<StartQueuedOutcome>;
@@ -167,6 +180,8 @@ const WRITE_ATTEMPTS = 3;
 type Choices = {
   model: ModelChoice;
   costLimitCents: number | null;
+  /** #918: the minutes the turn may run; null: the platform's 60. */
+  timeLimitMinutes: number | null;
   environment: TurnEnvironment | null;
   runnerEnvironment: TurnRunnerEnvironment | null;
   profile: TurnProfile | null;
@@ -248,11 +263,13 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     last: {
       modelChoice: ModelChoice;
       costLimitCents: number | null;
+      timeLimitMinutes: number | null;
       environment: TurnEnvironment | null;
       runnerEnvironment: TurnRunnerEnvironment | null;
       profile: TurnProfile | null;
       resultSchema: StoredResultSchema | null;
     },
+    options: ContinueOptions,
   ): Promise<Choices> {
     let model = input.model ?? last.modelChoice;
     let costLimitCents =
@@ -306,6 +323,11 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         "This model cannot be used for a task.",
         { reason },
       );
+    if (options.costCapCents !== undefined)
+      costLimitCents = Math.min(
+        Math.max(1, Math.floor(options.costCapCents)),
+        await deps.operatorCostLimitCents(),
+      );
     if (costLimitCents !== null) {
       const maximumCents = await deps.operatorCostLimitCents();
       if (costLimitCents > maximumCents)
@@ -318,6 +340,8 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     return {
       model,
       costLimitCents,
+      // A turn goes on with the time limit of the last one, unless the workflow that starts it names its own (#918).
+      timeLimitMinutes: options.timeLimitMinutes ?? last.timeLimitMinutes,
       environment,
       runnerEnvironment,
       profile,
@@ -439,7 +463,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
   }
 
   return {
-    async continueSession(user, sessionId, body) {
+    async continueSession(user, sessionId, body, options = {}) {
       const checked = validateContinueInput(body);
       if (!checked.ok)
         throw new ImplementerError(
@@ -468,13 +492,14 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         session.repositoryId,
       );
       const headSha = await tipOf(session, integration, repo);
-      const choices = await resolveChoices(input, last);
+      const choices = await resolveChoices(input, last, options);
 
       const queued: QueuedInstruction = {
         clientRequestId: input.clientRequestId,
         instruction: input.instruction,
         modelChoice: choices.model,
         costLimitCents: choices.costLimitCents,
+        timeLimitMinutes: choices.timeLimitMinutes,
         environment: choices.environment,
         runnerEnvironment: choices.runnerEnvironment,
         profile: choices.profile,
@@ -493,6 +518,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
             instruction: input.instruction,
             modelChoice: choices.model,
             costLimitCents: choices.costLimitCents,
+            timeLimitMinutes: choices.timeLimitMinutes,
             environment: choices.environment,
             runnerEnvironment: choices.runnerEnvironment,
             profile: choices.profile,
@@ -643,6 +669,7 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           instruction: queued.instruction,
           modelChoice: queued.modelChoice,
           costLimitCents: queued.costLimitCents,
+          timeLimitMinutes: queued.timeLimitMinutes ?? null,
           environment: queued.environment,
           runnerEnvironment: queued.runnerEnvironment ?? null,
           profile: queued.profile,

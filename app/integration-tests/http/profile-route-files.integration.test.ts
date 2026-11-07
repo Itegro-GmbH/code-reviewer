@@ -56,7 +56,6 @@ const REVIEWER = {
   description: "Reads a branch.",
   model: { entryId: "entry-1" },
   instructions: "Review only.",
-  costLimitCents: 200,
   canPush: false,
 };
 

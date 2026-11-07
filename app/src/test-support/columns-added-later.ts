@@ -33,6 +33,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
     "result_schema",
     "result_value",
+    // #918: the minutes a turn may run, from the workflow that started it; null for every turn that exists (the platform's 60).
+    "time_limit_minutes",
   ],
   // #841: the next instruction of a session and the one that could not start; null for every session that exists.
   implementer_sessions: [

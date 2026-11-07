@@ -60,8 +60,6 @@ export const FORM_COPY = {
   profileModelUnknown: "A model of this profile",
   profileModelGone:
     "The model of this profile is not available in this workspace, so the task would be refused. Choose another profile or none.",
-  profileCostHint: "The cost limit of the profile.",
-  profileCostMaximum: "The operator's maximum",
   profileNoPush: "This profile does not push: the result stays in the run.",
   environment: "Environment",
   environmentPlaceholder: "Choose an environment",
