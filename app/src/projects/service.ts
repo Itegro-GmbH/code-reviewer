@@ -76,6 +76,14 @@ export function createProjectService(deps: {
       const result = await projects.activate(checkRepositoryId(repositoryId));
       switch (result.kind) {
         case "activated":
+          if (result.outcome !== "unchanged")
+            // What follows an activation never fails it (the hook's own contract); a throw is dropped.
+            await Promise.resolve(
+              hooks.onProjectActivated?.({
+                projectId: result.project.id,
+                repositoryId: result.project.repositoryId,
+              }),
+            ).catch(() => undefined);
           return { project: result.project, outcome: result.outcome };
         case "repository_not_found":
           throw new ProjectError(

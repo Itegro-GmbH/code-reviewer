@@ -195,6 +195,17 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/runs/[id]/continuation", class: "implementer" },
+  // The tickets of a project's repository, from the ticket mirror (#923), with the run that is going on for each and what its runs spent,
+  // and the full sync that rebuilds it. The mirror itself is fed in every deployment (the webhook route is `review`); what reads it is the
+  // factory's cockpit.
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
+    class: "implementer",
+  },
   // A member stops a run of the Implementer (#891).
   {
     route: "/api/w/[workspace]/implementer/runs/[runId]/cancel",

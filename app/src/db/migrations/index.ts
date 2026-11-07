@@ -97,6 +97,7 @@ import { migration as widenStepCostBasisForSubscription } from "./20261105231000
 import { migration as addWorkflowRunFailure } from "./20261106004000_add_workflow_run_failure.ts";
 import { migration as addUsageRecordCostBasis } from "./20261106012000_add_usage_record_cost_basis.ts";
 import { migration as addImplementerSessionStartBranch } from "./20261106130000_add_implementer_session_start_branch.ts";
+import { migration as createTrackerMirror } from "./20261107140000_create_tracker_mirror.ts";
 import { migration as addWorkflowRunTriggerId } from "./20261107110000_add_workflow_run_trigger_id.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
@@ -223,6 +224,7 @@ const migrations: Record<string, Migration> = {
   "20261106130000_add_implementer_session_start_branch":
     addImplementerSessionStartBranch,
   "20261107110000_add_workflow_run_trigger_id": addWorkflowRunTriggerId,
+  "20261107140000_create_tracker_mirror": createTrackerMirror,
 };
 
 export const migrationProvider: MigrationProvider = {

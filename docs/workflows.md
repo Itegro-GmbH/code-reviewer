@@ -974,6 +974,9 @@ the outcome `workflow_runs_started` (at least one workflow has a run for this de
 starts; the delivery can be redelivered, for a workflow saved later). If writing a run fails, the other workflows still start, the answer is `500` and a redelivery
 finds the runs that were written.
 
+**The ticket of the run.** The run also names the issue it is about as `workflow_runs.ticket_ref`, `github:<owner>/<repo>#<number>` (#923): the [ticket mirror](ticket-mirror.md) reads
+the run that is going on for a ticket, and what the runs of a ticket spent, by it. The runs of this trigger that started before got it from their input when the column was added.
+
 **The input is the ticket.** `trigger_input` of the run, and what the steps read, is the ticket (`trigger.ticket`, below) and, as workflows written before #916 read them,
 the issue and the repository:
 
