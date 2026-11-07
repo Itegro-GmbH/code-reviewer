@@ -34,7 +34,7 @@ import {
   checkResultValue,
   validateResultSchema,
 } from "../workflows/result-schema.ts";
-import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import { formatTicketRef, parseTicketRef } from "../workflows/ticket-ref.ts";
 import { TICKET_INPUT, isStartableKind } from "../workflows/triggers.ts";
 import {
   forTrigger,
@@ -489,6 +489,16 @@ export function createWorkflowRunService(
         clientRequestId,
         triggerKind: trigger.kind,
         triggerId: trigger.id,
+        // #923: the ticket the run is about, in the form the label trigger writes it (the mirror reads the runs of a ticket by it).
+        ...(ticket === undefined
+          ? {}
+          : {
+              ticketRef: formatTicketRef({
+                provider: "github",
+                repo: ticket.repo.fullName,
+                number: ticket.number,
+              }),
+            }),
         createdBy: user.id,
         actorLogin: user.githubLogin,
       });

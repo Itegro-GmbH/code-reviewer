@@ -1,0 +1,77 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 12,
+    "node_id": "I_kwDOAAA12",
+    "title": "Cache the widget list",
+    "body": "The widget list is rebuilt on every request.\nCache it for a minute.",
+    "state": "open",
+    "state_reason": null,
+    "html_url": "https://github.com/acme/widgets/issues/12",
+    "labels": [
+      {
+        "id": 9001,
+        "node_id": "LA_1",
+        "name": "enhancement",
+        "color": "a2eeef"
+      },
+      {
+        "id": 9002,
+        "node_id": "LA_2",
+        "name": "ready for agent",
+        "color": "0e8a16"
+      }
+    ],
+    "assignees": [
+      {
+        "login": "alice",
+        "id": 1001,
+        "type": "User"
+      }
+    ],
+    "type": {
+      "id": 501,
+      "name": "Task"
+    },
+    "parent_issue_url": "https://api.github.com/repos/acme/widgets/issues/3",
+    "updated_at": "2026-11-06T13:00:00Z",
+    "created_at": "2026-11-01T08:00:00Z",
+    "user": {
+      "login": "alice",
+      "id": 1001,
+      "type": "User"
+    }
+  },
+  "repository": {
+    "id": 7001,
+    "name": "widgets",
+    "full_name": "acme/widgets",
+    "private": true,
+    "html_url": "https://github.com/acme/widgets",
+    "owner": {
+      "login": "acme",
+      "id": 5001,
+      "type": "Organization"
+    },
+    "default_branch": "main"
+  },
+  "installation": {
+    "id": 4242,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+  },
+  "sender": {
+    "login": "bob",
+    "id": 1002,
+    "type": "User"
+  },
+  "comment": {
+    "id": 99100,
+    "body": "Looks good, one question about the TTL.",
+    "user": {
+      "login": "alice",
+      "id": 1001,
+      "type": "User"
+    },
+    "author_association": "COLLABORATOR"
+  }
+}

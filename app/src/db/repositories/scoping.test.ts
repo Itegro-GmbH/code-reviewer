@@ -40,6 +40,7 @@ const SCOPED = [
   "refusal-notices-repository.ts",
   "repositories-repository.ts",
   "runs-repository.ts",
+  "tracker-repository.ts",
   "usage-records-repository.ts",
   "workspace-entitlements-repository.ts",
   "workspace-erasure-repository.ts",

@@ -14,6 +14,7 @@ import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
   type WebhookHandler,
+  type TrackerWriter,
   type WorkflowStarter,
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
@@ -43,7 +44,11 @@ export function getJobQueueReviewTriggerIntake(
  * on an issue in one workspace (#845); the route passes it in, because the engine depends on this folder and not the other way round.
  */
 export function getGithubAppWebhookHandler(
-  options: { workflowsFor?: (workspaceId: string) => WorkflowStarter } = {},
+  options: {
+    workflowsFor?: (workspaceId: string) => WorkflowStarter;
+    /** What writes the changes of tickets of one workspace into the ticket mirror (#923); the route passes it in like `workflowsFor`. */
+    trackerFor?: (workspaceId: string) => TrackerWriter;
+  } = {},
 ): WebhookHandler {
   const db = getDatabase();
   return createGithubAppWebhookHandler({
@@ -59,6 +64,9 @@ export function getGithubAppWebhookHandler(
         settings: reviewSettingsServiceFor(workspaceId),
       }),
       intake: getJobQueueReviewTriggerIntake(workspaceId),
+      ...(options.trackerFor === undefined
+        ? {}
+        : { tracker: options.trackerFor(workspaceId) }),
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),

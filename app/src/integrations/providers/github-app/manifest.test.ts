@@ -93,7 +93,13 @@ describe("the GitHub App manifest", () => {
       emails: "read",
       members: "read",
     });
-    expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
+    expect(manifest.default_events).toEqual([
+      "pull_request",
+      "issue_comment",
+      "issues",
+      "sub_issues",
+      "check_suite",
+    ]);
   });
 
   // #405-T13
@@ -287,7 +293,13 @@ describe("the manifest of a deployment with the Implementer", () => {
       ...ALL_PERMISSIONS,
       contents: "write",
     });
-    expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
+    expect(manifest.default_events).toEqual([
+      "pull_request",
+      "issue_comment",
+      "issues",
+      "sub_issues",
+      "check_suite",
+    ]);
     expect(manifest).toEqual({
       ...manifestFor(CODE_REVIEW_COM),
       default_permissions: { ...ALL_PERMISSIONS, contents: "write" },
