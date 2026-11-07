@@ -2,6 +2,7 @@
 
 import type { Metadata } from "next";
 import { requireImplementerCapability } from "@/implementer/shared";
+import { projectServiceFor } from "@/projects/shared";
 import { LanesTab } from "@/projects/ui/project-tabs";
 import { workflowServiceFor } from "@/workflows/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
@@ -9,8 +10,8 @@ import { CockpitFrame } from "../cockpit-frame";
 
 export const metadata: Metadata = { title: "Project · Lanes" };
 
-// The lanes of one project (#925). A lane does not belong to a project yet (#922), so the tab lists the lanes of the workspace; each
-// one opens its page with the Start form and its runs. Only in a deployment with the capability `implementer`.
+// The lanes of one project (#925, #922): the workflows that belong to it; each one opens its page with the Start form and its runs. A
+// repository without a project has none. Only in a deployment with the capability `implementer`.
 export default async function ProjectLanesPage({
   params,
 }: PageProps<"/w/[workspace]/projects/[repositoryId]/lanes">) {
@@ -24,7 +25,11 @@ export default async function ProjectLanesPage({
       repositoryId={repositoryId}
       tab="lanes"
     >
-      <LanesContent workspaceId={workspace.id} workspaceSlug={workspace.slug} />
+      <LanesContent
+        workspaceId={workspace.id}
+        workspaceSlug={workspace.slug}
+        repositoryId={repositoryId}
+      />
     </CockpitFrame>
   );
 }
@@ -32,10 +37,17 @@ export default async function ProjectLanesPage({
 async function LanesContent({
   workspaceId,
   workspaceSlug,
+  repositoryId,
 }: {
   workspaceId: string;
   workspaceSlug: string;
+  repositoryId: string;
 }) {
-  const { workflows } = await workflowServiceFor(workspaceId).list();
+  const entry = await projectServiceFor(workspaceId).findProject(repositoryId);
+  const projectId = entry?.project?.id;
+  const workflows =
+    projectId === undefined
+      ? []
+      : (await workflowServiceFor(workspaceId).list(projectId)).workflows;
   return <LanesTab workspaceSlug={workspaceSlug} lanes={workflows} />;
 }

@@ -20,6 +20,29 @@ export type SetActiveAnswer = {
   changed: boolean;
 };
 
+/** A board of the repository (#922) as the dialog of a new project lists it. */
+export type BoardChoice = {
+  projectV2Id: string;
+  number: number;
+  title: string;
+  hasStatusField: boolean;
+  statuses: string[];
+};
+
+export type BoardsAnswer = { available: boolean; boards: BoardChoice[] };
+
+/** The body of a new project (#922): the repository, the board of its GitHub Project, and the built-in lanes to copy. */
+export type NewProjectBody = {
+  repositoryId: string;
+  board: { projectV2Id: string } | null;
+  lanes: string[];
+};
+
+export type CreatedProjectAnswer = {
+  project: { id: string; repositoryId: string; active: boolean };
+  lanes: { key: string; ok: boolean; workflowId?: string; code?: string }[];
+};
+
 /** What the sync button needs of an answer: how many repositories are new and the code of each problem. */
 export type SyncResult = { added: number; errors: { code: string }[] };
 
@@ -29,6 +52,16 @@ export type ProjectsApi = {
     active: boolean,
   ): Promise<RequestResult<SetActiveAnswer>>;
   sync(): Promise<RequestResult<SyncResult>>;
+};
+
+/** The calls of the "New project" dialog of the factory (#922). */
+export type NewProjectApi = {
+  /** `GET .../repositories/:id/boards`: the boards the project of that repository could take. */
+  boards(repositoryId: string): Promise<RequestResult<BoardsAnswer>>;
+  /** `POST .../projects`: creates the project of a repository in the factory. */
+  createProject(
+    body: NewProjectBody,
+  ): Promise<RequestResult<CreatedProjectAnswer>>;
 };
 
 export function createProjectsApi(
@@ -55,9 +88,37 @@ export function createProjectsApi(
   };
 }
 
+export function createNewProjectApi(
+  fetchImpl: FetchLike,
+  workspaceSlug: string,
+): NewProjectApi {
+  return {
+    boards: (repositoryId) =>
+      requestJson<BoardsAnswer>(
+        fetchImpl,
+        "GET",
+        workspaceApiPath(
+          workspaceSlug,
+          `/repositories/${encodeURIComponent(repositoryId)}/boards`,
+        ),
+      ),
+    createProject: (body) =>
+      requestJson<CreatedProjectAnswer>(
+        fetchImpl,
+        "POST",
+        workspaceApiPath(workspaceSlug, "/projects"),
+        body,
+      ),
+  };
+}
+
 /** The real thing, for the components; tests hand in their own. */
 export function browserProjectsApi(workspaceSlug: string): ProjectsApi {
   return createProjectsApi((url, init) => fetch(url, init), workspaceSlug);
+}
+
+export function browserNewProjectApi(workspaceSlug: string): NewProjectApi {
+  return createNewProjectApi((url, init) => fetch(url, init), workspaceSlug);
 }
 
 /** The synchronization of the whole instance: the instance admin's route of the admin portal. */

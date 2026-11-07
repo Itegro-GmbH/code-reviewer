@@ -31,7 +31,7 @@ at a step that ran before on every path, the types of the values that flow, the 
    message) holds the first 20, and a message says how many more there are. A message, a path and a name in `available` repeat at most the
    first 64 characters of what you wrote (a longer key is cut and ends in `…`, so its path points near it). Below a result-schema field
    name that is refused nothing is checked: fix the name, validate again.
-4. When it is valid, `POST /api/w/<slug>/workflows` saves it as version 1, or `PUT /api/w/<slug>/workflows/<id>` saves the next version.
+4. When it is valid, `POST /api/w/<slug>/workflows?projectId=<project id>` saves it as version 1 in that project (a lane belongs to exactly one project, see [Lanes belong to a project](#lanes-belong-to-a-project)), or `PUT /api/w/<slug>/workflows/<id>` saves the next version.
    Saving runs the same validator and refuses an invalid document with the same list (`422`, `WORKFLOW_INVALID`).
 
 An answer you will see while fixing:
@@ -60,17 +60,17 @@ An answer you will see while fixing:
 
 ## The document
 
-| Field                  | Needed             | What                                                                                                                                                                                             |
-| ---------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `version`              | yes                | `1`.                                                                                                                                                                                             |
-| `name`                 | yes                | 1 to 100 characters, not only spaces. Unique among the workflows of the workspace that are not archived (case is ignored).                                                                       |
-| `description`          | no                 | Up to 1000 characters.                                                                                                                                                                           |
-| `triggers`             | yes (or `trigger`) | The triggers that start the workflow, 1 to 10, each with pre-steps of its own ([The triggers](#the-triggers-and-their-pre-steps)).                                                               |
-| `trigger`              | no                 | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both.                   |
-| `budgetUsd`            | no                 | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today).                                                                          |
-| `turnTimeLimitMinutes` | no                 | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
-| `steps`                | yes                | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included).                                                                                                |
-| `onFailure`            | no                 | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did.                               |
+| Field | Needed | What |
+| --- | --- | --- |
+| `version` | yes | `1`. |
+| `name` | yes | 1 to 100 characters, not only spaces. Unique among the workflows of the workspace that are not archived (case is ignored). |
+| `description` | no | Up to 1000 characters. |
+| `triggers` | yes (or `trigger`) | The triggers that start the workflow, 1 to 10, each with pre-steps of its own ([The triggers](#the-triggers-and-their-pre-steps)). |
+| `trigger` | no | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both. |
+| `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
+| `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
+| `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
+| `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
 Every object is **closed**: a field the format does not name is an error (`unknown_field`, with the names that exist). Lengths are counted in
 characters (an emoji is one), as the JSON Schema counts them.
@@ -94,19 +94,19 @@ may only read what **every** trigger yields.
 ]
 ```
 
-| Field   | Needed | What                                                                                                                                                                                                 |
-| ------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`    | yes    | A letter, then letters, digits, `_` or `-` (64 at most); `trigger` and `previous` are taken. Unique among the triggers (`duplicate_id`). The start API takes it as `"trigger"`.                      |
-| `kind`  | yes    | One of the kinds below.                                                                                                                                                                              |
-| `steps` | no     | The pre-steps: the form of `steps`, may be empty. They see the values of their own trigger only. Their ids are unique in the whole document, with the shared steps and `onFailure` (`duplicate_id`). |
+| Field | Needed | What |
+| --- | --- | --- |
+| `id` | yes | A letter, then letters, digits, `_` or `-` (64 at most); `trigger` and `previous` are taken. Unique among the triggers (`duplicate_id`). The start API takes it as `"trigger"`. |
+| `kind` | yes | One of the kinds below. |
+| `steps` | no | The pre-steps: the form of `steps`, may be empty. They see the values of their own trigger only. Their ids are unique in the whole document, with the shared steps and `onFailure` (`duplicate_id`). |
 
-| `kind`               | Other fields                                                                                                                                                                                                                                                       | What the steps can read (`{{trigger.<field>}}`)                                                                                                                                                                                                                                                           |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ticket.labeled`     | `label` (needed, not only spaces): the label that starts the workflow                                                                                                                                                                                              | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
-| `manual`             | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one                                                                                                                                                                                                              |
-| `api`                | the same as `manual`                                                                                                                                                                                                                                               | the same. It is started through the API only; the start form of the web app offers `manual` triggers                                                                                                                                                                                                      |
-| `pullRequest.pushed` | none                                                                                                                                                                                                                                                               | reserved: the format validates it, the engine starts no run from it yet                                                                                                                                                                                                                                   |
-| `schedule`           | `cron` (needed): five fields separated by one space                                                                                                                                                                                                                | reserved, like `pullRequest.pushed`                                                                                                                                                                                                                                                                       |
+| `kind` | Other fields | What the steps can read (`{{trigger.<field>}}`) |
+| --- | --- | --- |
+| `ticket.labeled` | `label` (needed, not only spaces): the label that starts the workflow | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
+| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
+| `api` | the same as `manual` | the same. It is started through the API only; the start form of the web app offers `manual` triggers |
+| `pullRequest.pushed` | none | reserved: the format validates it, the engine starts no run from it yet |
+| `schedule` | `cron` (needed): five fields separated by one space | reserved, like `pullRequest.pushed` |
 
 `trigger.id` and `trigger.kind` (`ticket.labeled`, `manual`, …) are readable facts of every trigger. A run of a workflow written with the old
 `trigger` has the id `labeled` or `manual` and the kind `ticket.labeled` or `manual`.
@@ -120,15 +120,15 @@ shared steps: only the values of the trigger are. With one trigger nothing chang
 the number; GitHub is the provider so far, the shape is provider neutral). The input type `ticket` takes such a reference; the engine resolves
 it through the provider when the run starts, and the steps read it as `{{trigger.ticket.…}}`:
 
-| Field           | What                                                                                                           |
-| --------------- | -------------------------------------------------------------------------------------------------------------- |
-| `number`        | the number (an integer)                                                                                        |
+| Field | What |
+| --- | --- |
+| `number` | the number (an integer) |
 | `title`, `body` | free text from whoever opened the ticket: read in texts, never a [target](#one-repository-per-run-and-targets) |
-| `labels`        | the names of its labels (a list; free text too)                                                                |
-| `type`          | the kind of ticket the platform reports (GitHub's issue type, `Bug`), empty when it has none                   |
-| `assignees`     | the logins of the people it is assigned to (a list)                                                            |
-| `url`           | its web address                                                                                                |
-| `repo`          | the repository: `repo.fullName`, `.owner`, `.name`, `.defaultBranch`                                           |
+| `labels` | the names of its labels (a list; free text too) |
+| `type` | the kind of ticket the platform reports (GitHub's issue type, `Bug`), empty when it has none |
+| `assignees` | the logins of the people it is assigned to (a list) |
+| `url` | its web address |
+| `repo` | the repository: `repo.fullName`, `.owner`, `.name`, `.defaultBranch` |
 
 A label trigger yields the same ticket from the webhook (`type` and `assignees` are filled when GitHub's payload has them, else empty), so a
 step reads `{{trigger.ticket.number}}` whichever trigger fired. `trigger.ticket` is a **target**: one trusted value that names the issue (see
@@ -161,23 +161,23 @@ Other triggers (Jira) come later. Who may set the label is decided by GitHub, no
 no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. Several repositories in one run are a later
 extension.
 
-The inputs that decide **what the workflow acts on** are _targets_: `issue`, `ticket`, `pullRequest`, `head`, `base`, the labels `add` and `remove` and the `reviewers` of an action, the `board` and `status` of `ticket.setStatus`, and
+The inputs that decide **what the workflow acts on** are *targets*: `issue`, `ticket`, `pullRequest`, `head`, `base`, the labels `add` and `remove` and the `reviewers` of an action, the `board` and `status` of `ticket.setStatus`, and
 the `environment` of an agent step. An agent's result is data, never a command, and so is what whoever opened the issue wrote (its title, body
 and labels): anyone who can open an issue could steer a run through them. So a target takes only
 
 - a **literal** (`"develop"`, `7`), or
 - **exactly one reference**, nothing around it, to one of the few values the platform or the caller vouches for. Which ones depends on the input:
 
-| Input             | A literal                                                                                            | A reference to                                                                                                                                                                                                                                     |
-| ----------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `issue`, `ticket` | a positive whole number, 1 to 2147483647                                                             | `{{trigger.ticket}}` or `{{trigger.ticket.number}}` (the ticket the run is about), `{{trigger.issue}}` or `{{trigger.issue.number}}` (the issue a label started), or an input of a manual trigger declared `integer` (`{{trigger.input.issueNo}}`) |
-| `add`, `remove`   | label names                                                                                          | an input of a manual trigger: `{{trigger.input.label}}` as an entry, or `{{trigger.input.labels}}` as the whole list                                                                                                                               |
-| `base`            | a branch name                                                                                        | `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`)                                                                                                              |
-| `head`            | a branch name                                                                                        | `{{<agent step>.branch}}`, the branch of an agent step that may push (a fact the platform made)                                                                                                                                                    |
-| `pullRequest`     | a positive whole number, 1 to 2147483647                                                             | `{{<step id>.number}}` of an earlier `pullRequest.open` (or `github.pullRequest.open`) action (the pull request the platform opened), or an input of a manual trigger declared `integer`                                                           |
-| `reviewers`       | `"project members"` or a list of GitHub logins                                                       | an input of a manual trigger: `{{trigger.input.reviewer}}` as an entry, or `{{trigger.input.reviewers}}` as the whole list                                                                                                                         |
-| `board`, `status` | the number of a GitHub Project (`"7"`) or its node id, and the name of an option of its Status field | nothing: a literal only                                                                                                                                                                                                                            |
-| `environment`     | the name of an environment                                                                           | nothing: a literal only                                                                                                                                                                                                                            |
+| Input | A literal | A reference to |
+| --- | --- | --- |
+| `issue`, `ticket` | a positive whole number, 1 to 2147483647 | `{{trigger.ticket}}` or `{{trigger.ticket.number}}` (the ticket the run is about), `{{trigger.issue}}` or `{{trigger.issue.number}}` (the issue a label started), or an input of a manual trigger declared `integer` (`{{trigger.input.issueNo}}`) |
+| `add`, `remove` | label names | an input of a manual trigger: `{{trigger.input.label}}` as an entry, or `{{trigger.input.labels}}` as the whole list |
+| `base` | a branch name | `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`) |
+| `head` | a branch name | `{{<agent step>.branch}}`, the branch of an agent step that may push (a fact the platform made) |
+| `pullRequest` | a positive whole number, 1 to 2147483647 | `{{<step id>.number}}` of an earlier `pullRequest.open` (or `github.pullRequest.open`) action (the pull request the platform opened), or an input of a manual trigger declared `integer` |
+| `reviewers` | `"project members"` or a list of GitHub logins | an input of a manual trigger: `{{trigger.input.reviewer}}` as an entry, or `{{trigger.input.reviewers}}` as the whole list |
+| `board`, `status` | the number of a GitHub Project (`"7"`) or its node id, and the name of an option of its Status field | nothing: a literal only |
+| `environment` | the name of an environment | nothing: a literal only |
 
 Everything else (a result field of an agent, a field of an action or a loop, `previous.…`, `trigger.issue.title`, `.body` or `.labels`, text
 around a reference, `trigger.ticket.title`, `.body`, `.labels`) is refused with `target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`,
@@ -196,16 +196,16 @@ again when it runs**.
 
 A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
 
-| Field         | Needed                | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id`          | yes                   | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `profile`     | yes                   | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema.                                                                                                                                                                             |
-| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running.                                                                     |
-| `instruction` | yes                   | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `session`     | no                    | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run).                                                                                                                                                                                                                                                                                                                              |
-| `branch`      | no                    | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
-| `result`      | no                    | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one).                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `description` | no                    | A note.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Field | Needed | What |
+| --- | --- | --- |
+| `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
+| `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
+| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
+| `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
+| `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
+| `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
+| `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one). |
+| `description` | no | A note. |
 
 **What an agent step yields**, for `{{<id>.<field>}}`: the fields of its `result`, and the **facts** the platform knows without the agent
 reporting them: `costUsd` (always), and, **only if the profile may push**, `branch`, `commits` (a list of commit ids, oldest first), `headCommit`
@@ -220,17 +220,17 @@ that fails its own check binds its fields as unknown: you get the errors of the 
 No model, no agent: the platform does what the action says, against the target the workflow names. An agent's result is data, never a
 command; consequences (a comment, a pull request) happen only here. The inputs sit on the node itself.
 
-| `connector`               | Inputs (`*` needed)                                                                                                                                                                                               | Yields                                   |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `ticket.comment`          | `ticket`\* (a positive whole number, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`, `{{trigger.issue}}`, or a manual input declared `integer`), `body`\*                                                      | `url`, `existing`                        |
-| `ticket.labels`           | `ticket`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`)                                                         | `labels` (the labels the ticket has now) |
-| `ticket.setStatus`        | `ticket`\*, `board`\* (the number or node id of the GitHub Project that holds the board, a literal), `status`\* (a literal option name of the board's Status field)                                               | `status`                                 |
-| `ticket.requestReview`    | `pullRequest`\* (a number, `{{<step id>.number}}` of a `pullRequest.open` step, or a manual input declared `integer`), `reviewers`\* (`"project members"` or a list of GitHub logins)                             | `requested` (the logins asked)           |
-| `pullRequest.open`        | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url`, `existing`              |
-| `pullRequest.comment`     | `pullRequest`\*, `body`\*                                                                                                                                                                                         | `url`, `existing`                        |
-| `github.pullRequest.open` | as `pullRequest.open`                                                                                                                                                                                             | as `pullRequest.open`                    |
-| `github.issue.comment`    | `issue`\* (as `ticket`), `body`\*                                                                                                                                                                                 | `url`, `existing`                        |
-| `github.issue.labels`     | `issue`\*, `add`, `remove` as `ticket.labels`                                                                                                                                                                     | `labels`                                 |
+| `connector` | Inputs (`*` needed) | Yields |
+| --- | --- | --- |
+| `ticket.comment` | `ticket`\* (a positive whole number, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`, `{{trigger.issue}}`, or a manual input declared `integer`), `body`\* | `url`, `existing` |
+| `ticket.labels` | `ticket`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`) | `labels` (the labels the ticket has now) |
+| `ticket.setStatus` | `ticket`\*, `status`\* (a literal option name of the board's Status field), `board` (the number or node id of a GitHub Project, a literal: an override; left out, the board of the lane's project is used) | `status` |
+| `ticket.requestReview` | `pullRequest`\* (a number, `{{<step id>.number}}` of a `pullRequest.open` step, or a manual input declared `integer`), `reviewers`\* (`"project members"` or a list of GitHub logins) | `requested` (the logins asked) |
+| `pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url`, `existing` |
+| `pullRequest.comment` | `pullRequest`\*, `body`\* | `url`, `existing` |
+| `github.pullRequest.open` | as `pullRequest.open` | as `pullRequest.open` |
+| `github.issue.comment` | `issue`\* (as `ticket`), `body`\* | `url`, `existing` |
+| `github.issue.labels` | `issue`\*, `add`, `remove` as `ticket.labels` | `labels` |
 
 Connectors are named by what they do, not by the provider; the provider is the one of the run's repository (GitHub so far). The `github.*` names are
 **aliases** that saved lanes keep using (#916, #917): `ticket.comment` is `github.issue.comment`, `ticket.labels` is `github.issue.labels` and
@@ -239,7 +239,7 @@ writes below a pull request, the way `ticket.comment` does below an issue. The a
 `github.issue.comment`, `github.issue.labels`), and so is `pullRequest.comment`, which is a comment too (`ticket.setStatus` and `ticket.requestReview` are not).
 
 `ticket.setStatus` writes the **Status field of a GitHub Project** (projects_v2) of the repository's owner: the issue is put into the column `status` names and, when it
-is not on the board yet, added to it first. `board` is named on the action for now (the project that is connected to a board comes with #922, which moves it there). The option
+is not on the board yet, added to it first. The board is the **board of the project the lane belongs to** ([Lanes belong to a project](#lanes-belong-to-a-project)): the action takes it from there, so a lane copied into another project moves its tickets on that project's board. `board` stays accepted as an override (a literal, as before); a lane whose project has no board and which names none ends the step with `action_input_invalid`. The option
 name is looked up **when the step runs**: a board without such an option ends the step with `board_status_unknown`, and the message names the options it has. A board that
 is not found among the owner's projects ends it with `github_not_found`; a board named by its node id must belong to the repository's owner, else it is not found as well. `board` and `status` are names that are looked up
 by equality, so nothing is put into them (no mention of a person is defused in a status such as `Needs @design`). GraphQL errors that come with partial data never read as moved: the step ends when the card was not added or the status not set. The App needs the opt-in **Projects** permission (see [GitHub actions](#github-actions) and `docs/github-app.md`); without
@@ -283,16 +283,15 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
 - **The facts of the failure** (`{{failure.<fact>}}`, all texts):
 
-  | Fact      | Holds                                                                                                                                                                                                                                             |
-  | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `status`  | `failed` or `cancelled`: how the run ends.                                                                                                                                                                                                        |
-  | `stepId`  | The step the failure belongs to: the step that failed, the agent step the budget could not pay, the `if` or `loop` whose condition could not be told, the step a cancel stopped. Empty when no step does (a run cancelled before its first step). |
-  | `code`    | The code of that step (`no_result`, `timeout`, `github_not_found`, …), or the code of the run (`budget_exhausted`, `condition_failed`); `cancelled` for a cancel.                                                                                 |
-  | `message` | A short sentence (300 characters at most) about why.                                                                                                                                                                                              |
+  | Fact | Holds |
+  | --- | --- |
+  | `status` | `failed` or `cancelled`: how the run ends. |
+  | `stepId` | The step the failure belongs to: the step that failed, the agent step the budget could not pay, the `if` or `loop` whose condition could not be told, the step a cancel stopped. Empty when no step does (a run cancelled before its first step). |
+  | `code` | The code of that step (`no_result`, `timeout`, `github_not_found`, …), or the code of the run (`budget_exhausted`, `condition_failed`); `cancelled` for a cancel. |
+  | `message` | A short sentence (300 characters at most) about why. |
 
   They are **data, not commands**: none of them is a [target](#one-repository-per-run-and-targets) (`target_from_untrusted_value`), and `code` and `message`, which may quote a connector, GitHub or a runner,
   go into a comment **defused** like the text an agent wrote or the title of an issue (no mention of a person or team, no `Closes #n`, no comment marker, see [Results and facts](#results-and-facts)).
-
 - **When they run.** After a step failed, the budget ended the run (`budget_exhausted`; they cost nothing, so they run), a condition could not be told (`condition_failed`), or a member cancelled the run
   (after its agent has stopped, [Cancelling a run](#cancelling-a-run)). They do **not** run when the run could not even start (`workflow_owner_gone`) or its steps do not fit its document (`document_unusable`):
   nothing of such a run can be trusted to act on an issue.
@@ -341,12 +340,12 @@ its place wants: a number where a number is wanted, a list of texts where `add` 
 
 One operator per condition:
 
-| Operator              | Value                                         | Holds when                                                                                             |
-| --------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `empty`, `notEmpty`   | one operand (a reference to a list or a text) | the list or text is empty / is not                                                                     |
-| `equals`, `notEquals` | `[a, b]`: two operands                        | equal / not equal: two texts (a choice of names counts as text), two numbers, or two true/false values |
-| `all`, `any`          | a list of conditions (at least one)           | all / at least one holds                                                                               |
-| `not`                 | a condition                                   | it does not hold                                                                                       |
+| Operator | Value | Holds when |
+| --- | --- | --- |
+| `empty`, `notEmpty` | one operand (a reference to a list or a text) | the list or text is empty / is not |
+| `equals`, `notEquals` | `[a, b]`: two operands | equal / not equal: two texts (a choice of names counts as text), two numbers, or two true/false values |
+| `all`, `any` | a list of conditions (at least one) | all / at least one holds |
+| `not` | a condition | it does not hold |
 
 An operand is a reference (`"{{review.findings}}"`), a text, a number or true/false. Comparing something with a choice of names it can never
 be gives `condition_value_not_in_enum` (with the names it can be). Conditions nest 4 levels deep at most.
@@ -363,15 +362,14 @@ the root is an object; a field is a `string` (optionally with `enum`, a list of 
   "required": ["findings"],
   "properties": {
     "findings": {
-      "type": "array",
-      "maxItems": 20,
+      "type": "array", "maxItems": 20,
       "items": {
         "type": "object",
         "required": ["type", "name"],
         "properties": {
-          "type": { "type": "string", "enum": ["bug", "risk", "nit"] },
-          "name": { "type": "string", "maxLength": 120 },
-          "description": { "type": "string" }
+          "type": {"type": "string", "enum": ["bug", "risk", "nit"]},
+          "name": {"type": "string", "maxLength": 120},
+          "description": {"type": "string"}
         }
       }
     }
@@ -585,18 +583,18 @@ the run (the step, its code and a short message, defused), and `release` takes `
 
 ## The API
 
-All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace, and answer `Cache-Control: no-store`. The body of a
+All routes are under `/api/w/<slug>/workflows`, need a signed in member of the workspace, and answer `Cache-Control: no-store`. A lane belongs to a project (#922): the list and the creation name it with the query value `projectId` (the workspace has no list of all its workflows any more); the routes of one workflow are by its id as before. The API keeps these routes with the `projectId` filter for one release, then the project-scoped routes take over. The body of a
 write is the document itself (`Content-Type: application/json`, 256 KB at most). A refusal is `{"error": <code>, "message": ...}` with a stable
 code from the table below.
 
-| Route                      | What                                                                                                                                                                                                       | Answer                                                                                                         |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing.                                                                                                                   | `200` `{valid, errors, truncated, steps, budgetUsd?}` (also for an invalid document)                           |
-| `POST /workflows`          | Validates and saves as **version 1**.                                                                                                                                                                      | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` and `truncated` (as the validate call gives them)   |
-| `PUT /workflows/<id>`      | Validates and saves as the **next version**; the name is taken from the document. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}`                                                                                             |
-| `GET /workflows`           | The workflows of the workspace by name, **not the archived ones**.                                                                                                                                         | `200` `{workflows: [{id, name, version, createdAt, updatedAt, archivedAt}], maximum}`                          |
-| `GET /workflows/<id>`      | The workflow with its current version, or `?version=n`. An archived workflow is readable too.                                                                                                              | `200` `{workflow: {id, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt}]}}` |
-| `DELETE /workflows/<id>`   | **Archives** the workflow (a soft delete). Asked again, it answers the same.                                                                                                                               | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND`; `409` `WORKFLOW_ARCHIVE_LIMIT_REACHED`   |
+| Route | What | Answer |
+| --- | --- | --- |
+| `POST /workflows/validate` | Checks the document against the format and the workspace's environments. Stores nothing. | `200` `{valid, errors, truncated, steps, budgetUsd?}` (also for an invalid document) |
+| `POST /workflows?projectId=<id>` | Validates and saves as **version 1**, as a lane of that project (switched on, of this workspace). The name is held once per project. | `201` `{workflow}`; `422` `WORKFLOW_INVALID` with `errors` and `truncated` (as the validate call gives them); `400` `WORKFLOW_PROJECT_REQUIRED`, `404` `WORKFLOW_PROJECT_NOT_FOUND` or `409` `WORKFLOW_PROJECT_INACTIVE` with `issues` |
+| `PUT /workflows/<id>` | Validates and saves as the **next version**; the name is taken from the document. `?expectedVersion=n` saves only if `n` is still current (a race gives `409` `WORKFLOW_VERSION_CONFLICT` with `current`). | `200` `{workflow}` |
+| `GET /workflows?projectId=<id>` | The lanes of the project by name, **not the archived ones**. `projectId` is required. | `200` `{workflows: [{id, projectId, name, version, createdAt, updatedAt, archivedAt}], maximum}`; `400` `WORKFLOW_PROJECT_REQUIRED` or `404` `WORKFLOW_PROJECT_NOT_FOUND` with `issues: [{path: "projectId", code, message, available}]`, `available` being the ids of the projects of the workspace |
+| `GET /workflows/<id>` | The workflow with its current version, or `?version=n`. An archived workflow is readable too. | `200` `{workflow: {id, projectId, name, version, archivedAt, documentVersion, document, versions: [{version, savedAt}]}}` |
+| `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND`; `409` `WORKFLOW_ARCHIVE_LIMIT_REACHED` |
 
 Every save is a **new, immutable version**: the database refuses to change a saved version (there is no UPDATE of a version; only the erasure
 of a whole workspace deletes rows). An identical document is saved again as a new version. A workspace holds 100 workflows that are not
@@ -610,6 +608,36 @@ cannot grow the rows for ever: with 1000 archived workflows in a workspace one m
 `WORKFLOW_ARCHIVE_LIMIT_REACHED`, with `maximum`); creating, saving and reading go on. Every member may do everything in a workspace (no role is checked), so
 the count, not a role, is the bound; there is no way to remove archived workflows yet (a follow-up).
 
+### Lanes belong to a project
+
+A **project is exactly one ticket source** (#922, epic #915): the GitHub issues of one repository, with an optional GitHub Project (projects_v2) as its board. A project has no list of
+repositories of its own, and a lane belongs to exactly one project (`workflows.project_id`; there is no list of lanes outside a project: the web page of the Lanes tab is the project's, and
+`/w/<slug>/workflows` leads to the projects). The ticket source is stored on the project as `{ "provider": "github", "repositoryId", "board": { "projectV2Id", "statusFieldId" } | null }`; a project
+that was written before has no stored source and reads as the issues of its repository without a board.
+
+- **The label trigger** starts a lane only when the label is put on an issue of the **repository of its project**, and the project is switched on. A lane of another project, and a lane without a project, wait for no label.
+- **A manual or api start** is held to the same repository: the `ticket` input must be an issue of it (`422 WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT`), and so must `input.repo` for a lane that names a repository instead
+  (`422 WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`). Both answer `issues: [{ path, code: "ticket_outside_project" | "repository_outside_project", message, available }]`, `available` naming the repository the project takes
+  its tickets from. A lane without a project (archived, or written by an older version) is not held to it.
+- **`ticket.setStatus`** takes the board from the project ([The action](#the-action-kind-action)); `board` on the step stays an accepted override.
+- **The name of a lane** is held once per project (case ignored), not once per workspace, so every project can have its own "Issue to PR". A lane without a project keeps the old rule among such lanes.
+- **A lane without a project** is what an older version writes while this one is being deployed (the database allows it; the service never creates one, and the migration has placed or archived every lane that existed when it ran).
+  It is still read, saved, archived and started by its id (a manual or api start is held to no repository), and it keeps its name rule among such lanes. It starts **no run from a label**, is listed in **no project** (the list
+  needs a `projectId`) and shows on no Lanes tab; a lane like that is written again in a project (`POST /workflows?projectId=…`) and the old one archived. There is no separate list of them: they are rare and last for one release.
+- **Migration.** Each workflow that existed was given to the project of the repository its newest run used (an active project before an inactive one), else to the only active project of its workspace; a lane that
+  can only go to an inactive project is placed there and listed in the log, and one that no project could take was archived and is
+  listed in the log of the migration (`20261107190000_project_ticket_source`) so that its owner can write it again in the right project. The mirror of the tickets (`tracker_items`) points at the project of
+  its repository.
+
+**Creating a project** in the factory is `POST /api/w/<slug>/projects` (Admins and Owners, like switching a repository on): the body is
+`{ "repositoryId", "board": { "projectV2Id" } | null, "lanes": ["issue-to-pr", "review-a-pull-request"] }`, `board` and `lanes` optional. The board must be one of the boards of the repository (`GET
+/api/w/<slug>/repositories/<id>/boards` lists them with the options of their Status field, read from GitHub with a token that may read boards and nothing else); the server takes the Status field from that list, never from
+the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save, with the profiles `implementer` and `reviewer` and the first environment of the workspace by name): a lane that
+cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project (when the copying fails altogether, every lane is `ok: false` with `code: "LANE_COPY_FAILED"`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
+`400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]` (`unknown_field`, `missing_field`, `wrong_type`, `invalid_value`, `unknown_lane`, `duplicate_lane`, `unknown_board`, `board_without_status`,
+`board_unavailable`; `available` lists what would have been accepted); a repository that is a project already is `409 PROJECT_ALREADY_EXISTS`. The tickets of a project are `GET /api/w/<slug>/projects/<id>/issues`, the same
+answer as the issues of its repository. Switching a repository on or off for review (`PUT .../repositories/<id>/project`) and the review settings are unchanged: a deployment without the factory behaves as before.
+
 ### For the engine (milestone 3)
 
 What the engine keeps to (milestone 3a keeps all of it); the validator and the routes assume it.
@@ -619,7 +647,7 @@ What the engine keeps to (milestone 3a keeps all of it); the validator and the r
 - **Environments are matched by name, case ignored**, here and when a run starts (`PYTHON` finds `Python`); names are unique in a workspace
   that way.
 - **A session may continue across versions of one profile**: `implementer@1` may continue the session of a step that ran as
-  `implementer@2`, because the session belongs to the profile _name_ (and the environment), not to its version. This is kept on purpose.
+  `implementer@2`, because the session belongs to the profile *name* (and the environment), not to its version. This is kept on purpose.
 - **The engine checks the targets again** (an issue number is a positive whole number up to 2147483647, a label or a branch a text) when it
   runs: what the validator checks is what the document says, and an input of a manual trigger is only known then.
 - **The engine never expands a template inside a default value.** The default of a reference is a JSON value written out, taken as it is:
@@ -628,7 +656,7 @@ What the engine keeps to (milestone 3a keeps all of it); the validator and the r
 
 ## Engine
 
-_Milestones 3 and 5 of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md)._ The engine takes a saved workflow
+*Milestones 3 and 5 of epic #833; the code is [`app/src/workflow-runs/`](../app/src/workflow-runs/README.md).* The engine takes a saved workflow
 version and runs it: one **run** per start, one **step run** per time a step runs (a step in a loop has one for every round). It runs `agent` and `action` steps in the order the
 document says, and the control steps `if` and `loop` ([Control at run time](#control-at-run-time)). A workflow starts with the **manual** trigger or a **label** on an issue
 (milestone 4, [The label trigger](#the-label-trigger)). A node of a kind the engine does not run (the reserved kinds, which the validator refuses anyway) is refused when a
@@ -639,15 +667,11 @@ run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step na
 `POST /api/w/<slug>/workflows/<id>/runs` with `{"trigger": "manual", "input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
 task, `start_implementer_task`: a run starts tasks). `trigger` is the `id` of one of the workflow's [triggers](#the-triggers-and-their-pre-steps) of the kind `manual` or `api`; it may be left out
 when the workflow has exactly one of them (a workflow written with the single `trigger` has one). `input` must fit the `input` schema of that trigger (checked again here with the same rules as a
-result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`); either is a repository of the workspace. The answer is
+result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
 `201 {"run": {...}}`, with the run and its steps; the pre-steps of the trigger and then the shared steps start right after the answer.
 
 ```jsonc
-{
-  "trigger": "manual",
-  "input": { "ticket": "github:itegro/shop#128" },
-  "clientRequestId": "…",
-}
+{ "trigger": "manual", "input": { "ticket": "github:itegro/shop#128" }, "clientRequestId": "…" }
 ```
 
 A `ticket` is resolved through the GitHub App of the workspace when the run starts (`trigger.ticket` holds what it answered, bounded; the run keeps it, so a step reads one
@@ -731,11 +755,11 @@ name of the person ("Answer by @login: …") so that the ticket holds the whole 
 `POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
 (`outcome`) and carries the run:
 
-| Outcome             | Status | Meaning                                                                                                               |
-| ------------------- | ------ | --------------------------------------------------------------------------------------------------------------------- |
-| `requested`         | 202    | The run runs and is marked. The turn of its step is asked to stop; the run ends `cancelled` when that turn has ended. |
-| `already_requested` | 200    | Somebody asked before; nothing changed (the engine is told again, which is harmless).                                 |
-| `already_ended`     | 200    | The run is over (`succeeded`, `failed` or `cancelled`); nothing changed, the run shows how it ended.                  |
+| Outcome | Status | Meaning |
+| --- | --- | --- |
+| `requested` | 202 | The run runs and is marked. The turn of its step is asked to stop; the run ends `cancelled` when that turn has ended. |
+| `already_requested` | 200 | Somebody asked before; nothing changed (the engine is told again, which is harmless). |
+| `already_ended` | 200 | The run is over (`succeeded`, `failed` or `cancelled`); nothing changed, the run shows how it ended. |
 
 `404 WORKFLOW_RUN_NOT_FOUND` for a run of another workspace or workflow. What happens, in this order:
 
@@ -759,47 +783,13 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 ```json
 {
   "run": {
-    "id": "7f0c…",
-    "workflowId": "…",
-    "workflowVersion": 3,
-    "trigger": "manual",
-    "actorLogin": "octocat",
-    "status": "running",
-    "errorCode": null,
-    "triggerId": "manual",
-    "budgetUsd": 20,
-    "spentUsd": 0.42,
-    "repositoryId": "…",
-    "baseBranch": "main",
-    "input": { "input": { "repo": "acme/widgets", "topic": "caching" } },
-    "createdAt": "…",
-    "updatedAt": "…",
-    "finishedAt": null,
+    "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "trigger": "manual", "actorLogin": "octocat", "status": "running", "errorCode": null,
+    "triggerId": "manual", "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"input": {"repo": "acme/widgets", "topic": "caching"}},
+    "createdAt": "…", "updatedAt": "…", "finishedAt": null,
     "steps": [
-      {
-        "id": "plan",
-        "position": 0,
-        "kind": "agent",
-        "status": "succeeded",
-        "round": 1,
-        "profile": { "name": "worker", "version": 1 },
-        "jobId": "…",
-        "turnId": "…",
-        "costUsd": 0.42,
-        "costBasis": "reported",
-        "output": {
-          "summary": "…",
-          "costUsd": 0.42,
-          "branch": "workflow/7f0c…/plan"
-        },
-        "ask": null,
-        "waitingOnCommentId": null,
-        "errorCode": null,
-        "errorMessage": null,
-        "createdAt": "…",
-        "startedAt": "…",
-        "finishedAt": "…"
-      }
+      { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
+        "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
+        "ask": null, "waitingOnCommentId": null, "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
   }
 }
@@ -883,7 +873,7 @@ The limits belong to the workflow (the lane), not to the profile: the budget abo
 
 ### Control at run time
 
-_Milestone 5 (#846)._ The rows of a run are written in the order the steps run, and the engine decides the next move by **replaying the rows against the document**
+*Milestone 5 (#846).* The rows of a run are written in the order the steps run, and the engine decides the next move by **replaying the rows against the document**
 (`machine.ts`): there is no cursor to lose, so a doubled event or a sweep that comes at the same time finds what the first one wrote and changes nothing. A row says which
 node it is (`stepId`), how often that step has run (`round`, from 1) and, for a control step, what it decided.
 
@@ -917,7 +907,7 @@ node it is (`stepId`), how often that step has run (`round`, from 1) and, for a 
 
 ### `onFailure` at run time
 
-_#902._ When the walk would end the run `failed` or `cancelled` and the workflow has `onFailure` steps, the engine first **stores how the run ends** with the run (`workflow_runs.failure`: the status, the error code and the
+*#902.* When the walk would end the run `failed` or `cancelled` and the workflow has `onFailure` steps, the engine first **stores how the run ends** with the run (`workflow_runs.failure`: the status, the error code and the
 facts above) and keeps it `running`. The rows after that are the rows of `onFailure`, replayed against its steps the same way as the workflow's own; a step that failed or was skipped counts as over, so the next one runs.
 When the last one is over, the run ends with the stored status and error code (`failed` with `step_failed`, `budget_exhausted` or `condition_failed`; `cancelled` with none), and `finishedAt` is the end of the cleanup.
 
@@ -975,41 +965,41 @@ no value (a branch, a reference, an agent's text) can name another one. Each mak
 repository and to the one permission it needs, and switched off afterwards. The inputs are data: they are cleaned and bounded here, after the
 references are resolved.
 
-| Connector                                             | App permission it needs (as the App's settings page words it)                                                                              | Idempotent?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `github.pullRequest.open`                             | Pull requests: Read and write and Contents: Read-only                                                                                      | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts.                                                                                                                                                                                                                                          |
-| `github.issue.comment`                                | Issues: Read and write                                                                                                                     | Not by GitHub (it has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which keeps a comment from being written twice. As a second guard the comment ends with an invisible marker `<!-- wf-<runId>-<position> -->`, and the comments of the issue that changed since the step began (five minutes earlier, for the clocks) are looked at for the App's own comment with it before one is written (`existing: true`, the url of that comment). That holds **within one run** only; see "After a timeout or an error of GitHub's own". |
-| `github.issue.labels`                                 | Issues: Read and write                                                                                                                     | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `ticket.setStatus`                                    | Projects: Read and write (an organization permission, **opt-in**: the App holds it only when its owner asked for it) and Issues: Read-only | Yes: the issue is added to the board if it is not on it (adding it twice finds its card) and the Status is set to the option named, the same value twice. The option must exist; one is never created. Through GitHub's GraphQL API, as Projects have no REST API for it. Projects of a user (not an organization) cannot be written with an installation token.                                                                                                                                                                                                                                      |
-| `ticket.requestReview`                                | Pull requests: Read and write                                                                                                              | Yes: a person who has been asked stays asked. `requested` is the logins GitHub lists as asked afterwards.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `pullRequest.comment`                                 | Issues: Read and write                                                                                                                     | As `github.issue.comment`: the same marker and the same search; GitHub files the comments of a pull request under issues.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `pullRequest.open`, `ticket.comment`, `ticket.labels` | as the `github.*` connector each one is an alias of                                                                                        | as that connector                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Connector | App permission it needs (as the App's settings page words it) | Idempotent? |
+| --- | --- | --- |
+| `github.pullRequest.open` | Pull requests: Read and write and Contents: Read-only | Yes: an open pull request for the same head and base is the result (`number` and `url` of it, `existing: true`), not an error. It is looked for first, and again when GitHub answers that one exists. Only a pull request whose head is a branch of this repository (not of a fork of the same owner) and whose head and base are the ones asked for counts. |
+| `github.issue.comment` | Issues: Read and write | Not by GitHub (it has no way to say "this comment once"). The engine never repeats an action (`action_timeout`, `action_interrupted`), which keeps a comment from being written twice. As a second guard the comment ends with an invisible marker `<!-- wf-<runId>-<position> -->`, and the comments of the issue that changed since the step began (five minutes earlier, for the clocks) are looked at for the App's own comment with it before one is written (`existing: true`, the url of that comment). That holds **within one run** only; see "After a timeout or an error of GitHub's own". |
+| `github.issue.labels` | Issues: Read and write | Yes: an added label that is on the issue stays, a removed one that is not on it is skipped. A label the repository lacks is created by the add. `labels` is what the issue has afterwards. |
+| `ticket.setStatus` | Projects: Read and write (an organization permission, **opt-in**: the App holds it only when its owner asked for it) and Issues: Read-only | Yes: the issue is added to the board if it is not on it (adding it twice finds its card) and the Status is set to the option named, the same value twice. The option must exist; one is never created. Through GitHub's GraphQL API, as Projects have no REST API for it. Projects of a user (not an organization) cannot be written with an installation token. |
+| `ticket.requestReview` | Pull requests: Read and write | Yes: a person who has been asked stays asked. `requested` is the logins GitHub lists as asked afterwards. |
+| `pullRequest.comment` | Issues: Read and write | As `github.issue.comment`: the same marker and the same search; GitHub files the comments of a pull request under issues. |
+| `pullRequest.open`, `ticket.comment`, `ticket.labels` | as the `github.*` connector each one is an alias of | as that connector |
 
 GitHub files the comments and labels of a pull request under issues, so `Issues` covers a pull request too. Every connector asks for the narrowest token of its own, one entry each in `WORKFLOW_ACTION_TOKEN_PERMISSIONS` (`job-access.ts`), the aliases with the permissions of the connector they stand for.
 
 `github.pullRequest.open` needs **Pull requests: Read and write** and, besides, **Contents: Read-only** (the App's installation holds it for the agent's branch already): its token asks for
 `pull_requests: write`, `contents: read` and `metadata: read`. Without the contents GitHub cannot resolve the head and base refs and answers 422 "head invalid" for a branch that exists (#913).
 
-| Input                          | Bound                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `title`                        | One line (line breaks and control characters become a space), at most 256 characters; a longer title is cut (never inside a surrogate pair, so no emoji is torn in two), lone surrogate halves are dropped, and the bidirectional controls (U+200E, U+200F, U+061C, U+202A–U+202E, U+2066–U+2069) are removed so that a title reads as it is written. Empty after cleaning is `action_input_invalid`. |
-| `body` (pull request, comment) | Control characters other than line breaks and tabs are dropped, as are the bidirectional controls of the title row and lone surrogate halves; at most 60 000 characters, a longer text is cut (never inside a surrogate pair) and ends with a note saying how much was left out. A comment must not be empty.                                                                                         |
-| `head`, `base`                 | A plain branch name of the repository (`A-Za-z0-9._/-`, at most 255 characters, no `..`, no `owner:` prefix that would reach into a fork). `base` is the branch the run's agent steps started from (the default branch of the repository when the run began) when the node names none.                                                                                                                |
-| `issue`                        | A whole number from 1.                                                                                                                                                                                                                                                                                                                                                                                |
-| `add`, `remove`                | At most 20 names each, 50 characters at most, no control characters, no empty name, **no name of dots only** (`.`, `..`): the address that removes a label ends with its name, `DELETE …/labels/.` is read as `…/labels/` and would remove every label of the issue. The connector and the client both refuse such a name before any request. Duplicates are dropped.                                 |
+| Input | Bound |
+| --- | --- |
+| `title` | One line (line breaks and control characters become a space), at most 256 characters; a longer title is cut (never inside a surrogate pair, so no emoji is torn in two), lone surrogate halves are dropped, and the bidirectional controls (U+200E, U+200F, U+061C, U+202A–U+202E, U+2066–U+2069) are removed so that a title reads as it is written. Empty after cleaning is `action_input_invalid`. |
+| `body` (pull request, comment) | Control characters other than line breaks and tabs are dropped, as are the bidirectional controls of the title row and lone surrogate halves; at most 60 000 characters, a longer text is cut (never inside a surrogate pair) and ends with a note saying how much was left out. A comment must not be empty. |
+| `head`, `base` | A plain branch name of the repository (`A-Za-z0-9._/-`, at most 255 characters, no `..`, no `owner:` prefix that would reach into a fork). `base` is the branch the run's agent steps started from (the default branch of the repository when the run began) when the node names none. |
+| `issue` | A whole number from 1. |
+| `add`, `remove` | At most 20 names each, 50 characters at most, no control characters, no empty name, **no name of dots only** (`.`, `..`): the address that removes a label ends with its name, `DELETE …/labels/.` is read as `…/labels/` and would remove every label of the issue. The connector and the client both refuse such a name before any request. Duplicates are dropped. |
 
 **Failures.** What GitHub refuses ends the step with a code of its own and a message for the run page that names no token and no text of the action. The one text of GitHub's that it carries is the short reason of a refused value (`github_validation`,
 for example "GitHub said: PullRequest head invalid."): it is GitHub's own, so it is cleaned (one line, no invisible characters, no links in any form (`https://…`, `www.…`, `//…`, `javascript:…`, `mailto:…`) or token-looking words, no `[ ] ( ) < >` or backticks), defused like an agent's text and only then cut at 150 characters (so the bound holds for the text as it is kept), and the message as a whole is at most 300 characters in `{{failure.message}}` (the engine clips it there):
 
-| What GitHub answered                                                                                                                                                                                                                   | Code                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended                                                                  | `github_permission_missing`                                                                                   |
-| 404 for the issue or pull request; no such Project among the owner's projects; the repository is not (or no longer) part of the installation; the installation is gone                                                                 | `github_not_found`                                                                                            |
-| The board has no option of the name the step asks for (`ticket.setStatus`), the message lists the options                                                                                                                              | `board_status_unknown`                                                                                        |
-| 422: no commits between head and base, a branch that does not exist, a reviewer that cannot review the pull request, any other value it does not accept (GitHub's reason follows the generic sentence); 403 for an archived repository | `github_validation`                                                                                           |
-| 429, or 403 with a rate-limit header, or 403 without one whose message names a rate limit (GitHub's secondary limit answers like that)                                                                                                 | `github_rate_limited`                                                                                         |
-| 403 for any other reason (no permission, no rate limit, no archived repository)                                                                                                                                                        | `action_failed` (the message names the call and the status; it does not send the owner to the App's settings) |
-| 5xx, no connection, no answer in time                                                                                                                                                                                                  | `github_unavailable`                                                                                          |
+| What GitHub answered | Code |
+| --- | --- |
+| The App lacks the permission (the token request is refused with 422, or the call with 403 "Resource not accessible by integration"), or the installation is suspended | `github_permission_missing` |
+| 404 for the issue or pull request; no such Project among the owner's projects; the repository is not (or no longer) part of the installation; the installation is gone | `github_not_found` |
+| The board has no option of the name the step asks for (`ticket.setStatus`), the message lists the options | `board_status_unknown` |
+| 422: no commits between head and base, a branch that does not exist, a reviewer that cannot review the pull request, any other value it does not accept (GitHub's reason follows the generic sentence); 403 for an archived repository | `github_validation` |
+| 429, or 403 with a rate-limit header, or 403 without one whose message names a rate limit (GitHub's secondary limit answers like that) | `github_rate_limited` |
+| 403 for any other reason (no permission, no rate limit, no archived repository) | `action_failed` (the message names the call and the status; it does not send the owner to the App's settings) |
+| 5xx, no connection, no answer in time | `github_unavailable` |
 
 **Outputs.** `pullRequest.open` (`github.pullRequest.open`) answers `{ number, url, existing }`, `ticket.comment` and `pullRequest.comment` (`github.issue.comment`) `{ url, existing }`, `ticket.labels` (`github.issue.labels`) `{ labels }`, `ticket.setStatus` `{ status }` and `ticket.requestReview` `{ requested }`.
 `existing` is `true` when the action found what it would have made (an open pull request for the head and base, the App's own comment with the marker of the step) and
@@ -1036,7 +1026,7 @@ once the text is put together (`defuseSegments`, `app/src/workflow-runs/template
   attempt of a step believe its comment exists. This holds inside code as well;
 - as `&amp;` for the `&` of the entities of `@` and `#` (`&#64;`, `&#x40;`, `&commat;`, `&#35;`, `&#x23;`, `&num;`).
 
-A fenced block (` ``` ` or `~~~`, open to the end of the text when it is never closed) and a code span (`` `…` ``) are left out of all of this except for `<!--`: GitHub
+A fenced block (```` ``` ```` or `~~~`, open to the end of the text when it is never closed) and a code span (`` `…` ``) are left out of all of this except for `<!--`: GitHub
 mentions nobody there. A title is no Markdown, so nothing is left out of a title. Where a code span or a fence of an agent cannot be told from the one GitHub sees (a quote
 or list item, an indented line, a table row), the text is defused as if it were no code.
 
@@ -1051,7 +1041,7 @@ number or a list that is a whole reference (an issue number, labels). What a ste
 - **A token is not switched off when the call was aborted** (N4). After `action_timeout` the client still asks GitHub to revoke the token of the call, but with the call's
   signal already aborted that request can be lost; the token then lives until it expires (an hour at most) and is limited to the repository of the run and one permission.
 - **A label name is in the message of a failed removal** (N5). The address of a removal ends with the label's name, and a message that names the call (`GitHub answered 500
-for DELETE …/labels/<name>`) carries it. The label names are inputs of the workflow, not secrets, but a message of this kind is not free of the action's text.
+  for DELETE …/labels/<name>`) carries it. The label names are inputs of the workflow, not secrets, but a message of this kind is not free of the action's text.
 - The defusing knows the forms above and no others. A full address of an issue in an agent's text (`https://github.com/o/r/issues/12`) is defused only as far as the number is
   concerned; a closing keyword with a reference that is none of the forms above, mentions that GitHub recognises through other markup (HTML tags, a link
   whose text is a name), and look-alike characters (a full-width `＠`) are not modelled. Text a person reads in a title of a pull request is not Markdown, so a
@@ -1070,7 +1060,7 @@ and **Pull requests: Read and write** to it (the pull request action needs **Con
 
 ### The label trigger
 
-_Milestone 4 of epic #833 (#845)._ A label put on an issue starts the workflows that wait for it. The webhook of the GitHub App (`POST /api/webhooks/github-app`,
+*Milestone 4 of epic #833 (#845).* A label put on an issue starts the workflows that wait for it. The webhook of the GitHub App (`POST /api/webhooks/github-app`,
 [`app/src/webhooks/`](../app/src/webhooks/README.md)) takes the event `issues`; once the signature, the delivery id and the installation are settled, the
 workspace of the installation decides which workflows start ([`label-trigger.ts`](../app/src/workflow-runs/label-trigger.ts)).
 
@@ -1083,7 +1073,7 @@ workspace of the installation decides which workflows start ([`label-trigger.ts`
   personal access token is a `User` to GitHub** and starts workflows like a person; use no such account for anything that labels an issue a workflow waits for, unless
   that is meant;
 - the repository of the issue is an **active repository of the workspace** (the installation's workspace; a repository of another installation, or one that was
-  removed from it, starts nothing). No project is needed;
+  removed from it, starts nothing), and it is the **ticket source of the project the workflow is a lane of** ([Lanes belong to a project](#lanes-belong-to-a-project)); the project must be switched on. A lane of another project, and a workflow without a project, start nothing;
 - the workflow is **not archived**, its **current version** has a trigger of the kind `ticket.labeled` (or `github.issueLabeled`, its name before #916), and its `label` is **exactly** the label that was put on: the same
   characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it). The run starts through **that trigger**: its [pre-steps](#the-triggers-and-their-pre-steps) run first,
   then the shared steps. A workflow with two label triggers for one label starts one run, through the first;
@@ -1128,16 +1118,16 @@ the run that is going on for a ticket, and what the runs of a ticket spent, by i
 **The input is the ticket.** `trigger_input` of the run, and what the steps read, is the ticket (`trigger.ticket`, below) and, as workflows written before #916 read them,
 the issue and the repository:
 
-| Value                                      | What                                                                                                                                                                                                                                                     |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `trigger.ticket`                           | `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo` ([The ticket](#the-triggers-and-their-pre-steps)), the same bounds as `trigger.issue`; `type` and `assignees` come from the payload of the webhook when it has them, else empty. |
-| `trigger.issue.number`                     | The number of the issue (an integer).                                                                                                                                                                                                                    |
-| `trigger.issue.title`                      | The title, at most 256 characters (a longer one ends in `…`).                                                                                                                                                                                            |
-| `trigger.issue.body`                       | The description, at most 8,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none.                                                                                                                    |
-| `trigger.issue.url`                        | The web address of the issue.                                                                                                                                                                                                                            |
-| `trigger.issue.labels`                     | The names of all labels the issue has now (the new one included): 20 at most, 50 characters each (GitHub's own bound for a name); a longer name is cut, and labels after the twentieth are left out.                                                     |
-| `trigger.repo.fullName`, `.owner`, `.name` | The repository.                                                                                                                                                                                                                                          |
-| `trigger.repo.defaultBranch`               | Its default branch at the time of the delivery: the branch the run's agent steps start from.                                                                                                                                                             |
+| Value | What |
+| --- | --- |
+| `trigger.ticket` | `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo` ([The ticket](#the-triggers-and-their-pre-steps)), the same bounds as `trigger.issue`; `type` and `assignees` come from the payload of the webhook when it has them, else empty. |
+| `trigger.issue.number` | The number of the issue (an integer). |
+| `trigger.issue.title` | The title, at most 256 characters (a longer one ends in `…`). |
+| `trigger.issue.body` | The description, at most 8,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |
+| `trigger.issue.url` | The web address of the issue. |
+| `trigger.issue.labels` | The names of all labels the issue has now (the new one included): 20 at most, 50 characters each (GitHub's own bound for a name); a longer name is cut, and labels after the twentieth are left out. |
+| `trigger.repo.fullName`, `.owner`, `.name` | The repository. |
+| `trigger.repo.defaultBranch` | Its default branch at the time of the delivery: the branch the run's agent steps start from. |
 
 The bounds leave room for the workflow's own text: the instruction of an agent step is at most 20,000 characters, and the title (256), the labels (1,000 at most) and the
 body (8,000) take at most about 9,300 of them.
@@ -1157,7 +1147,7 @@ works as written.
 
 **What the GitHub App needs** (the owner of the App sets this on GitHub; nothing in the app changes the App's configuration):
 
-- the event **Issues** subscribed (_Permissions & events > Subscribe to events_: tick **Issues**; see [`github-app.md`](github-app.md#events)). Without it GitHub sends no `issues` delivery and no label starts anything;
+- the event **Issues** subscribed (*Permissions & events > Subscribe to events*: tick **Issues**; see [`github-app.md`](github-app.md#events)). Without it GitHub sends no `issues` delivery and no label starts anything;
 - the permission **Issues: Read** to receive the event. The actions of the workflow need more: **Issues: Read and write** (the comment, the labels) and **Pull requests: Read and write**
   (the pull request), and **Contents: Read and write** for the agent's branch ([GitHub actions](#github-actions));
 - every installation has to accept a changed permission (GitHub asks the account that installed the App).
@@ -1166,64 +1156,66 @@ works as written.
 
 A run that ends failed has `errorCode`; a step that failed has `errorCode` and a short `errorMessage`.
 
-| Code                        | Of   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `step_failed`               | run  | A step failed; the step says why.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `budget_exhausted`          | run  | The budget does not cover another agent step.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `step_kind_not_supported`   | run  | The pinned document holds a node this engine does not run (a reserved kind, or a node that is not well formed).                                                                                                                                                                                                                                                                                                                                                                     |
-| `condition_failed`          | run  | The `when` of an `if` or the `until` of a `loop` could not be evaluated: a value it needs does not exist and has no default.                                                                                                                                                                                                                                                                                                                                                        |
-| `document_unusable`         | run  | The pinned version cannot be read, or the steps written so far are not what it says they should be.                                                                                                                                                                                                                                                                                                                                                                                 |
-| `workflow_owner_gone`       | run  | A run a label started: the account that owns the workflow (the author of the version the run uses) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
-| `template_missing_value`    | step | A reference points at a value the run does not have, and has no default.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `template_invalid`          | step | A reference holds an object, or the text is not a template.                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `template_too_large`        | step | The text does not fit where it goes.                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `profile_not_found`         | step | The profile is gone, archived or has no such version.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `environment_not_found`     | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace.                                                                                                                                                                                                                                                                                                                                                                       |
-| `environment_mismatch`      | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step.                                                                                                                                                                                                 |
-| `agent_start_failed`        | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour.                                                                                                                                                                                                                                                                                                                          |
-| `turn_unreadable`           | step | The turn, its job or its stored schema cannot be read.                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `no_result`                 | step | No result, or one that does not fit the schema.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `job_failed`                | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is.                                                                                                                                                                                                                                                                                                                                       |
-| `connector_unavailable`     | step | No connector is there for the action.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `action_input_invalid`      | step | The inputs of the action are not what the connector takes, once the references are resolved.                                                                                                                                                                                                                                                                                                                                                                                        |
-| `action_failed`             | step | The connector failed for a reason that has no code of its own; the step says "The action failed." and the cause is in the log of the engine.                                                                                                                                                                                                                                                                                                                                        |
-| `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission.                                                                                                                                                                                                                                                                                                                                            |
-| `github_not_found`          | step | GitHub has no such issue, pull request or repository, or the installation is gone.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `board_status_unknown`      | step | `ticket.setStatus`: the board has no status of that name; the message lists the statuses it has.                                                                                                                                                                                                                                                                                                                                                                                    |
-| `github_validation`         | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept.                                                                                                                                                                                                                                                                                                                                                                   |
-| `github_rate_limited`       | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated.                                                                                                                                                                                                                                                                                                                                                    |
-| `github_unavailable`        | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened.                                                                                                                                                                                                                                                                                                                                     |
-| `action_timeout`            | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened.                                                                                                                                                                                                                                                                                                                         |
-| `action_interrupted`        | step | The engine was interrupted while the action ran; it is not repeated.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `cancelled`                 | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code.                                                                                                                                                                                                                                                                                  |
+| Code | Of | Meaning |
+| --- | --- | --- |
+| `step_failed` | run | A step failed; the step says why. |
+| `budget_exhausted` | run | The budget does not cover another agent step. |
+| `step_kind_not_supported` | run | The pinned document holds a node this engine does not run (a reserved kind, or a node that is not well formed). |
+| `condition_failed` | run | The `when` of an `if` or the `until` of a `loop` could not be evaluated: a value it needs does not exist and has no default. |
+| `document_unusable` | run | The pinned version cannot be read, or the steps written so far are not what it says they should be. |
+| `workflow_owner_gone` | run | A run a label started: the account that owns the workflow (the author of the version the run uses) is no longer a member of the workspace. The run ends before its first step. The message: "The person who owns this workflow is no longer a member of the workspace; save the workflow again to take it over." The failed run frees the issue. If the owner leaves while the run goes on, the agent step that cannot start fails with `agent_start_failed` and the same sentence. |
+| `template_missing_value` | step | A reference points at a value the run does not have, and has no default. |
+| `template_invalid` | step | A reference holds an object, or the text is not a template. |
+| `template_too_large` | step | The text does not fit where it goes. |
+| `profile_not_found` | step | The profile is gone, archived or has no such version. |
+| `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
+| `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
+| `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
+| `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
+| `no_result` | step | No result, or one that does not fit the schema. |
+| `job_failed` | step | The job ended without success and without a code of its own. Any other code of the job (`timeout`, `cost_limit_reached`, …) is kept as it is. |
+| `connector_unavailable` | step | No connector is there for the action. |
+| `action_input_invalid` | step | The inputs of the action are not what the connector takes, once the references are resolved. |
+| `action_failed` | step | The connector failed for a reason that has no code of its own; the step says "The action failed." and the cause is in the log of the engine. |
+| `github_permission_missing` | step | The GitHub App of the workspace lacks a permission the action needs, or the installation is suspended; the message names the permission. |
+| `github_not_found` | step | GitHub has no such issue, pull request or repository, or the installation is gone. |
+| `board_status_unknown` | step | `ticket.setStatus`: the board has no status of that name; the message lists the statuses it has. |
+| `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
+| `github_rate_limited` | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated. |
+| `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
+| `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
+| `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
+| `cancelled` | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code. |
 
 ### Errors of the run routes (`error`)
 
-| Code                                    | Status | Meaning                                                                                                         |
-| --------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------- |
-| `WORKFLOW_RUN_REQUEST_INVALID`          | 400    | The body is not JSON or not `{input, clientRequestId}`, or the request id is not usable.                        |
-| `WORKFLOW_RUN_CROSS_SITE_REQUEST`       | 403    | The request comes from another site.                                                                            |
-| `WORKFLOW_RUN_WORKFLOW_NOT_FOUND`       | 404    | No such workflow in this workspace.                                                                             |
-| `WORKFLOW_RUN_NOT_FOUND`                | 404    | No such run of this workflow in this workspace.                                                                 |
-| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND`     | 404    | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). |
-| `WORKFLOW_RUN_TRIGGER_UNKNOWN`          | 404    | The workflow has no trigger with the id the body names as `trigger`.                                            |
-| `WORKFLOW_RUN_TICKET_NOT_FOUND`         | 404    | The repository has no issue of the number the `ticket` names (a pull request is none).                          |
-| `WORKFLOW_RUN_WORKFLOW_ARCHIVED`        | 409    | The workflow is archived and is not started.                                                                    |
-| `WORKFLOW_RUN_REQUEST_REUSED`           | 409    | The request id made another run (`runId` is the first).                                                         |
-| `WORKFLOW_RUN_NOT_WAITING`              | 409    | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped).   |
-| `WORKFLOW_RUN_QUESTION_CHANGED`         | 409    | `answer`: another question waits than the one the body names (`question`).                                      |
-| `WORKFLOW_RUN_BODY_TOO_LARGE`           | 413    | The body is over 128 KB.                                                                                        |
-| `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415    | The body is not `application/json`.                                                                             |
-| `WORKFLOW_RUN_TRIGGER_NOT_MANUAL`       | 422    | Only a trigger of the kind `manual` or `api` is started by hand or through the API.                             |
-| `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`  | 422    | A node is of a kind the engine does not run (`step` names it).                                                  |
-| `WORKFLOW_RUN_INPUT_INVALID`            | 422    | The input does not fit the trigger's `input`; `errors` lists every problem.                                     |
-| `WORKFLOW_RUN_ANSWER_INVALID`           | 422    | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have.             |
-| `WORKFLOW_RUN_DOCUMENT_UNUSABLE`        | 500    | The saved document cannot be read.                                                                              |
-| `WORKFLOW_RUN_GITHUB_UNAVAILABLE`       | 503    | GitHub could not be asked for the repository.                                                                   |
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `WORKFLOW_RUN_REQUEST_INVALID` | 400 | The body is not JSON or not `{input, clientRequestId}`, or the request id is not usable. |
+| `WORKFLOW_RUN_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
+| `WORKFLOW_RUN_WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace. |
+| `WORKFLOW_RUN_NOT_FOUND` | 404 | No such run of this workflow in this workspace. |
+| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_TRIGGER_UNKNOWN` | 404 | The workflow has no trigger with the id the body names as `trigger`. |
+| `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
+| `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
+| `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
+| `WORKFLOW_RUN_NOT_WAITING` | 409 | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped). |
+| `WORKFLOW_RUN_QUESTION_CHANGED` | 409 | `answer`: another question waits than the one the body names (`question`). |
+| `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
+| `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
+| `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
+| `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` | 422 | The `ticket` is not an issue of the repository the lane's project takes its tickets from (`issues[].available` names it). |
+| `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT` | 422 | `input.repo` is not that repository. |
+| `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
+| `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
+| `WORKFLOW_RUN_ANSWER_INVALID` | 422 | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have. |
+| `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
+| `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
 ## The run page
 
-_Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`._
+*Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
 A member can edit a workflow in the [lane builder](#the-lane-builder), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
 `start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
@@ -1248,16 +1240,15 @@ not exist.
     own, and **Send answer** (`POST .../runs/<runId>/answer`). Once answered it shows who answered what and from where (this page or a comment). A waiting run is polled like a running one, so an answer given on the ticket shows up
     here, and **Cancel run** works while it waits.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
-    - _reported_: the runner reported the cost;
-    - _estimated_: the runner reported none, so it is the token counts at the catalog price of the model;
-    - _booked as the limit_: nothing better was known, so the step was charged the whole limit it ran under. The real cost is probably lower; the run never
+    - *reported*: the runner reported the cost;
+    - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;
+    - *booked as the limit*: nothing better was known, so the step was charged the whole limit it ran under. The real cost is probably lower; the run never
       spends more than its budget.
 
     A step that no runner took (`no_runner_available`, cost 0) never ran: it shows "not run" instead of a basis.
 
     The basis is kept with the step (`workflow_step_runs.cost_basis`, null for a step that was charged nothing, and for steps written before milestone 3c) and is
     in the step of the run routes as `costBasis`.
-
   - **Steps**, in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost. An agent step links to its
     Implementer run (`/w/<slug>/runs/<jobId>`), where the live view shows what the agent does.
   - **Rounds and control (#846).** Every run of a step is listed on its own, and a step that ran more than once says its round ("round 2"). A **condition** and a **loop** are steps
@@ -1277,21 +1268,20 @@ not exist.
 
 ## The lane builder
 
-_#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of a project; the route moves when lanes belong to a project (#922)._
+*#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*
 
 The builder reads a workflow and edits **the document itself**: there is no second format, what it shows is what the validator checks and what it saves. A document written with the single `trigger` of before #916 opens as `triggers` with that one entry (the id the engine gives it), but is saved with its single `trigger` as long as nobody changes that trigger, so an older app version can still read it; editing the trigger, or giving it a pre-step, saves `triggers`. Everything else in a document is kept as it is.
 
 - **Flow** (left). Each trigger is a dashed group with its pre-steps; then the shared steps top down. A loop is a container with its body indented and a footer (until, max rounds, exits); an `if` shows then and else side by side; `onFailure` is a group of its own at the bottom and offers comments, labels and `if` only. The **+** below a card inserts a step of the kind picked (agent step, action, loop, if) after it, at any depth; a step can be added to an empty branch, body or pre-step list too.
 - **Inspector** (right) for the selected node, with the id (editable: references to the old id are **not** renamed, the validator reports them), remove, and move up and down within the list:
-  - _trigger_: kind (changing it starts the fields of the new kind), label, cron, or the input as a table of fields (name, type, required);
-  - _agent step_: profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step still has one or the validator asks for it (deprecated since #919: the profile says where it runs; clearing the field removes it, and a new agent step gets none). No model, no key;
-  - _action_: the connector and its inputs, taken from the connector's own spec, so the inputs, the required ones and the **targets** (marked "target · one value", or "target · literal") are the validator's; a list of labels is one entry to a line, or one reference to a list (the text being typed stays as it is, a trailing new line included, while it parses to the same list);
-  - _loop_: max rounds (1 to 10) and the `until` condition; _if_: the `when` condition. A condition is an operator (`empty`, `notEmpty`, `equals`, `notEquals`, `all`, `any`, `not`) and its operands or conditions. An operand is text unless its type is set to Number or true/false, so `"3"` stays a text.
+  - *trigger*: kind (changing it starts the fields of the new kind), label, cron, or the input as a table of fields (name, type, required);
+  - *agent step*: profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step still has one or the validator asks for it (deprecated since #919: the profile says where it runs; clearing the field removes it, and a new agent step gets none). No model, no key;
+  - *action*: the connector and its inputs, taken from the connector's own spec, so the inputs, the required ones and the **targets** (marked "target · one value", or "target · literal") are the validator's; a list of labels is one entry to a line, or one reference to a list (the text being typed stays as it is, a trailing new line included, while it parses to the same list);
+  - *loop*: max rounds (1 to 10) and the `until` condition; *if*: the `when` condition. A condition is an operator (`empty`, `notEmpty`, `equals`, `notEquals`, `all`, `any`, `not`) and its operands or conditions. An operand is text unless its type is set to Number or true/false, so `"3"` stays a text.
 
   Fields are plain text with `{{…}}`; chips and the variable picker are #927.
-
 - **Validation on every change.** The document is sent to `POST .../workflows/validate` after a short pause. An error's `path` is a JSON pointer; the node it belongs to is the deepest step or trigger it runs through, which gets a red count on its card, and the inspector of that node shows the error in full: code, path, the validator's message and `available` as chips. Where `available` holds **exactly one** name and the value at `path` is a plain text (`profile_unknown`, `profile_archived`, `profile_version_unknown`, `environment_unknown`, `unknown_connector`, `unknown_trigger_kind`, `session_target_invalid`) the error has a one-click fix; nothing else is guessed. Errors about the lane as a whole (the name, the budget, no steps) show under the header whichever node is picked. The header says "Valid · n steps · $budget", or the number of errors and "not saved".
-- **Header**: **JSON** shows the document read only; **Run now** opens the Start form of the manual trigger (it starts the _saved_ version, and says so when there are unsaved changes); **Save as vN** is on only for a document the validator accepted as it stands that differs from the saved one. It is `PUT .../workflows/<id>?expectedVersion=<current>`, so a lane saved by someone else since the page was opened is `WORKFLOW_VERSION_CONFLICT` (the page says so and keeps the changes). A saved document is always one the validator accepts, so the engine runs it.
+- **Header**: **JSON** shows the document read only; **Run now** opens the Start form of the manual trigger (it starts the *saved* version, and says so when there are unsaved changes); **Save as vN** is on only for a document the validator accepted as it stands that differs from the saved one. It is `PUT .../workflows/<id>?expectedVersion=<current>`, so a lane saved by someone else since the page was opened is `WORKFLOW_VERSION_CONFLICT` (the page says so and keeps the changes). A saved document is always one the validator accepts, so the engine runs it.
 - **Lane card** (right column): the limits of the lane (`budgetUsd`, `turnTimeLimitMinutes`; a limit left out shows the default and is written when changed), the versions, and the sentence that a turn ends with done or ask.
 
 ## Error codes
@@ -1300,76 +1290,79 @@ The builder reads a workflow and edits **the document itself**: there is no seco
 
 Form (the JSON Schema says the same, and a test holds the two together):
 
-| Code                   | Meaning                                                                                         | What to do                                               |
-| ---------------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `wrong_type`           | A value of the wrong JSON type (a text where an object belongs, a number where a text belongs). | Use the type the message names.                          |
-| `unknown_field`        | A key the format does not have here.                                                            | Remove it, or use one of `available`.                    |
-| `missing_field`        | A key that is needed is absent.                                                                 | Add it; the message says what it holds.                  |
-| `invalid_value`        | The right type, a value the field does not take (a pattern, a range, a list of names).          | Follow the message; `available` lists the allowed names. |
-| `unknown_kind`         | A step `kind` that does not exist.                                                              | Use one of `available`.                                  |
-| `unknown_trigger_kind` | A trigger `kind` that does not exist.                                                           | Use one of `available`.                                  |
-| `unknown_connector`    | A connector that does not exist.                                                                | Use one of `available`.                                  |
-| `limit_exceeded`       | A number or length above what the format allows.                                                | Lower it to the limit the message names.                 |
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `wrong_type` | A value of the wrong JSON type (a text where an object belongs, a number where a text belongs). | Use the type the message names. |
+| `unknown_field` | A key the format does not have here. | Remove it, or use one of `available`. |
+| `missing_field` | A key that is needed is absent. | Add it; the message says what it holds. |
+| `invalid_value` | The right type, a value the field does not take (a pattern, a range, a list of names). | Follow the message; `available` lists the allowed names. |
+| `unknown_kind` | A step `kind` that does not exist. | Use one of `available`. |
+| `unknown_trigger_kind` | A trigger `kind` that does not exist. | Use one of `available`. |
+| `unknown_connector` | A connector that does not exist. | Use one of `available`. |
+| `limit_exceeded` | A number or length above what the format allows. | Lower it to the limit the message names. |
 
 Beyond the form:
 
-| Code                                         | Meaning                                                                                                                                                                                                                                                                        | What to do                                                                                                                  |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `kind_not_supported`                         | `forEach`, `approval` or `workflow`: reserved, not available in version 1.                                                                                                                                                                                                     | Build it from `agent`, `action`, `if`, `loop`.                                                                              |
-| `duplicate_id`                               | Two steps with one id, in the pre-steps of the triggers and the shared steps alike; or two triggers with one id.                                                                                                                                                               | Give each step and each trigger its own id.                                                                                 |
-| `template_syntax`                            | A `{{ }}` that is not a reference, a default that is no JSON (or nests braces more than 3 deep), or a `{{` never closed.                                                                                                                                                       | Fix the text; write `\\{{` for a literal `{{`.                                                                              |
-| `reference_unknown_step`                     | A reference starts with a name that is no step.                                                                                                                                                                                                                                | Use one of `available` (the steps in reach).                                                                                |
-| `reference_to_later_step`                    | The step comes later, is the step itself, or contains it.                                                                                                                                                                                                                      | Move the use after the step, or use another step.                                                                           |
-| `reference_not_in_scope`                     | The step ran earlier but not on every path to here (inside a branch); or a shared step reads a part of `trigger` that not every trigger yields (`trigger.ticket` when one trigger yields none): the message names a trigger that lacks it.                                     | Use it inside its branch, or restructure; give the trigger that lacks the value a ticket input, or leave the reference out. |
-| `reference_unknown_field`                    | The step has no such field.                                                                                                                                                                                                                                                    | Use one of `available`.                                                                                                     |
-| `reference_optional_field`                   | The field is not required, so it may be missing.                                                                                                                                                                                                                               | Make it `required` in the result schema, or add `\| default <JSON>`.                                                        |
-| `reference_fact_unavailable`                 | `branch`, `commits`, `headCommit` or `pushed` of a step whose profile may not push.                                                                                                                                                                                            | Use a profile that may push, or another value.                                                                              |
-| `reference_type_mismatch`                    | The value does not fit where it is used.                                                                                                                                                                                                                                       | Use a value of the type the message names, or a field of an object.                                                         |
-| `default_type_mismatch`                      | The default does not fit the field's type.                                                                                                                                                                                                                                     | Give a default of that type.                                                                                                |
-| `previous_outside_loop`                      | `previous.` outside a loop body.                                                                                                                                                                                                                                               | Use it inside a loop.                                                                                                       |
-| `previous_without_default`                   | `previous.` where round one has no value.                                                                                                                                                                                                                                      | Use it in `instruction.next`, or add a default.                                                                             |
-| `previous_unknown_step`                      | `previous.<id>` names no step of the innermost loop body that always runs (the message says whether it belongs to an outer loop, sits in an `if`, or is no step of the body).                                                                                                  | Use one of `available`, or the step without `previous.`.                                                                    |
-| `condition_operand_type`                     | An operand of the wrong type, or two that cannot be compared.                                                                                                                                                                                                                  | Compare like with like; `empty` takes a list or a text.                                                                     |
-| `condition_value_not_in_enum`                | A text compared with a choice of names that can never hold it.                                                                                                                                                                                                                 | Use one of `available`.                                                                                                     |
-| `instruction_next_outside_loop`              | `instruction.next` in a step that is not in a loop.                                                                                                                                                                                                                            | Use a plain text, or put the step in a loop.                                                                                |
-| `session_target_invalid`                     | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`.                                   | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch).  |
-| `profile_unknown`                            | No such profile.                                                                                                                                                                                                                                                               | Use one of `available`.                                                                                                     |
-| `profile_archived`                           | The profile exists but is archived: no step may run it.                                                                                                                                                                                                                        | Use one of `available`.                                                                                                     |
-| `profile_version_unknown`                    | The profile has no such version.                                                                                                                                                                                                                                               | Use one of `available`, or leave the version out.                                                                           |
-| `environment_unknown`                        | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed.                                                                                                                                                        | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile.         |
-| `environment_mismatch`                       | The step names an `environment` other than the one of its profile (#919). `available` is the profile's.                                                                                                                                                                        | Leave `environment` out of the step.                                                                                        |
-| `environment_required`                       | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments.                                                                                                                                                    | Name one in the step, or save a new version of the profile with an `environment`.                                           |
-| `runner_needs_own_key`                       | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key.                                                                            | Use a profile with a model of your own key, or an environment that runs on a platform VM.                                   |
-| `harness_needs_runner`                       | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner.                                                                                                                               | Use an environment that runs on a runner.                                                                                   |
-| `result_field_reserved`                      | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`).                                                                                                                                                                            | Rename it.                                                                                                                  |
-| `required_field_unknown`                     | `required` of a result schema names a field that is not in `properties`.                                                                                                                                                                                                       | Fix the name or add the property.                                                                                           |
-| `repo_required`                              | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository.                                                                                                                              | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`.                                         |
-| `target_from_untrusted_value`                | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names.                                                                  |
-| `duplicate_trigger_label`                    | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first.                                                                                                                         | Give one of them another label, or merge them.                                                                              |
-| `label_retriggers_workflow`                  | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may.                                                                                                                                | Remove the label instead, or add another one.                                                                               |
-| `on_failure_step_not_allowed`                | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them.                                                                                   | Only comment and change labels after a failure.                                                                             |
-| `too_many_steps`                             | More than 50 steps.                                                                                                                                                                                                                                                            | Split the workflow.                                                                                                         |
-| `nesting_too_deep`                           | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep.                                                                                                                                                                               | Flatten it.                                                                                                                 |
-| `result_schema_too_large`                    | A result schema with more than 100 fields in all.                                                                                                                                                                                                                              | Make it smaller.                                                                                                            |
-| `budget_above_maximum`                       | `budgetUsd` above the operator's maximum.                                                                                                                                                                                                                                      | Lower it to the maximum the message names.                                                                                  |
-| `invalid_value` (at `/turnTimeLimitMinutes`) | `turnTimeLimitMinutes` is not a whole number from 15 to 60.                                                                                                                                                                                                                    | Use a whole number of minutes in that range, or leave it out for 60.                                                        |
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `kind_not_supported` | `forEach`, `approval` or `workflow`: reserved, not available in version 1. | Build it from `agent`, `action`, `if`, `loop`. |
+| `duplicate_id` | Two steps with one id, in the pre-steps of the triggers and the shared steps alike; or two triggers with one id. | Give each step and each trigger its own id. |
+| `template_syntax` | A `{{ }}` that is not a reference, a default that is no JSON (or nests braces more than 3 deep), or a `{{` never closed. | Fix the text; write `\\{{` for a literal `{{`. |
+| `reference_unknown_step` | A reference starts with a name that is no step. | Use one of `available` (the steps in reach). |
+| `reference_to_later_step` | The step comes later, is the step itself, or contains it. | Move the use after the step, or use another step. |
+| `reference_not_in_scope` | The step ran earlier but not on every path to here (inside a branch); or a shared step reads a part of `trigger` that not every trigger yields (`trigger.ticket` when one trigger yields none): the message names a trigger that lacks it. | Use it inside its branch, or restructure; give the trigger that lacks the value a ticket input, or leave the reference out. |
+| `reference_unknown_field` | The step has no such field. | Use one of `available`. |
+| `reference_optional_field` | The field is not required, so it may be missing. | Make it `required` in the result schema, or add `\| default <JSON>`. |
+| `reference_fact_unavailable` | `branch`, `commits`, `headCommit` or `pushed` of a step whose profile may not push. | Use a profile that may push, or another value. |
+| `reference_type_mismatch` | The value does not fit where it is used. | Use a value of the type the message names, or a field of an object. |
+| `default_type_mismatch` | The default does not fit the field's type. | Give a default of that type. |
+| `previous_outside_loop` | `previous.` outside a loop body. | Use it inside a loop. |
+| `previous_without_default` | `previous.` where round one has no value. | Use it in `instruction.next`, or add a default. |
+| `previous_unknown_step` | `previous.<id>` names no step of the innermost loop body that always runs (the message says whether it belongs to an outer loop, sits in an `if`, or is no step of the body). | Use one of `available`, or the step without `previous.`. |
+| `condition_operand_type` | An operand of the wrong type, or two that cannot be compared. | Compare like with like; `empty` takes a list or a text. |
+| `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
+| `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
+| `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
+| `profile_unknown` | No such profile. | Use one of `available`. |
+| `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
+| `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
+| `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile. |
+| `environment_mismatch` | The step names an `environment` other than the one of its profile (#919). `available` is the profile's. | Leave `environment` out of the step. |
+| `environment_required` | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
+| `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
+| `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
+| `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
+| `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
+| `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
+| `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
+| `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
+| `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `too_many_steps` | More than 50 steps. | Split the workflow. |
+| `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
+| `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |
+| `budget_above_maximum` | `budgetUsd` above the operator's maximum. | Lower it to the maximum the message names. |
+| `invalid_value` (at `/turnTimeLimitMinutes`) | `turnTimeLimitMinutes` is not a whole number from 15 to 60. | Use a whole number of minutes in that range, or leave it out for 60. |
 
 ### Of the routes (`error`)
 
-| Code                                | Status | Meaning                                                                                                            |
-| ----------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------ |
-| `WORKFLOW_REQUEST_INVALID`          | 400    | The body is not JSON, or a query value is not a whole number.                                                      |
-| `WORKFLOW_CROSS_SITE_REQUEST`       | 403    | The request comes from another site.                                                                               |
-| `WORKFLOW_NOT_FOUND`                | 404    | No such workflow in this workspace (another workspace's looks the same), also for an archive.                      |
-| `WORKFLOW_VERSION_NOT_FOUND`        | 404    | The workflow has no such version.                                                                                  |
-| `WORKFLOW_NAME_TAKEN`               | 409    | The workspace has a workflow of that name that is not archived (case ignored).                                     |
-| `WORKFLOW_LIMIT_REACHED`            | 409    | The workspace holds 100 workflows that are not archived (`maximum`).                                               |
-| `WORKFLOW_ARCHIVE_LIMIT_REACHED`    | 409    | The workspace holds 1000 archived workflows: one more cannot be archived (`maximum`).                              |
-| `WORKFLOW_VERSION_LIMIT_REACHED`    | 409    | The workflow holds 500 versions (`maximum`).                                                                       |
-| `WORKFLOW_ARCHIVED`                 | 409    | The workflow is archived and takes no new version.                                                                 |
-| `WORKFLOW_VERSION_CONFLICT`         | 409    | `expectedVersion` is not current any more (`current` says which is).                                               |
-| `WORKFLOW_BODY_TOO_LARGE`           | 413    | The body is over 256 KB.                                                                                           |
-| `WORKFLOW_CONTENT_TYPE_UNSUPPORTED` | 415    | The body is not `application/json`.                                                                                |
-| `WORKFLOW_INVALID`                  | 422    | The document does not pass the validator; `errors` lists the problems and `truncated` says whether there are more. |
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `WORKFLOW_REQUEST_INVALID` | 400 | The body is not JSON, or a query value is not a whole number. |
+| `WORKFLOW_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
+| `WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace (another workspace's looks the same), also for an archive. |
+| `WORKFLOW_VERSION_NOT_FOUND` | 404 | The workflow has no such version. |
+| `WORKFLOW_PROJECT_REQUIRED` | 400 | `projectId` is missing from a list or a creation; `issues` names it and `available` the projects of the workspace. |
+| `WORKFLOW_PROJECT_NOT_FOUND` | 404 | `projectId` is no project of this workspace (another workspace's looks the same). |
+| `WORKFLOW_PROJECT_INACTIVE` | 409 | The project is switched off and takes no new lane. |
+| `WORKFLOW_NAME_TAKEN` | 409 | The project has a lane of that name that is not archived (case ignored; for a lane without a project, the workspace). |
+| `WORKFLOW_LIMIT_REACHED` | 409 | The workspace holds 100 workflows that are not archived (`maximum`). |
+| `WORKFLOW_ARCHIVE_LIMIT_REACHED` | 409 | The workspace holds 1000 archived workflows: one more cannot be archived (`maximum`). |
+| `WORKFLOW_VERSION_LIMIT_REACHED` | 409 | The workflow holds 500 versions (`maximum`). |
+| `WORKFLOW_ARCHIVED` | 409 | The workflow is archived and takes no new version. |
+| `WORKFLOW_VERSION_CONFLICT` | 409 | `expectedVersion` is not current any more (`current` says which is). |
+| `WORKFLOW_BODY_TOO_LARGE` | 413 | The body is over 256 KB. |
+| `WORKFLOW_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
+| `WORKFLOW_INVALID` | 422 | The document does not pass the validator; `errors` lists the problems and `truncated` says whether there are more. |
 
 The routes of a workspace that is not yours, and in a deployment without the capability, are the 404 of a path that does not exist.

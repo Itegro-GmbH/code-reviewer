@@ -276,7 +276,7 @@ export function createTrackerRepository(
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
           deleted_at, board_seen_at
         )
-        select r.workspace_id, r.id, null, ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
+        select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
           ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
@@ -284,6 +284,7 @@ export function createTrackerRepository(
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
         on conflict (repository_id, number) do update set
+          project_id = coalesce(excluded.project_id, tracker_items.project_id),
           provider = excluded.provider,
           repo = excluded.repo,
           node_id = excluded.node_id,
@@ -489,10 +490,11 @@ export function createTrackerRepository(
       const claimed = await sql<
         Selectable<TrackerSyncStateTable>
       >`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, null, ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
+        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
         on conflict (repository_id) do update set
+          project_id = coalesce(excluded.project_id, tracker_sync_state.project_id),
           "cursor" = excluded."cursor",
           started_at = excluded.started_at,
           updated_at = excluded.updated_at
@@ -513,6 +515,7 @@ export function createTrackerRepository(
     async saveSyncState(repositoryId, state) {
       const at = formatTimestamp(now());
       const columns = [
+        sql`project_id = coalesce(excluded.project_id, tracker_sync_state.project_id)`,
         ...(state.cursor === undefined
           ? []
           : [sql`"cursor" = excluded."cursor"`]),
@@ -525,7 +528,7 @@ export function createTrackerRepository(
         sql`updated_at = excluded.updated_at`,
       ];
       await sql`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, null, ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
+        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
           ${state.lastFullSyncAt ?? null}::text, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}

@@ -74,14 +74,18 @@ describe("ticket.setStatus", () => {
   });
 
   // #917-T302
-  it("needs the ticket, the board and the status", () => {
-    for (const input of ["ticket", "board", "status"]) {
+  it("needs the ticket and the status, and takes the board from the project of the lane when it names none", () => {
+    for (const input of ["ticket", "status"]) {
       const step = setStatus();
       delete step[input];
       expect(codes(afterPullRequest([step]))).toEqual([
         [`${THEN}/1/${input}`, "missing_field"],
       ]);
     }
+    // #922: the board is an override that stays accepted; left out, the project's board is used.
+    const withoutBoard = setStatus();
+    delete withoutBoard.board;
+    expect(codes(afterPullRequest([withoutBoard]))).toEqual([]);
   });
 
   // #917-T303

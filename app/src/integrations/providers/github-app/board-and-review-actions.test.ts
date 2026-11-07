@@ -38,6 +38,7 @@ const widgets: RepoRef = {
 function setup(
   data: FakeGithubAppClientData = {},
   projectMembers?: (call: ActionCall) => Promise<string[]>,
+  projectBoard?: (call: ActionCall) => Promise<string | undefined>,
 ) {
   const client = fakeGithubAppClient(data);
   const provider = createGithubAppProvider({
@@ -47,6 +48,7 @@ function setup(
   const connectors = createGithubConnectors({
     targetOf: async () => ({ provider, integration, repo: widgets }),
     ...(projectMembers === undefined ? {} : { projectMembers }),
+    ...(projectBoard === undefined ? {} : { projectBoard }),
   });
   const connector = (name: string) => {
     const found = connectors.find((candidate) => candidate.name === name);
@@ -220,6 +222,38 @@ describe("ticket.setStatus", () => {
         await failure(connector("ticket.setStatus").run(call(inputs))),
       ).toBeInstanceOf(ActionInputError);
     expect(client.calls).toEqual([]);
+  });
+
+  // #922-T51
+  it("takes the board of the project when the step names none, and the board of the step when it names one", async () => {
+    const { client, connector } = setup({}, undefined, async () => "PVT_board");
+
+    await connector("ticket.setStatus").run(
+      call({ ticket: 5, status: "Done" }),
+    );
+    await connector("ticket.setStatus").run(
+      call({ ticket: 5, board: "7", status: "Done" }),
+    );
+
+    const boards = client.calls
+      .filter((c) => c.method === "moveIssueOnBoard")
+      .map((c) => (c.args[4] as { board: string }).board);
+    expect(boards).toEqual(["PVT_board", "7"]);
+  });
+
+  // #922-T52
+  it("is an action_input_invalid, before GitHub is asked, when the step names no board and the project has none", async () => {
+    const withoutBoard = setup({}, undefined, async () => undefined);
+    const withoutHook = setup();
+
+    for (const { client, connector } of [withoutBoard, withoutHook]) {
+      const error = await failure(
+        connector("ticket.setStatus").run(call({ ticket: 5, status: "Done" })),
+      );
+      expect(error).toBeInstanceOf(ActionInputError);
+      expect(error.message).toContain("has no board");
+      expect(client.calls).toEqual([]);
+    }
   });
 
   // #917-T116

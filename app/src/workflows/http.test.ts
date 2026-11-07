@@ -19,6 +19,7 @@ const USER = {
 
 const VIEW: WorkflowView = {
   id: "wf-1",
+  projectId: "project-1",
   name: "Issue to PR",
   version: 2,
   createdAt: "2026-11-04T08:00:00.000Z",
@@ -44,12 +45,16 @@ function setup(overrides: Partial<WorkflowService> = {}) {
       calls.push(`validate ${JSON.stringify(body)}`),
       { valid: true, errors: [], truncated: false, steps: 1, budgetUsd: 20 }
     ),
-    list: async () => (calls.push("list"), { workflows: [VIEW], maximum: 100 }),
+    list: async (projectId) => (
+      calls.push(`list ${projectId}`),
+      { workflows: [VIEW], maximum: 100 }
+    ),
     get: async (id, version) => (calls.push(`get ${id} ${version}`), VIEW),
-    create: async (_user, body) => (
-      calls.push(`create ${JSON.stringify(body)}`),
+    create: async (_user, projectId, body) => (
+      calls.push(`create ${projectId} ${JSON.stringify(body)}`),
       VIEW
     ),
+    copyBuiltIn: async () => [],
     update: async (_user, id, body, expected) => (
       calls.push(`update ${id} ${JSON.stringify(body)} ${expected}`),
       VIEW
@@ -124,11 +129,62 @@ describe("the workflow handlers", () => {
     const { handlers, calls, json } = setup();
 
     const created = await handlers.create(
-      json("POST", { version: 1, name: "x" }),
+      json("POST", { version: 1, name: "x" }, {}, "?projectId=project-1"),
     );
 
     expect(created.status).toBe(201);
-    expect(calls).toEqual(['create {"version":1,"name":"x"}']);
+    expect(calls).toEqual(['create project-1 {"version":1,"name":"x"}']);
+  });
+
+  // #922-T20
+  it("hands the projectId of the query to the list and to the create, and nothing when there is none", async () => {
+    const { handlers, calls, json, url } = setup();
+
+    await handlers.list(new Request(`${url}?projectId=project-1`));
+    await handlers.list(new Request(url));
+    await handlers.create(json("POST", {}));
+
+    expect(calls).toEqual([
+      "list project-1",
+      "list undefined",
+      "create undefined {}",
+    ]);
+  });
+
+  // #922-T21
+  it("answers a missing or unknown project with 400 and the request issue that names the available projects", async () => {
+    const { handlers, url } = setup({
+      list: async () => {
+        throw new WorkflowError(
+          "WORKFLOW_PROJECT_REQUIRED",
+          "A lane belongs to a project: name it with projectId.",
+          {
+            issues: [
+              {
+                path: "projectId",
+                code: "project_required",
+                message: "projectId is required.",
+                available: ["project-1"],
+              },
+            ],
+          },
+        );
+      },
+    });
+
+    const refused = await handlers.list(new Request(url));
+
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      error: "WORKFLOW_PROJECT_REQUIRED",
+      issues: [
+        {
+          path: "projectId",
+          code: "project_required",
+          available: ["project-1"],
+        },
+      ],
+    });
   });
 
   // #833-M1-T184

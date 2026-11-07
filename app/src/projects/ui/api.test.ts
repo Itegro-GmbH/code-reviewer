@@ -4,7 +4,11 @@
 // activating, deactivating and running the sync. The routes themselves are proven where they live.
 import { describe, expect, it } from "vitest";
 import type { FetchLike } from "../../ui/json-request.ts";
-import { createInstanceSyncApi, createProjectsApi } from "./api.ts";
+import {
+  createInstanceSyncApi,
+  createNewProjectApi,
+  createProjectsApi,
+} from "./api.ts";
 
 function recorder(body: unknown = {}) {
   const calls: Array<{ url: string; method: string; body: string | null }> = [];
@@ -85,6 +89,64 @@ describe("the instance's call", () => {
 
     expect(calls).toEqual([
       { url: "/api/admin/integrations/sync", method: "POST" },
+    ]);
+  });
+});
+
+describe("the new project dialog's calls (#922)", () => {
+  // #922-T35
+  it("reads the boards of a repository with GET on its boards route", async () => {
+    const calls: Array<{ url: string; method: string; body: string | null }> =
+      [];
+    const api = createNewProjectApi(async (url, init) => {
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      return new Response(JSON.stringify({ available: true, boards: [] }), {
+        status: 200,
+      });
+    }, "acme");
+
+    await api.boards("a/b");
+
+    expect(calls).toEqual([
+      {
+        url: "/api/w/acme/repositories/a%2Fb/boards",
+        method: "GET",
+        body: null,
+      },
+    ]);
+  });
+
+  // #922-T35
+  it("creates a project with POST on the projects route and the body as given", async () => {
+    const calls: Array<{ url: string; method: string; body: string | null }> =
+      [];
+    const api = createNewProjectApi(async (url, init) => {
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      return new Response(JSON.stringify({ project: {}, lanes: [] }), {
+        status: 201,
+      });
+    }, "acme");
+
+    await api.createProject({
+      repositoryId: "repo-1",
+      board: { projectV2Id: "PVT_x" },
+      lanes: ["issue-to-pr"],
+    });
+
+    expect(calls).toEqual([
+      {
+        url: "/api/w/acme/projects",
+        method: "POST",
+        body: '{"repositoryId":"repo-1","board":{"projectV2Id":"PVT_x"},"lanes":["issue-to-pr"]}',
+      },
     ]);
   });
 });

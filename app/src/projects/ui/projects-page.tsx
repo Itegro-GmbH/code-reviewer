@@ -19,7 +19,7 @@ import type {
 } from "../../config-status/status.ts";
 import type { ManualReviewApi } from "../../manual-reviews/ui/api.ts";
 import type { ProjectService } from "../service.ts";
-import type { ProjectsApi } from "./api.ts";
+import type { NewProjectApi, ProjectsApi } from "./api.ts";
 import {
   loadProjectList,
   type LastRunSource,
@@ -64,6 +64,7 @@ export function ProjectsPageContent({
   cards = false,
   data,
   api,
+  newProjectApi,
   manualReviewApi,
 }: {
   /** Who the page speaks for (the configuration hints name the product). */
@@ -84,6 +85,8 @@ export function ProjectsPageContent({
   cards?: boolean;
   data: ProjectsPageData;
   api?: ProjectsApi;
+  /** Only tests pass this: the calls of the "New project" dialog (#922). */
+  newProjectApi?: NewProjectApi;
   /** Only tests pass this: the calls of the play button's dialog. */
   manualReviewApi?: ManualReviewApi;
 }) {
@@ -115,8 +118,8 @@ export function ProjectsPageContent({
                     repositoryId,
                     fullName,
                   }))}
+                {...(newProjectApi === undefined ? {} : { api: newProjectApi })}
                 blockedReason={activationBlocked}
-                {...(api === undefined ? {} : { api })}
               />
             </div>
           ) : null}

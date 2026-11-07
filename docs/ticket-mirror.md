@@ -71,7 +71,7 @@ delivery that only the mirror reads fails with a 5xx if the cache cannot be writ
 review or a workflow never fails because of the mirror (the failure is logged by its code).
 
 **The full sync** reads everything from GitHub and writes it. It starts when a project is created, and on demand: **Resync** in the
-project's setup, or `POST /api/w/<slug>/repositories/<id>/issues/sync`. It reads, one page of one phase at a time:
+project's setup, or `POST /api/w/<slug>/repositories/<id>/issues/sync`. Since #922 `tracker_items.project_id` and `tracker_sync_state.project_id` hold the project of the repository, and the tickets are also read as `GET /api/w/<slug>/projects/<projectId>/issues` (the same answer; an unknown project is `404 TRACKER_PROJECT_NOT_FOUND`). It reads, one page of one phase at a time:
 
 1. **issues**: every issue and pull request, any state, the least recently changed first
    (`GET /repos/{owner}/{repo}/issues?state=all&sort=updated&direction=asc`, 100 per page). Sub-issues come with it

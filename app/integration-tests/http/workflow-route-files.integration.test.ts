@@ -18,6 +18,8 @@ import {
 import { issueToPr, tiny } from "../../src/workflows/test-fixtures.ts";
 import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
+import { createProjectsRepository } from "../../src/db/repositories/projects-repository.ts";
+import { seedImplementerRepository } from "../../src/test-support/implementer.ts";
 
 const session = vi.hoisted(() => ({
   currentLookup: vi.fn<() => Promise<SessionLookup>>(),
@@ -84,6 +86,18 @@ async function startRoutes(
         },
         100,
       );
+  // A project in each workspace (#922): a lane is listed and created within one.
+  const projectIds: Record<string, string> = {};
+  for (const [slug, id] of [
+    ["default", workspaceId],
+    ["other", otherId],
+  ] as const) {
+    const seeded = await seedImplementerRepository(db, id, slug);
+    const project = await createProjectsRepository(db, id).get(
+      seeded.repositoryId,
+    );
+    projectIds[slug] = project!.id;
+  }
   session.currentLookup.mockResolvedValue(
     await signedInMember(db, {
       workspaceId,
@@ -106,12 +120,14 @@ async function startRoutes(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
+  const withProject = (workspace: string) =>
+    `${base(workspace)}?projectId=${projectIds[workspace] ?? "unknown"}`;
   const list = (workspace = "default") =>
-    listRoute.GET(new Request(base(workspace)), {
+    listRoute.GET(new Request(withProject(workspace)), {
       params: Promise.resolve({ workspace }),
     } as Parameters<typeof listRoute.GET>[1]);
   const create = (body: unknown, workspace = "default") =>
-    listRoute.POST(json("POST", base(workspace), body), {
+    listRoute.POST(json("POST", withProject(workspace), body), {
       params: Promise.resolve({ workspace }),
     } as Parameters<typeof listRoute.POST>[1]);
   const validate = (body: unknown, workspace = "default") =>
@@ -163,6 +179,7 @@ async function startRoutes(
     db,
     workspaceId,
     otherId,
+    projectIds,
     listRoute,
     validateRoute,
     itemRoute,
@@ -466,5 +483,59 @@ describe("archiving through the route file", () => {
     expect(await rows()).toHaveLength(2);
     expect(await versions()).toHaveLength(2);
     expect((await archive("missing")).status).toBe(404);
+  });
+});
+
+describe("the project of a lane (#922)", () => {
+  // #922-T80
+  it("lists and creates lanes within a project: a missing project is 400 and names the projects there are, another workspace's project is 404", async () => {
+    const t = await startRoutes();
+    await t.addEnvironment("node");
+    const url = (query: string) =>
+      `https://app.test/api/w/default/workflows${query}`;
+    const context = {
+      params: Promise.resolve({ workspace: "default" }),
+    } as Parameters<typeof t.listRoute.GET>[1];
+
+    const missing = await t.listRoute.GET(new Request(url("")), context);
+    const foreign = await t.listRoute.GET(
+      new Request(url(`?projectId=${t.projectIds.other}`)),
+      context,
+    );
+    const created = await t.create(tiny());
+    const own = await t.list();
+    const stranger = await t.listRoute.POST(
+      new Request(url(`?projectId=${t.projectIds.other}`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(tiny()),
+      }),
+      context,
+    );
+
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({
+      error: "WORKFLOW_PROJECT_REQUIRED",
+      issues: [
+        {
+          path: "projectId",
+          code: "project_required",
+          available: [t.projectIds.default],
+        },
+      ],
+    });
+    expect(foreign.status).toBe(404);
+    const refused = JSON.stringify(await foreign.json());
+    expect(refused).toContain("WORKFLOW_PROJECT_NOT_FOUND");
+    expect(refused).not.toContain(t.projectIds.other);
+    expect(created.status).toBe(201);
+    expect(
+      (
+        (await own.json()) as { workflows: { projectId: string }[] }
+      ).workflows.map((workflow) => workflow.projectId),
+    ).toEqual([t.projectIds.default]);
+    expect(stranger.status).toBe(404);
+    // Only the lane of this workspace was written.
+    expect(await t.rows()).toHaveLength(1);
   });
 });
