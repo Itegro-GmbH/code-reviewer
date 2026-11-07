@@ -83,9 +83,10 @@ describe("a linear run of two agent steps", () => {
       budgetMicroUsd: 20_000_000,
       spentMicroUsd: 0,
     });
-    // A run started since #916 keeps the input under `input`, beside the ticket when there is one.
+    // A run without a ticket stores the input as it was handed in, as before #916 (an older version reads it during a deploy).
     expect(JSON.parse(state.run.triggerInput)).toEqual({
-      input: { repo: "acme/widgets", topic: "caching" },
+      repo: "acme/widgets",
+      topic: "caching",
     });
     expect(stepsOf(state)).toEqual([["plan", "running"]]);
     const [first] = state.steps;
