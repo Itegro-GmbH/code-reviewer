@@ -790,8 +790,12 @@ describe("the action", () => {
           "github.issue.comment",
           "github.issue.labels",
           "github.pullRequest.open",
+          "pullRequest.comment",
+          "pullRequest.open",
           "ticket.comment",
           "ticket.labels",
+          "ticket.requestReview",
+          "ticket.setStatus",
         ],
       }),
     ]);

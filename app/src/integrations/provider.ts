@@ -180,6 +180,40 @@ export interface IntegrationProvider {
   ): Promise<{ labels: string[] }>;
 
   /**
+   * Only where the app can ask for a review (#917, `ticket.requestReview`): requests a review of pull request `prNumber` from these users
+   * (logins), as the app, with a token limited to this repository and the pull request permission. Answers the users that are asked
+   * afterwards. Asking twice is harmless. With `skipRefused`, a user the platform refuses (not a collaborator, the author) is left
+   * out instead of failing the call (a refusal for another reason still fails it); `max` stops asking once that many are requested. Rejects like `openPullRequest`; `INTEGRATION_REQUEST_REFUSED` is a user that cannot review.
+   */
+  requestReviewers?(
+    integration: Integration,
+    repo: RepoRef,
+    prNumber: number,
+    reviewers: readonly string[],
+    options?: { skipRefused?: boolean; max?: number; signal?: AbortSignal },
+  ): Promise<{ requested: string[] }>;
+
+  /**
+   * Only where tickets sit on a board (#917, `ticket.setStatus`; GitHub: a Project, projects_v2): puts issue `issueNumber` into the
+   * status column named `status` of the board `board` (its number or id) of the repository's owner, adding the issue to the board when
+   * it is not on it. The token is limited to this repository and to the projects permission of the app, which the owner of the
+   * installation grants on its own (without it the call rejects with `INTEGRATION_ACCESS_SCOPE_REFUSED`). What the board or the issue
+   * decide is an answer, not an error. Idempotent.
+   */
+  setTicketStatus?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    move: { board: string; status: string },
+    signal?: AbortSignal,
+  ): Promise<
+    | { kind: "moved"; status: string }
+    | { kind: "board_not_found" }
+    | { kind: "issue_not_found" }
+    | { kind: "status_unknown"; available: string[] }
+  >;
+
+  /**
    * Only where a review is posted as a comment (#657): the body of the comment `commentId` below the pull request, so the
    * run page can show what was posted. Only a comment the app itself wrote counts (anybody can write a comment): another
    * author's, and a comment that is gone, answer null. The body is untrusted text. Rejects like `getPullRequest`; the

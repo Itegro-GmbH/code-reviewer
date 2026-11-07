@@ -3,6 +3,7 @@
 // An in-memory GithubAppClient for unit tests of the provider: no HTTP, no GitHub. It answers from
 // plain data and records every call. (The real client is tested against the fake GitHub API.)
 import type {
+  BoardMove,
   CollaboratorPermission,
   GithubAppClient,
   IssueComment,
@@ -47,6 +48,14 @@ export type FakeGithubAppClientData = {
   labelsFailure?: Error;
   /** The labels `changeIssueLabels` answers (#844). Default: the added ones. */
   labelsAfter?: string[];
+  /** Makes `requestPullRequestReviewers` reject with this error (#917). */
+  reviewersFailure?: Error;
+  /** The logins `requestPullRequestReviewers` answers (#917). Default: the ones asked for. */
+  reviewersAfter?: string[];
+  /** Makes `moveIssueOnBoard` reject with this error (#917). */
+  boardFailure?: Error;
+  /** What `moveIssueOnBoard` answers (#917). Default: moved to the status asked for. */
+  boardMove?: BoardMove;
   /** Makes `listIssueComments` reject with this error. */
   listCommentsFailure?: Error;
   /** What `listIssueComments` answers, by "owner/name#number". */
@@ -343,6 +352,50 @@ export function fakeGithubAppClient(
       throwIfAborted(signal);
       if (data.labelsFailure) throw data.labelsFailure;
       return data.labelsAfter ?? [...change.add];
+    },
+    async requestPullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      options,
+    ) {
+      record(
+        "requestPullRequestReviewers",
+        installationId,
+        scope,
+        repoFullName,
+        prNumber,
+        reviewers,
+        options?.skipRefused === true,
+        ...(options?.max === undefined ? [] : [options.max]),
+        ...(options?.signal === undefined ? [] : [options.signal]),
+      );
+      throwIfAborted(options?.signal);
+      if (data.reviewersFailure) throw data.reviewersFailure;
+      return data.reviewersAfter ?? [...reviewers];
+    },
+    async moveIssueOnBoard(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      move,
+      signal,
+    ) {
+      record(
+        "moveIssueOnBoard",
+        installationId,
+        scope,
+        repoFullName,
+        issueNumber,
+        move,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.boardFailure) throw data.boardFailure;
+      return data.boardMove ?? { kind: "moved", status: move.status };
     },
     async createCheckRun(installationId, scope, repoFullName, input) {
       record("createCheckRun", installationId, scope, repoFullName, input);

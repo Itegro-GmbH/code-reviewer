@@ -4,9 +4,12 @@
 // exactly what pushing a branch needs.
 import { describe, expect, it } from "vitest";
 import {
+  BOARD_STATUS_TOKEN_PERMISSIONS,
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  REVIEW_REQUEST_TOKEN_PERMISSIONS,
+  WORKFLOW_ACTION_TOKEN_PERMISSIONS,
   toImplementerAccessError,
   toWriteError,
 } from "./job-access.ts";
@@ -20,6 +23,58 @@ describe("the token permissions of the action that opens a pull request", () => 
       contents: "read",
       metadata: "read",
     });
+  });
+});
+
+describe("the token permissions of the workflow actions (#917)", () => {
+  // #917-T400
+  it.each([
+    [
+      "pullRequest.open",
+      { pull_requests: "write", contents: "read", metadata: "read" },
+    ],
+    [
+      "github.pullRequest.open",
+      { pull_requests: "write", contents: "read", metadata: "read" },
+    ],
+    ["pullRequest.comment", { issues: "write", metadata: "read" }],
+    ["ticket.comment", { issues: "write", metadata: "read" }],
+    ["github.issue.comment", { issues: "write", metadata: "read" }],
+    ["ticket.labels", { issues: "write", metadata: "read" }],
+    ["github.issue.labels", { issues: "write", metadata: "read" }],
+    [
+      "ticket.setStatus",
+      { organization_projects: "write", issues: "read", metadata: "read" },
+    ],
+    ["ticket.requestReview", { pull_requests: "write", metadata: "read" }],
+  ])("%s asks for exactly %j", (connector, permissions) => {
+    expect(WORKFLOW_ACTION_TOKEN_PERMISSIONS[connector]).toStrictEqual(
+      permissions,
+    );
+  });
+
+  // #917-T401
+  it("ask for the projects of the owner only for the board, and for pull requests only to open them and to ask for a review", () => {
+    expect(REVIEW_REQUEST_TOKEN_PERMISSIONS).toStrictEqual({
+      pull_requests: "write",
+      metadata: "read",
+    });
+    expect(BOARD_STATUS_TOKEN_PERMISSIONS).toStrictEqual({
+      organization_projects: "write",
+      issues: "read",
+      metadata: "read",
+    });
+    const needing = (permission: string) =>
+      Object.entries(WORKFLOW_ACTION_TOKEN_PERMISSIONS)
+        .filter(([, held]) => permission in held)
+        .map(([name]) => name)
+        .sort();
+    expect(needing("organization_projects")).toEqual(["ticket.setStatus"]);
+    expect(needing("pull_requests")).toEqual([
+      "github.pullRequest.open",
+      "pullRequest.open",
+      "ticket.requestReview",
+    ]);
   });
 });
 

@@ -42,7 +42,10 @@ import {
 } from "./result-schema.ts";
 import {
   GITHUB_ISSUE_LABELS,
+  PROJECT_MEMBERS,
   TICKET_LABELS,
+  TICKET_REQUEST_REVIEW,
+  TICKET_SET_STATUS,
   type ConnectorSpec,
 } from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
@@ -279,6 +282,7 @@ export function actionBinding(
     kind: "action",
     type: spec?.output ?? { kind: "unknown" },
     unavailable: {},
+    ...(spec === undefined ? {} : { connector: spec.name }),
   };
 }
 
@@ -835,6 +839,87 @@ function checkAction(
     spec.name === TICKET_LABELS.name
   )
     checkNoRetrigger(node, path, c);
+  if (spec.name === TICKET_SET_STATUS.name) checkBoardInputs(node, path, c);
+  if (spec.name === TICKET_REQUEST_REVIEW.name) checkReviewers(node, path, c);
+}
+
+/** The number of a GitHub Project (1 to 2147483647) or its node id: what `ticket.setStatus` takes as `board`. */
+const BOARD_REFERENCE = /^(?:[1-9]\d{0,9}|PVT_[A-Za-z0-9_-]{1,200})$/;
+/** A GitHub login: letters, digits and single hyphens, up to 39 characters. */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * `ticket.setStatus`: `board` and `status` are literals (a target with no reference allowed), so what is checked here is their form:
+ * the board is the number of a Project or its node id, the status is not blank. The option name itself is the board's and is looked up
+ * when the step runs (`board_status_unknown` lists the options).
+ */
+function checkBoardInputs(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const { board, status } = node;
+  if (
+    typeof board === "string" &&
+    !board.includes("{{") &&
+    !BOARD_REFERENCE.test(board)
+  )
+    c.report(
+      issue(
+        pointer(path, "board"),
+        "invalid_value",
+        '\'board\' is the number of a GitHub Project of the repository\'s owner (for example "7") or its node id ("PVT_…").',
+      ),
+    );
+  if (
+    typeof status === "string" &&
+    !status.includes("{{") &&
+    status.trim() === ""
+  )
+    c.report(
+      issue(
+        pointer(path, "status"),
+        "invalid_value",
+        "'status' is the name of an option of the board's Status field, not blank.",
+      ),
+    );
+}
+
+/** `ticket.requestReview`: `reviewers` is the text "project members" or a list of GitHub logins (a reference to a manual input is fine). */
+function checkReviewers(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const { reviewers } = node;
+  const refused = (at: string, what: string): void =>
+    c.report(
+      issue(
+        at,
+        "invalid_value",
+        `${what} 'reviewers' is "${PROJECT_MEMBERS}" or a list of GitHub logins.`,
+        [PROJECT_MEMBERS],
+      ),
+    );
+  if (typeof reviewers === "string") {
+    if (!reviewers.includes("{{") && reviewers !== PROJECT_MEMBERS)
+      refused(
+        pointer(path, "reviewers"),
+        `${shown(reviewers)} is no group of people.`,
+      );
+    return;
+  }
+  if (!Array.isArray(reviewers)) return;
+  if (reviewers.length === 0)
+    refused(pointer(path, "reviewers"), "The list is empty.");
+  reviewers.forEach((entry: unknown, position) => {
+    if (typeof entry !== "string" || entry.includes("{{")) return;
+    if (!GITHUB_LOGIN.test(entry))
+      refused(
+        pointer(path, "reviewers", position),
+        `${shown(entry)} is not a GitHub login.`,
+      );
+  });
 }
 
 /** Adding the label that starts the workflow would start it again, and again. */
