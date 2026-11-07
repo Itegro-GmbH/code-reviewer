@@ -101,9 +101,17 @@ export type TrackerSyncState = {
   updatedAt: string;
 };
 
+/** How long a tombstone (an item the provider deleted) is kept after the last time it was written: long enough for a late delivery. */
+export const TOMBSTONE_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
+
 export type TrackerRepository = {
-  /** Writes the item: inserts it, or replaces what the provider says of it. Board status, pull requests and checks stay as they are. */
-  upsertItem(repositoryId: string, item: TrackerItemWrite): Promise<void>;
+  /**
+   * Writes the item: inserts it, or replaces what the provider says of it. Board status, pull requests and checks stay as they are.
+   * A delivery older than what the row holds (`updatedAt`; a tombstone is only replaced by a strictly newer one) is dropped, so a replayed
+   * or late delivery cannot undo a newer one. Either way the row counts as written (`syncedAt`). Answers whether the row now holds this
+   * delivery; false for a stale one and for a repository that is not in the workspace.
+   */
+  upsertItem(repositoryId: string, item: TrackerItemWrite): Promise<boolean>;
   getItem(
     repositoryId: string,
     number: number,
@@ -113,15 +121,29 @@ export type TrackerRepository = {
     repositoryId: string,
     filter: TrackerItemFilter,
   ): Promise<TrackerItem[]>;
-  /** Removes the item; answers whether there was one. */
-  deleteItem(repositoryId: string, number: number): Promise<boolean>;
-  /** Sets the board status of the item the board names by its node id (any repository of the workspace); answers how many rows changed. */
+  /**
+   * Hides the item as of `at` (the provider's time of the deletion): the row stays as a tombstone, so a delivery older than `at` does not
+   * bring it back. Answers whether a visible item was hidden; false when there is none, or it changed after `at`.
+   */
+  deleteItem(
+    repositoryId: string,
+    number: number,
+    at: string,
+  ): Promise<boolean>;
+  /**
+   * Sets the board status of the item the board names by its node id (any repository of the workspace) and notes that a board saw it;
+   * answers how many rows changed.
+   */
   setBoardStatusByNode(nodeId: string, status: string | null): Promise<number>;
-  /** Sets the parent of an issue; answers whether the issue is cached. */
+  /**
+   * Sets the parent of an issue as of `at` (the provider's time of the change, the same clock as `updatedAt`); answers whether the issue is
+   * cached and was not changed after `at`.
+   */
   setParent(
     repositoryId: string,
     number: number,
     parent: number | null,
+    at: string,
   ): Promise<boolean>;
   setChecksState(
     repositoryId: string,
@@ -136,13 +158,34 @@ export type TrackerRepository = {
     repositoryId: string,
     issueNumbers?: readonly number[],
   ): Promise<void>;
-  /** Forgets the board statuses (a full sync of the board starts from nothing). */
-  clearBoardStatuses(repositoryId: string): Promise<void>;
+  /** Empties the board status of the items no board said anything about since `since` (the end of a full sync of the boards). */
+  clearBoardStatusesNotSeenSince(
+    repositoryId: string,
+    since: string,
+  ): Promise<void>;
   /** Forgets the checks of every pull request (a full sync of them starts from nothing). */
   clearChecksStates(repositoryId: string): Promise<void>;
-  /** Removes the items not written since `before`; answers how many. */
+  /**
+   * Removes the items not written since `before`; answers how many. Tombstones go only when they were written last more than
+   * `TOMBSTONE_KEPT_MS` before `before`.
+   */
   removeNotWrittenSince(repositoryId: string, before: string): Promise<number>;
   getSyncState(repositoryId: string): Promise<TrackerSyncState | undefined>;
+  /**
+   * Starts a sync in one atomic step, unless one is under way: the state is written (this cursor and start, nothing else changes) only
+   * when the repository has no sync, the last one ended, it has not moved since `staleBefore` (its `updatedAt` is bumped with every
+   * page) or its cursor is the unreadable text `replacing`. Otherwise another call owns the sync and its state is left alone.
+   * `claimed` says which; `state` is what the row holds afterwards (undefined for a repository that is not in the workspace).
+   */
+  claimSync(
+    repositoryId: string,
+    claim: {
+      cursor: string;
+      startedAt: string;
+      staleBefore: string;
+      replacing?: string;
+    },
+  ): Promise<{ claimed: boolean; state: TrackerSyncState | undefined }>;
   /** Writes the state of the sync of the repository; fields left out keep their value. */
   saveSyncState(
     repositoryId: string,
@@ -206,54 +249,68 @@ export function createTrackerRepository(
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
 
+  const getSyncState: TrackerRepository["getSyncState"] = async (
+    repositoryId,
+  ) => {
+    const row = await db
+      .selectFrom("tracker_sync_state")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .where("repository_id", "=", repositoryId)
+      .executeTakeFirst();
+    return row === undefined ? undefined : syncStateFrom(row);
+  };
+
   return {
     async upsertItem(repositoryId, item) {
       const at = formatTimestamp(now());
-      const values = {
-        workspace_id: workspaceId,
-        repository_id: repositoryId,
-        provider: item.provider,
-        repo: item.repo,
-        number: item.number,
-        node_id: item.nodeId,
-        kind: item.kind,
-        state: item.state,
-        state_reason: item.stateReason,
-        type: item.type,
-        title: item.title,
-        body_excerpt: item.bodyExcerpt,
-        labels: encodeJson(item.labels),
-        assignees: encodeJson(item.assignees),
-        closes: encodeJson(item.closes),
-        updated_at: item.updatedAt,
-        synced_at: at,
-      };
+      // What other deliveries fill in is empty for a ticket seen for the first time and kept when it is written again. The values are
+      // selected from `repositories`, so nothing is inserted for a repository that is not in the workspace; the parameters are cast
+      // because a select list does not tell Postgres their type.
       const parent =
         item.parentNumber === undefined
-          ? {}
-          : { parent_number: item.parentNumber };
-      await db
-        .insertInto("tracker_items")
-        .values({
-          ...values,
-          // What other deliveries fill in: empty for a ticket seen for the first time, and kept when it is written again.
-          project_id: null,
-          board_status: null,
-          parent_number: item.parentNumber ?? null,
-          pull_requests: "[]",
-          checks_state: null,
-        })
-        .onConflict((conflict) =>
-          conflict
-            .columns(["repository_id", "number"])
-            .doUpdateSet({
-              ...values,
-              ...parent,
-            })
-            // The row of another workspace is never touched, even if a repository id were reused.
-            .where("tracker_items.workspace_id", "=", workspaceId),
+          ? sql`tracker_items.parent_number`
+          : sql`excluded.parent_number`;
+      const written = await sql<{ number: number }>`insert into tracker_items (
+          workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
+          body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
+          deleted_at, board_seen_at
         )
-        .execute();
+        select r.workspace_id, r.id, null, ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
+          ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
+          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
+          ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
+          null, null
+        from repositories r
+        where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
+        on conflict (repository_id, number) do update set
+          provider = excluded.provider,
+          repo = excluded.repo,
+          node_id = excluded.node_id,
+          kind = excluded.kind,
+          state = excluded.state,
+          state_reason = excluded.state_reason,
+          type = excluded.type,
+          title = excluded.title,
+          body_excerpt = excluded.body_excerpt,
+          labels = excluded.labels,
+          assignees = excluded.assignees,
+          closes = excluded.closes,
+          parent_number = ${parent},
+          updated_at = excluded.updated_at,
+          synced_at = excluded.synced_at,
+          deleted_at = null
+        where tracker_items.workspace_id = ${workspaceId}
+          and case
+            when tracker_items.deleted_at is null then excluded.updated_at >= tracker_items.updated_at
+            else excluded.updated_at > tracker_items.updated_at
+          end
+        returning tracker_items.number`.execute(db);
+      if (written.rows.length > 0) return true;
+      // A delivery older than the row (or a repository that is not ours): nothing is replaced, but the row was seen, so a full sync
+      // that is reading keeps it.
+      await own(repositoryId, item.number).set({ synced_at: at }).execute();
+      return false;
     },
 
     async getItem(repositoryId, number) {
@@ -263,6 +320,7 @@ export function createTrackerRepository(
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("number", "=", number)
+        .where("deleted_at", "is", null)
         .executeTakeFirst();
       return row === undefined ? undefined : itemFrom(row);
     },
@@ -272,7 +330,8 @@ export function createTrackerRepository(
         .selectFrom("tracker_items")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
-        .where("repository_id", "=", repositoryId);
+        .where("repository_id", "=", repositoryId)
+        .where("deleted_at", "is", null);
       if (filter.state !== undefined)
         query = query.where("state", "=", filter.state);
       if (filter.kind !== undefined)
@@ -286,29 +345,40 @@ export function createTrackerRepository(
       return rows.map(itemFrom);
     },
 
-    async deleteItem(repositoryId, number) {
-      const result = await db
-        .deleteFrom("tracker_items")
-        .where("workspace_id", "=", workspaceId)
-        .where("repository_id", "=", repositoryId)
-        .where("number", "=", number)
+    async deleteItem(repositoryId, number, at) {
+      const result = await own(repositoryId, number)
+        .set({
+          deleted_at: at,
+          updated_at: at,
+          synced_at: formatTimestamp(now()),
+        })
+        .where("deleted_at", "is", null)
+        .where("updated_at", "<=", at)
         .executeTakeFirst();
-      return Number(result.numDeletedRows) > 0;
+      return Number(result.numUpdatedRows) > 0;
     },
 
     async setBoardStatusByNode(nodeId, status) {
+      const at = formatTimestamp(now());
       const result = await db
         .updateTable("tracker_items")
-        .set({ board_status: status, synced_at: formatTimestamp(now()) })
+        .set({ board_status: status, board_seen_at: at, synced_at: at })
         .where("workspace_id", "=", workspaceId)
         .where("node_id", "=", nodeId)
+        .where("deleted_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows);
     },
 
-    async setParent(repositoryId, number, parent) {
+    async setParent(repositoryId, number, parent, at) {
       const result = await own(repositoryId, number)
-        .set({ parent_number: parent, synced_at: formatTimestamp(now()) })
+        .set({
+          parent_number: parent,
+          updated_at: at,
+          synced_at: formatTimestamp(now()),
+        })
+        .where("deleted_at", "is", null)
+        .where("updated_at", "<=", at)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
     },
@@ -316,6 +386,7 @@ export function createTrackerRepository(
     async setChecksState(repositoryId, number, state) {
       const result = await own(repositoryId, number)
         .set({ checks_state: state, synced_at: formatTimestamp(now()) })
+        .where("deleted_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
     },
@@ -325,29 +396,50 @@ export function createTrackerRepository(
       const only =
         issueNumbers === undefined
           ? sql``
-          : sql`and i.number in (${sql.join(issueNumbers.map((number) => sql.lit(number)))})`;
-      await sql`update tracker_items i
-        set pull_requests = coalesce((
-          select jsonb_agg(p.number order by p.number)::text
+          : sql`and t.number in (${sql.join(issueNumbers.map((number) => sql.lit(number)))})`;
+      // One pass: the `closes` of every pull request are unnested once and gathered per issue number, then joined to the issues.
+      // (`closes` is JSON text written by `upsertItem`; the cast reads it as such.) An issue no pull request closes gets `[]`;
+      // a row that already holds the right text is not written.
+      await sql`with closing as materialized (
+          select c.value::integer as issue_number, jsonb_agg(distinct p.number order by p.number)::text as numbers
           from tracker_items p
-          where p.workspace_id = i.workspace_id
-            and p.repository_id = i.repository_id
+          cross join lateral jsonb_array_elements_text(p.closes::jsonb) as c(value)
+          where p.workspace_id = ${workspaceId}
+            and p.repository_id = ${repositoryId}
             and p.kind = 'pull_request'
-            and p.closes::jsonb @> jsonb_build_array(i.number)
-        ), '[]')
-        where i.workspace_id = ${workspaceId}
-          and i.repository_id = ${repositoryId}
-          and i.kind = 'issue'
-          ${only}`.execute(db);
+            and p.deleted_at is null
+            and p.closes <> '[]'
+          group by c.value::integer
+        )
+        update tracker_items i
+        set pull_requests = coalesce(closing.numbers, '[]')
+        from tracker_items t
+        left join closing on closing.issue_number = t.number
+        where t.workspace_id = ${workspaceId}
+          and t.repository_id = ${repositoryId}
+          and t.kind = 'issue'
+          and t.deleted_at is null
+          ${only}
+          and i.repository_id = t.repository_id
+          and i.number = t.number
+          and i.pull_requests is distinct from coalesce(closing.numbers, '[]')`.execute(
+        db,
+      );
     },
 
-    async clearBoardStatuses(repositoryId) {
+    async clearBoardStatusesNotSeenSince(repositoryId, since) {
       await db
         .updateTable("tracker_items")
         .set({ board_status: null })
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("board_status", "is not", null)
+        .where((eb) =>
+          eb.or([
+            eb("board_seen_at", "is", null),
+            eb("board_seen_at", "<", since),
+          ]),
+        )
         .execute();
     },
 
@@ -367,49 +459,78 @@ export function createTrackerRepository(
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("synced_at", "<", before)
+        .where("deleted_at", "is", null)
         .executeTakeFirst();
+      // A tombstone is not counted: it is an item that was already gone. It stays for a while for the deliveries that come late.
+      await db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("deleted_at", "is not", null)
+        .where(
+          "synced_at",
+          "<",
+          formatTimestamp(new Date(Date.parse(before) - TOMBSTONE_KEPT_MS)),
+        )
+        .execute();
       return Number(result.numDeletedRows);
     },
 
-    async getSyncState(repositoryId) {
-      const row = await db
-        .selectFrom("tracker_sync_state")
-        .selectAll()
-        .where("workspace_id", "=", workspaceId)
-        .where("repository_id", "=", repositoryId)
-        .executeTakeFirst();
-      return row === undefined ? undefined : syncStateFrom(row);
+    getSyncState,
+
+    async claimSync(repositoryId, claim) {
+      const at = formatTimestamp(now());
+      const replacing =
+        claim.replacing === undefined
+          ? sql``
+          : sql`or tracker_sync_state."cursor" = ${claim.replacing}`;
+      // One statement: Postgres locks the row of a conflict, so of two calls at once the second sees what the first wrote and fails the
+      // condition. A repository that is not in the workspace is never inserted.
+      const claimed = await sql<
+        Selectable<TrackerSyncStateTable>
+      >`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, r.workspace_id, null, ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
+        from repositories r
+        where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
+        on conflict (repository_id) do update set
+          "cursor" = excluded."cursor",
+          started_at = excluded.started_at,
+          updated_at = excluded.updated_at
+        where tracker_sync_state.workspace_id = ${workspaceId}
+          and (
+            tracker_sync_state."cursor" is null
+            or tracker_sync_state.started_at is null
+            or tracker_sync_state.updated_at < ${claim.staleBefore}
+            ${replacing}
+          )
+        returning *`.execute(db);
+      const row = claimed.rows[0];
+      if (row !== undefined)
+        return { claimed: true, state: syncStateFrom(row) };
+      return { claimed: false, state: await getSyncState(repositoryId) };
     },
 
     async saveSyncState(repositoryId, state) {
       const at = formatTimestamp(now());
-      const given = {
-        ...(state.cursor === undefined ? {} : { cursor: state.cursor }),
+      const columns = [
+        ...(state.cursor === undefined
+          ? []
+          : [sql`"cursor" = excluded."cursor"`]),
         ...(state.startedAt === undefined
-          ? {}
-          : { started_at: state.startedAt }),
+          ? []
+          : [sql`started_at = excluded.started_at`]),
         ...(state.lastFullSyncAt === undefined
-          ? {}
-          : { last_full_sync_at: state.lastFullSyncAt }),
-      };
-      await db
-        .insertInto("tracker_sync_state")
-        .values({
-          repository_id: repositoryId,
-          workspace_id: workspaceId,
-          cursor: null,
-          started_at: null,
-          last_full_sync_at: null,
-          ...given,
-          updated_at: at,
-        })
-        .onConflict((conflict) =>
-          conflict
-            .column("repository_id")
-            .doUpdateSet({ ...given, updated_at: at })
-            .where("tracker_sync_state.workspace_id", "=", workspaceId),
-        )
-        .execute();
+          ? []
+          : [sql`last_full_sync_at = excluded.last_full_sync_at`]),
+        sql`updated_at = excluded.updated_at`,
+      ];
+      await sql`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, r.workspace_id, null, ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
+          ${state.lastFullSyncAt ?? null}::text, ${at}::text
+        from repositories r
+        where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
+        on conflict (repository_id) do update set ${sql.join(columns)}
+        where tracker_sync_state.workspace_id = ${workspaceId}`.execute(db);
     },
   };
 }

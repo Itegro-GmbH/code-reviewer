@@ -357,16 +357,20 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<void>;
   /**
-   * One page (100) of the issues and pull requests of a repository, any state, oldest first (#923), read with a token of its own limited
-   * to `scope`. A pull request comes back as such (`kind`). `last` is true when the page is the last one.
+   * One page (100) of the issues and pull requests of a repository, any state, the least recently changed first (#923), read with a
+   * token of its own limited to `scope`. A pull request comes back as such (`kind`). `since` (ISO 8601, UTC) leaves out what changed
+   * before it: a list longer than `MAX_PAGES` pages is walked by asking again from the time of the last item, so a repository of any
+   * size can be read (the one thing that still stops it is `MAX_PAGES` pages of items that all changed in the same second). `last` is
+   * true when the page is the last one; `skipped` counts the tickets of the page that could not be read and are not in `items`.
    */
   readTrackerIssues(
     installationId: string,
     scope: JobTokenScope,
     repoFullName: string,
     page: number,
+    since?: string,
     signal?: AbortSignal,
-  ): Promise<{ items: TrackerItemFields[]; last: boolean }>;
+  ): Promise<{ items: TrackerItemFields[]; last: boolean; skipped: number }>;
   /**
    * One page (30) of the open pull requests of a repository with the state of the checks of the head of each (#923): one more call per
    * pull request, which is why the page is small.
@@ -442,6 +446,8 @@ export type GithubAppClientOptions = {
 };
 
 const PAGE_SIZE = 100;
+/** A time the issue list can start from (`since`): ISO 8601 in UTC, as the sync writes it. */
+const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 /** The pull requests of one page of the checks read: each costs a call. */
 const CHECKS_PAGE_SIZE = 30;
 /** The boards of one repository the mirror reads, and the items of one page of a board. */
@@ -474,6 +480,13 @@ function checkPage(page: number): void {
       `The page ${page} is outside the pages a list may have.`,
     );
 }
+
+/** The `type` of the GraphQL errors that mean the app may not read the board; any other error is a failure to try again. */
+const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
+  "FORBIDDEN",
+  "INSUFFICIENT_SCOPES",
+  "NOT_FOUND",
+]);
 
 const BOARDS_QUERY =
   "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
@@ -1111,8 +1124,10 @@ export function createGithubAppClient(
   }
 
   /**
-   * One GraphQL query. Null when GitHub answered with errors (a permission or a board that is not ours to read): the caller treats the
-   * board as unavailable. Anything else wrong (no answer, not JSON) is an error as for REST.
+   * One GraphQL query. Null when GitHub says the board is not ours to read: every error of the answer is `FORBIDDEN`,
+   * `INSUFFICIENT_SCOPES` or `NOT_FOUND`; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
+   * a query GitHub could not run) and anything else wrong (no answer, not JSON) fails as for REST, so the sync keeps its place and goes
+   * on from there.
    */
   async function graphql(
     token: string,
@@ -1128,8 +1143,24 @@ export function createGithubAppClient(
       signal,
     );
     if (!isRecord(json)) throw shapeError("POST /graphql");
-    if (Array.isArray(json.errors) && json.errors.length > 0) return null;
-    return isRecord(json.data) ? json.data : null;
+    if (Array.isArray(json.errors) && json.errors.length > 0) {
+      const types = (json.errors as unknown[]).map((error) =>
+        isRecord(error) && typeof error.type === "string" ? error.type : "",
+      );
+      if (types.every((type) => BOARD_UNAVAILABLE_ERRORS.has(type)))
+        return null;
+      if (types.includes("RATE_LIMITED"))
+        throw new GithubAppError(
+          "GITHUB_APP_RATE_LIMITED",
+          "GitHub rate limit reached for POST /graphql.",
+        );
+      throw new GithubAppError(
+        "GITHUB_APP_REQUEST_FAILED",
+        "GitHub answered POST /graphql with errors.",
+      );
+    }
+    if (!isRecord(json.data)) throw shapeError("POST /graphql");
+    return json.data;
   }
 
   /** `default_branch` of `GET /repos/{owner}/{repo}`. */
@@ -1998,10 +2029,27 @@ export function createGithubAppClient(
 
     revokeInstallationToken,
 
-    async readTrackerIssues(installationId, scope, repoFullName, page, signal) {
+    async readTrackerIssues(
+      installationId,
+      scope,
+      repoFullName,
+      page,
+      since,
+      signal,
+    ) {
       checkInstallationId(installationId);
       checkPage(page);
-      const path = `${repoPath(repoFullName)}/issues?state=all&sort=created&direction=asc&per_page=${PAGE_SIZE}&page=${page}`;
+      if (since !== undefined && !SINCE_PATTERN.test(since))
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The time to read the issues from is not an ISO 8601 time in UTC.",
+        );
+      // GitHub takes whole seconds: the time is cut down to the second (the item it names is read once more, which is harmless).
+      const from =
+        since === undefined
+          ? ""
+          : `&since=${encodeURIComponent(since.replace(/\.\d+Z$/, "Z"))}`;
+      const path = `${repoPath(repoFullName)}/issues?state=all&sort=updated&direction=asc&per_page=${PAGE_SIZE}&page=${page}${from}`;
       return withScopedToken(
         installationId,
         scope,
@@ -2010,14 +2058,16 @@ export function createGithubAppClient(
           if (!Array.isArray(json))
             throw shapeError("GET /repos/{owner}/{repo}/issues");
           const items: TrackerItemFields[] = [];
+          let skipped = 0;
           for (const entry of json) {
             const item = toTrackerItem(entry, repoFullName);
-            // One odd record cannot block the sync: it is left out and the rest is read.
-            if (item === null)
+            // One odd record cannot block the sync: it is left out and the rest is read. The sync is told, and removes nothing.
+            if (item === null) {
+              skipped += 1;
               warn("A ticket of the list could not be read and was left out.");
-            else items.push(item);
+            } else items.push(item);
           }
-          return { items, last: json.length < PAGE_SIZE };
+          return { items, last: json.length < PAGE_SIZE, skipped };
         },
         signal,
       );

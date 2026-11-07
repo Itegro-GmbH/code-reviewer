@@ -103,7 +103,7 @@ const tokenRequests = (calls: Call[]) =>
 
 describe("the issues of the full sync", () => {
   // #923-T75
-  it("reads a page oldest first with a token of one repository and read access, and switches the token off", async () => {
+  it("reads a page, the least recently changed first, with a token of one repository and read access, and switches the token off", async () => {
     const { client, calls } = scripted((call) =>
       call.path.startsWith("/repos/acme/widgets/issues?")
         ? {
@@ -135,7 +135,7 @@ describe("the issues of the full sync", () => {
     ]);
     expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
       "POST /app/installations/4242/access_tokens",
-      "GET /repos/acme/widgets/issues?state=all&sort=created&direction=asc&per_page=100&page=1",
+      "GET /repos/acme/widgets/issues?state=all&sort=updated&direction=asc&per_page=100&page=1",
       "DELETE /installation/token",
     ]);
     expect(tokenRequests(calls)[0]?.body).toEqual({
@@ -163,6 +163,52 @@ describe("the issues of the full sync", () => {
     await expect(
       client.readTrackerIssues("4242", READ, "acme/widgets", 101),
     ).rejects.toBeInstanceOf(GithubAppError);
+  });
+
+  // #923-R14
+  it("continues a list from a time, in whole seconds, and refuses a time that is none", async () => {
+    const { client, calls } = scripted((call) =>
+      call.path.startsWith("/repos/acme/widgets/issues?")
+        ? { json: [] }
+        : undefined,
+    );
+
+    await client.readTrackerIssues(
+      "4242",
+      READ,
+      "acme/widgets",
+      2,
+      "2026-11-06T10:00:03.456Z",
+    );
+
+    expect(calls.map((call) => call.path)).toContain(
+      "/repos/acme/widgets/issues?state=all&sort=updated&direction=asc&per_page=100&page=2&since=2026-11-06T10%3A00%3A03Z",
+    );
+    for (const since of [
+      "yesterday",
+      "2026-11-06",
+      "2026-11-06T10:00:03+02:00",
+    ])
+      await expect(
+        client.readTrackerIssues("4242", READ, "acme/widgets", 1, since),
+      ).rejects.toBeInstanceOf(GithubAppError);
+  });
+
+  // #923-R15
+  it("counts the tickets of a page that it could not read", async () => {
+    const { client } = scripted(() => ({
+      json: [ISSUE, { no: "ticket" }, { number: "x" }],
+    }));
+
+    const page = await client.readTrackerIssues(
+      "4242",
+      READ,
+      "acme/widgets",
+      1,
+    );
+
+    expect(page.items.map((item) => item.number)).toEqual([12]);
+    expect(page.skipped).toBe(2);
   });
 
   // #923-T77
@@ -402,6 +448,67 @@ describe("the board of the full sync", () => {
       items: [],
       next: null,
     });
+  });
+
+  // #923-R16
+  it.each(["FORBIDDEN", "INSUFFICIENT_SCOPES", "NOT_FOUND"])(
+    "is not available when GitHub answers the query with only %s errors",
+    async (type) => {
+      const { client } = scripted((call) =>
+        call.path === "/graphql"
+          ? {
+              json: {
+                data: null,
+                errors: [{ type, message: "not for this app" }],
+              },
+            }
+          : undefined,
+      );
+
+      expect(
+        await client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+      ).toEqual({ available: false, items: [], next: null });
+    },
+  );
+
+  // #923-R17
+  it.each([
+    [
+      [{ type: "RATE_LIMITED", message: "slow down" }],
+      "GITHUB_APP_RATE_LIMITED",
+    ],
+    [[{ type: "INTERNAL", message: "boom" }], "GITHUB_APP_REQUEST_FAILED"],
+    [[{ message: "no type" }], "GITHUB_APP_REQUEST_FAILED"],
+    // One error that is not about the permission is enough: the board is not "not ours".
+    [
+      [
+        { type: "FORBIDDEN", message: "a" },
+        { type: "MAX_NODE_LIMIT_EXCEEDED", message: "b" },
+      ],
+      "GITHUB_APP_REQUEST_FAILED",
+    ],
+  ])(
+    "fails, so that the sync keeps its place, when the errors are %j",
+    async (errors, code) => {
+      const { client } = scripted((call) =>
+        call.path === "/graphql" ? { json: { data: null, errors } } : undefined,
+      );
+
+      await expect(
+        client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+      ).rejects.toMatchObject({ code });
+    },
+  );
+
+  // #923-R18
+  it("fails when the answer has neither data nor errors", async () => {
+    const { client } = scripted((call) =>
+      call.path === "/graphql" ? { json: {} } : undefined,
+    );
+
+    await expect(
+      client.readTrackerBoard("4242", BOARD, "acme/widgets", null),
+    ).rejects.toBeInstanceOf(GithubAppError);
   });
 
   // #923-T84

@@ -814,9 +814,15 @@ export function createGithubAppProvider(
             scope(TRACKER_READ_TOKEN_PERMISSIONS),
             repo.fullName,
             step.page,
+            step.since,
             signal,
           );
-          return { phase: "issues", items: page.items, last: page.last };
+          return {
+            phase: "issues",
+            items: page.items,
+            last: page.last,
+            skipped: page.skipped,
+          };
         }
         if (step.phase === "checks") {
           const page = await client.readTrackerChecks(

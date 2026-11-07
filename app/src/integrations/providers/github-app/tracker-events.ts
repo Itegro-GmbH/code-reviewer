@@ -53,6 +53,12 @@ function repoOf(context: TrackerParseContext): RepoRef {
   };
 }
 
+/** The ISO text of a time the payload carries, or null when it is not a time. */
+function timeOf(value: string): string | null {
+  const time = Date.parse(value);
+  return Number.isNaN(time) ? null : new Date(time).toISOString();
+}
+
 function boardStatusChange(
   context: TrackerParseContext,
   action: string,
@@ -107,6 +113,12 @@ function subIssueChange(
     parentRepo.toLowerCase() !== childRepo.toLowerCase()
   )
     return ignored("the sub-issue is in another repository than its parent");
+  const at = timeOf(field<string>(payload, "sub_issue.updated_at"));
+  if (at === null)
+    return {
+      kind: "invalid_payload",
+      reason: 'the "sub_issues" payload has no time in sub_issue.updated_at',
+    };
   return change({
     kind: "parent_changed",
     repo: repoOf(context),
@@ -114,6 +126,7 @@ function subIssueChange(
     parent: action.endsWith("_added")
       ? field<number>(payload, "parent_issue.number")
       : null,
+    at,
   });
 }
 
@@ -174,12 +187,20 @@ export function parseTrackerChange(
   if (
     eventName === "issues" &&
     (action === "deleted" || action === "transferred")
-  )
+  ) {
+    const at = timeOf(field<string>(payload, "issue.updated_at"));
+    if (at === null)
+      return {
+        kind: "invalid_payload",
+        reason: 'the "issues" payload has no time in issue.updated_at',
+      };
     return change({
       kind: "item_removed",
       repo,
       number: field<number>(payload, "issue.number"),
+      at,
     });
+  }
   if (eventName === "issue_comment" && action === "deleted") {
     // A deleted comment changes nothing about the ticket but the time of the last change; `edited` and `created` carry it already.
     return ignored("a deleted comment is no news for the ticket");

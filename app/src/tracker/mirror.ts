@@ -95,11 +95,13 @@ export function createTrackerMirror(
         case "item_changed": {
           const { item } = change;
           const before = await tracker.getItem(repositoryId, item.number);
-          await tracker.upsertItem(repositoryId, {
+          // A delivery older than what the cache holds (replayed, or overtaken by a newer one) changes nothing, not even the checks.
+          const written = await tracker.upsertItem(repositoryId, {
             provider: TRACKER_PROVIDER,
             repo: change.repo.fullName,
             ...item,
           });
+          if (!written) return "not_mirrored";
           if (item.kind === "pull_request") {
             // The checks belong to a commit: a new commit, or a pull request that is over, has none.
             if (change.resetChecks || item.state === "closed")
@@ -114,17 +116,21 @@ export function createTrackerMirror(
           }
           return "updated";
         }
-        case "item_removed": {
-          const before = await tracker.getItem(repositoryId, change.number);
-          if (before === undefined) return "not_mirrored";
-          await tracker.deleteItem(repositoryId, change.number);
-          return "updated";
-        }
+        case "item_removed":
+          // The row stays as a tombstone: a delivery about the issue that is older than this one does not bring it back.
+          return (await tracker.deleteItem(
+            repositoryId,
+            change.number,
+            change.at,
+          ))
+            ? "updated"
+            : "not_mirrored";
         case "parent_changed":
           return (await tracker.setParent(
             repositoryId,
             change.child,
             change.parent,
+            change.at,
           ))
             ? "updated"
             : "not_mirrored";

@@ -71,6 +71,7 @@ async function setup(
     next: null,
     written: 3,
     removed: 0,
+    skipped: 0,
     boardAvailable: true,
   }));
   const service = createTrackerService({

@@ -158,9 +158,10 @@ describe("the tickets of the mirror", () => {
     await tracker.upsertItem(first.id, item(12, { parentNumber: null }));
 
     expect((await tracker.getItem(first.id, 12))?.parentNumber).toBeNull();
-    expect(await tracker.setParent(first.id, 12, 5)).toBe(true);
+    const later = "2026-11-06T10:05:00.000Z";
+    expect(await tracker.setParent(first.id, 12, 5, later)).toBe(true);
     expect((await tracker.getItem(first.id, 12))?.parentNumber).toBe(5);
-    expect(await tracker.setParent(first.id, 99, 5)).toBe(false);
+    expect(await tracker.setParent(first.id, 99, 5, later)).toBe(false);
   });
 
   // #923-T90
@@ -239,20 +240,27 @@ describe("the tickets of the mirror", () => {
   });
 
   // #923-T93
-  it("finds the item of a board by the node id of its content, and forgets the statuses of one repository", async () => {
-    const { tracker, first, second } = await setup();
+  it("finds the item of a board by the node id of its content, and forgets the statuses no board said anything about since a time", async () => {
+    const { tracker, first, second, now } = await setup();
     await tracker.upsertItem(first.id, item(12));
+    await tracker.upsertItem(first.id, item(13));
     await tracker.upsertItem(
       second.id,
       item(12, { repo: "acme/repo-2", nodeId: "N_other" }),
     );
     await tracker.setBoardStatusByNode("N_other", "Done");
+    await tracker.setBoardStatusByNode("N_13", "Todo");
+    const since = now().toISOString();
 
     expect(await tracker.setBoardStatusByNode("N_12", "In Progress")).toBe(1);
     expect(await tracker.setBoardStatusByNode("N_unknown", "Done")).toBe(0);
-    await tracker.clearBoardStatuses(first.id);
+    await tracker.clearBoardStatusesNotSeenSince(first.id, since);
 
-    expect((await tracker.getItem(first.id, 12))?.boardStatus).toBeNull();
+    // 12 was seen after `since`; 13 was not; the other repository is not touched.
+    expect((await tracker.getItem(first.id, 12))?.boardStatus).toBe(
+      "In Progress",
+    );
+    expect((await tracker.getItem(first.id, 13))?.boardStatus).toBeNull();
     expect((await tracker.getItem(second.id, 12))?.boardStatus).toBe("Done");
   });
 
@@ -269,7 +277,7 @@ describe("the tickets of the mirror", () => {
   });
 
   // #923-T95
-  it("removes a ticket, and the tickets not written since a time", async () => {
+  it("hides a ticket, and removes the tickets not written since a time", async () => {
     const { tracker, first, now } = await setup();
     await tracker.upsertItem(first.id, item(1));
     await tracker.upsertItem(first.id, item(2));
@@ -283,8 +291,12 @@ describe("the tickets of the mirror", () => {
         .map((row) => row.number)
         .sort(),
     ).toEqual([2, 3]);
-    expect(await tracker.deleteItem(first.id, 2)).toBe(true);
-    expect(await tracker.deleteItem(first.id, 2)).toBe(false);
+    expect(
+      await tracker.deleteItem(first.id, 2, "2026-11-06T11:00:00.000Z"),
+    ).toBe(true);
+    expect(
+      await tracker.deleteItem(first.id, 2, "2026-11-06T11:00:00.000Z"),
+    ).toBe(false);
   });
 
   // #923-T96
@@ -355,5 +367,316 @@ describe("the tickets of the mirror", () => {
       tracker.upsertItem(first.id, item(2, { state: "merged" as never })),
     ).rejects.toThrow();
     await expect(tracker.upsertItem(first.id, item(0))).rejects.toThrow();
+  });
+});
+
+const T1 = "2026-11-06T11:00:01.000Z";
+const T2 = "2026-11-06T11:00:02.000Z";
+const T3 = "2026-11-06T11:00:03.000Z";
+
+describe("deliveries that arrive out of order or twice", () => {
+  // #923-R19
+  it("drops a delivery older than the row, takes an equal or newer one, and still counts the row as written", async () => {
+    const { tracker, first, now } = await setup();
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "New", updatedAt: T2 }),
+      ),
+    ).toBe(true);
+    const cut = now().toISOString();
+
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Old", updatedAt: T1 }),
+      ),
+    ).toBe(false);
+
+    expect(await tracker.getItem(first.id, 12)).toMatchObject({
+      title: "New",
+      updatedAt: T2,
+    });
+    // The page of a full sync that was read before the newer delivery does not make the row look gone.
+    expect(await tracker.removeNotWrittenSince(first.id, cut)).toBe(0);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Same", updatedAt: T2 }),
+      ),
+    ).toBe(true);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Next", updatedAt: T3 }),
+      ),
+    ).toBe(true);
+    expect((await tracker.getItem(first.id, 12))?.title).toBe("Next");
+  });
+
+  // #923-R20
+  it("keeps a stale pull request out and leaves its closes as they are", async () => {
+    const { tracker, first } = await setup();
+    await tracker.upsertItem(first.id, item(12));
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", closes: [12], updatedAt: T2 }),
+    );
+
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        closes: [],
+        state: "closed",
+        updatedAt: T1,
+      }),
+    );
+    await tracker.linkPullRequests(first.id, [12]);
+
+    expect(await tracker.getItem(first.id, 7)).toMatchObject({
+      state: "open",
+      closes: [12],
+    });
+    expect((await tracker.getItem(first.id, 12))?.pullRequests).toEqual([7]);
+  });
+
+  // #923-R21
+  it("drops a parent change older than the row, and an item delivery older than a parent change", async () => {
+    const { tracker, first } = await setup();
+    await tracker.upsertItem(first.id, item(12, { updatedAt: T1 }));
+
+    expect(await tracker.setParent(first.id, 12, null, T3)).toBe(true);
+    expect(await tracker.setParent(first.id, 12, 3, T2)).toBe(false);
+    expect((await tracker.getItem(first.id, 12))?.parentNumber).toBeNull();
+
+    expect(
+      await tracker.setParent(first.id, 12, 5, "2026-11-06T11:00:04.000Z"),
+    ).toBe(true);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { parentNumber: 3, updatedAt: T3 }),
+      ),
+    ).toBe(false);
+    expect((await tracker.getItem(first.id, 12))?.parentNumber).toBe(5);
+  });
+
+  // #923-R22
+  it("keeps a deleted ticket as a tombstone: hidden everywhere, brought back only by a strictly newer delivery", async () => {
+    const { tracker, first, now } = await setup();
+    await tracker.upsertItem(first.id, item(12, { updatedAt: T1 }));
+    await tracker.upsertItem(first.id, item(13, { updatedAt: T1 }));
+    await tracker.setBoardStatusByNode("N_12", "Todo");
+
+    expect(await tracker.deleteItem(first.id, 12, T2)).toBe(true);
+
+    expect(await tracker.getItem(first.id, 12)).toBeUndefined();
+    expect(
+      (await tracker.listItems(first.id, { limit: 10 })).map(
+        (row) => row.number,
+      ),
+    ).toEqual([13]);
+    expect(await tracker.setBoardStatusByNode("N_12", "Done")).toBe(0);
+    expect(await tracker.setChecksState(first.id, 12, "success")).toBe(false);
+    expect(await tracker.setParent(first.id, 12, 3, T3)).toBe(false);
+    // An edit from before the deletion, a replay of it and one at the very time of the deletion: the ticket stays gone.
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Late", updatedAt: T1 }),
+      ),
+    ).toBe(false);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Same", updatedAt: T2 }),
+      ),
+    ).toBe(false);
+    expect(await tracker.getItem(first.id, 12)).toBeUndefined();
+    // The deletion itself is not applied twice, and not over a change that came after it.
+    expect(await tracker.deleteItem(first.id, 12, T3)).toBe(false);
+    expect(
+      await tracker.deleteItem(first.id, 13, "2026-11-06T10:00:00.000Z"),
+    ).toBe(false);
+    // A full sync counts what it removes: the ticket that was not written, not the tombstone, which stays for the deliveries that are late.
+    expect(
+      await tracker.removeNotWrittenSince(first.id, now().toISOString()),
+    ).toBe(1);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Late again", updatedAt: T1 }),
+      ),
+    ).toBe(false);
+    expect(
+      await tracker.upsertItem(
+        first.id,
+        item(12, { title: "Back", updatedAt: T3 }),
+      ),
+    ).toBe(true);
+    expect(await tracker.getItem(first.id, 12)).toMatchObject({
+      title: "Back",
+    });
+  });
+
+  // #923-R23
+  it("forgets a tombstone only after it has been kept for a long time", async () => {
+    const { tracker, first, db } = await setup();
+    await tracker.upsertItem(first.id, item(12, { updatedAt: T1 }));
+    await tracker.deleteItem(first.id, 12, T2);
+
+    await tracker.removeNotWrittenSince(first.id, "2026-11-20T00:00:00.000Z");
+    expect(
+      await db.selectFrom("tracker_items").select("number").execute(),
+    ).toHaveLength(1);
+
+    await tracker.removeNotWrittenSince(first.id, "2027-03-01T00:00:00.000Z");
+    expect(
+      await db.selectFrom("tracker_items").select("number").execute(),
+    ).toHaveLength(0);
+  });
+});
+
+describe("the pull requests of many issues", () => {
+  // #923-R24
+  it("links hundreds of issues in one statement, writes only what changed, and leaves out deleted pull requests", async () => {
+    const { tracker, first, db } = await setup();
+    for (let number = 1; number <= 300; number += 1)
+      await tracker.upsertItem(first.id, item(number));
+    // 250 pull requests, numbered after the issues, each closing two issues; one of them is deleted.
+    for (let n = 0; n < 250; n += 1)
+      await tracker.upsertItem(
+        first.id,
+        item(1000 + n, {
+          kind: "pull_request",
+          closes: [n + 1, ((n + 1) % 300) + 1],
+        }),
+      );
+    await tracker.deleteItem(first.id, 1000, "2026-11-06T23:00:00.000Z");
+
+    await tracker.linkPullRequests(first.id);
+
+    // Issue k is closed by the pull requests 1000 + k - 1 and 1000 + k - 2 (those that exist); 1000 is deleted.
+    const listed = async (number: number) =>
+      (await tracker.getItem(first.id, number))?.pullRequests;
+    expect(await listed(1)).toEqual([]);
+    expect(await listed(2)).toEqual([1001]);
+    expect(await listed(3)).toEqual([1001, 1002]);
+    expect(await listed(250)).toEqual([1248, 1249]);
+    expect(await listed(251)).toEqual([1249]);
+    expect(await listed(252)).toEqual([]);
+    expect(await listed(300)).toEqual([]);
+    // Nothing changed: not one row is written the second time.
+    const before = await db
+      .selectFrom("tracker_items")
+      .select(["number", "synced_at"])
+      .execute();
+    await tracker.linkPullRequests(first.id);
+    expect(
+      await db
+        .selectFrom("tracker_items")
+        .select(["number", "synced_at"])
+        .execute(),
+    ).toEqual(before);
+  });
+});
+
+describe("claiming a sync", () => {
+  const claim = (cursor: string, startedAt: string) => ({
+    cursor,
+    startedAt,
+    staleBefore: "2026-11-06T11:00:00.000Z",
+  });
+
+  // #923-R25
+  it("lets one of two calls at the same time start the sync and leaves the state of the other alone", async () => {
+    const { tracker, first } = await setup();
+
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        tracker.claimSync(
+          first.id,
+          claim(
+            `{"phase":"issues","page":${index + 1}}`,
+            `2026-11-06T12:00:0${index}.000Z`,
+          ),
+        ),
+      ),
+    );
+
+    expect(results.filter((result) => result.claimed)).toHaveLength(1);
+    const winner = results.find((result) => result.claimed);
+    for (const result of results)
+      expect(result.state).toMatchObject({
+        cursor: winner?.state?.cursor,
+        startedAt: winner?.state?.startedAt,
+      });
+    expect(await tracker.getSyncState(first.id)).toMatchObject({
+      cursor: winner?.state?.cursor,
+      startedAt: winner?.state?.startedAt,
+    });
+  });
+
+  // #923-R26
+  it("takes a sync over when the last one ended, when it has not moved, or when its cursor is the unreadable one named", async () => {
+    const { tracker, first } = await setup();
+    const started = await tracker.claimSync(
+      first.id,
+      claim("A", "2026-11-06T12:00:00.000Z"),
+    );
+    expect(started.claimed).toBe(true);
+    expect(started.state).toMatchObject({ cursor: "A", lastFullSyncAt: null });
+    // Under way and moving (written after `staleBefore`): not free.
+    expect(
+      (
+        await tracker.claimSync(
+          first.id,
+          claim("B", "2026-11-06T12:00:01.000Z"),
+        )
+      ).claimed,
+    ).toBe(false);
+    // Not moved since `staleBefore`: free.
+    expect(
+      (
+        await tracker.claimSync(first.id, {
+          cursor: "C",
+          startedAt: "2026-11-07T12:00:00.000Z",
+          staleBefore: "2030-01-01T00:00:00.000Z",
+        })
+      ).claimed,
+    ).toBe(true);
+    // The cursor named is the one the row holds: free; another text: not.
+    expect(
+      (
+        await tracker.claimSync(first.id, {
+          ...claim("D", "2026-11-07T12:00:00.000Z"),
+          replacing: "other",
+        })
+      ).claimed,
+    ).toBe(false);
+    expect(
+      (
+        await tracker.claimSync(first.id, {
+          ...claim("D", "2026-11-07T12:00:00.000Z"),
+          replacing: "C",
+        })
+      ).claimed,
+    ).toBe(true);
+    // Ended: free, and the time of the last full sync is kept.
+    await tracker.saveSyncState(first.id, {
+      cursor: null,
+      startedAt: null,
+      lastFullSyncAt: "2026-11-07T13:00:00.000Z",
+    });
+    const again = await tracker.claimSync(
+      first.id,
+      claim("E", "2026-11-07T14:00:00.000Z"),
+    );
+    expect(again.claimed).toBe(true);
+    expect(again.state).toMatchObject({
+      cursor: "E",
+      lastFullSyncAt: "2026-11-07T13:00:00.000Z",
+    });
   });
 });

@@ -41,42 +41,48 @@ const item = (
   ...overrides,
 });
 
-/** What GitHub holds for the repository: the pages of the issues, the checks of the open pull requests and the boards. */
+/** The nth second of the day the fixtures happen on: what orders the list GitHub answers. */
+const at = (second: number) =>
+  new Date(Date.UTC(2026, 10, 6, 10, 0, second)).toISOString();
+
+/** What GitHub holds for the repository: the issues (answered the least recently changed first), the checks of the open pull requests and the boards. */
 type GitHub = {
-  issues: TrackerItemFields[][];
+  issues: TrackerItemFields[];
+  /** How many items one page of the list holds. */
+  pageSize: number;
   checks: { number: number; checksState: string | null }[][];
   /** Pages of board items; null: the app may not read boards. */
   board: { nodeId: string; status: string | null }[][] | null;
+  /** How many tickets of each page cannot be read (`skipped` of the page). */
+  skippedPerPage?: number;
 };
 
 const GITHUB: GitHub = {
+  pageSize: 3,
   issues: [
-    [
-      item(3, { type: "Epic" }),
-      item(12, {
-        type: "Task",
-        parentNumber: 3,
-        labels: [{ name: "ready", color: "0e8a16" }],
-      }),
-    ],
-    [
-      item(13, { state: "closed", stateReason: "completed" }),
-      item(7, {
-        kind: "pull_request",
-        nodeId: "PR_7",
-        closes: [12],
-        title: "Fix 12",
-      }),
-    ],
-    [
-      item(8, {
-        kind: "pull_request",
-        nodeId: "PR_8",
-        closes: [13],
-        state: "closed",
-        stateReason: "merged",
-      }),
-    ],
+    item(3, { type: "Epic", updatedAt: at(1) }),
+    item(12, {
+      type: "Task",
+      parentNumber: 3,
+      labels: [{ name: "ready", color: "0e8a16" }],
+      updatedAt: at(2),
+    }),
+    item(13, { state: "closed", stateReason: "completed", updatedAt: at(3) }),
+    item(7, {
+      kind: "pull_request",
+      nodeId: "PR_7",
+      closes: [12],
+      title: "Fix 12",
+      updatedAt: at(4),
+    }),
+    item(8, {
+      kind: "pull_request",
+      nodeId: "PR_8",
+      closes: [13],
+      state: "closed",
+      stateReason: "merged",
+      updatedAt: at(5),
+    }),
   ],
   checks: [[{ number: 7, checksState: "failure" }]],
   board: [
@@ -97,12 +103,25 @@ function provider(github: GitHub) {
       steps.push(step);
       const failure = failures.shift();
       if (failure !== undefined) throw failure;
-      if (step.phase === "issues")
+      if (step.phase === "issues") {
+        // As GitHub answers: from `since` on, in pages of `pageSize`.
+        const listed = github.issues.filter(
+          (listedItem) =>
+            step.since === undefined || listedItem.updatedAt >= step.since,
+        );
+        const items = listed.slice(
+          (step.page - 1) * github.pageSize,
+          step.page * github.pageSize,
+        );
         return {
           phase: "issues",
-          items: github.issues[step.page - 1] ?? [],
-          last: step.page >= github.issues.length,
+          items,
+          last: items.length < github.pageSize,
+          ...(github.skippedPerPage === undefined
+            ? {}
+            : { skipped: github.skippedPerPage }),
         };
+      }
       if (step.phase === "checks")
         return {
           phase: "checks",
@@ -134,11 +153,18 @@ const tick = () => new Date((clock += 1000));
 function setup(github: GitHub = GITHUB) {
   const tracker = createFakeTrackerRepository(tick);
   const remote = provider(github);
-  const sync = createTrackerSync({ tracker, provider: remote.port, now: tick });
+  const warn = vi.fn<(line: string) => void>();
+  const sync = createTrackerSync({
+    tracker,
+    provider: remote.port,
+    now: tick,
+    warn,
+  });
   return {
     tracker,
     remote,
     sync,
+    warn,
     run: (options = {}) => sync.run(INTEGRATION, REPOSITORY, options),
   };
 }
@@ -153,14 +179,16 @@ describe("the full sync of the ticket mirror", () => {
     expect(progress).toEqual({
       status: "done",
       next: null,
-      written: 5,
+      written: 7,
       removed: 0,
+      skipped: 0,
       boardAvailable: true,
     });
+    // The list is walked by the time of the last change: each walk continues from the last item of the one before (read once more).
     expect(remote.steps).toEqual([
       { phase: "issues", page: 1 },
-      { phase: "issues", page: 2 },
-      { phase: "issues", page: 3 },
+      { phase: "issues", page: 1, since: at(3) },
+      { phase: "issues", page: 1, since: at(5) },
       { phase: "checks", page: 1 },
       { phase: "board", after: null },
       { phase: "board", after: "1" },
@@ -196,13 +224,14 @@ describe("the full sync of the ticket mirror", () => {
     expect(first).toMatchObject({
       status: "partial",
       next: "issues",
-      written: 4,
+      written: 6,
     });
     expect(
       readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
     ).toEqual({
       phase: "issues",
-      page: 3,
+      page: 1,
+      since: at(5),
     });
 
     const second = await run({ maxPages: 2 });
@@ -217,8 +246,8 @@ describe("the full sync of the ticket mirror", () => {
     // Every page was read once: nothing was read again after it was saved.
     expect(remote.steps.map((step) => JSON.stringify(step))).toEqual([
       '{"phase":"issues","page":1}',
-      '{"phase":"issues","page":2}',
-      '{"phase":"issues","page":3}',
+      `{"phase":"issues","page":1,"since":"${at(3)}"}`,
+      `{"phase":"issues","page":1,"since":"${at(5)}"}`,
       '{"phase":"checks","page":1}',
       '{"phase":"board","after":null}',
       '{"phase":"board","after":"1"}',
@@ -247,12 +276,13 @@ describe("the full sync of the ticket mirror", () => {
     remote.failures.push(undefined, new Error("boom"));
 
     await expect(run()).rejects.toThrow("boom");
-    expect(tracker.rows().map((row) => row.number)).toEqual([3, 12]);
+    expect(tracker.rows().map((row) => row.number)).toEqual([3, 12, 13]);
     expect(
       readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
     ).toEqual({
       phase: "issues",
-      page: 2,
+      page: 1,
+      since: at(3),
     });
 
     const progress = await run();
@@ -330,7 +360,8 @@ describe("the full sync of the ticket mirror", () => {
       readCursor((await tracker.getSyncState("r-1"))?.cursor ?? null),
     ).toEqual({
       phase: "issues",
-      page: 2,
+      page: 1,
+      since: at(3),
     });
   });
 
@@ -388,14 +419,13 @@ describe("the rebuild rule", () => {
       fullName: "acme/widgets",
       url: "https://github.com/acme/widgets",
     };
-    for (const page of GITHUB.issues)
-      for (const ticket of page)
-        await mirror.apply(INTEGRATION, {
-          kind: "item_changed",
-          repo,
-          item: ticket,
-          resetChecks: false,
-        });
+    for (const ticket of GITHUB.issues)
+      await mirror.apply(INTEGRATION, {
+        kind: "item_changed",
+        repo,
+        item: ticket,
+        resetChecks: false,
+      });
     for (const page of GITHUB.board ?? [])
       for (const { nodeId, status } of page)
         await mirror.apply(INTEGRATION, {
@@ -440,10 +470,192 @@ describe("the position of a sync", () => {
     ['{"phase":"checks","page":1.5}', undefined],
     ['{"phase":"board","after":5}', undefined],
     ['{"phase":"issues","page":4}', { phase: "issues", page: 4 }],
+    [
+      '{"phase":"issues","page":1,"since":"2026-11-06T10:00:03.000Z","skipped":2}',
+      {
+        phase: "issues",
+        page: 1,
+        since: "2026-11-06T10:00:03.000Z",
+        skipped: 2,
+      },
+    ],
+    ['{"phase":"issues","page":1,"since":"yesterday"}', undefined],
+    ['{"phase":"issues","page":1,"since":5}', undefined],
+    ['{"phase":"checks","page":2,"skipped":0}', { phase: "checks", page: 2 }],
     ['{"phase":"checks","page":2}', { phase: "checks", page: 2 }],
     ['{"phase":"board","after":null}', { phase: "board", after: null }],
     ['{"phase":"board","after":"1:abc"}', { phase: "board", after: "1:abc" }],
   ])("reads %s as %j", (text, expected) => {
     expect(readCursor(text)).toEqual(expected);
+  });
+});
+
+describe("a sync that is bigger or slower than one call", () => {
+  // #923-R06
+  it("walks a list of more than 100 pages to its end by the time of the last change", async () => {
+    const issues = Array.from({ length: 10_550 }, (_, index) =>
+      item(index + 1, { updatedAt: at(index + 1) }),
+    );
+    const { tracker, remote, run } = setup({
+      issues,
+      pageSize: 100,
+      checks: [],
+      board: null,
+    });
+
+    const progress = await run({ maxPages: 1000 });
+
+    expect(progress).toMatchObject({ status: "done", removed: 0, skipped: 0 });
+    expect(tracker.rows()).toHaveLength(10_550);
+    const reads = remote.steps.filter((step) => step.phase === "issues");
+    // More than the 100 pages the client lets one walk have, and none of them asks for a page beyond it.
+    expect(reads.length).toBeGreaterThan(100);
+    expect(
+      Math.max(
+        ...reads.map((step) => (step.phase === "issues" ? step.page : 0)),
+      ),
+    ).toBe(1);
+  });
+
+  // #923-R07
+  it("goes on by page within a time that more than a page of items share", async () => {
+    const issues = Array.from({ length: 250 }, (_, index) =>
+      item(index + 1, { updatedAt: at(7) }),
+    );
+    const { tracker, remote, run } = setup({
+      issues,
+      pageSize: 100,
+      checks: [],
+      board: null,
+    });
+
+    await run();
+
+    expect(tracker.rows()).toHaveLength(250);
+    expect(remote.steps.filter((step) => step.phase === "issues")).toEqual([
+      { phase: "issues", page: 1 },
+      { phase: "issues", page: 1, since: at(7) },
+      { phase: "issues", page: 2, since: at(7) },
+      { phase: "issues", page: 3, since: at(7) },
+    ]);
+  });
+
+  // #923-R08
+  it("does not reset the sync another call has under way, and continues it", async () => {
+    const { tracker, remote, run } = setup();
+    await run({ maxPages: 1 });
+    const under = await tracker.getSyncState("r-1");
+    expect(under?.startedAt).not.toBeNull();
+
+    // A second call while the first one is between its pages: it takes the position that is saved and does not start over.
+    await run({ maxPages: 1 });
+
+    expect(remote.steps.map((step) => JSON.stringify(step))).toEqual([
+      '{"phase":"issues","page":1}',
+      `{"phase":"issues","page":1,"since":"${at(3)}"}`,
+    ]);
+    expect((await tracker.getSyncState("r-1"))?.startedAt).toBe(
+      under?.startedAt,
+    );
+  });
+
+  // #923-R09
+  it("keeps a sync alive for as long as it moves: staleness is counted from the last page, not from the start", async () => {
+    const { remote, run } = setup();
+    await run({ maxPages: 1 });
+    clock += STALE_AFTER_MS - 60_000;
+    await run({ maxPages: 1 });
+    clock += STALE_AFTER_MS - 60_000;
+
+    // The sync began more than an hour ago, but its last page was written less than an hour ago.
+    await run({ maxPages: 1 });
+
+    expect(remote.steps.map((step) => JSON.stringify(step))).toEqual([
+      '{"phase":"issues","page":1}',
+      `{"phase":"issues","page":1,"since":"${at(3)}"}`,
+      `{"phase":"issues","page":1,"since":"${at(5)}"}`,
+    ]);
+  });
+});
+
+describe("what a sync leaves alone when it cannot know", () => {
+  // #923-R10
+  it("removes nothing, says so and reports the count when a ticket of the list could not be read", async () => {
+    const { tracker, run, warn } = setup({ ...GITHUB, skippedPerPage: 1 });
+    await run();
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(99, { title: "Looks gone, but one ticket could not be read" }),
+    });
+
+    const progress = await run();
+
+    // One per page, three pages.
+    expect(progress).toMatchObject({ status: "done", removed: 0, skipped: 3 });
+    expect(tracker.rows().map((row) => row.number)).toEqual([
+      3, 7, 8, 12, 13, 99,
+    ]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("3 ticket(s)"));
+    expect(warn.mock.calls.flat().join("\n")).not.toContain("Looks gone");
+  });
+
+  // #923-R11
+  it("adds the tickets that could not be read over the calls of one sync", async () => {
+    const { run } = setup({ ...GITHUB, skippedPerPage: 1 });
+
+    await run({ maxPages: 1 });
+    const second = await run({ maxPages: 1 });
+    expect(second).toMatchObject({ status: "partial", skipped: 2 });
+    expect(await run()).toMatchObject({ status: "done", skipped: 3 });
+  });
+
+  // #923-R12
+  it("keeps the board statuses when the board cannot be read, and goes on from there", async () => {
+    const { tracker, remote, run } = setup({
+      ...GITHUB,
+      board: [[{ nodeId: "N_3", status: "Todo" }]],
+    });
+    await run();
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBeNull();
+    await tracker.setBoardStatusByNode("N_12", "In Progress");
+    // Issues (3 reads) and checks (1) are read, then the board fails.
+    remote.failures.push(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error("GraphQL had an error"),
+    );
+
+    await expect(run()).rejects.toThrow("GraphQL");
+
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Progress");
+    expect(await run()).toMatchObject({ status: "done" });
+    expect(await tracker.getItem("r-1", 12)).toMatchObject({
+      boardStatus: null,
+    });
+    expect(await tracker.getItem("r-1", 3)).toMatchObject({
+      boardStatus: "Todo",
+    });
+  });
+
+  // #923-R13
+  it("keeps a status that a delivery set while the board phase was still to come", async () => {
+    const { tracker, run } = setup({
+      ...GITHUB,
+      board: [[{ nodeId: "N_3", status: "Todo" }]],
+    });
+    await run();
+    await tracker.setBoardStatusByNode("N_12", "In Progress");
+    // The sync reads the issues and the checks, and stops before the board.
+    await run({ maxPages: 4 });
+    // A webhook says the item moved while the sync is between its phases.
+    await tracker.setBoardStatusByNode("N_12", "In Review");
+
+    await run();
+
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Review");
+    expect((await tracker.getItem("r-1", 3))?.boardStatus).toBe("Todo");
   });
 });

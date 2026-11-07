@@ -78,7 +78,7 @@ describe("applying a change of a ticket to the mirror", () => {
       await changed(issue(12, { labels: [{ name: "a", color: "1" }] })),
     ).toBe("updated");
     await tracker.setBoardStatusByNode("I_12", "In Progress");
-    await tracker.setParent("r-1", 12, 3);
+    await tracker.setParent("r-1", 12, 3, "2026-11-06T10:00:00.000Z");
     await changed(
       issue(12, {
         title: "Renamed",
@@ -149,7 +149,12 @@ describe("applying a change of a ticket to the mirror", () => {
     const { tracker, mirror, changed } = setup();
     await changed(issue(12));
 
-    const removal = { kind: "item_removed", repo: REPO, number: 12 } as const;
+    const removal = {
+      kind: "item_removed",
+      repo: REPO,
+      number: 12,
+      at: "2026-11-06T10:00:00.000Z",
+    } as const;
     expect(await mirror.apply(INTEGRATION, removal)).toBe("updated");
     expect(await tracker.getItem("r-1", 12)).toBeUndefined();
     expect(await mirror.apply(INTEGRATION, removal)).toBe("not_mirrored");
@@ -165,6 +170,7 @@ describe("applying a change of a ticket to the mirror", () => {
       repo: REPO,
       child: 12,
       parent: 3,
+      at: "2026-11-06T10:00:01.000Z",
     });
     expect((await tracker.getItem("r-1", 12))?.parentNumber).toBe(3);
     await mirror.apply(INTEGRATION, {
@@ -172,6 +178,7 @@ describe("applying a change of a ticket to the mirror", () => {
       repo: REPO,
       child: 12,
       parent: null,
+      at: "2026-11-06T10:00:02.000Z",
     });
     expect((await tracker.getItem("r-1", 12))?.parentNumber).toBeNull();
     expect(
@@ -180,6 +187,7 @@ describe("applying a change of a ticket to the mirror", () => {
         repo: REPO,
         child: 99,
         parent: 3,
+        at: "2026-11-06T10:00:03.000Z",
       }),
     ).toBe("not_mirrored");
   });
@@ -280,5 +288,131 @@ describe("applying a change of a ticket to the mirror", () => {
       }),
     ).toBe("not_mirrored");
     expect(tracker.rows()).toEqual([]);
+  });
+});
+
+describe("deliveries that arrive out of order or twice", () => {
+  const T1 = "2026-11-06T10:00:01.000Z";
+  const T2 = "2026-11-06T10:00:02.000Z";
+  const T3 = "2026-11-06T10:00:03.000Z";
+
+  // #923-R01
+  it("drops an issue delivery older than the one the cache holds, and a replay of the same one", async () => {
+    const { tracker, changed } = setup();
+    await changed(issue(12, { title: "New", updatedAt: T2 }));
+
+    expect(await changed(issue(12, { title: "Old", updatedAt: T1 }))).toBe(
+      "not_mirrored",
+    );
+    expect(await changed(issue(12, { title: "New", updatedAt: T2 }))).toBe(
+      "updated",
+    );
+
+    expect(await tracker.getItem("r-1", 12)).toMatchObject({
+      title: "New",
+      updatedAt: T2,
+    });
+  });
+
+  // #923-R02
+  it("drops a pull request delivery older than the cache: its checks, its reference to the issues and its state stay", async () => {
+    const { tracker, changed } = setup();
+    await changed(issue(12));
+    await changed(
+      pullRequest(7, [12], {
+        title: "Newer",
+        state: "closed",
+        stateReason: "merged",
+        updatedAt: T2,
+      }),
+    );
+    await tracker.setChecksState("r-1", 7, "success");
+
+    // The `synchronize` of an older commit arrives late: it would clear the checks and open the pull request again.
+    expect(
+      await changed(
+        pullRequest(7, [], { title: "Older", state: "open", updatedAt: T1 }),
+        true,
+      ),
+    ).toBe("not_mirrored");
+
+    expect(await tracker.getItem("r-1", 7)).toMatchObject({
+      title: "Newer",
+      state: "closed",
+      closes: [12],
+      checksState: "success",
+    });
+    expect((await tracker.getItem("r-1", 12))?.pullRequests).toEqual([7]);
+  });
+
+  // #923-R03
+  it("drops a parent change older than the cache, in either order of the two changes", async () => {
+    const { tracker, mirror, changed } = setup();
+    await changed(issue(12, { updatedAt: T1 }));
+    const parent = (to: number | null, at: string) =>
+      mirror.apply(INTEGRATION, {
+        kind: "parent_changed",
+        repo: REPO,
+        child: 12,
+        parent: to,
+        at,
+      });
+
+    // Removed at T3, but the delivery of "added at T2" comes after it.
+    expect(await parent(null, T3)).toBe("updated");
+    expect(await parent(3, T2)).toBe("not_mirrored");
+    expect((await tracker.getItem("r-1", 12))?.parentNumber).toBeNull();
+
+    // And an issue delivery older than the parent change does not undo it either.
+    expect(await parent(5, "2026-11-06T10:00:04.000Z")).toBe("updated");
+    expect(await changed(issue(12, { parentNumber: 3, updatedAt: T3 }))).toBe(
+      "not_mirrored",
+    );
+    expect((await tracker.getItem("r-1", 12))?.parentNumber).toBe(5);
+  });
+
+  // #923-R04
+  it("keeps a deleted issue gone when an older delivery comes after the deletion, and takes a newer one", async () => {
+    const { tracker, mirror, changed } = setup();
+    await changed(issue(12, { updatedAt: T1 }));
+    await mirror.apply(INTEGRATION, {
+      kind: "item_removed",
+      repo: REPO,
+      number: 12,
+      at: T2,
+    });
+
+    // An edit from before the deletion, and one at the very time of it: neither brings the issue back.
+    expect(await changed(issue(12, { title: "Late", updatedAt: T1 }))).toBe(
+      "not_mirrored",
+    );
+    expect(await changed(issue(12, { title: "Same", updatedAt: T2 }))).toBe(
+      "not_mirrored",
+    );
+    expect(await tracker.getItem("r-1", 12)).toBeUndefined();
+    expect(tracker.tombstones()).toEqual([12]);
+
+    // A delivery after the deletion is news (the issue exists again): it is written.
+    expect(await changed(issue(12, { title: "Back", updatedAt: T3 }))).toBe(
+      "updated",
+    );
+    expect(await tracker.getItem("r-1", 12)).toMatchObject({ title: "Back" });
+    expect(tracker.tombstones()).toEqual([]);
+  });
+
+  // #923-R05
+  it("drops a deletion older than the cache (the issue changed after it)", async () => {
+    const { tracker, mirror, changed } = setup();
+    await changed(issue(12, { updatedAt: T2 }));
+
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "item_removed",
+        repo: REPO,
+        number: 12,
+        at: T1,
+      }),
+    ).toBe("not_mirrored");
+    expect(await tracker.getItem("r-1", 12)).toBeDefined();
   });
 });

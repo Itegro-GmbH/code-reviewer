@@ -1426,10 +1426,14 @@ export interface TrackerItemsTable {
   /** JSON text: the numbers of the issues the pull request closes. */
   closes: string;
   checks_state: string | null;
-  /** The provider's time of the last change. */
+  /** The newest time of a change of the provider the row has taken. */
   updated_at: string;
   /** When the row was last written from the provider. */
   synced_at: string;
+  /** Set when the provider deleted or moved the issue: the row is a tombstone, hidden from every read, so an older delivery cannot revive it. */
+  deleted_at: string | null;
+  /** When a board last said something about the item (a delivery or the board phase of a full sync). */
+  board_seen_at: string | null;
 }
 
 /** #923: where the full sync of a repository's tickets stands. */

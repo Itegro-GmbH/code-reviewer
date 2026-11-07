@@ -12,6 +12,7 @@ and comes back as a delivery.
 
 - [What is stored](#what-is-stored)
 - [How rows get there](#how-rows-get-there)
+- [Deliveries out of order](#deliveries-out-of-order)
 - [The rebuild rule](#the-rebuild-rule)
 - [What is read at the time of the question](#what-is-read-at-the-time-of-the-question)
 - [The API](#the-api)
@@ -35,7 +36,9 @@ them**: no status, type or label is mapped to a vocabulary of ours.
 | `parent_number` | The issue this one is a sub-issue of, in the same repository |
 | `pull_requests`, `closes` | For an issue, the numbers of the pull requests that close it; for a pull request, the issues it closes. A pull request closes an issue when its description says so with GitHub's keywords (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved` followed by `#12` or `owner/repo#12` of the same repository). `pull_requests` is computed from the `closes` of the cached pull requests |
 | `checks_state` | The state of the checks of an open pull request, in GitHub's words: the worst conclusion of its check suites (`failure`, `timed_out`, `startup_failure`, `action_required`, `cancelled`, `stale`), else `in_progress` or `queued`, else `success`, else `neutral` or `skipped`. Empty when it has no suite |
-| `updated_at`, `synced_at` | GitHub's time of the last change, and when we last wrote the row |
+| `updated_at`, `synced_at` | GitHub's time of the last change (the newest one the row has taken: see [Deliveries out of order](#deliveries-out-of-order)), and when we last wrote the row |
+| `deleted_at` | Set when GitHub deleted or moved the issue: the row stays as a **tombstone**, hidden from every read, so that a late delivery cannot bring the issue back. Empty for a ticket that exists |
+| `board_seen_at` | When a board last said something about the item (a delivery, or the board phase of a full sync): what the end of a full sync resets the board statuses by |
 
 `tracker_sync_state` holds, per repository, the position of a full sync that is under way (`cursor`, `started_at`) and when the last
 one ended (`last_full_sync_at`).
@@ -55,10 +58,10 @@ come from two sources, and both write the same shape:
 
 | Event and action | Effect on the cache |
 |---|---|
-| `issues`, any action | The ticket is written (created or replaced); `deleted` and `transferred` remove it |
+| `issues`, any action | The ticket is written (created or replaced); `deleted` and `transferred` hide it (tombstone) |
 | `pull_request`, any action (`opened`, `closed`, merged, `review_requested`, `synchronize`, `edited`, ...) | The ticket of the pull request is written; `opened`, `reopened` and `synchronize` clear its checks (they belong to a commit), a closed pull request has none; the issues it closes (before and now) are linked again |
 | `issue_comment`, `created` or `edited` | The ticket (issue or pull request) is written from the delivery: the time of its last change moves. A deleted comment changes nothing. The comments themselves, and the markers of a question of a run, are not stored: the ask of a run is read from the run |
-| `sub_issues` | `parent_number` of the sub-issue is set, or emptied |
+| `sub_issues` | `parent_number` of the sub-issue is set, or emptied (as of the time of the sub-issue in the delivery, `sub_issue.updated_at`) |
 | `projects_v2_item` | `board_status` of the item's ticket is set to the new **Status**, or emptied when the item left the board. The item is found by the node id of its content, in any repository of the workspace |
 | `check_suite` | For each open pull request the suite lists (same repository), the app asks GitHub for the check suites of the commit and stores their state (`checks_state`) |
 
@@ -70,26 +73,64 @@ review or a workflow never fails because of the mirror (the failure is logged by
 **The full sync** reads everything from GitHub and writes it. It starts when a project is created, and on demand: **Resync** in the
 project's setup, or `POST /api/w/<slug>/repositories/<id>/issues/sync`. It reads, one page of one phase at a time:
 
-1. **issues**: every issue and pull request, any state, oldest first (`GET /repos/{owner}/{repo}/issues?state=all`, 100 per page).
-   Sub-issues come with it (`parent_issue_url` of each issue); a pull request comes with its `merged_at`;
+1. **issues**: every issue and pull request, any state, the least recently changed first
+   (`GET /repos/{owner}/{repo}/issues?state=all&sort=updated&direction=asc`, 100 per page). Sub-issues come with it
+   (`parent_issue_url` of each issue); a pull request comes with its `merged_at`. Each page is asked **from the time of the last item of
+   the page before** (`since`, the item at the end is read once more, which is harmless), so a repository of any size ends, and the walk
+   does not shift when a ticket is edited while it runs: an edited ticket moves to the end of the list and is read again there. The one
+   thing that still stops it is more than 100 pages (10,000 items) that all changed in the same second: the sync then fails with
+   `TRACKER_SYNC_FAILED` and stands where it was;
 2. **checks**: the open pull requests (30 per page) and, for each, the check suites of its head commit;
-3. **board**: the items of the project boards of the repository with their **Status** (GraphQL, the one place REST has nothing; a
-   board the App may not read is skipped).
+3. **board**: the items of the project boards of the repository with their **Status** (GraphQL, the one place REST has nothing). A board
+   the App may not read is skipped: GitHub says so with `FORBIDDEN`, `INSUFFICIENT_SCOPES` or `NOT_FOUND` as the type of every error of
+   the answer. **Any other error** (a rate limit, a server error, a query GitHub could not run) fails the call like a REST failure, so the
+   sync keeps its place and continues from there; it is never read as "no board".
 
 The token of each read is minted for it and limited to one repository and to read access (`issues`, `pull_requests`, `checks` and
-`metadata`; `organization_projects` and `metadata` for the board). The sync is **resumable**: the phase and page are saved after each
+`metadata`; `organization_projects` and `metadata` for the board). The sync is **resumable**: the phase and position are saved after each
 page (`tracker_sync_state.cursor`), so a call that ends early (the request has about twenty seconds, GitHub did not answer) is
-continued by the next call, which answers `202` while there is more to read and `200` when the cache is complete. A sync that has
-not moved for an hour starts again from the beginning.
+continued by the next call, which answers `202` while there is more to read and `200` when the cache is complete. A sync that has not
+moved for an hour (counted from the last page that was saved, `tracker_sync_state.updated_at`, not from its start) starts again from the
+beginning.
+
+**One sync at a time.** Starting a sync is one atomic step in the database (`claimSync`: an insert that updates only when there is no sync,
+the last one ended, it has not moved for an hour or its cursor is unreadable). Of two calls at the same time one starts, the other
+continues the sync that is there: it never resets another call's cursor or start time. Two calls that continue the same sync read a
+page twice and write the same rows twice.
+
+## Deliveries out of order
+
+GitHub delivers each event once or more, and not in the order the changes were made (a failed delivery is retried later; a replay can be
+asked for). A delivery is a snapshot of the ticket as of its `updated_at`, so **the mirror never lets an older snapshot replace a newer
+one**:
+
+- a ticket is replaced only by a delivery whose `updated_at` is **equal or newer** than the row's (`updated_at` of the row is the newest
+  time it has taken). An older one changes nothing (the checks, the issues a pull request closes and the parent stay as they are) and is
+  answered as `not_mirrored`; the row still counts as written, so a full sync that is reading keeps it;
+- the same rule holds for the page of a **full sync**: a page read before a newer webhook does not overwrite it;
+- a parent change (`sub_issues`) and a deletion carry the time of the issue in the delivery and follow the same rule: a change older than
+  the row is dropped, and a newer one moves the row's time, so an older issue delivery that comes after it is dropped too;
+- a **deleted** issue stays as a tombstone (`deleted_at`): hidden from the list, from the single read, from the board and checks
+  writes and from the linking of pull requests, but present for the ordering. A delivery older than the deletion, or at the very time of
+  it, does not bring the issue back; one **strictly newer** does (the tombstone is cleared). A full sync does not count a tombstone as
+  removed and keeps it for 30 days after it was last written, then forgets it.
+
+What is not covered: a deletion that arrives before the delivery that created the issue leaves no tombstone (there was no row), so a
+late creation writes the issue until the next full sync removes it.
 
 ## The rebuild rule
 
 When the last phase of a full sync is over:
 
 1. every ticket **not written since the sync began** is removed: GitHub does not have it any more (a deleted or transferred issue whose
-   delivery was missed);
-2. the pull requests of every issue are computed again from the `closes` of the pull requests;
-3. `last_full_sync_at` is set and the cursor is cleared.
+   delivery was missed). **Not when a ticket of the list could not be read** (a record that lacks what the mirror needs): the row of that
+   ticket would look gone, so nothing is removed in that sync, the number of tickets it left out is in the answer (`skipped`) and in the
+   log, and the next sync tries again. The count is kept across the calls of one sync;
+2. the **board statuses** no board said anything about since the sync began are emptied (an item that left the board without a delivery).
+   They are not emptied before: a board that cannot be read keeps the statuses the cache has, and a status a webhook set while the sync was
+   between its phases survives;
+3. the pull requests of every issue are computed again from the `closes` of the pull requests, in one pass over the pull requests;
+4. `last_full_sync_at` is set and the cursor is cleared.
 
 Because the sync reads the same fields the webhooks read, with the same functions (`tracker-map.ts`: the same rule for the closing
 keywords, the merged state and the state of the checks), **a cache that was deleted and synced holds what a cache kept current by
@@ -127,7 +168,7 @@ list has no field for it.
 - Other codes: `TRACKER_REPOSITORY_NOT_FOUND` (404), `TRACKER_PROJECT_NOT_ACTIVE` (409, the repository has no active project).
 
 `POST /api/w/<slug>/repositories/<repositoryId>/issues/sync` (members who may change the project's settings) runs the full sync as above and answers
-`{ status, next, written, removed, boardAvailable }`: `200` with `status: "done"`, or `202` with `status: "partial"` and the phase `next`
+`{ status, next, written, removed, skipped, boardAvailable }`: `200` with `status: "done"`, or `202` with `status: "partial"` and the phase `next`
 reads when it is asked again. `TRACKER_INTEGRATION_UNAVAILABLE` (409) says the installation is suspended or removed;
 `TRACKER_SYNC_FAILED` (503) says GitHub could not be asked, and the sync stands where it was.
 

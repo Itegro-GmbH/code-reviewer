@@ -95,7 +95,12 @@ describe("what a delivery says about the ticket mirror", () => {
     });
     expect(parse("issues.deleted.mirror")).toEqual({
       kind: "change",
-      change: { kind: "item_removed", repo: REPO, number: 12 },
+      change: {
+        kind: "item_removed",
+        repo: REPO,
+        number: 12,
+        at: "2026-11-06T10:00:00.000Z",
+      },
     });
   });
 
@@ -144,12 +149,54 @@ describe("what a delivery says about the ticket mirror", () => {
   it("sets a parent when a sub-issue is added and empties it when it is removed", () => {
     expect(parse("sub_issues.sub_issue_added")).toEqual({
       kind: "change",
-      change: { kind: "parent_changed", repo: REPO, child: 12, parent: 3 },
+      change: {
+        kind: "parent_changed",
+        repo: REPO,
+        child: 12,
+        parent: 3,
+        at: "2026-11-06T10:00:00.000Z",
+      },
     });
     expect(parse("sub_issues.parent_issue_removed")).toEqual({
       kind: "change",
-      change: { kind: "parent_changed", repo: REPO, child: 12, parent: null },
+      change: {
+        kind: "parent_changed",
+        repo: REPO,
+        child: 12,
+        parent: null,
+        at: "2026-11-06T10:00:00.000Z",
+      },
     });
+  });
+
+  // #923-R29
+  it("needs the time of the issue to order a deletion or a parent change against the other deliveries", () => {
+    const parse = (eventName: string, payload: unknown) =>
+      parseTrackerChange({ integrationId: "i-1", eventName, payload });
+    const deleted = webhookFixture("issues.deleted.mirror") as {
+      issue: Record<string, unknown>;
+    };
+    const added = webhookFixture("sub_issues.sub_issue_added") as {
+      sub_issue: Record<string, unknown>;
+    };
+
+    expect(
+      parse("issues", {
+        ...deleted,
+        issue: { ...deleted.issue, updated_at: "later" },
+      }),
+    ).toMatchObject({ kind: "invalid_payload" });
+    expect(
+      parse("sub_issues", {
+        ...added,
+        sub_issue: { ...added.sub_issue, updated_at: "later" },
+      }),
+    ).toMatchObject({ kind: "invalid_payload" });
+    const { updated_at: _removed, ...withoutTime } = added.sub_issue;
+    void _removed;
+    expect(
+      parse("sub_issues", { ...added, sub_issue: withoutTime }),
+    ).toMatchObject({ kind: "invalid_payload" });
   });
 
   // #923-T16

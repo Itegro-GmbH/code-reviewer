@@ -114,6 +114,19 @@ function noticeKeyOf(repositoryId: string) {
 const NOTICE_OPTIONS = { leaseMs: 60_000, maxAttempts: 3 };
 const CHECK_LEASE = { leaseMs: 60_000, maxAttempts: 5 };
 
+/** How many rows the ticket mirror holds in all workspaces together: a write that inserted a row it must not shows here. */
+async function trackerRowCounts(db: Kysely<Database>) {
+  const items = await db
+    .selectFrom("tracker_items")
+    .select((eb) => eb.fn.countAll<string>().as("n"))
+    .executeTakeFirstOrThrow();
+  const states = await db
+    .selectFrom("tracker_sync_state")
+    .select((eb) => eb.fn.countAll<string>().as("n"))
+    .executeTakeFirstOrThrow();
+  return { items: Number(items.n), syncStates: Number(states.n) };
+}
+
 /** The ticket every seeded workspace has: number 1 in its repository, a pull request, so that it can hold checks. */
 function trackerItem(tag: string) {
   return {
@@ -2372,7 +2385,18 @@ const CASES: Case[] = [
         number: 1,
         nodeId: `node-${b.externalRepositoryId}`,
       }),
-    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // A number B does not have: nothing is inserted into B's repository under A's workspace id.
+    name: "tracker.upsertItem (a new number)",
+    run: (a, b) =>
+      a.tracker.upsertItem(b.repository.id, {
+        ...trackerItem("hijacked"),
+        number: 2,
+        nodeId: "node-hijacked-2",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "tracker.getItem",
@@ -2387,7 +2411,8 @@ const CASES: Case[] = [
   },
   {
     name: "tracker.deleteItem",
-    run: (a, b) => a.tracker.deleteItem(b.repository.id, 1),
+    run: (a, b) =>
+      a.tracker.deleteItem(b.repository.id, 1, "2999-01-01T00:00:00.000Z"),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
@@ -2398,7 +2423,8 @@ const CASES: Case[] = [
   },
   {
     name: "tracker.setParent",
-    run: (a, b) => a.tracker.setParent(b.repository.id, 1, 5),
+    run: (a, b) =>
+      a.tracker.setParent(b.repository.id, 1, 5, "2999-01-01T00:00:00.000Z"),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
@@ -2412,8 +2438,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
-    name: "tracker.clearBoardStatuses",
-    run: (a, b) => a.tracker.clearBoardStatuses(b.repository.id),
+    name: "tracker.clearBoardStatusesNotSeenSince",
+    run: (a, b) =>
+      a.tracker.clearBoardStatusesNotSeenSince(
+        b.repository.id,
+        "2999-01-01T00:00:00.000Z",
+      ),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
@@ -2434,6 +2464,18 @@ const CASES: Case[] = [
     name: "tracker.getSyncState",
     run: (a, b) => a.tracker.getSyncState(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // B's sync is under way and moving: A cannot start one over it, and is told nothing about it.
+    name: "tracker.claimSync",
+    run: (a, b) =>
+      a.tracker.claimSync(b.repository.id, {
+        cursor: '{"phase":"issues","page":1}',
+        startedAt: "2026-11-06T12:00:00.000Z",
+        staleBefore: "2999-01-01T00:00:00.000Z",
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ claimed: false, state: undefined }),
   },
   {
     // B's repository id is the key of B's state: A's write finds it and must leave it alone.
@@ -2749,13 +2791,49 @@ describe("two workspaces", () => {
     async (_name, testCase) => {
       const { db, a, b, reposA } = await twoWorkspaces();
       const before = await rowsOf(db, b.workspaceId);
+      const counts = await trackerRowCounts(db);
 
       const answer = await testCase.run(reposA, b, db);
 
       testCase.expectAnswer(answer, a, b);
       expect(await rowsOf(db, b.workspaceId)).toEqual(before);
+      // And nothing was added to the mirror under A's id in the repository of B (or anywhere).
+      expect(await trackerRowCounts(db)).toEqual(counts);
     },
   );
+
+  // #923-R27
+  it("insert nothing into the mirror for a repository of the other workspace, whatever the table already holds", async () => {
+    const { db, b, reposA } = await twoWorkspaces();
+    // B has no sync state at all: a write of A that inserted would create one.
+    await db
+      .deleteFrom("tracker_sync_state")
+      .where("workspace_id", "=", b.workspaceId)
+      .execute();
+    const counts = await trackerRowCounts(db);
+
+    expect(
+      await reposA.tracker.upsertItem(b.repository.id, {
+        ...trackerItem("hijacked"),
+        number: 2,
+        nodeId: "node-hijacked-2",
+      }),
+    ).toBe(false);
+    await reposA.tracker.saveSyncState(b.repository.id, {
+      cursor: '{"phase":"issues","page":1}',
+    });
+    expect(
+      await reposA.tracker.claimSync(b.repository.id, {
+        cursor: '{"phase":"issues","page":1}',
+        startedAt: "2026-11-06T12:00:00.000Z",
+        staleBefore: "2999-01-01T00:00:00.000Z",
+      }),
+    ).toEqual({ claimed: false, state: undefined });
+
+    expect(await trackerRowCounts(db)).toEqual(counts);
+    expect(counts.syncStates).toBeGreaterThan(0);
+    expect(await reposA.tracker.getSyncState(b.repository.id)).toBeUndefined();
+  });
 
   // DM-06
   it("have a table row for every method of every scoped repository", async () => {

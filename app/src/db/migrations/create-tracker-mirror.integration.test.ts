@@ -160,6 +160,56 @@ describe("the ticket mirror migration", () => {
     await db.destroy();
   });
 
+  // #923-R28
+  it("does not stop at a run whose input is no JSON: that run names no ticket and the others are filled", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(
+      db,
+      upTo((name) => name < THIS),
+    );
+    await seedRuns(db);
+    const insertRun = (id: string, kind: string, input: string) =>
+      sql`insert into workflow_runs (id, workspace_id, workflow_id, workflow_version, repository_id, base_branch, trigger_input, status, budget_micro_usd, client_request_id, created_by, actor_login, trigger_kind, created_at, updated_at)
+        values (${id}, 'w-1', 'wf-1', 1, 'r-1', 'main', ${input}, 'running', 1000000, ${`req-${id}`}, 'u-1', 'octocat', ${kind}, ${T}, ${T})`.execute(
+        db,
+      );
+    await insertRun("run-text-manual", "manual", "this is not json");
+    await insertRun("run-text-api", "api", "{broken");
+    await insertRun("run-text-label", "github.issueLabeled", "");
+    await insertRun("run-text-label-ticket", "ticket.labeled", "[1,");
+
+    await migrateToLatest(
+      db,
+      upTo((name) => name <= THIS),
+    );
+
+    const runs = await db
+      .selectFrom("workflow_runs")
+      .select(["id", "ticket_ref"])
+      .orderBy("id")
+      .execute();
+    expect(runs.filter((run) => run.id.startsWith("run-text"))).toEqual([
+      { id: "run-text-api", ticket_ref: null },
+      { id: "run-text-label", ticket_ref: null },
+      { id: "run-text-label-ticket", ticket_ref: null },
+      { id: "run-text-manual", ticket_ref: null },
+    ]);
+    expect(runs.find((run) => run.id === "run-label")?.ticket_ref).toBe(
+      "github:acme/widgets#12",
+    );
+    expect(runs.find((run) => run.id === "run-manual-ticket")?.ticket_ref).toBe(
+      "github:acme/widgets#15",
+    );
+    // The helper the backfill used is gone again.
+    const left = await sql<{
+      n: number;
+    }>`select count(*)::int as n from pg_proc where proname = 'try_jsonb'`.execute(
+      db,
+    );
+    expect(left.rows[0]?.n).toBe(0);
+    await db.destroy();
+  });
+
   // #923-T100
   it("is undone by `down`, and the tables and the column come back by running it again", async () => {
     const { db } = await createEmptyTestDatabase();

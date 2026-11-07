@@ -310,14 +310,18 @@ export type TrackerChange =
       item: TrackerItemFields;
       resetChecks: boolean;
     }
-  /** An issue was deleted or moved to another repository. */
-  | { kind: "item_removed"; repo: RepoRef; number: number }
-  /** A sub-issue got a parent (`parent` is its number), or lost it (null). */
+  /** An issue was deleted or moved to another repository. `at`: the platform's time of the issue as the delivery shows it (ISO 8601, UTC). */
+  | { kind: "item_removed"; repo: RepoRef; number: number; at: string }
+  /**
+   * A sub-issue got a parent (`parent` is its number), or lost it (null). `at`: the platform's time of the sub-issue as the delivery shows
+   * it, the clock of `TrackerItemFields.updatedAt` (a delivery older than what the cache holds is dropped).
+   */
   | {
       kind: "parent_changed";
       repo: RepoRef;
       child: number;
       parent: number | null;
+      at: string;
     }
   /** An item of a project board got another status (`null`: it has none now, or left the board). */
   | { kind: "board_status_changed"; nodeId: string; status: string | null }
@@ -337,8 +341,12 @@ export type TrackerChangeResult =
 
 /** Where a full sync of a repository's tickets stands, as far as the platform is asked: one page of one phase at a time. */
 export type TrackerPageStep =
-  /** Every issue and pull request, any state, oldest first. */
-  | { phase: "issues"; page: number }
+  /**
+   * Every issue and pull request, any state, the least recently changed first. `since` (ISO 8601, UTC) leaves out what changed before it:
+   * a sync continues a list that is longer than the platform lets one walk by asking from the time of the last item it read, with `page`
+   * counting from there.
+   */
+  | { phase: "issues"; page: number; since?: string }
   /** The open pull requests, and the state of the checks of each. */
   | { phase: "checks"; page: number }
   /** The status of the items of the project boards of the repository. `after` is the opaque position the last page returned. */
@@ -346,7 +354,13 @@ export type TrackerPageStep =
 
 /** One page of a phase, and where the next one is. */
 export type TrackerPage =
-  | { phase: "issues"; items: TrackerItemFields[]; last: boolean }
+  | {
+      phase: "issues";
+      items: TrackerItemFields[];
+      last: boolean;
+      /** How many tickets of the page could not be read and are not in `items` (absent: none). */
+      skipped?: number;
+    }
   | {
       phase: "checks";
       pullRequests: { number: number; checksState: string | null }[];

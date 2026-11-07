@@ -440,11 +440,20 @@ export function fakeGithubAppClient(
       );
       if (data.reviewFailure) throw data.reviewFailure;
     },
-    async readTrackerIssues(installationId, scope, repoFullName, page) {
+    async readTrackerIssues(installationId, scope, repoFullName, page, since) {
       record("readTrackerIssues", installationId, scope, repoFullName, page);
       if (data.trackerFailure) throw data.trackerFailure;
+      // As GitHub answers: the least recently changed first, from `since` on, in pages as long as the longest page given.
       const pages = data.trackerIssuePages?.[repoFullName] ?? [];
-      return { items: pages[page - 1] ?? [], last: page >= pages.length };
+      const size = Math.max(1, ...pages.map((entry) => entry.length));
+      const items = pages
+        .flat()
+        .filter((item) => since === undefined || item.updatedAt >= since)
+        .sort((a, b) =>
+          a.updatedAt < b.updatedAt ? -1 : a.updatedAt > b.updatedAt ? 1 : 0,
+        );
+      const slice = items.slice((page - 1) * size, page * size);
+      return { items: slice, last: slice.length < size, skipped: 0 };
     },
     async readTrackerChecks(installationId, scope, repoFullName, page) {
       record("readTrackerChecks", installationId, scope, repoFullName, page);

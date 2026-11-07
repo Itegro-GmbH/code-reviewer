@@ -22,6 +22,7 @@ const PROGRESS = {
   next: null,
   written: 1,
   removed: 0,
+  skipped: 0,
   boardAvailable: true,
 };
 

@@ -166,6 +166,8 @@ export const TRACKER_WEBHOOK_FIELDS = {
     ...TRACKER_REPOSITORY,
     { path: "parent_issue.number", type: "number" },
     { path: "sub_issue.number", type: "number" },
+    // The time of the sub-issue as the delivery shows it: what orders this delivery against the others about the same ticket.
+    { path: "sub_issue.updated_at", type: "string" },
     // Present when the two issues are in different repositories; equal otherwise.
     { path: "parent_issue_repo.full_name", type: "string", optional: true },
     { path: "sub_issue_repo.full_name", type: "string", optional: true },

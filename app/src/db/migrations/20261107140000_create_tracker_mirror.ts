@@ -13,7 +13,8 @@
 //  - two tables are added; their foreign keys to `workspaces` and `repositories` take a short lock on those tables;
 //  - one nullable column without a default is added to `workflow_runs`, which Postgres does without rewriting the table; the backfill
 //    touches only the rows of the label trigger (a handful: the trigger exists since #845) and the rows started with a ticket (since
-//    #916), and the input of those is JSON that the platform itself wrote;
+//    #916), and the input of those is JSON that the platform itself wrote (a text that is none is read as "no ticket" instead of
+//    stopping the batch);
 //  - the wait for the locks is bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back (`MIGRATION_FAILED`)
 //    and the deployment can be run again.
 //
@@ -79,9 +80,16 @@ export const migration: Migration = {
       .addColumn("closes", "text", (column) => column.notNull().defaultTo("[]"))
       // The state of the checks of an open pull request, as GitHub names it (`success`, `failure`, `in_progress`, ...).
       .addColumn("checks_state", "text")
-      // GitHub's own time of the last change, and when this row was last written from GitHub.
+      // GitHub's own time of the last change (the newest one the row has taken: an older delivery does not replace it), and when this
+      // row was last written from GitHub.
       .addColumn("updated_at", "text", (column) => column.notNull())
       .addColumn("synced_at", "text", (column) => column.notNull())
+      // The tombstone of an issue GitHub deleted or moved: the row stays, hidden from every read, so that a delivery older than the
+      // deletion cannot bring the issue back. Null for a ticket that exists.
+      .addColumn("deleted_at", "text")
+      // When a board last said something about the item (a full sync or a delivery): what a full sync of the board resets by, so that the
+      // statuses it did not see are emptied at its end and not before it has read anything.
+      .addColumn("board_seen_at", "text")
       .addPrimaryKeyConstraint("tracker_items_pkey", [
         "repository_id",
         "number",
@@ -100,10 +108,10 @@ export const migration: Migration = {
       )
       .execute();
 
+    // The list of a repository: the newest change first, ties by the higher number (`listItems`), tombstones left out.
     await sql`create index tracker_items_list_index
-      on tracker_items (workspace_id, repository_id, state, updated_at desc)`.execute(
-      db,
-    );
+      on tracker_items (workspace_id, repository_id, state, updated_at desc, number desc)
+      where deleted_at is null`.execute(db);
     await sql`create index tracker_items_node_index
       on tracker_items (workspace_id, node_id)`.execute(db);
 
@@ -144,30 +152,52 @@ export const migration: Migration = {
     await sql`alter table workflow_runs validate constraint workflow_runs_ticket_ref_check`.execute(
       db,
     );
+    // The input of a run is JSON that the platform wrote, but a text that is none must not stop the batch: `pg_temp.try_jsonb` answers null
+    // for it (the run then names no ticket). The candidates are picked by their trigger first, in a CTE that is materialized, so that
+    // the input of no other run is read at all.
+    await sql`create function pg_temp.try_jsonb(input text) returns jsonb
+      language plpgsql immutable as $$
+      begin
+        return input::jsonb;
+      exception when others then
+        return null;
+      end;
+      $$`.execute(db);
     // The label trigger stored the issue and the repository as JSON (`label-trigger.ts`; since #916 the ticket next to them, and under the
     // kind `ticket.labeled`): the ticket is `github:<repo>#<number>`.
-    await sql`update workflow_runs
-      set ticket_ref = 'github:' || (trigger_input::jsonb -> 'repo' ->> 'fullName') || '#' || (trigger_input::jsonb -> 'issue' ->> 'number')
-      where trigger_kind in ('github.issueLabeled', 'ticket.labeled')
-        and ticket_ref is null
-        and (trigger_input::jsonb -> 'repo' ->> 'fullName') is not null
-        and (trigger_input::jsonb -> 'issue' ->> 'number') is not null`.execute(
-      db,
-    );
+    await sql`with candidates as materialized (
+        select id, pg_temp.try_jsonb(trigger_input) as input
+        from workflow_runs
+        where trigger_kind in ('github.issueLabeled', 'ticket.labeled')
+          and ticket_ref is null
+      )
+      update workflow_runs r
+      set ticket_ref = 'github:' || (c.input -> 'repo' ->> 'fullName') || '#' || (c.input -> 'issue' ->> 'number')
+      from candidates c
+      where r.id = c.id
+        and (c.input -> 'repo' ->> 'fullName') is not null
+        and (c.input -> 'issue' ->> 'number') is not null`.execute(db);
     // A run started by hand or through the API with a `ticket` input stored `{ input, ticket }` (#916, `readStoredInput`): exactly those two
     // fields, both records. Any other input (every run without a ticket stored it as handed in, and may have fields of its own called
     // `input`, `ticket` or `repo`) names no ticket.
-    await sql`update workflow_runs
-      set ticket_ref = 'github:' || (trigger_input::jsonb -> 'ticket' -> 'repo' ->> 'fullName') || '#' || (trigger_input::jsonb -> 'ticket' ->> 'number')
-      where trigger_kind in ('manual', 'api')
-        and ticket_ref is null
-        and case when jsonb_typeof(trigger_input::jsonb) = 'object'
-          then (trigger_input::jsonb - 'input' - 'ticket') = '{}'::jsonb
-            and jsonb_typeof(trigger_input::jsonb -> 'input') = 'object'
-            and jsonb_typeof(trigger_input::jsonb -> 'ticket') = 'object'
-            and jsonb_typeof(trigger_input::jsonb -> 'ticket' -> 'repo' -> 'fullName') = 'string'
-            and jsonb_typeof(trigger_input::jsonb -> 'ticket' -> 'number') = 'number'
+    await sql`with candidates as materialized (
+        select id, pg_temp.try_jsonb(trigger_input) as input
+        from workflow_runs
+        where trigger_kind in ('manual', 'api')
+          and ticket_ref is null
+      )
+      update workflow_runs r
+      set ticket_ref = 'github:' || (c.input -> 'ticket' -> 'repo' ->> 'fullName') || '#' || (c.input -> 'ticket' ->> 'number')
+      from candidates c
+      where r.id = c.id
+        and case when jsonb_typeof(c.input) = 'object'
+          then (c.input - 'input' - 'ticket') = '{}'::jsonb
+            and jsonb_typeof(c.input -> 'input') = 'object'
+            and jsonb_typeof(c.input -> 'ticket') = 'object'
+            and jsonb_typeof(c.input -> 'ticket' -> 'repo' -> 'fullName') = 'string'
+            and jsonb_typeof(c.input -> 'ticket' -> 'number') = 'number'
           else false end`.execute(db);
+    await sql`drop function pg_temp.try_jsonb(text)`.execute(db);
     // The enrichment of a list of tickets reads the runs of each (cost so far, the active run).
     await sql`create index if not exists workflow_runs_ticket_index
       on workflow_runs (workspace_id, ticket_ref) where ticket_ref is not null`.execute(
