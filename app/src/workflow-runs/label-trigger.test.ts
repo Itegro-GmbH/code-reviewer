@@ -106,6 +106,8 @@ function harness(
           createdBy: input.createdBy,
           actorLogin: input.actorLogin,
           cancelRequestedAt: null,
+          discardedAt: null,
+          pauseRequestedAt: null,
           failure: null,
           ticketRef: input.ticketRef ?? null,
           createdAt: "2026-11-05T10:00:00.000Z",

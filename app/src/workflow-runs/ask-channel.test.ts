@@ -50,6 +50,8 @@ function run(
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
     failure: null,
     createdAt: "2026-11-07T08:00:00.000Z",
     updatedAt: "2026-11-07T08:00:00.000Z",

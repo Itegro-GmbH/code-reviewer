@@ -162,6 +162,8 @@ function harness(options: {
     createdBy: "u-1",
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
     failure: null,
     ticketRef: null,
     createdAt: NOW.toISOString(),
@@ -263,6 +265,8 @@ function harness(options: {
         run.cancelRequestedAt = NOW.toISOString();
         return true;
       },
+      discardRun: vi.fn(),
+      setPause: vi.fn(),
       async beginFailure(failure) {
         if (run.failure !== null || run.status !== "running") return false;
         run.failure = failure;

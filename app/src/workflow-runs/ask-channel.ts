@@ -12,6 +12,8 @@
 //    comment already is. A question that was never posted (the answer came first) is posted as answered, never as an open question.
 //  - A run that is stopped while the question is open edits the comment the same way (the marker says `cancelled`) and takes the label
 //    `agent waiting` off.
+//  - A run a member discards (#921) edits the comment of its open question the same way (the marker says `discarded`) and takes both
+//    `agent working` and `agent waiting` off the ticket, also when no question was open: the ticket is free for a new run.
 //  - Labels and the edit are best effort: the question and the answer are what matter, and a repository that refuses a label does not
 //    stop a run.
 import type {
@@ -25,6 +27,7 @@ import {
   answerRecordComment,
   answeredComment,
   cancelledComment,
+  discardedComment,
   markerOf,
   supersededComment,
   mentionsOf,
@@ -183,6 +186,36 @@ export function createGithubAskChannel(
         }
       // Nobody works on the ticket any more, so only the one that said somebody had to answer goes.
       await labels(target, place, { add: [], remove: [LABEL_WAITING] });
+    },
+
+    async discarded(run, open) {
+      const place = placeOf(run, await deps.listSteps(run.id));
+      const target = place === undefined ? undefined : await deps.targetOf(run);
+      if (place === undefined || target === undefined) return;
+      const { provider, integration, repo } = target;
+      if (
+        open !== undefined &&
+        open.step.waitingOnCommentId !== null &&
+        provider.updateIssueComment !== undefined
+      )
+        try {
+          await provider.updateIssueComment(
+            integration,
+            repo,
+            open.step.waitingOnCommentId,
+            discardedComment({
+              identity: identityOf(run, open.step, open.ask),
+              ask: open.ask,
+            }),
+          );
+        } catch {
+          // The run is over either way; a comment that cannot be edited stays as it is.
+        }
+      // Nobody works on the ticket any more, and nobody has to answer: both labels go.
+      await labels(target, place, {
+        add: [],
+        remove: [LABEL_WAITING, LABEL_WORKING],
+      });
     },
 
     async superseded(run, step, ask, commentId) {

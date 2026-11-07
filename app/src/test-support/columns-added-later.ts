@@ -55,11 +55,14 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   // #916: the trigger of the document that started the run; null for every run that exists.
   // #923: the ticket a run is about; null for every run that exists (the label trigger's runs are backfilled by the migration, and no
   // test of an older migration holds such a run).
+  // #921: when a run was discarded and when a member asked it to pause; null for every run that exists.
   workflow_runs: [
     "trigger_kind",
     "cancel_requested_at",
     "trigger_id",
     "ticket_ref",
+    "discarded_at",
+    "pause_requested_at",
   ],
   // #920: the question a step ended with and the comment that carries it; null for every step that exists.
   workflow_step_runs: ["ask", "waiting_on_comment_id"],

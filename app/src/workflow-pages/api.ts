@@ -37,8 +37,20 @@ export type WorkflowRunsApi = {
       text?: string;
     },
   ): Promise<RequestResult<{ run: RunView }>>;
-  /** Stops a run (#891). `requested`: it is told to stop; a repeat and a run that is over answer with their own outcome. */
-  cancel(
+  /**
+   * Discards a run, whatever state it is in (#921): `discarded`, or `already_discarded` for a repeat. The run in the answer is the discarded
+   * one (the page of a run that is over does not poll any more, so this is how it shows).
+   */
+  discard(
+    workflowId: string,
+    runId: string,
+  ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
+  /** Asks a run to stop after its current step (#921), or lets it go on again. `changed`, or `unchanged` for a repeat. */
+  pause(
+    workflowId: string,
+    runId: string,
+  ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
+  resume(
     workflowId: string,
     runId: string,
   ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
@@ -52,6 +64,12 @@ export function createWorkflowRunsApi(
     workspaceApiPath(
       workspaceSlug,
       `/workflows/${encodeURIComponent(workflowId)}/runs`,
+    );
+  const post = (workflowId: string, runId: string, action: string) =>
+    requestJson<{ run: RunView; outcome: string }>(
+      fetchImpl,
+      "POST",
+      `${runsPath(workflowId)}/${encodeURIComponent(runId)}/${action}`,
     );
   return {
     list: (workflowId) =>
@@ -80,12 +98,9 @@ export function createWorkflowRunsApi(
         `${runsPath(workflowId)}/${encodeURIComponent(runId)}/answer`,
         body,
       ),
-    cancel: (workflowId, runId) =>
-      requestJson<{ run: RunView; outcome: string }>(
-        fetchImpl,
-        "POST",
-        `${runsPath(workflowId)}/${encodeURIComponent(runId)}/cancel`,
-      ),
+    discard: (workflowId, runId) => post(workflowId, runId, "discard"),
+    pause: (workflowId, runId) => post(workflowId, runId, "pause"),
+    resume: (workflowId, runId) => post(workflowId, runId, "resume"),
   };
 }
 

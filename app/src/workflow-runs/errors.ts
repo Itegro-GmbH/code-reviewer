@@ -123,5 +123,7 @@ export const STEP_FAILURE_CODES = [
   "action_interrupted",
   /** A member stopped the run (or the task of the step) before the turn of the step started or while it ran (#891). */
   "cancelled",
+  /** A member discarded the run while the step ran or waited for an answer (#921). The run is `discarded`, not `failed`. */
+  "discarded",
 ] as const;
 export type StepFailureCode = (typeof STEP_FAILURE_CODES)[number];

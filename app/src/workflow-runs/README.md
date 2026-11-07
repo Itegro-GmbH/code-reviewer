@@ -53,6 +53,14 @@ the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
    completion is stored. A hook that throws or rejects is caught and logged by its code; the completion is not affected. A job that ends without a report is
    found by `reconcileWorkflowRuns` (the sweep and the opportunistic maintenance), which calls `advance` for every run that waited a minute.
 
+## Discard and pause (#921)
+
+A run is active (`running`, `waiting`) or `discarded`; `cancelled` is read for the rows the stop of #891 wrote. `engine.discard(runId)` does a discard under the lock of the run: the steps that are not over end (`pending` `skipped`, `running` and `waiting` `failed` with
+`discarded`, cost kept by `finishStep`), then `RunLock.discardRun` sets `discarded`, `discarded_at` and, for a run that had none, `finished_at`. `decide` does nothing for any status but `running` and `waiting`, so a discarded run is left alone whatever its turn reports; `onFailure` never
+starts (no `begin_failure`). The trigger-key indexes count `running` and `waiting` only, so the ticket is free the moment the status changes. After the lock: `jobs.requestCancel` for the job of each running step (`stopUnrecordedTurn` finds the turn of a claimed step with no job by its request id and discards
+an instruction queued behind another turn), and `AskChannel.discarded` edits the comment of an open question (marker `discarded`) and takes `agent waiting` and `agent working` off. The service's `cancel` is the same function as `discard`. `RunLock.setPause` sets or clears `pause_requested_at`; `nextMove` answers
+`idle` for `add_step` and an unclaimed `execute` while it is set (`pauseRequested`), and the failure phase is not held.
+
 ## A question: `ask` (#920)
 
 A turn ends with `done` or with `ask` (`docs/workflows.md`, "A question: `done` or `ask`"). The runner reports a question as `implementer.agentAsk`; `turn-facts.ts` yields it as `asked` (bounded again, a result wins over it).

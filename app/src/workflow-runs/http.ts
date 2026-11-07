@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The handlers behind the run routes (#844): `POST/GET .../workflows/:id/runs`, `GET .../workflows/:id/runs/:runId` and (#891) `POST .../runs/:runId/cancel`, with their
+// The handlers behind the run routes (#844): `POST/GET .../workflows/:id/runs`, `GET .../workflows/:id/runs/:runId` and (#891, #921) `POST .../runs/:runId/discard` (`cancel` forwards to it), `pause` and `resume`, with their
 // collaborators passed in so the route files only wire the real ones and tests wire fakes. Order, as for the other factory routes: the
 // user first, then where the request comes from, then (for a body) its content type and size, then the service. Every answer is
 // `Cache-Control: no-store`. A refusal is `{ "error": <code>, "message": ... }` with a stable code from `errors.ts`.
@@ -35,11 +35,26 @@ export type WorkflowRunRouteHandlers = {
     runId: string,
   ): Promise<Response>;
   /**
-   * #891: stops a run. 202 `{ run, outcome: "requested" }` for a run that is told to stop (its turn stops at its runner's next heartbeat, then
-   * the run ends `cancelled`), 200 with the same body for a repeat (`already_requested`) and for a run that is over (`already_ended`; the run
-   * shows how it ended); 404 `WORKFLOW_RUN_NOT_FOUND`.
+   * #921: discards a run, whatever state it is in. 200 `{ run, outcome: "discarded" }` (the run is `discarded` now: its turn is asked to stop,
+   * its ticket is free), 200 `{ run, outcome: "already_discarded" }` for a repeat; 404 `WORKFLOW_RUN_NOT_FOUND`.
    */
+  discard(
+    request: Request,
+    workflowId: string,
+    runId: string,
+  ): Promise<Response>;
+  /** #891: the old route of the same call; it forwards to `discard` and answers the same (#921). */
   cancel(
+    request: Request,
+    workflowId: string,
+    runId: string,
+  ): Promise<Response>;
+  /**
+   * #921: asks a run to stop after its current step (`pause`) or lets it go on (`resume`). 200 `{ run, outcome }` with `changed`, or
+   * `unchanged` for a repeat and for a run that is over; 404 `WORKFLOW_RUN_NOT_FOUND`.
+   */
+  pause(request: Request, workflowId: string, runId: string): Promise<Response>;
+  resume(
     request: Request,
     workflowId: string,
     runId: string,
@@ -141,13 +156,29 @@ export function createWorkflowRunRouteHandlers({
         );
         return Response.json(answered, { status: 202, headers: NO_STORE });
       }),
-    cancel: (request, workflowId, runId) =>
-      guarded(request, async () => {
-        const cancelled = await service.cancel(workflowId, runId);
-        return Response.json(cancelled, {
-          status: cancelled.outcome === "requested" ? 202 : 200,
+    discard: (request, workflowId, runId) =>
+      guarded(request, async () =>
+        Response.json(await service.discard(workflowId, runId), {
           headers: NO_STORE,
-        });
-      }),
+        }),
+      ),
+    cancel: (request, workflowId, runId) =>
+      guarded(request, async () =>
+        Response.json(await service.cancel(workflowId, runId), {
+          headers: NO_STORE,
+        }),
+      ),
+    pause: (request, workflowId, runId) =>
+      guarded(request, async () =>
+        Response.json(await service.pause(workflowId, runId), {
+          headers: NO_STORE,
+        }),
+      ),
+    resume: (request, workflowId, runId) =>
+      guarded(request, async () =>
+        Response.json(await service.resume(workflowId, runId), {
+          headers: NO_STORE,
+        }),
+      ),
   };
 }

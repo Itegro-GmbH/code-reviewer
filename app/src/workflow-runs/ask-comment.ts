@@ -30,15 +30,16 @@ export function runPagePath(
 
 type Identity = { runId: string; stepId: string; n: number };
 
-type MarkerState = "ask" | "answered" | "cancelled" | "superseded";
+type MarkerState =
+  "ask" | "answered" | "cancelled" | "discarded" | "superseded";
 
-/** `<!-- factory ask run=<id> step=<id> q=<n> -->`; `answered` replaces `ask` once the question has its answer, `cancelled` when the run was stopped. */
+/** `<!-- factory ask run=<id> step=<id> q=<n> -->`; `answered` replaces `ask` once the question has its answer, `cancelled` when the run was stopped (#891), `discarded` when a member discarded it (#921). */
 export function markerOf(state: MarkerState, identity: Identity): string {
   return `<!-- factory ${state} run=${identity.runId} step=${identity.stepId} q=${String(identity.n)} -->`;
 }
 
 const MARKER =
-  /<!-- factory (ask|answered|cancelled|superseded) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
+  /<!-- factory (ask|answered|cancelled|discarded|superseded) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
 
 /** The marker a comment carries, or undefined. Nothing else of the comment is read. */
 export function readMarker(
@@ -137,6 +138,19 @@ export function cancelledComment(input: {
   return [
     markerOf("cancelled", input.identity),
     "The agent had a question, and the run was cancelled before it was answered. No answer is needed.",
+    "",
+    ...questionBlock(input.ask),
+  ].join("\n");
+}
+
+/** The question as it reads once a member discarded the run (#921): nobody has to answer. */
+export function discardedComment(input: {
+  identity: Identity;
+  ask: AgentAsk;
+}): string {
+  return [
+    markerOf("discarded", input.identity),
+    "The agent had a question, and the run was discarded. No answer is needed.",
     "",
     ...questionBlock(input.ask),
   ].join("\n");

@@ -163,6 +163,14 @@ export type AskChannel = {
     ask: StepAsk,
   ): Promise<void>;
   /**
+   * #921: the run was discarded: edits the comment of its open question (`open`, when a step waited for an answer) to say so, and takes both
+   * `agent working` and `agent waiting` off the ticket or pull request the run is about, whatever state the run was in.
+   */
+  discarded(
+    run: StoredWorkflowRun,
+    open: { step: StoredStepRun; ask: StepAsk } | undefined,
+  ): Promise<void>;
+  /**
    * A second comment for the same question was posted (two announcements at once) and the other one is the question's: edits the comment
    * `commentId` to say so, so that only one comment asks.
    */
@@ -192,6 +200,11 @@ export type AnswerResult =
 /** The question an answer is for: the step run that asked it (its row, so the rounds of a loop differ) and which question of it this is (`StepAsk.n`). */
 export type AskedQuestion = { stepRunId: string; n: number };
 
+/** What `discard` came to: `not_found` for a run that is none of this workspace's; a repeat changes nothing. */
+export type DiscardResult = {
+  outcome: "discarded" | "already_discarded" | "not_found";
+};
+
 export type WorkflowEngine = {
   /** Takes the run as far as it can go: writes and does the next steps until it waits for a job, or is over. Idempotent. */
   advance(runId: string): Promise<void>;
@@ -214,6 +227,14 @@ export type WorkflowEngine = {
       via: "comment" | "ui";
     },
   ): Promise<AnswerResult>;
+  /**
+   * #921: discards a run, whatever state it is in (running, waiting, or over however it ended). Under the lock of the run the steps that
+   * are not over end (a step that was not started is skipped, one that ran or waited fails with `discarded`) and the run becomes
+   * `discarded`: over, and free of its ticket for a new run. `onFailure` does not run: nothing technical failed. After the lock is released
+   * the turn that runs is asked to stop, a turn that is being started is found and asked too, the comment of an open question says it was
+   * discarded, and the labels `agent working` and `agent waiting` come off the ticket. Repeating it changes nothing.
+   */
+  discard(runId: string): Promise<DiscardResult>;
 };
 
 type Resolved = { name: string; version: number } | undefined;
@@ -528,6 +549,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return {
       runStatus: run.status,
       cancelRequested: run.cancelRequestedAt !== null,
+      pauseRequested: run.pauseRequestedAt !== null,
       budgetMicroUsd: run.budgetMicroUsd,
       spentMicroUsd: run.spentMicroUsd,
       steps: machineStepsOf(steps),
@@ -1585,8 +1607,13 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       if (after.ask.state !== "open") {
         if (after.ask.answer !== undefined)
           await deps.asks.answered(run, shown, after.ask);
-      } else if (after.step.status !== "waiting")
-        await deps.asks.cancelled(run, shown, after.ask);
+      } else if (after.step.status !== "waiting") {
+        // The step is over: a member discarded the run (#921), or a stop ended it (#891).
+        const current = await deps.runs.getRun(run.id);
+        if (current?.status === "discarded")
+          await deps.asks.discarded(current, { step: shown, ask: after.ask });
+        else await deps.asks.cancelled(run, shown, after.ask);
+      }
     } catch {
       log(`[workflow-runs] ASK_NOT_SHOWN run=${run.id} step=${step.stepId}`);
     }
@@ -1807,6 +1834,99 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /**
+   * The turn of an agent step that was claimed and has no job recorded: the turn may be starting this moment, or an instruction of the step
+   * waits behind the turn of its session. The turn is found by the request id and asked to stop; the instruction is taken out of the
+   * session first, as for a step that is given up. A turn that starts later is stopped by whoever starts it (`attachTurn` fails for an ended
+   * step, and the run is not `running`).
+   */
+  async function stopUnrecordedTurn(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    steps: readonly StoredStepRun[],
+  ): Promise<void> {
+    let found = await deps.turns.findByRequest(requestIdOf(run, step));
+    if (found === undefined) {
+      const document = await documentOf(run);
+      const node =
+        document === undefined
+          ? undefined
+          : nodesById(document).get(step.stepId);
+      const target =
+        node === undefined
+          ? undefined
+          : continuedStep(node, steps, step.position);
+      if (target === undefined) return;
+      await discardQueuedInstruction(run, step, target);
+      found = await deps.turns.findByRequest(requestIdOf(run, step));
+    }
+    if (found !== undefined) await deps.jobs.requestCancel(found.jobId);
+  }
+
+  async function discard(runId: string): Promise<DiscardResult> {
+    const done = await deps.runs.lockRun(runId, async (lock) => {
+      if (lock.run.status === "discarded")
+        return { outcome: "already_discarded" as const };
+      const steps = [...lock.steps];
+      for (const step of steps) {
+        if (step.status === "pending")
+          await lock.finishStep(step.id, { status: "skipped" });
+        else if (step.status === "running" || step.status === "waiting")
+          await lock.finishStep(
+            step.id,
+            failed(
+              "discarded",
+              step.status === "waiting"
+                ? "The run was discarded while the step waited for an answer."
+                : "The run was discarded while the step ran.",
+            ),
+          );
+      }
+      await lock.discardRun();
+      const waiting = steps.findLast((step) => step.status === "waiting");
+      const ask = parseStepAsk(waiting?.ask ?? null);
+      return {
+        outcome: "discarded" as const,
+        run: lock.run,
+        steps,
+        open:
+          waiting !== undefined && ask?.state === "open"
+            ? { step: waiting, ask }
+            : undefined,
+      };
+    });
+    if (done === undefined) return { outcome: "not_found" };
+    if (done.outcome === "already_discarded") return done;
+    const { run, steps, open } = done;
+    // Outside the lock: the queue takes its own. A turn that was waiting ends at once; one that runs is told by its next heartbeat, and
+    // what it reports reaches no run any more (a discarded run is over).
+    for (const step of steps) {
+      if (step.status !== "running") continue;
+      try {
+        if (step.jobId !== null) {
+          const asked = await deps.jobs.requestCancel(step.jobId);
+          log(
+            `[workflow-runs] discard asked run=${runId} job=${step.jobId} outcome=${asked.status}`,
+          );
+        } else if (step.kind === "agent") {
+          await stopUnrecordedTurn(run, step, steps);
+        }
+      } catch {
+        log(
+          `[workflow-runs] DISCARD_TURN_NOT_STOPPED run=${runId} step=${step.stepId}`,
+        );
+      }
+    }
+    if (deps.asks !== undefined)
+      try {
+        await deps.asks.discarded(run, open);
+      } catch {
+        log(`[workflow-runs] DISCARD_NOT_SHOWN run=${runId}`);
+      }
+    log(`[workflow-runs] run discarded run=${runId}`);
+    return { outcome: "discarded" };
+  }
+
   async function answer(
     runId: string,
     input: AnswerInput & {
@@ -1872,6 +1992,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
   return {
     advance,
     answer,
+    discard,
     async jobEnded(jobId) {
       try {
         const step = await deps.runs.findStepByJob(jobId);

@@ -24,7 +24,8 @@ type Status =
   | "succeeded"
   | "failed"
   | "skipped"
-  | "cancelled";
+  | "cancelled"
+  | "discarded";
 
 const ICON: Record<Status, Icon> = {
   pending: HourglassIcon,
@@ -34,6 +35,7 @@ const ICON: Record<Status, Icon> = {
   failed: XIcon,
   skipped: MinusIcon,
   cancelled: ProhibitIcon,
+  discarded: ProhibitIcon,
 };
 const TONE: Record<
   Status,
@@ -46,6 +48,7 @@ const TONE: Record<
   failed: "danger",
   skipped: "neutral",
   cancelled: "neutral",
+  discarded: "neutral",
 };
 
 function StatusBadge({

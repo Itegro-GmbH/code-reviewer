@@ -902,7 +902,7 @@ with an unknown cost (`no_result`), which bills the minutes only, like a lost le
 **When the holder does not stop.** The job is ended by the app, with `cancelled`, in these cases, and never queued again however many attempts it has left (a turn is run once anyway): its lease lapsed; its claim was given back (`release`); the grace of 4 minutes (`cancelGraceMs`,
 `DEFAULT_CANCEL_GRACE_MS`) after the request is over, at the heartbeat of the holder (which then loses its claim, like at the hard limit) or at the sweep. A runner of an earlier release ignores the field and stops that way, without a push.
 
-**In a workflow.** The [run route](workflows.md#cancelling-a-run) asks the job of the step. Stopping the task of an agent step on its own ends the run `cancelled` too, at the next look of the engine (the end of the turn, or the sweep).
+**In a workflow.** A [discard of the run](workflows.md#discarding-a-run) (#921; the old cancel route of the run forwards to it) asks the job of the step. Stopping the task of an agent step on its own ends the run `cancelled` too, at the next look of the engine (the end of the turn, or the sweep).
 
 **Tests.** `jobs/cancel-queue.integration.test.ts` (the queue: waiting, running, repeats, ended jobs, other workspaces, the report, billing, the lapsed lease, the release, the grace), `implementer/cancel.test.ts` (the service and the route), `job_loop` host tests
 `test_job_loop_cancelled.py` (heartbeat answer, the stop, the report, the lease check), `workflow-runs/engine-cancel.integration.test.ts` and `machine.test.ts` (the run).
