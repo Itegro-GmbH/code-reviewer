@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// Stopping a workflow run (#891) with the real engine, Implementer service and job queue on a real Postgres: the turn that runs is asked to
-// stop and the run ends `cancelled` when it has; a turn that still waits ends at once; no step starts after the stop; the cost of what ran is
-// in the run; a repeat and a run that is over change nothing; and a task stopped by itself ends the run it belongs to the same way.
+// The stop of a workflow run (#891) with the real engine, Implementer service and job queue on a real Postgres. Since #921 a member discards a
+// run (`engine-discard.integration.test.ts`) and the cancel route forwards to that; what stays is how the engine ends a run that carries the
+// mark of the old stop (`cancel_requested_at`, written before) and a run whose task was stopped by itself: the turn that runs is asked to stop
+// and the run ends `cancelled` when it has; a turn that still waits ends at once; no step starts after the stop; the cost of what ran is in the
+// run; and a task stopped by itself ends the run it belongs to the same way.
 import { describe, expect, it } from "vitest";
 import {
   startEngineHarness,
@@ -19,18 +21,22 @@ async function started(app: EngineHarness) {
 
 const cancelledReport = { ok: false, errorCode: "cancelled", costUsd: 0.3 };
 
-describe("stopping a workflow run", () => {
+/** A run of before #921 that was asked to stop: the mark the cancel of #891 wrote. Returns whether this call set it. */
+async function markStopped(app: EngineHarness, runId: string) {
+  return app.runs.lockRun(runId, (lock) => lock.requestCancel());
+}
+
+describe("the stop of a workflow run (#891), as the engine still reads it", () => {
   // #891-T40
   it("marks the run, asks the turn that runs to stop and ends the run cancelled when the turn has reported it", async () => {
     const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     const lease = await app.claimTurn();
 
-    const cancelled = await app.service.cancel(workflow.id, runId);
+    const marked = await markStopped(app, runId);
     await app.engine.advance(runId);
 
-    expect(cancelled.outcome).toBe("requested");
-    expect(app.kicked).toContain(runId);
+    expect(marked).toBe(true);
     // The run goes on until the turn has stopped; the job knows, so the next heartbeat tells its holder.
     const running = await app.stateOf(runId);
     expect(running.run.status).toBe("running");
@@ -63,18 +69,18 @@ describe("stopping a workflow run", () => {
       status: "cancelled",
       errorCode: "cancelled",
     });
-    const view = await app.service.get(workflow.id, runId);
+    const view = await app.service.get(state.run.workflowId, runId);
     expect(view).toMatchObject({ status: "cancelled", spentUsd: 0.3 });
   });
 
   // #891-T41
   it("ends a turn that still waits for a runner at once, and the run with it, in one look of the engine", async () => {
     const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     const waiting = await app.waitingJobs();
     expect(waiting).toHaveLength(1);
 
-    await app.service.cancel(workflow.id, runId);
+    await markStopped(app, runId);
     await app.engine.advance(runId);
 
     const state = await app.stateOf(runId);
@@ -99,59 +105,31 @@ describe("stopping a workflow run", () => {
   });
 
   // #891-T42
-  it("changes nothing for a repeat or for a run that is over, and says so", async () => {
+  it("marks a run once: a repeat changes nothing, and the mark stays", async () => {
     const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     const lease = await app.claimTurn();
 
-    const first = await app.service.cancel(workflow.id, runId);
-    const again = await app.service.cancel(workflow.id, runId);
+    const first = await markStopped(app, runId);
+    const again = await markStopped(app, runId);
     await app.engine.advance(runId);
     await app.finishTurn({ ...cancelledReport, claimed: lease });
     await app.engine.jobEnded(lease.job.id);
-    const after = await app.service.cancel(workflow.id, runId);
+    const after = await markStopped(app, runId);
 
-    expect([first.outcome, again.outcome, after.outcome]).toEqual([
-      "requested",
-      "already_requested",
-      "already_ended",
-    ]);
-    expect(after.run).toMatchObject({ status: "cancelled" });
-    // The mark of the first call stays.
-    expect((await app.stateOf(runId)).run.cancelRequestedAt).not.toBeNull();
-    await expect(
-      app.service.cancel(workflow.id, "no-such-run"),
-    ).rejects.toMatchObject({ code: "WORKFLOW_RUN_NOT_FOUND" });
-    await expect(
-      app.service.cancel("other-workflow", runId),
-    ).rejects.toMatchObject({ code: "WORKFLOW_RUN_NOT_FOUND" });
-  });
-
-  // #891-T43
-  it("leaves a run that succeeded as it is", async () => {
-    const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
-    await app.engine.jobEnded(
-      await app.finishTurn({ agentResult: { summary: "Plan." } }),
-    );
-    await app.engine.jobEnded(await app.finishTurn());
-    expect((await app.stateOf(runId)).run.status).toBe("succeeded");
-
-    const cancelled = await app.service.cancel(workflow.id, runId);
-
-    expect(cancelled.outcome).toBe("already_ended");
+    expect([first, again, after]).toEqual([true, false, false]);
     expect((await app.stateOf(runId)).run).toMatchObject({
-      status: "succeeded",
-      cancelRequestedAt: null,
+      status: "cancelled",
     });
+    expect((await app.stateOf(runId)).run.cancelRequestedAt).not.toBeNull();
   });
 
   // #891-T44
   it("lets a turn that finished before the stop took effect keep its result, and ends the run cancelled without starting the next step", async () => {
     const app = await startEngineHarness();
-    const { workflow, runId } = await started(app);
+    const { runId } = await started(app);
     const lease = await app.claimTurn();
-    await app.service.cancel(workflow.id, runId);
+    await markStopped(app, runId);
 
     // The runner's report was already on its way: the turn succeeded.
     await app.finishTurn({
@@ -192,7 +170,7 @@ describe("stopping a workflow run", () => {
     if (step === undefined) throw new Error("the step was not written");
     await app.runs.claimStep(step.id);
 
-    await app.service.cancel(workflow.id, run.id);
+    await markStopped(app, run.id);
     await app.engine.advance(run.id);
 
     const state = await app.stateOf(run.id);

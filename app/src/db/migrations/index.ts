@@ -103,6 +103,7 @@ import { migration as addWorkflowRunTriggerId } from "./20261107110000_add_workf
 import { migration as addImplementerTurnTimeLimit } from "./20261107150000_add_implementer_turn_time_limit.ts";
 import { migration as addWorkflowRunWaiting } from "./20261107170000_add_workflow_run_waiting.ts";
 import { migration as addProfileEnvironment } from "./20261107180000_add_profile_environment.ts";
+import { migration as addWorkflowRunDiscard } from "./20261107200000_add_workflow_run_discard.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -233,6 +234,7 @@ const migrations: Record<string, Migration> = {
   "20261107170000_add_workflow_run_waiting": addWorkflowRunWaiting,
   "20261107180000_add_profile_environment": addProfileEnvironment,
   "20261107190000_project_ticket_source": projectTicketSource,
+  "20261107200000_add_workflow_run_discard": addWorkflowRunDiscard,
 };
 
 export const migrationProvider: MigrationProvider = {

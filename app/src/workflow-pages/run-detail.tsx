@@ -414,59 +414,101 @@ function Step({
 }
 
 /**
- * Stops a run that runs (#891). The button asks the route; the run keeps running until its agent has stopped, so a run that was asked
- * (here or elsewhere: `cancelRequestedAt`) shows that it is stopping instead of the button. The page's own polling shows the end.
+ * What a member can do with a run (#921). Discard works on any run that is not discarded yet, running, waiting or over: the run is
+ * `discarded` at once and the page shows it from the answer (a run that is over is not polled any more). A run that is active can also be
+ * paused after its current step and resumed. A run of before #921 that was asked to stop (`cancelRequestedAt`) says so.
  */
-function CancelControl({
+function RunControls({
   run,
-  requested,
   workflowId,
   api,
-  onAsked,
+  onChanged,
 }: {
   run: RunView;
-  /** The stop was asked for, by anyone (the run says so) or by this page just now. */
-  requested: boolean;
   workflowId: string;
   api: WorkflowRunsApi;
-  onAsked: () => void;
+  /** The run as the route answered it: shown until the page's own polling has something newer. */
+  onChanged: (run: RunView) => void;
 }) {
   const product = useProductIdentity();
-  const [pending, setPending] = useState(false);
+  const [pending, setPending] = useState<"discard" | "pause" | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  if (run.status !== "running" && run.status !== "waiting") return null;
-  if (requested)
+  if (run.status === "discarded")
     return (
       <p
-        data-slot="run-cancel-requested"
+        data-slot="run-discarded"
         className="text-sm text-muted-foreground"
         role="status"
       >
-        {PAGE_COPY.cancelRequested}
+        {PAGE_COPY.discardedNote}
       </p>
     );
-  async function cancel() {
-    setPending(true);
+  const active = run.status === "running" || run.status === "waiting";
+  const paused = run.pauseRequestedAt !== null;
+  async function act(
+    kind: "discard" | "pause",
+    call: () => ReturnType<WorkflowRunsApi["discard"]>,
+  ) {
+    setPending(kind);
     setProblem(null);
-    const result = await api.cancel(workflowId, run.id);
-    setPending(false);
-    if (result.ok) onAsked();
+    const result = await call();
+    setPending(null);
+    if (result.ok) onChanged(result.data.run);
     else setProblem(describeStartFailure(product, result));
   }
   return (
     <div className="flex flex-col gap-2">
+      {active && run.cancelRequestedAt !== null ? (
+        <p
+          data-slot="run-cancel-requested"
+          className="text-sm text-muted-foreground"
+          role="status"
+        >
+          {PAGE_COPY.cancelRequested}
+        </p>
+      ) : null}
+      {active && paused ? (
+        <p
+          data-slot="run-paused"
+          className="text-sm text-muted-foreground"
+          role="status"
+        >
+          {PAGE_COPY.pausedNote}
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
+        {active ? (
+          <Button
+            type="button"
+            variant="secondary"
+            loading={pending === "pause"}
+            loadingLabel={paused ? PAGE_COPY.resuming : PAGE_COPY.pausing}
+            disabled={pending !== null}
+            onClick={() =>
+              void act("pause", () =>
+                paused
+                  ? api.resume(workflowId, run.id)
+                  : api.pause(workflowId, run.id),
+              )
+            }
+          >
+            {paused ? PAGE_COPY.resumeRun : PAGE_COPY.pauseRun}
+          </Button>
+        ) : null}
         <Button
           type="button"
           variant="secondary"
-          loading={pending}
-          loadingLabel={PAGE_COPY.cancelling}
-          onClick={() => void cancel()}
+          loading={pending === "discard"}
+          loadingLabel={PAGE_COPY.discarding}
+          disabled={pending !== null}
+          onClick={() =>
+            void act("discard", () => api.discard(workflowId, run.id))
+          }
         >
-          {PAGE_COPY.cancelRun}
+          {PAGE_COPY.discardRun}
         </Button>
         <span className="text-sm text-muted-foreground">
-          {PAGE_COPY.cancelHint}
+          {PAGE_COPY.discardHint}
         </span>
       </div>
       {problem === null ? null : (
@@ -512,9 +554,15 @@ export function WorkflowRunDetail({
     // A run that has ended does not change any more: no more requests.
     idleIntervalMs: null,
   });
-  const { run } = data;
-  // A stop this page asked for shows at once; the run says so itself from the next poll on.
-  const [askedFor, setAskedFor] = useState<string | null>(null);
+  // What a discard, a pause or a resume answered shows at once; the page's own polling takes over when it has something newer. A run that
+  // was discarded is over and not polled any more, so the answer is what the page shows from then on.
+  const [changed, setChanged] = useState<RunView | null>(null);
+  const run =
+    changed !== null &&
+    changed.id === data.run.id &&
+    changed.updatedAt > data.run.updatedAt
+      ? changed
+      : data.run;
   const repository = repositoryOfRun(run);
   const failure = describeRunFailure(run.errorCode);
   return (
@@ -571,12 +619,11 @@ export function WorkflowRunDetail({
             { term: PAGE_COPY.runBaseBranch, description: run.baseBranch },
           ]}
         />
-        <CancelControl
+        <RunControls
           run={run}
-          requested={run.cancelRequestedAt !== null || askedFor === run.id}
           workflowId={workflowId}
           api={api}
-          onAsked={() => setAskedFor(run.id)}
+          onChanged={setChanged}
         />
       </Section>
       <Budget run={run} />

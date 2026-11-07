@@ -27,6 +27,8 @@ const SUMMARY: RunSummaryView = {
   status: "running",
   errorCode: null,
   cancelRequestedAt: null,
+  discardedAt: null,
+  pauseRequestedAt: null,
   actorLogin: "octocat",
   budgetUsd: 20,
   spentUsd: 0,
@@ -68,9 +70,21 @@ function setup(
       calls.push(`list ${workflowId}`),
       { runs: [SUMMARY] }
     ),
+    discard: async (workflowId, runId) => (
+      calls.push(`discard ${workflowId} ${runId}`),
+      { run: VIEW, outcome: "discarded" }
+    ),
     cancel: async (workflowId, runId) => (
       calls.push(`cancel ${workflowId} ${runId}`),
-      { run: VIEW, outcome: "requested" }
+      { run: VIEW, outcome: "discarded" }
+    ),
+    pause: async (workflowId, runId) => (
+      calls.push(`pause ${workflowId} ${runId}`),
+      { run: VIEW, outcome: "changed" }
+    ),
+    resume: async (workflowId, runId) => (
+      calls.push(`resume ${workflowId} ${runId}`),
+      { run: VIEW, outcome: "changed" }
     ),
     ...overrides,
   };
@@ -286,49 +300,86 @@ describe("the workflow run handlers", () => {
   });
 });
 
-describe("cancelling a run", () => {
+describe("discarding, cancelling, pausing and resuming a run", () => {
   const post = (url: string) => new Request(url, { method: "POST" });
 
-  // #891-T50
-  it("asks the service and answers 202 for a run that is told to stop, 200 for a repeat and for a run that is over, with the run", async () => {
-    for (const [outcome, status] of [
-      ["requested", 202],
-      ["already_requested", 200],
-      ["already_ended", 200],
-    ] as const) {
+  // #921-T50
+  it("asks the service and answers 200 with the run for a discard and for a repeat", async () => {
+    for (const outcome of ["discarded", "already_discarded"] as const) {
       const { handlers, calls, url } = setup({
-        cancel: async () => ({ run: VIEW, outcome }),
+        discard: async () => ({ run: VIEW, outcome }),
       });
 
-      const response = await handlers.cancel(post(url), "wf-1", "run-1");
+      const response = await handlers.discard(post(url), "wf-1", "run-1");
 
-      expect(response.status).toBe(status);
+      expect(response.status).toBe(200);
       expect(response.headers.get("cache-control")).toBe("no-store");
       expect(await response.json()).toEqual({ run: VIEW, outcome });
       expect(calls).toEqual([]);
     }
     const { handlers, calls, url } = setup();
-    await handlers.cancel(post(url), "wf-1", "run-1");
+    await handlers.discard(post(url), "wf-1", "run-1");
+    expect(calls).toEqual(["discard wf-1 run-1"]);
+  });
+
+  // #921-T51
+  it("lets the old cancel route forward: it asks the service's cancel and answers like a discard", async () => {
+    const { handlers, calls, url } = setup();
+
+    const response = await handlers.cancel(post(url), "wf-1", "run-1");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ run: VIEW, outcome: "discarded" });
     expect(calls).toEqual(["cancel wf-1 run-1"]);
   });
 
-  // #891-T51
-  it("answers the stable code for a run that is not there", async () => {
-    const { handlers, url } = setup({
-      cancel: async () => {
-        throw new WorkflowRunError(
-          "WORKFLOW_RUN_NOT_FOUND",
-          "There is no such run of this workflow.",
-        );
-      },
+  // #921-T52
+  it("answers the stable code for a run that is not there, on every one of the routes", async () => {
+    for (const method of ["discard", "cancel", "pause", "resume"] as const) {
+      const { handlers, url } = setup({
+        [method]: async () => {
+          throw new WorkflowRunError(
+            "WORKFLOW_RUN_NOT_FOUND",
+            "There is no such run of this workflow.",
+          );
+        },
+      });
+
+      const response = await handlers[method](post(url), "wf-1", "run-9");
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: "WORKFLOW_RUN_NOT_FOUND",
+      });
+    }
+  });
+
+  // #921-T53
+  it("pauses and resumes through the service and answers 200 with the outcome", async () => {
+    const { handlers, calls, url } = setup();
+
+    const paused = await handlers.pause(post(url), "wf-1", "run-1");
+    const resumed = await handlers.resume(post(url), "wf-1", "run-1");
+
+    expect(paused.status).toBe(200);
+    expect(await paused.json()).toEqual({ run: VIEW, outcome: "changed" });
+    expect(resumed.status).toBe(200);
+    expect(calls).toEqual(["pause wf-1 run-1", "resume wf-1 run-1"]);
+  });
+
+  // #921-T54
+  it("refuses a request from another site before it asks the service", async () => {
+    const { handlers, calls, url } = setup();
+    const crossSite = new Request(url, {
+      method: "POST",
+      headers: { "sec-fetch-site": "cross-site" },
     });
 
-    const response = await handlers.cancel(post(url), "wf-1", "run-9");
-
-    expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({
-      error: "WORKFLOW_RUN_NOT_FOUND",
-    });
+    for (const method of ["discard", "cancel", "pause", "resume"] as const)
+      expect((await handlers[method](crossSite, "wf-1", "run-1")).status).toBe(
+        403,
+      );
+    expect(calls).toEqual([]);
   });
 });
 

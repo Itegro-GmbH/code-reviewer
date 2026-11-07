@@ -47,6 +47,11 @@ export const RUN_STATUS_COPY = {
     description:
       "A member of the workspace stopped the run. What the agent had committed was pushed to its branch when possible; the steps that had not started did not run.",
   },
+  discarded: {
+    label: "Discarded",
+    description:
+      "A member of the workspace discarded the run. It is no longer active and nothing counts against the ticket; a new run can start on it.",
+  },
 } as const;
 
 export const STEP_STATUS_COPY = {
@@ -150,6 +155,8 @@ const STEP_FAILURE_TEXT: Record<
     "No runner of this workspace with the labels of the environment took the task in time.",
   cancelled:
     "A member of the workspace stopped the run, so the agent of this step was ended.",
+  discarded:
+    "A member of the workspace stopped using this run, so this step did not go on.",
 };
 type JobFailureCode = "timeout" | "cost_limit_reached" | "no_runner_available";
 
@@ -321,12 +328,20 @@ export const PAGE_COPY = {
   askAnsweredBy: "Answered by",
   askViaPage: "on this page",
   askViaComment: "in a comment",
-  cancelRun: "Cancel run",
-  cancelling: "Stopping the run",
-  cancelHint:
-    "Stops the agent that is working and starts no further step. What it has committed is pushed to its branch; only what it used until it stopped is charged.",
+  discardRun: "Discard this run",
+  discarding: "Discarding the run",
+  discardHint:
+    "A run is active or discarded. Discard when the agent went the wrong way and you want to start over in a new run.",
+  discardedNote:
+    "Discarded: no longer active, nothing counts against the ticket. Start a fresh run when you want.",
+  pauseRun: "Pause after this step",
+  pausing: "Pausing the run",
+  resumeRun: "Resume",
+  resuming: "Resuming the run",
+  pausedNote:
+    "Paused: the step that runs goes on, and no further step starts until you resume.",
   cancelRequested:
-    "The run is stopping: the agent is told to stop, which takes up to a minute or two, and the run ends when it has. This page updates by itself.",
+    "A stop was asked for before runs could be discarded: the agent is told to stop and the run ends when it has. You can discard the run instead.",
 } as const;
 
 export const START_COPY = {
