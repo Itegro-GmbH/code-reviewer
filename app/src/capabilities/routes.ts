@@ -206,6 +206,17 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
     class: "implementer",
   },
+  // A project is one ticket source (#922): the factory's new project (its board and its first lanes), the boards of a repository it can
+  // take, and the tickets of a project by its own id (the same answer as the issues of its repository).
+  { route: "/api/w/[workspace]/projects", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/projects/[projectId]/issues",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/boards",
+    class: "implementer",
+  },
   // A member stops a run of the Implementer (#891).
   {
     route: "/api/w/[workspace]/implementer/runs/[runId]/cancel",

@@ -71,6 +71,10 @@ const FAILURE_COPY: Record<ProjectErrorCode | SyncErrorCode, string> = {
     "This repository is no longer available to the GitHub App, so it cannot be activated.",
   PROJECT_INTEGRATION_UNAVAILABLE:
     "The GitHub App installation of this repository is suspended or removed, so the repository cannot be activated.",
+  PROJECT_ALREADY_EXISTS:
+    "This repository is a project already. Reload the page to see it.",
+  PROJECT_BOARDS_UNAVAILABLE:
+    "GitHub could not be asked for the boards of this repository right now. Try again in a moment.",
   SYNC_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,
 };
 

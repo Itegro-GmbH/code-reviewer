@@ -46,10 +46,19 @@ function harness(document: unknown) {
     workflows: {
       async get() {
         return {
-          workflow: { archivedAt: null },
+          workflow: { archivedAt: null, projectId: null },
           current: { version: 1, document: JSON.stringify(document) },
         };
       },
+    },
+    // A lane without a project is held to no repository (#922).
+    projects: {
+      async getById() {
+        return undefined;
+      },
+    },
+    async repositoryName() {
+      return undefined;
     },
     async resolveRepository(fullName: string) {
       return { id: "repo-1", fullName, defaultBranch: "main" };

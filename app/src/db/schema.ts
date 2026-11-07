@@ -179,6 +179,11 @@ export interface ProjectsTable {
   active: number;
   /** JSON text: the project's setting overrides, '{}' until some are saved. */
   settings: string;
+  /**
+   * JSON text (#922): the ticket source, `{ provider, repositoryId, board }`; null for a row an older version wrote, which reads as the
+   * GitHub issues of `repository_id` without a board.
+   */
+  ticket_source: string | null;
   /** ISO 8601 text in UTC. */
   created_at: string;
   updated_at: string;
@@ -1330,6 +1335,8 @@ export interface WorkflowsTable {
   updated_at: string;
   /** Set when the workflow was archived: hidden from the list, takes no new version, its name is free. */
   archived_at: string | null;
+  /** The project the lane belongs to (#922); null for an archived lane no project could take and for one an older version wrote. */
+  project_id: string | null;
 }
 
 /** One saved version of a workflow's document (#833). Immutable: the database refuses an update. */

@@ -20,6 +20,7 @@ import { createWorkflowEngine } from "./engine.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowRunService } from "./service.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createConnectorRegistry, type ActionConnector } from "./connectors.ts";
 import { ImplementerError } from "../implementer/errors.ts";
@@ -1010,6 +1011,8 @@ describe("another workspace", () => {
     const otherService = createWorkflowRunService({
       runs: otherRuns,
       workflows: createWorkflowsRepository(app.h.db, otherId),
+      projects: createProjectsRepository(app.h.db, otherId),
+      repositoryName: async () => undefined,
       resolveRepository: async () => ({
         id: "x",
         fullName: "acme/x",

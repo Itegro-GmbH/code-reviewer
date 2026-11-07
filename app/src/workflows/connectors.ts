@@ -135,9 +135,9 @@ export const PROJECT_MEMBERS = "project members";
  * The provider-neutral names of the actions on a pull request and of the two that only a board and a review have (#917). The provider
  * comes from the repository of the run: GitHub so far.
  * - `pullRequest.open` is `github.pullRequest.open` and `pullRequest.comment` writes a comment below a pull request;
- * - `ticket.setStatus` puts a ticket into a column of the board, the GitHub Project (projects_v2) named by `board` until the project
- *   itself carries its board (#922); `status` is a literal option name of that board and the engine looks it up when it runs
- *   (`board_status_unknown` names the options there are);
+ * - `ticket.setStatus` puts a ticket into a column of the board of the project the lane belongs to (#922: the GitHub Project, projects_v2,
+ *   its ticket source names); `board` (the number of a Project or its node id) is an override that stays accepted. `status` is a literal
+ *   option name of that board and the engine looks it up when it runs (`board_status_unknown` names the options there are);
  * - `ticket.requestReview` asks for a review of a pull request, from the members of the project or from logins.
  */
 export const PULL_REQUEST_OPEN: ConnectorSpec = {
@@ -160,7 +160,7 @@ export const TICKET_SET_STATUS: ConnectorSpec = {
   description: "Moves a ticket to a column of the board of its project.",
   inputs: {
     ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
-    board: { type: STRING, required: true, target: [] },
+    board: { type: STRING, required: false, target: [] },
     status: { type: STRING, required: true, target: [] },
   },
   output: objectOf({ status: STRING }),

@@ -5,6 +5,7 @@
 import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { createWorkflowService, type WorkflowService } from "./service.ts";
@@ -14,6 +15,7 @@ export function workflowServiceFor(workspaceId: string): WorkflowService {
   const db = getDatabase();
   return createWorkflowService({
     workflows: createWorkflowsRepository(db, workspaceId),
+    projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
   });

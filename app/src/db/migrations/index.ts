@@ -98,6 +98,7 @@ import { migration as addWorkflowRunFailure } from "./20261106004000_add_workflo
 import { migration as addUsageRecordCostBasis } from "./20261106012000_add_usage_record_cost_basis.ts";
 import { migration as addImplementerSessionStartBranch } from "./20261106130000_add_implementer_session_start_branch.ts";
 import { migration as createTrackerMirror } from "./20261107160000_create_tracker_mirror.ts";
+import { migration as projectTicketSource } from "./20261107190000_project_ticket_source.ts";
 import { migration as addWorkflowRunTriggerId } from "./20261107110000_add_workflow_run_trigger_id.ts";
 import { migration as addImplementerTurnTimeLimit } from "./20261107150000_add_implementer_turn_time_limit.ts";
 import { migration as addWorkflowRunWaiting } from "./20261107170000_add_workflow_run_waiting.ts";
@@ -231,6 +232,7 @@ const migrations: Record<string, Migration> = {
   "20261107160000_create_tracker_mirror": createTrackerMirror,
   "20261107170000_add_workflow_run_waiting": addWorkflowRunWaiting,
   "20261107180000_add_profile_environment": addProfileEnvironment,
+  "20261107190000_project_ticket_source": projectTicketSource,
 };
 
 export const migrationProvider: MigrationProvider = {

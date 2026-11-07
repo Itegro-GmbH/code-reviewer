@@ -153,13 +153,30 @@ real route file) and `integration-tests/webhooks/project-gate.integration.test.t
 webhook route). `startWebhookHarness().seedInstallation()` activates the seeded repository by default;
 pass `{ activateProject: false }` to test the opposite.
 
+## A project is one ticket source (#922)
+
+In the factory a project is **exactly one ticket source**: the GitHub issues of one repository and, optionally, the GitHub Project (projects_v2) that is its board. It is modelled on the row that was
+always there (one `projects` row per repository), so a deployment without the capability `implementer` behaves exactly as before (projects are the review switches of repositories, the review settings stay
+where they were). `projects.ticket_source` (JSON text, `{ provider: "github", repositoryId, board: { projectV2Id, statusFieldId } | null }`, read by `projects-repository.ts` as `StoredProject.ticketSource`) is
+null for every row that existed and reads as "the issues of the repository, no board"; `repositoryId` is always the row's own. Lanes belong to a project (`workflows.project_id`, `src/workflows/README.md`); the label
+trigger and a manual start work only within the project's repository. A project has no list of repositories of its own: the lanes say which repositories they work in.
+
+| File                     | Role                                                                                                                                                                                                                                                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `new-project-request.ts` | The strict check of the body of `POST /api/w/:workspace/projects`: every problem is `{ path, code, message, available }`                                                                                                                                                                                          |
+| `create-http.ts`         | `createNewProjectHandlers`: `POST /projects` (the project, its board and the built-in lanes it starts with) and `GET /repositories/:id/boards` (the boards GitHub has, for the picker); the board is verified against the boards the provider lists and the Status field is taken from there, never from the body |
+| `create-shared.ts`       | The wiring: `boardsFor` (the provider's `listBoards`, a token that may read boards and nothing else; a failure is logged by its code). The route file copies the lanes through `WorkflowService.copyBuiltIn`: this module does not know the workflows                                                             |
+| `errors.ts`              | Besides the codes above: `PROJECT_ALREADY_EXISTS` (409) and `PROJECT_BOARDS_UNAVAILABLE` (503)                                                                                                                                                                                                                    |
+
+`POST /api/w/:workspace/projects` (Admin or Owner, `manage_projects`; only with the capability `implementer`) takes `{ repositoryId, board?: { projectV2Id } | null, lanes?: ["issue-to-pr", "review-a-pull-request"] }`,
+switches the repository on with its ticket source and copies the built-in lanes (`src/workflows/built-in-lanes.ts`); it answers `201 { project, lanes: [{ key, ok, workflowId | code }] }` (a copy that fails altogether is `LANE_COPY_FAILED` for every lane, and the project stays). The tickets are also
+`GET /api/w/:workspace/projects/:projectId/issues`, the same answer as the issues of the repository. How the lanes and the trigger use the project: [`docs/workflows.md`](../../../docs/workflows.md#lanes-belong-to-a-project).
+
 ## The cockpit (#925)
 
 In the factory a project is opened as a cockpit (`ui/project-cockpit.tsx`): the repository as the title with its state, and the tabs **Issues**, **ToDos**,
 **Runs**, **Lanes** and **Setup**, each a page of its own below `/w/<slug>/projects/<id>` (`/todos`, `/runs`, `/lanes`, `/setup`; Issues is the project's own
 address). The Projects page lists the projects as cards (`ui/project-cards.tsx`) with a "New project" dialog (`ui/new-project-dialog.tsx`): the ticket source is
-a repository that is no project yet, and "Create" switches it on through the route of the project switch. Until the ticket source (#923), the answers (#924) and the
-lanes of a project (#922) exist, the numbers on a card say "–", Issues and ToDos show the empty state of the prototype, and the Lanes tab lists the workspace's
-workflows. Setup holds the ticket source card, the project switch, the re-read from GitHub and the way to the review settings (`/review`, the page the project
+a repository that is no project yet, and "Create" switches it on through the route of the project switch. Until the answers (#924) exist, the numbers on a card say "–" and ToDos show the empty state of the prototype; the Lanes tab lists the lanes of the project (#922). The dialog reads the boards of the chosen repository from GitHub, offers them as the optional board and lets the person tick the built-in lanes to copy. Setup holds the ticket source card, the project switch, the re-read from GitHub and the way to the review settings (`/review`, the page the project
 address was before). A deployment without the capability `implementer` has no cockpit at all (every tab page, `/runs` and `/setup` included, is not found), keeps the table with the review switches on the
 Projects page, and `/projects/<id>` opens the review settings as it always did.

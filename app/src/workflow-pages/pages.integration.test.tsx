@@ -9,6 +9,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import {
@@ -23,10 +24,8 @@ import type { WorkflowRunsApi } from "./api.ts";
 import {
   loadRunPage,
   loadWorkflowPage,
-  loadWorkflowsPage,
   RunPageContent,
   WorkflowPageContent,
-  WorkflowsPageContent,
 } from "./pages.tsx";
 
 vi.mock("next/navigation", () => ({
@@ -41,12 +40,15 @@ function servicesOf(app: EngineHarness, workspaceId: string) {
   return {
     workflows: createWorkflowService({
       workflows: createWorkflowsRepository(db, workspaceId),
+      projects: createProjectsRepository(db, workspaceId),
       environments: createImplementerEnvironmentsRepository(db, workspaceId),
       profiles: createProfilesRepository(db, workspaceId),
     }),
     runs: createWorkflowRunService({
       runs: createWorkflowRunsRepository(db, workspaceId),
       workflows: createWorkflowsRepository(db, workspaceId),
+      projects: createProjectsRepository(db, workspaceId),
+      repositoryName: async () => undefined,
       resolveRepository: async () => undefined,
       readTicket: async () => undefined,
       kick: () => {},
@@ -96,40 +98,14 @@ describe("a workflow or run of another workspace", () => {
       kind: "not_found",
     });
   });
-
-  // #873-T71
-  it("is not in the list of workflows of the workspace asking", async () => {
-    const app = await startEngineHarness();
-    const { workflow } = await startedRun(app);
-    const other = await addWorkspace(app.h.db, "other");
-
-    const mine = await loadWorkflowsPage(servicesOf(app, app.workspaceId));
-    const theirs = await loadWorkflowsPage(servicesOf(app, other));
-
-    expect(mine.workflows.map((entry) => entry.id)).toEqual([workflow.id]);
-    expect(theirs.workflows).toEqual([]);
-  });
 });
 
 describe("the pages with real data", () => {
   // #873-T72
-  it("lists the workflows, links to a workflow, shows its Start form and its runs", async () => {
+  it("shows the Start form and the runs of a workflow", async () => {
     const app = await startEngineHarness();
     const { workflow, runId } = await startedRun(app);
     const own = servicesOf(app, app.workspaceId);
-
-    const list = render(
-      <WorkflowsPageContent
-        workspaceSlug="acme"
-        data={await loadWorkflowsPage(own)}
-      />,
-    );
-    expect(
-      screen
-        .getByRole("link", { name: String(workflow.name) })
-        .getAttribute("href"),
-    ).toBe(`/w/acme/workflows/${workflow.id}`);
-    list.unmount();
 
     const page = await loadWorkflowPage(workflow.id, own);
     if (page.kind !== "ready") throw new Error("not ready");

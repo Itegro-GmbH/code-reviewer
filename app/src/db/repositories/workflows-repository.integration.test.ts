@@ -46,6 +46,7 @@ describe("the workflows repository", () => {
       workflow: {
         id: "wf-1",
         workspaceId: idA,
+        projectId: null,
         name: "Issue to PR",
         version: 1,
         createdBy: "u-1",
