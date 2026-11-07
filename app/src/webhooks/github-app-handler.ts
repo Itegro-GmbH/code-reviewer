@@ -15,6 +15,9 @@
 //   6. identify  `identifyWebhook` names the installation; the integration is loaded, and with it
 //                the workspace the delivery belongs to (everything after this runs in that
 //                workspace: its projects, its settings, its job queue)
+//   6b. mirror   the events the ticket mirror follows (#923) update its cache first, in the workspace of the delivery; a failure of the
+//                mirror never stops what else the delivery does (a review, a workflow), and an event that only the mirror uses
+//                (`sub_issues`, `projects_v2_item`, `check_suite`) is answered `tracker_updated`, or `ignored`
 //   7. translate `parseEvent`: a review trigger, an installation change, a label on an issue or "ignored"
 //   8. act       label on an issue -> the workflows the label starts get their runs (#845; no project is needed: the repository
 //                must be an active one of the workspace);
@@ -63,6 +66,7 @@ import {
 } from "./automatic-review-policy.ts";
 import { isCommandAllowed } from "../review-settings/effective.ts";
 import type { ReviewTriggerIntake } from "./review-trigger-intake.ts";
+import type { TrackerMirror } from "../tracker/mirror.ts";
 
 /** 1 MiB. GitHub's own limit is 25 MB, but the payloads this app reads are a few kilobytes. */
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
@@ -76,6 +80,20 @@ const REVIEW_EVENTS: ReadonlySet<string> = new Set([
 ]);
 /** The events that can start a workflow (#845). */
 const WORKFLOW_EVENTS: ReadonlySet<string> = new Set(["issues"]);
+/** The events the ticket mirror follows (#923); the first three also start reviews or workflows, the others are used by the mirror only. */
+const TRACKER_EVENTS: ReadonlySet<string> = new Set([
+  "issues",
+  "issue_comment",
+  "pull_request",
+  "sub_issues",
+  "projects_v2_item",
+  "check_suite",
+]);
+const TRACKER_ONLY_EVENTS: ReadonlySet<string> = new Set([
+  "sub_issues",
+  "projects_v2_item",
+  "check_suite",
+]);
 const INSTALLATION_EVENTS: ReadonlySet<string> = new Set([
   "installation",
   "installation_repositories",
@@ -137,6 +155,8 @@ export type WorkspaceCollaborators = {
    * nothing (`ignored`).
    */
   workflows?: WorkflowStarter;
+  /** The ticket mirror of the workspace (#923). Left out where a server has none: the events it follows are then used for what else they do. */
+  tracker?: TrackerMirror;
 };
 
 export type GithubAppWebhookDeps = {
@@ -311,6 +331,44 @@ export function createGithubAppWebhookHandler(
     }
   }
 
+  /**
+   * Hands the delivery to the ticket mirror of the integration's workspace (#923): the provider reads what changed, the mirror writes it.
+   * Answers whether the cache changed. `strict`: a failure is thrown (a delivery only the mirror uses is tried again by GitHub);
+   * otherwise it is logged by its code and the delivery goes on with what else it does.
+   */
+  async function mirrorTickets(
+    provider: IntegrationProvider,
+    integration: Integration,
+    eventName: string,
+    deliveryId: string,
+    request: Request,
+    strict: boolean,
+  ): Promise<boolean> {
+    const tracker = deps.workspace(integration.workspaceId).tracker;
+    if (tracker === undefined || provider.parseTrackerChange === undefined)
+      return false;
+    try {
+      const parsed = await provider.parseTrackerChange(integration, request);
+      if (parsed.kind !== "change") {
+        logger.info(
+          `[webhook] delivery=${deliveryId} the ticket mirror takes nothing from it: ${parsed.reason}`,
+        );
+        return false;
+      }
+      return (await tracker.apply(integration, parsed.change)) === "updated";
+    } catch (error) {
+      logger.error(
+        `[webhook] delivery=${deliveryId} event=${eventName} the ticket mirror could not be updated (${errorCodeOf(error)})`,
+      );
+      if (strict)
+        throw new WebhookProcessingError(
+          `the ticket mirror could not be updated (${errorCodeOf(error)})`,
+          503,
+        );
+      return false;
+    }
+  }
+
   /** Steps 6 to 8: everything after the delivery was claimed. */
   async function handleDelivery(
     eventName: string,
@@ -340,6 +398,22 @@ export function createGithubAppWebhookHandler(
     if (integration === undefined && !isInstallationEvent)
       return "unknown_installation";
 
+    // The ticket mirror (#923) hears the event first. A delivery that is also a review trigger or a label must still reach those, so a
+    // failure of the mirror is logged there; an event only the mirror uses fails the delivery, so that GitHub can redeliver it.
+    let mirrored = false;
+    if (integration !== undefined && TRACKER_EVENTS.has(eventName)) {
+      mirrored = await mirrorTickets(
+        provider,
+        integration,
+        eventName,
+        deliveryId,
+        request,
+        TRACKER_ONLY_EVENTS.has(eventName),
+      );
+      if (TRACKER_ONLY_EVENTS.has(eventName))
+        return mirrored ? "tracker_updated" : "ignored";
+    }
+
     const event: IntegrationEvent = await provider.parseEvent(
       integration ?? standIn(identity.externalId),
       request,
@@ -347,7 +421,7 @@ export function createGithubAppWebhookHandler(
 
     if (event.kind === "ignored") {
       logger.info(`[webhook] ignored: ${event.reason}`);
-      return "ignored";
+      return mirrored ? "tracker_updated" : "ignored";
     }
 
     if (event.kind === "installation_changed") {
@@ -554,6 +628,7 @@ export function createGithubAppWebhookHandler(
     if (
       !REVIEW_EVENTS.has(eventName) &&
       !WORKFLOW_EVENTS.has(eventName) &&
+      !TRACKER_ONLY_EVENTS.has(eventName) &&
       !INSTALLATION_EVENTS.has(eventName)
     )
       return accepted("event_not_used");

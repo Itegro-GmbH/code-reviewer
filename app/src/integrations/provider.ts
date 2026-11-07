@@ -15,6 +15,9 @@ import type {
   ReviewCheck,
   ReviewTrigger,
   ReviewVerdict,
+  TrackerChangeResult,
+  TrackerPage,
+  TrackerPageStep,
 } from "./types.ts";
 
 /** How a user connects this kind of integration. */
@@ -328,4 +331,36 @@ export interface IntegrationProvider {
     repo: RepoRef,
     signal?: AbortSignal,
   ): Promise<PullRequestRef[]>;
+
+  /**
+   * Only where the platform has tickets the app mirrors (#923, the GitHub App): what the delivery says about the ticket mirror. Reads the
+   * payload and no more; a delivery that is no news for the mirror is `ignored` with a reason for the log.
+   */
+  parseTrackerChange?(
+    integration: Integration,
+    request: Request,
+  ): Promise<TrackerChangeResult>;
+
+  /**
+   * Only together with `parseTrackerChange`: one page of one phase of a full sync of a repository's tickets (#923), read with a token
+   * of its own that holds the read permissions of that phase and nothing else. Rejects when the platform cannot be asked; a board the
+   * app may not read is `available: false`, never a failure.
+   */
+  readTrackerPage?(
+    integration: Integration,
+    repo: RepoRef,
+    step: TrackerPageStep,
+    signal?: AbortSignal,
+  ): Promise<TrackerPage>;
+
+  /**
+   * Only together with `parseTrackerChange`: the state of the checks of a commit as the platform names it (`success`, `failure`,
+   * `in_progress`, ...), or null when it has none. The same rule as the sync uses for each open pull request.
+   */
+  readChecksState?(
+    integration: Integration,
+    repo: RepoRef,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
 }

@@ -72,6 +72,26 @@ export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
+/**
+ * What the token of the ticket mirror's full sync (#923) may do: read the issues, the pull requests and the checks of one repository and
+ * the metadata. Read only, and no code: a leaked token could change nothing.
+ */
+export const TRACKER_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
+  issues: "read",
+  pull_requests: "read",
+  checks: "read",
+  metadata: "read",
+};
+
+/**
+ * What the token that reads the project boards of the mirror (#923) may do: read the organization's projects and the metadata. A token of
+ * its own, so the issue token never holds the board permission and the other way round.
+ */
+export const TRACKER_BOARD_TOKEN_PERMISSIONS: InstallationPermissions = {
+  organization_projects: "read",
+  metadata: "read",
+};
+
 /** What the token of the branch reads (#750) may do: read the contents of one repository and the metadata. */
 export const BRANCH_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   contents: "read",

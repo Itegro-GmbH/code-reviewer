@@ -49,6 +49,8 @@ export const WEBHOOK_ACCEPTED_OUTCOMES = [
   "workflow_runs_started",
   /** An issue got a label (#845) and no workflow of the workspace starts for it (no workflow with the label, or the repository is not an active one). */
   "no_workflow_matched",
+  /** The ticket mirror (#923) took something from the delivery: a ticket, its parent, its board status or its checks were written. */
+  "tracker_updated",
   "installation_changed",
   /** An installation that no workspace has linked: noted as unclaimed, nothing was created. */
   "installation_unclaimed",

@@ -12,7 +12,7 @@ import type {
   RemoteRepository,
 } from "./client.ts";
 import { GithubAppError } from "./errors.ts";
-import type { PullRequestRef } from "../../types.ts";
+import type { PullRequestRef, TrackerItemFields } from "../../types.ts";
 
 /** An installation the way a test writes it: the permissions it holds (#749) are empty unless it says. */
 export type FakeRemoteInstallation = Omit<RemoteInstallation, "permissions"> &
@@ -36,6 +36,22 @@ export type FakeGithubAppClientData = {
   revokeFailure?: Error;
   /** Makes `listOpenPullRequests` reject with this error. */
   listPullRequestsFailure?: Error;
+  /** The pages `readTrackerIssues` answers, by "owner/name": page 1 is the first entry (#923). */
+  trackerIssuePages?: Record<string, TrackerItemFields[][]>;
+  /** The pages `readTrackerChecks` answers, by "owner/name" (#923). */
+  trackerCheckPages?: Record<
+    string,
+    { number: number; checksState: string | null }[][]
+  >;
+  /** What `readChecksState` answers, by "owner/name@sha" (#923); a commit not listed has no checks. */
+  trackerChecks?: Record<string, string | null>;
+  /** The pages `readTrackerBoard` answers, by "owner/name"; `available: false` for none (#923). */
+  trackerBoardPages?: Record<
+    string,
+    { nodeId: string; status: string | null }[][]
+  >;
+  /** Makes the tracker reads reject with this error (#923). */
+  trackerFailure?: Error;
   /** Makes `createIssueComment` reject with this error. */
   commentFailure?: Error;
   /** Makes `openPullRequest` reject with this error (#844). */
@@ -405,6 +421,35 @@ export function fakeGithubAppClient(
         message,
       );
       if (data.reviewFailure) throw data.reviewFailure;
+    },
+    async readTrackerIssues(installationId, scope, repoFullName, page) {
+      record("readTrackerIssues", installationId, scope, repoFullName, page);
+      if (data.trackerFailure) throw data.trackerFailure;
+      const pages = data.trackerIssuePages?.[repoFullName] ?? [];
+      return { items: pages[page - 1] ?? [], last: page >= pages.length };
+    },
+    async readTrackerChecks(installationId, scope, repoFullName, page) {
+      record("readTrackerChecks", installationId, scope, repoFullName, page);
+      if (data.trackerFailure) throw data.trackerFailure;
+      const pages = data.trackerCheckPages?.[repoFullName] ?? [];
+      return { pullRequests: pages[page - 1] ?? [], last: page >= pages.length };
+    },
+    async readChecksState(installationId, scope, repoFullName, headSha) {
+      record("readChecksState", installationId, scope, repoFullName, headSha);
+      if (data.trackerFailure) throw data.trackerFailure;
+      return data.trackerChecks?.[`${repoFullName}@${headSha}`] ?? null;
+    },
+    async readTrackerBoard(installationId, scope, repoFullName, after) {
+      record("readTrackerBoard", installationId, scope, repoFullName, after);
+      if (data.trackerFailure) throw data.trackerFailure;
+      const pages = data.trackerBoardPages?.[repoFullName];
+      if (pages === undefined) return { available: false, items: [], next: null };
+      const index = after === null ? 0 : Number(after);
+      return {
+        available: true,
+        items: pages[index] ?? [],
+        next: index + 1 < pages.length ? String(index + 1) : null,
+      };
     },
     async revokeInstallationToken(token) {
       record("revokeInstallationToken", token);

@@ -160,6 +160,7 @@ function harness(options: {
     actorLogin: "octocat",
     cancelRequestedAt: null,
     failure: null,
+    ticketRef: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     finishedAt: null,

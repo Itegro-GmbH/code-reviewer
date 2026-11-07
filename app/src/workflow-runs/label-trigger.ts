@@ -91,6 +91,12 @@ export const labelTriggerKey = (
   issueNumber: number,
 ): string => `${repositoryId}#${issueNumber}`;
 
+/** The ticket a run of a label is about, in the form `workflow_runs.ticket_ref` has (#923): `github:owner/repo#128`. */
+export const labelTicketRef = (
+  repoFullName: string,
+  issueNumber: number,
+): string => `github:${repoFullName}#${issueNumber}`;
+
 /** The request id a delivery starts a workflow under: the same delivery never makes a second run of the same workflow. */
 export const labelRequestId = (
   deliveryId: string,
@@ -205,6 +211,7 @@ export function createLabelTrigger(
             clientRequestId: labelRequestId(deliveryId, workflow.id),
             triggerKind: LABEL_TRIGGER_KIND,
             triggerKey,
+            ticketRef: labelTicketRef(labeled.repo.fullName, labeled.issue.number),
             createdBy: null,
             actorLogin,
           });

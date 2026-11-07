@@ -28,6 +28,7 @@ import {
 import type { GithubAppConfig } from "./config.ts";
 import { GithubAppError } from "./errors.ts";
 import { parseGithubEvent } from "./events.ts";
+import { parseTrackerChange } from "./tracker-events.ts";
 import {
   BRANCH_READ_TOKEN_PERMISSIONS,
   CHECK_TOKEN_PERMISSIONS,
@@ -38,6 +39,8 @@ import {
   ISSUE_ACTION_TOKEN_PERMISSIONS,
   NOTICE_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  TRACKER_BOARD_TOKEN_PERMISSIONS,
+  TRACKER_READ_TOKEN_PERMISSIONS,
   VERDICT_TOKEN_PERMISSIONS,
   jobTokenRepositoryIds,
   toImplementerAccessError,
@@ -760,6 +763,89 @@ export function createGithubAppProvider(
         return await (
           await getClient()
         ).listOpenPullRequests(integration.externalId, repo.fullName, signal);
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async parseTrackerChange(integration, request) {
+      const payload = await readJson(request);
+      if (payload === undefined)
+        return { kind: "ignored", reason: "the body is not valid JSON" };
+      return parseTrackerChange({
+        integrationId: integration.id,
+        eventName: request.headers.get("x-github-event") ?? "",
+        payload,
+      });
+    },
+
+    async readTrackerPage(integration, repo, step, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      const scope = (permissions: InstallationPermissions): JobTokenScope => ({
+        repositoryIds,
+        permissions,
+      });
+      try {
+        const client = await getClient();
+        if (step.phase === "issues") {
+          const page = await client.readTrackerIssues(
+            integration.externalId,
+            scope(TRACKER_READ_TOKEN_PERMISSIONS),
+            repo.fullName,
+            step.page,
+            signal,
+          );
+          return { phase: "issues", items: page.items, last: page.last };
+        }
+        if (step.phase === "checks") {
+          const page = await client.readTrackerChecks(
+            integration.externalId,
+            scope(TRACKER_READ_TOKEN_PERMISSIONS),
+            repo.fullName,
+            step.page,
+            signal,
+          );
+          return {
+            phase: "checks",
+            pullRequests: page.pullRequests,
+            last: page.last,
+          };
+        }
+        const page = await client.readTrackerBoard(
+          integration.externalId,
+          scope(TRACKER_BOARD_TOKEN_PERMISSIONS),
+          repo.fullName,
+          step.after,
+          signal,
+        );
+        return { phase: "board", ...page };
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async readChecksState(integration, repo, headSha, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      try {
+        return await (
+          await getClient()
+        ).readChecksState(
+          integration.externalId,
+          { repositoryIds, permissions: TRACKER_READ_TOKEN_PERMISSIONS },
+          repo.fullName,
+          headSha,
+          signal,
+        );
       } catch (error) {
         throw toReadError(error);
       }

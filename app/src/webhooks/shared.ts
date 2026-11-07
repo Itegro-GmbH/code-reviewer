@@ -18,6 +18,7 @@ import {
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
 import { reviewSettingsServiceFor } from "../review-settings/shared.ts";
+import { trackerMirrorFor } from "../tracker/shared.ts";
 import { createAutomaticReviewSettingsSource } from "./automatic-review-settings.ts";
 import { consoleWebhookLogger } from "./logger.ts";
 import { createJobQueueReviewTriggerIntake } from "./job-queue-intake.ts";
@@ -59,6 +60,7 @@ export function getGithubAppWebhookHandler(
         settings: reviewSettingsServiceFor(workspaceId),
       }),
       intake: getJobQueueReviewTriggerIntake(workspaceId),
+      tracker: trackerMirrorFor(workspaceId),
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),

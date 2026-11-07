@@ -1375,10 +1375,72 @@ export interface WorkflowRunsTable {
    * the facts those steps read. The run stays `running` until they are over. Null otherwise.
    */
   failure: ColumnType<string | null, string | null | undefined, string | null>;
+  /** #923: the ticket the run is about (`github:owner/repo#128`); null for a run that is about none. */
+  ticket_ref: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */
   finished_at: string | null;
+}
+
+/**
+ * #923: one issue or pull request of a repository, the read cache of the ticket mirror (`src/tracker/`). Rebuilt from the provider at
+ * any time and never the source of truth; the values are those of the provider, nothing is mapped.
+ */
+export interface TrackerItemsTable {
+  workspace_id: string;
+  repository_id: string;
+  /** Reserved for #922 (the project as the ticket source); null until then. */
+  project_id: string | null;
+  provider: string;
+  /** "owner/name". */
+  repo: string;
+  number: number;
+  /** The provider's global id; how a board item finds its row. */
+  node_id: string;
+  /** `issue` or `pull_request`. */
+  kind: string;
+  /** `open` or `closed`. */
+  state: string;
+  /** GitHub's reason (`completed`, `not_planned`, `reopened`); `merged` for a merged pull request. */
+  state_reason: string | null;
+  /** The issue type as the organization named it. */
+  type: string | null;
+  title: string;
+  body_excerpt: string;
+  /** JSON text: `[{ "name", "color" }]`. */
+  labels: string;
+  /** JSON text: `[{ "login" }]`. */
+  assignees: string;
+  /** The Status of the project board as the board names it. */
+  board_status: string | null;
+  parent_number: number | null;
+  /** JSON text: the numbers of the pull requests that close the issue. */
+  pull_requests: string;
+  /** JSON text: the numbers of the issues the pull request closes. */
+  closes: string;
+  checks_state: string | null;
+  /** The provider's time of the last change. */
+  updated_at: string;
+  /** When the row was last written from the provider. */
+  synced_at: string;
+}
+
+/** #923: where the full sync of a repository's tickets stands. */
+export interface TrackerSyncStateTable {
+  repository_id: string;
+  workspace_id: string;
+  project_id: string | null;
+  /** JSON text: the phase and position of the sync under way; null when none is. */
+  cursor: string | null;
+  /** When the sync under way began. */
+  started_at: string | null;
+  last_full_sync_at: string | null;
+  updated_at: string;
 }
 
 /** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded`, `failed` or `skipped` (#846). */
@@ -1530,6 +1592,8 @@ export interface Database {
   workflow_versions: WorkflowVersionsTable;
   workflow_runs: WorkflowRunsTable;
   workflow_step_runs: WorkflowStepRunsTable;
+  tracker_items: TrackerItemsTable;
+  tracker_sync_state: TrackerSyncStateTable;
   profiles: ProfilesTable;
   profile_versions: ProfileVersionsTable;
   runners: RunnersTable;
