@@ -15,13 +15,16 @@
 //  5. the input fits the trigger's `input` schema (checked again here with `checkResultValue`: the validator knows the schema, only a
 //     start knows the values);
 //  6. the repository is one of the workspace's, active, and the platform still resolves it: that of the `ticket` input when the trigger
-//     has one (the ticket is read through the provider and handed to the steps as `trigger.ticket`), else the one named by `input.repo`.
+//     has one (the ticket is read through the provider and handed to the steps as `trigger.ticket`), else the one named by `input.repo`;
+//  7. the repository is the ticket source of the project the lane belongs to (#922; `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` for a ticket,
+//     `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT` for `input.repo`). A lane without a project (archived, or written by an older version) is not held to it.
 // Then the run is written with the version the workflow has now, and the engine is told to start it.
 import type {
   StoredStepRun,
   StoredWorkflowRun,
   WorkflowRunsRepository,
 } from "../db/repositories/workflow-runs-repository.ts";
+import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
@@ -167,6 +170,10 @@ export type WorkflowRunServiceDependencies = {
   /** #920: the engine that takes the answer. Left out: the service has no `answer`, as before. */
   engine?: Pick<WorkflowEngine, "answer">;
   workflows: Pick<WorkflowsRepository, "get">;
+  /** The projects of the workspace (#922): the lane's project says which repository its runs may work in. */
+  projects: Pick<ProjectsRepository, "getById">;
+  /** The full name of a repository of the workspace (`owner/name`), or undefined when there is none; names the project's repository in a refusal. */
+  repositoryName(repositoryId: string): Promise<string | undefined>;
   /**
    * The repository of the workspace the full name (`owner/name`, case ignored) stands for, with its default branch, or undefined
    * when it is none of the workspace's or not active. Throws `WORKFLOW_RUN_GITHUB_UNAVAILABLE` when the platform cannot be asked.
@@ -493,6 +500,43 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
           "There is no such repository in this workspace.",
         );
+      // #922: a lane works within the ticket source of its project; checked before the platform is asked about the ticket.
+      const project =
+        found.workflow.projectId === null
+          ? undefined
+          : await deps.projects.getById(found.workflow.projectId);
+      if (
+        project !== undefined &&
+        project.ticketSource.repositoryId !== repository.id
+      ) {
+        const sourceName = await deps.repositoryName(
+          project.ticketSource.repositoryId,
+        );
+        const available = sourceName === undefined ? [] : [sourceName];
+        const ticketGiven = ref !== undefined;
+        throw new WorkflowRunError(
+          ticketGiven
+            ? "WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT"
+            : "WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT",
+          ticketGiven
+            ? "The ticket is not in the ticket source of the project of this lane."
+            : "The repository is not the ticket source of the project of this lane.",
+          {
+            issues: [
+              {
+                path: ticketGiven ? "input.ticket" : "input.repo",
+                code: ticketGiven
+                  ? "ticket_outside_project"
+                  : "repository_outside_project",
+                message: ticketGiven
+                  ? "The ticket must be an issue of the repository the project takes its tickets from."
+                  : "The repository must be the one the project takes its tickets from.",
+                available,
+              },
+            ],
+          },
+        );
+      }
       let ticket: TicketValue | undefined;
       if (ref !== undefined) {
         const issue = await deps.readTicket(repository.id, ref.ref.number);

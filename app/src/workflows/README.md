@@ -29,9 +29,10 @@ No database, no I/O: a document and a `WorkflowResolver` go in, a list of proble
 | `resolver.ts`                                     | `WorkflowResolver`: which profiles (with the facts of the versions a document runs), environments and connectors exist, as plain data                                                                           |
 | `profile-refs.ts`                                 | Which profiles and versions a document names (an iterative walk), and the resolver's profile list built from the rows read for exactly those versions                                                           |
 | `issues.ts`, `limits.ts`                          | The issue shape and its stable codes (form codes are the ones the JSON Schema states too), the bounds                                                                                                           |
-| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list, get, create, save a version, archive), the handlers, the route codes, the wiring                                                                                         |
+| `service.ts`, `http.ts`, `errors.ts`, `shared.ts` | The workspace service (validate, list and create within a project, get, save a version, archive, copy built-in lanes), the handlers, the route codes, the wiring                                                |
+| `built-in-lanes.ts`                               | The two documents a new project copies as its first lanes (`issue-to-pr`, `review-a-pull-request`), as data in format v1; `issue-to-pr` is the example of `docs/workflows.md`                                   |
 
-The storage is `workflows` (name, current version, `archived_at`) and `workflow_versions` (the document text of every version; the database refuses an
+The storage is `workflows` (name, current version, `archived_at`, and since #922 `project_id`: a lane belongs to exactly one project, and its name is held once per project) and `workflow_versions` (the document text of every version; the database refuses an
 UPDATE, only the erasure of a workspace deletes) in `src/db/repositories/workflows-repository.ts`, scoped to a workspace. A workflow is archived, not
 deleted: hidden from the list, no new version, free name, versions kept.
 

@@ -575,6 +575,131 @@ describe("the board of the full sync", () => {
   });
 });
 
+describe("the boards of a repository (#922)", () => {
+  const node = (overrides: Record<string, unknown>) => ({
+    id: "PVT_1",
+    number: 1,
+    title: "Roadmap",
+    closed: false,
+    field: {
+      id: "PVTSSF_1",
+      options: [{ name: "Todo" }, { name: "In Progress" }, { name: "Done" }],
+    },
+    ...overrides,
+  });
+
+  // #922-T40
+  it("lists the open boards with the Status field and its options, with a token that holds the board permission and nothing else", async () => {
+    const { client, calls } = scripted((call) =>
+      call.path === "/graphql"
+        ? {
+            json: {
+              data: {
+                repository: {
+                  projectsV2: {
+                    nodes: [
+                      node({}),
+                      node({
+                        id: "PVT_2",
+                        number: 2,
+                        title: "Old",
+                        closed: true,
+                      }),
+                      // A board without a Status field: it can be listed, no ticket can be moved on it.
+                      node({
+                        id: "PVT_3",
+                        number: 3,
+                        title: "Loose",
+                        field: null,
+                      }),
+                      // Nodes of a shape that is none are skipped.
+                      { id: 5 },
+                    ],
+                  },
+                },
+              },
+            },
+          }
+        : undefined,
+    );
+
+    const answer = await client.listRepositoryBoards(
+      "4242",
+      BOARD,
+      "acme/widgets",
+    );
+
+    expect(answer).toEqual({
+      available: true,
+      boards: [
+        {
+          projectV2Id: "PVT_1",
+          number: 1,
+          title: "Roadmap",
+          statusFieldId: "PVTSSF_1",
+          statuses: ["Todo", "In Progress", "Done"],
+        },
+        {
+          projectV2Id: "PVT_3",
+          number: 3,
+          title: "Loose",
+          statusFieldId: null,
+          statuses: [],
+        },
+      ],
+    });
+    expect(tokenRequests(calls)[0]?.body).toEqual({
+      repository_ids: [7001],
+      permissions: BOARD.permissions,
+    });
+    const query = calls.find((call) => call.path === "/graphql")?.body as {
+      query: string;
+      variables: Record<string, unknown>;
+    };
+    expect(query.variables).toMatchObject({ owner: "acme", name: "widgets" });
+    // Closed boards are left out at GitHub, so they cannot fill the page and hide the open ones.
+    expect(query.query).toContain('query:"is:open"');
+  });
+
+  // #922-T41
+  it.each(["FORBIDDEN", "INSUFFICIENT_SCOPES", "NOT_FOUND"])(
+    "is not available when GitHub answers with only %s errors",
+    async (type) => {
+      const { client } = scripted((call) =>
+        call.path === "/graphql"
+          ? { json: { data: null, errors: [{ type, message: "no" }] } }
+          : undefined,
+      );
+
+      expect(
+        await client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
+      ).toEqual({ available: false, boards: [] });
+    },
+  );
+
+  // #922-T42
+  it("is not available when GitHub refuses the token for the board permission, and fails on anything else", async () => {
+    const refused = scripted((call) =>
+      /\/access_tokens$/.test(call.path)
+        ? {
+            status: 422,
+            json: { message: "The permissions requested are not granted." },
+          }
+        : undefined,
+    );
+    expect(
+      await refused.client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
+    ).toEqual({ available: false, boards: [] });
+
+    const broken = scripted((call) =>
+      call.path === "/graphql" ? { status: 500, json: {} } : undefined,
+    );
+    await expect(
+      broken.client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
+    ).rejects.toBeInstanceOf(GithubAppError);
+  });
+});
+
 describe("the board status of one ticket (#932)", () => {
   const answer = (projectItems: unknown) => ({
     json: { data: { node: { projectItems } } },

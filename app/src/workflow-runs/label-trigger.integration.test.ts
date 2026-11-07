@@ -11,6 +11,7 @@ import { createWorkflowsRepository } from "../db/repositories/workflows-reposito
 import { sha } from "../test-support/jobs.ts";
 import {
   SUMMARY_RESULT,
+  USER,
   startEngineHarness,
   type EngineHarness,
 } from "../test-support/workflow-engine-harness.ts";
@@ -139,6 +140,95 @@ function labeledWith(issue: Record<string, unknown>) {
   };
   return { ...payload, issue: { ...payload.issue, ...issue } };
 }
+
+/** A second repository of the installation with a project of its own (#922), and the delivery of a label on its issue 5. */
+async function addOtherProject(app: EngineHarness) {
+  app.h.fake.setRepositories(4242, [
+    { id: 7001, fullName: "acme/widgets" },
+    { id: 7002, fullName: "acme/other" },
+  ]);
+  await app.h.sync.syncAll();
+  const repository = (await app.h.repositories.list()).find(
+    (candidate) => candidate.fullName === "acme/other",
+  );
+  if (repository === undefined) throw new Error("seeding failed");
+  const activated = await app.h.projects.activateProject(repository.id);
+  const payload = labeledWith({
+    number: 5,
+    html_url: "https://github.com/acme/other/issues/5",
+  }) as unknown as Record<string, unknown> & {
+    repository: Record<string, unknown>;
+  };
+  return {
+    project: activated.project,
+    labelOnOther: {
+      ...payload,
+      repository: {
+        ...payload.repository,
+        id: 7002,
+        name: "other",
+        full_name: "acme/other",
+        html_url: "https://github.com/acme/other",
+      },
+    },
+  };
+}
+
+describe("a label starts only the lanes of the project whose ticket source is the repository (#922)", () => {
+  // #922-T21
+  it("ignores the lanes of another project and the workflows that belong to no project, and the label on another repository starts only its own project's lanes", async () => {
+    const { app } = await startHarness();
+    const other = await addOtherProject(app);
+    const own = await app.saveWorkflow(issueToPullRequest("Own lane"));
+    const elsewhere = await app.workflows.create(
+      {
+        name: "Lane of the other project",
+        document: JSON.stringify(
+          issueToPullRequest("Lane of the other project"),
+        ),
+        createdBy: USER.id,
+        projectId: other.project.id,
+      },
+      100,
+    );
+    const homeless = await app.workflows.create(
+      {
+        name: "Without a project",
+        document: JSON.stringify(issueToPullRequest("Without a project")),
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!elsewhere.ok || !homeless.ok) throw new Error("seeding failed");
+
+    await app.h.deliver("issues.labeled", { deliveryId: "delivery-1" });
+    expect(await runsOf(app, own.id)).toHaveLength(1);
+    expect(await runsOf(app, elsewhere.workflow.id)).toHaveLength(0);
+    expect(await runsOf(app, homeless.workflow.id)).toHaveLength(0);
+
+    await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-2",
+      payload: other.labelOnOther,
+    });
+    expect(await runsOf(app, own.id)).toHaveLength(1);
+    expect(await runsOf(app, elsewhere.workflow.id)).toHaveLength(1);
+    expect(await runsOf(app, homeless.workflow.id)).toHaveLength(0);
+  });
+
+  // #922-T22
+  it("starts nothing for a lane whose project is switched off", async () => {
+    const { app } = await startHarness();
+    const workflow = await app.saveWorkflow(issueToPullRequest());
+    await app.h.projects.deactivateProject(app.repository.id);
+
+    const response = await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-1",
+    });
+
+    expect(response.status).toBe(202);
+    expect(await runsOf(app, workflow.id)).toHaveLength(0);
+  });
+});
 
 describe("the webhook: a label on an issue starts the workflows that wait for it", () => {
   // #845-T30
