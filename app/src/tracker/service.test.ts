@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it, vi } from "vitest";
+import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import { TrackerError } from "./errors.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
@@ -207,6 +208,23 @@ describe("the list of the tickets of a project's repository", () => {
     expect((await service.listIssues("r-1", OPEN)).sync.inProgress).toBe(true);
   });
 
+  // #932-T21
+  it("says when a row was last written, so that a sync with nothing delivered since can be told", async () => {
+    const { service, tracker } = await setup();
+    const { lastFullSyncAt, lastWriteAt } = (
+      await service.listIssues("r-1", OPEN)
+    ).sync;
+    // The rows of the test were written after the sync it names: a delivery arrived since.
+    expect(lastWriteAt).toEqual(expect.any(String));
+    expect(lastWriteAt && lastFullSyncAt && lastWriteAt > lastFullSyncAt).toBe(
+      true,
+    );
+    expect(lastWriteAt).toBe(await tracker.newestWriteAt("r-1"));
+
+    tracker.clear();
+    expect(await tracker.newestWriteAt("r-1")).toBeNull();
+  });
+
   // #923-T59
   it.each([
     ["an id that is no repository", "nope", {}, "TRACKER_REPOSITORY_NOT_FOUND"],
@@ -258,6 +276,27 @@ describe("the full sync of a repository", () => {
       expect(run).not.toHaveBeenCalled();
     },
   );
+
+  // #932-R23
+  it("keeps the code of the platform's failure on the error, so that the nightly resync can tell a rate limit", async () => {
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const { service } = await setup({
+      sync: async () => {
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_RATE_LIMITED",
+          "GitHub rate limit reached.",
+        );
+      },
+    });
+
+    await expect(service.sync("r-1")).rejects.toMatchObject({
+      code: "TRACKER_SYNC_FAILED",
+      providerCode: "INTEGRATION_ACCESS_RATE_LIMITED",
+    });
+    error.mockRestore();
+  });
 
   // #923-T62
   it("answers a failure of GitHub with one code and tells the log nothing but the code", async () => {

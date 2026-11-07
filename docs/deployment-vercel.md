@@ -90,8 +90,10 @@ and uses Postgres only.
 - No work at start: the schema is migrated by a command (`pnpm migrate`), the first-run setup code is made by a
   command (`pnpm setup-code`), and `/api/health` answers `503` with `{"status":"error","code":"SCHEMA_BEHIND"}` while
   the database lacks a migration of this version.
-- Two crons (`app/vercel.json`): `/api/internal/repository-sync` once a day and `/api/internal/dispatch-sweep` **every
-  2 hours**. Both need `CRON_SECRET`.
+- Three crons (`app/vercel.json`): `/api/internal/repository-sync` once a day, `/api/internal/dispatch-sweep` **every
+  2 hours** and `/api/internal/tracker-resync` once a night (the full sync of the ticket mirror of every active project,
+  #932: it heals what a missed delivery left behind; a deployment without the factory answers `skipped` and asks GitHub
+  for nothing). All three need `CRON_SECRET`.
 
 ## 2. What you need first
 
@@ -117,7 +119,7 @@ and uses Postgres only.
 
   | Project | Root directory | Framework | Config |
   |---|---|---|---|
-  | App | `app/` | Next.js | `app/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-app...`, function durations, the two crons |
+  | App | `app/` | Next.js | `app/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-app...`, function durations, the three crons |
   | Dispatcher | `dispatcher/` | Hono (the entry is `src/index.ts`, the only file named `app`, `index` or `server` that imports `hono`) | `dispatcher/vercel.json`: region `fra1`, install command `pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...`, `maxDuration` 1800 for `src/index.ts`, one cron (the reaper, every 5 minutes) |
 
   Both need Node.js 24 (`engines` in both `package.json` files, `.nvmrc`). Set the Node.js version of each project to

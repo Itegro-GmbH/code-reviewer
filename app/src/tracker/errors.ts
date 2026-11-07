@@ -33,10 +33,20 @@ export const TRACKER_ERROR_STATUS: Record<TrackerErrorCode, number> = {
 export class TrackerError extends Error {
   readonly safeMessage = true as const;
   readonly code: TrackerErrorCode;
+  /**
+   * For `TRACKER_SYNC_FAILED`: the code the platform's failure had (`INTEGRATION_ACCESS_RATE_LIMITED`, ...), for the log and for the
+   * nightly resync to tell a rate limit. Never the message, which may carry what the platform answered.
+   */
+  readonly providerCode: string | undefined;
 
-  constructor(code: TrackerErrorCode, message: string) {
+  constructor(
+    code: TrackerErrorCode,
+    message: string,
+    options?: { providerCode?: string },
+  ) {
     super(message);
     this.name = "TrackerError";
     this.code = code;
+    this.providerCode = options?.providerCode;
   }
 }

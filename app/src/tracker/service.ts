@@ -62,8 +62,16 @@ export type TicketList = {
   repositoryId: string;
   repo: string;
   items: TicketListItem[];
-  /** Where the cache stands: when the last full sync ended, and whether one is under way. */
-  sync: { lastFullSyncAt: string | null; inProgress: boolean };
+  /**
+   * Where the cache stands: when the last full sync ended, whether one is under way, and when a row was last written (a delivery, or the
+   * sync). A `lastWriteAt` that is not after `lastFullSyncAt` says no delivery has arrived since the sync (#932): what the hint in Setup
+   * reads ("nothing has been delivered since the last full sync").
+   */
+  sync: {
+    lastFullSyncAt: string | null;
+    inProgress: boolean;
+    lastWriteAt: string | null;
+  };
 };
 
 export type TicketQuery = {
@@ -82,7 +90,12 @@ export type TrackerService = {
    */
   sync(
     repositoryId: string,
-    options?: { maxPages?: number; deadline?: number },
+    options?: {
+      maxPages?: number;
+      deadline?: number;
+      signal?: AbortSignal;
+      resume?: boolean;
+    },
   ): Promise<SyncProgress>;
 };
 
@@ -90,7 +103,10 @@ export type TrackerServiceDependencies = {
   repositories: Pick<RepositoriesRepository, "get">;
   integrations: Pick<IntegrationsRepository, "get">;
   projects: Pick<ProjectService, "getActiveProjectForRepository">;
-  tracker: Pick<TrackerRepository, "listItems" | "getSyncState">;
+  tracker: Pick<
+    TrackerRepository,
+    "listItems" | "getSyncState" | "newestWriteAt"
+  >;
   runs: Pick<WorkflowRunsRepository, "summarizeTickets">;
   sync: TrackerSync;
 };
@@ -190,6 +206,7 @@ export function createTrackerService(
         sync: {
           lastFullSyncAt: state?.lastFullSyncAt ?? null,
           inProgress: state?.cursor != null,
+          lastWriteAt: await deps.tracker.newestWriteAt(repository.id),
         },
       };
     },
@@ -208,12 +225,19 @@ export function createTrackerService(
         return await deps.sync.run(integration, repository, options);
       } catch (error) {
         // The code of the failure is for the log; the body of a failure of the platform is never repeated.
+        const providerCode =
+          error instanceof IntegrationError
+            ? error.code
+            : error instanceof Error
+              ? error.name
+              : "unknown";
         console.error(
-          `[tracker] sync of repository=${repository.id} failed (${error instanceof IntegrationError ? error.code : error instanceof Error ? error.name : "unknown"})`,
+          `[tracker] sync of repository=${repository.id} failed (${providerCode})`,
         );
         throw new TrackerError(
           "TRACKER_SYNC_FAILED",
           "GitHub could not be asked, or refused. The sync stands where it was; start it again.",
+          { providerCode },
         );
       }
     },

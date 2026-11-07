@@ -265,7 +265,7 @@ provider what the delivery changes in the cache (`parseTrackerChange`) and hands
 (`tracker` of `WorkspaceCollaborators`, wired in by the route like the workflows):
 
 - an event only the mirror reads (`sub_issues`, `projects_v2_item`, `check_suite`) is answered `tracker_updated` when a row changed and
-  `ignored` otherwise; when the cache cannot be written the delivery fails (503, `WEBHOOK_PROCESSING_FAILED`) and GitHub redelivers it;
+  `ignored` otherwise; when the cache cannot be written the delivery fails (503, `WEBHOOK_PROCESSING_FAILED`); GitHub does not retry it by itself, it can be redelivered by hand and the nightly resync heals it;
 - an event that also starts a review or a workflow (`issues`, `issue_comment`, `pull_request`) does that as before, and a failure of the
   mirror is only logged (by its code), so a broken cache never costs a review its start. When such a delivery starts nothing (an `edited`
   issue) and the mirror took it, the answer is `tracker_updated` instead of `ignored`;

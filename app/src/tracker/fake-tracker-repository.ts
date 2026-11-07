@@ -102,6 +102,22 @@ export function createFakeTrackerRepository(
       const row = visible(repositoryId, number);
       return row === undefined ? undefined : strip(row);
     },
+    async findItemByNode(nodeId) {
+      for (const item of items.values())
+        if (item.nodeId === nodeId && item.deletedAt === null)
+          return strip(item);
+      return undefined;
+    },
+    async newestWriteAt(repositoryId) {
+      let newest: string | null = null;
+      for (const item of items.values())
+        if (
+          item.repositoryId === repositoryId &&
+          (newest === null || item.syncedAt > newest)
+        )
+          newest = item.syncedAt;
+      return newest;
+    },
     async listItems(repositoryId, filter) {
       return rowsOf(repositoryId)
         .filter(
@@ -194,12 +210,13 @@ export function createFakeTrackerRepository(
             boardStatus: null,
           });
     },
-    async clearChecksStates(repositoryId) {
+    async clearChecksStatesOfClosed(repositoryId) {
       for (const item of rowsOf(repositoryId))
-        items.set(key(repositoryId, item.number), {
-          ...item,
-          checksState: null,
-        });
+        if (item.kind !== "pull_request" || item.state !== "open")
+          items.set(key(repositoryId, item.number), {
+            ...item,
+            checksState: null,
+          });
     },
     async removeNotWrittenSince(repositoryId, before) {
       let removed = 0;

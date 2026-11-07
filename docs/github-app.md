@@ -279,7 +279,7 @@ a project's repository: each of them updates the row of its ticket, for a reposi
 | `issues` | Tick "Issues" (the one-click way ticks it) | A label put on an open issue by a user account (sender type `User`; a machine account with a personal access token is one) starts the workflows of the workspace that wait for that label, but only one running run of a workflow for one issue. Pull requests, bots, organizations, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing. **An issue created from a template or form with `labels:` gets them when it is created, and that starts a run: keep the trigger label out of every issue template, above all in a public repository**. Mirror: every action (`opened`, `edited`, `closed`, `reopened`, `labeled`, `assigned`, `typed`, ..., `deleted` and `transferred` remove the ticket) updates the ticket |
 | `sub_issues` | Tick "Sub issues" (the one-click way ticks it) | Mirror only: an issue got a parent or lost it (`parent_issue_added`, `sub_issue_added`, `parent_issue_removed`, `sub_issue_removed`); only when both issues are in the same repository |
 | `check_suite` | Tick "Check suite" (the one-click way ticks it) | Mirror only: the checks of a commit started or finished; the app asks GitHub for the state of the checks of that commit and stores it on the open pull requests that have it as head (a pull request from a fork is not listed by GitHub in the suite, and its checks are read by the next full sync) |
-| `projects_v2_item` | Tick "Projects v2 item" by hand, see "The project board" | Mirror only: an item of an organization project board got another **Status**, or left the board |
+| `projects_v2_item` | Tick "Projects v2 item" by hand, see "The project board" | Mirror only: an item of an organization project board got another **Status**, was added, restored, archived or deleted |
 | `installation` | Always sent, nothing to tick | The app was installed, removed, suspended or unsuspended: creates or disables the installation in the app |
 | `installation_repositories` | Always sent, nothing to tick | Repositories were added to or removed from an installation: keeps the repository list current |
 
@@ -299,7 +299,9 @@ App that exists. Without it the mirror works as before and the status stays empt
 The token that reads the boards is made for the one call, limited to one repository and to `organization_projects: read` and
 `metadata: read` (`TRACKER_BOARD_TOKEN_PERMISSIONS`); the token of the other reads of the sync holds `issues`, `pull_requests` and
 `checks`, all `read`, and `metadata: read` (`TRACKER_READ_TOKEN_PERMISSIONS`). Both are in `job-access.ts` and are switched off
-after the call. Boards of a personal account cannot be read with an installation token: their items show no status.
+after the call. When an item is added to a board, restored, archived or deleted (GitHub's delivery names no status for these), the App asks
+GitHub for the status of that one ticket with a token of the same kind and stores what the ticket's remaining boards say, so an item that leaves one board
+keeps the status another board gives it (#932). Boards of a personal account cannot be read with an installation token: their items show no status.
 
 Every other event (for example GitHub's `ping`, or `push`) is answered with `202` and ignored. The list is the
 set of events the webhook code reads (`webhook-fields.ts` next to `job-access.ts`: `WEBHOOK_READ_FIELDS` for the reviews and workflows,

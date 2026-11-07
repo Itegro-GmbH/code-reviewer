@@ -346,6 +346,12 @@ export type TrackerChange =
     }
   /** An item of a project board got another status (`null`: it has none now, or left the board). */
   | { kind: "board_status_changed"; nodeId: string; status: string | null }
+  /**
+   * An item was added to a board, restored on it, archived or deleted: the delivery names no status, and the ticket may be on other boards,
+   * so the cache asks the platform where the ticket stands now. `removed`: the item left this board; it is what the cache falls back to
+   * (an empty status) when the boards cannot be read.
+   */
+  | { kind: "board_item_reread"; nodeId: string; removed: boolean }
   /** The checks of a commit changed: the cache asks the platform for the state of these pull requests. */
   | {
       kind: "checks_changed";

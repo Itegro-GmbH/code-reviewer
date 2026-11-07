@@ -116,6 +116,13 @@ export type TrackerRepository = {
     repositoryId: string,
     number: number,
   ): Promise<TrackerItem | undefined>;
+  /** The cached item the provider's id names, in any repository of the workspace; undefined for none and for a tombstone. */
+  findItemByNode(nodeId: string): Promise<TrackerItem | undefined>;
+  /**
+   * When the cache of the repository was last written (the newest `syncedAt` of its rows, a tombstone included): by a delivery or by a
+   * sync. After the end of a full sync (`lastFullSyncAt`) it says whether a delivery has arrived since; null for no row.
+   */
+  newestWriteAt(repositoryId: string): Promise<string | null>;
   /** The items of the repository, the newest change first. */
   listItems(
     repositoryId: string,
@@ -163,8 +170,11 @@ export type TrackerRepository = {
     repositoryId: string,
     since: string,
   ): Promise<void>;
-  /** Forgets the checks of every pull request (a full sync of them starts from nothing). */
-  clearChecksStates(repositoryId: string): Promise<void>;
+  /**
+   * Forgets the checks of every row that is not an open pull request (the end of a full sync of the checks: every open pull request was
+   * read, and a state the platform does not know was written as none).
+   */
+  clearChecksStatesOfClosed(repositoryId: string): Promise<void>;
   /**
    * Removes the items not written since `before`; answers how many. Tombstones go only when they were written last more than
    * `TOMBSTONE_KEPT_MS` before `before`.
@@ -326,6 +336,27 @@ export function createTrackerRepository(
       return row === undefined ? undefined : itemFrom(row);
     },
 
+    async findItemByNode(nodeId) {
+      const row = await db
+        .selectFrom("tracker_items")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("node_id", "=", nodeId)
+        .where("deleted_at", "is", null)
+        .executeTakeFirst();
+      return row === undefined ? undefined : itemFrom(row);
+    },
+
+    async newestWriteAt(repositoryId) {
+      const row = await db
+        .selectFrom("tracker_items")
+        .select((eb) => eb.fn.max("synced_at").as("newest"))
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .executeTakeFirst();
+      return row?.newest ?? null;
+    },
+
     async listItems(repositoryId, filter) {
       let query = db
         .selectFrom("tracker_items")
@@ -444,13 +475,16 @@ export function createTrackerRepository(
         .execute();
     },
 
-    async clearChecksStates(repositoryId) {
+    async clearChecksStatesOfClosed(repositoryId) {
       await db
         .updateTable("tracker_items")
         .set({ checks_state: null })
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("checks_state", "is not", null)
+        .where((eb) =>
+          eb.or([eb("kind", "<>", "pull_request"), eb("state", "<>", "open")]),
+        )
         .execute();
     },
 
