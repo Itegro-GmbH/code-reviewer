@@ -894,6 +894,53 @@ describe("a job of the implementer kind in the claim", () => {
   });
 });
 
+describe("a turn that ends with a question (#920)", () => {
+  // #920-T07
+  it("has a valid example of the question, alone and inside the result; the job input says whether a turn may ask", () => {
+    const result = example("RunnerResult");
+    result.implementer.agentAsk = example("ImplementerAgentAsk");
+    const input = example("RunnerJobInput");
+    input.implementer.resultSchema = example("ImplementerResultSchema");
+    input.implementer.canAsk = true;
+
+    expect(accepts("ImplementerAgentAsk", example("ImplementerAgentAsk"))).toBe(
+      true,
+    );
+    expect(accepts("RunnerResult", result)).toBe(true);
+    expect(accepts("RunnerJobInput", input)).toBe(true);
+    input.implementer.canAsk = "yes";
+    expect(accepts("RunnerJobInput", input)).toBe(false);
+    expect(
+      contract.check("ClaimRequest", {
+        engines: ["implementer"],
+        features: ["implementer_ask"],
+      }).valid,
+    ).toBe(true);
+  });
+
+  // #920-T07
+  it("refuses a question that is no closed object with a question of 1 to 2000 characters, at most 10 options of at most 200", () => {
+    const bad = [
+      [],
+      "why",
+      {},
+      { question: "" },
+      { question: "q".repeat(2001) },
+      { question: "q", answer: "x" },
+      { question: "q", options: [] },
+      { question: "q", options: Array(11).fill("a") },
+      { question: "q", options: ["a".repeat(201)] },
+      { question: "q", options: [3] },
+      { question: "q", context: "c".repeat(4001) },
+    ];
+    for (const value of bad)
+      expect(accepts("ImplementerAgentAsk", value), JSON.stringify(value)).toBe(
+        false,
+      );
+    expect(accepts("ImplementerAgentAsk", { question: "q" })).toBe(true);
+  });
+});
+
 describe("the result schema and the result of a turn (#843)", () => {
   function withSchema(schema: unknown): Document {
     const input = example("RunnerJobInput");

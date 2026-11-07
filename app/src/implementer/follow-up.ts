@@ -126,6 +126,8 @@ export type ContinueOptions = {
   costCapCents?: number;
   /** How many minutes the turn may run; left out: those of the last turn. */
   timeLimitMinutes?: number;
+  /** #920: the request id may start with the prefix that is the engine's alone (`wf-`); a request body never gets this. */
+  workflowStep?: boolean;
 };
 
 export type FollowUps = {
@@ -463,7 +465,9 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
 
   return {
     async continueSession(user, sessionId, body, options = {}) {
-      const checked = validateContinueInput(body);
+      const checked = validateContinueInput(body, {
+        workflowStep: options.workflowStep === true,
+      });
       if (!checked.ok)
         throw new ImplementerError(
           "IMPLEMENTER_REQUEST_INVALID",

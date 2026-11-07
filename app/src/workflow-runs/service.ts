@@ -43,6 +43,8 @@ import {
   unsupportedStep,
   type RunTrigger,
 } from "./document.ts";
+import { parseStepAsk, type StepAsk } from "./ask.ts";
+import type { WorkflowEngine } from "./engine.ts";
 import { WorkflowRunError } from "./errors.ts";
 import {
   MICRO_USD_PER_USD,
@@ -76,6 +78,13 @@ export type StepView = {
   costBasis: "reported" | "estimated" | "limit" | "subscription" | null;
   /** The values later steps refer to; null until the step succeeded. */
   output: unknown;
+  /**
+   * #920: the question the step's turn ended with and what became of it (`open` while the step is `waiting`, `answered` with who answered
+   * and how); null for a step that never asked. Agent text and a person's: shown as plain text.
+   */
+  ask: StepAsk | null;
+  /** #920: the id of the comment that carries the question on the ticket or the pull request, once it is posted; null otherwise. */
+  waitingOnCommentId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -136,12 +145,27 @@ export type WorkflowRunService = {
    * A repeat and a run that is over change nothing and say so. Throws `WORKFLOW_RUN_NOT_FOUND`.
    */
   cancel(workflowId: string, runId: string): Promise<CancelledRun>;
+  /**
+   * #920: answers the question the run waits for, from the page of the run: an option by its number (from 1) and/or a text. Whoever may start
+   * a run may answer one. The answer is recorded with the person's GitHub login, or with none (`by: null`) for an account without one: an
+   * email address is never written on a ticket. The step and the run go on (the engine starts the turn that continues the session). Throws `WORKFLOW_RUN_NOT_FOUND`,
+   * `WORKFLOW_RUN_REQUEST_INVALID` for a body that is no answer, `WORKFLOW_RUN_NOT_WAITING`, `WORKFLOW_RUN_QUESTION_CHANGED` (the body's
+   * `question` is not the one that waits) and `WORKFLOW_RUN_ANSWER_INVALID`.
+   */
+  answer(
+    user: { id: string; githubLogin: string | null },
+    workflowId: string,
+    runId: string,
+    body: unknown,
+  ): Promise<{ run: RunView }>;
   /** The newest runs of a workflow, without their steps. */
   list(workflowId: string): Promise<{ runs: RunSummaryView[] }>;
 };
 
 export type WorkflowRunServiceDependencies = {
   runs: WorkflowRunsRepository;
+  /** #920: the engine that takes the answer. Left out: the service has no `answer`, as before. */
+  engine?: Pick<WorkflowEngine, "answer">;
   workflows: Pick<WorkflowsRepository, "get">;
   /**
    * The repository of the workspace the full name (`owner/name`, case ignored) stands for, with its default branch, or undefined
@@ -230,6 +254,8 @@ function stepView(step: StoredStepRun): StepView {
     costUsd: step.costMicroUsd === null ? null : usd(step.costMicroUsd),
     costBasis: step.costBasis,
     output: jsonOrNull(step.output),
+    ask: parseStepAsk(step.ask) ?? null,
+    waitingOnCommentId: step.waitingOnCommentId,
     errorCode: step.errorCode,
     errorMessage: step.errorMessage,
     createdAt: step.createdAt,
@@ -323,6 +349,12 @@ function startedTrigger(
     );
   return only;
 }
+
+const ANSWER_REFUSALS = {
+  answer_empty: "The answer is empty: choose an option or write a text.",
+  answer_too_long: "The answer is too long.",
+  option_unknown: "The question has no such option.",
+} as const;
 
 export function createWorkflowRunService(
   deps: WorkflowRunServiceDependencies,
@@ -530,7 +562,8 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_NOT_FOUND",
           "There is no such run of this workflow.",
         );
-      if (found.status !== "running")
+      // #920: a run that waits for an answer is stopped too: nobody can answer it any more.
+      if (found.status !== "running" && found.status !== "waiting")
         return { run: await view(found), outcome: "already_ended" };
       // Under the lock of the run, like every decision about it: of two calls one marks the run, the other finds the mark.
       const marked = await deps.runs.lockRun(runId, (lock) =>
@@ -544,10 +577,76 @@ export function createWorkflowRunService(
         outcome:
           marked === true
             ? "requested"
-            : current.status === "running"
+            : current.status === "running" || current.status === "waiting"
               ? "already_requested"
               : "already_ended",
       };
+    },
+
+    async answer(user, workflowId, runId, body) {
+      checkId(workflowId);
+      const invalid = (message: string) =>
+        new WorkflowRunError("WORKFLOW_RUN_REQUEST_INVALID", message);
+      if (!isRecord(body)) throw invalid("The body must be a JSON object.");
+      for (const key of Object.keys(body))
+        if (key !== "choice" && key !== "text" && key !== "question")
+          throw invalid(`The body has no field ${key.slice(0, 40)}.`);
+      const { choice, text, question } = body;
+      if (
+        !isRecord(question) ||
+        typeof question.stepRunId !== "string" ||
+        question.stepRunId === "" ||
+        question.stepRunId.length > 128 ||
+        typeof question.n !== "number" ||
+        !Number.isSafeInteger(question.n)
+      )
+        throw invalid(
+          "question must name the question that is answered: { stepRunId, n }.",
+        );
+      if (
+        choice !== undefined &&
+        (typeof choice !== "number" || !Number.isSafeInteger(choice))
+      )
+        throw invalid("choice must be the number of an option, from 1.");
+      if (text !== undefined && typeof text !== "string")
+        throw invalid("text must be a text.");
+      const found = await deps.runs.getRun(runId);
+      if (found === undefined || found.workflowId !== workflowId)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_FOUND",
+          "There is no such run of this workflow.",
+        );
+      if (deps.engine === undefined)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_WAITING",
+          "This run does not wait for an answer.",
+        );
+      const answered = await deps.engine.answer(runId, {
+        question: { stepRunId: question.stepRunId, n: question.n },
+        ...(choice === undefined ? {} : { choice }),
+        ...(text === undefined ? {} : { text }),
+        by: user.githubLogin,
+        via: "ui",
+      });
+      if (answered.outcome === "refused") {
+        if (answered.code === "question_changed")
+          throw new WorkflowRunError(
+            "WORKFLOW_RUN_QUESTION_CHANGED",
+            "This question was already answered or replaced.",
+          );
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_ANSWER_INVALID",
+          ANSWER_REFUSALS[answered.code],
+        );
+      }
+      if (answered.outcome === "not_waiting")
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_NOT_WAITING",
+          "This run does not wait for an answer: it was answered already, or it is being stopped.",
+        );
+      // The turn that goes on starts after the response, like the first steps of a run.
+      deps.kick(runId);
+      return { run: await view((await deps.runs.getRun(runId)) ?? found) };
     },
 
     async list(workflowId) {

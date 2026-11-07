@@ -14,6 +14,7 @@ import { builtInProjectDynamicSettings } from "../review-settings/settings.ts";
 import { managedModelsOf } from "./managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
+import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createPinnedAddressReader } from "../review-settings/pinned-addresses.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
@@ -125,6 +126,13 @@ function sharedDeps(): WorkerApiDeps {
       createImplementerRepository(getDatabase(), job.workspaceId).getTurnByJob(
         job.id,
       ),
+    // #920: a turn a workflow step started is the only one that may ask: its delivery id is the request id of an agent step of this workspace.
+    startedByWorkflow: async (job) =>
+      job.deliveryId !== null &&
+      (await createWorkflowRunsRepository(
+        getDatabase(),
+        job.workspaceId,
+      ).isAgentStepDelivery(job.deliveryId, job.id)),
     // #841: what a follow-up turn is told about the turns before it, from the job's own workspace: the stored reports, the session's
     // summary and whether the conversation of the directly preceding turn is stored (#885).
     implementerResume: async (job, { turn, session }) => {

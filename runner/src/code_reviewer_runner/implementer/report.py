@@ -26,7 +26,7 @@ from typing import Any, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
-from .finish_tool import MAX_RESULT_BYTES, scan_bounds
+from .finish_tool import MAX_RESULT_BYTES, check_ask, scan_bounds
 from .history import MAX_COMMITS, MAX_FILES, MAX_PATH_CHARS, MAX_SUBJECT_CHARS, ChangeKind
 
 MAX_SUMMARY_CHARS = 8192
@@ -58,6 +58,7 @@ _BLOCK_KEYS = frozenset(
         "checkedOut",
         "resume",
         "agentResult",
+        "agentAsk",
     }
 )
 MAX_BRANCHES = 50
@@ -66,7 +67,7 @@ MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
 _OPTIONAL_KEYS = frozenset(
-    {"branchesDropped", "setup", "network", "checkedOut", "agentResult", "resume"}
+    {"branchesDropped", "setup", "network", "checkedOut", "agentResult", "agentAsk", "resume"}
 )
 _RESUME_KEYS = frozenset({"mode", "reason"})
 _RESUME_MODES = frozenset({"imported", "summary_only"})
@@ -274,6 +275,15 @@ def agent_result_ok(value: object) -> bool:
     )
 
 
+def agent_ask_ok(value: object) -> bool:
+    """`agentAsk` (#920): a question the app takes as data: the shape of `finish_tool.check_ask`
+    (closed, bounded), with `options` and `context` left out when there are none."""
+    given = as_object(value)
+    if given is None or check_ask(given):
+        return False
+    return "options" not in given or bool(given["options"])
+
+
 def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     if value is None:
         return allow_none
@@ -297,6 +307,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
     if "resume" in block and not _resume_ok(block["resume"]):
         return None
     if "agentResult" in block and not agent_result_ok(block["agentResult"]):
+        return None
+    if "agentAsk" in block and not agent_ask_ok(block["agentAsk"]):
         return None
     base, head, pushed = block["baseCommit"], block["headCommit"], block["pushed"]
     commits, files, branches = block["commits"], block["filesChanged"], block["branches"]

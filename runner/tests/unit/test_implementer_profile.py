@@ -107,3 +107,8 @@ def test_the_worker_names_the_feature_that_reads_the_profile() -> None:
 # #909-T13
 def test_the_worker_names_the_feature_that_reads_the_start_branch() -> None:
     assert "implementer_start_branch" in WORKER_FEATURES
+
+
+# #920-T19
+def test_the_worker_names_the_feature_that_offers_the_question() -> None:
+    assert "implementer_ask" in WORKER_FEATURES

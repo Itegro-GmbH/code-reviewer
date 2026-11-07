@@ -173,6 +173,28 @@ describe("the body that starts a task", () => {
     ]);
   });
 
+  // #920-T183
+  it.each(["wf-", "wf-run-1-0", "wf-run-1-0-q2"])(
+    "refuses the client request id %j: the prefix is the engine's alone, so a task cannot pass for a workflow step",
+    (clientRequestId) => {
+      expect(issuesOf({ ...VALID, clientRequestId })).toEqual([
+        { field: "clientRequestId", code: "request_id_reserved" },
+      ]);
+      // The engine hands its own ids over under the trust only code inside the app has.
+      expect(
+        validateStartInput(
+          { ...VALID, clientRequestId },
+          { workflowStep: true },
+        ),
+      ).toMatchObject({ ok: true, value: { clientRequestId } });
+    },
+  );
+
+  it("takes ids that only contain the prefix inside, or another one", () => {
+    for (const clientRequestId of ["awf-1", "WF-1", "w-1", "req-wf-1"])
+      expect(validateStartInput({ ...VALID, clientRequestId }).ok).toBe(true);
+  });
+
   it.each([
     ["", "required"],
     ["  ", "required"],

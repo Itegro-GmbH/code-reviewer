@@ -4,6 +4,7 @@
 // never told by colour alone (the same rule as the badge of an Implementer run). The symbol is hidden from assistive technology: the
 // label is the accessible name.
 import {
+  ChatCircleDotsIcon,
   CheckIcon,
   HourglassIcon,
   MinusIcon,
@@ -17,19 +18,30 @@ import { Badge } from "../components/ui/badge.tsx";
 import { RUN_STATUS_COPY, STEP_STATUS_COPY } from "./messages.ts";
 
 type Status =
-  "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+  | "pending"
+  | "running"
+  | "waiting"
+  | "succeeded"
+  | "failed"
+  | "skipped"
+  | "cancelled";
 
 const ICON: Record<Status, Icon> = {
   pending: HourglassIcon,
   running: PlayIcon,
+  waiting: ChatCircleDotsIcon,
   succeeded: CheckIcon,
   failed: XIcon,
   skipped: MinusIcon,
   cancelled: ProhibitIcon,
 };
-const TONE: Record<Status, "neutral" | "running" | "success" | "danger"> = {
+const TONE: Record<
+  Status,
+  "neutral" | "running" | "success" | "danger" | "warning"
+> = {
   pending: "neutral",
   running: "running",
+  waiting: "warning",
   succeeded: "success",
   failed: "danger",
   skipped: "neutral",

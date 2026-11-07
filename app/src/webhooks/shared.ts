@@ -14,6 +14,7 @@ import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
   type WebhookHandler,
+  type TicketAnswerTaker,
   type TrackerWriter,
   type WorkflowStarter,
 } from "./github-app-handler.ts";
@@ -46,6 +47,8 @@ export function getJobQueueReviewTriggerIntake(
 export function getGithubAppWebhookHandler(
   options: {
     workflowsFor?: (workspaceId: string) => WorkflowStarter;
+    /** #920: what takes the answer of a comment `/answer ...` in one workspace. */
+    answersFor?: (workspaceId: string) => TicketAnswerTaker;
     /** What writes the changes of tickets of one workspace into the ticket mirror (#923); the route passes it in like `workflowsFor`. */
     trackerFor?: (workspaceId: string) => TrackerWriter;
   } = {},
@@ -70,6 +73,9 @@ export function getGithubAppWebhookHandler(
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),
+      ...(options.answersFor === undefined
+        ? {}
+        : { answers: options.answersFor(workspaceId) }),
     }),
     automatic: {},
     logger: consoleWebhookLogger,

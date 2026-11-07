@@ -11,6 +11,7 @@
 // The facts are the platform's, not the agent's: the cost (the usage the runner reported), and, when the profile version may push, the
 // branch the platform made for the turn, the commits it made, the last commit and whether the branch reached the remote. A fact name is
 // never taken from the result: the validator refuses such a field, and what a stored schema might still hold is dropped.
+import { boundAgentAsk, type AgentAsk } from "../db/agent-ask.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
@@ -48,6 +49,16 @@ export type EndedTurn = {
 export type CostBasis = "reported" | "estimated" | "limit" | "subscription";
 
 export type TurnOutcome =
+  /**
+   * #920: the turn ended with a question instead of a result. The step waits for an answer; what the turn cost is charged now. The
+   * question is the agent's text, held to its bounds again here.
+   */
+  | {
+      ok: true;
+      asked: AgentAsk;
+      costMicroUsd: number;
+      costBasis: CostBasis;
+    }
   | {
       ok: true;
       output: Record<string, unknown>;
@@ -242,6 +253,13 @@ export function outcomeOfTurn(
       costMicroUsd,
       costBasis,
     };
+
+  // #920: a turn that handed in no result but a question (the runner reports one only for a turn that may ask; a result wins over it).
+  if (ended.turn.resultSchema !== null && ended.turn.resultValue === null) {
+    const asked = boundAgentAsk(implementerBlock(ended.jobResult).agentAsk);
+    if (asked !== undefined)
+      return { ok: true, asked, costMicroUsd, costBasis };
+  }
 
   let result: Record<string, unknown> = {};
   if (ended.turn.resultSchema !== null) {

@@ -274,6 +274,19 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<{ id: string; url: string }>;
   /**
+   * Replaces the body of a comment below an issue or pull request (#920; `PATCH .../issues/comments/{id}`), as the app, with a token of its own
+   * limited to `scope`. Only a comment the app wrote can be edited by it; 404 `GITHUB_APP_NOT_FOUND` when there is none. The body is never part
+   * of a message.
+   */
+  updateIssueComment(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    commentId: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  /**
    * Opens a pull request as the app (#844), with a token of its own limited to `scope`, switched off after the call. An open pull
    * request from `head` into `base` is the result (`existing`) instead of a second one or an error: it is looked for first, and again
    * when GitHub answers 422 because one exists. Other failures reject with the stable code of the answer; a 422 says why in `refusal`
@@ -1819,6 +1832,27 @@ export function createGithubAppClient(
           )
             throw shapeError("POST /repos/{owner}/{repo}/issues/{n}/comments");
           return { id: String(json.id), url: json.html_url };
+        },
+        signal,
+      );
+    },
+
+    async updateIssueComment(
+      installationId,
+      scope,
+      repoFullName,
+      commentId,
+      body,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkCheckRunId(commentId);
+      const path = `${repoPath(repoFullName)}/issues/comments/${commentId}`;
+      await withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          await request(token, "PATCH", path, { body }, signal);
         },
         signal,
       );
