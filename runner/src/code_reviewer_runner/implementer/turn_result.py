@@ -74,6 +74,10 @@ class TurnResult:
     # turn's result schema once the agent's container was gone; None: the turn has no result schema,
     # or the agent handed in none that fits. Data of an untrusted writer, never a command.
     agent_result: dict[str, Any] | None = None
+    # #920: the question the agent ended the turn with (`question`, `options`, `context`), checked
+    # by
+    # Control like the result; None: the turn ended with a result, or with neither. Never a command.
+    agent_ask: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -110,6 +114,7 @@ class TurnResult:
             **({} if self.checked_out is None else {"checkedOut": self.checked_out}),
             **({} if self.resume is None else {"resume": self.resume}),
             **({} if self.agent_result is None else {"agentResult": self.agent_result}),
+            **({} if self.agent_ask is None else {"agentAsk": self.agent_ask}),
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }

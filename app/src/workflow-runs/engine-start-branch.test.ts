@@ -63,6 +63,8 @@ function stepRow(overrides: Partial<StoredStepRun>): StoredStepRun {
     output: JSON.stringify({ branch: IMPLEMENT_BRANCH }),
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     startedAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     finishedAt: null,
@@ -203,6 +205,8 @@ describe("the time limit of a turn", () => {
     expect(app.startTask.mock.calls[0]?.[2]).toEqual({
       costCapCents: 500,
       timeLimitMinutes: 15,
+      // The engine's own request ids (`wf-...`) are reserved for it and pass the parser under this trust.
+      workflowStep: true,
     });
   });
 

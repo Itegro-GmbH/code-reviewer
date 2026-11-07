@@ -86,6 +86,8 @@ function harness(options: {
     output: null,
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     startedAt: new Date(NOW.getTime() - STEP_STALE_MS - 1).toISOString(),
     finishedAt: null,

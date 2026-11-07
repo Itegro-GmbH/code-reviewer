@@ -14,6 +14,8 @@ import {
   readModel,
   CONTROL_OR_NEWLINE,
   ID_MAX_LENGTH,
+  WORKFLOW_REQUEST_ID_PREFIX,
+  type InputTrust,
 } from "./start-input.ts";
 
 export type ContinueInput = {
@@ -35,7 +37,10 @@ export type ContinueInputCheck =
 
 export { INSTRUCTION_MAX_LENGTH };
 
-export function validateContinueInput(body: unknown): ContinueInputCheck {
+export function validateContinueInput(
+  body: unknown,
+  trust: InputTrust = {},
+): ContinueInputCheck {
   const fields: Record<string, unknown> =
     typeof body === "object" && body !== null && !Array.isArray(body)
       ? (body as Record<string, unknown>)
@@ -108,6 +113,11 @@ export function validateContinueInput(body: unknown): ContinueInputCheck {
   else if (requestId.length > 200) refuse("clientRequestId", "too_long");
   else if (!CLIENT_REQUEST_ID.test(requestId))
     refuse("clientRequestId", "invalid");
+  else if (
+    trust.workflowStep !== true &&
+    requestId.startsWith(WORKFLOW_REQUEST_ID_PREFIX)
+  )
+    refuse("clientRequestId", "request_id_reserved");
 
   if (issues.length > 0) return { ok: false, issues };
   return {

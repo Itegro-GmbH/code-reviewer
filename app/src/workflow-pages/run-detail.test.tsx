@@ -8,7 +8,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../ui/json-request.ts";
-import type { RunView } from "../workflow-runs/service.ts";
+import type { RunView, StepView } from "../workflow-runs/service.ts";
 import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
 import {
   COST_BASIS_COPY,
@@ -835,6 +835,246 @@ describe("stopping a run", () => {
     expect(
       container.querySelector("[data-slot=run-cancel-failure]")?.textContent,
     ).toContain("no longer exists");
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+  });
+});
+
+describe("a question of the agent (#920)", () => {
+  const ASK = {
+    n: 1,
+    state: "open" as const,
+    question: "Retry which failures? <b>now</b>",
+    options: ["Network errors", "Network errors and 5xx answers"],
+    context: "client.ts tells the two apart.",
+  };
+  const waiting = (ask: NonNullable<StepView["ask"]> = ASK) =>
+    run({
+      status: "waiting",
+      steps: [
+        step({
+          status: "waiting",
+          finishedAt: null,
+          costUsd: 0.5,
+          ask,
+        }),
+      ],
+    });
+  const answering = (answers: RequestResult<{ run: RunView }>[]) => {
+    const answer = vi.fn(
+      async () => answers.shift() ?? failure("UNEXPECTED_RESPONSE"),
+    );
+    return {
+      run: vi.fn(async () => ok(waiting())),
+      answer,
+    } as unknown as WorkflowRunsApi & { answer: typeof answer };
+  };
+
+  // #920-T150
+  it("shows a waiting run in words, the question as text with its numbered options and context, and keeps polling", async () => {
+    const api = answering([]);
+    const { container } = renderRun(waiting(), api);
+
+    expect(
+      screen.getByText("Waiting for an answer", {
+        selector: "[data-status=waiting] *",
+      }),
+    ).toBeTruthy();
+    const block = container.querySelector("[data-slot=step-ask]");
+    expect(
+      block?.querySelector("[data-slot=step-ask-question]")?.textContent,
+    ).toBe("Retry which failures? <b>now</b>");
+    // The question is the agent's text: markup in it is text, never an element.
+    expect(block?.querySelector("b")).toBeNull();
+    expect(
+      [...container.querySelectorAll("[data-slot=step-ask-option]")].map(
+        (li) => li.textContent,
+      ),
+    ).toEqual([
+      "Network errorsAnswer 1",
+      "Network errors and 5xx answersAnswer 2",
+    ]);
+    expect(block?.textContent).toContain("client.ts tells the two apart.");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(api.run).toHaveBeenCalled();
+  });
+
+  // #920-T151
+  it("sends the option with the note, and says the answer was sent", async () => {
+    const api = answering([{ ok: true, data: { run: run() } }]);
+    const { container } = renderRun(waiting(), api);
+    const note = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(note, "and log it");
+      note.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 2" }).click();
+    });
+
+    expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      // The answer names the question the page showed (the step run and its number).
+      question: { stepRunId: "plan", n: 1 },
+      choice: 2,
+      text: "and log it",
+    });
+    expect(container.querySelector("[data-slot=step-ask-sent]")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Answer 2" })).toBeNull();
+  });
+
+  // #920-T152
+  it("sends a text of its own when it is not empty, and not before", async () => {
+    const api = answering([{ ok: true, data: { run: run() } }]);
+    renderRun(
+      waiting({ n: 1, state: "open", question: "Which backoff?" }),
+      api,
+    );
+    const send = screen.getByRole("button", { name: "Send answer" });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+    const note = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(note, "Exponential.");
+      note.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Send answer" }).click();
+    });
+
+    expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      question: { stepRunId: "plan", n: 1 },
+      text: "Exponential.",
+    });
+  });
+
+  // #920-T153
+  it("tells a refusal in words and keeps the form", async () => {
+    const api = answering([
+      {
+        ok: false,
+        status: 409,
+        code: "WORKFLOW_RUN_NOT_WAITING",
+        issues: [],
+      },
+    ]);
+    const { container } = renderRun(waiting(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=step-ask-failure]")?.textContent,
+    ).toContain("does not wait for an answer any more");
+    expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
+  });
+
+  // #920-T187
+  it("says the question was answered or replaced when the run now waits on another one", async () => {
+    const api = answering([
+      {
+        ok: false,
+        status: 409,
+        code: "WORKFLOW_RUN_QUESTION_CHANGED",
+        issues: [],
+      },
+    ]);
+    const { container } = renderRun(waiting(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=step-ask-failure]")?.textContent,
+    ).toBe("This question was already answered or replaced.");
+  });
+
+  // #920-T188
+  it("says the question could not be posted to the ticket once the engine gave up, and still takes an answer", () => {
+    const { container } = renderRun(
+      waiting({ ...ASK, announce: { attempts: 10, ended: "gave_up" } }),
+    );
+
+    expect(container.textContent).toContain(
+      "The question could not be posted to the ticket",
+    );
+    expect(container.textContent).not.toContain(
+      "answer on the ticket with /answer",
+    );
+    expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
+  });
+
+  // #920-T154
+  it("shows who answered what and from where once it is answered, without a form", () => {
+    const { container } = renderRun(
+      run({
+        steps: [
+          step({
+            status: "running",
+            ask: {
+              ...ASK,
+              state: "resumed",
+              answer: {
+                text: "Network errors and 5xx answers",
+                choice: 2,
+                by: "octocat",
+                via: "comment",
+                at: "2026-11-07T10:00:00.000Z",
+              },
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(
+      container.querySelector("[data-slot=step-ask-answer]")?.textContent,
+    ).toBe(
+      "Answered by octocat (in a comment): Network errors and 5xx answers",
+    );
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Answer/ })).toBeNull();
+  });
+
+  // #920-T98
+  it("shows the next question of the step as a new one to answer, not as sent", async () => {
+    const second = { ...ASK, n: 2, question: "And the backoff?" };
+    const api = {
+      run: vi.fn(async () => ok(waiting(second))),
+      answer: vi.fn(async () => ({ ok: true, data: { run: run() } })),
+    } as unknown as WorkflowRunsApi;
+    const { container } = renderRun(waiting(), api);
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+    expect(container.querySelector("[data-slot=step-ask-sent]")).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+
+    expect(container.querySelector("[data-slot=step-ask-sent]")).toBeNull();
+    expect(
+      container.querySelector("[data-slot=step-ask-question]")?.textContent,
+    ).toBe("And the backoff?");
+    expect(screen.getByRole("button", { name: "Answer 2" })).toBeTruthy();
+  });
+
+  // #920-T155
+  it("has the button to cancel a run that waits", () => {
+    renderRun(waiting());
+
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 });

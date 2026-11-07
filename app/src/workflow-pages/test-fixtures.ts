@@ -26,6 +26,8 @@ export function step(overrides: Partial<StepView> = {}): StepView {
       costUsd: 0.42,
       branch: "workflow/run-1/plan",
     },
+    ask: null,
+    waitingOnCommentId: null,
     errorCode: null,
     errorMessage: null,
     createdAt: "2026-11-05T10:00:00.000Z",

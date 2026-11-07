@@ -11,6 +11,7 @@ import { managedModelsOf } from "../runner-api/managed-models.ts";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
+import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import {
   createImplementerSnapshotsRepository,
   isDirectPredecessorSnapshot,
@@ -544,6 +545,12 @@ export async function startRunnerApiHarness(
         createImplementerRepository(fixture.db, job.workspaceId).getTurnByJob(
           job.id,
         ),
+      startedByWorkflow: async (job) =>
+        job.deliveryId !== null &&
+        (await createWorkflowRunsRepository(
+          fixture.db,
+          job.workspaceId,
+        ).isAgentStepDelivery(job.deliveryId, job.id)),
       implementerResume: async (job, { turn, session }) => {
         const history = await createImplementerRepository(
           fixture.db,

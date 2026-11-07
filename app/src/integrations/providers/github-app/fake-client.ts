@@ -329,6 +329,26 @@ export function fakeGithubAppClient(
         url: `https://github.com/${repoFullName}/pull/${String(prNumber)}#issuecomment-5001`,
       };
     },
+    async updateIssueComment(
+      installationId,
+      scope,
+      repoFullName,
+      commentId,
+      body,
+      signal,
+    ) {
+      record(
+        "updateIssueComment",
+        installationId,
+        scope,
+        repoFullName,
+        commentId,
+        body,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.commentFailure) throw data.commentFailure;
+    },
     async openPullRequest(installationId, scope, repoFullName, input, signal) {
       record(
         "openPullRequest",

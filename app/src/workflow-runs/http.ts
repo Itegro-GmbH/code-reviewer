@@ -25,6 +25,16 @@ export type WorkflowRunRouteHandlers = {
   list(request: Request, workflowId: string): Promise<Response>;
   get(request: Request, workflowId: string, runId: string): Promise<Response>;
   /**
+   * #920: answers the question a run waits for: `{ question: { stepRunId, n }, choice?, text? }` (the question that is answered, and an option by its number from 1, a text, or both). 202 `{ run }` once the
+   * step goes on (the turn that continues the session starts after the response); 409 `WORKFLOW_RUN_NOT_WAITING` when nothing waits for an
+   * answer or it was answered before; 409 `WORKFLOW_RUN_QUESTION_CHANGED` when another question waits than the one named; 422 `WORKFLOW_RUN_ANSWER_INVALID`; 404 `WORKFLOW_RUN_NOT_FOUND`.
+   */
+  answer(
+    request: Request,
+    workflowId: string,
+    runId: string,
+  ): Promise<Response>;
+  /**
    * #891: stops a run. 202 `{ run, outcome: "requested" }` for a run that is told to stop (its turn stops at its runner's next heartbeat, then
    * the run ends `cancelled`), 200 with the same body for a repeat (`already_requested`) and for a run that is over (`already_ended`; the run
    * shows how it ended); 404 `WORKFLOW_RUN_NOT_FOUND`.
@@ -77,7 +87,7 @@ export function createWorkflowRunRouteHandlers({
   requireUser,
   service,
 }: WorkflowRunRouteDependencies): WorkflowRunRouteHandlers {
-  async function answer(
+  async function guarded(
     request: Request,
     work: (user: SessionUser) => Promise<Response>,
   ): Promise<Response> {
@@ -97,7 +107,7 @@ export function createWorkflowRunRouteHandlers({
 
   return {
     start: (request, workflowId) =>
-      answer(request, async (user) => {
+      guarded(request, async (user) => {
         const started = await service.start(
           // The login recorded as the one who started the run, as for a task: the GitHub login, or the email of an account without GitHub.
           { id: user.id, githubLogin: actorName(user) },
@@ -110,18 +120,29 @@ export function createWorkflowRunRouteHandlers({
         );
       }),
     list: (request, workflowId) =>
-      answer(request, async () =>
+      guarded(request, async () =>
         Response.json(await service.list(workflowId), { headers: NO_STORE }),
       ),
     get: (request, workflowId, runId) =>
-      answer(request, async () =>
+      guarded(request, async () =>
         Response.json(
           { run: await service.get(workflowId, runId) },
           { headers: NO_STORE },
         ),
       ),
+    answer: (request, workflowId, runId) =>
+      guarded(request, async (user) => {
+        const answered = await service.answer(
+          // The GitHub login or none: what is recorded with the answer is shown on the ticket, where an email must never appear.
+          { id: user.id, githubLogin: user.githubLogin },
+          workflowId,
+          runId,
+          await readBody(request),
+        );
+        return Response.json(answered, { status: 202, headers: NO_STORE });
+      }),
     cancel: (request, workflowId, runId) =>
-      answer(request, async () => {
+      guarded(request, async () => {
         const cancelled = await service.cancel(workflowId, runId);
         return Response.json(cancelled, {
           status: cancelled.outcome === "requested" ? 202 : 200,

@@ -656,6 +656,70 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
 
+### A question: `done` or `ask` (#920)
+
+Every agent turn ends with one of two things: **`done`**, its result, or **`ask`**, a question for a person. The agent hands in the question through the same finish tool,
+`factory-submit --ask` (the JSON `{"question": "...", "options": ["...", "..."], "context": "..."}` on standard input; `options` and `context` are optional) or
+`submit_result({ "ask": { "question": "...", "options": [...], "context": "..." } })`; the last call of a turn wins. A question is at most 2000 characters, at most 10 options of at most
+200 characters, and a context of at most 4000 (counted in UTF-16 code units, as the app counts; an emoji is two). Only a turn that a workflow step started is offered `ask`: a plain Implementer task or follow-up with a result schema is not, since nobody would answer it. Only a step that has a result schema (its own `result`, or the default of its profile version) has the finish tool, so only such a step can ask. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
+the claim feature `implementer_ask` cannot either: its turn runs as before, ending with a result or failing, and the agent is not told that `ask` exists. `ask` is not a failure: `onFailure` is not touched.
+
+What the engine does when a turn ends with a question:
+
+- the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once, and the step keeps it whatever
+  becomes of it (a step that fails or is cancelled while it waits still shows what its turns cost: the costs of the steps add up to what the run spent). **The run waits as long as it
+  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`, the comment of the question is edited to `<!-- factory cancelled … -->` ("cancelled before it was answered") and the label `agent waiting` goes);
+- the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `askedAt`, `state` and, once answered, `answer`) and shown on the run page. The agent's
+  sandbox is gone, as after `done`; the Implementer session and its snapshot stay;
+- one run per ticket, one open question per run: the run holds the ticket's slot (`trigger_key`) while it waits, so a second run for the same ticket is `busy`, not started.
+
+**The answer** starts a new turn of the same session with the question and the answer as its instruction; the step goes back to `running` and reads that turn like any other (it may end with `done` or ask again).
+It costs what a turn costs, against what is left of the budget; if less than one cent is left the step fails `budget_exhausted`. An answer is one of:
+
+- a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "question": { "stepRunId": "…", "n": 1 }, "choice": 2 }` (`question` names the question that is answered: the step run that asked it, which the
+  run shows as the `id` of the step, and its number; an option by its number, from 1), `{ "question": …, "text": "..." }`, or both (the text is a note to the option); for
+  every member who may start a run (`start_implementer_task`). `202 { run }` when the step goes on, `409 WORKFLOW_RUN_NOT_WAITING` when nothing waits for an answer or it was answered before,
+  `409 WORKFLOW_RUN_QUESTION_CHANGED` when another question waits than the one named (the step asked again after the page was loaded; the page shows "This question was already answered or replaced"), `400 WORKFLOW_RUN_REQUEST_INVALID` for a body without `question`,
+  `422 WORKFLOW_RUN_ANSWER_INVALID` for an empty or too long answer or an option the question does not have (an answer is at most 4000 characters);
+- a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run (open, closed or merged: the run still waits), by somebody with write access to the repository (the check `/review` uses); bot comments never count.
+
+An answer belongs to the question that was open when it was written, and the engine checks that under the lock of the run: the page and a `/answer` comment both send the question they are for (`question`: the step run and `n`), and an answer for another question than the one that waits is refused (`question_changed`), so a page that was open while the agent asked again never answers the new question with the old answer. A comment answers only a question that is older than it: its id must be greater than the id of the comment that carries the question (when that comment is known the ids alone decide; a question without a comment yet is judged by the moment its step began to wait, with 30 seconds of grace for clocks that differ), and it must not have been
+written before the step began to wait (`askedAt`). So a late comment, or the redelivery of one, never answers a question that came after it. An answer from the page names the person by GitHub login, or by none for an
+account without one (an email address is never written on a ticket or into the instruction of the agent).
+
+Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
+
+**Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (`workflow_runs.ticket_ref`, #923: the issue of its `ticket` input or of the label that started it; a run written before the column was backfilled, and one that has none reads the issue from the input of its trigger),
+else on the **pull request** an action step of the run opened, else nowhere. There it is a comment of the GitHub App of the workspace:
+
+```
+<!-- factory ask run=<run id> step=<step id> q=<n> -->
+The agent has a question and waits for the answer:
+
+**Retry which failures?**
+
+1. Network errors only
+2. Network errors and 5xx answers
+
+Reply with `/answer <n>` (a note may follow) or answer in the factory: https://…/w/acme/workflows/…/runs/…
+
+@alice @bob
+```
+
+The first line is the hidden marker (`q` counts the questions of the step); a question without options says "Reply with `/answer <your answer>`". The question, the options and the context are the agent's text: defused
+(no mention, no link that reaches somebody, no direction marks) and bounded, like every text an agent writes into a comment. The people asked are the members of the workspace that have a GitHub login (the first 10;
+there is no project of members yet). The ticket also gets the label **`agent waiting`** and loses **`agent working`**. Posting is best effort: a comment or a label GitHub refuses does not stop the run, and the question is on
+the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one). A question whose comment could not be posted is posted again by the next look at the run (the sweep looks at
+a waiting run that has no comment yet, and so does every `advance`), at most ten more times and not once an hour has passed since it was asked: then the engine gives up and writes that on the step (`ask.announce.ended = "gave_up"`), the sweep stops looking, and the run page says "The question could not be posted to the ticket" (it can still be answered there). A run with no ticket and no pull request is not announced again at all (`ended = "no_place"`): the run page shows the question. Two announcements that post at once keep one comment: the one the step records stays, the other is edited to say that another comment is the question (`<!-- factory superseded … -->`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
+
+**The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
+own tables (a run of the workspace that waits and whose `ticket_ref` is that ticket, else one about no ticket whose pull request it is; the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
+no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. A comment that has write access and still cannot answer (an answer that is empty once cleaned, or too long, no question
+waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none, and neither does a comment on a repository the workspace never ran a workflow on (the reply "no question is waiting" is only for one where runs exist; the marker of a reply is looked up among the comments since the comment it answers). The comment of the question is then edited
+to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the
+name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
+[`app/src/webhooks/README.md`](../app/src/webhooks/README.md).
+
 ### Cancelling a run
 
 `POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
@@ -684,7 +748,7 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label by itself: a workflow with [`onFailure`](#after-a-failure-onfailure) cleans up after the agent has stopped (the facts have `status` `cancelled`); without it the issue keeps `agent working` and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
 the run `cancelled` the same way, not `failed`.
 
-A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
+A run looks like this (a step is `pending` when written, `running` once claimed, `waiting` while its turn's question is not answered (#920), then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
 ```json
 {
@@ -695,7 +759,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
         "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
-        "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
+        "ask": null, "waitingOnCommentId": null, "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
   }
 }
@@ -1106,11 +1170,14 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
 | `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
+| `WORKFLOW_RUN_NOT_WAITING` | 409 | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped). |
+| `WORKFLOW_RUN_QUESTION_CHANGED` | 409 | `answer`: another question waits than the one the body names (`question`). |
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
+| `WORKFLOW_RUN_ANSWER_INVALID` | 422 | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
@@ -1133,10 +1200,13 @@ not exist.
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
-  - **Status.** `running`, `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+  - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
+  - **A question** (#920). A step whose agent asked shows the question, the numbered options and the context as plain text, and, while the run waits, a button for each option, a field for a note or a text of your
+    own, and **Send answer** (`POST .../runs/<runId>/answer`). Once answered it shows who answered what and from where (this page or a comment). A waiting run is polled like a running one, so an answer given on the ticket shows up
+    here, and **Cancel run** works while it waits.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
     - *reported*: the runner reported the cost;
     - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;

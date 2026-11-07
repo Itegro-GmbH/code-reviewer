@@ -63,6 +63,8 @@ function stepRow(overrides: Partial<StoredStepRun>): StoredStepRun {
     output: "{}",
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     startedAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     finishedAt: null,

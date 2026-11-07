@@ -2,7 +2,10 @@
 
 // The one place that writes the pull request columns of a turn's job (#752).
 import { describe, expect, it } from "vitest";
-import { implementerJobShape } from "./implementer-job-shape.ts";
+import {
+  clientRequestIdOf,
+  implementerJobShape,
+} from "./implementer-job-shape.ts";
 
 const input = {
   workspaceId: "w-1",
@@ -52,5 +55,16 @@ describe("the shape of a turn's job", () => {
     expect(
       implementerJobShape({ ...input, workspaceId: "w-2" }).deliveryId,
     ).not.toBe(implementerJobShape(input).deliveryId);
+  });
+});
+
+describe("the request id of a delivery id", () => {
+  // #920-T94
+  it("is read back for its own workspace and for nobody else", () => {
+    const { deliveryId } = implementerJobShape(input);
+
+    expect(clientRequestIdOf("w-1", deliveryId)).toBe(input.clientRequestId);
+    expect(clientRequestIdOf("w-2", deliveryId)).toBeUndefined();
+    expect(clientRequestIdOf("w-1", "a-webhook-delivery-guid")).toBeUndefined();
   });
 });

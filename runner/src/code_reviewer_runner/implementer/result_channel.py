@@ -23,6 +23,9 @@ from . import finish_tool
 
 RESULT_SUBPATH: Final = "result"
 RESULT_FILE: Final = "result.json"
+# #920: where the finish tool writes a question, next to the result file.
+ASK_FILE: Final = posixpath.basename(finish_tool.ASK_PATH)
+ASK_ENABLED_FILE: Final = posixpath.basename(finish_tool.ASK_ENABLED_PATH)
 # Where the agent's container and the reader see the directory.
 AGENT_RESULT_DIRECTORY: Final = "/work/result"
 READER_RESULT_DIRECTORY: Final = "/result"
@@ -47,6 +50,10 @@ class ResultReader(Protocol):
         plain file, or the reader could not be asked)."""
         ...
 
+    def read_ask(self, max_bytes: int) -> bytes | None:
+        """#920: the same for the question file."""
+        ...
+
 
 def make_result_directory(work_dir: Path) -> None:
     """The directory both containers mount, made by Control before the agent's container exists
@@ -68,14 +75,20 @@ def result_mount(work_volume: str, target: str, *, read_only: bool) -> dict[str,
     }
 
 
-def finish_files(schema: Mapping[str, Any]) -> dict[str, tuple[bytes, int]]:
+def finish_files(
+    schema: Mapping[str, Any], *, can_ask: bool = False
+) -> dict[str, tuple[bytes, int]]:
     """The files of the finish tool (name -> (bytes, mode)), to be written next to the engine's
-    configuration: the module itself under a shebang that runs it isolated, and the schema."""
+    configuration: the module itself under a shebang that runs it isolated, and the schema. A turn
+    that may end with a question (#920) also gets the marker file the tool looks for."""
     source = Path(finish_tool.__file__).read_bytes()
-    return {
+    files = {
         FACTORY_SUBMIT: (f"#!{INTERPRETER} -I\n".encode() + source, 0o755),
         SCHEMA_FILE: (json.dumps(schema).encode("utf-8"), 0o644),
     }
+    if can_ask and finish_tool.ask_possible(schema, enabled=True):
+        files[ASK_ENABLED_FILE] = (b"1\n", 0o644)
+    return files
 
 
 def finish_server_command() -> Sequence[str]:

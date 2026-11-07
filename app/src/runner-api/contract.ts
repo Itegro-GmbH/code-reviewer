@@ -4,6 +4,7 @@
 // these types and sets are written by hand and kept in line with it by
 // integration-tests/compatibility/runner-api-contract.integration.test.ts (the sets are compared
 // with the file, and real answers and the request checks are validated against it).
+import type { AgentAsk } from "../db/agent-ask.ts";
 import type { JsonValue, ReviewCommand } from "../integrations/types.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { CostPolicyJson } from "../native-cost/policy.ts";
@@ -70,6 +71,9 @@ export const CLAIM_FEATURES = [
   // #909: the runner reads `implementer.startBranch` and starts the work from that branch instead of the base branch. Sent only to a
   // caller that named it; a turn with a start branch is refused (`implementer_engine_unavailable`, free) for a caller that did not.
   "implementer_start_branch",
+  // #920: the runner reads `implementer.canAsk` and offers the agent the question next to the result (`implementer.agentAsk`). Sent only to
+  // a caller that named it; for any other caller the turn runs as before (no question can be asked), it is not refused.
+  "implementer_ask",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -880,6 +884,12 @@ export type ImplementerResult = {
    * is then recorded `no_result`).
    */
   agentResult?: { [key: string]: JsonValue };
+  /**
+   * #920: the question the agent ended the turn with instead of a result (`ImplementerAgentAsk` in the contract). A turn with one succeeds
+   * and has no `agentResult`; the workflow engine puts the step into `waiting`. Agent text, bounded by `boundAgentAsk`, the secrets taken
+   * out. Absent when the turn did not ask, or the app found the question over its bounds.
+   */
+  agentAsk?: AgentAsk;
 };
 
 /** #840: the two ways a follow-up turn gets its earlier conversation (`ImplementerResumeResult.mode` in the contract). */

@@ -65,6 +65,7 @@ from .docker_api import DockerApi, DockerError
 from .exec_run import run_exec
 from .git_process import Outcome
 from .result_channel import (
+    ASK_FILE,
     READ_RESULT_SCRIPT,
     READER_RESULT_DIRECTORY,
     RESULT_FILE,
@@ -299,6 +300,16 @@ class ReaderAccess:
         """The first `max_bytes` bytes of the agent's result file (#843), read in the reader that
         cannot write: a plain file, not a link, else None. The bytes are the agent's and are
         judged by `finish_tool.parse_result`; nothing here looks at them."""
+        return self._read_agent_file(RESULT_FILE, max_bytes, timeout, "read the result")
+
+    def read_ask(self, max_bytes: int, *, timeout: float = RESULT_READ_SECONDS) -> bytes | None:
+        """#920: the same for the question file the finish tool writes; judged by
+        `finish_tool.parse_ask`."""
+        return self._read_agent_file(ASK_FILE, max_bytes, timeout, "read the question")
+
+    def _read_agent_file(
+        self, file: str, max_bytes: int, timeout: float, name: str
+    ) -> bytes | None:
         container = self._ensure(False)
         if container is None:
             return None
@@ -316,12 +327,12 @@ class ReaderAccess:
                 "-c",
                 READ_RESULT_SCRIPT,
                 "read",
-                f"{READER_RESULT_DIRECTORY}/{RESULT_FILE}",
+                f"{READER_RESULT_DIRECTORY}/{file}",
                 str(max_bytes),
             ],
             timeout=timeout,
             consume=keep,
-            name="read the result",
+            name=name,
         )
         return bytes(kept) if done.returncode == 0 and not done.unanswered else None
 

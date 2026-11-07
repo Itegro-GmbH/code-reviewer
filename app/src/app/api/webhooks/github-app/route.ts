@@ -8,11 +8,15 @@ import { touched } from "../../../../dispatch/maintenance-shared.ts";
 import { deliveryTouchedTheQueue } from "../../../../webhooks/touch-policy.ts";
 import { getGithubAppWebhookHandler } from "../../../../webhooks/shared.ts";
 import { trackerMirrorFor } from "../../../../tracker/shared.ts";
-import { labelTriggerFor } from "../../../../workflow-runs/shared.ts";
+import {
+  labelTriggerFor,
+  ticketAnswersFor,
+} from "../../../../workflow-runs/shared.ts";
 
 export async function POST(request: Request): Promise<Response> {
   const response = await getGithubAppWebhookHandler({
     workflowsFor: labelTriggerFor,
+    answersFor: ticketAnswersFor,
     trackerFor: trackerMirrorFor,
   })(request);
   // #395: a delivery that queued a job (or dropped waiting ones) is a moment at which the database is awake anyway;
