@@ -744,7 +744,7 @@ describe("the boards of a repository (#922)", () => {
   });
 
   // #932-R25
-  it("is not available when a board of the list is one it may not read, instead of leaving it out of the list", async () => {
+  it("leaves a board it may not read out of the list and keeps the readable ones: an unreadable board can be neither synced nor moved on", async () => {
     const { client } = scripted((call) =>
       call.path === "/graphql"
         ? {
@@ -765,7 +765,18 @@ describe("the boards of a repository (#922)", () => {
 
     expect(
       await client.listRepositoryBoards("4242", BOARD, "acme/widgets"),
-    ).toEqual({ available: false, boards: [] });
+    ).toEqual({
+      available: true,
+      boards: [
+        {
+          projectV2Id: "PVT_1",
+          number: 1,
+          title: "Roadmap",
+          statusFieldId: "PVTSSF_1",
+          statuses: ["Todo", "In Progress", "Done"],
+        },
+      ],
+    });
   });
 
   // #922-T41

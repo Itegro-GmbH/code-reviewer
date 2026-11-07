@@ -628,8 +628,7 @@ function repositoryBoardsOf(
   if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
   const nodes = repository.projectsV2.nodes;
   if (!Array.isArray(nodes)) return null;
-  // A board GitHub could not give (null: the token may not read it) cannot be named, so the list would be silently short: no answer.
-  if (nodes.includes(null)) return null;
+  // A board GitHub could not give (null: the token may not read it) is left out: it can be neither synced nor moved on, so it is no choice.
   const boards: RepositoryBoard[] = [];
   for (const node of nodes as unknown[]) {
     if (

@@ -155,7 +155,8 @@ When the last phase of a full sync is over:
    not shift between the calls of one sync;
 3. at the end of the **checks** phase the checks of every row that is not an open pull request are emptied (every open pull request was read in
    that phase, and a state GitHub does not know is written as empty). They are not emptied before: a sync that is cut in the middle of the checks
-   leaves the pull requests it has not reached as they were;
+   leaves the pull requests it has not reached as they were. The phase pages through the open pull requests by page number, so a pull request that
+   closes between two slices can shift one past the walk; that one keeps its older checks until a `check_suite` delivery or the next sync;
 4. the pull requests of every issue are computed again from the `closes` of the pull requests, in one pass over the pull requests;
 5. `last_full_sync_at` is set and the cursor is cleared.
 
