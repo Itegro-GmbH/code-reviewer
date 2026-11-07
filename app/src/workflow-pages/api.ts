@@ -27,11 +27,15 @@ export type WorkflowRunsApi = {
       clientRequestId: string;
     },
   ): Promise<RequestResult<{ run: RunView }>>;
-  /** Answers the question the run waits for (#920): an option by its number from 1 and/or a text. */
+  /** Answers the question the run waits for (#920): the question the page showed, and an option by its number from 1 and/or a text. */
   answer(
     workflowId: string,
     runId: string,
-    body: { choice?: number; text?: string },
+    body: {
+      question: { stepRunId: string; n: number };
+      choice?: number;
+      text?: string;
+    },
   ): Promise<RequestResult<{ run: RunView }>>;
   /** Stops a run (#891). `requested`: it is told to stop; a repeat and a run that is over answer with their own outcome. */
   cancel(

@@ -460,3 +460,37 @@ describe("a question that was never posted, and one that was stopped (#920)", ()
     ).resolves.toBeUndefined();
   });
 });
+
+describe("a second comment for the same question (#920)", () => {
+  // #920-T180
+  it("edits the comment that lost to say another one is the question, repeating nothing of it, and leaves the labels alone", async () => {
+    const { channel, input, updateIssueComment, changeIssueLabels } = harness();
+
+    await channel.superseded(input, step(), ASKED, "9002");
+
+    expect(updateIssueComment).toHaveBeenCalledOnce();
+    const [, , commentId, body] = updateIssueComment.mock
+      .calls[0] as unknown as [unknown, unknown, string, string];
+    expect(commentId).toBe("9002");
+    expect(body).toContain(
+      "<!-- factory superseded run=run-1 step=plan q=1 -->",
+    );
+    expect(body).toContain("Please answer there");
+    expect(body).not.toContain("Retry which failures?");
+    expect(changeIssueLabels).not.toHaveBeenCalled();
+  });
+
+  // #920-T181
+  it("survives a provider that cannot edit, and a run that has no target", async () => {
+    const failing = harness({
+      provider: {
+        updateIssueComment: async () => {
+          throw new Error("gone");
+        },
+      },
+    });
+    await expect(
+      failing.channel.superseded(failing.input, step(), ASKED, "9002"),
+    ).resolves.toBeUndefined();
+  });
+});

@@ -676,12 +676,14 @@ What the engine does when a turn ends with a question:
 **The answer** starts a new turn of the same session with the question and the answer as its instruction; the step goes back to `running` and reads that turn like any other (it may end with `done` or ask again).
 It costs what a turn costs, against what is left of the budget; if less than one cent is left the step fails `budget_exhausted`. An answer is one of:
 
-- a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "choice": 2 }` (an option by its number, from 1), `{ "text": "..." }`, or both (the text is a note to the option); for
+- a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "question": { "stepRunId": "…", "n": 1 }, "choice": 2 }` (`question` names the question that is answered: the step run that asked it, which the
+  run shows as the `id` of the step, and its number; an option by its number, from 1), `{ "question": …, "text": "..." }`, or both (the text is a note to the option); for
   every member who may start a run (`start_implementer_task`). `202 { run }` when the step goes on, `409 WORKFLOW_RUN_NOT_WAITING` when nothing waits for an answer or it was answered before,
+  `409 WORKFLOW_RUN_QUESTION_CHANGED` when another question waits than the one named (the step asked again after the page was loaded; the page shows "This question was already answered or replaced"), `400 WORKFLOW_RUN_REQUEST_INVALID` for a body without `question`,
   `422 WORKFLOW_RUN_ANSWER_INVALID` for an empty or too long answer or an option the question does not have (an answer is at most 4000 characters);
 - a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run (open, closed or merged: the run still waits), by somebody with write access to the repository (the check `/review` uses); bot comments never count.
 
-An answer belongs to the question that was open when it was written. A comment answers only a question that is older than it: its id must be greater than the id of the comment that carries the question, and it must not have been
+An answer belongs to the question that was open when it was written, and the engine checks that under the lock of the run: the page and a `/answer` comment both send the question they are for (`question`: the step run and `n`), and an answer for another question than the one that waits is refused (`question_changed`), so a page that was open while the agent asked again never answers the new question with the old answer. A comment answers only a question that is older than it: its id must be greater than the id of the comment that carries the question (when that comment is known the ids alone decide; a question without a comment yet is judged by the moment its step began to wait, with 30 seconds of grace for clocks that differ), and it must not have been
 written before the step began to wait (`askedAt`). So a late comment, or the redelivery of one, never answers a question that came after it. An answer from the page names the person by GitHub login, or by none for an
 account without one (an email address is never written on a ticket or into the instruction of the agent).
 
@@ -708,12 +710,12 @@ The first line is the hidden marker (`q` counts the questions of the step); a qu
 (no mention, no link that reaches somebody, no direction marks) and bounded, like every text an agent writes into a comment. The people asked are the members of the workspace that have a GitHub login (the first 10;
 there is no project of members yet). The ticket also gets the label **`agent waiting`** and loses **`agent working`**. Posting is best effort: a comment or a label GitHub refuses does not stop the run, and the question is on
 the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one). A question whose comment could not be posted is posted again by the next look at the run (the sweep looks at
-a waiting run that has no comment yet, and so does every `advance`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
+a waiting run that has no comment yet, and so does every `advance`), at most ten more times and not once an hour has passed since it was asked: then the engine gives up and writes that on the step (`ask.announce.ended = "gave_up"`), the sweep stops looking, and the run page says "The question could not be posted to the ticket" (it can still be answered there). A run with no ticket and no pull request is not announced again at all (`ended = "no_place"`): the run page shows the question. Two announcements that post at once keep one comment: the one the step records stays, the other is edited to say that another comment is the question (`<!-- factory superseded … -->`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
 
 **The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
 own tables (a run of the workspace that waits and whose `ticket_ref` is that ticket, else one about no ticket whose pull request it is; the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
 no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. A comment that has write access and still cannot answer (an answer that is empty once cleaned, or too long, no question
-waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none. The comment of the question is then edited
+waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none, and neither does a comment on a repository the workspace never ran a workflow on (the reply "no question is waiting" is only for one where runs exist; the marker of a reply is looked up among the comments since the comment it answers). The comment of the question is then edited
 to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the
 name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
 [`app/src/webhooks/README.md`](../app/src/webhooks/README.md).
@@ -1168,6 +1170,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
 | `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
 | `WORKFLOW_RUN_NOT_WAITING` | 409 | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped). |
+| `WORKFLOW_RUN_QUESTION_CHANGED` | 409 | `answer`: another question waits than the one the body names (`question`). |
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |

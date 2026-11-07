@@ -244,6 +244,7 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
     listWaitingWithoutTicket: (repositoryId) =>
       runs.listWaitingWithoutTicket(repositoryId, 100),
     listSteps: (runId) => runs.listSteps(runId),
+    hasRuns: (repositoryId) => runs.hasRunOnRepository(repositoryId),
     engine: lazyAnswerEngine(workspaceId),
     async reply(repositoryId, answer, text, key) {
       const target = await connectorTargetOf(workspaceId, repositoryId);
@@ -253,7 +254,13 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
         target.repo,
         answer.number,
         `${key}\n${text}`,
-        { marker: key },
+        // The reply follows the comment it answers: nothing older can hold the marker.
+        {
+          marker: key,
+          ...(answer.createdAt === undefined
+            ? {}
+            : { since: answer.createdAt }),
+        },
       );
     },
     kick: (runId) =>

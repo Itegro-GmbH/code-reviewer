@@ -9,15 +9,17 @@
 //    waits for one question at a time and a ticket has one run per workflow, so the newest waiting run wins when two workflows wait on
 //    the same ticket. A comment on anything else starts nothing.
 //  - The answer belongs to ONE question: a comment answers it only when it was written after the question was asked (its id is greater than
-//    the id of the comment that carries the question, and it is not older than the moment the step began to wait). A late or redelivered
-//    comment from before never answers a question that came later, whatever it says.
+//    the id of the comment that carries the question; only a question without a comment yet is judged by the moment the step began to wait,
+//    with a grace of `ASK_TIME_GRACE_MS` for clocks that differ). A late or redelivered comment from before never answers a question
+//    that came later, whatever it says. The engine checks the question again under the lock of the run (`question`: the step and its `n`).
 //  - `/answer <n>` is an option by its number, a note may follow. A question without that option takes the whole text as a free answer
 //    (`/answer 3 retries` is a text where the question has no option 3).
 //  - The answer goes through `engine.answer`, under the lock of the run: of two answers at once one wins. Then the engine is kicked (the
 //    turn that goes on starts after the response, like the first steps of a run).
 //  - A comment that should have answered something and could not (an empty or too long text, nothing waits, it was answered first) gets a
 //    short reply of the App on the ticket, in fixed words that repeat nothing of the comment. A commenter without write access never gets
-//    this far (the webhook's parser ignores them), so that is silent by design, and so is a comment that is too old for the question.
+//    this far (the webhook's parser ignores them), so that is silent by design, and so is a comment that is too old for the question, and
+//    a comment on a repository whose workspace never ran a workflow (`/answer` there is somebody else's word).
 import type {
   StoredWorkflowRun,
   StoredStepRun,
@@ -53,6 +55,8 @@ export type TicketAnswersDependencies = {
   /** The runs that wait on a repository and are about no ticket (their question is on a pull request), newest first. */
   listWaitingWithoutTicket(repositoryId: string): Promise<StoredWorkflowRun[]>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
+  /** Whether the workspace has any run on the repository, in any state. Without one a comment of `/answer` is nobody's business and gets no reply. */
+  hasRuns(repositoryId: string): Promise<boolean>;
   engine: Pick<WorkflowEngine, "answer">;
   kick(runId: string): void;
   /**
@@ -76,12 +80,18 @@ export const ANSWER_REPLIES = {
     "The question has no such option. Reply with `/answer <your answer>` instead.",
   not_waiting:
     "No question is waiting for an answer on this ticket any more: it was answered already, or the run was stopped.",
+  question_changed:
+    "That question was already answered or replaced by a new one. Please look at the latest question and answer that.",
   no_run: "No question is waiting for an answer on this ticket.",
 } as const;
 
+/** How much earlier than the question a comment may say it was written and still count: the clock of the provider and ours differ a little. */
+export const ASK_TIME_GRACE_MS = 30_000;
+
 /**
- * Whether a comment is older than the question: its id is not greater than the id of the comment that carries the question (ids of the
- * provider grow with time; compared only where both are numbers), or it was written before the step began to wait.
+ * Whether a comment is older than the question. When the id of the comment that carries the question is known, only the ids decide (they
+ * grow with time, and are compared only where both are numbers): the moments of two clocks never overrule them. A question without a
+ * comment yet is judged by the moment the step began to wait, with `ASK_TIME_GRACE_MS` of grace.
  */
 export function isOlderThanQuestion(
   answer: Pick<TicketAnswer, "commentId" | "createdAt">,
@@ -90,20 +100,21 @@ export function isOlderThanQuestion(
   if (question.commentId !== null) {
     const asked = Number(question.commentId);
     const written = Number(answer.commentId);
-    if (
+    return (
       Number.isSafeInteger(asked) &&
       Number.isSafeInteger(written) &&
       written <= asked
-    )
-      return true;
+    );
   }
-  if (answer.createdAt !== undefined && question.ask.askedAt !== undefined) {
-    const written = Date.parse(answer.createdAt);
-    const asked = Date.parse(question.ask.askedAt);
-    if (!Number.isNaN(written) && !Number.isNaN(asked) && written < asked)
-      return true;
-  }
-  return false;
+  if (answer.createdAt === undefined || question.ask.askedAt === undefined)
+    return false;
+  const written = Date.parse(answer.createdAt);
+  const asked = Date.parse(question.ask.askedAt);
+  return (
+    !Number.isNaN(written) &&
+    !Number.isNaN(asked) &&
+    written < asked - ASK_TIME_GRACE_MS
+  );
 }
 
 export function createTicketAnswers(
@@ -164,6 +175,7 @@ export function createTicketAnswers(
           answer.choice !== undefined &&
           (ask.options?.length ?? 0) >= answer.choice;
         const taken = await deps.engine.answer(run.id, {
+          question: { stepRunId: waiting.id, n: ask.n },
           ...(asOption && answer.choice !== undefined
             ? { choice: answer.choice }
             : {}),
@@ -188,7 +200,9 @@ export function createTicketAnswers(
         return { outcome: "answered", runId: run.id };
       }
       if (stale) return { outcome: "not_taken", reason: "stale" };
-      await reply(repository.id, answer, ANSWER_REPLIES.no_run);
+      // Where the workspace never ran a workflow, the comment is nobody's business: no reply that would show up on every `/answer`.
+      if (await deps.hasRuns(repository.id))
+        await reply(repository.id, answer, ANSWER_REPLIES.no_run);
       return { outcome: "no_run" };
     },
   };

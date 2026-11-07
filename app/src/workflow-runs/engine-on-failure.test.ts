@@ -248,6 +248,7 @@ function harness(options: {
       attachTurn: vi.fn(),
       askStep: vi.fn(),
       answerStep: vi.fn(),
+      setUnpostedAsk: vi.fn(),
       attachAnswerTurn: vi.fn(),
       resumeRun: vi.fn(),
       async finishStep(id, outcome) {

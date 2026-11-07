@@ -11,6 +11,28 @@ function issuesOf(body: unknown) {
   return checked.ok ? [] : checked.issues;
 }
 
+describe("the request id of a follow-up (#920)", () => {
+  // #920-T184
+  it.each(["wf-", "wf-run-1-0", "wf-run-1-0-q2"])(
+    "refuses %j: the prefix is the engine's alone, so a follow-up cannot pass for a workflow step",
+    (clientRequestId) => {
+      expect(issuesOf({ ...base, clientRequestId })).toEqual([
+        { field: "clientRequestId", code: "request_id_reserved" },
+      ]);
+      expect(
+        validateContinueInput(
+          { ...base, clientRequestId },
+          { workflowStep: true },
+        ),
+      ).toMatchObject({ ok: true, value: { clientRequestId } });
+    },
+  );
+
+  it("takes ids that only contain the prefix inside", () => {
+    expect(issuesOf({ ...base, clientRequestId: "req-wf-1" })).toEqual([]);
+  });
+});
+
 describe("the body of a follow-up", () => {
   // #841-V01
   it("accepts an instruction and a request id alone, and leaves every choice undefined", () => {

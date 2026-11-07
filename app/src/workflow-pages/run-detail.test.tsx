@@ -919,6 +919,8 @@ describe("a question of the agent (#920)", () => {
     });
 
     expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      // The answer names the question the page showed (the step run and its number).
+      question: { stepRunId: "plan", n: 1 },
       choice: 2,
       text: "and log it",
     });
@@ -950,6 +952,7 @@ describe("a question of the agent (#920)", () => {
     });
 
     expect(api.answer).toHaveBeenCalledWith("wf-1", "run-1", {
+      question: { stepRunId: "plan", n: 1 },
       text: "Exponential.",
     });
   });
@@ -973,6 +976,42 @@ describe("a question of the agent (#920)", () => {
     expect(
       container.querySelector("[data-slot=step-ask-failure]")?.textContent,
     ).toContain("does not wait for an answer any more");
+    expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
+  });
+
+  // #920-T187
+  it("says the question was answered or replaced when the run now waits on another one", async () => {
+    const api = answering([
+      {
+        ok: false,
+        status: 409,
+        code: "WORKFLOW_RUN_QUESTION_CHANGED",
+        issues: [],
+      },
+    ]);
+    const { container } = renderRun(waiting(), api);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+
+    expect(
+      container.querySelector("[data-slot=step-ask-failure]")?.textContent,
+    ).toBe("This question was already answered or replaced.");
+  });
+
+  // #920-T188
+  it("says the question could not be posted to the ticket once the engine gave up, and still takes an answer", () => {
+    const { container } = renderRun(
+      waiting({ ...ASK, announce: { attempts: 10, ended: "gave_up" } }),
+    );
+
+    expect(container.textContent).toContain(
+      "The question could not be posted to the ticket",
+    );
+    expect(container.textContent).not.toContain(
+      "answer on the ticket with /answer",
+    );
     expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
   });
 

@@ -37,7 +37,15 @@ export async function dueWorkflowRuns(
                 .select("workflow_step_runs.id")
                 .whereRef("workflow_step_runs.run_id", "=", "workflow_runs.id")
                 .where("workflow_step_runs.status", "=", "waiting")
-                .where("workflow_step_runs.waiting_on_comment_id", "is", null),
+                .where("workflow_step_runs.waiting_on_comment_id", "is", null)
+                // The engine stopped announcing it (`StepAsk.announce.ended`): a key of ours, since the quotes inside a text of the
+                // agent are escaped in the stored JSON and never form this.
+                .where((step) =>
+                  step.or([
+                    step("workflow_step_runs.ask", "is", null),
+                    step("workflow_step_runs.ask", "not like", '%"ended":%'),
+                  ]),
+                ),
             ),
           ]),
         ]),

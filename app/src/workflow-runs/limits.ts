@@ -76,3 +76,7 @@ export const BRANCH_MAX_CHARS = 255;
 
 /** #920: the most an answer to a question of an agent holds, in characters (a note after an option, or a free text). */
 export const ASK_ANSWER_MAX_CHARS = 4000;
+
+/** #920: how often a question whose comment is not posted is announced again before the engine gives up, and for how long after it was asked. */
+export const ASK_REANNOUNCE_MAX_ATTEMPTS = 10;
+export const ASK_REANNOUNCE_MAX_AGE_MS = 60 * 60 * 1000;

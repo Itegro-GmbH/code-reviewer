@@ -149,7 +149,8 @@ export type WorkflowRunService = {
    * #920: answers the question the run waits for, from the page of the run: an option by its number (from 1) and/or a text. Whoever may start
    * a run may answer one. The answer is recorded with the person's GitHub login, or with none (`by: null`) for an account without one: an
    * email address is never written on a ticket. The step and the run go on (the engine starts the turn that continues the session). Throws `WORKFLOW_RUN_NOT_FOUND`,
-   * `WORKFLOW_RUN_REQUEST_INVALID` for a body that is no answer, `WORKFLOW_RUN_NOT_WAITING` and `WORKFLOW_RUN_ANSWER_INVALID`.
+   * `WORKFLOW_RUN_REQUEST_INVALID` for a body that is no answer, `WORKFLOW_RUN_NOT_WAITING`, `WORKFLOW_RUN_QUESTION_CHANGED` (the body's
+   * `question` is not the one that waits) and `WORKFLOW_RUN_ANSWER_INVALID`.
    */
   answer(
     user: { id: string; githubLogin: string | null },
@@ -588,9 +589,20 @@ export function createWorkflowRunService(
         new WorkflowRunError("WORKFLOW_RUN_REQUEST_INVALID", message);
       if (!isRecord(body)) throw invalid("The body must be a JSON object.");
       for (const key of Object.keys(body))
-        if (key !== "choice" && key !== "text")
+        if (key !== "choice" && key !== "text" && key !== "question")
           throw invalid(`The body has no field ${key.slice(0, 40)}.`);
-      const { choice, text } = body;
+      const { choice, text, question } = body;
+      if (
+        !isRecord(question) ||
+        typeof question.stepRunId !== "string" ||
+        question.stepRunId === "" ||
+        question.stepRunId.length > 128 ||
+        typeof question.n !== "number" ||
+        !Number.isSafeInteger(question.n)
+      )
+        throw invalid(
+          "question must name the question that is answered: { stepRunId, n }.",
+        );
       if (
         choice !== undefined &&
         (typeof choice !== "number" || !Number.isSafeInteger(choice))
@@ -610,16 +622,23 @@ export function createWorkflowRunService(
           "This run does not wait for an answer.",
         );
       const answered = await deps.engine.answer(runId, {
+        question: { stepRunId: question.stepRunId, n: question.n },
         ...(choice === undefined ? {} : { choice }),
         ...(text === undefined ? {} : { text }),
         by: user.githubLogin,
         via: "ui",
       });
-      if (answered.outcome === "refused")
+      if (answered.outcome === "refused") {
+        if (answered.code === "question_changed")
+          throw new WorkflowRunError(
+            "WORKFLOW_RUN_QUESTION_CHANGED",
+            "This question was already answered or replaced.",
+          );
         throw new WorkflowRunError(
           "WORKFLOW_RUN_ANSWER_INVALID",
           ANSWER_REFUSALS[answered.code],
         );
+      }
       if (answered.outcome === "not_waiting")
         throw new WorkflowRunError(
           "WORKFLOW_RUN_NOT_WAITING",

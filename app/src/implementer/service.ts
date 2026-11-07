@@ -104,6 +104,8 @@ export type StartTaskOptions = {
    * to the Worker as its time limit. Left out: the platform's 60 minutes.
    */
   timeLimitMinutes?: number;
+  /** #920: the request id may start with the prefix that is the engine's alone (`wf-`); a request body never gets this. */
+  workflowStep?: boolean;
 };
 
 export type ImplementerServiceDependencies = FollowUpDependencies & {
@@ -257,7 +259,9 @@ export function createImplementerService(
     listModels: () => deps.models.options(),
 
     async startTask(user, input, options = {}) {
-      const checked = validateStartInput(input);
+      const checked = validateStartInput(input, {
+        workflowStep: options.workflowStep === true,
+      });
       if (!checked.ok)
         throw new ImplementerError(
           "IMPLEMENTER_REQUEST_INVALID",

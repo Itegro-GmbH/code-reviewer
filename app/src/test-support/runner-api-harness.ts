@@ -550,7 +550,7 @@ export async function startRunnerApiHarness(
         (await createWorkflowRunsRepository(
           fixture.db,
           job.workspaceId,
-        ).isAgentStepDelivery(job.deliveryId)),
+        ).isAgentStepDelivery(job.deliveryId, job.id)),
       implementerResume: async (job, { turn, session }) => {
         const history = await createImplementerRepository(
           fixture.db,

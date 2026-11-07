@@ -28,6 +28,7 @@ import {
   answeredComment,
   cancelledComment,
   markerOf,
+  supersededComment,
   mentionsOf,
   questionComment,
 } from "./ask-comment.ts";
@@ -258,6 +259,23 @@ export function createGithubAskChannel(
         }
       // Nobody works on the ticket any more, so only the one that said somebody had to answer goes.
       await labels(target, place, { add: [], remove: [LABEL_WAITING] });
+    },
+
+    async superseded(run, step, ask, commentId) {
+      const target = await deps.targetOf(run);
+      if (target === undefined) return;
+      const { provider, integration, repo } = target;
+      if (provider.updateIssueComment === undefined) return;
+      try {
+        await provider.updateIssueComment(
+          integration,
+          repo,
+          commentId,
+          supersededComment({ identity: identityOf(run, step, ask) }),
+        );
+      } catch {
+        // Two comments is the cost of a failed edit; the question is the one the step records, and the page of the run shows it.
+      }
     },
   };
 }

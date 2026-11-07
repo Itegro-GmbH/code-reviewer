@@ -25,9 +25,9 @@ export type WorkflowRunRouteHandlers = {
   list(request: Request, workflowId: string): Promise<Response>;
   get(request: Request, workflowId: string, runId: string): Promise<Response>;
   /**
-   * #920: answers the question a run waits for: `{ choice?, text? }` (an option by its number from 1, a text, or both). 202 `{ run }` once the
+   * #920: answers the question a run waits for: `{ question: { stepRunId, n }, choice?, text? }` (the question that is answered, and an option by its number from 1, a text, or both). 202 `{ run }` once the
    * step goes on (the turn that continues the session starts after the response); 409 `WORKFLOW_RUN_NOT_WAITING` when nothing waits for an
-   * answer or it was answered before; 422 `WORKFLOW_RUN_ANSWER_INVALID`; 404 `WORKFLOW_RUN_NOT_FOUND`.
+   * answer or it was answered before; 409 `WORKFLOW_RUN_QUESTION_CHANGED` when another question waits than the one named; 422 `WORKFLOW_RUN_ANSWER_INVALID`; 404 `WORKFLOW_RUN_NOT_FOUND`.
    */
   answer(
     request: Request,

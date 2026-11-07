@@ -55,6 +55,7 @@ import {
   type AnswerInput,
   type StepAsk,
 } from "./ask.ts";
+import { placeOf } from "./ask-channel.ts";
 import { conditionHolds } from "./conditions.ts";
 import { readStoredInput } from "./ticket.ts";
 import {
@@ -66,6 +67,8 @@ import {
 } from "./document.ts";
 import {
   ACTION_TIMEOUT_MS,
+  ASK_REANNOUNCE_MAX_AGE_MS,
+  ASK_REANNOUNCE_MAX_ATTEMPTS,
   ERROR_MESSAGE_MAX_CHARS,
   MICRO_USD_COLUMN_MAX,
   MICRO_USD_PER_CENT,
@@ -159,6 +162,16 @@ export type AskChannel = {
     step: StoredStepRun,
     ask: StepAsk,
   ): Promise<void>;
+  /**
+   * A second comment for the same question was posted (two announcements at once) and the other one is the question's: edits the comment
+   * `commentId` to say so, so that only one comment asks.
+   */
+  superseded(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+    commentId: string,
+  ): Promise<void>;
 };
 
 /** What `answer` came to. A refusal names why; the question stays open. */
@@ -168,8 +181,16 @@ export type AnswerResult =
   | { outcome: "not_waiting" }
   | {
       outcome: "refused";
-      code: "answer_empty" | "answer_too_long" | "option_unknown";
+      code:
+        | "answer_empty"
+        | "answer_too_long"
+        | "option_unknown"
+        /** The question that waits is not the one the answer was written for (it was answered and the step asked again). */
+        | "question_changed";
     };
+
+/** The question an answer is for: the step run that asked it (its row, so the rounds of a loop differ) and which question of it this is (`StepAsk.n`). */
+export type AskedQuestion = { stepRunId: string; n: number };
 
 export type WorkflowEngine = {
   /** Takes the run as far as it can go: writes and does the next steps until it waits for a job, or is over. Idempotent. */
@@ -181,11 +202,17 @@ export type WorkflowEngine = {
   jobEnded(jobId: string): Promise<void>;
   /**
    * #920: answers the question the run waits for. Under the lock of the run: of two answers one wins, the other finds the question
-   * answered. The step and the run are `running` again afterwards; the caller kicks `advance`, which starts the turn that goes on.
+   * answered. The step and the run are `running` again afterwards; the caller kicks `advance`, which starts the turn that goes on. The
+   * answer names the question it was written for and is refused (`question_changed`) when another one waits now, so a page that was open
+   * while the agent asked again never answers the new question with the old one's answer.
    */
   answer(
     runId: string,
-    input: AnswerInput & { by: string | null; via: "comment" | "ui" },
+    input: AnswerInput & {
+      question: AskedQuestion;
+      by: string | null;
+      via: "comment" | "ui";
+    },
   ): Promise<AnswerResult>;
 };
 
@@ -679,16 +706,61 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return pre;
   }
 
+  /**
+   * #920: whether the question of a step that waits is announced once more. Not for a run that has no place for it (no ticket, no pull
+   * request: the page of the run shows the question), and not any more after `ASK_REANNOUNCE_MAX_ATTEMPTS` attempts or once
+   * `ASK_REANNOUNCE_MAX_AGE_MS` have passed since it was asked: that is written on the step (`announce.ended`), so the sweep stops
+   * looking and the page can say the question could not be posted. Each attempt is counted and marks the run as looked at.
+   */
+  async function announceAgain(
+    lock: RunLock,
+    waiting: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<Decision> {
+    const announce = ask.announce ?? { attempts: 0 };
+    if (announce.ended !== undefined) return { kind: "done" };
+    const end = async (ended: "no_place" | "gave_up"): Promise<Decision> => {
+      await lock.setUnpostedAsk(
+        waiting.id,
+        serializeAsk({ ...ask, announce: { ...announce, ended } }),
+      );
+      return { kind: "done" };
+    };
+    if (deps.asks === undefined || placeOf(lock.run, lock.steps) === undefined)
+      return end("no_place");
+    const askedAt = ask.askedAt === undefined ? NaN : Date.parse(ask.askedAt);
+    if (
+      announce.attempts >= ASK_REANNOUNCE_MAX_ATTEMPTS ||
+      now().getTime() - askedAt >= ASK_REANNOUNCE_MAX_AGE_MS
+    ) {
+      log(
+        `[workflow-runs] ASK_GIVEN_UP run=${lock.run.id} step=${waiting.stepId}`,
+      );
+      return end("gave_up");
+    }
+    const counted = await lock.setUnpostedAsk(
+      waiting.id,
+      serializeAsk({
+        ...ask,
+        announce: { attempts: announce.attempts + 1 },
+      }),
+    );
+    await lock.touch();
+    return { kind: "asked", stepRun: counted ?? waiting };
+  }
+
   async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
     // #920: a run that waits for an answer does nothing, unless somebody asked it to stop, or its question is not shown anywhere yet (the
-    // post failed or was never made): that is made again, and the marker of the comment keeps it from being posted twice.
+    // post failed or was never made): that is made again, a bounded number of times, and the marker of the comment keeps it from being
+    // posted twice.
     if (run.status === "waiting" && run.cancelRequestedAt === null) {
       const waiting = lock.steps.findLast((step) => step.status === "waiting");
+      const ask = parseStepAsk(waiting?.ask ?? null);
       return waiting !== undefined &&
         waiting.waitingOnCommentId === null &&
-        parseStepAsk(waiting.ask)?.state === "open"
-        ? { kind: "asked", stepRun: waiting }
+        ask?.state === "open"
+        ? announceAgain(lock, waiting, ask)
         : { kind: "done" };
     }
     if (run.status !== "running" && run.status !== "waiting")
@@ -1066,7 +1138,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ...(node.result === undefined ? {} : { result: node.result }),
           clientRequestId: requestIdOf(run, step),
         },
-        { costCapCents: capCents(step.capMicroUsd), timeLimitMinutes },
+        {
+          costCapCents: capCents(step.capMicroUsd),
+          timeLimitMinutes,
+          workflowStep: true,
+        },
       );
       return { runId: started.runId };
     } catch (error) {
@@ -1127,7 +1203,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           clientRequestId: requestIdOf(run, step),
         },
         // #918: the cost of a turn is what is left of the lane's budget, whatever the turn before was held to.
-        { costCapCents: capCents(step.capMicroUsd), timeLimitMinutes },
+        {
+          costCapCents: capCents(step.capMicroUsd),
+          timeLimitMinutes,
+          workflowStep: true,
+        },
       );
       return continued.runId === null
         ? { queued: true }
@@ -1478,10 +1558,28 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         return;
       const posted = await deps.asks.asked(run, stored.step, stored.ask);
       if (posted === undefined) return;
-      await deps.runs.recordAskComment(step.id, posted.commentId);
+      const recorded = await deps.runs.recordAskComment(
+        step.id,
+        posted.commentId,
+      );
       // Answered or stopped while the question was being posted: the comment just posted says so now.
       const after = await storedAsk(run.id, step.id);
       if (after === undefined) return;
+      // Another announcement posted its own comment first (the marker is not seen by two posts that are made at once): that one is the
+      // question's, this one says so and is never shown as a second question.
+      if (
+        !recorded &&
+        after.step.waitingOnCommentId !== null &&
+        after.step.waitingOnCommentId !== posted.commentId
+      ) {
+        await deps.asks.superseded(
+          run,
+          after.step,
+          after.ask,
+          posted.commentId,
+        );
+        return;
+      }
       // The id of the comment is in hand even where the row no longer takes it (a step that ended).
       const shown = { ...after.step, waitingOnCommentId: posted.commentId };
       if (after.ask.state !== "open") {
@@ -1593,7 +1691,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           clientRequestId: requestId,
         },
         // #918: the cost of a turn is what is left of the lane's budget; the time limit is the one of the turn before (the default of a follow-up).
-        { costCapCents: capCents(left) },
+        { costCapCents: capCents(left), workflowStep: true },
       );
       // Nobody else queues in this session while the run waits; if the Implementer says otherwise, the next look asks again.
       if (continued.runId === null) return;
@@ -1711,7 +1809,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
 
   async function answer(
     runId: string,
-    input: AnswerInput & { by: string | null; via: "comment" | "ui" },
+    input: AnswerInput & {
+      question: AskedQuestion;
+      by: string | null;
+      via: "comment" | "ui";
+    },
   ): Promise<AnswerResult> {
     const done = await deps.runs.lockRun(
       runId,
@@ -1727,6 +1829,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         const ask = parseStepAsk(waiting?.ask ?? null);
         if (waiting === undefined || ask === undefined || ask.state !== "open")
           return { outcome: "not_waiting" };
+        if (
+          waiting.id !== input.question.stepRunId ||
+          ask.n !== input.question.n
+        )
+          return { outcome: "refused", code: "question_changed" };
         const resolved = resolveAnswer(ask, input);
         if (!resolved.ok) return { outcome: "refused", code: resolved.code };
         const answered: StepAsk = {

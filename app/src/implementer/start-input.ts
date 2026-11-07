@@ -97,7 +97,19 @@ export function readInstruction(
   return "ok";
 }
 
-export function validateStartInput(body: unknown): StartInputCheck {
+/**
+ * #920: the request ids of the turns a workflow step starts begin with this prefix (`wf-<run>-<position>`), and the claim of a job
+ * reads it as "a workflow started this turn, so it may ask". A client of the API never gets to choose such an id.
+ */
+export const WORKFLOW_REQUEST_ID_PREFIX = "wf-";
+
+/** What only code inside the app may set (never a request body): the engine starts its own turns under the reserved prefix. */
+export type InputTrust = { workflowStep?: boolean };
+
+export function validateStartInput(
+  body: unknown,
+  trust: InputTrust = {},
+): StartInputCheck {
   const fields: Record<string, unknown> =
     typeof body === "object" && body !== null && !Array.isArray(body)
       ? (body as Record<string, unknown>)
@@ -225,6 +237,11 @@ export function validateStartInput(body: unknown): StartInputCheck {
   else if (requestId.length > 200) refuse("clientRequestId", "too_long");
   else if (!CLIENT_REQUEST_ID.test(requestId))
     refuse("clientRequestId", "invalid");
+  else if (
+    trust.workflowStep !== true &&
+    requestId.startsWith(WORKFLOW_REQUEST_ID_PREFIX)
+  )
+    refuse("clientRequestId", "request_id_reserved");
 
   if (issues.length > 0) return { ok: false, issues };
   // The checks above narrowed the fields; the casts only restate what they proved.

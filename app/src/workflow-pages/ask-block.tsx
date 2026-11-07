@@ -36,9 +36,11 @@ export function AskBlock({
   const open = step.status === "waiting" && ask.state === "open" && !sent;
 
   async function send(choice: number | undefined) {
+    if (step.ask === null) return;
     setPending(true);
     setProblem(null);
     const result = await api.answer(workflowId, runId, {
+      question: { stepRunId: step.id, n: step.ask.n },
       ...(choice === undefined ? {} : { choice }),
       ...(note.trim() === "" ? {} : { text: note }),
     });
@@ -111,7 +113,9 @@ export function AskBlock({
               {PAGE_COPY.askSend}
             </Button>
             <span className="text-muted-foreground">
-              {PAGE_COPY.askWaitingHint}
+              {ask.announce?.ended === "gave_up"
+                ? PAGE_COPY.askNotPosted
+                : PAGE_COPY.askWaitingHint}
             </span>
           </div>
           {problem === null ? null : (

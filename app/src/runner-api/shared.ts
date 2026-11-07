@@ -132,7 +132,7 @@ function sharedDeps(): WorkerApiDeps {
       (await createWorkflowRunsRepository(
         getDatabase(),
         job.workspaceId,
-      ).isAgentStepDelivery(job.deliveryId)),
+      ).isAgentStepDelivery(job.deliveryId, job.id)),
     // #841: what a follow-up turn is told about the turns before it, from the job's own workspace: the stored reports, the session's
     // summary and whether the conversation of the directly preceding turn is stored (#885).
     implementerResume: async (job, { turn, session }) => {

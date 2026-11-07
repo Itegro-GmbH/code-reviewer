@@ -11,6 +11,7 @@ import { serializeAsk, type StepAsk } from "./ask.ts";
 import type { AnswerResult } from "./engine.ts";
 import {
   ANSWER_REPLIES,
+  ASK_TIME_GRACE_MS,
   createTicketAnswers,
   isOlderThanQuestion,
 } from "./ticket-answers.ts";
@@ -106,6 +107,8 @@ function harness(options: {
   active?: boolean;
   result?: AnswerResult;
   replyFails?: boolean;
+  /** Whether the workspace has a run on the repository at all; default yes. */
+  hasRuns?: boolean;
 }) {
   const answer = vi.fn(
     async (): Promise<AnswerResult> =>
@@ -133,6 +136,7 @@ function harness(options: {
     listWaitingForTicket,
     listWaitingWithoutTicket,
     listSteps: async (runId) => options.steps?.[runId] ?? [waitingStep(OPEN)],
+    hasRuns: async () => options.hasRuns !== false,
     engine: { answer },
     kick,
     reply,
@@ -156,6 +160,8 @@ describe("an answer on a ticket", () => {
 
     expect(taken).toEqual({ outcome: "answered", runId: "run-1" });
     expect(answer).toHaveBeenCalledWith("run-1", {
+      // The answer names the question it was written for; the engine checks it again under the lock of the run.
+      question: { stepRunId: "s-1", n: 1 },
       choice: 2,
       text: "and log it",
       by: "octocat",
@@ -182,6 +188,7 @@ describe("an answer on a ticket", () => {
     });
 
     expect(answer).toHaveBeenCalledWith("run-1", {
+      question: { stepRunId: "s-1", n: 1 },
       text: "3 retries",
       by: "octocat",
       via: "comment",
@@ -246,6 +253,7 @@ describe("an answer on a ticket", () => {
   it("says so when the answer cannot be used or somebody was first, and does not kick", async () => {
     for (const [result, reason] of [
       [{ outcome: "refused", code: "option_unknown" }, "refused"],
+      [{ outcome: "refused", code: "question_changed" }, "refused"],
       [{ outcome: "not_waiting" }, "not_waiting"],
     ] as const) {
       const { answers, kick } = harness({ result });
@@ -327,7 +335,7 @@ describe("an answer belongs to the question that was open when it was written (#
   });
 
   // #920-T105
-  it("takes no comment written before the step began to wait, and none for a question whose comment was never posted either", async () => {
+  it("judges a question without a comment by the moment the step began to wait, with a grace for clocks that differ", async () => {
     const { answers, answer } = harness({
       steps: { "run-1": [waitingStep(asked, null)] },
     });
@@ -335,15 +343,16 @@ describe("an answer belongs to the question that was open when it was written (#
     expect(
       await answers.answer("d", {
         ...ANSWER,
-        createdAt: "2026-11-07T08:59:59.000Z",
+        createdAt: "2026-11-07T08:59:00.000Z",
       }),
     ).toEqual({ outcome: "not_taken", reason: "stale" });
     expect(answer).not.toHaveBeenCalled();
 
+    // 20 seconds before the question: inside the grace, so it counts.
     expect(
       await answers.answer("d", {
         ...ANSWER,
-        createdAt: "2026-11-07T09:00:01.000Z",
+        createdAt: "2026-11-07T08:59:40.000Z",
       }),
     ).toEqual({ outcome: "answered", runId: "run-1" });
   });
@@ -391,14 +400,52 @@ describe("an answer belongs to the question that was open when it was written (#
     expect(isOlderThanQuestion({ commentId: "node-77" }, question)).toBe(false);
     expect(
       isOlderThanQuestion(
-        { commentId: "5001", createdAt: "yesterday" },
-        question,
+        { commentId: "5001" },
+        { commentId: null, ask: { askedAt: undefined } },
       ),
     ).toBe(false);
     expect(
       isOlderThanQuestion(
-        { commentId: "5001" },
-        { commentId: null, ask: { askedAt: undefined } },
+        { commentId: "5001", createdAt: "yesterday" },
+        { commentId: null, ask: { askedAt: ASKED_AT } },
+      ),
+    ).toBe(false);
+  });
+
+  // #920-T170
+  it("lets the ids alone decide when the comment of the question is known, whatever the clocks say", () => {
+    const question = { commentId: "5000", ask: { askedAt: ASKED_AT } };
+    // Written long before the step began to wait, by the clock, but after the question by id: counts.
+    expect(
+      isOlderThanQuestion(
+        { commentId: "5001", createdAt: "2026-11-06T00:00:00.000Z" },
+        question,
+      ),
+    ).toBe(false);
+    // Written long after, by the clock, but before the question by id: old.
+    expect(
+      isOlderThanQuestion(
+        { commentId: "4999", createdAt: "2026-11-08T00:00:00.000Z" },
+        question,
+      ),
+    ).toBe(true);
+  });
+
+  // #920-T171
+  it("uses the time only without a comment id, and only beyond the grace", () => {
+    const question = { commentId: null, ask: { askedAt: ASKED_AT } };
+    const at = (offsetMs: number) =>
+      new Date(Date.parse(ASKED_AT) + offsetMs).toISOString();
+    expect(
+      isOlderThanQuestion(
+        { commentId: "1", createdAt: at(-ASK_TIME_GRACE_MS - 1000) },
+        question,
+      ),
+    ).toBe(true);
+    expect(
+      isOlderThanQuestion(
+        { commentId: "1", createdAt: at(-ASK_TIME_GRACE_MS + 1000) },
+        question,
       ),
     ).toBe(false);
   });
@@ -415,6 +462,10 @@ describe("a comment that could not answer gets a short reply (#920)", () => {
       [
         { outcome: "refused", code: "answer_too_long" },
         ANSWER_REPLIES.answer_too_long,
+      ],
+      [
+        { outcome: "refused", code: "question_changed" },
+        ANSWER_REPLIES.question_changed,
       ],
       [{ outcome: "not_waiting" }, ANSWER_REPLIES.not_waiting],
     ] as const) {
@@ -454,6 +505,19 @@ describe("a comment that could not answer gets a short reply (#920)", () => {
     const inactive = harness({ active: false });
     await inactive.answers.answer("d", ANSWER);
     expect(inactive.reply).not.toHaveBeenCalled();
+  });
+
+  // #920-T172
+  it("stays silent on a repository where the workspace never ran a workflow, and replies where runs exist but none waits", async () => {
+    const never = harness({ runs: [], hasRuns: false });
+    expect(await never.answers.answer("d", ANSWER)).toEqual({
+      outcome: "no_run",
+    });
+    expect(never.reply).not.toHaveBeenCalled();
+
+    const none = harness({ runs: [], hasRuns: true });
+    await none.answers.answer("d", ANSWER);
+    expect(none.reply).toHaveBeenCalledTimes(1);
   });
 
   // #920-T111

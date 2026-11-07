@@ -74,6 +74,7 @@ async function waitingRun() {
       listWaitingWithoutTicket: (repositoryId) =>
         app.runs.listWaitingWithoutTicket(repositoryId, 100),
       listSteps: (runId) => app.runs.listSteps(runId),
+      hasRuns: (repositoryId) => app.runs.hasRunOnRepository(repositoryId),
       engine: app.engine,
       kick: (runId) => void kicked.push(runId),
     }),

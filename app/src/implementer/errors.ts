@@ -121,7 +121,13 @@ export type ImplementerIssue = {
     | "clientRequestId";
   /** `not_with_profile`: a model or a cost limit next to a profile, whose version brings both. */
   code:
-    "required" | "invalid" | "too_long" | "not_with_profile" | BranchNameIssue;
+    | "required"
+    | "invalid"
+    | "too_long"
+    | "not_with_profile"
+    /** #920: the request id starts with the prefix that is the workflow engine's alone (`wf-`). */
+    | "request_id_reserved"
+    | BranchNameIssue;
   /**
    * For `result` (#843): the first problem the validator of the result-schema format found, `<pointer> <code>`: enough to start from;
    * `POST /workflows/validate` lists every problem of a schema written in a workflow.

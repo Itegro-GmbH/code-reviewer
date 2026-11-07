@@ -318,6 +318,8 @@ export const PAGE_COPY = {
     "The answer was sent. The run goes on: the agent gets it as its next instruction, and this page updates by itself.",
   askWaitingHint:
     "The run waits for as long as it takes. You can also answer on the ticket with /answer.",
+  askNotPosted:
+    "The question could not be posted to the ticket, so it can only be answered here.",
   askAnswered: "Answered",
   askAnsweredBy: "Answered by",
   askViaPage: "on this page",
@@ -376,6 +378,8 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
   WORKFLOW_RUN_NOT_WAITING:
     "This run does not wait for an answer any more: it was answered already, or it is being stopped.",
+  WORKFLOW_RUN_QUESTION_CHANGED:
+    "This question was already answered or replaced.",
   WORKFLOW_RUN_ANSWER_INVALID:
     "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",

@@ -30,7 +30,7 @@ export function runPagePath(
 
 type Identity = { runId: string; stepId: string; n: number };
 
-type MarkerState = "ask" | "answered" | "cancelled";
+type MarkerState = "ask" | "answered" | "cancelled" | "superseded";
 
 /** `<!-- factory ask run=<id> step=<id> q=<n> -->`; `answered` replaces `ask` once the question has its answer, `cancelled` when the run was stopped. */
 export function markerOf(state: MarkerState, identity: Identity): string {
@@ -38,7 +38,7 @@ export function markerOf(state: MarkerState, identity: Identity): string {
 }
 
 const MARKER =
-  /<!-- factory (ask|answered|cancelled) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
+  /<!-- factory (ask|answered|cancelled|superseded) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
 
 /** The marker a comment carries, or undefined. Nothing else of the comment is read. */
 export function readMarker(
@@ -139,6 +139,14 @@ export function cancelledComment(input: {
     "The agent had a question, and the run was cancelled before it was answered. No answer is needed.",
     "",
     ...questionBlock(input.ask),
+  ].join("\n");
+}
+
+/** A second comment for a question that another comment carries (two announcements raced): it says so and repeats nothing of the question. */
+export function supersededComment(input: { identity: Identity }): string {
+  return [
+    markerOf("superseded", input.identity),
+    "This comment repeats a question that is asked in another comment on this ticket. Please answer there.",
   ].join("\n");
 }
 

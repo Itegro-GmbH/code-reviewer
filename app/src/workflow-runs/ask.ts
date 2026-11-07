@@ -25,12 +25,22 @@ export type AskAnswer = {
   at: string;
 };
 
+/**
+ * How often the engine looked again at a question whose comment is not posted (#920). `ended` says it stopped: `no_place` (the run has no
+ * ticket and no pull request, so the question is shown on the page of the run only) or `gave_up` (the post kept failing; the page says so).
+ */
+export type AskAnnounce = {
+  attempts: number;
+  ended?: "no_place" | "gave_up";
+};
+
 export type StepAsk = AgentAsk & {
   /** Which question of the step this is, from 1: a step may ask again after an answer. */
   n: number;
   state: AskState;
   /** When the step began to wait for this question (the engine's clock, ISO 8601); an answer written before it is none to it. Absent in a row from before. */
   askedAt?: string;
+  announce?: AskAnnounce;
   answer?: AskAnswer;
 };
 
@@ -51,7 +61,7 @@ export function parseStepAsk(text: string | null): StepAsk | undefined {
   }
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
-  const { n, state, answer, askedAt, ...rest } = value as Record<
+  const { n, state, answer, askedAt, announce, ...rest } = value as Record<
     string,
     unknown
   >;
@@ -66,6 +76,7 @@ export function parseStepAsk(text: string | null): StepAsk | undefined {
   )
     return undefined;
   const given = parseAnswer(answer);
+  const looked = parseAnnounce(announce);
   if (state !== "open" && given === undefined) return undefined;
   return {
     ...asked,
@@ -74,7 +85,19 @@ export function parseStepAsk(text: string | null): StepAsk | undefined {
     ...(typeof askedAt === "string" && !Number.isNaN(Date.parse(askedAt))
       ? { askedAt }
       : {}),
+    ...(looked === undefined ? {} : { announce: looked }),
     ...(given === undefined ? {} : { answer: given }),
+  };
+}
+
+function parseAnnounce(value: unknown): AskAnnounce | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { attempts, ended } = value as Record<string, unknown>;
+  if (typeof attempts !== "number" || !Number.isSafeInteger(attempts))
+    return undefined;
+  return {
+    attempts,
+    ...(ended === "no_place" || ended === "gave_up" ? { ended } : {}),
   };
 }
 

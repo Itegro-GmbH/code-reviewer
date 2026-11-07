@@ -205,6 +205,8 @@ describe("the time limit of a turn", () => {
     expect(app.startTask.mock.calls[0]?.[2]).toEqual({
       costCapCents: 500,
       timeLimitMinutes: 15,
+      // The engine's own request ids (`wf-...`) are reserved for it and pass the parser under this trust.
+      workflowStep: true,
     });
   });
 
