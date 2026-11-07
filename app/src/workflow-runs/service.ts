@@ -5,14 +5,17 @@
 // an Implementer task: a run starts tasks); every rule about the data is here.
 //
 // A start is checked in this order, and nothing is written before the last check:
-//  1. the body: `{ input, clientRequestId }`, nothing else;
+//  1. the body: `{ trigger, input, clientRequestId }`, nothing else (`trigger` may be left out when the workflow has one trigger a
+//     person or a script can start);
 //  2. a request id that made a run before answers that run, if the body is the same (`created: false`), else `WORKFLOW_RUN_REQUEST_REUSED`;
 //  3. the workflow exists in this workspace and is not archived;
-//  4. its trigger is the manual one, and every step is one the engine runs (only a kind the engine does not run is refused
-//     here, with the step named, rather than failing halfway through a run that already cost money);
+//  4. the trigger is one of its `manual` or `api` triggers, and every step the run would go through (the pre-steps of that trigger and
+//     the shared steps) is one the engine runs (only a kind the engine does not run is refused here, with the step named, rather than
+//     failing halfway through a run that already cost money);
 //  5. the input fits the trigger's `input` schema (checked again here with `checkResultValue`: the validator knows the schema, only a
 //     start knows the values);
-//  6. the repository named by `input.repo` is one of the workspace's, active, and the platform still resolves it.
+//  6. the repository is one of the workspace's, active, and the platform still resolves it: that of the `ticket` input when the trigger
+//     has one (the ticket is read through the provider and handed to the steps as `trigger.ticket`), else the one named by `input.repo`.
 // Then the run is written with the version the workflow has now, and the engine is told to start it.
 import type {
   StoredStepRun,
@@ -22,6 +25,7 @@ import type {
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { CLIENT_REQUEST_ID } from "../jobs/job-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
+import { ID_PATTERN } from "../workflows/check-steps.ts";
 import {
   BUDGET_OPERATOR_MAX_USD,
   WORKFLOW_ID_MAX_LENGTH,
@@ -30,10 +34,14 @@ import {
   checkResultValue,
   validateResultSchema,
 } from "../workflows/result-schema.ts";
+import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import { TICKET_INPUT, isStartableKind } from "../workflows/triggers.ts";
 import {
+  forTrigger,
   readRunDocument,
   runBudgetMicroUsd,
   unsupportedStep,
+  type RunTrigger,
 } from "./document.ts";
 import { WorkflowRunError } from "./errors.ts";
 import {
@@ -41,6 +49,12 @@ import {
   RUNS_LISTED_MAX,
   TRIGGER_INPUT_MAX_CHARS,
 } from "./limits.ts";
+import {
+  readStoredInput,
+  storedInputOf,
+  ticketValue,
+  type TicketValue,
+} from "./ticket.ts";
 
 export type StepView = {
   id: string;
@@ -73,8 +87,10 @@ export type RunSummaryView = {
   id: string;
   workflowId: string;
   workflowVersion: number;
-  /** What started the run: a person by hand (`manual`) or a label on an issue (`github.issueLabeled`). */
+  /** What started the run: a person by hand (`manual`), a script (`api`) or a label on a ticket (`ticket.labeled`, `github.issueLabeled` before #916). */
   trigger: StoredWorkflowRun["triggerKind"];
+  /** The id of the trigger of the workflow that started it; null for a run written before triggers had ids. */
+  triggerId: string | null;
   status: StoredWorkflowRun["status"];
   errorCode: string | null;
   /** When a member asked for the run to stop (#891), or null. A run that runs and has this is stopping: it ends `cancelled` when its turn has. */
@@ -133,7 +149,28 @@ export type WorkflowRunServiceDependencies = {
    */
   resolveRepository(
     fullName: string,
-  ): Promise<{ id: string; defaultBranch: string } | undefined>;
+  ): Promise<
+    { id: string; fullName: string; defaultBranch: string } | undefined
+  >;
+  /**
+   * #916: the issue `number` of the repository (as `resolveRepository` answered it) as a ticket, or undefined when there is none (or it is
+   * a pull request). The texts are those of whoever opened it. Throws `WORKFLOW_RUN_GITHUB_UNAVAILABLE` when the platform cannot be asked.
+   */
+  readTicket(
+    repositoryId: string,
+    number: number,
+  ): Promise<
+    | {
+        number: number;
+        title: string;
+        body: string;
+        url: string;
+        labels: string[];
+        assignees: string[];
+        type: string;
+      }
+    | undefined
+  >;
   /** Tells the engine the run exists. It runs the first steps; the caller does not wait for them. Never throws. */
   kick(runId: string): void;
   /** The most a workflow may be given to spend: `BUDGET_OPERATOR_MAX_USD`. */
@@ -167,6 +204,7 @@ function summaryOf(run: StoredWorkflowRun): RunSummaryView {
     workflowId: run.workflowId,
     workflowVersion: run.workflowVersion,
     trigger: run.triggerKind,
+    triggerId: run.triggerId,
     status: run.status,
     errorCode: run.errorCode,
     cancelRequestedAt: run.cancelRequestedAt,
@@ -213,8 +251,9 @@ function viewOf(
   };
 }
 
-/** The body of a start: `{ input, clientRequestId }` and nothing else. */
+/** The body of a start: `{ trigger?, input, clientRequestId }` and nothing else. */
 function readBody(body: unknown): {
+  trigger?: string;
   input: Record<string, unknown>;
   clientRequestId: string;
 } {
@@ -222,9 +261,9 @@ function readBody(body: unknown): {
     new WorkflowRunError("WORKFLOW_RUN_REQUEST_INVALID", message);
   if (!isRecord(body)) throw invalid("The body must be a JSON object.");
   for (const key of Object.keys(body))
-    if (key !== "input" && key !== "clientRequestId")
+    if (key !== "trigger" && key !== "input" && key !== "clientRequestId")
       throw invalid(`The body has no field ${key.slice(0, 40)}.`);
-  const { input, clientRequestId } = body;
+  const { trigger, input, clientRequestId } = body;
   if (
     typeof clientRequestId !== "string" ||
     !CLIENT_REQUEST_ID.test(clientRequestId)
@@ -234,7 +273,55 @@ function readBody(body: unknown): {
     );
   if (input !== undefined && !isRecord(input))
     throw invalid("input must be a JSON object.");
-  return { input: input ?? {}, clientRequestId };
+  if (
+    trigger !== undefined &&
+    (typeof trigger !== "string" || !ID_PATTERN.test(trigger))
+  )
+    throw invalid("trigger must be the id of a trigger of the workflow.");
+  return {
+    ...(trigger === undefined ? {} : { trigger }),
+    input: input ?? {},
+    clientRequestId,
+  };
+}
+
+/** The input of a run as the caller handed it in (without the ticket, which is stored resolved), from what a run stored. */
+function inputHandedIn(run: StoredWorkflowRun): Record<string, unknown> {
+  return readStoredInput(jsonOrNull(run.triggerInput)).input;
+}
+
+/** The trigger the caller means: the one it names, or the only one that can be started. */
+function startedTrigger(
+  triggers: readonly RunTrigger[],
+  named: string | undefined,
+): RunTrigger {
+  const startable = triggers.filter((trigger) => isStartableKind(trigger.kind));
+  if (named !== undefined) {
+    const found = triggers.find((trigger) => trigger.id === named);
+    if (found === undefined)
+      throw new WorkflowRunError(
+        "WORKFLOW_RUN_TRIGGER_UNKNOWN",
+        `The workflow has no trigger ${named}. Triggers that can be started: ${startable.map((t) => t.id).join(", ") || "none"}.`,
+      );
+    if (!isStartableKind(found.kind))
+      throw new WorkflowRunError(
+        "WORKFLOW_RUN_TRIGGER_NOT_MANUAL",
+        `The trigger ${named} is not started by hand: only a trigger of the kind manual or api is.`,
+      );
+    return found;
+  }
+  const [only, ...others] = startable;
+  if (only === undefined)
+    throw new WorkflowRunError(
+      "WORKFLOW_RUN_TRIGGER_NOT_MANUAL",
+      "Only a workflow with a manual or api trigger is started by hand.",
+    );
+  if (others.length > 0)
+    throw new WorkflowRunError(
+      "WORKFLOW_RUN_REQUEST_INVALID",
+      `The workflow has several triggers that can be started; name one as "trigger": ${startable.map((t) => t.id).join(", ")}.`,
+    );
+  return only;
 }
 
 export function createWorkflowRunService(
@@ -248,16 +335,35 @@ export function createWorkflowRunService(
 
   /**
    * The run an earlier request with this id made, when the body is the same one. The inputs are compared by content: the same input
-   * written with its keys in another order is the same request.
+   * written with its keys in another order is the same request. A body that names a trigger must name the one the run was started by;
+   * a ticket is the same when it names the same issue (the repository's letters are not told apart).
    */
   function sameRequest(
     earlier: StoredWorkflowRun,
     workflowId: string,
+    trigger: string | undefined,
     input: Record<string, unknown>,
   ): StoredWorkflowRun {
+    const { [TICKET_INPUT]: ticket, ...rest } = input;
+    const earlierRest = inputHandedIn(earlier);
+    const resolved = readStoredInput(jsonOrNull(earlier.triggerInput)).ticket;
+    const earlierName = isRecord(resolved?.repo)
+      ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.number)}`
+      : undefined;
+    const parsed =
+      typeof ticket === "string" ? parseTicketRef(ticket) : undefined;
+    const name =
+      parsed?.ok === true
+        ? `${parsed.ref.repo.toLowerCase()}#${String(parsed.ref.number)}`
+        : undefined;
     if (
       earlier.workflowId !== workflowId ||
-      canonicalJson(jsonOrNull(earlier.triggerInput)) !== canonicalJson(input)
+      (trigger !== undefined &&
+        earlier.triggerId !== null &&
+        earlier.triggerId !== trigger) ||
+      canonicalJson(earlierRest) !== canonicalJson(rest) ||
+      (ticket === undefined) !== (earlierName === undefined) ||
+      (name !== undefined && name !== earlierName)
     )
       throw new WorkflowRunError(
         "WORKFLOW_RUN_REQUEST_REUSED",
@@ -273,9 +379,8 @@ export function createWorkflowRunService(
 
   return {
     async start(user, workflowId, body) {
-      const { input, clientRequestId } = readBody(body);
-      const triggerInput = JSON.stringify(input);
-      if (triggerInput.length > TRIGGER_INPUT_MAX_CHARS)
+      const { trigger: named, input, clientRequestId } = readBody(body);
+      if (JSON.stringify(input).length > TRIGGER_INPUT_MAX_CHARS)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REQUEST_INVALID",
           "The input is too large.",
@@ -286,7 +391,7 @@ export function createWorkflowRunService(
       const earlier = await deps.runs.findByRequest(clientRequestId);
       if (earlier !== undefined)
         return {
-          run: await view(sameRequest(earlier, workflowId, input)),
+          run: await view(sameRequest(earlier, workflowId, named, input)),
           created: false,
         };
 
@@ -297,16 +402,18 @@ export function createWorkflowRunService(
           "WORKFLOW_RUN_WORKFLOW_ARCHIVED",
           "The workflow is archived and is not started.",
         );
-      const document = readRunDocument(found.current.document);
-      if (document === undefined)
+      const read = readRunDocument(found.current.document);
+      if (read === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
           "The saved workflow cannot be read.",
         );
-      if (document.trigger.kind !== "manual")
+      const trigger = startedTrigger(read.triggers, named);
+      const document = forTrigger(read, { id: trigger.id, kind: trigger.kind });
+      if (document === undefined)
         throw new WorkflowRunError(
-          "WORKFLOW_RUN_TRIGGER_NOT_MANUAL",
-          "Only a workflow with the manual trigger is started by hand.",
+          "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
+          "The saved workflow cannot be read.",
         );
       const unsupported = unsupportedStep(document);
       if (unsupported !== undefined)
@@ -316,7 +423,9 @@ export function createWorkflowRunService(
           { step: { id: unsupported.id, kind: unsupported.kind } },
         );
 
-      const schema = validateResultSchema(document.trigger.input).schema;
+      const schema = validateResultSchema(trigger.input, "", {
+        allowTicket: true,
+      }).schema;
       if (schema === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_DOCUMENT_UNUSABLE",
@@ -329,17 +438,45 @@ export function createWorkflowRunService(
           "The input does not fit the input of the trigger.",
           { errors: problems },
         );
-      const repo = input.repo;
-      if (typeof repo !== "string" || !REPO_NAME.test(repo))
+
+      // The repository of the run: the ticket's when the input has one, else the one named by `input.repo`.
+      const { [TICKET_INPUT]: ticketText, ...handedIn } = input;
+      const ref =
+        typeof ticketText === "string" ? parseTicketRef(ticketText) : undefined;
+      if (ref !== undefined && !ref.ok)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_INPUT_INVALID",
+          "The ticket is not a reference like github:owner/repo#128.",
+          { errors: [] },
+        );
+      const repoName = ref === undefined ? input.repo : ref.ref.repo;
+      if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
           "input.repo must be a repository of the workspace, as owner/name.",
         );
-      const repository = await deps.resolveRepository(repo);
+      const repository = await deps.resolveRepository(repoName);
       if (repository === undefined)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_REPOSITORY_NOT_FOUND",
           "There is no such repository in this workspace.",
+        );
+      let ticket: TicketValue | undefined;
+      if (ref !== undefined) {
+        const issue = await deps.readTicket(repository.id, ref.ref.number);
+        if (issue === undefined)
+          throw new WorkflowRunError(
+            "WORKFLOW_RUN_TICKET_NOT_FOUND",
+            "There is no such ticket in that repository (a pull request is none).",
+          );
+        ticket = ticketValue(issue, repository);
+      }
+      // Without a ticket the input is stored as it always was: a version that still runs during a deploy reads it as `trigger.input`.
+      const triggerInput = JSON.stringify(storedInputOf(handedIn, ticket));
+      if (triggerInput.length > TRIGGER_INPUT_MAX_CHARS)
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_REQUEST_INVALID",
+          "The input is too large.",
         );
 
       const created = await deps.runs.createRun({
@@ -350,12 +487,14 @@ export function createWorkflowRunService(
         triggerInput,
         budgetMicroUsd: runBudgetMicroUsd(document, maxBudgetUsd),
         clientRequestId,
+        triggerKind: trigger.kind,
+        triggerId: trigger.id,
         createdBy: user.id,
         actorLogin: user.githubLogin,
       });
       if (created.status === "existing")
         return {
-          run: await view(sameRequest(created.run, workflowId, input)),
+          run: await view(sameRequest(created.run, workflowId, named, input)),
           created: false,
         };
       deps.kick(created.run.id);

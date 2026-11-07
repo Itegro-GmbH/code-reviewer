@@ -78,7 +78,11 @@ export const CONTROL_COPY = {
 
 export const TRIGGER_COPY = {
   manual: "Started by hand",
+  api: "Started through the API",
+  "ticket.labeled": "A label on a ticket",
   "github.issueLabeled": "A label on an issue",
+  "pullRequest.pushed": "A push to a pull request",
+  schedule: "On a schedule",
 } as const;
 
 /** Why a run failed, in a sentence. */
@@ -321,6 +325,10 @@ export const START_COPY = {
   choose: "Choose",
   fieldRepo: "Repository",
   repoHint: "owner/name, one of the repositories of this workspace.",
+  fieldTicket: "Ticket",
+  ticketHint:
+    "github:owner/repo#128, an issue of one of the repositories of this workspace.",
+  triggerHeading: "Start through",
 } as const;
 
 const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
@@ -330,6 +338,9 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_NOT_FOUND: "This run no longer exists.",
   WORKFLOW_RUN_REPOSITORY_NOT_FOUND:
     "That repository is not one of this workspace's repositories.",
+  WORKFLOW_RUN_TRIGGER_UNKNOWN: "This workflow has no such trigger.",
+  WORKFLOW_RUN_TICKET_NOT_FOUND:
+    "That ticket does not exist in the repository (a pull request is not a ticket).",
   WORKFLOW_RUN_WORKFLOW_ARCHIVED:
     "This workflow is archived and cannot be started.",
   WORKFLOW_RUN_REQUEST_REUSED:

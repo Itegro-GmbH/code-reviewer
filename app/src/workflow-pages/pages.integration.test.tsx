@@ -48,6 +48,7 @@ function servicesOf(app: EngineHarness, workspaceId: string) {
       runs: createWorkflowRunsRepository(db, workspaceId),
       workflows: createWorkflowsRepository(db, workspaceId),
       resolveRepository: async () => undefined,
+      readTicket: async () => undefined,
       kick: () => {},
     }),
   };

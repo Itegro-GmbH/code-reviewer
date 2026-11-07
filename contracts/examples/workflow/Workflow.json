@@ -1,19 +1,46 @@
 {
   "version": 1,
   "name": "Issue to PR",
-  "description": "Implement the issue, have it reviewed, fix until the review finds nothing (3 rounds at most), then open the pull request; otherwise comment on the issue.",
-  "trigger": {
-    "kind": "github.issueLabeled",
-    "label": "ready for agent"
-  },
+  "description": "Implement the ticket, have it reviewed, fix until the review finds nothing (3 rounds at most), then open the pull request; otherwise comment on the ticket. A label starts it, or a person by hand: the manual trigger puts the label on first, so both arrive at the same context.",
+  "triggers": [
+    {
+      "id": "labeled",
+      "kind": "ticket.labeled",
+      "label": "agent implement",
+      "steps": []
+    },
+    {
+      "id": "manual",
+      "kind": "manual",
+      "input": {
+        "type": "object",
+        "required": ["ticket"],
+        "properties": {
+          "ticket": {
+            "type": "ticket",
+            "description": "The ticket to implement, like github:owner/repo#128."
+          }
+        }
+      },
+      "steps": [
+        {
+          "id": "mark",
+          "kind": "action",
+          "connector": "ticket.labels",
+          "ticket": "{{trigger.ticket}}",
+          "add": ["agent implement"]
+        }
+      ]
+    }
+  ],
   "budgetUsd": 20,
   "steps": [
     {
       "id": "start",
       "kind": "action",
-      "connector": "github.issue.labels",
-      "issue": "{{trigger.issue}}",
-      "remove": ["ready for agent"],
+      "connector": "ticket.labels",
+      "ticket": "{{trigger.ticket}}",
+      "remove": ["agent implement"],
       "add": ["agent working"]
     },
     {
@@ -30,7 +57,7 @@
             "continue": "implement"
           },
           "instruction": {
-            "first": "{{trigger.issue.title}}\n\n{{trigger.issue.body}}",
+            "first": "{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}",
             "next": "Fix these review findings:\n{{previous.review.findings}}"
           },
           "result": {
@@ -97,16 +124,16 @@
           "kind": "action",
           "connector": "github.pullRequest.open",
           "head": "{{implement.branch}}",
-          "title": "{{trigger.issue.title}}",
-          "body": "{{implement.summary}}\n\nCloses #{{trigger.issue.number}}"
+          "title": "{{trigger.ticket.title}}",
+          "body": "{{implement.summary}}\n\nCloses #{{trigger.ticket.number}}"
         }
       ],
       "else": [
         {
           "id": "stuck",
           "kind": "action",
-          "connector": "github.issue.comment",
-          "issue": "{{trigger.issue}}",
+          "connector": "ticket.comment",
+          "ticket": "{{trigger.ticket}}",
           "body": "Stopped after {{fix.rounds}} rounds. Open findings:\n{{review.findings}}"
         }
       ]
@@ -116,15 +143,15 @@
     {
       "id": "report",
       "kind": "action",
-      "connector": "github.issue.comment",
-      "issue": "{{trigger.issue}}",
+      "connector": "ticket.comment",
+      "ticket": "{{trigger.ticket}}",
       "body": "The agent stopped before a pull request was ready ({{failure.status}} at step {{failure.stepId}}, {{failure.code}}): {{failure.message}}"
     },
     {
       "id": "release",
       "kind": "action",
-      "connector": "github.issue.labels",
-      "issue": "{{trigger.issue}}",
+      "connector": "ticket.labels",
+      "ticket": "{{trigger.ticket}}",
       "remove": ["agent working"],
       "add": ["agent failed"]
     }

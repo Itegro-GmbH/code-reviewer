@@ -131,6 +131,27 @@ export interface IntegrationProvider {
   ): Promise<{ number: number; url: string; existing: boolean }>;
 
   /**
+   * Only where tickets can be read (#916, the `ticket` input of a trigger): one issue of the repository with the fields a workflow reads
+   * as `{{trigger.ticket.…}}`, or null when there is no issue of that number (a pull request is none). Read with a token limited to
+   * this repository and to reading its issues. The texts are those of whoever opened the issue: untrusted. Rejects like
+   * `getRepositoryFacts`.
+   */
+  readIssue?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    signal?: AbortSignal,
+  ): Promise<{
+    number: number;
+    title: string;
+    body: string;
+    url: string;
+    labels: string[];
+    assignees: string[];
+    type: string;
+  } | null>;
+
+  /**
    * Only where the app can write a comment (#844, `github.issue.comment`): writes `body` below an issue or pull request, as the
    * app, with a token limited to this repository and the issue permission. With a `marker` (text inside `body`), the comments of the
    * issue are looked at first: the app's own comment that holds the marker is the result (`existing`) and nothing is written, so a

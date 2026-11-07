@@ -83,6 +83,7 @@ describe("a linear run of two agent steps", () => {
       budgetMicroUsd: 20_000_000,
       spentMicroUsd: 0,
     });
+    // A run without a ticket stores the input as it was handed in, as before #916 (an older version reads it during a deploy).
     expect(JSON.parse(state.run.triggerInput)).toEqual({
       repo: "acme/widgets",
       topic: "caching",
@@ -990,7 +991,12 @@ describe("another workspace", () => {
     const otherService = createWorkflowRunService({
       runs: otherRuns,
       workflows: createWorkflowsRepository(app.h.db, otherId),
-      resolveRepository: async () => ({ id: "x", defaultBranch: "main" }),
+      resolveRepository: async () => ({
+        id: "x",
+        fullName: "acme/x",
+        defaultBranch: "main",
+      }),
+      readTicket: async () => undefined,
       kick: () => undefined,
     });
 

@@ -35,6 +35,11 @@ import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
+  canonicalTriggerKind,
+  legacyTriggerId,
+  type TriggerKind,
+} from "../workflows/triggers.ts";
+import {
   ActionInputError,
   ConnectorError,
   MAY_HAVE_HAPPENED,
@@ -43,7 +48,9 @@ import {
   type ConnectorRegistry,
 } from "./connectors.ts";
 import { conditionHolds } from "./conditions.ts";
+import { readStoredInput } from "./ticket.ts";
 import {
+  forTrigger,
   machineNodes,
   nodesById,
   readRunDocument,
@@ -187,21 +194,36 @@ function parseOutput(text: string | null): unknown {
 }
 
 /**
+ * What `{{trigger.*}}` holds for a run (#916): its `id` and `kind`, and what the trigger stored when it started the run. A run started
+ * by hand or through the API stored its input as handed in, or `{ input, ticket }` when it has a ticket (`readStoredInput`); a run a
+ * label started stored `{ ticket, issue, repo }` (`label-trigger.ts`).
+ *
+ * TODO(#923): `workflow_runs.ticket_ref` (the ticket's reference, `github:owner/repo#128`) comes with the ticket mirror of #923, in a
+ * migration of its own. This change does not add the column; once it exists, `createRun` of the label trigger and of the start service
+ * set it from the ticket they hold (`ticket.ts`).
+ */
+function triggerValueOf(run: StoredWorkflowRun): Record<string, unknown> {
+  const stored = parseOutput(run.triggerInput);
+  const record = isRecord(stored) ? stored : {};
+  const kind = canonicalTriggerKind(run.triggerKind as TriggerKind);
+  const facts = { id: run.triggerId ?? legacyTriggerId(kind), kind };
+  if (kind === "manual" || kind === "api")
+    return { ...facts, ...readStoredInput(stored) };
+  return { ...facts, ...record };
+}
+
+/**
  * What a reference can reach: the trigger and the output of every step that succeeded (of a step that ran in several rounds, the
- * latest), and `previous.<step>`, what a direct step of the loop body had in the round before (`context`). A run started by hand has
- * `trigger.input`, what the caller handed in; a run a label started has `trigger.issue` and `trigger.repo`, stored as they are
- * (`label-trigger.ts`).
+ * latest), and `previous.<step>`, what a direct step of the loop body had in the round before (`context`).
  */
 function valuesOf(
   run: StoredWorkflowRun,
   steps: readonly StoredStepRun[],
   context?: RoundContext,
 ): RunValues {
-  const input = parseOutput(run.triggerInput);
-  const record = isRecord(input) ? input : {};
   const failure = failureOf(run);
   return {
-    trigger: run.triggerKind === "manual" ? { input: record } : record,
+    trigger: triggerValueOf(run),
     // The facts of the failure exist for the steps of `onFailure` only: once the run has begun them.
     ...(failure === undefined
       ? {}
@@ -391,9 +413,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       run.workflowId,
       run.workflowVersion,
     );
-    return version === undefined
+    if (version === undefined) return undefined;
+    // The pre-steps of the trigger that started the run come before the shared steps; the machine walks one list (#916).
+    const document = readRunDocument(version.document);
+    return document === undefined
       ? undefined
-      : readRunDocument(version.document);
+      : forTrigger(document, { id: run.triggerId, kind: run.triggerKind });
   }
 
   /** The state the machine decides from: the rows, the nodes of the document, and how a condition is told from the values of the run. */

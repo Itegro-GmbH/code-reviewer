@@ -113,6 +113,19 @@ export async function startEngineHarness(
     actionTimeoutMs?: number;
     /** The most connections the pool of the database opens; a test of the engine under a small pool sets it. */
     poolMax?: number;
+    /** The tickets the platform answers for (#916), by `owner/name#number`; a ticket that is not listed does not exist. */
+    tickets?: Record<
+      string,
+      {
+        number: number;
+        title: string;
+        body: string;
+        url: string;
+        labels: string[];
+        assignees: string[];
+        type: string;
+      }
+    >;
   } = {},
 ) {
   const app = await startImplementerHarness({
@@ -197,7 +210,12 @@ export async function startEngineHarness(
       );
       return found === undefined
         ? undefined
-        : { id: found.id, defaultBranch: "main" };
+        : { id: found.id, fullName: found.fullName, defaultBranch: "main" };
+    },
+    async readTicket(repositoryId, number) {
+      const repository = await h.repositories.get(repositoryId);
+      if (repository === undefined) return undefined;
+      return options.tickets?.[`${repository.fullName}#${String(number)}`];
     },
     kick: (runId) => void kicked.push(runId),
     ...(options.maxBudgetUsd === undefined
@@ -235,11 +253,16 @@ export async function startEngineHarness(
   const start = (
     workflowId: string,
     overrides: {
+      /** The id of the trigger to start (#916); left out, the one that can be started. */
+      trigger?: string;
       input?: Record<string, unknown>;
       clientRequestId?: string;
     } = {},
   ) =>
     service.start(USER, workflowId, {
+      ...(overrides.trigger === undefined
+        ? {}
+        : { trigger: overrides.trigger }),
       input: overrides.input ?? { repo: "acme/widgets", topic: "caching" },
       clientRequestId: overrides.clientRequestId ?? "run-1",
     });

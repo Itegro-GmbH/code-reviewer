@@ -94,6 +94,56 @@ describe("the fields", () => {
   });
 });
 
+describe("the ticket and the trigger (#916)", () => {
+  // #916-T120
+  it("asks for the ticket as a text with its hint, and sends it trimmed with the id of the trigger", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(ok(run({ id: "run-9" })));
+    render(
+      <StartForm
+        workspaceSlug="acme"
+        workflowId="wf-1"
+        trigger="manual"
+        fields={[{ name: "ticket", required: true, kind: "ticket" }]}
+        api={api}
+      />,
+    );
+
+    expect(screen.getByText(START_COPY.ticketHint)).toBeTruthy();
+    await user.type(
+      screen.getByLabelText(START_COPY.fieldTicket),
+      "  github:acme/widgets#128 ",
+    );
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start).toHaveBeenCalledWith("wf-1", {
+      trigger: "manual",
+      input: { ticket: "github:acme/widgets#128" },
+      clientRequestId: expect.stringMatching(/^[\x21-\x7e]{1,200}$/),
+    });
+  });
+
+  // #916-T121
+  it("does not send a form whose ticket is empty, and sends no trigger when the workflow has the single trigger of before", async () => {
+    const user = userEvent.setup();
+    const api = apiAnswering(ok(run()));
+    renderForm(api, [{ name: "ticket", required: true, kind: "ticket" }]);
+
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+    expect(api.start).not.toHaveBeenCalled();
+    expect(screen.getByText(START_COPY.required)).toBeTruthy();
+
+    await user.type(
+      screen.getByLabelText(START_COPY.fieldTicket),
+      "github:acme/widgets#1",
+    );
+    await user.click(screen.getByRole("button", { name: START_COPY.start }));
+    await waitFor(() => expect(api.start).toHaveBeenCalledTimes(1));
+    expect(api.start.mock.calls[0]?.[1]).not.toHaveProperty("trigger");
+  });
+});
+
 describe("what is sent", () => {
   // #873-T51
   it("starts with the input typed, leaves empty optional fields out, and goes to the run", async () => {

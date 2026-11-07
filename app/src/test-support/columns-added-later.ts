@@ -50,7 +50,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
   // #891: when a member asked for the run to stop; null for every run that exists.
-  workflow_runs: ["trigger_kind", "cancel_requested_at"],
+  // #916: the trigger of the document that started the run; null for every run that exists.
+  workflow_runs: ["trigger_kind", "cancel_requested_at", "trigger_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.

@@ -456,6 +456,22 @@ export function createGithubAppProvider(
       }
     },
 
+    async readIssue(integration, repo, issueNumber, signal) {
+      try {
+        return await (
+          await getClient()
+        ).getIssue(
+          integration.externalId,
+          actionScope(integration, repo, COMMENT_READ_TOKEN_PERMISSIONS),
+          repo.fullName,
+          issueNumber,
+          signal,
+        );
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
     async changeIssueLabels(integration, repo, issueNumber, change, signal) {
       try {
         return {

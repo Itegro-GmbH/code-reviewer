@@ -3,7 +3,12 @@
 // The failure a run ended with, as the steps of `onFailure` read it (#902): `{{failure.status}}`, `.stepId`, `.code` and `.message`.
 // They run after a run ended `failed` or `cancelled` and may only comment on an issue and change its labels, so the connectors they
 // may name are listed here. The engine (src/workflow-runs/) fills the facts in; the validator only knows their types.
-import { GITHUB_ISSUE_COMMENT, GITHUB_ISSUE_LABELS } from "./connectors.ts";
+import {
+  GITHUB_ISSUE_COMMENT,
+  GITHUB_ISSUE_LABELS,
+  TICKET_COMMENT,
+  TICKET_LABELS,
+} from "./connectors.ts";
 import { enumOf, objectOf, STRING, type ObjectType } from "./value-type.ts";
 
 /** What a reference to the failure starts with. Taken as an id by the steps of `onFailure`, so none of them can be called like it. */
@@ -20,6 +25,8 @@ export type FailureStatus = (typeof FAILURE_STATUSES)[number];
 export const ON_FAILURE_CONNECTORS: readonly string[] = [
   GITHUB_ISSUE_COMMENT.name,
   GITHUB_ISSUE_LABELS.name,
+  TICKET_COMMENT.name,
+  TICKET_LABELS.name,
 ];
 
 /** The node kinds an `onFailure` list may hold: actions, and `if` over the facts of the failure. */

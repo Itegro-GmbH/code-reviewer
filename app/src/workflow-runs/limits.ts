@@ -66,3 +66,10 @@ export const ISSUE_LABELS_MAX = 20;
 export const ISSUE_LABEL_MAX_CHARS = 50;
 /** A GitHub login is at most 39 characters; a bot's ends in `[bot]`. */
 export const ACTOR_LOGIN_MAX_CHARS = 100;
+/** The logins a ticket may list as assigned, and the length of one; GitHub allows ten assignees and a login of 39 characters. */
+export const TICKET_ASSIGNEES_MAX = 20;
+export const TICKET_ASSIGNEE_MAX_CHARS = 100;
+/** The kind of a ticket (`Bug`). */
+export const TICKET_TYPE_MAX_CHARS = 100;
+/** The default branch of a repository as a run stores it (a Git ref component is at most 255 bytes). */
+export const BRANCH_MAX_CHARS = 255;

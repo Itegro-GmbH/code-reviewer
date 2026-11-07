@@ -140,15 +140,30 @@ function StartSection({
       <h2 id="start-heading" className="text-xl font-semibold">
         {START_COPY.heading}
       </h2>
-      {notice !== null || form.kind !== "form" ? (
+      {notice !== null || (form.kind !== "form" && form.kind !== "forms") ? (
         <Alert variant="info" role="status">
           {notice ?? ""}
         </Alert>
+      ) : form.kind === "forms" ? (
+        form.forms.map((each) => (
+          <div key={each.trigger} className="flex flex-col gap-3">
+            <h3 className="text-base font-semibold">
+              {START_COPY.triggerHeading} {each.trigger}
+            </h3>
+            <StartForm
+              workspaceSlug={workspaceSlug}
+              workflowId={workflow.id}
+              fields={each.fields}
+              trigger={each.trigger}
+            />
+          </div>
+        ))
       ) : (
         <StartForm
           workspaceSlug={workspaceSlug}
           workflowId={workflow.id}
           fields={form.fields}
+          {...(form.trigger === undefined ? {} : { trigger: form.trigger })}
         />
       )}
     </section>

@@ -7,7 +7,7 @@ workspace with versions.
 
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
-workflow with the trigger `github.issueLabeled` starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
+workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
 either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run), and a workflow can clean up after a failed or cancelled run with [`onFailure`](#after-a-failure-onfailure). Not yet: an editor.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
@@ -65,7 +65,8 @@ An answer you will see while fixing:
 | `version` | yes | `1`. |
 | `name` | yes | 1 to 100 characters, not only spaces. Unique among the workflows of the workspace that are not archived (case is ignored). |
 | `description` | no | Up to 1000 characters. |
-| `trigger` | yes | What starts the workflow. |
+| `triggers` | yes (or `trigger`) | The triggers that start the workflow, 1 to 10, each with pre-steps of its own ([The triggers](#the-triggers-and-their-pre-steps)). |
+| `trigger` | no | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
 | `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled` ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
@@ -78,18 +79,84 @@ characters (an emoji is one), as the JSON Schema counts them.
 Everything else is configuration. The nodes talk to each other only through values; each one has an input and an output, and the validator
 holds one to the other.
 
-### The trigger
+### The triggers and their pre-steps
 
-| `kind` | Fields | What the steps can read |
+A workflow has **several triggers** (`triggers`, 1 to 10). Each one starts the workflow its own way and has its own **pre-steps**; when it
+fires, the engine runs its pre-steps and then the **shared steps** (`steps`). Every trigger must end with the same context, so the shared steps
+may only read what **every** trigger yields.
+
+```jsonc
+"triggers": [
+  { "id": "labeled", "kind": "ticket.labeled", "label": "agent implement", "steps": [] },
+  { "id": "manual", "kind": "manual", "input": { "type": "object", "required": ["ticket"], "properties": { "ticket": { "type": "ticket" } } },
+    "steps": [ { "id": "mark", "kind": "action", "connector": "ticket.labels", "ticket": "{{trigger.ticket}}", "add": ["agent implement"] } ] }
+]
+```
+
+| Field | Needed | What |
 | --- | --- | --- |
-| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`repo`**, a required text (`owner/name`): the repository the run works on (`repo_required`) | `{{trigger.input.<field>}}`, so `{{trigger.input.repo}}` |
-| `github.issueLabeled` | `label` (needed, not only spaces): the label that starts the workflow | `{{trigger.issue.number}}` (an integer), `.title`, `.body`, `.url`, `.labels` (a list; title, body and labels are free text from whoever opened the issue: read in texts, never a [target](#one-repository-per-run-and-targets)), and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch` |
+| `id` | yes | A letter, then letters, digits, `_` or `-` (64 at most); `trigger` and `previous` are taken. Unique among the triggers (`duplicate_id`). The start API takes it as `"trigger"`. |
+| `kind` | yes | One of the kinds below. |
+| `steps` | no | The pre-steps: the form of `steps`, may be empty. They see the values of their own trigger only. Their ids are unique in the whole document, with the shared steps and `onFailure` (`duplicate_id`). |
 
-Other triggers (a schedule, Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger).
+| `kind` | Other fields | What the steps can read (`{{trigger.<field>}}`) |
+| --- | --- | --- |
+| `ticket.labeled` | `label` (needed, not only spaces): the label that starts the workflow | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
+| `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
+| `api` | the same as `manual` | the same. It is started through the API only; the start form of the web app offers `manual` triggers |
+| `pullRequest.pushed` | none | reserved: the format validates it, the engine starts no run from it yet |
+| `schedule` | `cron` (needed): five fields separated by one space | reserved, like `pullRequest.pushed` |
+
+`trigger.id` and `trigger.kind` (`ticket.labeled`, `manual`, …) are readable facts of every trigger. A run of a workflow written with the old
+`trigger` has the id `labeled` or `manual` and the kind `ticket.labeled` or `manual`.
+
+**What the shared steps may read.** The shared steps (and `onFailure`) read the part of `trigger` that all triggers yield. `trigger.ticket` is
+there only when every trigger yields a ticket; when one does not, the reference is `reference_not_in_scope` and the message names a trigger
+that lacks it. `trigger.input.…` is there when every trigger has an input with that field. A pre-step's own steps are not in reach of the
+shared steps: only the values of the trigger are. With one trigger nothing changes: it is all in reach.
+
+**The ticket.** A **ticket** is the work item a run is about, named by a reference like `github:owner/repo#128` (the provider, the repository,
+the number; GitHub is the provider so far, the shape is provider neutral). The input type `ticket` takes such a reference; the engine resolves
+it through the provider when the run starts, and the steps read it as `{{trigger.ticket.…}}`:
+
+| Field | What |
+| --- | --- |
+| `number` | the number (an integer) |
+| `title`, `body` | free text from whoever opened the ticket: read in texts, never a [target](#one-repository-per-run-and-targets) |
+| `labels` | the names of its labels (a list; free text too) |
+| `type` | the kind of ticket the platform reports (GitHub's issue type, `Bug`), empty when it has none |
+| `assignees` | the logins of the people it is assigned to (a list) |
+| `url` | its web address |
+| `repo` | the repository: `repo.fullName`, `.owner`, `.name`, `.defaultBranch` |
+
+A label trigger yields the same ticket from the webhook (`type` and `assignees` are filled when GitHub's payload has them, else empty), so a
+step reads `{{trigger.ticket.number}}` whichever trigger fired. `trigger.ticket` is a **target**: one trusted value that names the issue (see
+below). `ticket` is a field of the input itself and it is called `ticket`: not inside a list or an object, and not in the result of an agent
+step (`invalid_value`). A caller hands it in as text (`"input": { "ticket": "github:itegro/shop#128" }`); a text that is no reference, or a provider
+that is not known, is refused when the run starts (`WORKFLOW_RUN_INPUT_INVALID`).
+
+**Pre-steps** are the place to make the contexts alike: a manual trigger puts the label on the ticket that a label trigger arrives with (`mark`
+above), then the shared steps do the work once. A step in a pre-step may be anything a step may be; it runs under the same budget as the rest.
+The label an `ticket.labeled` trigger waits for is not added again by the bot's own writes: the webhook ignores them. So
+`label_retriggers_workflow` is raised for a step that adds a label that starts the workflow in the **shared** steps and in the pre-steps of the
+**label trigger** itself, and not for a pre-step of a trigger that is no label trigger (the example above adds the label of `labeled` in the
+pre-step of `manual`, which is right).
+
+Why a pre-step may add the label of **another** trigger and a shared step may not add any trigger's label: the webhook ignores the App's own
+writes, so a label a step adds never fires a trigger by itself. That makes it safe for the pre-step of `manual` to put the label of `labeled` on
+the ticket: that pre-step runs for `manual` only, never for the trigger whose label it adds, and it is how one context is made like the other.
+A shared step has no such place: it runs for **every** trigger, so the label it adds is always the label of a trigger it also runs for. The
+document would then state, in its own steps, that a run puts back the label that started it, and only the webhook's exemption would keep that
+from looping. The validator does not rely on that exemption for the steps that run for every trigger, so they may add none of the labels that
+start the workflow, and the pre-step of a label trigger may not add its own. Two `ticket.labeled` triggers may not wait for the same label
+(`duplicate_trigger_label`, case does not matter): one label would start two runs. The JSON Schema cannot say that, the validator does, and
+reports it at the `label` of the second trigger, naming the first.
+
+Other triggers (Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger).
 
 ### One repository per run, and targets
 
-**A run works on one repository** in version 1: `trigger.repo` of an issue trigger, the input `repo` of a manual one. No agent step and
+**A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. No agent step and
 no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. Several repositories in one run are a later
 extension.
 
@@ -102,14 +169,14 @@ and labels): anyone who can open an issue could steer a run through them. So a t
 
 | Input | A literal | A reference to |
 | --- | --- | --- |
-| `issue` | a positive whole number, 1 to 2147483647 | `{{trigger.issue}}` or `{{trigger.issue.number}}` (the issue that started the run), or an input of a manual trigger declared `integer` (`{{trigger.input.issueNo}}`) |
+| `issue`, `ticket` | a positive whole number, 1 to 2147483647 | `{{trigger.ticket}}` or `{{trigger.ticket.number}}` (the ticket the run is about), `{{trigger.issue}}` or `{{trigger.issue.number}}` (the issue a label started), or an input of a manual trigger declared `integer` (`{{trigger.input.issueNo}}`) |
 | `add`, `remove` | label names | an input of a manual trigger: `{{trigger.input.label}}` as an entry, or `{{trigger.input.labels}}` as the whole list |
-| `base` | a branch name | `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`) |
+| `base` | a branch name | `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}`, or an input of a manual trigger (`{{trigger.input.base}}`) |
 | `head` | a branch name | `{{<agent step>.branch}}`, the branch of an agent step that may push (a fact the platform made) |
 | `environment` | the name of an environment | nothing: a literal only |
 
 Everything else (a result field of an agent, a field of an action or a loop, `previous.…`, `trigger.issue.title`, `.body` or `.labels`, text
-around a reference) is refused with `target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`,
+around a reference, `trigger.ticket.title`, `.body`, `.labels`) is refused with `target_from_untrusted_value`; the message names what the input takes. Free-text inputs (`title`, `body`,
 `instruction`) take any reference, an agent's result and the title of the issue included: a list becomes lines of text there. A manual
 trigger's input is what the caller of the run (a person or an AI with the right to run workflows) hands in, so it is taken like a literal.
 
@@ -154,9 +221,14 @@ command; consequences (a comment, a pull request) happen only here. The inputs s
 | `github.pullRequest.open` | `head`\* (a branch: a literal or `{{<agent>.branch}}`), `title`\*, `base` (a branch: a literal, `{{trigger.repo.defaultBranch}}` or a manual input; the default branch if left out), `body`, `draft` (true/false) | `number`, `url` |
 | `github.issue.comment` | `issue`\* (a positive whole number, `{{trigger.issue}}` or `{{trigger.issue.number}}`, or a manual input declared `integer`), `body`\* | `url` |
 | `github.issue.labels` | `issue`\*, `add` (a list of labels), `remove` (a list), at least one **entry** in `add` and `remove` together (`add: [], remove: []` is `missing_field`) | `labels` (the labels the issue has now) |
+| `ticket.comment` | `ticket`\* (as `issue`: a number, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`, …), `body`\* | `url` |
+| `ticket.labels` | `ticket`\*, `add`, `remove` as `github.issue.labels` | `labels` |
 
-The action works on the repository of the run. `head`, `base`, `issue`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
-the trigger `github.issueLabeled` an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
+`ticket.comment` and `ticket.labels` are the provider-neutral names of the two actions on a ticket (#916): GitHub is the provider so far, and they
+do what `github.issue.comment` and `github.issue.labels` do, on the issue of the run's repository. They are allowed in `onFailure` like those.
+
+The action works on the repository of the run. `head`, `base`, `issue`, `ticket`, `add` and `remove` are [targets](#one-repository-per-run-and-targets). With
+a label trigger an action may **not add the label that starts the workflow** (case ignored): the workflow would start itself
 again (`label_retriggers_workflow`); removing it is fine. A connector that does not exist is refused (`unknown_connector`). The engine runs an action
 through a connector it has: the three GitHub connectors run on a server that has the GitHub App, and a step whose connector is not there ends with
 `connector_unavailable` (see [Engine](#engine) and [GitHub actions](#github-actions)).
@@ -181,7 +253,7 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 `onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
 (`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
 
-- **What they may be.** An `action` of `github.issue.comment` or `github.issue.labels`, and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+- **What they may be.** An `action` of `ticket.comment` or `ticket.labels` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
   `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
 - **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
@@ -281,6 +353,11 @@ the root is an object; a field is a `string` (optionally with `enum`, a list of 
 }
 ```
 
+**`ticket` (#916)** is one more type, for the `input` of a `manual` or `api` trigger only: `{"type": "ticket"}`, a text like `github:owner/repo#128` (the provider, the
+repository, the number). It is the one field of the input itself called `ticket`: not inside an array or an object, under no other name, and not in the `result` of an agent step (`invalid_value`).
+A value is checked like the others (`wrong_type` for a non-text, `invalid_value` for a text that is no reference or names a provider that is not known, with the providers as `available`). The engine
+resolves it through the provider when the run starts and the steps read it as `{{trigger.ticket}}` ([The triggers](#the-triggers-and-their-pre-steps)).
+
 Caps: a string is held to `maxLength` (10000 characters when not given, 100000 at most), a list to `maxItems` (100 when not given, 1000 at most), an
 `enum` has 50 values at most, an object 50 fields, a schema 100 fields in all and 4 levels of objects and lists.
 
@@ -309,24 +386,47 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
 {
   "version": 1,
   "name": "Issue to PR",
-  "description": "Implement the issue, have it reviewed, fix until the review finds nothing (3 rounds at most), then open the pull request; otherwise comment on the issue.",
-  "trigger": {
-    "kind": "github.issueLabeled",
-    "label": "ready for agent"
-  },
+  "description": "Implement the ticket, have it reviewed, fix until the review finds nothing (3 rounds at most), then open the pull request; otherwise comment on the ticket. A label starts it, or a person by hand: the manual trigger puts the label on first, so both arrive at the same context.",
+  "triggers": [
+    {
+      "id": "labeled",
+      "kind": "ticket.labeled",
+      "label": "agent implement",
+      "steps": []
+    },
+    {
+      "id": "manual",
+      "kind": "manual",
+      "input": {
+        "type": "object",
+        "required": ["ticket"],
+        "properties": {
+          "ticket": {
+            "type": "ticket",
+            "description": "The ticket to implement, like github:owner/repo#128."
+          }
+        }
+      },
+      "steps": [
+        {
+          "id": "mark",
+          "kind": "action",
+          "connector": "ticket.labels",
+          "ticket": "{{trigger.ticket}}",
+          "add": ["agent implement"]
+        }
+      ]
+    }
+  ],
   "budgetUsd": 20,
   "steps": [
     {
       "id": "start",
       "kind": "action",
-      "connector": "github.issue.labels",
-      "issue": "{{trigger.issue}}",
-      "remove": [
-        "ready for agent"
-      ],
-      "add": [
-        "agent working"
-      ]
+      "connector": "ticket.labels",
+      "ticket": "{{trigger.ticket}}",
+      "remove": ["agent implement"],
+      "add": ["agent working"]
     },
     {
       "id": "fix",
@@ -342,14 +442,12 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
             "continue": "implement"
           },
           "instruction": {
-            "first": "{{trigger.issue.title}}\n\n{{trigger.issue.body}}",
+            "first": "{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}",
             "next": "Fix these review findings:\n{{previous.review.findings}}"
           },
           "result": {
             "type": "object",
-            "required": [
-              "summary"
-            ],
+            "required": ["summary"],
             "properties": {
               "summary": {
                 "type": "string",
@@ -368,28 +466,18 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
           "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",
           "result": {
             "type": "object",
-            "required": [
-              "findings"
-            ],
+            "required": ["findings"],
             "properties": {
               "findings": {
                 "type": "array",
                 "maxItems": 20,
                 "items": {
                   "type": "object",
-                  "required": [
-                    "type",
-                    "name",
-                    "description"
-                  ],
+                  "required": ["type", "name", "description"],
                   "properties": {
                     "type": {
                       "type": "string",
-                      "enum": [
-                        "bug",
-                        "risk",
-                        "nit"
-                      ]
+                      "enum": ["bug", "risk", "nit"]
                     },
                     "name": {
                       "type": "string",
@@ -413,10 +501,7 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
       "id": "done",
       "kind": "if",
       "when": {
-        "equals": [
-          "{{fix.exit}}",
-          "until"
-        ]
+        "equals": ["{{fix.exit}}", "until"]
       },
       "then": [
         {
@@ -424,16 +509,16 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
           "kind": "action",
           "connector": "github.pullRequest.open",
           "head": "{{implement.branch}}",
-          "title": "{{trigger.issue.title}}",
-          "body": "{{implement.summary}}\n\nCloses #{{trigger.issue.number}}"
+          "title": "{{trigger.ticket.title}}",
+          "body": "{{implement.summary}}\n\nCloses #{{trigger.ticket.number}}"
         }
       ],
       "else": [
         {
           "id": "stuck",
           "kind": "action",
-          "connector": "github.issue.comment",
-          "issue": "{{trigger.issue}}",
+          "connector": "ticket.comment",
+          "ticket": "{{trigger.ticket}}",
           "body": "Stopped after {{fix.rounds}} rounds. Open findings:\n{{review.findings}}"
         }
       ]
@@ -443,27 +528,23 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
     {
       "id": "report",
       "kind": "action",
-      "connector": "github.issue.comment",
-      "issue": "{{trigger.issue}}",
+      "connector": "ticket.comment",
+      "ticket": "{{trigger.ticket}}",
       "body": "The agent stopped before a pull request was ready ({{failure.status}} at step {{failure.stepId}}, {{failure.code}}): {{failure.message}}"
     },
     {
       "id": "release",
       "kind": "action",
-      "connector": "github.issue.labels",
-      "issue": "{{trigger.issue}}",
-      "remove": [
-        "agent working"
-      ],
-      "add": [
-        "agent failed"
-      ]
+      "connector": "ticket.labels",
+      "ticket": "{{trigger.ticket}}",
+      "remove": ["agent working"],
+      "add": ["agent failed"]
     }
   ]
 }
 ```
 
-How it reads: label the issue `ready for agent`, and `start` swaps the labels. The loop `fix` (3 rounds at most): `implement` works (in
+How it reads: label the issue `agent implement` (the trigger `labeled`), or start it by hand with `{"trigger": "manual", "input": {"ticket": "github:owner/repo#128"}}`: the pre-step `mark` of the manual trigger puts the label on, so both arrive at the same context. Then `start` swaps the labels. The loop `fix` (3 rounds at most): `implement` works (in
 round two it continues its own session and is told the findings of the review before), `review` looks at the branch and returns
 `findings`; the loop ends when there are none. `done` then opens the pull request when the loop ended with `until`, and otherwise comments
 the open findings on the issue. `{{review.findings}}` after the loop is the last round's. The engine runs this workflow end to end ([Control at run time](#control-at-run-time)); a label starts it
@@ -473,7 +554,7 @@ the open findings on the issue. `{{review.findings}}` after the loop is the last
 ([Branches](#branches-and-what-a-step-starts-from)). It declares its `result` although the profile `reviewer` brings the same default: the example then validates and reads without the profile at hand.
 
 **When a step fails inside the loop** (or the budget ends the run, or a member cancels it) the run ends as `failed` (or `cancelled`), no pull request is opened, and `onFailure` runs: `report` comments on the issue what stopped
-the run (the step, its code and a short message, defused), and `release` takes `agent working` off and puts `agent failed` on. It cannot put `ready for agent` back: that label starts the workflow, so adding it is refused
+the run (the step, its code and a short message, defused), and `release` takes `agent working` off and puts `agent failed` on. It cannot put `agent implement` back: that label starts the workflow, so adding it is refused
 (`label_retriggers_workflow`); a person puts it on again when the issue should be tried again. The run keeps its status; the page shows the two steps after the one that failed ([After a failure](#after-a-failure-onfailure)).
 
 ## The API
@@ -529,12 +610,22 @@ run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step na
 
 ### Starting a run
 
-`POST /api/w/<slug>/workflows/<id>/runs` with `{"input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
-task, `start_implementer_task`: a run starts tasks). `input` must fit the `input` schema of the trigger (checked again here with the same rules as a
-result: a start knows the values) and names the repository (`input.repo`, `owner/name`) of the workspace. The answer is `201 {"run": {...}}`, with
-the run and its steps; the first steps start right after the answer.
+`POST /api/w/<slug>/workflows/<id>/runs` with `{"trigger": "manual", "input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
+task, `start_implementer_task`: a run starts tasks). `trigger` is the `id` of one of the workflow's [triggers](#the-triggers-and-their-pre-steps) of the kind `manual` or `api`; it may be left out
+when the workflow has exactly one of them (a workflow written with the single `trigger` has one). `input` must fit the `input` schema of that trigger (checked again here with the same rules as a
+result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`); either is a repository of the workspace. The answer is
+`201 {"run": {...}}`, with the run and its steps; the pre-steps of the trigger and then the shared steps start right after the answer.
 
-- **Idempotent.** The same `clientRequestId` with the same workflow and input answers `200` with the run it made before and writes nothing;
+```jsonc
+{ "trigger": "manual", "input": { "ticket": "github:itegro/shop#128" }, "clientRequestId": "…" }
+```
+
+A `ticket` is resolved through the GitHub App of the workspace when the run starts (`trigger.ticket` holds what it answered, bounded; the run keeps it, so a step reads one
+snapshot). `404 WORKFLOW_RUN_TICKET_NOT_FOUND` when the repository has no issue of that number (a pull request is none), `404 WORKFLOW_RUN_TRIGGER_UNKNOWN` for a trigger id the workflow does not
+have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by hand, `400 WORKFLOW_RUN_REQUEST_INVALID` when no trigger is named and several can be started. A run stores
+`trigger` (its kind) and `triggerId` (the trigger of the document), also in the list. The start form of the web page is made from the input of a `manual` trigger, one form each when there are several.
+
+- **Idempotent.** The same `clientRequestId` with the same workflow, trigger and input answers `200` with the run it made before and writes nothing;
   another workflow or input under that id is `409 WORKFLOW_RUN_REQUEST_REUSED` (with `runId`). The id is 1 to 200 printable ASCII characters
   without a space.
 - **The version is pinned.** The run uses the version the workflow has at the start; saving a new version later changes nothing under it.
@@ -575,7 +666,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 {
   "run": {
     "id": "7f0c…", "workflowId": "…", "workflowVersion": 3, "trigger": "manual", "actorLogin": "octocat", "status": "running", "errorCode": null,
-    "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"repo": "acme/widgets", "topic": "caching"},
+    "triggerId": "manual", "budgetUsd": 20, "spentUsd": 0.42, "repositoryId": "…", "baseBranch": "main", "input": {"input": {"repo": "acme/widgets", "topic": "caching"}},
     "createdAt": "…", "updatedAt": "…", "finishedAt": null,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
@@ -588,7 +679,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
 
 `jobId` and `turnId` link an agent step to its Implementer run (the live view of that run shows what the agent does). `costBasis` says where `costUsd` comes
 from (`reported`, `estimated` or `limit`, see [The budget over all steps](#the-budget-over-all-steps)); it is null for a step that was charged nothing. `trigger` is what
-started the run (`manual`, or `github.issueLabeled`) and `actorLogin` who: the person who started it, or whoever put the label on. It is for display and decides nothing.
+started the run (`manual`, `api`, `ticket.labeled` or, on rows written before #916, `github.issueLabeled`) and `triggerId` the trigger of the document that did, and `actorLogin` who: the person who started it, or whoever put the label on. It is for display and decides nothing.
 For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The label trigger](#the-label-trigger)); the run page shows the trigger and the login and asks for no starter.
 
 ### What the engine does
@@ -845,8 +936,9 @@ workspace of the installation decides which workflows start ([`label-trigger.ts`
   that is meant;
 - the repository of the issue is an **active repository of the workspace** (the installation's workspace; a repository of another installation, or one that was
   removed from it, starts nothing). No project is needed;
-- the workflow is **not archived**, its **current version** has the trigger `github.issueLabeled`, and its `label` is **exactly** the label that was put on: the same
-  characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it);
+- the workflow is **not archived**, its **current version** has a trigger of the kind `ticket.labeled` (or `github.issueLabeled`, its name before #916), and its `label` is **exactly** the label that was put on: the same
+  characters, case and spaces included (GitHub keeps the spelling a label was created with, and the payload carries it). The run starts through **that trigger**: its [pre-steps](#the-triggers-and-their-pre-steps) run first,
+  then the shared steps. A workflow with two label triggers for one label starts one run, through the first;
 - every step is one the engine runs (`agent`, `action`, `if` and `loop`, at any depth). A workflow with a node of another kind is **left out** and the log says which step: a run that
   ends halfway, after its first action changed the issue, is worse than none (the validator refuses the reserved kinds, so no saved workflow has one);
 - the workflow has **no running run for this issue**. A workflow has at most one running run for one issue (the repository and the issue number): the label put on,
@@ -855,7 +947,7 @@ workspace of the installation decides which workflows start ([`label-trigger.ts`
   the issue, for runs that are `running`), so two deliveries that race for the same issue write one run. The delivery that started nothing is answered
   `no_workflow_matched`. Another issue, or another workflow, is not held by it.
 
-The format gives an issue trigger no repository of its own: the workflow runs on the repository of the issue (`trigger.repo`), so every active repository of the
+The format gives a label trigger no repository of its own: the workflow runs on the repository of the ticket (`trigger.ticket.repo`), so every active repository of the
 workspace fits. Several workflows may wait for one label; **each starts a run of its own**.
 
 **Nobody is asked.** There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login of the person is
@@ -872,8 +964,8 @@ are written once, is a header. Whoever holds a correctly signed body (a captured
 signature still decides who can start a run at all; the rule of one running run for one issue (above) is what limits a replay, the delivery id only protects against
 GitHub's own redelivery.
 
-**A run without a person.** `workflow_runs.created_by` is empty for such a run and `triggerKind` is `github.issueLabeled` (the check of the table: only a run started by
-hand needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the author of the version the run uses; saving the workflow again makes a new version, and its author owns the runs that start afterwards); their job shows the login of whoever put the label on. Neither decides anything: what a run may do is what the workflow, its profile and the GitHub
+**A run without a person.** `workflow_runs.created_by` is empty for such a run and `triggerKind` is `ticket.labeled` (`github.issueLabeled` on the rows written before #916; `triggerId` is the id of the trigger; the check of the table: only a run started by
+hand or through the API needs a user). The Implementer records the account a session belongs to, so the **turns of such a run belong to the account that owns the workflow** (the author of the version the run uses; saving the workflow again makes a new version, and its author owns the runs that start afterwards); their job shows the login of whoever put the label on. Neither decides anything: what a run may do is what the workflow, its profile and the GitHub
 App allow.
 
 **At most one run per delivery and workflow.** The run is started under the request id `gh-<delivery id>-<workflow id>`. GitHub's "Redeliver" of a delivery, or a second
@@ -882,10 +974,12 @@ the outcome `workflow_runs_started` (at least one workflow has a run for this de
 starts; the delivery can be redelivered, for a workflow saved later). If writing a run fails, the other workflows still start, the answer is `500` and a redelivery
 finds the runs that were written.
 
-**The input is the issue.** `trigger_input` of the run, and what the steps read, is:
+**The input is the ticket.** `trigger_input` of the run, and what the steps read, is the ticket (`trigger.ticket`, below) and, as workflows written before #916 read them,
+the issue and the repository:
 
 | Value | What |
 | --- | --- |
+| `trigger.ticket` | `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo` ([The ticket](#the-triggers-and-their-pre-steps)), the same bounds as `trigger.issue`; `type` and `assignees` come from the payload of the webhook when it has them, else empty. |
 | `trigger.issue.number` | The number of the issue (an integer). |
 | `trigger.issue.title` | The title, at most 256 characters (a longer one ends in `…`). |
 | `trigger.issue.body` | The description, at most 8,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |
@@ -907,7 +1001,7 @@ read the issue, and works in its sandbox. In the **text of an action** (a commen
 nothing), a `<!--` rebuilds no marker. The number and the address of the issue and the repository are the platform's and stay as they are, so `Closes #{{trigger.issue.number}}`
 works as written.
 
-**The labels at the start.** The engine changes no label by itself. Swapping `ready for agent` for `agent working` is the first step of the workflow, an action
+**The labels at the start.** The engine changes no label by itself. Swapping `agent implement` for `agent working` is the first shared step of the workflow, an action
 `github.issue.labels` (see [the first workflow](#the-first-workflow)); the validator refuses an action that adds the label that starts the workflow.
 
 **What the GitHub App needs** (the owner of the App sets this on GitHub; nothing in the app changes the App's configuration):
@@ -958,12 +1052,14 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_CROSS_SITE_REQUEST` | 403 | The request comes from another site. |
 | `WORKFLOW_RUN_WORKFLOW_NOT_FOUND` | 404 | No such workflow in this workspace. |
 | `WORKFLOW_RUN_NOT_FOUND` | 404 | No such run of this workflow in this workspace. |
-| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo` is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_REPOSITORY_NOT_FOUND` | 404 | `input.repo`, or the repository of the `ticket`, is none of the workspace's repositories (or not `owner/name`). |
+| `WORKFLOW_RUN_TRIGGER_UNKNOWN` | 404 | The workflow has no trigger with the id the body names as `trigger`. |
+| `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
 | `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
-| `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a workflow with the manual trigger is started by hand. |
+| `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
@@ -979,12 +1075,12 @@ not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
 - **One workflow** (`/w/<slug>/workflows/<id>`): the **Start form** and the newest 50 runs.
-  - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) first: a text, a whole number, a number, a
-    choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. It sends `{input, clientRequestId}` to
+  - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) or the ticket first: a text (a ticket is a text like `github:owner/repo#128`), a whole number, a number, a
+    choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
     `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
     answer is one run, changing the input is another. A refusal is told in words; a field the server names is marked. A workflow that is archived, or whose
     trigger is not the manual one, shows a note instead of the form.
-  - The list of runs has the status, the start, the trigger (only "started by hand" exists today), what was spent of the budget and the version of the
+  - The list of runs has the status, the start, the trigger (started by hand, through the API, or by a label), what was spent of the budget and the version of the
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
@@ -1041,11 +1137,11 @@ Beyond the form:
 | Code | Meaning | What to do |
 | --- | --- | --- |
 | `kind_not_supported` | `forEach`, `approval` or `workflow`: reserved, not available in version 1. | Build it from `agent`, `action`, `if`, `loop`. |
-| `duplicate_id` | Two steps with one id. | Give each step its own id. |
+| `duplicate_id` | Two steps with one id, in the pre-steps of the triggers and the shared steps alike; or two triggers with one id. | Give each step and each trigger its own id. |
 | `template_syntax` | A `{{ }}` that is not a reference, a default that is no JSON (or nests braces more than 3 deep), or a `{{` never closed. | Fix the text; write `\\{{` for a literal `{{`. |
 | `reference_unknown_step` | A reference starts with a name that is no step. | Use one of `available` (the steps in reach). |
 | `reference_to_later_step` | The step comes later, is the step itself, or contains it. | Move the use after the step, or use another step. |
-| `reference_not_in_scope` | The step ran earlier but not on every path to here (inside a branch). | Use it inside its branch, or restructure. |
+| `reference_not_in_scope` | The step ran earlier but not on every path to here (inside a branch); or a shared step reads a part of `trigger` that not every trigger yields (`trigger.ticket` when one trigger yields none): the message names a trigger that lacks it. | Use it inside its branch, or restructure; give the trigger that lacks the value a ticket input, or leave the reference out. |
 | `reference_unknown_field` | The step has no such field. | Use one of `available`. |
 | `reference_optional_field` | The field is not required, so it may be missing. | Make it `required` in the result schema, or add `\| default <JSON>`. |
 | `reference_fact_unavailable` | `branch`, `commits`, `headCommit` or `pushed` of a step whose profile may not push. | Use a profile that may push, or another value. |
@@ -1066,10 +1162,11 @@ Beyond the form:
 | `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
-| `repo_required` | A manual trigger without `input` that declares `repo` as a required text: the run has no repository. | Declare `repo` in `properties` and `required` of the trigger's `input`. |
+| `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
-| `label_retriggers_workflow` | An action adds the label that starts the workflow. | Remove the label instead, or add another one. |
-| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`github.issue.comment`), a label change (`github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
+| `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |
