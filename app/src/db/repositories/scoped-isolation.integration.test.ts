@@ -515,6 +515,7 @@ async function seed(
     clientRequestId: `run-${tag}`,
     createdBy: `user-${tag}`,
     actorLogin: "octocat",
+    ticketRef: `github:acme/${tag}#1`,
   });
   const workflowStep = await repos.workflowRuns.lockRun(
     workflowRun.run.id,
@@ -2299,6 +2300,13 @@ const CASES: Case[] = [
   {
     name: "workflowRuns.listSteps",
     run: (a, b) => a.workflowRuns.listSteps(b.workflowRun.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // B's ticket is no ticket of A: the run of B, its cost and its lane are not A's to read (#923).
+    name: "workflowRuns.summarizeTickets",
+    run: (a, b) =>
+      a.workflowRuns.summarizeTickets([b.workflowRun.ticketRef ?? "none"]),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
