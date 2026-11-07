@@ -81,6 +81,7 @@ function harness(branch: string | undefined) {
     spentMicroUsd: 0,
     clientRequestId: "request-1",
     triggerKind: "github.issueLabeled",
+    triggerId: null,
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,

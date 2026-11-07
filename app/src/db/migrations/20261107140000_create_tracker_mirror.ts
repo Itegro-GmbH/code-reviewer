@@ -6,13 +6,14 @@
 //    GitHub names them, nothing is mapped);
 //  - `tracker_sync_state`: where a full sync stands (the cursor of the phase it is in) and when the last one ended;
 //  - `workflow_runs.ticket_ref`: the ticket a run is about (`github:owner/repo#128`), which the cache is enriched with at read time.
-//    Runs started by the label trigger get it from their trigger input here; runs written afterwards get it when they are written.
+//    Runs started by the label trigger and runs started with a `ticket` input get it from their trigger input here; runs written afterwards
+//    get it when they are written.
 //
 // Expand only, safe for the version that is still running (it never reads the new tables or the new column) and for the live database:
 //  - two tables are added; their foreign keys to `workspaces` and `repositories` take a short lock on those tables;
 //  - one nullable column without a default is added to `workflow_runs`, which Postgres does without rewriting the table; the backfill
-//    touches only the rows of the label trigger (a handful: the trigger exists since #845) and the input of those is JSON that the
-//    trigger itself wrote;
+//    touches only the rows of the label trigger (a handful: the trigger exists since #845) and the rows started with a ticket (since
+//    #916), and the input of those is JSON that the platform itself wrote;
 //  - the wait for the locks is bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back (`MIGRATION_FAILED`)
 //    and the deployment can be run again.
 //
@@ -143,15 +144,30 @@ export const migration: Migration = {
     await sql`alter table workflow_runs validate constraint workflow_runs_ticket_ref_check`.execute(
       db,
     );
-    // The label trigger stored the issue and the repository as JSON (`label-trigger.ts`): the ticket is `github:<repo>#<number>`.
+    // The label trigger stored the issue and the repository as JSON (`label-trigger.ts`; since #916 the ticket next to them, and under the
+    // kind `ticket.labeled`): the ticket is `github:<repo>#<number>`.
     await sql`update workflow_runs
       set ticket_ref = 'github:' || (trigger_input::jsonb -> 'repo' ->> 'fullName') || '#' || (trigger_input::jsonb -> 'issue' ->> 'number')
-      where trigger_kind = 'github.issueLabeled'
+      where trigger_kind in ('github.issueLabeled', 'ticket.labeled')
         and ticket_ref is null
         and (trigger_input::jsonb -> 'repo' ->> 'fullName') is not null
         and (trigger_input::jsonb -> 'issue' ->> 'number') is not null`.execute(
       db,
     );
+    // A run started by hand or through the API with a `ticket` input stored `{ input, ticket }` (#916, `readStoredInput`): exactly those two
+    // fields, both records. Any other input (every run without a ticket stored it as handed in, and may have fields of its own called
+    // `input`, `ticket` or `repo`) names no ticket.
+    await sql`update workflow_runs
+      set ticket_ref = 'github:' || (trigger_input::jsonb -> 'ticket' -> 'repo' ->> 'fullName') || '#' || (trigger_input::jsonb -> 'ticket' ->> 'number')
+      where trigger_kind in ('manual', 'api')
+        and ticket_ref is null
+        and case when jsonb_typeof(trigger_input::jsonb) = 'object'
+          then (trigger_input::jsonb - 'input' - 'ticket') = '{}'::jsonb
+            and jsonb_typeof(trigger_input::jsonb -> 'input') = 'object'
+            and jsonb_typeof(trigger_input::jsonb -> 'ticket') = 'object'
+            and jsonb_typeof(trigger_input::jsonb -> 'ticket' -> 'repo' -> 'fullName') = 'string'
+            and jsonb_typeof(trigger_input::jsonb -> 'ticket' -> 'number') = 'number'
+          else false end`.execute(db);
     // The enrichment of a list of tickets reads the runs of each (cost so far, the active run).
     await sql`create index if not exists workflow_runs_ticket_index
       on workflow_runs (workspace_id, ticket_ref) where ticket_ref is not null`.execute(

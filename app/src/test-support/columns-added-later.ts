@@ -50,9 +50,15 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
   // #891: when a member asked for the run to stop; null for every run that exists.
+  // #916: the trigger of the document that started the run; null for every run that exists.
   // #923: the ticket a run is about; null for every run that exists (the label trigger's runs are backfilled by the migration, and no
   // test of an older migration holds such a run).
-  workflow_runs: ["trigger_kind", "cancel_requested_at", "ticket_ref"],
+  workflow_runs: [
+    "trigger_kind",
+    "cancel_requested_at",
+    "trigger_id",
+    "ticket_ref",
+  ],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.

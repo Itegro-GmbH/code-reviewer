@@ -24,10 +24,12 @@ import {
  * - `input`: `{{trigger.input.…}}`, what the caller of a manual trigger hands in (its type is the schema's);
  * - `issue`: `{{trigger.issue}}` or `{{trigger.issue.number}}`, the issue that started the run (not its title, body or labels: whoever
  *   opened the issue wrote those);
- * - `defaultBranch`: `{{trigger.repo.defaultBranch}}`;
+ * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way;
+ * - `defaultBranch`: `{{trigger.repo.defaultBranch}}` or `{{trigger.ticket.repo.defaultBranch}}`;
  * - `branch`: `{{<agent step>.branch}}`, the branch the platform made.
  */
-export type TargetRoot = "input" | "issue" | "defaultBranch" | "branch";
+export type TargetRoot =
+  "input" | "issue" | "ticket" | "defaultBranch" | "branch";
 
 export type InputSpec = {
   type: ValueType;
@@ -53,7 +55,7 @@ const ISSUE: ValueType = {
   options: [objectOf({ number: INTEGER }), INTEGER],
 };
 
-const ISSUE_ROOTS: readonly TargetRoot[] = ["issue", "input"];
+const ISSUE_ROOTS: readonly TargetRoot[] = ["issue", "ticket", "input"];
 const LABEL_ROOTS: readonly TargetRoot[] = ["input"];
 export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
   name: "github.pullRequest.open",
@@ -94,8 +96,37 @@ export const GITHUB_ISSUE_LABELS: ConnectorSpec = {
   atLeastOneOf: ["add", "remove"],
 };
 
+/**
+ * The provider-neutral names of the two actions on a ticket (#916): the same inputs with `ticket` for `issue`. The engine does them
+ * through the provider of the ticket's repository, which is GitHub so far: `ticket.comment` is `github.issue.comment`, `ticket.labels`
+ * is `github.issue.labels`.
+ */
+export const TICKET_COMMENT: ConnectorSpec = {
+  name: "ticket.comment",
+  description: "Writes a comment on a ticket.",
+  inputs: {
+    ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
+    body: { type: STRING, required: true },
+  },
+  output: GITHUB_ISSUE_COMMENT.output,
+};
+
+export const TICKET_LABELS: ConnectorSpec = {
+  name: "ticket.labels",
+  description: "Adds and removes labels on a ticket.",
+  inputs: {
+    ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
+    add: { type: listOf(STRING), required: false, target: LABEL_ROOTS },
+    remove: { type: listOf(STRING), required: false, target: LABEL_ROOTS },
+  },
+  output: GITHUB_ISSUE_LABELS.output,
+  atLeastOneOf: ["add", "remove"],
+};
+
 export const BUILT_IN_CONNECTORS: readonly ConnectorSpec[] = [
   GITHUB_ISSUE_COMMENT,
   GITHUB_ISSUE_LABELS,
   GITHUB_PULL_REQUEST_OPEN,
+  TICKET_COMMENT,
+  TICKET_LABELS,
 ];

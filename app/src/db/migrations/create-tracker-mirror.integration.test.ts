@@ -9,10 +9,10 @@ import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
-import { migration } from "./20261107090000_create_tracker_mirror.ts";
+import { migration } from "./20261107140000_create_tracker_mirror.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261107090000_create_tracker_mirror";
+const THIS = "20261107140000_create_tracker_mirror";
 const T = "2026-11-06T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {
@@ -73,11 +73,58 @@ async function seedRuns(db: Kysely<Database>) {
     }),
     "u-1",
   );
+  // #916: a run a label started stores the ticket next to the issue and the repository, under the new kind.
+  await run(
+    "run-label-ticket",
+    "ticket.labeled",
+    JSON.stringify({
+      ticket: { number: 14, repo: { fullName: "acme/widgets" } },
+      issue: { number: 14 },
+      repo: { fullName: "acme/widgets" },
+    }),
+    null,
+  );
+  // #916: a run started with a `ticket` input stores `{ input, ticket }`, by hand or through the API.
+  await run(
+    "run-manual-ticket",
+    "manual",
+    JSON.stringify({
+      input: {},
+      ticket: { number: 15, repo: { fullName: "acme/widgets" } },
+    }),
+    "u-1",
+  );
+  await run(
+    "run-api-ticket",
+    "api",
+    JSON.stringify({
+      input: { note: "x" },
+      ticket: { number: 16, repo: { fullName: "acme/widgets" } },
+    }),
+    "u-1",
+  );
+  // A raw input of a run without a ticket names none, whatever fields it has: its own `ticket`, or `input` next to other fields.
+  await run(
+    "run-api-own-ticket",
+    "api",
+    JSON.stringify({ ticket: "github:acme/widgets#17", repo: "acme/widgets" }),
+    "u-1",
+  );
+  await run(
+    "run-manual-own-input",
+    "manual",
+    JSON.stringify({
+      input: {},
+      ticket: { number: 18, repo: { fullName: "acme/widgets" } },
+      topic: "x",
+    }),
+    "u-1",
+  );
 }
 
 describe("the ticket mirror migration", () => {
   // #923-T99
-  it("adds the two tables empty and the column of the tickets of runs, and fills it for the runs of the label trigger only", async () => {
+  it("adds the two tables empty and the column of the tickets of runs, and fills it for the runs of the label trigger and the runs started with a ticket, from both shapes of their input", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(
       db,
@@ -96,8 +143,13 @@ describe("the ticket mirror migration", () => {
       .orderBy("id")
       .execute();
     expect(runs).toEqual([
+      { id: "run-api-own-ticket", ticket_ref: null },
+      { id: "run-api-ticket", ticket_ref: "github:acme/widgets#16" },
       { id: "run-label", ticket_ref: "github:acme/widgets#12" },
+      { id: "run-label-ticket", ticket_ref: "github:acme/widgets#14" },
       { id: "run-manual", ticket_ref: null },
+      { id: "run-manual-own-input", ticket_ref: null },
+      { id: "run-manual-ticket", ticket_ref: "github:acme/widgets#15" },
     ]);
     expect(await db.selectFrom("tracker_items").selectAll().execute()).toEqual(
       [],

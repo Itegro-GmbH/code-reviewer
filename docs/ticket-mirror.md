@@ -40,8 +40,10 @@ them**: no status, type or label is mapped to a vocabulary of ours.
 `tracker_sync_state` holds, per repository, the position of a full sync that is under way (`cursor`, `started_at`) and when the last
 one ended (`last_full_sync_at`).
 
-`workflow_runs.ticket_ref` (`github:owner/repo#128`) names the ticket a run is about. The label trigger sets it; the migration filled
-it for the runs it had started before.
+`workflow_runs.ticket_ref` (`github:owner/repo#128`) names the ticket a run is about. The label trigger sets it, and so does the start of a run
+with a `ticket` input (by hand or through the API; the reference of the ticket as the provider resolved it). A run without a ticket has none. The migration filled it
+for the runs started before, from both shapes of their stored input: the issue and the repository of a label run (`github.issueLabeled` and `ticket.labeled`), and
+`{ input, ticket }` of a run started with a ticket; a raw input (every run whose trigger has no `ticket` input) names no ticket, whatever fields it has.
 
 ## How rows get there
 

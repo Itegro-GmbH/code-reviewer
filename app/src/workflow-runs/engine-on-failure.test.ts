@@ -156,6 +156,7 @@ function harness(options: {
     spentMicroUsd: 1_000_000,
     clientRequestId: "request-1",
     triggerKind: "github.issueLabeled",
+    triggerId: null,
     createdBy: "u-1",
     actorLogin: "octocat",
     cancelRequestedAt: null,

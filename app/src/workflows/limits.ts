@@ -11,6 +11,8 @@ export const STEPS_MAX = 50;
 export const NESTING_DEPTH_MAX = 4;
 /** How deep `loop` may nest inside `loop`. */
 export const LOOP_NESTING_MAX = 2;
+/** Triggers one workflow may have (#916). */
+export const TRIGGERS_MAX = 10;
 /** Workflow budget in USD when the document names none. */
 export const BUDGET_DEFAULT_USD = 20;
 /** What the operator allows a workflow to spend, until the operator can set it (the service takes it as a parameter). */

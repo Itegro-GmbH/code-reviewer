@@ -222,6 +222,34 @@ describe("workflow templates at run time", () => {
     ).toBe("@alice #4");
   });
 
+  // #916-T71
+  it("defuses the type and the assignees of a ticket in a comment body, like its title", () => {
+    const run: RunValues = {
+      trigger: {
+        ticket: {
+          number: 12,
+          title: "t",
+          type: "@acme/security #99",
+          assignees: ["@carol"],
+        },
+      },
+      steps: {},
+    };
+
+    expect(
+      renderText(
+        "{{trigger.ticket.type}} / {{trigger.ticket.assignees}} / {{trigger.ticket.number}}",
+        run,
+        undefined,
+        { defuse: true },
+      ),
+    ).toBe("@\u200bacme/security #\u200b99 / - @\u200bcarol / 12");
+    // An agent's instruction reads the ticket as it is.
+    expect(renderText("{{trigger.ticket.type}}", run)).toBe(
+      "@acme/security #99",
+    );
+  });
+
   // #844-T311
   it("defuses a list and a whole reference of an agent step, and text only (the type of a number or a list is not touched)", () => {
     const run: RunValues = {

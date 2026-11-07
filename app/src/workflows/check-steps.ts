@@ -40,7 +40,11 @@ import {
   validateResultSchema,
   type ResultSchema,
 } from "./result-schema.ts";
-import { GITHUB_ISSUE_LABELS, type ConnectorSpec } from "./connectors.ts";
+import {
+  GITHUB_ISSUE_LABELS,
+  TICKET_LABELS,
+  type ConnectorSpec,
+} from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
 import {
   firstOf,
@@ -79,8 +83,11 @@ const COMMON_KEYS = ["id", "kind", "description"] as const;
 
 export type Checker = ScopeContext & {
   resolver: WorkflowResolver;
-  /** The label that starts the workflow, when the trigger has one and it is well formed. */
-  triggerLabel?: string;
+  /**
+   * The labels (trimmed, lower case) a step here may not add, because they start the workflow: those of its label triggers that are
+   * well formed. The pre-steps of a trigger that is not a label trigger have none: the bot's own writes start no run (#916).
+   */
+  retriggerLabels?: readonly string[];
 };
 
 export type StepState = {
@@ -823,7 +830,11 @@ function checkAction(
         spec.atLeastOneOf,
       ),
     );
-  if (spec.name === GITHUB_ISSUE_LABELS.name) checkNoRetrigger(node, path, c);
+  if (
+    spec.name === GITHUB_ISSUE_LABELS.name ||
+    spec.name === TICKET_LABELS.name
+  )
+    checkNoRetrigger(node, path, c);
 }
 
 /** Adding the label that starts the workflow would start it again, and again. */
@@ -832,12 +843,13 @@ function checkNoRetrigger(
   path: string,
   c: Checker,
 ): void {
-  const label = c.triggerLabel?.trim().toLowerCase();
-  if (label === undefined || !Array.isArray(node.add)) return;
+  const labels = c.retriggerLabels;
+  if (labels === undefined || labels.length === 0 || !Array.isArray(node.add))
+    return;
   node.add.forEach((entry: unknown, position) => {
     if (typeof entry !== "string") return;
     const literal = literalText(parseTemplate(entry))?.trim().toLowerCase();
-    if (literal === label)
+    if (literal !== undefined && labels.includes(literal))
       c.report(
         issue(
           pointer(path, "add", position),

@@ -14,7 +14,7 @@ source of truth**. The page for people is [`docs/ticket-mirror.md`](../../../doc
 | `fake-tracker-repository.ts` | The in-memory repository of the unit tests; it has to behave like the SQL one (`tracker-repository.integration.test.ts` proves the SQL)                                                                                                                                                   |
 
 Where the rest lives: the tables and the only SQL are in `src/db/repositories/tracker-repository.ts` (migration
-`20261107090000_create_tracker_mirror.ts`); what a GitHub payload means is in `src/integrations/providers/github-app/`
+`20261107140000_create_tracker_mirror.ts`); what a GitHub payload means is in `src/integrations/providers/github-app/`
 (`tracker-events.ts` turns a delivery into a `TrackerChange`, `tracker-map.ts` turns issue and pull request JSON into
 `TrackerItemFields` and the check suites into one state, `client.ts` has the three reads of the sync). This folder knows no GitHub: it
 talks to the provider through `IntegrationProvider.parseTrackerChange`, `readTrackerPage` and `readChecksState`.

@@ -66,6 +66,20 @@ export type JobTokenScope = {
   permissions: InstallationPermissions;
 };
 
+/** An issue as a workflow reads it as a ticket (#916). The texts are untrusted: whoever opened the issue wrote them. */
+export type ReadIssue = {
+  number: number;
+  title: string;
+  /** An issue without a description has an empty body. */
+  body: string;
+  url: string;
+  labels: string[];
+  /** The logins of the people the issue is assigned to. */
+  assignees: string[];
+  /** GitHub's issue type (`Bug`, `Feature`), empty for an issue without one. */
+  type: string;
+};
+
 /** A comment below a pull request, as far as the app needs it. */
 export type IssueComment = {
   /** The comment id as text. */
@@ -196,6 +210,17 @@ export type GithubAppClient = {
     name: string,
     signal?: AbortSignal,
   ): Promise<{ sha: string } | null>;
+  /**
+   * One issue (#916), read as a ticket with a token of its own limited to `scope`, or null when there is none of that number or the number
+   * is a pull request (a ticket is an issue); same token and abort rules as `getRepositoryFacts`.
+   */
+  getIssue(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    issueNumber: number,
+    signal?: AbortSignal,
+  ): Promise<ReadIssue | null>;
   /** The repository permission of a user; "none" for a user GitHub does not know. */
   getCollaboratorPermission(
     installationId: string,
@@ -1452,6 +1477,66 @@ export function createGithubAppClient(
             )
               throw shapeError("GET /repos/{owner}/{repo}/branches/{branch}");
             return { sha: commit.sha };
+          } catch (error) {
+            if (
+              error instanceof GithubAppError &&
+              error.code === "GITHUB_APP_NOT_FOUND"
+            )
+              return null;
+            throw error;
+          }
+        },
+        signal,
+      );
+    },
+
+    async getIssue(installationId, scope, repoFullName, issueNumber, signal) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(issueNumber);
+      const path = `${repoPath(repoFullName)}/issues/${issueNumber}`;
+      const where = "GET /repos/{owner}/{repo}/issues/{n}";
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          try {
+            const json = await request(token, "GET", path, undefined, signal);
+            if (
+              !isRecord(json) ||
+              typeof json.number !== "number" ||
+              typeof json.title !== "string" ||
+              typeof json.html_url !== "string" ||
+              !Array.isArray(json.labels)
+            )
+              throw shapeError(where);
+            // The issues API answers for a pull request too; a ticket is an issue.
+            if (isRecord(json.pull_request)) return null;
+            const labels = json.labels.flatMap((item: unknown) => {
+              const name =
+                typeof item === "string"
+                  ? item
+                  : isRecord(item)
+                    ? item.name
+                    : undefined;
+              return typeof name === "string" ? [name] : [];
+            });
+            const assignees = Array.isArray(json.assignees)
+              ? json.assignees.flatMap((item: unknown) =>
+                  isRecord(item) && typeof item.login === "string"
+                    ? [item.login]
+                    : [],
+                )
+              : [];
+            const kind = isRecord(json.type) ? json.type.name : undefined;
+            return {
+              number: json.number,
+              title: json.title,
+              body: typeof json.body === "string" ? json.body : "",
+              url: json.html_url,
+              labels,
+              assignees,
+              type: typeof kind === "string" ? kind : "",
+            };
           } catch (error) {
             if (
               error instanceof GithubAppError &&

@@ -7,6 +7,7 @@ import type {
   GithubAppClient,
   IssueComment,
   PullRequestReview,
+  ReadIssue,
   ReadIssueComment,
   RemoteInstallation,
   RemoteRepository,
@@ -84,6 +85,10 @@ export type FakeGithubAppClientData = {
   defaultBranch?: string;
   /** The branches of every repository, by name, each with its head commit (#750). Default: the default branch only. */
   branches?: Record<string, string>;
+  /** What `getIssue` answers, by "owner/name#number" (#916); an issue not listed is not found. */
+  issues?: Record<string, ReadIssue>;
+  /** Makes `getIssue` reject with this error (#916). */
+  issueFailure?: Error;
   /** Makes `getRepositoryFacts`, `listBranches` and `getBranch` reject with this error (#750). */
   branchReadFailure?: Error;
 };
@@ -203,6 +208,19 @@ export function fakeGithubAppClient(
       throwIfAborted(signal);
       if (data.branchReadFailure) throw data.branchReadFailure;
       return { defaultBranch: data.defaultBranch ?? "main" };
+    },
+    async getIssue(installationId, scope, repoFullName, issueNumber, signal) {
+      record(
+        "getIssue",
+        installationId,
+        scope,
+        repoFullName,
+        issueNumber,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.issueFailure) throw data.issueFailure;
+      return data.issues?.[`${repoFullName}#${String(issueNumber)}`] ?? null;
     },
     async listBranches(installationId, scope, repoFullName, signal) {
       record(

@@ -88,6 +88,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "target_from_untrusted_value",
   /** A step adds the label that starts the workflow, which would start it again. */
   "label_retriggers_workflow",
+  /** Two `ticket.labeled` triggers wait for the same label (the JSON Schema cannot say it). */
+  "duplicate_trigger_label",
   /** A `required` entry of a result schema that names no property (the schema language cannot say it). */
   "required_field_unknown",
   /** A step of `onFailure` that is not a comment, a label change or an `if` over them: no agent, no loop, no pull request runs after a failure. */
