@@ -26,8 +26,8 @@ import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { loadAuthConfig } from "../auth/config.ts";
-import { workspacePath } from "../workspaces/paths.ts";
 import { createGithubAskChannel } from "./ask-channel.ts";
+import { runPagePath } from "./ask-comment.ts";
 import { createTicketAnswers, type TicketAnswers } from "./ticket-answers.ts";
 import { createConnectorRegistry } from "./connectors.ts";
 import {
@@ -104,11 +104,10 @@ function askChannelFor(workspaceId: string) {
       createWorkspaceMembersRepository(db, workspaceId).githubLogins(),
     async runLink(run) {
       const workspace = await createWorkspacesRepository(db).get(workspaceId);
-      const path = workspacePath(
-        workspace?.slug ?? workspaceId,
-        `/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`,
-      );
-      return new URL(path, loadAuthConfig(process.env).baseUrl).href;
+      return new URL(
+        runPagePath(workspace?.slug ?? workspaceId, run),
+        loadAuthConfig(process.env).baseUrl,
+      ).href;
     },
   });
 }
@@ -228,9 +227,21 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
       );
       return repository?.active === true ? { id: repository.id } : undefined;
     },
-    listWaiting: (repositoryId) => runs.listWaiting(repositoryId, 20),
+    // TODO(#923): find the run by the ticket (`ticket_ref`) once the mirror has it; until then the newest waiting runs of the repository are read.
+    listWaiting: (repositoryId) => runs.listWaiting(repositoryId, 100),
     listSteps: (runId) => runs.listSteps(runId),
     engine: workflowEngineFor(workspaceId),
+    async reply(repositoryId, answer, text, key) {
+      const target = await connectorTargetOf(workspaceId, repositoryId);
+      if (target?.provider.commentOnIssue === undefined) return;
+      await target.provider.commentOnIssue(
+        target.integration,
+        target.repo,
+        answer.number,
+        `${key}\n${text}`,
+        { marker: key },
+      );
+    },
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });

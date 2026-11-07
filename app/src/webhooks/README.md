@@ -207,10 +207,11 @@ defused in the text of an action: [`docs/workflows.md`](../../../docs/workflows.
 
 **A comment `/answer <n>` or `/answer <text>` (#920).** An `issue_comment` on an issue or a pull request that starts with `/answer` is the answer to the question a workflow run waits for
 ([`docs/workflows.md`](../../../docs/workflows.md#a-question-done-or-ask-920)). The parser reads it like `/review`: not from a bot, and only from a commenter whose association can have write access (`OWNER`, `MEMBER`,
-`COLLABORATOR`) and who really has it (one more GitHub call); anybody else is `ignored`. On an issue the state does not matter; on a pull request it must be open. The handler gives the answer to `answers`
+`COLLABORATOR`) and who really has it (one more GitHub call); anybody else is `ignored`. On an issue and on a pull request the state does not matter (a run that waits is answered on a closed or merged pull request too; `/review` there still needs an open one). The handler gives the answer to `answers`
 (`TicketAnswers` of `src/workflow-runs/`), which finds the run in the database: the runs of the workspace that wait on that repository, whose open question belongs to this ticket (or pull request). The outcome is
-`ticket_answered` (the delivery id stays claimed) when the run took the answer, and `no_answer_taken` otherwise (no run waits on it, the answer cannot be used, or somebody answered first). A server without a workflow engine
-leaves `answers` out; such a comment is then `ignored`.
+`ticket_answered` (the delivery id stays claimed) when the run took the answer, and `no_answer_taken` otherwise (no run waits on it, the answer cannot be used, somebody answered first, or the comment is older than the question:
+its id must be greater than the id of the question's comment and its `created_at` not before the step began to wait, so a redelivery never answers a later question). A comment that has write access and could not answer
+gets a short reply of the App (fixed words, nothing of the comment). A server without a workflow engine leaves `answers` out; such a comment is then `ignored`.
 
 ## The review trigger intake
 

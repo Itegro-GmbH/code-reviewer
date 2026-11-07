@@ -133,7 +133,8 @@ export function createWorkflowRunRouteHandlers({
     answer: (request, workflowId, runId) =>
       guarded(request, async (user) => {
         const answered = await service.answer(
-          { id: user.id, githubLogin: actorName(user) },
+          // The GitHub login or none: what is recorded with the answer is shown on the ticket, where an email must never appear.
+          { id: user.id, githubLogin: user.githubLogin },
           workflowId,
           runId,
           await readBody(request),

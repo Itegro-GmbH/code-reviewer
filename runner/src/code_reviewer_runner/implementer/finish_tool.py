@@ -508,6 +508,13 @@ def problem_sentence(parsed: Parsed) -> str:
 _ASK_KEYS = ("question", "options", "context")
 
 
+def _units(text: str) -> int:
+    """The length of a text in UTF-16 code units: how the app counts (`String.length`), so a text
+    the runner lets through is one the app accepts. A character outside the Basic Multilingual
+    Plane (an emoji) is two."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
 def ask_possible(schema: Mapping[str, Any], *, enabled: bool) -> bool:
     """Whether a turn may end with a question: Control asked for it, and the result schema has no
     field
@@ -533,7 +540,7 @@ def check_ask(value: object) -> list[Issue]:
         issues.append(
             _issue("/question", "wrong_type", f"Expected a string, got {_type_name(question)}.")
         )
-    elif question.strip() == "" or len(question) > ASK_QUESTION_MAX_LENGTH:
+    elif question.strip() == "" or _units(question) > ASK_QUESTION_MAX_LENGTH:
         issues.append(
             _issue(
                 "/question",
@@ -561,7 +568,7 @@ def check_ask(value: object) -> list[Issue]:
                 if (
                     not isinstance(entry, str)
                     or entry.strip() == ""
-                    or len(entry) > ASK_OPTION_MAX_LENGTH
+                    or _units(entry) > ASK_OPTION_MAX_LENGTH
                 ):
                     issues.append(
                         _issue(
@@ -576,12 +583,12 @@ def check_ask(value: object) -> list[Issue]:
             issues.append(
                 _issue("/context", "wrong_type", f"Expected a string, got {_type_name(context)}.")
             )
-        elif len(context) > ASK_CONTEXT_MAX_LENGTH:
+        elif _units(context) > ASK_CONTEXT_MAX_LENGTH:
             issues.append(
                 _issue(
                     "/context",
                     "limit_exceeded",
-                    f"The text is {len(context)} characters; at most {ASK_CONTEXT_MAX_LENGTH}.",
+                    f"The text is {_units(context)} characters; at most {ASK_CONTEXT_MAX_LENGTH}.",
                 )
             )
     for key in given:

@@ -169,7 +169,8 @@ function parseIssueEvent(
 /**
  * `/answer` (#920): the commenter has been checked for the association that can have write access (no call); this reads the command
  * and then asks GitHub whether the commenter really has write access, the check `/review` makes. The comment is on an issue or on a pull
- * request, open or not: a run that waits for an answer is the app's to find, and a comment on anything else changes nothing.
+ * request, open, closed or merged: a run that waits for an answer is the app's to find (a pull request that was closed while the run
+ * waits is still what the person answers on), and a comment on anything else changes nothing.
  */
 async function ticketAnswerEvent(
   context: ParseContext,
@@ -180,12 +181,16 @@ async function ticketAnswerEvent(
   const actor = actorOf(payload);
   if (!(await context.hasWriteAccess(repo.fullName, actor.login)))
     return ignored("the commenter has no write access");
+  const createdAt = hasField(payload, "comment.created_at")
+    ? field<string>(payload, "comment.created_at")
+    : undefined;
   return {
     kind: "ticket_answer",
     answer: {
       repo,
       number: field<number>(payload, "issue.number"),
       commentId: String(field<number>(payload, "comment.id")),
+      ...(createdAt === undefined || createdAt === "" ? {} : { createdAt }),
       actor,
       ...(answer.choice === undefined ? {} : { choice: answer.choice }),
       ...(answer.text === undefined ? {} : { text: answer.text }),
@@ -290,8 +295,21 @@ export async function parseGithubEvent(
       ? ignored("the comment is on an issue, not on a pull request")
       : ticketAnswerEvent(context, answer);
   }
-  if (field<string>(payload, "issue.state") !== "open")
-    return ignored("the pull request is not open");
+  if (field<string>(payload, "issue.state") !== "open") {
+    // #920: a closed or merged pull request starts no review, but a run may still wait for an answer on it.
+    const notOpen = "the pull request is not open";
+    if (
+      field<string>(payload, "sender.type") === "Bot" ||
+      !mayHaveWriteAccess(field<string>(payload, "comment.author_association"))
+    )
+      return ignored(notOpen);
+    const closedAnswer = parseAnswerCommand(
+      field<string>(payload, "comment.body"),
+    );
+    return closedAnswer === null
+      ? ignored(notOpen)
+      : ticketAnswerEvent(context, closedAnswer);
+  }
   if (field<string>(payload, "sender.type") === "Bot")
     return ignored("the comment was written by a bot");
 

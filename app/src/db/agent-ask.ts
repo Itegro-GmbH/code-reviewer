@@ -27,8 +27,10 @@ function text(value: unknown, max: number): string | undefined {
 }
 
 /**
- * The question when `value` is one within the bounds, else undefined. A copy: unknown keys, an empty list and an empty context are not
- * kept (the runner writes none of them; another writer's are the agent's noise, not a reason to refuse the report).
+ * The question when `value` is one within the bounds, else undefined. A copy. A key other than the three, a text that is blank or longer
+ * than its bound (counted in UTF-16 code units, as `String.length` does and as the runner does), more options than the bound and an
+ * option that is no such text are all refused as a whole: the runner writes none of them, so the app does not guess what was meant. An
+ * empty list of options is the one thing that is let through, and it is left out of the copy.
  */
 export function boundAgentAsk(value: unknown): AgentAsk | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value))

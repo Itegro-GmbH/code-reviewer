@@ -118,3 +118,46 @@ describe("the answer to a question", () => {
     expect(text).toContain("Go on with the task");
   });
 });
+
+describe("the question as the fix round of #920 keeps it", () => {
+  // #920-T100
+  it("keeps when the step began to wait, and reads a row from before without it", () => {
+    const asked = { ...ASKED, askedAt: "2026-11-07T09:00:00.000Z" };
+    expect(parseStepAsk(serializeAsk(asked))).toEqual(asked);
+    expect(parseStepAsk(serializeAsk(ASKED))?.askedAt).toBeUndefined();
+    expect(
+      parseStepAsk(JSON.stringify({ ...ASKED, askedAt: "no time" }))?.askedAt,
+    ).toBeUndefined();
+  });
+
+  // #920-T101
+  it("counts the bounds of the question in UTF-16 code units, as the runner does", () => {
+    const emoji = "\u{1F600}";
+    expect(boundAgentAsk({ question: emoji.repeat(1000) })).toBeDefined();
+    expect(boundAgentAsk({ question: emoji.repeat(1001) })).toBeUndefined();
+  });
+
+  // #920-T102
+  it("cleans the answer first and refuses what is empty or too long as it will be stored, before the question is touched", () => {
+    expect(resolveAnswer(ASKED, { text: "\u0001\u200e \n" })).toEqual({
+      ok: false,
+      code: "answer_empty",
+    });
+    expect(resolveAnswer(ASKED, { text: "Use\u0000 Redis\u202e." })).toEqual({
+      ok: true,
+      text: "Use Redis.",
+    });
+    expect(resolveAnswer(ASKED, { choice: 1, text: "\u0007" })).toEqual({
+      ok: true,
+      text: "Network errors",
+      choice: 1,
+    });
+    // Too long counts what is kept, not what was removed.
+    const padded = `${"a".repeat(4000)}${"\u0000".repeat(50)}`;
+    expect(resolveAnswer(ASKED, { text: padded })).toMatchObject({ ok: true });
+    expect(resolveAnswer(ASKED, { text: `${padded}a` })).toEqual({
+      ok: false,
+      code: "answer_too_long",
+    });
+  });
+});

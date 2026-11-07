@@ -69,7 +69,7 @@ async function waitingRun() {
         );
         return found?.active === true ? { id: found.id } : undefined;
       },
-      listWaiting: (repositoryId) => app.runs.listWaiting(repositoryId, 20),
+      listWaiting: (repositoryId) => app.runs.listWaiting(repositoryId, 100),
       listSteps: (runId) => app.runs.listSteps(runId),
       engine: app.engine,
       kick: (runId) => void kicked.push(runId),
@@ -244,6 +244,56 @@ describe("the webhook: a comment /answer on an issue", () => {
     expect(await outcomeOf(response)).toBe("ticket_answered");
     // `/answer 5` on a question with two options is a free text, and the run was answered already by the first.
     expect(await outcomeOf(taken)).toBe("no_answer_taken");
+    expect(await statusOf(app, runId)).toBe("running");
+  });
+
+  // #920-T146
+  it("takes no comment from before the question: its id is not greater than the id of the comment that carries the question, whatever its text", async () => {
+    const { app, kicked, runId } = await waitingRun();
+    const [plan] = (await app.stateOf(runId)).steps;
+    // The question was posted as comment 100000; the delivered comment is 99001.
+    await app.runs.recordAskComment(plan?.id ?? "", "100000");
+
+    const old = await app.h.deliver("issue_comment.created.on-issue", {
+      deliveryId: "delivery-1",
+      payload: comment("/answer 1"),
+    });
+    const redelivered = await app.h.deliver("issue_comment.created.on-issue", {
+      deliveryId: "delivery-1",
+      payload: comment("/answer 1"),
+    });
+
+    expect(await outcomeOf(old)).toBe("no_answer_taken");
+    expect(await outcomeOf(redelivered)).toBe("no_answer_taken");
+    expect(await statusOf(app, runId)).toBe("waiting");
+    expect(kicked).toEqual([]);
+
+    // A comment written after the question answers it.
+    const fresh = await app.h.deliver("issue_comment.created.on-issue", {
+      deliveryId: "delivery-2",
+      payload: comment("/answer 1", { comment: { id: 100001 } }),
+    });
+    expect(await outcomeOf(fresh)).toBe("ticket_answered");
+    expect(await statusOf(app, runId)).toBe("running");
+  });
+
+  // #920-T147
+  it("answers on a pull request that was closed meanwhile, as long as the run still waits", async () => {
+    const { app, runId } = await waitingRun();
+
+    const response = await app.h.deliver("issue_comment.created.on-issue", {
+      deliveryId: "delivery-1",
+      payload: comment("/answer 1", {
+        issue: {
+          number: 7,
+          state: "closed",
+          title: "Add widget caching",
+          pull_request: { url: "https://github.test/acme/widgets/pull/7" },
+        },
+      }),
+    });
+
+    expect(await outcomeOf(response)).toBe("ticket_answered");
     expect(await statusOf(app, runId)).toBe("running");
   });
 });

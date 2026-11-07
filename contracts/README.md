@@ -50,7 +50,7 @@ result schema of a turn in the format of `result-schema.v1.json`, sent only to a
 20,000 values; the app bounds it again). A turn that ended without one has the error code `no_result` (`KnownRunnerErrorCode`).
 `examples/implementer/ImplementerResultSchema.json` and `ImplementerAgentResult.json` are validated by all three suites.
 
-A turn ends with a result or, since #920, with a question: `implementer.canAsk` of the job input (sent only with `resultSchema` and only to a caller that names the claim feature
+A turn ends with a result or, since #920, with a question: `implementer.canAsk` of the job input (sent only with `resultSchema`, only for a turn a workflow step started, and only to a caller that names the claim feature
 `implementer_ask`) lets the finish tool offer `ask`, and `ImplementerAgentAsk` is `agentAsk` of `ImplementerResult` (`question`, optional `options` and `context`, bounded; the app bounds it again).
 A turn with a question succeeds without `agentResult`. `examples/implementer/ImplementerAgentAsk.json` is validated like the other two.
 

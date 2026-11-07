@@ -144,8 +144,17 @@ export type AskChannel = {
     step: StoredStepRun,
     ask: StepAsk,
   ): Promise<{ commentId: string } | undefined>;
-  /** The question was answered: marks its comment as answered and puts the labels back. */
+  /**
+   * The question was answered: marks its comment as answered and puts the labels back. A question that was never posted (the answer came
+   * first, or the post failed) gets its answered state posted instead of an open question.
+   */
   answered(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<void>;
+  /** The run was stopped while the question was open: marks its comment as cancelled and takes the `agent waiting` label off. */
+  cancelled(
     run: StoredWorkflowRun,
     step: StoredStepRun,
     ask: StepAsk,
@@ -207,6 +216,8 @@ type Decision =
   | { kind: "asked"; stepRun: StoredStepRun }
   /** #920: a question was answered; the turn that goes on is started after the lock is released. */
   | { kind: "resume"; stepRun: StoredStepRun }
+  /** #920: the run was stopped while its step waited: the step ended cancelled, and the question is marked so after the lock is released. */
+  | { kind: "cancelled_ask"; stepRun: StoredStepRun }
   | { kind: "again" }
   | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean }
   /** #891: the run was asked to stop and the turn of this step still runs: its job is asked to stop, after the lock is released. */
@@ -564,6 +575,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         ...outcome.asked,
         n: (previous?.n ?? 0) + 1,
         state: "open",
+        askedAt: now().toISOString(),
       };
       const waiting = await lock.askStep(step.id, serializeAsk(ask), {
         costMicroUsd: cost,
@@ -670,11 +682,17 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
 
   async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
-    // #920: a run that waits for an answer does nothing, unless somebody asked it to stop.
-    if (
-      run.status !== "running" &&
-      !(run.status === "waiting" && run.cancelRequestedAt !== null)
-    )
+    // #920: a run that waits for an answer does nothing, unless somebody asked it to stop, or its question is not shown anywhere yet (the
+    // post failed or was never made): that is made again, and the marker of the comment keeps it from being posted twice.
+    if (run.status === "waiting" && run.cancelRequestedAt === null) {
+      const waiting = lock.steps.findLast((step) => step.status === "waiting");
+      return waiting !== undefined &&
+        waiting.waitingOnCommentId === null &&
+        parseStepAsk(waiting.ask)?.state === "open"
+        ? { kind: "asked", stepRun: waiting }
+        : { kind: "done" };
+    }
+    if (run.status !== "running" && run.status !== "waiting")
       return { kind: "done" };
     if (pre.document === undefined)
       return {
@@ -851,7 +869,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ),
         );
         await lock.resumeRun();
-        return { kind: "again" };
+        return { kind: "cancelled_ask", stepRun };
       }
       case "cancel_job": {
         const stepRun = lock.steps[move.position];
@@ -1423,19 +1441,73 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return deps.turns.findByRequest(requestIdOf(run, step));
   }
 
-  /** Shows the question of a step that began to wait where people can answer it. A failure is logged: the question is stored with the step. */
+  /** The step as it is stored now, with its question; undefined when the step or its question cannot be read. */
+  async function storedAsk(
+    runId: string,
+    stepRunId: string,
+  ): Promise<{ step: StoredStepRun; ask: StepAsk } | undefined> {
+    const step = (await deps.runs.listSteps(runId)).find(
+      (row) => row.id === stepRunId,
+    );
+    const ask = step === undefined ? undefined : parseStepAsk(step.ask);
+    return step === undefined || ask === undefined ? undefined : { step, ask };
+  }
+
+  /**
+   * Shows the question of a step that began to wait where people can answer it. Looked at again for a step whose question is not shown (the
+   * sweep and every `advance` do), so it is idempotent: a step with a comment is left alone, and the marker keeps a second post from being
+   * made. What happened meanwhile decides what is shown: a question that was answered before it was posted is posted as answered, never as
+   * an open question, and one that was stopped is not posted at all. A failure is logged: the question is stored with the step.
+   */
   async function announce(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    if (deps.asks === undefined) return;
+    try {
+      const stored = await storedAsk(run.id, step.id);
+      if (stored === undefined) return;
+      if (stored.ask.state !== "open") {
+        if (stored.ask.answer !== undefined)
+          await deps.asks.answered(run, stored.step, stored.ask);
+        return;
+      }
+      if (
+        stored.step.status !== "waiting" ||
+        stored.step.waitingOnCommentId !== null
+      )
+        return;
+      const posted = await deps.asks.asked(run, stored.step, stored.ask);
+      if (posted === undefined) return;
+      await deps.runs.recordAskComment(step.id, posted.commentId);
+      // Answered or stopped while the question was being posted: the comment just posted says so now.
+      const after = await storedAsk(run.id, step.id);
+      if (after === undefined) return;
+      // The id of the comment is in hand even where the row no longer takes it (a step that ended).
+      const shown = { ...after.step, waitingOnCommentId: posted.commentId };
+      if (after.ask.state !== "open") {
+        if (after.ask.answer !== undefined)
+          await deps.asks.answered(run, shown, after.ask);
+      } else if (after.step.status !== "waiting")
+        await deps.asks.cancelled(run, shown, after.ask);
+    } catch {
+      log(`[workflow-runs] ASK_NOT_SHOWN run=${run.id} step=${step.stepId}`);
+    }
+  }
+
+  /** Marks the question of a step that was stopped while it waited as cancelled. A failure is logged: the step has ended either way. */
+  async function cancelAsk(
     run: StoredWorkflowRun,
     step: StoredStepRun,
   ): Promise<void> {
     const ask = parseStepAsk(step.ask);
     if (deps.asks === undefined || ask === undefined) return;
     try {
-      const posted = await deps.asks.asked(run, step, ask);
-      if (posted !== undefined)
-        await deps.runs.recordAskComment(step.id, posted.commentId);
+      await deps.asks.cancelled(run, step, ask);
     } catch {
-      log(`[workflow-runs] ASK_NOT_SHOWN run=${run.id} step=${step.stepId}`);
+      log(
+        `[workflow-runs] ASK_NOT_CANCELLED run=${run.id} step=${step.stepId}`,
+      );
     }
   }
 
@@ -1613,6 +1685,10 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       }
       if (decision.kind === "resume") {
         if (latest !== undefined) await resumeAgent(latest, decision.stepRun);
+        continue;
+      }
+      if (decision.kind === "cancelled_ask") {
+        if (latest !== undefined) await cancelAsk(latest, decision.stepRun);
         continue;
       }
       if (decision.kind === "cancel_job") {

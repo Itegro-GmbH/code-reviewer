@@ -11,7 +11,10 @@ import type { Database } from "../schema.ts";
 
 export type DueWorkflowRun = { workspaceId: string; runId: string };
 
-/** The runs that run (or wait and were asked to stop) and were last touched before `olderThan`, the ones that waited longest first, at most `limit`. */
+/**
+ * The runs that run (or wait and were asked to stop, or wait with a question that is shown nowhere yet) and were last touched before
+ * `olderThan`, the ones that waited longest first, at most `limit`.
+ */
 export async function dueWorkflowRuns(
   db: Kysely<Database>,
   options: { olderThan: string; limit: number },
@@ -19,13 +22,24 @@ export async function dueWorkflowRuns(
   const rows = await db
     .selectFrom("workflow_runs")
     .select(["id", "workspace_id"])
-    // #920: a run that waits for an answer has nothing to do, unless somebody asked it to stop.
+    // #920: a run that waits for an answer has nothing to do, unless somebody asked it to stop or its question has no comment yet (it is
+    // announced again, which the marker of the comment makes harmless).
     .where((eb) =>
       eb.or([
         eb("status", "=", "running"),
         eb.and([
           eb("status", "=", "waiting"),
-          eb("cancel_requested_at", "is not", null),
+          eb.or([
+            eb("cancel_requested_at", "is not", null),
+            eb.exists(
+              eb
+                .selectFrom("workflow_step_runs")
+                .select("workflow_step_runs.id")
+                .whereRef("workflow_step_runs.run_id", "=", "workflow_runs.id")
+                .where("workflow_step_runs.status", "=", "waiting")
+                .where("workflow_step_runs.waiting_on_comment_id", "is", null),
+            ),
+          ]),
         ]),
       ]),
     )

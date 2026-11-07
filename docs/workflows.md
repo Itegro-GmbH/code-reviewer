@@ -661,14 +661,15 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 Every agent turn ends with one of two things: **`done`**, its result, or **`ask`**, a question for a person. The agent hands in the question through the same finish tool,
 `factory-submit --ask` (the JSON `{"question": "...", "options": ["...", "..."], "context": "..."}` on standard input; `options` and `context` are optional) or
 `submit_result({ "ask": { "question": "...", "options": [...], "context": "..." } })`; the last call of a turn wins. A question is at most 2000 characters, at most 10 options of at most
-200 characters, and a context of at most 4000. Only a step that has a result schema (its own `result`, or the default of its profile version) has the finish tool, so only such a step can ask. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
+200 characters, and a context of at most 4000 (counted in UTF-16 code units, as the app counts; an emoji is two). Only a turn that a workflow step started is offered `ask`: a plain Implementer task or follow-up with a result schema is not, since nobody would answer it. Only a step that has a result schema (its own `result`, or the default of its profile version) has the finish tool, so only such a step can ask. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
 the claim feature `implementer_ask` cannot either: its turn runs as before, ending with a result or failing, and the agent is not told that `ask` exists. `ask` is not a failure: `onFailure` is not touched.
 
 What the engine does when a turn ends with a question:
 
-- the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once. **The run waits as long as it
-  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`);
-- the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `state` and, once answered, `answer`) and shown on the run page. The agent's
+- the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once, and the step keeps it whatever
+  becomes of it (a step that fails or is cancelled while it waits still shows what its turns cost: the costs of the steps add up to what the run spent). **The run waits as long as it
+  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`, the comment of the question is edited to `<!-- factory cancelled … -->` ("cancelled before it was answered") and the label `agent waiting` goes);
+- the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `askedAt`, `state` and, once answered, `answer`) and shown on the run page. The agent's
   sandbox is gone, as after `done`; the Implementer session and its snapshot stay;
 - one run per ticket, one open question per run: the run holds the ticket's slot (`trigger_key`) while it waits, so a second run for the same ticket is `busy`, not started.
 
@@ -678,7 +679,11 @@ It costs what a turn costs, against what is left of the budget; if less than one
 - a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "choice": 2 }` (an option by its number, from 1), `{ "text": "..." }`, or both (the text is a note to the option); for
   every member who may start a run (`start_implementer_task`). `202 { run }` when the step goes on, `409 WORKFLOW_RUN_NOT_WAITING` when nothing waits for an answer or it was answered before,
   `422 WORKFLOW_RUN_ANSWER_INVALID` for an empty or too long answer or an option the question does not have (an answer is at most 4000 characters);
-- a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run, by somebody with write access to the repository (the check `/review` uses); bot comments never count.
+- a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run (open, closed or merged: the run still waits), by somebody with write access to the repository (the check `/review` uses); bot comments never count.
+
+An answer belongs to the question that was open when it was written. A comment answers only a question that is older than it: its id must be greater than the id of the comment that carries the question, and it must not have been
+written before the step began to wait (`askedAt`). So a late comment, or the redelivery of one, never answers a question that came after it. An answer from the page names the person by GitHub login, or by none for an
+account without one (an email address is never written on a ticket or into the instruction of the agent).
 
 Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
 
@@ -702,11 +707,13 @@ Reply with `/answer <n>` (a note may follow) or answer in the factory: https://�
 The first line is the hidden marker (`q` counts the questions of the step); a question without options says "Reply with `/answer <your answer>`". The question, the options and the context are the agent's text: defused
 (no mention, no link that reaches somebody, no direction marks) and bounded, like every text an agent writes into a comment. The people asked are the members of the workspace that have a GitHub login (the first 10;
 there is no project of members yet). The ticket also gets the label **`agent waiting`** and loses **`agent working`**. Posting is best effort: a comment or a label GitHub refuses does not stop the run, and the question is on
-the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one).
+the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one). A question whose comment could not be posted is posted again by the next look at the run (the sweep looks at
+a waiting run that has no comment yet, and so does every `advance`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
 
 **The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
 own tables (a run of the workspace that waits on that ticket or pull request, the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
-no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. The comment of the question is then edited
+no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. A comment that has write access and still cannot answer (an answer that is empty once cleaned, or too long, no question
+waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none. The comment of the question is then edited
 to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the
 name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
 [`app/src/webhooks/README.md`](../app/src/webhooks/README.md).

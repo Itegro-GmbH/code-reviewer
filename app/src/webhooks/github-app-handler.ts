@@ -131,7 +131,7 @@ export type TicketAnswerTaker = {
   ): Promise<
     | { outcome: "answered"; runId: string }
     | { outcome: "no_run" }
-    | { outcome: "not_taken"; reason: "refused" | "not_waiting" }
+    | { outcome: "not_taken"; reason: "refused" | "not_waiting" | "stale" }
   >;
 };
 
@@ -414,7 +414,8 @@ export function createGithubAppWebhookHandler(
 
     // A comment `/answer ...` by somebody with write access (#920) answers the question the run of the workspace that waits on this ticket or
     // pull request asks. The repository must be an active one of the workspace (a project is not needed); which run it is, is the app's to find.
-    // The delivery stays claimed only when the answer was taken: a comment that came before the question is answered by a redelivery.
+    // The delivery stays claimed only when the answer was taken. A redelivery of a comment that was not taken is looked at again, and it still
+    // answers nothing that came after it: the answer must be younger than its question (`ticket-answers.ts`).
     if (event.kind === "ticket_answer") {
       if (answers === undefined) return "ignored";
       const taken = await answers.answer(deliveryId, event.answer);

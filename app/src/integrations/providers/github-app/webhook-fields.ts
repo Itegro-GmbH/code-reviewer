@@ -60,6 +60,8 @@ export const WEBHOOK_READ_FIELDS = {
     // The id of the comment: a replayed delivery of the same comment must not start a second job.
     { path: "comment.id", type: "number" },
     { path: "comment.body", type: "string" },
+    // #920: when the comment was written; an answer older than its question is no answer to it. GitHub always sends it.
+    { path: "comment.created_at", type: "string", optional: true },
     // Who can write at all: only OWNER, MEMBER and COLLABORATOR can, so others cost no API call.
     { path: "comment.author_association", type: "string" },
     { path: "installation.id", type: "number" },

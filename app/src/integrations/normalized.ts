@@ -190,7 +190,7 @@ function isTicketAnswer(value: unknown): boolean {
     !hasKeysWithin(
       value,
       ["repo", "number", "commentId", "actor", "raw"],
-      ["choice", "text"],
+      ["choice", "text", "createdAt"],
     )
   )
     return false;
@@ -203,7 +203,8 @@ function isTicketAnswer(value: unknown): boolean {
     isNonEmptyString(value.raw) &&
     (value.choice === undefined ||
       (Number.isInteger(value.choice) && (value.choice as number) >= 1)) &&
-    (value.text === undefined || isNonEmptyString(value.text))
+    (value.text === undefined || isNonEmptyString(value.text)) &&
+    (value.createdAt === undefined || isNonEmptyString(value.createdAt))
   );
 }
 

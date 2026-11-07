@@ -3,15 +3,18 @@
 // #920: the words of a question on a ticket: the comment that carries it, the edit that says it was answered, the record of an answer
 // given on the page, and the marker of the first.
 import { describe, expect, it } from "vitest";
+import { workspacePath } from "../workspaces/paths.ts";
 import type { StepAsk } from "./ask.ts";
 import {
   MENTIONS_MAX,
   answerRecordComment,
   answeredComment,
+  cancelledComment,
   markerOf,
   mentionsOf,
   questionComment,
   readMarker,
+  runPagePath,
   safeText,
 } from "./ask-comment.ts";
 
@@ -201,5 +204,29 @@ describe("the text and the people", () => {
     expect(asked).toHaveLength(MENTIONS_MAX);
     expect(asked.slice(0, 2)).toEqual(["@alice", "@bob-1"]);
     expect(asked).not.toContain("@-bad");
+  });
+});
+
+describe("the page of a run", () => {
+  // #920-T90
+  it("is the address the workspace paths give, with the ids encoded", () => {
+    const run = { workflowId: "wf 1", id: "run/2" };
+    expect(runPagePath("acme", run)).toBe(
+      workspacePath("acme", "/workflows/wf%201/runs/run%2F2"),
+    );
+  });
+});
+
+describe("the question of a run that was stopped", () => {
+  // #920-T119
+  it("says nobody has to answer any more, keeps the question, and carries a marker that reads back", () => {
+    const body = cancelledComment({ identity: IDENTITY, ask: ASK });
+
+    expect(body).toContain("cancelled before it was answered");
+    expect(body).toContain("**Retry which failures?**");
+    expect(readMarker(body)).toEqual({ ...IDENTITY, state: "cancelled" });
+    expect(markerOf("cancelled", IDENTITY)).toBe(
+      `<!-- factory cancelled run=${IDENTITY.runId} step=plan q=2 -->`,
+    );
   });
 });

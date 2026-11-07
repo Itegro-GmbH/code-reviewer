@@ -12,6 +12,7 @@ import "server-only";
 import { type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
+import { clientRequestIdOf } from "../implementer-job-shape.ts";
 import type {
   Database,
   WorkflowRunsTable,
@@ -258,6 +259,12 @@ export type WorkflowRunsRepository = {
   listSteps(runId: string): Promise<StoredStepRun[]>;
   /** The step an Implementer job belongs to, if a workflow started it. */
   findStepByJob(jobId: string): Promise<StoredStepRun | undefined>;
+  /**
+   * #920: whether the delivery id of a job (`implementer:<workspace>:<request id>`) is that of a turn an agent step of this workspace
+   * started: the request id is `wf-<run>-<position>`, with `-q<n>` after it for the turn that goes on after an answer. The step was written
+   * before the turn, so this is true from the first moment of the turn.
+   */
+  isAgentStepDelivery(deliveryId: string): Promise<boolean>;
   /** #920: the runs of a repository that wait for an answer, the one that began to wait last first; at most `limit`. */
   listWaiting(
     repositoryId: string,
@@ -509,6 +516,22 @@ export function createWorkflowRunsRepository(
       return rows.map(runFrom);
     },
 
+    async isAgentStepDelivery(deliveryId) {
+      const requestId = clientRequestIdOf(workspaceId, deliveryId);
+      if (requestId === undefined) return false;
+      const found = /^wf-(.+)-(\d{1,9})(?:-q\d{1,9})?$/.exec(requestId);
+      if (found === null) return false;
+      const row = await db
+        .selectFrom("workflow_step_runs")
+        .select("id")
+        .where("workspace_id", "=", workspaceId)
+        .where("run_id", "=", found[1] as string)
+        .where("position", "=", Number(found[2]))
+        .where("kind", "=", "agent")
+        .executeTakeFirst();
+      return row !== undefined;
+    },
+
     async findStepByJob(jobId) {
       const row = await db
         .selectFrom("workflow_step_runs")
@@ -621,23 +644,35 @@ export function createWorkflowRunsRepository(
           },
           async finishStep(stepRunId, outcome) {
             const at = formatTimestamp(now());
+            const index = lock.steps.findIndex((step) => step.id === stepRunId);
+            const before = index === -1 ? undefined : lock.steps[index];
+            // #920: what the step's earlier turns cost was charged to the run when they ended with a question. A step that ends without a
+            // cost of its own (it failed, or the run was stopped while it waited) keeps that cost: the costs of the steps add up to what
+            // the run spent.
+            const charged = before?.costMicroUsd ?? 0;
+            const kept =
+              outcome.status !== "skipped" &&
+              charged > 0 &&
+              (outcome.costMicroUsd ?? 0) < charged
+                ? {
+                    ...outcome,
+                    costMicroUsd: charged,
+                    costBasis: outcome.costBasis ?? before?.costBasis ?? null,
+                  }
+                : outcome;
             const ended = await trx
               .updateTable("workflow_step_runs")
-              .set(endValues(outcome, at))
+              .set(endValues(kept, at))
               .where("workspace_id", "=", workspaceId)
               .where("id", "=", stepRunId)
               .where("status", "in", ["pending", "running", "waiting"])
               .returningAll()
               .executeTakeFirst();
             if (ended === undefined) return;
-            const index = lock.steps.findIndex((step) => step.id === stepRunId);
-            // #920: what the step's earlier turns cost has been charged to the run when they ended with a question.
-            const charged =
-              index === -1 ? 0 : (lock.steps[index]?.costMicroUsd ?? 0);
             if (index !== -1) lock.steps[index] = stepFrom(ended);
             const cost = Math.max(
               0,
-              (outcome.status === "skipped" ? 0 : (outcome.costMicroUsd ?? 0)) -
+              (kept.status === "skipped" ? 0 : (kept.costMicroUsd ?? 0)) -
                 charged,
             );
             if (cost > 0) {

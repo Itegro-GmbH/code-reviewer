@@ -42,7 +42,10 @@ const VIEW: RunView = {
   steps: [],
 };
 
-function setup(overrides: Partial<WorkflowRunService> = {}) {
+function setup(
+  overrides: Partial<WorkflowRunService> = {},
+  user: SessionUser = USER,
+) {
   const calls: string[] = [];
   const service: WorkflowRunService = {
     start: async (user, workflowId, body) => (
@@ -71,7 +74,7 @@ function setup(overrides: Partial<WorkflowRunService> = {}) {
     ),
     ...overrides,
   };
-  const requireUser = vi.fn(async () => USER);
+  const requireUser = vi.fn(async () => user);
   const handlers = createWorkflowRunRouteHandlers({ requireUser, service });
   const url = "https://app.test/api/w/default/workflows/wf-1/runs";
   const json = (body: unknown, headers: Record<string, string> = {}): Request =>
@@ -326,5 +329,37 @@ describe("cancelling a run", () => {
     expect(await response.json()).toMatchObject({
       error: "WORKFLOW_RUN_NOT_FOUND",
     });
+  });
+});
+
+describe("answering a question from the page (#920)", () => {
+  // #920-T97
+  it("hands the service the GitHub login of the person, and none for an account without one: never an email address", async () => {
+    const withLogin = setup();
+    await withLogin.handlers.answer(
+      withLogin.json({ choice: 1 }),
+      "wf-1",
+      "run-1",
+    );
+    expect(withLogin.calls).toEqual([
+      'answer user-1 octocat wf-1 run-1 {"choice":1}',
+    ]);
+
+    const withoutLogin = setup({}, {
+      id: "user-2",
+      githubLogin: null,
+      email: "person@example.test",
+    } as unknown as SessionUser);
+    const response = await withoutLogin.handlers.answer(
+      withoutLogin.json({ text: "Use Redis." }),
+      "wf-1",
+      "run-1",
+    );
+
+    expect(response.status).toBe(202);
+    expect(withoutLogin.calls).toEqual([
+      'answer user-2 null wf-1 run-1 {"text":"Use Redis."}',
+    ]);
+    expect(withoutLogin.calls.join()).not.toContain("person@example.test");
   });
 });

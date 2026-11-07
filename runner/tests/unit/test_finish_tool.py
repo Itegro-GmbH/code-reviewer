@@ -564,6 +564,23 @@ def test_the_command_refuses_ask_for_a_turn_that_may_not_ask_and_a_wrong_questio
     assert not (tmp_path / "ask.json").exists()
 
 
+# #920-T99
+def test_a_question_is_measured_in_utf16_code_units_like_the_app() -> None:
+    """The app counts `String.length`: a character outside the Basic Multilingual Plane is two."""
+    emoji = "\U0001f600"
+    assert check_ask({"question": emoji * 1000}) == []
+    assert [i.path for i in check_ask({"question": emoji * 1001})] == ["/question"]
+    assert check_ask({"question": "q", "options": [emoji * 100]}) == []
+    assert [i.path for i in check_ask({"question": "q", "options": [emoji * 101]})] == [
+        "/options/0"
+    ]
+    assert check_ask({"question": "q", "context": emoji * 2000}) == []
+    assert [i.path for i in check_ask({"question": "q", "context": emoji * 2001})] == ["/context"]
+    # Text of the Basic Multilingual Plane counts as before, one unit each.
+    assert check_ask({"question": "ü" * 2000}) == []
+    assert [i.path for i in check_ask({"question": "ü" * 2001})] == ["/question"]
+
+
 # #920-T15
 def test_ask_is_offered_only_when_enabled_and_the_schema_has_no_field_of_that_name() -> None:
     assert ask_possible(FINDINGS, enabled=True)

@@ -58,7 +58,10 @@ the filter: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger).
 A turn ends with `done` or with `ask` (`docs/workflows.md`, "A question: `done` or `ask`"). The runner reports a question as `implementer.agentAsk`; `turn-facts.ts` yields it as `asked` (bounded again, a result wins over it).
 `endAgentStep` then writes `askStep`: the step and the run become `waiting`, the question is stored with the step (`ask.ts`) and the cost of the turn is charged now (a step that asked before is charged the sum of its
 turns at the end, and `finishStep` adds only the difference). `nextMove` does nothing for a `waiting` run, however long, except `cancel_waiting` once a stop is asked for; `waiting` also holds the ticket's slot
-(`trigger_key`). The question is shown through the optional `AskChannel` of the engine (`asks`), after the lock is released.
+(`trigger_key`). The question is shown through the optional `AskChannel` of the engine (`asks`), after the lock is released: `asked`, `answered` and `cancelled` (a stop while it waits). A step that waits with no comment
+(`waiting_on_comment_id` null) is announced again by `advance` and by the sweep (`dueWorkflowRuns` takes such a waiting run too); the marker of the comment makes that idempotent, and what happened meanwhile decides what is
+posted (an answer that came first is posted as answered, a stop is not posted). `finishStep` keeps the cost a step was charged when it asked, whatever outcome it ends with. `ticket-answers.ts` binds a `/answer` comment to the
+open question (`isOlderThanQuestion`) and replies to a comment that could not answer.
 
 `engine.answer` (called by the answer route and the `/answer` comment) runs under the lock of the run: of two answers one wins. It puts the answer on the step (`state: "answered"`) and makes step and run `running` again;
 the machine's next move is `resume_turn`, which starts the next turn of the session the step's last turn ran in, with the question and the answer as its instruction, under the request id `wf-<run>-<position>-q<n>` (starting it

@@ -394,7 +394,14 @@ function Step({
         </p>
       ) : null}
       {/* #920: the question the step asked, and the way to answer while it waits. */}
-      <AskBlock step={step} workflowId={workflowId} runId={runId} api={api} />
+      {/* A step may ask again after an answer: each question is its own block, so what the last one sent does not stay on the next. */}
+      <AskBlock
+        key={`${step.id}-${String(step.ask?.n ?? 0)}`}
+        step={step}
+        workflowId={workflowId}
+        runId={runId}
+        api={api}
+      />
       {step.kind === "agent" ? (
         <AgentOutcome step={step} repository={repository} />
       ) : step.kind === "action" ? (

@@ -352,3 +352,90 @@ describe("acknowledging an answer", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("a question that was never posted, and one that was stopped (#920)", () => {
+  const answered: StepAsk = {
+    ...ASKED,
+    state: "answered",
+    answer: {
+      text: "Network errors",
+      choice: 1,
+      by: "octocat",
+      via: "ui",
+      at: "2026-11-07T10:00:00.000Z",
+    },
+  };
+
+  // #920-T116
+  it("posts the answered state, never an open question, when the answer came before the question was posted", async () => {
+    const { channel, input, commentOnIssue, updateIssueComment } = harness();
+
+    await channel.answered(input, step(), answered);
+
+    expect(updateIssueComment).not.toHaveBeenCalled();
+    // One comment, the answered one: for an answer of the page the record in the name of the person would repeat it.
+    expect(commentOnIssue).toHaveBeenCalledOnce();
+    const [, , number, body, options] = commentOnIssue.mock
+      .calls[0] as unknown as [
+      unknown,
+      unknown,
+      number,
+      string,
+      { marker: string },
+    ];
+    expect(number).toBe(7);
+    expect(options.marker).toBe(
+      "<!-- factory answered run=run-1 step=plan q=1 -->",
+    );
+    expect(body).toContain(options.marker);
+    expect(body).toContain("Answered by @octocat: Network errors");
+    expect(body).not.toContain("waits for the answer");
+  });
+
+  // #920-T117
+  it("marks the comment of the question as cancelled and takes the waiting label off, adding no other", async () => {
+    const { channel, input, updateIssueComment, changeIssueLabels } = harness();
+
+    await channel.cancelled(input, step({ waitingOnCommentId: "9001" }), ASKED);
+
+    expect(updateIssueComment).toHaveBeenCalledOnce();
+    const [, , commentId, body] = updateIssueComment.mock
+      .calls[0] as unknown as [unknown, unknown, string, string];
+    expect(commentId).toBe("9001");
+    expect(body).toContain(
+      "<!-- factory cancelled run=run-1 step=plan q=1 -->",
+    );
+    expect(body).toContain("cancelled before it was answered");
+    expect(body).toContain("Retry which failures?");
+    expect(changeIssueLabels).toHaveBeenCalledWith(expect.anything(), REPO, 7, {
+      add: [],
+      remove: ["agent waiting"],
+    });
+  });
+
+  // #920-T118
+  it("takes the label off a question that has no comment, and survives a provider that cannot edit or label", async () => {
+    const without = harness();
+    await without.channel.cancelled(without.input, step(), ASKED);
+    expect(without.updateIssueComment).not.toHaveBeenCalled();
+    expect(without.changeIssueLabels).toHaveBeenCalledOnce();
+
+    const failing = harness({
+      provider: {
+        updateIssueComment: async () => {
+          throw new Error("gone");
+        },
+        changeIssueLabels: async () => {
+          throw new Error("no permission");
+        },
+      },
+    });
+    await expect(
+      failing.channel.cancelled(
+        failing.input,
+        step({ waitingOnCommentId: "9001" }),
+        ASKED,
+      ),
+    ).resolves.toBeUndefined();
+  });
+});

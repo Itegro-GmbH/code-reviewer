@@ -17,27 +17,37 @@ export const LABEL_WORKING = "agent working";
 /** The most mentions one question carries: a comment that pings the whole workspace is noise. */
 export const MENTIONS_MAX = 10;
 
+/**
+ * The page of a run below its workspace (`/w/<slug>/workflows/<workflow>/runs/<run>`). Written here, not taken from `workspaces/paths.ts`,
+ * which would make `workflow-runs` and `workspaces` import each other; a test in `ask-comment.test.ts` keeps the two in line.
+ */
+export function runPagePath(
+  slug: string,
+  run: { workflowId: string; id: string },
+): string {
+  return `/w/${slug}/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`;
+}
+
 type Identity = { runId: string; stepId: string; n: number };
 
-/** `<!-- factory ask run=<id> step=<id> q=<n> -->`; `answered` replaces `ask` once the question has its answer. */
-export function markerOf(
-  state: "ask" | "answered",
-  identity: Identity,
-): string {
+type MarkerState = "ask" | "answered" | "cancelled";
+
+/** `<!-- factory ask run=<id> step=<id> q=<n> -->`; `answered` replaces `ask` once the question has its answer, `cancelled` when the run was stopped. */
+export function markerOf(state: MarkerState, identity: Identity): string {
   return `<!-- factory ${state} run=${identity.runId} step=${identity.stepId} q=${String(identity.n)} -->`;
 }
 
 const MARKER =
-  /<!-- factory (ask|answered) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
+  /<!-- factory (ask|answered|cancelled) run=([A-Za-z0-9_-]{1,64}) step=([A-Za-z][A-Za-z0-9_-]{0,63}) q=([1-9][0-9]{0,8}) -->/;
 
 /** The marker a comment carries, or undefined. Nothing else of the comment is read. */
 export function readMarker(
   body: string,
-): (Identity & { state: "ask" | "answered" }) | undefined {
+): (Identity & { state: MarkerState }) | undefined {
   const found = MARKER.exec(body);
   if (found === null) return undefined;
   return {
-    state: found[1] as "ask" | "answered",
+    state: found[1] as MarkerState,
     runId: found[2] as string,
     stepId: found[3] as string,
     n: Number(found[4]),
@@ -116,6 +126,19 @@ export function answeredComment(input: {
     ...questionBlock(ask),
     "",
     `Answered by ${answer?.by === null || answer?.by === undefined ? "a member of the workspace" : `@${safeText(answer.by, 39).replace(/\s+/g, "")}`}: ${safeText(answer?.text ?? "", 4000)}`,
+  ].join("\n");
+}
+
+/** The question as it reads once the run was stopped before anybody answered: nobody has to. */
+export function cancelledComment(input: {
+  identity: Identity;
+  ask: AgentAsk;
+}): string {
+  return [
+    markerOf("cancelled", input.identity),
+    "The agent had a question, and the run was cancelled before it was answered. No answer is needed.",
+    "",
+    ...questionBlock(input.ask),
   ].join("\n");
 }
 

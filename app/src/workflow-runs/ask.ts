@@ -5,6 +5,7 @@
 // defensively, since a row written by another version is still a row.
 import { boundAgentAsk, type AgentAsk } from "../db/agent-ask.ts";
 import { ASK_ANSWER_MAX_CHARS } from "./limits.ts";
+import { cleanText } from "./templates.ts";
 
 /**
  * `open`: the step waits. `answered`: somebody answered and the turn that goes on has not been started yet. `resumed`: that turn was started
@@ -28,6 +29,8 @@ export type StepAsk = AgentAsk & {
   /** Which question of the step this is, from 1: a step may ask again after an answer. */
   n: number;
   state: AskState;
+  /** When the step began to wait for this question (the engine's clock, ISO 8601); an answer written before it is none to it. Absent in a row from before. */
+  askedAt?: string;
   answer?: AskAnswer;
 };
 
@@ -48,7 +51,10 @@ export function parseStepAsk(text: string | null): StepAsk | undefined {
   }
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
-  const { n, state, answer, ...rest } = value as Record<string, unknown>;
+  const { n, state, answer, askedAt, ...rest } = value as Record<
+    string,
+    unknown
+  >;
   const asked = boundAgentAsk(rest);
   if (
     asked === undefined ||
@@ -65,6 +71,9 @@ export function parseStepAsk(text: string | null): StepAsk | undefined {
     ...asked,
     n,
     state: state as AskState,
+    ...(typeof askedAt === "string" && !Number.isNaN(Date.parse(askedAt))
+      ? { askedAt }
+      : {}),
     ...(given === undefined ? {} : { answer: given }),
   };
 }
@@ -105,12 +114,14 @@ export type ResolvedAnswer =
 /**
  * The answer in the words the agent reads. A choice is an option of the question (its number, from 1) and the text, if any, is a note to
  * it; without a choice the text is the answer, and a question that has options takes a free text too (a person may say none of them).
+ * The text is cleaned (no control or direction characters) first and judged as it will be stored: an answer that is empty or too long
+ * then is refused here, before the question is touched (a stored answer that `parseStepAsk` would not read back would strand the step).
  */
 export function resolveAnswer(
   ask: Pick<AgentAsk, "options">,
   input: AnswerInput,
 ): ResolvedAnswer {
-  const note = (input.text ?? "").replace(/\s+$/u, "").replace(/^\s+/u, "");
+  const note = cleanText(input.text ?? "").trim();
   if (input.choice === undefined) {
     if (note === "") return { ok: false, code: "answer_empty" };
     return note.length > ASK_ANSWER_MAX_CHARS

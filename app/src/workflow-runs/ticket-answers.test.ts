@@ -9,7 +9,11 @@ import type {
 import type { TicketAnswer } from "../integrations/types.ts";
 import { serializeAsk, type StepAsk } from "./ask.ts";
 import type { AnswerResult } from "./engine.ts";
-import { createTicketAnswers } from "./ticket-answers.ts";
+import {
+  ANSWER_REPLIES,
+  createTicketAnswers,
+  isOlderThanQuestion,
+} from "./ticket-answers.ts";
 
 const REPO = {
   integrationId: "i-1",
@@ -55,7 +59,10 @@ function run(id: string, ticket: number | null): StoredWorkflowRun {
   };
 }
 
-function waitingStep(ask: StepAsk | null): StoredStepRun {
+function waitingStep(
+  ask: StepAsk | null,
+  waitingOnCommentId: string | null = null,
+): StoredStepRun {
   return {
     id: "s-1",
     runId: "run-1",
@@ -78,7 +85,7 @@ function waitingStep(ask: StepAsk | null): StoredStepRun {
     startedAt: null,
     finishedAt: null,
     ask: ask === null ? null : serializeAsk(ask),
-    waitingOnCommentId: null,
+    waitingOnCommentId,
   };
 }
 
@@ -97,6 +104,7 @@ function harness(options: {
   steps?: Record<string, StoredStepRun[]>;
   active?: boolean;
   result?: AnswerResult;
+  replyFails?: boolean;
 }) {
   const answer = vi.fn(
     async (): Promise<AnswerResult> =>
@@ -107,6 +115,10 @@ function harness(options: {
       },
   );
   const kick = vi.fn();
+  const reply = vi.fn(async (...call: unknown[]): Promise<void> => {
+    if (options.replyFails === true) throw new Error("GitHub said no");
+    expect(call).toHaveLength(4);
+  });
   const answers = createTicketAnswers({
     activeRepository: async () =>
       options.active === false ? undefined : { id: "r-1" },
@@ -114,8 +126,9 @@ function harness(options: {
     listSteps: async (runId) => options.steps?.[runId] ?? [waitingStep(OPEN)],
     engine: { answer },
     kick,
+    reply,
   });
-  return { answers, answer, kick };
+  return { answers, answer, kick, reply };
 }
 
 describe("an answer on a ticket", () => {
@@ -229,5 +242,194 @@ describe("an answer on a ticket", () => {
 
     expect(taken).toEqual({ outcome: "answered", runId: "run-1" });
     expect(answer).toHaveBeenCalled();
+  });
+});
+
+describe("an answer belongs to the question that was open when it was written (#920)", () => {
+  const ASKED_AT = "2026-11-07T09:00:00.000Z";
+  const asked: StepAsk = { ...OPEN, askedAt: ASKED_AT };
+
+  // #920-T103
+  it("takes no comment whose id is not greater than the id of the comment that carries the question", async () => {
+    for (const commentId of ["5000", "4999", "17"]) {
+      const { answers, answer, kick, reply } = harness({
+        steps: { "run-1": [waitingStep(asked, "5000")] },
+      });
+
+      expect(await answers.answer("d", { ...ANSWER, commentId })).toEqual({
+        outcome: "not_taken",
+        reason: "stale",
+      });
+      expect(answer).not.toHaveBeenCalled();
+      expect(kick).not.toHaveBeenCalled();
+      // An old comment is nobody's mistake: no reply.
+      expect(reply).not.toHaveBeenCalled();
+    }
+  });
+
+  // #920-T104
+  it("takes a comment written after the question, and compares ids as numbers, not as text", async () => {
+    // "9001" sorts before "10000" as text and after it as a number.
+    const { answers, answer } = harness({
+      steps: { "run-1": [waitingStep(asked, "800")] },
+    });
+
+    expect(await answers.answer("d", { ...ANSWER, commentId: "9001" })).toEqual(
+      { outcome: "answered", runId: "run-1" },
+    );
+    expect(answer).toHaveBeenCalledTimes(1);
+
+    const second = harness({
+      steps: { "run-1": [waitingStep(asked, "10000")] },
+    });
+    expect(
+      await second.answers.answer("d", { ...ANSWER, commentId: "9001" }),
+    ).toEqual({ outcome: "not_taken", reason: "stale" });
+  });
+
+  // #920-T105
+  it("takes no comment written before the step began to wait, and none for a question whose comment was never posted either", async () => {
+    const { answers, answer } = harness({
+      steps: { "run-1": [waitingStep(asked, null)] },
+    });
+
+    expect(
+      await answers.answer("d", {
+        ...ANSWER,
+        createdAt: "2026-11-07T08:59:59.000Z",
+      }),
+    ).toEqual({ outcome: "not_taken", reason: "stale" });
+    expect(answer).not.toHaveBeenCalled();
+
+    expect(
+      await answers.answer("d", {
+        ...ANSWER,
+        createdAt: "2026-11-07T09:00:01.000Z",
+      }),
+    ).toEqual({ outcome: "answered", runId: "run-1" });
+  });
+
+  // #920-T106
+  it("does not let the redelivery of a comment that found no question answer the question that came later", async () => {
+    // The comment (id 9001, written at 08:00) came when nothing waited: no_run, the delivery is released and GitHub may deliver it again.
+    const before = harness({ runs: [] });
+    const old = { ...ANSWER, createdAt: "2026-11-07T08:00:00.000Z" };
+    expect(await before.answers.answer("d", old)).toEqual({
+      outcome: "no_run",
+    });
+
+    // The next question is asked at 09:00 and its comment has the id 9500: the redelivery is old for it.
+    const later = harness({ steps: { "run-1": [waitingStep(asked, "9500")] } });
+    expect(await later.answers.answer("d", old)).toEqual({
+      outcome: "not_taken",
+      reason: "stale",
+    });
+    expect(later.answer).not.toHaveBeenCalled();
+  });
+
+  // #920-T107
+  it("goes on to another run on the ticket when the comment is old for the first", async () => {
+    const { answers, answer } = harness({
+      runs: [run("run-new", 7), run("run-old", 7)],
+      steps: {
+        "run-new": [waitingStep(asked, "9500")],
+        "run-old": [waitingStep(asked, "100")],
+      },
+    });
+
+    expect(await answers.answer("d", ANSWER)).toEqual({
+      outcome: "answered",
+      runId: "run-old",
+    });
+    expect(answer).toHaveBeenCalledWith("run-old", expect.anything());
+  });
+
+  // #920-T108
+  it("compares only what both sides have: no time, or an id that is no number, leaves the other check to decide", () => {
+    const question = { commentId: "5000", ask: { askedAt: ASKED_AT } };
+    expect(isOlderThanQuestion({ commentId: "5001" }, question)).toBe(false);
+    expect(isOlderThanQuestion({ commentId: "5000" }, question)).toBe(true);
+    expect(isOlderThanQuestion({ commentId: "node-77" }, question)).toBe(false);
+    expect(
+      isOlderThanQuestion(
+        { commentId: "5001", createdAt: "yesterday" },
+        question,
+      ),
+    ).toBe(false);
+    expect(
+      isOlderThanQuestion(
+        { commentId: "5001" },
+        { commentId: null, ask: { askedAt: undefined } },
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("a comment that could not answer gets a short reply (#920)", () => {
+  // #920-T109
+  it("replies in fixed words to an answer that is refused, too long, or came second, and never repeats the comment", async () => {
+    for (const [result, text] of [
+      [
+        { outcome: "refused", code: "answer_empty" },
+        ANSWER_REPLIES.answer_empty,
+      ],
+      [
+        { outcome: "refused", code: "answer_too_long" },
+        ANSWER_REPLIES.answer_too_long,
+      ],
+      [{ outcome: "not_waiting" }, ANSWER_REPLIES.not_waiting],
+    ] as const) {
+      const { answers, reply } = harness({ result });
+
+      await answers.answer("d", {
+        ...ANSWER,
+        raw: "secret token ghp_unlikely",
+        text: "secret token ghp_unlikely",
+      });
+
+      expect(reply).toHaveBeenCalledTimes(1);
+      expect(reply).toHaveBeenCalledWith(
+        "r-1",
+        expect.anything(),
+        text,
+        "<!-- factory answer-reply comment=9001 -->",
+      );
+      // What is written is the text and the key only; the comment itself is handed over for the place to write it, not for the words.
+      expect(
+        JSON.stringify(reply.mock.calls.map((call) => [call[2], call[3]])),
+      ).not.toContain("secret token");
+    }
+  });
+
+  // #920-T110
+  it("replies when no question is open on the ticket of an active repository, and stays silent for one that is not active", async () => {
+    const open = harness({ runs: [] });
+    await open.answers.answer("d", ANSWER);
+    expect(open.reply).toHaveBeenCalledWith(
+      "r-1",
+      expect.anything(),
+      ANSWER_REPLIES.no_run,
+      expect.any(String),
+    );
+
+    const inactive = harness({ active: false });
+    await inactive.answers.answer("d", ANSWER);
+    expect(inactive.reply).not.toHaveBeenCalled();
+  });
+
+  // #920-T111
+  it("says nothing for an answer that was taken, and a reply that fails changes nothing", async () => {
+    const taken = harness({});
+    await taken.answers.answer("d", ANSWER);
+    expect(taken.reply).not.toHaveBeenCalled();
+
+    const failing = harness({
+      result: { outcome: "not_waiting" },
+      replyFails: true,
+    });
+    expect(await failing.answers.answer("d", ANSWER)).toEqual({
+      outcome: "not_taken",
+      reason: "not_waiting",
+    });
   });
 });

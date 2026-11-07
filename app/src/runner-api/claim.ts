@@ -271,6 +271,11 @@ export type ClaimDeps = {
     turn: { turn: StoredImplementerTurn; session: StoredImplementerSession },
   ) => Promise<ResumeBlock>;
   /**
+   * #920: whether a workflow step started the turn of this job (its delivery id is the request id of an agent step of the job's
+   * workspace). Only such a turn may be offered the question: a plain task or follow-up has nobody to answer it.
+   */
+  startedByWorkflow: (job: Job) => Promise<boolean>;
+  /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
    */
@@ -410,6 +415,8 @@ export type Checked = {
     resultSchema: StoredResultSchema | null;
     /** #841: what the turns before it left, for a follow-up turn; null for the first turn of a session. */
     resume: ResumeBlock | null;
+    /** #920: a workflow step started the turn, so a question of the agent has somebody to answer it. */
+    startedByWorkflow: boolean;
   } | null;
 };
 
@@ -1138,6 +1145,7 @@ export async function checkJob(
           turn.turn.number >= 2
             ? await deps.implementerResume(job, turn)
             : null,
+        startedByWorkflow: await deps.startedByWorkflow(job),
       },
     };
   }
@@ -1420,8 +1428,10 @@ export async function buildJobInput(
             ...(implementer.resultSchema === null
               ? {}
               : { resultSchema: implementer.resultSchema }),
-            // #920: the turn may end with a question; only a Worker that named `implementer_ask` is told, any other runs it as before.
+            // #920: the turn may end with a question; only a turn a workflow step started (a plain task has nobody to answer) and only a
+            // Worker that named `implementer_ask` is told, any other runs it as before.
             ...(implementer.resultSchema !== null &&
+            implementer.startedByWorkflow &&
             features.includes("implementer_ask")
               ? { canAsk: true }
               : {}),
@@ -1663,6 +1673,7 @@ async function prepareSubscription(
     throw error;
   }
   const profile = turn.turn.profile;
+  const startedByWorkflow = await deps.startedByWorkflow(job);
   const input: SubscriptionJobInput = {
     reviewKind: "implementer",
     implementer: {
@@ -1690,7 +1701,9 @@ async function prepareSubscription(
       ...(turn.turn.resultSchema === null
         ? {}
         : { resultSchema: turn.turn.resultSchema }),
+      // #920: as for a hosted turn: only one a workflow step started.
       ...(turn.turn.resultSchema !== null &&
+      startedByWorkflow &&
       features.includes("implementer_ask")
         ? { canAsk: true }
         : {}),

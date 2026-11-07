@@ -147,11 +147,12 @@ export type WorkflowRunService = {
   cancel(workflowId: string, runId: string): Promise<CancelledRun>;
   /**
    * #920: answers the question the run waits for, from the page of the run: an option by its number (from 1) and/or a text. Whoever may start
-   * a run may answer one. The step and the run go on (the engine starts the turn that continues the session). Throws `WORKFLOW_RUN_NOT_FOUND`,
+   * a run may answer one. The answer is recorded with the person's GitHub login, or with none (`by: null`) for an account without one: an
+   * email address is never written on a ticket. The step and the run go on (the engine starts the turn that continues the session). Throws `WORKFLOW_RUN_NOT_FOUND`,
    * `WORKFLOW_RUN_REQUEST_INVALID` for a body that is no answer, `WORKFLOW_RUN_NOT_WAITING` and `WORKFLOW_RUN_ANSWER_INVALID`.
    */
   answer(
-    user: { id: string; githubLogin: string },
+    user: { id: string; githubLogin: string | null },
     workflowId: string,
     runId: string,
     body: unknown,

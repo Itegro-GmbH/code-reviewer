@@ -1008,6 +1008,30 @@ describe("a question of the agent (#920)", () => {
     expect(screen.queryByRole("button", { name: /Answer/ })).toBeNull();
   });
 
+  // #920-T98
+  it("shows the next question of the step as a new one to answer, not as sent", async () => {
+    const second = { ...ASK, n: 2, question: "And the backoff?" };
+    const api = {
+      run: vi.fn(async () => ok(waiting(second))),
+      answer: vi.fn(async () => ({ ok: true, data: { run: run() } })),
+    } as unknown as WorkflowRunsApi;
+    const { container } = renderRun(waiting(), api);
+    await act(async () => {
+      screen.getByRole("button", { name: "Answer 1" }).click();
+    });
+    expect(container.querySelector("[data-slot=step-ask-sent]")).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+
+    expect(container.querySelector("[data-slot=step-ask-sent]")).toBeNull();
+    expect(
+      container.querySelector("[data-slot=step-ask-question]")?.textContent,
+    ).toBe("And the backoff?");
+    expect(screen.getByRole("button", { name: "Answer 2" })).toBeTruthy();
+  });
+
   // #920-T155
   it("has the button to cancel a run that waits", () => {
     renderRun(waiting());

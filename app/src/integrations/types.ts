@@ -157,6 +157,8 @@ export type TicketAnswer = {
   number: number;
   /** The platform's id of the comment. */
   commentId: string;
+  /** When the comment was written (the platform's clock, ISO 8601), when the delivery says; an answer older than its question is no answer to it. */
+  createdAt?: string;
   actor: TriggerActor;
   /** The option the answer names by its number, from 1. */
   choice?: number;

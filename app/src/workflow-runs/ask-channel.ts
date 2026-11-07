@@ -9,7 +9,9 @@
 //    finds the comment by its marker and writes no second one.
 //  - An answer edits that comment (the marker says `answered`, and who answered what) and puts the labels back. An answer from the page
 //    also writes a comment in the name of the person ("Answer by @login: ..."), so the ticket holds the whole record, which a `/answer`
-//    comment already is.
+//    comment already is. A question that was never posted (the answer came first) is posted as answered, never as an open question.
+//  - A run that is stopped while the question is open edits the comment the same way (the marker says `cancelled`) and takes the label
+//    `agent waiting` off.
 //  - Labels and the edit are best effort: the question and the answer are what matter, and a repository that refuses a label does not
 //    stop a run.
 import type {
@@ -23,6 +25,7 @@ import {
   LABEL_WORKING,
   answerRecordComment,
   answeredComment,
+  cancelledComment,
   markerOf,
   mentionsOf,
   questionComment,
@@ -175,23 +178,40 @@ export function createGithubAskChannel(
       if (place === undefined || target === undefined) return;
       const { provider, integration, repo } = target;
       const identity = identityOf(run, step, ask);
-      // The comment of the question says it was answered, and by whom.
-      if (
-        step.waitingOnCommentId !== null &&
-        provider.updateIssueComment !== undefined
-      )
+      if (step.waitingOnCommentId !== null) {
+        // The comment of the question says it was answered, and by whom.
+        if (provider.updateIssueComment !== undefined)
+          try {
+            await provider.updateIssueComment(
+              integration,
+              repo,
+              step.waitingOnCommentId,
+              answeredComment({ identity, ask }),
+            );
+          } catch {
+            // The answer is stored; a comment that cannot be edited stays as it is.
+          }
+      } else if (provider.commentOnIssue !== undefined) {
+        // A question that was never posted is written down as answered (the marker keeps a repeat from writing it twice); that comment is
+        // the whole record, so the one in the name of the person below is not written as well.
         try {
-          await provider.updateIssueComment(
+          await provider.commentOnIssue(
             integration,
             repo,
-            step.waitingOnCommentId,
+            place.number,
             answeredComment({ identity, ask }),
+            { marker: markerOf("answered", identity) },
           );
         } catch {
-          // The answer is stored; a comment that cannot be edited stays as it is.
+          // As above.
         }
+      }
       // An answer on the page is written down on the ticket in the name of the person; a `/answer` comment is that record itself.
-      if (ask.answer?.via === "ui" && provider.commentOnIssue !== undefined)
+      if (
+        ask.answer?.via === "ui" &&
+        step.waitingOnCommentId !== null &&
+        provider.commentOnIssue !== undefined
+      )
         try {
           await provider.commentOnIssue(
             integration,
@@ -209,6 +229,29 @@ export function createGithubAskChannel(
         add: [LABEL_WORKING],
         remove: [LABEL_WAITING],
       });
+    },
+
+    async cancelled(run, step, ask) {
+      const place = placeOf(run, await deps.listSteps(run.id));
+      const target = place === undefined ? undefined : await deps.targetOf(run);
+      if (place === undefined || target === undefined) return;
+      const { provider, integration, repo } = target;
+      if (
+        step.waitingOnCommentId !== null &&
+        provider.updateIssueComment !== undefined
+      )
+        try {
+          await provider.updateIssueComment(
+            integration,
+            repo,
+            step.waitingOnCommentId,
+            cancelledComment({ identity: identityOf(run, step, ask), ask }),
+          );
+        } catch {
+          // The run is over either way; a comment that cannot be edited stays as it is.
+        }
+      // Nobody works on the ticket any more, so only the one that said somebody had to answer goes.
+      await labels(target, place, { add: [], remove: [LABEL_WAITING] });
     },
   };
 }

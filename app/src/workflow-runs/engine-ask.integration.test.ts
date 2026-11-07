@@ -9,6 +9,7 @@ import {
   twoAgentSteps,
   type EngineHarness,
 } from "../test-support/workflow-engine-harness.ts";
+import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { sha } from "../test-support/jobs.ts";
 import { parseStepAsk } from "./ask.ts";
 import type { AskChannel } from "./engine.ts";
@@ -47,15 +48,30 @@ async function instructionOf(app: EngineHarness, jobId: string) {
     .executeTakeFirstOrThrow();
 }
 
-function channel() {
+function channel(
+  hooks: {
+    /** What the post of the question does: throws to fail it, or runs something while "GitHub" takes it. */
+    whileAsking?: (call: number) => Promise<void>;
+  } = {},
+) {
   const calls: string[] = [];
+  let asked = 0;
   const asks: AskChannel = {
     async asked(run, step, ask) {
+      asked += 1;
       calls.push(`asked ${step.stepId} q${String(ask.n)}`);
+      await hooks.whileAsking?.(asked);
       return { commentId: "9001" };
     },
     async answered(run, step, ask) {
-      calls.push(`answered ${step.stepId} ${ask.answer?.text ?? ""}`);
+      calls.push(
+        `answered ${step.stepId} ${ask.answer?.text ?? ""} on ${step.waitingOnCommentId ?? "no comment"}`,
+      );
+    },
+    async cancelled(run, step, ask) {
+      calls.push(
+        `cancelled ${step.stepId} q${String(ask.n)} on ${step.waitingOnCommentId ?? "no comment"}`,
+      );
     },
   };
   return { asks, calls };
@@ -88,6 +104,7 @@ describe("a turn that ends with a question", () => {
       ...QUESTION,
       n: 1,
       state: "open",
+      askedAt: expect.any(String) as string,
     });
     expect(plan).toMatchObject({
       costMicroUsd: 500_000,
@@ -138,7 +155,7 @@ describe("a turn that ends with a question", () => {
     expect(after.instruction).toContain("and log it");
     expect(calls).toEqual([
       "asked plan q1",
-      "answered plan Network errors and 5xx answers\n\nand log it",
+      "answered plan Network errors and 5xx answers\n\nand log it on 9001",
     ]);
 
     // The step reads the new turn like any other: done, and the next step runs.
@@ -322,5 +339,149 @@ describe("a turn that ends with a question", () => {
       status: "failed",
       errorCode: "step_failed",
     });
+  });
+});
+
+describe("a question that is not shown yet, a stop, and what a step costs (#920)", () => {
+  // #920-T112
+  it("shows a question whose post failed at the next look, once: a step with a comment is left alone", async () => {
+    const { asks, calls } = channel({
+      whileAsking: async (call) => {
+        if (call === 1) throw new Error("GitHub is down");
+      },
+    });
+    const app = await startEngineHarness({ asks });
+    const { runId } = await started(app);
+
+    await endTurn(app, { agentAsk: QUESTION });
+    expect((await app.stateOf(runId)).steps[0]?.waitingOnCommentId).toBeNull();
+
+    await app.engine.advance(runId);
+    expect((await app.stateOf(runId)).steps[0]?.waitingOnCommentId).toBe(
+      "9001",
+    );
+    await app.engine.advance(runId);
+    await app.engine.advance(runId);
+
+    expect(calls).toEqual(["asked plan q1", "asked plan q1"]);
+    expect((await app.stateOf(runId)).run.status).toBe("waiting");
+  });
+
+  // #920-T113
+  it("does not leave an open question behind when the answer comes while the question is being posted: the comment is marked answered", async () => {
+    let runId = "";
+    const holder: { app?: EngineHarness } = {};
+    const { asks, calls } = channel({
+      whileAsking: async () => {
+        const taken = await holder.app?.engine.answer(runId, {
+          text: "Use Redis.",
+          by: "octocat",
+          via: "ui",
+        });
+        expect(taken?.outcome).toBe("answered");
+      },
+    });
+    const app = await startEngineHarness({ asks });
+    holder.app = app;
+    ({ runId } = await started(app));
+
+    await endTurn(app, { agentAsk: QUESTION });
+
+    // The answer itself found no comment yet; the post then knew the answer and said so on the comment it had just made.
+    expect(calls).toEqual([
+      "asked plan q1",
+      "answered plan Use Redis. on no comment",
+      "answered plan Use Redis. on 9001",
+    ]);
+    expect((await app.stateOf(runId)).steps[0]).toMatchObject({
+      status: "running",
+      waitingOnCommentId: "9001",
+    });
+  });
+
+  // #920-T114
+  it("keeps what the asking turns cost when the step fails after the answer: the costs of the steps add up to what the run spent", async () => {
+    const app = await startEngineHarness({ maxBudgetUsd: 1 });
+    const workflow = await app.saveWorkflow({
+      ...twoAgentSteps(),
+      budgetUsd: 1,
+    });
+    const { run } = await app.start(workflow.id);
+    await app.engine.advance(run.id);
+    app.h.fake.addBranch(REPO, `workflow/${run.id}/plan`, sha("c"));
+    await endTurn(app, { agentAsk: QUESTION, costUsd: 1 });
+    await app.engine.answer(run.id, { choice: 1, by: "a", via: "ui" });
+    await app.engine.advance(run.id);
+
+    const state = await app.stateOf(run.id);
+
+    expect(state.steps[0]).toMatchObject({
+      status: "failed",
+      errorCode: "budget_exhausted",
+      costMicroUsd: 1_000_000,
+      costBasis: "reported",
+    });
+    expect(
+      state.steps.reduce((sum, step) => sum + (step.costMicroUsd ?? 0), 0),
+    ).toBe(state.run.spentMicroUsd);
+    expect(state.run.spentMicroUsd).toBe(1_000_000);
+  });
+
+  // #920-T115
+  it("marks the comment of the question as cancelled when the run is stopped while it waits, and keeps the cost of the turn that asked", async () => {
+    const { asks, calls } = channel();
+    const app = await startEngineHarness({ asks });
+    const { workflow, runId } = await started(app);
+    await endTurn(app, { agentAsk: QUESTION, costUsd: 0.5 });
+
+    await app.service.cancel(workflow.id, runId);
+    await app.engine.advance(runId);
+    await app.engine.advance(runId);
+
+    expect(calls).toEqual(["asked plan q1", "cancelled plan q1 on 9001"]);
+    const state = await app.stateOf(runId);
+    expect(state.run).toMatchObject({
+      status: "cancelled",
+      spentMicroUsd: 500_000,
+    });
+    expect(state.steps[0]).toMatchObject({
+      status: "failed",
+      errorCode: "cancelled",
+      costMicroUsd: 500_000,
+      costBasis: "reported",
+    });
+  });
+
+  // #920-T160
+  it("takes a waiting run into the sweep only when its question has no comment yet, or a stop is asked for", async () => {
+    const { asks } = channel();
+    const app = await startEngineHarness({ asks });
+    const { workflow, runId } = await started(app);
+    const due = () =>
+      dueWorkflowRuns(app.h.db, {
+        olderThan: "2999-01-01T00:00:00.000Z",
+        limit: 10,
+      });
+    await endTurn(app, { agentAsk: QUESTION });
+
+    // The question has its comment: nothing to look at until somebody answers or stops it.
+    expect((await app.stateOf(runId)).steps[0]?.waitingOnCommentId).toBe(
+      "9001",
+    );
+    expect(await due()).toEqual([]);
+
+    // Without a comment (the post failed) the run is looked at again, to post it.
+    const [plan] = (await app.stateOf(runId)).steps;
+    await app.h.db
+      .updateTable("workflow_step_runs")
+      .set({ waiting_on_comment_id: null })
+      .where("id", "=", plan?.id ?? "")
+      .execute();
+    expect(await due()).toEqual([{ workspaceId: app.workspaceId, runId }]);
+    await app.engine.advance(runId);
+    expect(await due()).toEqual([]);
+
+    await app.service.cancel(workflow.id, runId);
+    expect(await due()).toEqual([{ workspaceId: app.workspaceId, runId }]);
   });
 });

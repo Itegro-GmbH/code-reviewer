@@ -46,6 +46,17 @@ export function implementerDeliveryId(
   return `${DELIVERY_PREFIX}${workspaceId}:${clientRequestId}`;
 }
 
+/** The client request id a turn's delivery id was made from, or undefined for a delivery id of another workspace or another kind of job. */
+export function clientRequestIdOf(
+  workspaceId: string,
+  deliveryId: string,
+): string | undefined {
+  const prefix = implementerDeliveryId(workspaceId, "");
+  return deliveryId.startsWith(prefix)
+    ? deliveryId.slice(prefix.length)
+    : undefined;
+}
+
 export function implementerJobShape(
   input: ImplementerJobShapeInput,
 ): ImplementerJobShape {

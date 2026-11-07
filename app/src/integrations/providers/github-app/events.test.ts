@@ -398,6 +398,7 @@ describe("a comment /answer on an issue or a pull request (#920)", () => {
       association?: string;
       senderType?: string;
       issueState?: string;
+      createdAt?: string;
     },
   ) {
     const payload = webhookFixture(fixture) as Record<
@@ -408,6 +409,9 @@ describe("a comment /answer on an issue or a pull request (#920)", () => {
       ...payload.comment,
       body: changes.body,
       author_association: changes.association ?? "COLLABORATOR",
+      ...(changes.createdAt === undefined
+        ? {}
+        : { created_at: changes.createdAt }),
     };
     if (changes.senderType !== undefined)
       payload.sender = { ...payload.sender, type: changes.senderType };
@@ -535,5 +539,63 @@ describe("a comment /answer on an issue or a pull request (#920)", () => {
     );
 
     expect(event).toMatchObject({ kind: "ignored" });
+  });
+
+  // #920-T95
+  it("is an answer on a closed pull request too, while a closed pull request still starts no review", async () => {
+    const answer = await parse(
+      answerPayload("issue_comment.created.review", {
+        body: "/answer 1",
+        issueState: "closed",
+      }),
+    );
+    expect(answer).toMatchObject({
+      kind: "ticket_answer",
+      answer: { choice: 1 },
+    });
+    expect(isIntegrationEvent(answer)).toBe(true);
+
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/review",
+          issueState: "closed",
+        }),
+      ),
+    ).toEqual({ kind: "ignored", reason: "the pull request is not open" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/answer 1",
+          issueState: "closed",
+          senderType: "Bot",
+        }),
+      ),
+    ).toEqual({ kind: "ignored", reason: "the pull request is not open" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/answer 1",
+          issueState: "closed",
+        }),
+        false,
+      ),
+    ).toEqual({ kind: "ignored", reason: "the commenter has no write access" });
+  });
+
+  // #920-T96
+  it("carries the time the comment was written, when the delivery says", async () => {
+    const event = await parse(
+      answerPayload("issue_comment.created.on-issue", {
+        body: "/answer 1",
+        createdAt: "2026-11-07T09:30:00Z",
+      }),
+    );
+
+    expect(event).toMatchObject({
+      kind: "ticket_answer",
+      answer: { createdAt: "2026-11-07T09:30:00Z" },
+    });
+    expect(isIntegrationEvent(event)).toBe(true);
   });
 });
