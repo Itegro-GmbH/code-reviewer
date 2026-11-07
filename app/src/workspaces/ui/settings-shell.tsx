@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The frame of the workspace settings area (#178): the sub-nav with one link per sub-page and the
-// shared heading. The settings index ("General", at `/settings`) is the area root and carries no
+// shared heading (#925: the four tabs, and the second row of a tab with several pages). The settings index ("General", at `/settings`) is the area root and carries no
 // breadcrumb; the sub-pages show `Settings / <page>` (epic #165 breadcrumb rule). The links are
 // `settings-nav.tsx`; one source (`SETTINGS_SECTIONS`, `settings-sections.ts`) feeds them and the headings.
 import type { ReactNode } from "react";
@@ -31,6 +31,8 @@ export function SettingsScreen({
   showPlan = false,
   showBilling = false,
   showAdvanced,
+  description,
+  badge,
   children,
 }: {
   workspaceSlug: string;
@@ -41,6 +43,10 @@ export function SettingsScreen({
   showBilling?: boolean;
   /** Lists the Advanced page. Left out, the settings layout decides (the Owner sees it, #658). */
   showAdvanced?: boolean;
+  /** A line under the title. */
+  description?: string;
+  /** A short status next to the title. */
+  badge?: ReactNode;
   children: ReactNode;
 }) {
   const section = SETTINGS_SECTIONS.find((item) => item.segment === current);
@@ -49,6 +55,8 @@ export function SettingsScreen({
     <>
       <PageHeader
         title={title}
+        {...(description === undefined ? {} : { description })}
+        {...(badge === undefined ? {} : { badge })}
         breadcrumb={
           current === "" ? undefined : (
             <Breadcrumbs

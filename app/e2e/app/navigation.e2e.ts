@@ -26,7 +26,7 @@ test.describe("the app frame", () => {
   });
 
   // CR-36-T09
-  test("@smoke a signed in person opens Projects, Runs, Settings and Members of the workspace in the same frame and signs out", async ({
+  test("@smoke a signed in person opens Projects, Runs and Settings of the workspace in the same frame and signs out", async ({
     page,
   }) => {
     await signInThroughTheForm(page, account);
@@ -37,7 +37,6 @@ test.describe("the app frame", () => {
       { link: "Projects", heading: "Projects", title: "Projects" },
       { link: "Runs", heading: "Runs", title: "Runs" },
       { link: "Settings", heading: "General", title: "Settings · General" },
-      { link: "Members", heading: "Members", title: "Members" },
     ];
     for (const { link, heading, title } of places) {
       await nav.getByRole("link", { name: link }).click();
@@ -99,8 +98,6 @@ test.describe("the app frame", () => {
       await expect(nav.getByRole("link")).toHaveText([
         "Projects",
         "Runs",
-        "Connections",
-        "Members",
         "Settings",
       ]);
       await nav.getByRole("link", { name: "Runs" }).click();

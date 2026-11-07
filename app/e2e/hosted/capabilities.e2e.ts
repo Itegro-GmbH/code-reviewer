@@ -95,6 +95,12 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       `/api/w/${slug}/environments`,
       `/api/w/${slug}/environments/x`,
       `/w/${slug}/environments`,
+      // The shell of the factory (#925): the ToDos and the profiles, the count on the sidebar link, and the ToDos and lanes tabs of a project.
+      `/w/${slug}/todos`,
+      `/api/w/${slug}/todos/count`,
+      `/w/${slug}/profiles`,
+      `/w/${slug}/projects/x/todos`,
+      `/w/${slug}/projects/x/lanes`,
       // The pages of the workflows (#873).
       `/w/${slug}/workflows`,
       `/w/${slug}/workflows/x`,

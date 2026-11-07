@@ -25,6 +25,8 @@ import {
   type LastRunSource,
   type ProjectListView,
 } from "./list-view.ts";
+import { NewProjectDialog } from "./new-project-dialog.tsx";
+import { ProjectCards } from "./project-cards.tsx";
 import { ProjectList } from "./project-list.tsx";
 
 export type ProjectsPageData = {
@@ -59,6 +61,7 @@ export function ProjectsPageContent({
   canConnect = canManage,
   canStartReview = true,
   llmNotice = null,
+  cards = false,
   data,
   api,
   manualReviewApi,
@@ -77,6 +80,8 @@ export function ProjectsPageContent({
   canStartReview?: boolean;
   /** The workspace's LLM notice, built by the page (it needs the server's summary); merged into the one strip. */
   llmNotice?: AttentionNotice | null;
+  /** The factory's page (#925): the projects as cards with a "New project" dialog, instead of the table with the review switches. */
+  cards?: boolean;
   data: ProjectsPageData;
   api?: ProjectsApi;
   /** Only tests pass this: the calls of the play button's dialog. */
@@ -91,22 +96,48 @@ export function ProjectsPageContent({
   return (
     <>
       <NeedsAttention notices={notices} />
-      <ProjectList
-        workspaceSlug={workspaceSlug}
-        canManage={canManage}
-        canConnect={canConnect}
-        canStartReview={canStartReview}
-        view={data.list}
-        activationBlocked={
-          data.config.githubApp.configured
-            ? null
-            : audience === "operator"
-              ? ACTIVATION_BLOCKED_TEXT
-              : ACTIVATION_BLOCKED_TEXT_FOR_MEMBERS
-        }
-        {...(api === undefined ? {} : { api })}
-        {...(manualReviewApi === undefined ? {} : { manualReviewApi })}
-      />
+      {cards ? (
+        <>
+          {canManage ? (
+            <div className="flex justify-end">
+              <NewProjectDialog
+                workspaceSlug={workspaceSlug}
+                choices={data.list.rows
+                  .filter(
+                    (row) => !row.switchedOn && row.status !== "unavailable",
+                  )
+                  .map(({ repositoryId, fullName }) => ({
+                    repositoryId,
+                    fullName,
+                  }))}
+                {...(api === undefined ? {} : { api })}
+              />
+            </div>
+          ) : null}
+          <ProjectCards
+            workspaceSlug={workspaceSlug}
+            canConnect={canConnect}
+            view={data.list}
+          />
+        </>
+      ) : (
+        <ProjectList
+          workspaceSlug={workspaceSlug}
+          canManage={canManage}
+          canConnect={canConnect}
+          canStartReview={canStartReview}
+          view={data.list}
+          activationBlocked={
+            data.config.githubApp.configured
+              ? null
+              : audience === "operator"
+                ? ACTIVATION_BLOCKED_TEXT
+                : ACTIVATION_BLOCKED_TEXT_FOR_MEMBERS
+          }
+          {...(api === undefined ? {} : { api })}
+          {...(manualReviewApi === undefined ? {} : { manualReviewApi })}
+        />
+      )}
     </>
   );
 }

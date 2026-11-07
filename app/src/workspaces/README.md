@@ -285,7 +285,7 @@ claimed (#277, `src/usage/README.md`, "Limits and suspension at claim"); the key
 ## Not here
 
 Transferring data, SSO and teams below the workspace are out of scope. A GitHub App installation
-is bound to a workspace by an Owner or Admin (`manage_connections`) through "Connect GitHub" on the Connections page; the
+is bound to a workspace by an Owner or Admin (`manage_connections`) through "Connect GitHub" on the Integrations tab of the settings; the
 rules are in `src/installation-binding/README.md`, and the synchronization of a workspace reads its own connections only
 (`POST /api/w/:workspace/integrations/sync`; the whole instance's stays the instance admin's). The workspace LLM key is
 in place (`src/llm/`, `manage_llm_key`: an Admin or an Owner sets it, every member sees whether there is one); the same action

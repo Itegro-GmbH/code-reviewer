@@ -119,7 +119,9 @@ describe("the list of runners", () => {
     show(fakeApi().api, false);
 
     await screen.findByText("build-box-1");
-    expect(screen.queryByRole("button", { name: /add a runner/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /connect your own runner/i }),
+    ).toBeNull();
     expect(screen.queryByRole("button", { name: /^revoke/i })).toBeNull();
   });
 
@@ -155,12 +157,12 @@ describe("the list of runners", () => {
 
 describe("a registration token", () => {
   // #854-T74
-  it("is shown once with the command to register a runner, and gone when the person is done", async () => {
+  it("is shown once, in a dialog, with the command to register a runner, and gone when the person is done", async () => {
     const user = userEvent.setup();
     show(fakeApi().api, true);
 
     await user.click(
-      await screen.findByRole("button", { name: /add a runner/i }),
+      await screen.findByRole("button", { name: /connect your own runner/i }),
     );
 
     expect((await screen.findByLabelText("Command")).textContent).toBe(
@@ -170,12 +172,16 @@ describe("a registration token", () => {
     expect(
       screen.getByRole("button", { name: "Copy the register command" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /add a runner/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /connect your own runner/i }),
+    ).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /done/i }));
 
     expect(screen.queryByText(/crt_token-1/)).toBeNull();
-    expect(screen.getByRole("button", { name: /add a runner/i })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /connect your own runner/i }),
+    ).toBeTruthy();
   });
 
   // #854-T75
@@ -195,7 +201,7 @@ describe("a registration token", () => {
     );
 
     await user.click(
-      await screen.findByRole("button", { name: /add a runner/i }),
+      await screen.findByRole("button", { name: /connect your own runner/i }),
     );
 
     expect(

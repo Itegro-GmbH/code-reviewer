@@ -172,7 +172,10 @@ describe("the General settings sub-page", () => {
     expect(screen.queryByRole("heading", { name: "Instance" })).toBeNull();
     expect(screen.queryByText("Tenancy")).toBeNull();
     expect(screen.queryByText("Multi-tenant")).toBeNull();
-    expect(screen.queryByText("Members")).toBeNull();
+    // "Members" is a tab of the settings navigation (#925); what must not be there is a member count in the page itself.
+    expect(
+      screen.queryAllByText("Members").filter((node) => !node.closest("nav")),
+    ).toEqual([]);
     expect(screen.queryByText("GitHub")).toBeNull();
     expect(screen.getByRole("heading", { name: "Workspace" })).toBeTruthy();
   });

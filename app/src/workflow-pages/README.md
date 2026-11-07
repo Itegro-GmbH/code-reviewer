@@ -7,8 +7,8 @@ basis, steps and results. What they show and how: [`docs/workflows.md`](../../..
 This is a module of its own, and the engine imports nothing from it: the pages only read through the services and the routes, so the import cycles of the engine
 (the runner API, the dispatch sweep) do not grow with the UI (`src/ci/import-cycles/`).
 
-The pages exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`) and are in the sidebar as **Workflows**. They sit in
-`src/app/(app)/w/[workspace]/workflows/`.
+The pages exist only in a deployment with the capability `implementer` (`src/capabilities/routes.ts`) and are reached from the **Lanes** tab of a project (#925: the sidebar has no Workflows place any more; the tab lists the workspace's workflows until a lane
+belongs to a project, #922). They sit in `src/app/(app)/w/[workspace]/workflows/`.
 
 | File                                   | Role                                                                                                                                                                     |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

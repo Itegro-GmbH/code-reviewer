@@ -83,5 +83,8 @@ export function workspaceHome(
   capabilities?: CapabilitySet,
 ): string {
   const hasProjects = capabilities === undefined || capabilities.has("review");
-  return workspacePath(slug, hasProjects ? "/projects" : "/connections");
+  return workspacePath(
+    slug,
+    hasProjects ? "/projects" : "/settings/integrations",
+  );
 }

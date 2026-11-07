@@ -52,9 +52,16 @@ describe("the Advanced settings sub-page", () => {
     expect(screen.getAllByRole("button")).toHaveLength(1);
     expect(screen.queryByText(/Reset every default/)).toBeNull();
     expect(screen.queryByText(/Remove the .* key/)).toBeNull();
-    const nav = screen.getByRole("navigation", { name: "Settings sections" });
+    // Advanced is a page of the General tab (#925): the tab and the page are marked.
+    const tabs = screen.getByRole("navigation", { name: "Settings sections" });
     expect(
-      within(nav)
+      within(tabs)
+        .getByRole("link", { name: "General" })
+        .getAttribute("aria-current"),
+    ).toBe("page");
+    const pages = screen.getByRole("navigation", { name: "General pages" });
+    expect(
+      within(pages)
         .getByRole("link", { name: "Advanced" })
         .getAttribute("aria-current"),
     ).toBe("page");

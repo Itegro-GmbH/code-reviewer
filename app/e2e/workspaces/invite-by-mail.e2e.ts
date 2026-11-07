@@ -91,7 +91,7 @@ test.describe("invitations by mail", () => {
     await create.getByRole("button", { name: "Create workspace" }).click();
     await expect(owner).toHaveURL(/\/w\/mail-team\/projects$/);
 
-    await owner.goto("/w/mail-team/members");
+    await owner.goto("/w/mail-team/settings/members");
     const form = owner.getByRole("form", { name: "Invite a person" });
     await form.getByLabel("Email address").fill(COLLEAGUE);
     await form.getByRole("button", { name: "Send invitation" }).click();
@@ -131,7 +131,7 @@ test.describe("invitations by mail", () => {
     ).toBeVisible();
 
     // The Owner sees the colleague as a Member, and the invitation gone.
-    await owner.goto("/w/mail-team/members");
+    await owner.goto("/w/mail-team/settings/members");
     await expect(
       owner.getByRole("list", { name: "Members" }).getByText(COLLEAGUE),
     ).toBeVisible();
@@ -148,7 +148,7 @@ test.describe("invitations by mail", () => {
   }) => {
     const owner = await newPerson(browser);
     await signIn(owner, OWNER);
-    await owner.goto("/w/mail-team/members");
+    await owner.goto("/w/mail-team/settings/members");
     const form = owner.getByRole("form", { name: "Invite a person" });
     await form.getByLabel("Email address").fill(NEWCOMER);
     await form.getByRole("button", { name: "Send invitation" }).click();

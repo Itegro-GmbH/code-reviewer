@@ -95,7 +95,7 @@ export function ProjectList({
   if (view.rows.length === 0)
     return (
       <NoRepositories
-        connectionsPath={workspacePath(workspaceSlug, "/connections")}
+        connectionsPath={workspacePath(workspaceSlug, "/settings/integrations")}
         canConnect={canConnect}
       />
     );

@@ -15,7 +15,7 @@ belongs to, and never hands the repositories of one customer to another. The dec
 | `rate-limits.ts`                                  | The shared counters (`start`, `callback` and `sync`, per person and for the instance)                                                                                                                         |
 | `errors.ts`, `../db/installation-link-request.ts` | The stable codes (refusals, waits, results of the page) and the vocabulary of a request                                                                                                                       |
 | `assemble.ts`, `shared.ts`                        | The wiring over a database (tests) and over the running server                                                                                                                                                |
-| `ui/`                                             | The Connections page of a workspace and the Approvals page of the portal, with the copy of every code                                                                                                         |
+| `ui/`                                             | The GitHub App page of a workspace (the Integrations tab of its settings) and the Approvals page of the portal, with the copy of every code                                                                   |
 
 ## The flow
 
@@ -53,7 +53,7 @@ belongs to, and never hands the repositories of one customer to another. The dec
 "Link an existing installation" lists the installations the person's token can use that no other workspace has linked (an
 authorization, then a signed list `github-picker`), and a choice goes through steps 3 to 5 again.
 
-A state never carries an address. Where a browser lands is a fixed page: `/w/<slug>/connections?github=<code>` for a workspace
+A state never carries an address. Where a browser lands is a fixed page: `/w/<slug>/settings/integrations?github=<code>` (the Integrations tab of the settings, #925; the old `/connections` redirects there and carries the two query parameters) for a workspace
 the person administers, `/github/result?github=<code>` otherwise; `redirect` or `next` parameters are ignored.
 
 ## What never creates a connection

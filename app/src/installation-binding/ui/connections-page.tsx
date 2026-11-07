@@ -9,7 +9,6 @@
 // `ConnectionsPageContent` renders it. The page file only wires the real services. Names that come from
 // GitHub (account logins) are untrusted and rendered as text.
 import type { ProductIdentity } from "../../product-identity/identity.ts";
-import { PageHeader } from "../../components/page-header.tsx";
 import type { InstallationLinkRequestsRepository } from "../../db/repositories/installation-link-requests-repository.ts";
 import type { IntegrationsRepository } from "../../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../../db/repositories/repositories-repository.ts";
@@ -146,14 +145,11 @@ export function ConnectionsPageContent({
   api?: BindingApi;
 }) {
   return (
-    <>
-      <PageHeader title="Connections" />
-      <ConnectionsPanel
-        workspaceSlug={workspaceSlug}
-        canManage={canManage}
-        data={data}
-        {...(api === undefined ? {} : { api })}
-      />
-    </>
+    <ConnectionsPanel
+      workspaceSlug={workspaceSlug}
+      canManage={canManage}
+      data={data}
+      {...(api === undefined ? {} : { api })}
+    />
   );
 }

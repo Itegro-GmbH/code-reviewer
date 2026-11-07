@@ -17,7 +17,7 @@
 // `application/json` only, a small limit, read and parsed once. The two GET routes are GitHub's own redirects:
 // they take their facts from the query, and what they do with it is the service's (a signed state, used once).
 //
-// Where a browser lands is ALWAYS a fixed page chosen here: `/w/<slug>/connections` for a workspace the person
+// Where a browser lands is ALWAYS a fixed page chosen here: `/w/<slug>/settings/integrations` for a workspace the person
 // administers, `/github/result` for the rest. Nothing GitHub or the request said, other than a code of our own
 // list, ends up in an address, so a crafted `redirect` or `next` parameter has nothing to act on. Every answer is
 // `Cache-Control: no-store`; the redirects send `Referrer-Policy: no-referrer`, so the state and the code in
@@ -39,8 +39,8 @@ import type { CallbackResult, InstallationBindingService } from "./service.ts";
 
 export const BINDING_REQUEST_MAX_BYTES = 4 * 1024;
 
-/** The page of a workspace that shows its connections, and where a flow of the binding ends. */
-export const CONNECTIONS_PAGE = "/connections";
+/** The Integrations tab of the workspace settings, which shows its connections, and where a flow of the binding ends. */
+export const CONNECTIONS_PAGE = "/settings/integrations";
 /** Where a flow ends when no workspace the person administers can be named. */
 export const BINDING_RESULT_PAGE = "/github/result";
 export const SETUP_CALLBACK_PATH = "/github/connected";

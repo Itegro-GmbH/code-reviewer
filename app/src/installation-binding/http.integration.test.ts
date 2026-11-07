@@ -322,7 +322,7 @@ describe("the redirects of GitHub", () => {
 
     expect(landed?.status).toBe(302);
     expect(landed?.headers.get("location")).toBe(
-      "/w/a/connections?github=linked",
+      "/w/a/settings/integrations?github=linked",
     );
     expect(landed?.headers.get("referrer-policy")).toBe("no-referrer");
   });
@@ -360,7 +360,7 @@ describe("the redirects of GitHub", () => {
       .setupCallback(new Request(back.toString()));
 
     expect(response.headers.get("location")).toBe(
-      "/w/a/connections?github=waiting_for_github_approval",
+      "/w/a/settings/integrations?github=waiting_for_github_approval",
     );
   });
 

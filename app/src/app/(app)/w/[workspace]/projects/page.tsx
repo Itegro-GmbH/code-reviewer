@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
+import { getCapabilities } from "@/capabilities/shared";
 import { getProductIdentity } from "@/product-identity/current";
 import type { Metadata } from "next";
 import { getConfigStatusFor } from "@/config-status/shared";
@@ -19,7 +20,11 @@ import { can } from "@/workspaces/permissions";
 
 // The area is named by the product of the deployment (#757): a function, not a constant of the module, like the root layout's title.
 export function generateMetadata(): Metadata {
-  return { title: getProductIdentity().qaAreaName };
+  return {
+    title: getCapabilities().has("implementer")
+      ? "Projects"
+      : getProductIdentity().qaAreaName,
+  };
 }
 
 // The repositories the GitHub App can read, each with a switch: a repository is reviewed only while
@@ -32,11 +37,17 @@ export default async function ProjectsPage({
   const { workspace, role, user } = await requireWorkspace(slug);
   const canManage = can(role, "manage_projects");
   const canConnect = can(role, "manage_connections");
+  // The factory shows its projects as cards (#925); any other product keeps the table with the review switches.
+  const factory = getCapabilities().has("implementer");
   return (
     <>
       <PageHeader
-        title={getProductIdentity().qaAreaName}
-        description={`The repositories ${getProductIdentity().name} watches.`}
+        title={factory ? "Projects" : getProductIdentity().qaAreaName}
+        description={
+          factory
+            ? "Your repositories, their issues and the lanes that run on them."
+            : `The repositories ${getProductIdentity().name} watches.`
+        }
         actions={
           // The synchronization of the workspace: it reads the workspace's own connections, for an Owner or
           // an Admin (the instance admin's synchronization of everything is a route of the admin portal).
@@ -50,6 +61,7 @@ export default async function ProjectsPage({
         canConnect={canConnect}
         canStartReview={can(role, "start_review")}
         canManageLlmKey={can(role, "manage_llm_key")}
+        cards={factory}
         user={user}
       />
     </>
@@ -63,6 +75,7 @@ async function ProjectsContent({
   canConnect,
   canStartReview,
   canManageLlmKey,
+  cards,
   user,
 }: {
   workspaceId: string;
@@ -71,6 +84,7 @@ async function ProjectsContent({
   canConnect: boolean;
   canStartReview: boolean;
   canManageLlmKey: boolean;
+  cards: boolean;
   user: { isInstanceAdmin: boolean };
 }) {
   const data = await loadProjectsPage({
@@ -96,6 +110,7 @@ async function ProjectsContent({
       canConnect={canConnect}
       canStartReview={canStartReview}
       llmNotice={llmNotice}
+      cards={cards}
       data={data}
     />
   );

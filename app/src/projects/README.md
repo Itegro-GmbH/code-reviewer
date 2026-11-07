@@ -152,3 +152,14 @@ hook), `http.integration.test.ts` (the handler), `integration-tests/http/project
 real route file) and `integration-tests/webhooks/project-gate.integration.test.ts` (the
 webhook route). `startWebhookHarness().seedInstallation()` activates the seeded repository by default;
 pass `{ activateProject: false }` to test the opposite.
+
+## The cockpit (#925)
+
+In the factory a project is opened as a cockpit (`ui/project-cockpit.tsx`): the repository as the title with its state, and the tabs **Issues**, **ToDos**,
+**Runs**, **Lanes** and **Setup**, each a page of its own below `/w/<slug>/projects/<id>` (`/todos`, `/runs`, `/lanes`, `/setup`; Issues is the project's own
+address). The Projects page lists the projects as cards (`ui/project-cards.tsx`) with a "New project" dialog (`ui/new-project-dialog.tsx`): the ticket source is
+a repository that is no project yet, and "Create" switches it on through the route of the project switch. Until the ticket source (#923), the answers (#924) and the
+lanes of a project (#922) exist, the numbers on a card say "–", Issues and ToDos show the empty state of the prototype, and the Lanes tab lists the workspace's
+workflows. Setup holds the ticket source card, the project switch, the re-read from GitHub and the way to the review settings (`/review`, the page the project
+address was before). A deployment without the capability `implementer` has no cockpit tabs but Runs and Setup, keeps the table with the review switches on the
+Projects page, and `/projects/<id>` opens the review settings as it always did.

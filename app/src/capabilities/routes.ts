@@ -129,7 +129,10 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/w/[workspace]/members", class: "core" },
   { route: "/w/[workspace]/settings", class: "core" },
   { route: "/w/[workspace]/settings/advanced", class: "core" },
+  // The tabs of the settings (#925): the GitHub App page and the members list moved here from `/connections` and `/members`.
+  { route: "/w/[workspace]/settings/integrations", class: "core" },
   { route: "/w/[workspace]/settings/llm", class: "core" },
+  { route: "/w/[workspace]/settings/members", class: "core" },
   { route: "/w/[workspace]/settings/plan", class: "core" },
   { route: "/workspaces/new", class: "core" },
 
@@ -168,6 +171,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/runs/[[...rest]]", class: "review" },
   { route: "/w/[workspace]/projects", class: "review" },
   { route: "/w/[workspace]/projects/[repositoryId]", class: "review" },
+  // The tabs of a project's cockpit (#925): the runs and the setup exist wherever there are projects, the issues are the project's own
+  // address (which opens the review settings where there is no factory), the ToDos and the lanes are the factory's.
+  { route: "/w/[workspace]/projects/[repositoryId]/review", class: "review" },
+  { route: "/w/[workspace]/projects/[repositoryId]/runs", class: "review" },
+  { route: "/w/[workspace]/projects/[repositoryId]/setup", class: "review" },
   { route: "/w/[workspace]/runs", class: "review" },
   { route: "/w/[workspace]/runs/[id]", class: "review" },
   { route: "/w/[workspace]/settings/review-defaults", class: "review" },
@@ -220,6 +228,19 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
+  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, and the ToDos and lanes tabs of
+  // a project.
+  { route: "/api/w/[workspace]/todos/count", class: "implementer" },
+  { route: "/w/[workspace]/todos", class: "implementer" },
+  { route: "/w/[workspace]/profiles", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/lanes",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/todos",
+    class: "implementer",
+  },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },

@@ -163,8 +163,8 @@ path that does not exist runs in the hosted lane (`e2e/hosted/capabilities.e2e.t
 
 ## The page (#756)
 
-`src/app/(app)/w/[workspace]/implementer/page.tsx` and `ui/`. The page is in the sidebar between the QA area and Runs (`shell/nav-items.ts`,
-capability `implementer`) and, like the routes, is **absent** outside the capability: `routes.ts` classifies it `implementer`, the proxy answers
+`src/app/(app)/w/[workspace]/implementer/page.tsx` and `ui/`. The page is no longer a place of the sidebar (#925: the sidebar is ToDos, Projects, Runs, Profiles, Runners, Settings); it is reached from the
+Lanes tab of a project ("send a task") and, like the routes, is **absent** outside the capability: `routes.ts` classifies it `implementer`, the proxy answers
 it as a path that does not exist, and the page asks again (`requireImplementerCapability()`) before it looks at the session. The server hands
 the form the workspace and the operator's maximum cost per task and nothing else; the form loads the repositories, branches and models through
 the routes above, so the page reads no secret and no token.

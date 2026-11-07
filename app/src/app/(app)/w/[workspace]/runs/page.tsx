@@ -22,7 +22,10 @@ export default async function RunsPage({
   const { workspace } = await requireWorkspace(slug);
   return (
     <>
-      <PageHeader title="Runs" />
+      <PageHeader
+        title="Runs"
+        description="What the environments are doing. Open a run to follow it."
+      />
       <RunsContent
         workspaceId={workspace.id}
         workspaceSlug={workspace.slug}

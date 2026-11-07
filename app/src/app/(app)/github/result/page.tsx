@@ -56,5 +56,5 @@ async function connectionsPath(): Promise<string> {
   const [first] = view.memberships;
   return first === undefined
     ? "/no-access"
-    : `${workspacePath(first.workspace.slug)}/connections`;
+    : `${workspacePath(first.workspace.slug)}/settings/integrations`;
 }

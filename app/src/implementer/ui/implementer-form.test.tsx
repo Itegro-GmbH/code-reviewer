@@ -291,7 +291,7 @@ describe("the repository select", () => {
     );
 
     const link = await screen.findByRole("link", { name: "Connections" });
-    expect(link.getAttribute("href")).toBe("/w/acme/connections");
+    expect(link.getAttribute("href")).toBe("/w/acme/settings/integrations");
     expect(screen.getByText(/No repository is linked yet/)).toBeTruthy();
     expect(screen.queryByLabelText("Repository")).toBeNull();
   });

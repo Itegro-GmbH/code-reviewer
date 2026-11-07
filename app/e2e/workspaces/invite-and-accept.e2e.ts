@@ -111,7 +111,9 @@ test.describe("an Owner invites a colleague who accepts", () => {
     colleague = uniqueAddress("colleague");
     await signIn(page, e2eEnv.adminEmail, e2eEnv.adminPassword);
     await expect(page).toHaveURL(/\/w\/default\/projects$/);
-    await page.getByRole("link", { name: "Members" }).first().click();
+    // Members is a tab of the settings (#925).
+    await page.getByRole("link", { name: "Settings", exact: true }).click();
+    await page.getByRole("link", { name: "Members", exact: true }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "Members" }),
     ).toBeVisible();
@@ -215,7 +217,7 @@ test.describe("an Owner invites a colleague who accepts", () => {
     page,
   }) => {
     await signIn(page, e2eEnv.adminEmail, e2eEnv.adminPassword);
-    await page.goto("/w/default/members");
+    await page.goto("/w/default/settings/members");
 
     await expect(
       page.getByRole("list", { name: "Members" }).getByText(colleague),
@@ -244,7 +246,7 @@ test.describe("an Owner invites a colleague who accepts", () => {
     await page.getByRole("button", { name: /Accept invitation/ }).click();
     await expect(page).toHaveURL(/\/w\/default\/projects$/);
 
-    await page.goto("/w/default/members");
+    await page.goto("/w/default/settings/members");
     await expect(
       page.getByRole("heading", { level: 1, name: "Members" }),
     ).toBeVisible();

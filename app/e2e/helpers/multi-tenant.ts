@@ -58,7 +58,7 @@ export async function connectGithub(
   slug: string,
   options: { installOn: string; authorizeAs: GithubAccount },
 ): Promise<void> {
-  await page.goto(`/w/${slug}/connections`);
+  await page.goto(`/w/${slug}/settings/integrations`);
   await page.getByRole("button", { name: "Connect GitHub" }).click();
   await page
     .getByRole("button", {
@@ -72,7 +72,9 @@ export async function connectGithub(
       exact: true,
     })
     .click();
-  await expect(page).toHaveURL(new RegExp(`/w/${slug}/connections\\?github=`));
+  await expect(page).toHaveURL(
+    new RegExp(`/w/${slug}/settings/integrations\\?github=`),
+  );
 }
 
 /** Switches a repository of the workspace on, as an Owner does it on the Projects page. */

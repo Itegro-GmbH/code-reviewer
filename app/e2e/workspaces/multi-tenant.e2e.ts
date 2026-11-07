@@ -75,11 +75,16 @@ test.describe("a multi-tenant instance", () => {
     await expect(list.getByRole("menuitem")).toHaveCount(2);
     await list.getByRole("menuitem").first().click();
     await expect(page).toHaveURL(/\/w\/team-a\/projects$/);
+    // Members is a tab of the settings (#925).
     await page
       .getByRole("navigation", { name: "Main" })
+      .getByRole("link", { name: "Settings" })
+      .click();
+    await page
+      .getByRole("navigation", { name: "Settings sections" })
       .getByRole("link", { name: "Members" })
       .click();
-    await expect(page).toHaveURL(/\/w\/team-a\/members$/);
+    await expect(page).toHaveURL(/\/w\/team-a\/settings\/members$/);
     await expect(page.getByText("founder@e2e.test").first()).toBeVisible();
 
     // The Owner renames the second one; the switcher shows the new name.
