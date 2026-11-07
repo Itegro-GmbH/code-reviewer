@@ -265,8 +265,10 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
             await tracker.setReviewRequestedFrom(
               repository.id,
               pullRequest.number,
+              // Undefined: the list does not say who is asked, which is not "nobody".
               pullRequest.reviewRequestedFrom,
               pullRequest.updatedAt,
+              pullRequest.headSha,
             );
           }
           if (page.last)

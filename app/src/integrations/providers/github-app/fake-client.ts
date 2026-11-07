@@ -47,6 +47,7 @@ export type FakeGithubAppClientData = {
       number: number;
       checksState: string | null;
       reviewRequestedFrom?: string[];
+      headSha?: string;
       updatedAt?: string;
     }[][]
   >;
@@ -578,7 +579,7 @@ export function fakeGithubAppClient(
       return {
         pullRequests: (pages[page - 1] ?? []).map((pullRequest) => ({
           ...pullRequest,
-          reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
+          headSha: pullRequest.headSha ?? "head-1",
           updatedAt: pullRequest.updatedAt ?? new Date(0).toISOString(),
         })),
         last: page >= pages.length,

@@ -26,6 +26,36 @@ export type TrackerLabel = { name: string; color: string };
 export type TrackerAssignee = { login: string };
 
 /** A cached issue or pull request. */
+/** One person who acted on a review ToDo, and the head commit of the pull request at that time. */
+export type ReviewMark = { login: string; sha: string };
+
+/** How many marks a row keeps (the oldest go first): the column holds at most 4096 characters. */
+export const REVIEW_MARKS_MAX = 25;
+
+/** The marks with this login added (a mark of the same login, compared without regard to case, is replaced). */
+export function withReviewMark(
+  marks: readonly ReviewMark[],
+  login: string,
+  sha: string,
+): ReviewMark[] {
+  const others = marks.filter(
+    (mark) => mark.login.toLowerCase() !== login.toLowerCase(),
+  );
+  return [...others, { login, sha }].slice(-REVIEW_MARKS_MAX);
+}
+
+/** The marks that are still valid: when nobody is asked there are none, and a head commit says which ones were made for it. */
+export function liveReviewMarks(
+  marks: readonly ReviewMark[],
+  asked: readonly string[] | undefined,
+  headSha: string | undefined,
+): ReviewMark[] {
+  if (asked !== undefined && asked.length === 0) return [];
+  return headSha === undefined
+    ? [...marks]
+    : marks.filter((mark) => mark.sha === headSha);
+}
+
 export type TrackerItem = {
   repositoryId: string;
   /** Reserved for #922; null until a project is the ticket source. */
@@ -53,10 +83,12 @@ export type TrackerItem = {
   /** #924: the logins a review of the pull request is asked from (the provider's `requested_reviewers`); empty for an issue and for none. */
   reviewRequestedFrom: string[];
   /**
-   * #924: the logins that acted on the review ToDo of the pull request while the provider still holds their request; the list hides the
-   * review from them. Only the logins that are still asked are kept, and a new commit clears it.
+   * #924: who acted on the review ToDo of the pull request, and for which head commit, while the provider still holds a request that
+   * covers them (their own, or the fan-out's: a member that is not asked by name is marked all the same); the list hides the review from
+   * them. A mark goes with a new head commit, with the end of the pull request, and when nobody is asked any more, never because its login
+   * is not in a list of the people asked.
    */
-  reviewActedBy: string[];
+  reviewActedBy: ReviewMark[];
   /** The provider's time of the last change. */
   updatedAt: string;
   /** When the row was last written from the provider. */
@@ -182,20 +214,27 @@ export type TrackerRepository = {
   setReviewRequestedFrom(
     repositoryId: string,
     number: number,
-    logins: readonly string[],
+    logins: readonly string[] | undefined,
     at: string,
+    headSha?: string,
   ): Promise<boolean>;
-  /** #924: takes one login (compared without regard to case) out of who a review is asked from, right after its request was taken away. */
+  /**
+   * #924: takes one login (compared without regard to case) out of who a review is asked from, right after its request was taken away,
+   * and marks that it acted for the commit `sha`, so that a delivery that still lists it does not bring the ToDo back. The row's time
+   * moves one millisecond on: GitHub tells seconds only, and a delivery of the same second that listed the login is older than this.
+   */
   removeReviewRequested(
     repositoryId: string,
     number: number,
     login: string,
+    sha: string,
   ): Promise<boolean>;
-  /** #924: remembers that this login acted on the review ToDo of the pull request while its request stands. */
+  /** #924: remembers that this login acted on the review ToDo of the pull request, which had the head commit `sha`. */
   markReviewActed(
     repositoryId: string,
     number: number,
     login: string,
+    sha: string,
   ): Promise<boolean>;
   /** #924: forgets who acted: the pull request has a new commit, so a request that stands is for that commit. */
   clearReviewActed(repositoryId: string, number: number): Promise<boolean>;
@@ -276,7 +315,7 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     closes: decodeJson<number[]>(row.closes),
     checksState: row.checks_state,
     reviewRequestedFrom: loginsFrom(row.review_requested_from),
-    reviewActedBy: loginsFrom(row.review_acted_by),
+    reviewActedBy: marksFrom(row.review_acted_by),
     updatedAt: row.updated_at,
     syncedAt: row.synced_at,
   };
@@ -293,6 +332,27 @@ function loginsFrom(text: string | null): string[] {
     : [];
 }
 
+/** The marks of the column: null and a text that is no list of `{login, sha}` read as none (a bare login has no commit, so no sha). */
+function marksFrom(text: string | null): ReviewMark[] {
+  if (text === null) return [];
+  const decoded = tryDecodeJson<unknown>(text);
+  if (!decoded.ok || !Array.isArray(decoded.value)) return [];
+  return decoded.value.flatMap((entry: unknown): ReviewMark[] => {
+    if (typeof entry === "string") return [{ login: entry, sha: "" }];
+    if (typeof entry !== "object" || entry === null) return [];
+    const { login, sha } = entry as { login?: unknown; sha?: unknown };
+    return typeof login === "string"
+      ? [{ login, sha: typeof sha === "string" ? sha : "" }]
+      : [];
+  });
+}
+
+/** The ISO time one millisecond after this one (the text itself when it is no time). */
+function afterInstant(text: string): string {
+  const time = Date.parse(text);
+  return Number.isNaN(time) ? text : new Date(time + 1).toISOString();
+}
+
 function syncStateFrom(
   row: Selectable<TrackerSyncStateTable>,
 ): TrackerSyncState {
@@ -305,6 +365,13 @@ function syncStateFrom(
     updatedAt: row.updated_at,
   };
 }
+
+/** The two lists of a pull request, and the time of the row, as `changeReviewLists` hands them over. `requested` null: never told. */
+type ReviewLists = {
+  requested: string[] | null;
+  acted: ReviewMark[];
+  updatedAt: string;
+};
 
 export function createTrackerRepository(
   db: Kysely<Database>,
@@ -319,42 +386,19 @@ export function createTrackerRepository(
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
 
-  /** Keeps of `review_acted_by` only the logins that are asked now: a request that was taken away and comes back is a new ToDo. */
-  const pruneReviewActed = async (
-    repositoryId: string,
-    number: number,
-    asked: readonly string[],
-  ): Promise<void> => {
-    const row = await db
-      .selectFrom("tracker_items")
-      .select("review_acted_by")
-      .where("workspace_id", "=", workspaceId)
-      .where("repository_id", "=", repositoryId)
-      .where("number", "=", number)
-      .executeTakeFirst();
-    if (row === undefined || row.review_acted_by === null) return;
-    const acted = loginsFrom(row.review_acted_by);
-    const askedNow = new Set(asked.map((login) => login.toLowerCase()));
-    const kept = acted.filter((login) => askedNow.has(login.toLowerCase()));
-    if (kept.length === acted.length) return;
-    await own(repositoryId, number)
-      .set({ review_acted_by: kept.length === 0 ? null : encodeJson(kept) })
-      .execute();
-  };
-
-  /** Changes the two lists of a pull request in one transaction, so that two members acting at once do not lose each other's change. */
+  /**
+   * Changes the lists of a pull request in one transaction, with the row locked, so that two members acting at once, or an action and a
+   * delivery, do not lose each other's change. `change` answers the new lists, or undefined to leave the row as it is.
+   */
   const changeReviewLists = async (
     repositoryId: string,
     number: number,
-    change: (lists: { requested: string[]; acted: string[] }) => {
-      requested: string[];
-      acted: string[];
-    },
+    change: (lists: ReviewLists) => ReviewLists | undefined,
   ): Promise<boolean> => {
     const run = async (executor: Kysely<Database>): Promise<boolean> => {
       const row = await executor
         .selectFrom("tracker_items")
-        .select(["review_requested_from", "review_acted_by"])
+        .select(["review_requested_from", "review_acted_by", "updated_at"])
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("number", "=", number)
@@ -364,15 +408,22 @@ export function createTrackerRepository(
         .executeTakeFirst();
       if (row === undefined) return false;
       const next = change({
-        requested: loginsFrom(row.review_requested_from),
-        acted: loginsFrom(row.review_acted_by),
+        requested:
+          row.review_requested_from === null
+            ? null
+            : loginsFrom(row.review_requested_from),
+        acted: marksFrom(row.review_acted_by),
+        updatedAt: row.updated_at,
       });
+      if (next === undefined) return false;
       await executor
         .updateTable("tracker_items")
         .set({
-          review_requested_from: encodeJson(next.requested),
+          review_requested_from:
+            next.requested === null ? null : encodeJson(next.requested),
           review_acted_by:
             next.acted.length === 0 ? null : encodeJson(next.acted),
+          updated_at: next.updatedAt,
           synced_at: formatTimestamp(now()),
         })
         .where("workspace_id", "=", workspaceId)
@@ -410,6 +461,13 @@ export function createTrackerRepository(
         item.reviewRequestedFrom === undefined
           ? sql`tracker_items.review_requested_from`
           : sql`excluded.review_requested_from`;
+      // The marks stay with the row: a list of the people asked that lacks a login says nothing against its mark (a member of the fan-out
+      // is never asked by name). They go when nobody is asked (a later request is a new ToDo); a new commit clears them on its own.
+      // Decided in this statement, so no read comes before the write.
+      const acted =
+        item.reviewRequestedFrom?.length === 0
+          ? sql`null`
+          : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
           workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
@@ -438,6 +496,7 @@ export function createTrackerRepository(
           closes = excluded.closes,
           parent_number = ${parent},
           review_requested_from = ${requested},
+          review_acted_by = ${acted},
           updated_at = excluded.updated_at,
           synced_at = excluded.synced_at,
           deleted_at = null
@@ -447,15 +506,7 @@ export function createTrackerRepository(
             else excluded.updated_at > tracker_items.updated_at
           end
         returning tracker_items.number`.execute(db);
-      if (written.rows.length > 0) {
-        if (item.reviewRequestedFrom !== undefined)
-          await pruneReviewActed(
-            repositoryId,
-            item.number,
-            item.reviewRequestedFrom,
-          );
-        return true;
-      }
+      if (written.rows.length > 0) return true;
       // A delivery older than the row (or a repository that is not ours): nothing is replaced, but the row was seen, so a full sync
       // that is reading keeps it.
       await own(repositoryId, item.number).set({ synced_at: at }).execute();
@@ -561,38 +612,34 @@ export function createTrackerRepository(
       return Number(result.numUpdatedRows) > 0;
     },
 
-    async setReviewRequestedFrom(repositoryId, number, logins, at) {
-      const result = await own(repositoryId, number)
-        .set({
-          review_requested_from: encodeJson([...logins]),
-          synced_at: formatTimestamp(now()),
-        })
-        .where("deleted_at", "is", null)
-        .where("kind", "=", "pull_request")
-        .where("updated_at", "<=", at)
-        .executeTakeFirst();
-      const written = Number(result.numUpdatedRows) > 0;
-      if (written) await pruneReviewActed(repositoryId, number, logins);
-      return written;
+    setReviewRequestedFrom(repositoryId, number, logins, at, headSha) {
+      return changeReviewLists(repositoryId, number, (lists) =>
+        // A pull request a delivery changed after the list was read keeps what the delivery said.
+        lists.updatedAt > at
+          ? undefined
+          : {
+              requested: logins === undefined ? lists.requested : [...logins],
+              acted: liveReviewMarks(lists.acted, logins, headSha),
+              updatedAt: lists.updatedAt,
+            },
+      );
     },
 
-    removeReviewRequested(repositoryId, number, login) {
-      const same = (other: string) =>
-        other.toLowerCase() === login.toLowerCase();
+    removeReviewRequested(repositoryId, number, login, sha) {
       return changeReviewLists(repositoryId, number, (lists) => ({
-        requested: lists.requested.filter((other) => !same(other)),
-        acted: lists.acted.filter((other) => !same(other)),
+        requested: (lists.requested ?? []).filter(
+          (other) => other.toLowerCase() !== login.toLowerCase(),
+        ),
+        acted: withReviewMark(lists.acted, login, sha),
+        updatedAt: afterInstant(lists.updatedAt),
       }));
     },
 
-    markReviewActed(repositoryId, number, login) {
+    markReviewActed(repositoryId, number, login, sha) {
       return changeReviewLists(repositoryId, number, (lists) => ({
         requested: lists.requested,
-        acted: lists.acted.some(
-          (other) => other.toLowerCase() === login.toLowerCase(),
-        )
-          ? lists.acted
-          : [...lists.acted, login],
+        acted: withReviewMark(lists.acted, login, sha),
+        updatedAt: lists.updatedAt,
       }));
     },
 

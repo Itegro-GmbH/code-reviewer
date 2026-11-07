@@ -12,10 +12,11 @@
 // batch is rolled back (`MIGRATION_FAILED`) and the deployment can be run again. The size check is added `not valid` and validated
 // afterwards (the column is null in every row).
 //
-// The same migration adds `review_acted_by` (JSON text `["login", ...]`, null for none): the logins that acted on a review ToDo of the
-// pull request while the provider still holds their request (the App's review does not satisfy a person's request, and taking the
-// request away can fail). The ToDo list hides the review from them; a write that says who is asked drops the logins no longer asked, and
-// a new commit clears the list, so a new request or a new head is a new ToDo.
+// The same migration adds `review_acted_by` (JSON text `[{"login": "...", "sha": "..."}]`, null for none): who acted on a review ToDo of
+// the pull request, and the head commit at that time, while the provider still holds a request that covers them (the App's review does
+// not satisfy a person's request, and taking the request away can fail). The ToDo list hides the review from them. A mark is dropped on a
+// new head commit, on close, or when a list says nobody is asked, never because its login is not in a list (a member of the fan-out is
+// never asked by name).
 //
 // `down` drops the columns (the next sync fills the first one again from the provider).
 import { sql } from "kysely";

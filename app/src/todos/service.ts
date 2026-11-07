@@ -11,7 +11,8 @@
 //    logins can only be acted on by those logins. The one exception is the fan-out of the lane, `reviewers: "project members"` (#917),
 //    which asks the members and which any member may answer. A pull request of nobody's lane is not a ToDo, whoever is asked. A person who
 //    acted on a review while GitHub still held their request (the App's review does not satisfy it, and taking it away can fail) does not
-//    see it again (`reviewActedBy` of the mirror row).
+//    see it again (`reviewActedBy` of the mirror row: the login and the head commit; a list of the people asked that lacks the login, as it does
+//    for a member of the fan-out, does not end it).
 //  - The done list is bounded (`DONE_MAX`): the asks that were answered last and the pull requests of a lane that ended while a review was
 //    still asked from the viewer (or from the members by a fan-out).
 //  - Every list is read newest first and bounded (`LOOK_AT_MAX` per kind of row); a list narrowed to a project is narrowed inside the
@@ -438,6 +439,18 @@ export function createTodosService(
     const members = new Set((await deps.memberLogins()).map(lower));
     const you =
       viewer.githubLogin === null ? undefined : lower(viewer.githubLogin);
+    // The fan-out of each distinct version of a lane is read once, all at the same time, before the loop asks for it one pull request at a
+    // time.
+    await Promise.all(
+      [
+        ...new Map(
+          opened.map(({ run }) => [
+            `${run.workflowId}@${String(run.workflowVersion)}`,
+            run,
+          ]),
+        ).values(),
+      ].map(asksProjectMembers),
+    );
     const open: ReviewTodo[] = [];
     const finished: DoneTodo[] = [];
     for (const { run, number } of opened) {
@@ -476,7 +489,10 @@ export function createTodosService(
         continue;
       }
       // Acted on while GitHub still holds the request: not a ToDo of this person any more.
-      if (you !== undefined && item.reviewActedBy.map(lower).includes(you))
+      if (
+        you !== undefined &&
+        item.reviewActedBy.some((mark) => lower(mark.login) === you)
+      )
         continue;
       open.push({
         kind: "review",

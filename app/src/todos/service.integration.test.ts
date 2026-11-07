@@ -305,7 +305,12 @@ describe("the ToDos of a workspace", () => {
       ),
     ).toMatchObject({ audience: "members" });
 
-    await alpha.tracker.markReviewActed(alpha.repository.id, 9, "alice");
+    await alpha.tracker.markReviewActed(
+      alpha.repository.id,
+      9,
+      "alice",
+      "head-1",
+    );
 
     expect(await seenBy("alice")).toEqual([]);
     expect(await seenBy("bob")).toEqual([[9, "you"]]);

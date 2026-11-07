@@ -583,7 +583,7 @@ describe("the reviews that are asked for", () => {
         item(7, {
           kind: "pull_request",
           reviewRequestedFrom: ["alice", "bob"],
-          reviewActedBy: ["Alice"],
+          reviewActedBy: [{ login: "Alice", sha: "head-1" }],
         }),
       ],
     });
@@ -597,6 +597,27 @@ describe("the reviews that are asked for", () => {
     ).toEqual([7]);
     expect(
       (await todos.list({ githubLogin: "carol" })).reviews.map((r) => r.number),
+    ).toEqual([7]);
+  });
+
+  // #924-T26b
+  it("keeps a review hidden from a member of the fan-out who acted although GitHub never asked them by name", async () => {
+    const todos = service({
+      members: ["alice", "bob", "carol"],
+      fanOut: ["wf-1"],
+      prSteps: [opened(7)],
+      items: [
+        item(7, {
+          kind: "pull_request",
+          reviewRequestedFrom: ["alice"],
+          reviewActedBy: [{ login: "carol", sha: "head-1" }],
+        }),
+      ],
+    });
+
+    expect((await todos.list({ githubLogin: "carol" })).reviews).toEqual([]);
+    expect(
+      (await todos.list({ githubLogin: "bob" })).reviews.map((r) => r.number),
     ).toEqual([7]);
   });
 

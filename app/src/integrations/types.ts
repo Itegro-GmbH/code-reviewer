@@ -403,8 +403,10 @@ export type TrackerPage =
       pullRequests: {
         number: number;
         checksState: string | null;
-        /** #924: the logins a review of the pull request is asked from. */
-        reviewRequestedFrom: string[];
+        /** #924: the logins a review of the pull request is asked from; absent when the list does not say (not the same as nobody). */
+        reviewRequestedFrom?: string[];
+        /** #924: the head commit of the pull request now: what the marks of a review that was acted on are held against. */
+        headSha: string;
         /** #924: the provider's time of the last change of the pull request, as the list read it (what a newer delivery is compared with). */
         updatedAt: string;
       }[];

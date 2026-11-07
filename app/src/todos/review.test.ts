@@ -281,6 +281,7 @@ describe("what a review leaves behind on the pull request", () => {
       "r-1",
       7,
       "alice",
+      SHA,
     );
     expect(tracker.markReviewActed).not.toHaveBeenCalled();
   });
@@ -297,6 +298,7 @@ describe("what a review leaves behind on the pull request", () => {
       "r-1",
       7,
       "alice",
+      SHA,
     );
   });
 
@@ -316,7 +318,12 @@ describe("what a review leaves behind on the pull request", () => {
       reviewId: "5001",
     });
 
-    expect(tracker.markReviewActed).toHaveBeenCalledWith("r-1", 7, "alice");
+    expect(tracker.markReviewActed).toHaveBeenCalledWith(
+      "r-1",
+      7,
+      "alice",
+      SHA,
+    );
     expect(tracker.removeReviewRequested).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("INTEGRATION_ACCESS_UNAVAILABLE"),
@@ -336,6 +343,7 @@ describe("what a review leaves behind on the pull request", () => {
       "r-1",
       7,
       "alice",
+      SHA,
     );
     // nothing to take away: alice has no request of her own, only the fan-out shows her the pull request
     expect(notNamed.removeReviewers).not.toHaveBeenCalled();
@@ -343,6 +351,7 @@ describe("what a review leaves behind on the pull request", () => {
       "r-1",
       7,
       "alice",
+      SHA,
     );
   });
 

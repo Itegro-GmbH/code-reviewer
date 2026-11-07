@@ -458,7 +458,10 @@ export type GithubAppClient = {
     pullRequests: {
       number: number;
       checksState: string | null;
-      reviewRequestedFrom: string[];
+      /** Absent when the entry carries no list of reviewers (#924): unknown, not nobody. */
+      reviewRequestedFrom?: string[];
+      /** The head commit of the pull request now (#924). */
+      headSha: string;
       /** The provider's time of the last change of the pull request, as the list read it (#924). */
       updatedAt: string;
     }[];
@@ -2630,7 +2633,8 @@ export function createGithubAppClient(
           const pullRequests: {
             number: number;
             checksState: string | null;
-            reviewRequestedFrom: string[];
+            reviewRequestedFrom?: string[];
+            headSha: string;
             updatedAt: string;
           }[] = [];
           for (const entry of json) {
@@ -2641,9 +2645,14 @@ export function createGithubAppClient(
               );
               continue;
             }
+            const reviewers = requestedReviewersOf(entry);
             pullRequests.push({
               number: pr.number,
-              reviewRequestedFrom: requestedReviewersOf(entry) ?? [],
+              // Left out when the entry has no list: unknown is not nobody.
+              ...(reviewers === undefined
+                ? {}
+                : { reviewRequestedFrom: reviewers }),
+              headSha: pr.headSha,
               updatedAt: updatedAtOf(entry),
               checksState: await readCommitChecks(
                 token,

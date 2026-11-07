@@ -13,8 +13,9 @@
 //    refusal is a failure, logged by its code only.
 //  - The App's review does not satisfy the request of the person, so GitHub keeps it. After the review (or the comment) the request of
 //    the caller is taken away (`removeReviewers`) and the mirror row is updated at once. When that fails, or there was no request of the
-//    caller to take away, the action is remembered in the mirror row (`markReviewActed`) so the ToDo does not stay as if nothing had
-//    happened; a new commit or a new request is a new ToDo. A failure of this bookkeeping never fails the review that was posted.
+//    caller to take away, the action is remembered in the mirror row (`markReviewActed`, with the head commit) so the ToDo does not stay as
+//    if nothing had happened; a new commit is a new ToDo, and so is a request after nobody was asked. The mark stays when the request
+//    was taken away too, so a delivery that still lists it does not bring the ToDo back. A failure of this bookkeeping never fails the review that was posted.
 //  - Asking for changes does not start a turn of the implementer session: the session of the run has ended by the time a pull request
 //    is reviewed, and continuing it on a fresh sandbox is the resumable session of the cockpit (#915), not part of this action.
 import { IntegrationError } from "../integrations/errors.ts";
@@ -188,6 +189,7 @@ export function createReviewActions(
     input: ReviewInput,
     login: string,
     requested: boolean,
+    headSha: string,
   ): Promise<void> {
     // Nothing of a person without a login can be taken away or remembered: an email never goes onto a pull request.
     if (login === "") return;
@@ -213,12 +215,14 @@ export function createReviewActions(
           input.repositoryId,
           input.number,
           login,
+          headSha,
         );
       else
         await deps.tracker.markReviewActed(
           input.repositoryId,
           input.number,
           login,
+          headSha,
         );
     } catch (error) {
       log(
@@ -301,6 +305,7 @@ export function createReviewActions(
             input,
             login,
             live?.includes(login.toLowerCase()) ?? true,
+            pullRequest.headSha,
           );
           return outcome;
         };

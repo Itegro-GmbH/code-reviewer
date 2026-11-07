@@ -150,6 +150,8 @@ function trackerItem(tag: string) {
     labels: [],
     assignees: [],
     closes: [],
+    // #924: a review is asked from ada, and somebody acted on it: a write that leaks into this row shows in the snapshot of the workspace.
+    reviewRequestedFrom: ["ada"],
     updatedAt: "2026-11-06T10:00:00.000Z",
   };
 }
@@ -569,6 +571,7 @@ async function seed(
   if (workflowAgentStep === undefined) throw new Error("seeding failed");
   // A ticket in every workspace (#923), with a board status and checks, and the state of a sync that is under way.
   await repos.tracker.upsertItem(repository.id, trackerItem(tag));
+  await repos.tracker.markReviewActed(repository.id, 1, "seeded", "sha-seed");
   await repos.tracker.setBoardStatusByNode(`node-repo-${tag}`, "In Progress");
   await repos.tracker.setChecksState(repository.id, 1, "success");
   await repos.tracker.saveSyncState(repository.id, {
@@ -2596,17 +2599,20 @@ const CASES: Case[] = [
         1,
         ["intruder"],
         "2999-01-01T00:00:00.000Z",
+        "sha-intruder",
       ),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "tracker.removeReviewRequested",
-    run: (a, b) => a.tracker.removeReviewRequested(b.repository.id, 1, "ada"),
+    run: (a, b) =>
+      a.tracker.removeReviewRequested(b.repository.id, 1, "ada", "sha-seed"),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
     name: "tracker.markReviewActed",
-    run: (a, b) => a.tracker.markReviewActed(b.repository.id, 1, "intruder"),
+    run: (a, b) =>
+      a.tracker.markReviewActed(b.repository.id, 1, "intruder", "sha-seed"),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {

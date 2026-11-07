@@ -126,7 +126,7 @@ describe("applying a change of a ticket to the mirror", () => {
     await changed(
       pullRequest(7, [], { ...asked, updatedAt: "2026-11-06T10:00:00.000Z" }),
     );
-    await tracker.markReviewActed("r-1", 7, "alice");
+    await tracker.markReviewActed("r-1", 7, "alice", "sha-1");
 
     await changed(
       pullRequest(7, [], {
@@ -135,7 +135,9 @@ describe("applying a change of a ticket to the mirror", () => {
         updatedAt: "2026-11-06T10:01:00.000Z",
       }),
     );
-    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual(["alice"]);
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "alice", sha: "sha-1" },
+    ]);
 
     await changed(
       pullRequest(7, [], { ...asked, updatedAt: "2026-11-06T10:02:00.000Z" }),
@@ -143,7 +145,7 @@ describe("applying a change of a ticket to the mirror", () => {
     );
     expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([]);
 
-    await tracker.markReviewActed("r-1", 7, "alice");
+    await tracker.markReviewActed("r-1", 7, "alice", "sha-1");
     await changed(
       pullRequest(7, [], {
         ...asked,
@@ -152,6 +154,80 @@ describe("applying a change of a ticket to the mirror", () => {
       }),
     );
     expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([]);
+  });
+
+  // #924-T14
+  it("keeps the mark of a member who is not asked by name when the list changes, and drops it when the list is empty", async () => {
+    const { tracker, changed } = setup();
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+    );
+    await tracker.markReviewActed("r-1", 7, "carol", "sha-1");
+
+    // any later delivery (a label, a push by somebody else, the nightly resync) lists the people asked: carol is not among them
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice"],
+        updatedAt: "2026-11-06T10:01:00.000Z",
+      }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "carol", sha: "sha-1" },
+    ]);
+    // a delivery that does not carry the list says nothing about it
+    await changed(
+      pullRequest(7, [], { updatedAt: "2026-11-06T10:02:00.000Z" }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toHaveLength(1);
+
+    // nobody is asked any more: the next request is a new ToDo
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: [],
+        updatedAt: "2026-11-06T10:03:00.000Z",
+      }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([]);
+  });
+
+  // #924-T15
+  it("keeps the mark of a person whose request was taken away, and does not take a stale list of the same second back", async () => {
+    const { tracker, changed } = setup();
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+    );
+
+    expect(
+      await tracker.removeReviewRequested("r-1", 7, "alice", "sha-1"),
+    ).toBe(true);
+    // GitHub tells seconds only: a delivery of the second that listed alice is older than our removal, not equal to it
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+    );
+    expect(await tracker.getItem("r-1", 7)).toMatchObject({
+      reviewRequestedFrom: ["bob"],
+      reviewActedBy: [{ login: "alice", sha: "sha-1" }],
+    });
+
+    // a later delivery is taken
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["bob"],
+        updatedAt: "2026-11-06T10:00:01.000Z",
+      }),
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewRequestedFrom).toEqual([
+      "bob",
+    ]);
   });
 
   // #923-T22

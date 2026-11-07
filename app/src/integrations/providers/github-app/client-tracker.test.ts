@@ -284,13 +284,16 @@ describe("the checks of the full sync", () => {
           number: 7,
           checksState: "failure",
           reviewRequestedFrom: ["carol"],
+          // #924-T17: the head commit now, which the marks of a review that was acted on are held against
+          headSha: SHA,
           // #924-T10: the time the list read, which a newer delivery is compared with; the epoch when the entry says none
           updatedAt: "2026-11-07T08:30:00.000Z",
         },
         {
           number: 8,
           checksState: "failure",
-          reviewRequestedFrom: [],
+          // an entry without a list of reviewers says nothing about them (#924-T18): the key is left out, it is not an empty list
+          headSha: SHA,
           updatedAt: "1970-01-01T00:00:00.000Z",
         },
       ],

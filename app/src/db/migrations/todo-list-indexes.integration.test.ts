@@ -62,7 +62,7 @@ describe("the indexes of the ToDo list", () => {
   });
 
   // #924-T13
-  it("cover the two text matches of the queries: the planner reads the partial index when a scan of the table is off the table", async () => {
+  it("cover the three queries of the list: the planner reads the partial index when a scan of the table is off the table", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(
       db,
@@ -89,6 +89,15 @@ describe("the indexes of the ToDo list", () => {
         order by created_at desc, id limit 200`,
     );
 
+    // the runs that wait, as a prepared statement with a generic plan (a parameter for the workspace, the status written as a constant)
+    await sql`set plan_cache_mode = force_generic_plan`.execute(db);
+    await sql`prepare waiting_runs (text) as select * from workflow_runs
+      where workspace_id = $1 and status = 'waiting' order by updated_at desc, id limit 200`.execute(
+      db,
+    );
+    const waiting = await plan(sql`execute waiting_runs ('w-1')`);
+
+    expect(waiting).toContain("workflow_runs_waiting_index");
     expect(answered).toContain("workflow_step_runs_answered_ask_index");
     expect(pullRequests).toContain("workflow_step_runs_pull_request_index");
     await db.destroy();

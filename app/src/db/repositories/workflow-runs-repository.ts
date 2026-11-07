@@ -739,7 +739,9 @@ export function createWorkflowRunsRepository(
         .selectFrom("workflow_runs")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
-        .where("status", "=", "waiting");
+        // The predicate of `workflow_runs_waiting_index` as a constant, not a parameter: a generic plan (a prepared statement) cannot
+        // prove a parameter equal to the index predicate.
+        .where(sql<boolean>`status = 'waiting'`);
       if (repositoryIds !== undefined)
         query = query.where("repository_id", "in", repositoryIds);
       const rows = await query

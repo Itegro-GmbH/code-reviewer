@@ -69,10 +69,14 @@ An **open pull request that a lane opened** (a run's action step made it) and a 
   fan-out is read from the lane's document (the version the run ran), not guessed from who is asked.
 
 **A person who acted does not see the review again.** The App's review does not satisfy a person's request on GitHub, so GitHub keeps it;
-after a review the caller's request is taken away ([below](#giving-a-review)), and when that cannot be done the mirror remembers that the
-login acted (`review_acted_by`, [ticket mirror](ticket-mirror.md)) and the list hides the review from that login. That memory ends when the
-login is no longer asked (a request that comes back is a new ToDo) and when the pull request gets a new commit (a request that stands is
-for the new head). The other members asked by a fan-out keep seeing it until they act or the pull request ends. Team reviewers are not read
+after a review the caller's request is taken away ([below](#giving-a-review)) and, whether that worked or not, the mirror remembers that the login acted, together with the head commit of the pull
+request at that time (`review_acted_by`, JSON `[{"login", "sha"}]`, [ticket mirror](ticket-mirror.md)); the list hides the review from that
+login. The mark is kept for a member of a fan-out too, who is never asked by name: a list of the people asked that lacks the login does not
+end it, so a later `pull_request` delivery or the nightly resync cannot bring the review back and invite a second, contradicting one. The
+mark ends when the pull request gets a new commit (a request that stands is for the new head: the delivery clears it, and the full sync
+drops the marks made for another head), when the pull request is over, and when nobody is asked any more (a request after that is a new
+ToDo). One edge stays: a person whose request was taken away and who is asked again on the same commit does not see it until the commit
+changes. The other members asked by a fan-out keep seeing the review until they act or the pull request ends. Team reviewers are not read
 (a request for a team is nobody's ToDo here).
 
 A pull request that no lane opened is not a ToDo, whoever is asked. The entry has `id: "review:<repositoryId>:<number>"`, `number`, `title`,

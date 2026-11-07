@@ -58,9 +58,12 @@ type GitHub = {
   checks: {
     number: number;
     checksState: string | null;
+    /** Left out: the list does not say who is asked (the object has no `requested_reviewers`). */
     reviewRequestedFrom?: string[];
     /** The time of the pull request in the list; default: later than every delivery of the fixtures. */
     updatedAt?: string;
+    /** The commit the pull request has now; default: `head-1`. */
+    headSha?: string;
   }[][];
   /** Pages of board items; null: the app may not read boards. */
   board: { nodeId: string; status: string | null }[][] | null;
@@ -141,8 +144,8 @@ function provider(github: GitHub) {
           pullRequests: (github.checks[step.page - 1] ?? []).map(
             (pullRequest) => ({
               ...pullRequest,
-              reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
               updatedAt: pullRequest.updatedAt ?? at(59),
+              headSha: pullRequest.headSha ?? "head-1",
             }),
           ),
           last: step.page >= github.checks.length,
@@ -272,6 +275,65 @@ describe("the full sync of the ticket mirror", () => {
     expect((await tracker.getItem("r-1", 7))?.reviewRequestedFrom).toEqual([
       "carol",
     ]);
+  });
+
+  // #924-T16
+  it("drops the marks of a review that were made for another head commit, keeps the others, and does not touch the list when it is unknown", async () => {
+    const asked = (headSha: string, reviewRequestedFrom?: string[]) => ({
+      ...GITHUB,
+      checks: [
+        [
+          {
+            number: 7,
+            checksState: "failure",
+            ...(reviewRequestedFrom === undefined
+              ? {}
+              : { reviewRequestedFrom }),
+            headSha,
+          },
+        ],
+      ],
+    });
+    const { tracker, run } = setup(asked("head-2", ["ada"]));
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["ada"],
+        updatedAt: at(4),
+      }),
+    });
+    await tracker.markReviewActed("r-1", 7, "carol", "head-1");
+    await tracker.markReviewActed("r-1", 7, "dave", "head-2");
+
+    await run();
+
+    // carol acted for the commit before: a new commit is a new ToDo; dave acted for this one
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "dave", sha: "head-2" },
+    ]);
+
+    // the list does not say who is asked: neither the list nor the marks of this head are changed ("unknown" is not "nobody")
+    const unknown = setup(asked("head-2"));
+    await unknown.tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["ada"],
+        updatedAt: at(4),
+      }),
+    });
+    await unknown.tracker.markReviewActed("r-1", 7, "dave", "head-2");
+    await unknown.tracker.markReviewActed("r-1", 7, "carol", "head-1");
+    await unknown.run();
+    expect(await unknown.tracker.getItem("r-1", 7)).toMatchObject({
+      reviewRequestedFrom: ["ada"],
+      reviewActedBy: [{ login: "dave", sha: "head-2" }],
+    });
   });
 
   // #923-T33
