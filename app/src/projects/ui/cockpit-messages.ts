@@ -25,18 +25,37 @@ export const PROJECT_COPY = {
 export const NEW_PROJECT_COPY = {
   title: "New project",
   description:
-    "Issues are shown in GitHub's own words. The factory writes back only through lane actions. Which repositories a lane works in is defined by the lane.",
+    "A project is exactly one ticket source: the GitHub issues of one repository, with a GitHub Project as its board if you like. Issues are shown in GitHub's own words; the factory writes back only through lane actions.",
   ticketSource: "Ticket source (one)",
   chooseRepository: "Choose a repository",
   githubIssuesOf: (repository: string) => `GitHub issues of ${repository}`,
   jira: "Jira project (later)",
   board: "Board (optional)",
-  boardHint: "Boards come with the ticket source.",
+  boardHint: "Choose a repository first: its boards are read from GitHub.",
+  boardsLoading: "Reading the boards of the repository…",
+  boardsNone: "This repository has no board. A project works without one.",
+  boardsUnreadable:
+    "GitHub did not let the App read the boards of this repository (the App needs the Projects permission, which the owner of the installation grants). A project works without a board.",
+  boardsFailed:
+    "GitHub could not be asked for the boards right now. Create the project without a board, or try again.",
+  boardPicked:
+    "Tickets move on this board; its Status field gives the columns.",
+  boardNoStatus: "no Status field",
   noRepository: "None",
+  lanes: "Lanes to start with",
+  lanesHint:
+    "Copies of the built-in lanes; the project owns them and you change them without changing the built-in.",
+  laneNames: {
+    "issue-to-pr": "Issue to PR",
+    "review-a-pull-request": "Review a pull request",
+  } as Record<string, string>,
+  laneProblem: (names: string) =>
+    `The project was created, but these lanes could not be copied (they need the profiles implementer and reviewer, and an environment): ${names}.`,
   none: "Every repository of the GitHub App already is a project.",
   cancel: "Cancel",
   create: "Create and read from GitHub",
   creating: "Creating the project",
+  openProject: "Open the project",
 } as const;
 
 export const COCKPIT_TABS = [
@@ -68,12 +87,11 @@ export const PROJECT_TODOS_COPY = {
 
 export const LANES_COPY = {
   title: "Lanes",
-  hint: "The flows that run on this project. A lane belongs to the project; which repositories it works in is defined in the lane.",
+  hint: "The flows that run on this project. A lane belongs to the project and works on its tickets, in its repository.",
   emptyTitle: "No lanes yet",
   emptyDescription:
-    "A lane is written through the API for now (docs/workflows.md). The lanes of the workspace are listed here.",
-  note: "Lanes are shared by the whole workspace until they belong to a project (#922).",
-  allLink: "All lanes of the workspace",
+    "A new project copies the built-in lanes it is asked to; others are written through the API with the project's id (docs/workflows.md).",
+  note: "A lane starts from a label on a ticket of this project's repository, or by hand with a ticket of it.",
   taskNote:
     "Until a lane can be started from an issue, a task goes to the agent by hand:",
   taskLink: "send a task",

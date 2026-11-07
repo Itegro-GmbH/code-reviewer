@@ -72,6 +72,7 @@ function harness(
   const created: NewWorkflowRun[] = [];
   const kicked: string[] = [];
   const lines: string[] = [];
+  const asked: string[] = [];
   const trigger = createLabelTrigger({
     runs: {
       async createRun(input) {
@@ -120,7 +121,8 @@ function harness(
       },
     },
     workflows: {
-      async listWithIssueTrigger() {
+      async listWithIssueTrigger(repositoryId) {
+        asked.push(repositoryId);
         return seeds.map((seed) => ({
           workflow: { id: seed.id, name: seed.id } as StoredWorkflow,
           current: {
@@ -139,7 +141,7 @@ function harness(
     kick: (runId) => void kicked.push(runId),
     log: (line) => lines.push(line),
   });
-  return { trigger, created, kicked, lines, written };
+  return { trigger, created, kicked, lines, written, asked };
 }
 
 const READY = { kind: "github.issueLabeled", label: "ready for agent" };
@@ -173,6 +175,21 @@ describe("which workflows a label starts", () => {
       clientRequestId: "gh-delivery-1-wf-1",
     });
     expect(kicked).toEqual(["run-1"]);
+  });
+
+  // #922-T20
+  it("asks only for the lanes of the project whose ticket source is the repository of the issue, and for none when the repository is not an active one", async () => {
+    const own = harness([{ id: "wf-1", document: workflowDocument(READY) }]);
+    await own.trigger.start("delivery-1", LABELED);
+    expect(own.asked).toEqual(["repo-1"]);
+
+    const other = harness([{ id: "wf-1", document: workflowDocument(READY) }]);
+    await other.trigger.start("delivery-2", {
+      ...LABELED,
+      repo: { ...LABELED.repo, externalId: "9999", fullName: "acme/other" },
+    });
+    expect(other.asked).toEqual([]);
+    expect(other.created).toEqual([]);
   });
 
   // #923-T85

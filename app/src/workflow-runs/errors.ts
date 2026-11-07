@@ -21,6 +21,8 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   WORKFLOW_RUN_BODY_TOO_LARGE: 413,
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: 415,
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: 422,
+  WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT: 422,
+  WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT: 422,
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED: 422,
   WORKFLOW_RUN_INPUT_INVALID: 422,
   /** #920: the answer is empty, too long, or names an option the question does not have. */
@@ -31,10 +33,20 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
 
 export type WorkflowRunErrorCode = keyof typeof WORKFLOW_RUN_ERROR_STATUS;
 
+/** A value of the request a lane of a project refuses (#922), with the names that would have been accepted. */
+export type WorkflowRunRequestIssue = {
+  path: string;
+  code: "ticket_outside_project" | "repository_outside_project";
+  message: string;
+  available: string[];
+};
+
 export class WorkflowRunError extends Error {
   readonly code: WorkflowRunErrorCode;
   /** On `WORKFLOW_RUN_INPUT_INVALID`: every problem of the input, as the validator of result schemas lists them. */
   readonly errors: Issue[];
+  /** On `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` and `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`: the value and the repository the project has. */
+  readonly issues: WorkflowRunRequestIssue[];
   /** On `WORKFLOW_RUN_REQUEST_REUSED`: the run the request id made. */
   readonly runId?: string;
   /** On `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`: the step and its kind. */
@@ -45,6 +57,7 @@ export class WorkflowRunError extends Error {
     message: string,
     details: {
       errors?: Issue[];
+      issues?: WorkflowRunRequestIssue[];
       runId?: string;
       step?: { id: string; kind: string };
     } = {},
@@ -53,6 +66,7 @@ export class WorkflowRunError extends Error {
     this.name = "WorkflowRunError";
     this.code = code;
     this.errors = details.errors ?? [];
+    this.issues = details.issues ?? [];
     if (details.runId !== undefined) this.runId = details.runId;
     if (details.step !== undefined) this.step = details.step;
   }

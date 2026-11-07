@@ -69,6 +69,7 @@ function refusal(error: WorkflowRunError): Response {
       error: error.code,
       message: error.message,
       ...(error.errors.length > 0 ? { errors: error.errors } : {}),
+      ...(error.issues.length > 0 ? { issues: error.issues } : {}),
       ...(error.runId === undefined ? {} : { runId: error.runId }),
       ...(error.step === undefined ? {} : { step: error.step }),
     },

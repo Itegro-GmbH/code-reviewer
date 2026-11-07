@@ -68,6 +68,8 @@ const HEAD = "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01";
 type Ids = {
   integrationId: string;
   repositoryId: string;
+  /** #922: the project of that repository, whose ticket source it is. */
+  projectId: string;
   runId: string;
   /** #841: a running Implementer session of the workspace and the job of its first turn. */
   sessionId: string;
@@ -234,6 +236,40 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/repositories/${ids.repositoryId}/issues/sync`,
     params: (ids) => ({ repositoryId: ids.repositoryId }),
     file: "repositories/[repositoryId]/issues/sync/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the project of a repository in the factory; a repository of the other workspace is not found, and nothing is written.
+    name: "POST projects",
+    route: "/api/w/[workspace]/projects",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: () => "/projects",
+    body: (ids) => ({ repositoryId: ids.repositoryId }),
+    params: () => ({}),
+    file: "projects/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the tickets of a project, by its own id; the project of the other workspace is not found.
+    name: "GET projects/[projectId]/issues",
+    route: "/api/w/[workspace]/projects/[projectId]/issues",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/projects/${ids.projectId}/issues`,
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/issues/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the boards of a repository, read from GitHub for the people who create projects.
+    name: "GET repositories/[repositoryId]/boards",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/boards",
+    method: "GET",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/repositories/${ids.repositoryId}/boards`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/boards/route.ts",
     implementer: true,
   },
   {
@@ -507,14 +543,14 @@ const ENTRIES: Entry[] = [
   },
   {
     // #833-M1-T228: every member lists the workflows of their own workspace; the other workspace's are not reachable.
+    // #922: the lanes of one project; the project of the other workspace is not there.
     name: "GET workflows",
     route: "/api/w/[workspace]/workflows",
     method: "GET",
     minRole: MINIMUM_ROLE.start_implementer_task,
-    path: () => "/workflows",
+    path: (ids) => `/workflows?projectId=${ids.projectId}`,
     params: () => ({}),
     file: "workflows/route.ts",
-    takesNoIds: true,
     implementer: true,
   },
   {
@@ -522,7 +558,7 @@ const ENTRIES: Entry[] = [
     route: "/api/w/[workspace]/workflows",
     method: "POST",
     minRole: MINIMUM_ROLE.start_implementer_task,
-    path: () => "/workflows",
+    path: (ids) => `/workflows?projectId=${ids.projectId}`,
     body: () => ({
       version: 1,
       name: "Created by the matrix",
@@ -547,7 +583,6 @@ const ENTRIES: Entry[] = [
     }),
     params: () => ({}),
     file: "workflows/route.ts",
-    takesNoIds: true,
     implementer: true,
   },
   {
@@ -1147,7 +1182,11 @@ async function seedWorkspace(
   ]);
   const [repository] = await repositories.list();
   if (repository === undefined) throw new Error("seeding failed");
-  await createProjectsRepository(db, workspace.id).activate(repository.id);
+  const activated = await createProjectsRepository(db, workspace.id).activate(
+    repository.id,
+    { board: null },
+  );
+  if (activated.kind !== "activated") throw new Error("seeding failed");
   const job = await jobQueueFor(workspace.id).enqueue({
     repositoryId: repository.id,
     prNumber: 7,
@@ -1256,6 +1295,7 @@ async function seedWorkspace(
       name: `Workflow of ${slug}`,
       document: `{"of":"${slug}"}`,
       createdBy: names.owner,
+      projectId: activated.project.id,
     },
     100,
   );
@@ -1322,6 +1362,7 @@ async function seedWorkspace(
       runnerId: `runner-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
+      projectId: activated.project.id,
       runId: job.job.id,
       sessionId: started.session.id,
       turnRunId: started.turn.jobId,

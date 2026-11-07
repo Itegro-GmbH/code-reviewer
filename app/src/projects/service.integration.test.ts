@@ -285,3 +285,63 @@ describe("finding one project entry", () => {
     expect(await service.findProject("no-such-repository")).toBeUndefined();
   });
 });
+
+describe("creating a project in the factory (#922)", () => {
+  const BOARD = { projectV2Id: "PVT_board1", statusFieldId: "PVTSSF_1" };
+
+  // #922-T65
+  it("creates the project with its board, runs the activation hook, and finds it by its id", async () => {
+    const events: string[] = [];
+    const { service, first } = await setup({
+      ...noopProjectHooks,
+      onProjectActivated: async (event) => void events.push(event.repositoryId),
+    });
+
+    const project = await service.createProject(first.id, BOARD);
+
+    expect(project.active).toBe(true);
+    expect(project.ticketSource).toEqual({
+      provider: "github",
+      repositoryId: first.id,
+      board: BOARD,
+    });
+    expect(events).toEqual([first.id]);
+    expect(await service.getProject(project.id)).toEqual(project);
+    expect(await service.getProject("")).toBeUndefined();
+    expect(await service.getProject("x".repeat(500))).toBeUndefined();
+  });
+
+  // #922-T66
+  it("creates a project without a board, and refuses a repository that is a project already without changing it", async () => {
+    const { service, first } = await setup();
+    await service.createProject(first.id, null);
+
+    expect(await codeOf(service.createProject(first.id, BOARD))).toBe(
+      "PROJECT_ALREADY_EXISTS",
+    );
+    expect(
+      (await service.findProject(first.id))?.project?.ticketSource.board,
+    ).toBeNull();
+  });
+
+  // #922-T67
+  it("creates the project of a repository that was switched off, and says what an unknown or an unavailable repository is", async () => {
+    const { service, first, remote, repositories, integration } = await setup();
+    await service.activateProject(first.id);
+    await service.deactivateProject(first.id);
+
+    const again = await service.createProject(first.id, BOARD);
+
+    expect(again.active).toBe(true);
+    expect(again.ticketSource.board).toEqual(BOARD);
+    expect(
+      await codeOf(service.createProject("no-such-repository", null)),
+    ).toBe("PROJECT_REPOSITORY_NOT_FOUND");
+    // The platform stops listing the first repository.
+    await repositories.reconcile(integration.id, [remote(2)]);
+    await service.deactivateProject(first.id);
+    expect(await codeOf(service.createProject(first.id, null))).toBe(
+      "PROJECT_REPOSITORY_UNAVAILABLE",
+    );
+  });
+});

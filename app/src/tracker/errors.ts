@@ -4,6 +4,8 @@
 export const TRACKER_ERROR_CODES = [
   /** The repository is not one of the workspace, or is not available on the platform any more. */
   "TRACKER_REPOSITORY_NOT_FOUND",
+  /** `/projects/:id/issues` (#922): the workspace has no project with this id. */
+  "TRACKER_PROJECT_NOT_FOUND",
   /** The repository has no active project: its tickets are not mirrored. */
   "TRACKER_PROJECT_NOT_ACTIVE",
   /** The installation of the repository is suspended, removed or disconnected, so the platform cannot be asked. */
@@ -19,6 +21,7 @@ export type TrackerErrorCode = (typeof TRACKER_ERROR_CODES)[number];
 
 export const TRACKER_ERROR_STATUS: Record<TrackerErrorCode, number> = {
   TRACKER_REPOSITORY_NOT_FOUND: 404,
+  TRACKER_PROJECT_NOT_FOUND: 404,
   TRACKER_PROJECT_NOT_ACTIVE: 409,
   TRACKER_INTEGRATION_UNAVAILABLE: 409,
   TRACKER_REQUEST_INVALID: 400,
