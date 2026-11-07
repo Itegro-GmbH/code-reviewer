@@ -166,7 +166,11 @@ describe("the runs of a ticket", () => {
       .execute();
     await db
       .updateTable("workflow_step_runs")
-      .set({ status: "waiting" })
+      // A waiting step always holds its question (workflow_step_runs_ask_check).
+      .set({
+        status: "waiting",
+        ask: JSON.stringify({ state: "open", question: "Which branch?" }),
+      })
       .where("run_id", "=", waiting.id)
       .where("step_id", "=", "implement")
       .execute();

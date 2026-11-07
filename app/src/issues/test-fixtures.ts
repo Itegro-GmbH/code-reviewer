@@ -39,7 +39,11 @@ export function ticketList(
     repositoryId: "repo-1",
     repo: "acme/widgets",
     items,
-    sync: { lastFullSyncAt: "2026-11-06T09:00:00.000Z", inProgress: false },
+    sync: {
+      lastFullSyncAt: "2026-11-06T09:00:00.000Z",
+      inProgress: false,
+      lastWriteAt: null,
+    },
     ...overrides,
   };
 }
