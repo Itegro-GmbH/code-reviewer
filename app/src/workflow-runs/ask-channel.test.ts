@@ -11,12 +11,8 @@ import type { IntegrationProvider } from "../integrations/provider.ts";
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import type { StepAsk } from "./ask.ts";
 import { serializeAsk } from "./ask.ts";
-import {
-  createGithubAskChannel,
-  placeOf,
-  pullRequestNumberOf,
-  ticketNumberOf,
-} from "./ask-channel.ts";
+import { createGithubAskChannel } from "./ask-channel.ts";
+import { placeOf, pullRequestNumberOf, ticketNumberOf } from "./ask-place.ts";
 
 const REPO: RepoRef = {
   integrationId: "i-1",

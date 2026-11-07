@@ -26,7 +26,7 @@ import type {
 } from "../db/repositories/workflow-runs-repository.ts";
 import type { TicketAnswer } from "../integrations/types.ts";
 import { parseStepAsk, type StepAsk } from "./ask.ts";
-import { placeOf } from "./ask-channel.ts";
+import { placeOf } from "./ask-place.ts";
 import { formatTicketRef } from "../workflows/ticket-ref.ts";
 import type { WorkflowEngine } from "./engine.ts";
 
