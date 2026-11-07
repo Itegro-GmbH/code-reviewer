@@ -48,8 +48,8 @@ function Harness({
       doc={doc}
       pointer={pointer}
       problems={sorted.byNode.get(pointer) ?? []}
-      documentProblems={sorted.document}
       profiles={profiles}
+      headingRef={{ current: null }}
       onChange={(next) => {
         seen?.(next);
         setDoc(next);
@@ -172,6 +172,29 @@ describe("an agent step", () => {
     ).toEqual({ continue: "review" });
   });
 
+  // #926-T36b
+  it("keeps the start branch when the session goes on, and disables the field instead", () => {
+    const seen = vi.fn();
+    render(
+      <Harness start={shippedLane()} pointer="/steps/1/body/0" seen={seen} />,
+    );
+    fireEvent.change(screen.getByLabelText("Session"), {
+      target: { value: "new" },
+    });
+    fireEvent.change(screen.getByLabelText("Start branch"), {
+      target: { value: "main" },
+    });
+    fireEvent.change(screen.getByLabelText("Session"), {
+      target: { value: "continue" },
+    });
+    expect(
+      getAt(seen.mock.lastCall?.[0] as Doc, "/steps/1/body/0/branch"),
+    ).toBe("main");
+    const branch = screen.getByLabelText("Start branch") as HTMLInputElement;
+    expect(branch.disabled).toBe(true);
+    expect(branch.value).toBe("main");
+  });
+
   // #926-T37
   it("shows the environment only where the step has one, or where the validator asks for one", () => {
     const lane = shippedLane();
@@ -268,6 +291,33 @@ describe("an action", () => {
     ).toBeNull();
   });
 
+  // #926-T41b
+  it("keeps what is typed in a list field while the list is written line by line", () => {
+    const seen = vi.fn();
+    render(<Harness start={shippedLane()} pointer="/steps/0" seen={seen} />);
+    const field = () =>
+      screen.getByLabelText("add (optional)") as HTMLTextAreaElement;
+    const type = (text: string) =>
+      fireEvent.change(field(), { target: { value: text } });
+    type("a");
+    type("a\n");
+    expect(field().value).toBe("a\n");
+    type("a\nb");
+    type("a\nb\n\n");
+    expect(field().value).toBe("a\nb\n\n");
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/steps/0/add")).toEqual([
+      "a",
+      "b",
+    ]);
+    type("{{trigger.input.labels}} ");
+    expect(field().value).toBe("{{trigger.input.labels}} ");
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/steps/0/add")).toBe(
+      "{{trigger.input.labels}}",
+    );
+    fireEvent.blur(field());
+    expect(field().value).toBe("{{trigger.input.labels}}");
+  });
+
   // #926-T41
   it("writes a list of labels one to a line and takes one reference for the whole list", () => {
     const seen = vi.fn();
@@ -327,6 +377,33 @@ describe("control nodes and triggers", () => {
     expect(getAt(seen.mock.lastCall?.[0] as Doc, "/steps/1/until")).toEqual({
       empty: "{{review.findings}} ",
     });
+  });
+
+  // #926-T44b
+  it("keeps a typed 3 a text, and makes it a number only where the person says number", () => {
+    const seen = vi.fn();
+    render(<Harness start={shippedLane()} pointer="/steps/2" seen={seen} />);
+    const when = () => getAt(seen.mock.lastCall?.[0] as Doc, "/steps/2/when");
+    fireEvent.change(screen.getByLabelText("When operand 2"), {
+      target: { value: "3" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", "3"] });
+    fireEvent.change(screen.getByLabelText("When operand 2 type"), {
+      target: { value: "number" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 3] });
+    fireEvent.change(screen.getByLabelText("When operand 2"), {
+      target: { value: "4" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", 4] });
+    fireEvent.change(screen.getByLabelText("When operand 2 type"), {
+      target: { value: "boolean" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", false] });
+    fireEvent.change(screen.getByLabelText("When operand 2"), {
+      target: { value: "true" },
+    });
+    expect(when()).toEqual({ equals: ["{{fix.exit}}", true] });
   });
 
   // #926-T44
@@ -483,7 +560,7 @@ describe("the errors of a node", () => {
   });
 
   // #926-T49
-  it("shows the errors about the lane as a whole when no node is picked", () => {
+  it("says to pick a step when no node is picked, and leaves the errors of the lane as a whole to the builder", () => {
     const problems: Problem[] = [
       {
         path: "/budgetUsd",
@@ -497,6 +574,6 @@ describe("the errors of a node", () => {
     expect(
       screen.getByText("Pick a step in the flow to edit it."),
     ).toBeTruthy();
-    expect(screen.getByText("budget_above_maximum")).toBeTruthy();
+    expect(screen.queryByText("budget_above_maximum")).toBeNull();
   });
 });

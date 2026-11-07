@@ -4,7 +4,7 @@
 // representation to keep in step with the validator: what the builder shows is the document, what it saves is the document, and a node is
 // found by the JSON pointer the validator's errors use. Nothing here validates; the validator does (`./validation.ts` asks it).
 import { LOOP_ROUNDS_MAX, STEPS_MAX } from "../../workflows/limits.ts";
-import { isRecord } from "../../workflows/json.ts";
+import { canonicalJson, isRecord } from "../../workflows/json.ts";
 import { legacyTriggerId, TRIGGER_KINDS } from "../../workflows/triggers.ts";
 import type { TriggerKind } from "../../workflows/triggers.ts";
 
@@ -176,6 +176,18 @@ export function insertNode(
   return { doc: setList(doc, list, entries), pointer: child(list, at) };
 }
 
+/** The pointer, once `pointer` is removed, of the node that was after it in its list (it moves into the place); undefined when it was the last. */
+export function successorAfterRemoval(
+  doc: Doc,
+  pointer: Pointer,
+): Pointer | undefined {
+  const place = splitNode(pointer);
+  if (place === undefined) return undefined;
+  return place.index + 1 < listAt(doc, place.list).length
+    ? child(place.list, place.index)
+    : undefined;
+}
+
 /** Removes a node of a list; the pointer of the node that takes its place in the view (the previous one, else the list's owner). */
 export function removeNode(
   doc: Doc,
@@ -317,6 +329,34 @@ export function normalise(document: unknown): Doc | undefined {
     } else out[key] = rest[key];
   }
   if (!placed) out.triggers = [entry];
+  return out;
+}
+
+/**
+ * The document to save: the one the builder edits, except that a lane written with the single `trigger` keeps that shape while the person
+ * has not touched the trigger (the `id` and `steps` that `normalise` added are dropped again). `original` is what the server holds.
+ * Editing the trigger, or adding a step to it, saves `triggers`.
+ */
+export function forSave(doc: Doc, original: unknown): Doc {
+  if (
+    !isRecord(original) ||
+    Array.isArray(original.triggers) ||
+    !isRecord(original.trigger)
+  )
+    return doc;
+  const before = normalise(original)?.triggers;
+  const now = doc.triggers;
+  if (
+    !Array.isArray(before) ||
+    !Array.isArray(now) ||
+    now.length !== 1 ||
+    canonicalJson(now[0]) !== canonicalJson(before[0])
+  )
+    return doc;
+  const out: Doc = {};
+  for (const key of Object.keys(doc))
+    if (key === "triggers") out.trigger = original.trigger;
+    else out[key] = doc[key];
   return out;
 }
 

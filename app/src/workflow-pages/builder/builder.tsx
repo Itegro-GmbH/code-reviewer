@@ -6,7 +6,7 @@
 // (after a short pause) so the red counts and the header follow the edit. "Save as vN" is on only for a document the validator has
 // accepted *as it stands* and that differs from the saved one; the save route validates again. Nothing is stored before that.
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../components/button.tsx";
 import { Alert } from "../../components/ui/alert.tsx";
 import { Badge } from "../../components/ui/badge.tsx";
@@ -29,18 +29,21 @@ import {
 } from "./api.ts";
 import { BUILDER_COPY, describeSaveFailure } from "./copy.ts";
 import {
+  forSave,
   insertNode,
   moveNode,
   newNode,
   nodeAt,
   normalise,
   removeNode,
+  successorAfterRemoval,
   type Doc,
   type Pointer,
 } from "./document.ts";
 import { Flow, type AddableKind } from "./flow.tsx";
 import { Inspector, type ProfileOption } from "./inspector.tsx";
 import { LaneCard, type VersionEntry } from "./lane-card.tsx";
+import { ProblemList } from "./problem-list.tsx";
 import { sortProblems } from "./problems.ts";
 
 type Checked = {
@@ -49,7 +52,16 @@ type Checked = {
   answer: ValidateAnswer | undefined;
 };
 
-type Saved = { doc: Doc; version: number; versions: VersionEntry[] };
+/** `raw` is the document as the server holds it (a lane written with the single `trigger` is saved in that shape until its trigger is edited). */
+type Saved = {
+  doc: Doc;
+  raw: unknown;
+  version: number;
+  versions: VersionEntry[];
+};
+
+/** Where focus goes after the next render: the inspector's heading, or a card. */
+type FocusTarget = { to: "inspector" } | { to: "card"; pointer: Pointer };
 
 function firstPointer(doc: Doc): Pointer {
   return nodeAt(doc, "/steps/0") === undefined ? "/triggers/0" : "/steps/0";
@@ -95,7 +107,7 @@ export function LaneBuilder({
   const [saved, setSaved] = useState<Saved | undefined>(
     initial === undefined
       ? undefined
-      : { doc: initial, version, versions: [...versions] },
+      : { doc: initial, raw: document, version, versions: [...versions] },
   );
   const [selected, setSelected] = useState<Pointer>(
     initial === undefined ? "" : firstPointer(initial),
@@ -105,12 +117,18 @@ export function LaneBuilder({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>(undefined);
   const [justSaved, setJustSaved] = useState(false);
+  const saveInFlight = useRef(false);
+  const flowBox = useRef<HTMLDivElement>(null);
+  const inspectorHeading = useRef<HTMLHeadingElement>(null);
+  const focusTarget = useRef<FocusTarget | undefined>(undefined);
+  const [focusTick, setFocusTick] = useState(0);
 
   useEffect(() => {
     if (doc === undefined) return;
     let stale = false;
+    const controller = new AbortController();
     const timer = setTimeout(() => {
-      void calls.validate(doc).then((result) => {
+      void calls.validate(doc, controller.signal).then((result) => {
         if (stale) return;
         setChecked({ doc, answer: result.ok ? result.data : undefined });
       });
@@ -118,8 +136,26 @@ export function LaneBuilder({
     return () => {
       stale = true;
       clearTimeout(timer);
+      controller.abort();
     };
   }, [calls, doc, validateDelayMs]);
+
+  useEffect(() => {
+    const target = focusTarget.current;
+    focusTarget.current = undefined;
+    if (target === undefined) return;
+    if (target.to === "card") {
+      const card = Array.from(
+        flowBox.current?.querySelectorAll<HTMLElement>("button[data-node]") ??
+          [],
+      ).find((each) => each.dataset.node === target.pointer);
+      if (card !== undefined) {
+        card.focus();
+        return;
+      }
+    }
+    inspectorHeading.current?.focus();
+  }, [focusTick]);
 
   if (doc === undefined || saved === undefined)
     return (
@@ -145,6 +181,16 @@ export function LaneBuilder({
     setSaveError(undefined);
   };
 
+  const focusAfterRender = (target: FocusTarget): void => {
+    focusTarget.current = target;
+    setFocusTick((tick) => tick + 1);
+  };
+
+  const select = (pointer: Pointer): void => {
+    setSelected(pointer);
+    focusAfterRender({ to: "inspector" });
+  };
+
   const add = (list: Pointer, index: number, kind: AddableKind): void => {
     const inserted = insertNode(
       doc,
@@ -157,13 +203,17 @@ export function LaneBuilder({
       ),
     );
     edit(inserted.doc);
-    setSelected(inserted.pointer);
+    select(inserted.pointer);
   };
 
   const remove = (): void => {
     const removed = removeNode(doc, effective);
+    const next = successorAfterRemoval(doc, effective);
     edit(removed.doc);
     setSelected(removed.selection);
+    focusAfterRender(
+      next === undefined ? { to: "inspector" } : { to: "card", pointer: next },
+    );
   };
 
   const move = (direction: -1 | 1): void => {
@@ -173,11 +223,16 @@ export function LaneBuilder({
   };
 
   const save = async (): Promise<void> => {
-    if (!valid || !dirty || saving) return;
-    const body = doc;
+    if (!valid || !dirty || saveInFlight.current) return;
+    saveInFlight.current = true;
+    const body = forSave(doc, saved.raw);
     setSaving(true);
     setSaveError(undefined);
-    const result = await calls.save(workflowId, body, saved.version);
+    const result = await calls
+      .save(workflowId, body, saved.version)
+      .finally(() => {
+        saveInFlight.current = false;
+      });
     setSaving(false);
     if (!result.ok) {
       setSaveError(describeSaveFailure(product, result));
@@ -185,7 +240,8 @@ export function LaneBuilder({
     }
     const { workflow } = result.data;
     setSaved({
-      doc: body,
+      doc,
+      raw: body,
       version: workflow.version,
       versions: workflow.versions,
     });
@@ -265,6 +321,14 @@ export function LaneBuilder({
           {BUILDER_COPY.couldNotCheck}
         </Alert>
       ) : null}
+      {sorted.document.length === 0 ? null : (
+        <ProblemList
+          doc={doc}
+          problems={sorted.document}
+          onChange={edit}
+          heading={BUILDER_COPY.documentErrors}
+        />
+      )}
       {showJson ? (
         <pre
           aria-label={BUILDER_COPY.jsonLabel}
@@ -274,20 +338,22 @@ export function LaneBuilder({
         </pre>
       ) : null}
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
-        <Flow
-          doc={doc}
-          selected={effective}
-          problems={sorted}
-          onSelect={setSelected}
-          onAdd={add}
-        />
+        <div ref={flowBox} className="min-w-0">
+          <Flow
+            doc={doc}
+            selected={effective}
+            problems={sorted}
+            onSelect={select}
+            onAdd={add}
+          />
+        </div>
         <aside className="flex min-w-0 flex-col gap-4">
           <Inspector
             doc={doc}
             pointer={effective}
             problems={sorted.byNode.get(effective) ?? []}
-            documentProblems={sorted.document}
             profiles={profiles}
+            headingRef={inspectorHeading}
             onChange={edit}
             onRemove={remove}
             onMove={move}

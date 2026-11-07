@@ -8,6 +8,7 @@ import {
   afterNode,
   agentIds,
   canMove,
+  forSave,
   idsIn,
   insertNode,
   isInLoop,
@@ -20,6 +21,7 @@ import {
   removeNode,
   setAt,
   stepCountOf,
+  successorAfterRemoval,
   uniqueId,
   withTriggerKind,
   type Doc,
@@ -73,6 +75,35 @@ describe("a document written before several triggers", () => {
     ]);
     expect(normalise("not a document")).toBeUndefined();
     expect(normalise([])).toBeUndefined();
+  });
+
+  // #926-T03b
+  it("is saved in its old shape until the trigger is touched, then with triggers", () => {
+    const old = issueToPr();
+    const normal = normalise(old) as Doc;
+    const renamed = setAt(normal, "/name", "Other") as Doc;
+    const keptOld = forSave(renamed, old);
+    expect(keptOld).toEqual({ ...old, name: "Other" });
+    expect(Object.keys(keptOld)).toEqual(Object.keys(old));
+    const edited = setAt(normal, "/triggers/0/label", "go") as Doc;
+    expect(forSave(edited, old)).toBe(edited);
+    const withSteps = setAt(normal, "/triggers/0/steps", [
+      { id: "a", kind: "action", connector: "ticket.comment" },
+    ]) as Doc;
+    expect(forSave(withSteps, old)).toBe(withSteps);
+    const now = shippedLane() as Doc;
+    expect(forSave(now, now)).toBe(now);
+  });
+});
+
+describe("removing a node", () => {
+  // #926-T07b
+  it("names the node that takes its place, or none when it was the last", () => {
+    const lane = shippedLane() as Doc;
+    expect(successorAfterRemoval(lane, "/steps/0")).toBe("/steps/0");
+    const last = `/steps/${String((lane.steps as unknown[]).length - 1)}`;
+    expect(successorAfterRemoval(lane, last)).toBeUndefined();
+    expect(successorAfterRemoval(lane, "/triggers/0")).toBeUndefined();
   });
 });
 

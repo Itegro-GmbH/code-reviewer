@@ -24,6 +24,7 @@ export function TextControl({
   label,
   value,
   onChange,
+  onBlur,
   hint,
   multiline,
   target,
@@ -34,6 +35,7 @@ export function TextControl({
   label: string;
   value: string;
   onChange: (text: string) => void;
+  onBlur?: () => void;
   hint?: ReactNode;
   multiline?: boolean;
   /** `true`: a target (one value); `"literal"`: a target that takes a literal only. */
@@ -61,6 +63,7 @@ export function TextControl({
             disabled={disabled === true}
             placeholder={placeholder ?? "text, with {{variables}}"}
             onChange={(event) => onChange(event.target.value)}
+            {...(onBlur === undefined ? {} : { onBlur })}
           />
         ) : (
           <Input
@@ -69,6 +72,7 @@ export function TextControl({
             disabled={disabled === true}
             {...(placeholder === undefined ? {} : { placeholder })}
             onChange={(event) => onChange(event.target.value)}
+            {...(onBlur === undefined ? {} : { onBlur })}
           />
         )
       }

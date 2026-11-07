@@ -10,8 +10,11 @@ import {
   convertCondition,
   emptyCondition,
   operandFrom,
+  operandKind,
+  operandOfKind,
   operandText,
   pairOf,
+  type OperandKind,
 } from "./condition.ts";
 import {
   CONDITION_OPERATORS,
@@ -28,6 +31,66 @@ const OPERATOR_LABEL: Record<ConditionOperator, string> = {
   any: "any of",
   not: "not",
 };
+
+const KIND_LABEL: Record<OperandKind, string> = {
+  text: "Text",
+  number: "Number",
+  boolean: "true/false",
+};
+
+/** One operand: a text (a reference is one), a number or true/false, as the person chose; typing never changes the kind. */
+function Operand({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: unknown;
+  placeholder: string;
+  onChange: (next: unknown) => void;
+}) {
+  const kind = operandKind(value);
+  return (
+    <div className="flex items-center gap-2">
+      {kind === "boolean" ? (
+        <NativeSelect
+          aria-label={label}
+          value={String(value === true)}
+          onChange={(event) =>
+            onChange(operandFrom(event.target.value, "boolean"))
+          }
+        >
+          <option value="true">true</option>
+          <option value="false">false</option>
+        </NativeSelect>
+      ) : (
+        <Input
+          aria-label={label}
+          type={kind === "number" ? "number" : "text"}
+          value={operandText(value)}
+          placeholder={placeholder}
+          onChange={(event) =>
+            onChange(operandFrom(event.target.value, kind, value))
+          }
+        />
+      )}
+      <NativeSelect
+        aria-label={`${label} type`}
+        value={kind}
+        onChange={(event) =>
+          onChange(operandOfKind(value, event.target.value as OperandKind))
+        }
+      >
+        {(Object.keys(KIND_LABEL) as OperandKind[]).map((each) => (
+          <option key={each} value={each}>
+            {KIND_LABEL[each]}
+          </option>
+        ))}
+      </NativeSelect>
+    </div>
+  );
+}
 
 export function ConditionEditor({
   label,
@@ -73,25 +136,25 @@ export function ConditionEditor({
           value={operandText(body)}
           placeholder="{{step.field}}"
           onChange={(event) =>
-            onChange({ [operator]: operandFrom(event.target.value, body) })
+            onChange({ [operator]: operandFrom(event.target.value, "text") })
           }
         />
       ) : null}
       {operator === "equals" || operator === "notEquals" ? (
         <div className="flex flex-col gap-2">
           {([0, 1] as const).map((at) => (
-            <Input
+            <Operand
               key={at}
-              aria-label={`${label} operand ${String(at + 1)}`}
-              value={operandText(pairOf(body)[at])}
+              label={`${label} operand ${String(at + 1)}`}
+              value={pairOf(body)[at]}
               placeholder={
                 at === 0
                   ? "{{step.field}}"
                   : "a text, a number or {{reference}}"
               }
-              onChange={(event) => {
+              onChange={(next) => {
                 const pair = pairOf(body);
-                pair[at] = operandFrom(event.target.value, pair[at]);
+                pair[at] = next;
                 onChange({ [operator]: pair });
               }}
             />

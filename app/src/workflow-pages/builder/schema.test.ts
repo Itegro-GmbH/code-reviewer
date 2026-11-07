@@ -9,7 +9,13 @@ import {
   valueOfText,
   withConnector,
 } from "./action-fields.ts";
-import { convertCondition, operandFrom, operandText } from "./condition.ts";
+import {
+  convertCondition,
+  operandFrom,
+  operandKind,
+  operandOfKind,
+  operandText,
+} from "./condition.ts";
 import {
   addRow,
   removeRow,
@@ -91,11 +97,22 @@ describe("conditions", () => {
   });
 
   // #926-T19
-  it("reads a number or true/false as one, and leaves an operand alone that was not edited", () => {
-    expect(operandFrom("3", undefined)).toBe(3);
-    expect(operandFrom("true", undefined)).toBe(true);
-    expect(operandFrom("until", undefined)).toBe("until");
-    expect(operandFrom("3", "3")).toBe("3");
+  it("keeps a typed text a text, and reads a number or true/false only for the kind the person chose", () => {
+    expect(operandFrom("3", "text")).toBe("3");
+    expect(operandFrom("true", "text")).toBe("true");
+    expect(operandFrom("3", "number", "")).toBe(3);
+    expect(operandFrom("", "number", 5)).toBe(0);
+    expect(operandFrom("x", "number", 5)).toBe(5);
+    expect(operandFrom("true", "boolean")).toBe(true);
+    expect(operandFrom("false", "boolean")).toBe(false);
+    expect(operandKind(3)).toBe("number");
+    expect(operandKind("3")).toBe("text");
+    expect(operandKind(false)).toBe("boolean");
+    expect(operandOfKind("3", "number")).toBe(3);
+    expect(operandOfKind("x", "number")).toBe(0);
+    expect(operandOfKind(3, "text")).toBe("3");
+    expect(operandOfKind(true, "text")).toBe("true");
+    expect(operandOfKind("true", "boolean")).toBe(true);
     expect(operandText(3)).toBe("3");
     expect(operandText(undefined)).toBe("");
   });

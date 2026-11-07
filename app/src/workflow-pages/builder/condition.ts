@@ -16,16 +16,40 @@ export function operandText(operand: unknown): string {
       : "";
 }
 
+export type OperandKind = "text" | "number" | "boolean";
+
+/** What an operand is: a number or true/false as such, everything else (a reference included) a text. */
+export function operandKind(operand: unknown): OperandKind {
+  return typeof operand === "number"
+    ? "number"
+    : typeof operand === "boolean"
+      ? "boolean"
+      : "text";
+}
+
 /**
- * The operand a text stands for. An operand is a reference, a text, a number or true/false: text that is a number or true/false is read
- * as one, unless it is what the operand already was (a text `"3"` stays a text while it is not edited).
+ * The operand a text stands for, for the kind the person chose: a text stays a text however much it looks like a number (`"3"` is not
+ * `3`); only a number field turns what is typed into a number (an empty one is 0, text that is no number leaves the operand as it was).
  */
-export function operandFrom(text: string, previous: unknown): unknown {
-  if (operandText(previous) === text && previous !== undefined) return previous;
-  if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text);
-  if (text === "true") return true;
-  if (text === "false") return false;
-  return text;
+export function operandFrom(
+  text: string,
+  kind: OperandKind,
+  previous?: unknown,
+): unknown {
+  if (kind === "boolean") return text === "true";
+  if (kind === "text") return text;
+  if (text.trim() === "") return 0;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : previous;
+}
+
+/** The operand with another kind: what can be carried over is (`"3"` to 3, `true` to the text "true"); the rest starts empty. */
+export function operandOfKind(operand: unknown, kind: OperandKind): unknown {
+  if (operandKind(operand) === kind) return operand;
+  if (kind === "text") return operandText(operand);
+  if (kind === "boolean") return operand === "true";
+  const number = typeof operand === "string" ? Number(operand) : Number.NaN;
+  return operand !== "" && Number.isFinite(number) ? number : 0;
 }
 
 export function emptyCondition(): Condition {

@@ -2,12 +2,12 @@
 
 // The inspector (#926): the fields of the selected node, by kind, and what the validator found at it. Every field writes straight into the
 // document; there is no draft of a field. Variable chips and the picker are the next issue (#927): a field is plain text with `{{…}}`.
-import { Badge } from "../../components/ui/badge.tsx";
+import { useState, type Ref } from "react";
 import { Button } from "../../components/button.tsx";
 import { Checkbox } from "../../components/ui/checkbox.tsx";
 import { FormField } from "../../implementer/ui/form-field.tsx";
 import { Input } from "../../components/ui/input.tsx";
-import { isRecord } from "../../workflows/json.ts";
+import { canonicalJson, isRecord } from "../../workflows/json.ts";
 import { LOOP_ROUNDS_MAX } from "../../workflows/limits.ts";
 import { TRIGGER_KINDS } from "../../workflows/triggers.ts";
 import {
@@ -18,6 +18,7 @@ import {
   textOfValue,
   valueOfText,
   withConnector,
+  type Control,
 } from "./action-fields.ts";
 import { ConditionEditor } from "./condition-editor.tsx";
 import { BUILDER_COPY, KIND_HELP } from "./copy.ts";
@@ -37,7 +38,8 @@ import {
   type Doc,
   type Pointer,
 } from "./document.ts";
-import { fixOf, type Problem } from "./problems.ts";
+import type { Problem } from "./problems.ts";
+import { ProblemList } from "./problem-list.tsx";
 import { SchemaTable } from "./schema-table.tsx";
 
 export type ProfileOption = { name: string; version: number };
@@ -188,7 +190,6 @@ function SessionControl({ doc, pointer, node, onChange }: FieldsProps) {
                       continue:
                         ids.find((id) => id !== node.id) ?? ids[0] ?? "",
                     },
-              ...(next === "new" ? {} : { branch: undefined }),
             }),
           )
         }
@@ -285,7 +286,7 @@ function AgentFields(props: FieldsProps) {
         placeholder="the base branch of the run"
         hint={
           continued
-            ? "A step that continues a session keeps that session's branch."
+            ? "A step that continues a session keeps that session's branch, so this one is not used. It stays for when the session is new again; until then the lane is not valid."
             : "The branch a session of its own starts from: a literal, or one reference to a trusted value."
         }
         onChange={(branch) =>
@@ -316,6 +317,56 @@ function AgentFields(props: FieldsProps) {
         onChange={(result) => onChange(patchNode(doc, pointer, { result }))}
       />
     </>
+  );
+}
+
+/**
+ * An action input as text. What is typed is kept as typed while it still stands for the value in the document (a list's newline at the
+ * end, a space after a whole reference, `007`); the document gets the parsed value on every change. It lets go of the draft on blur, or
+ * when the value was changed from elsewhere.
+ */
+function ValueControl({
+  name,
+  label,
+  control,
+  required,
+  value,
+  multiline,
+  target,
+  placeholder,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  control: Control;
+  required: boolean;
+  value: unknown;
+  multiline: boolean;
+  target?: boolean | "literal";
+  placeholder?: string;
+  onChange: (value: unknown) => void;
+}) {
+  const [draft, setDraft] = useState<string | undefined>(undefined);
+  const shown =
+    draft !== undefined &&
+    canonicalJson(valueOfText(control, draft, required)) ===
+      canonicalJson(value)
+      ? draft
+      : textOfValue(value);
+  return (
+    <TextControl
+      name={name}
+      label={label}
+      value={shown}
+      multiline={multiline}
+      {...(target === undefined ? {} : { target })}
+      {...(placeholder === undefined ? {} : { placeholder })}
+      onChange={(text) => {
+        setDraft(text);
+        onChange(valueOfText(control, text, required));
+      }}
+      onBlur={() => setDraft(undefined)}
+    />
   );
 }
 
@@ -381,11 +432,13 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
                 </div>
               );
             return (
-              <TextControl
-                key={name}
+              <ValueControl
+                key={`${pointer}-${name}`}
                 name={name}
                 label={label}
-                value={textOfValue(node[name])}
+                control={control}
+                required={input.required === true}
+                value={node[name]}
                 multiline={
                   control === "longText" ||
                   control === "list" ||
@@ -397,12 +450,8 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
                   : control === "numberOrText"
                     ? { placeholder: "a number, or one {{reference}}" }
                     : {})}
-                onChange={(text) =>
-                  onChange(
-                    patchNode(doc, pointer, {
-                      [name]: valueOfText(control, text, input.required),
-                    }),
-                  )
+                onChange={(next) =>
+                  onChange(patchNode(doc, pointer, { [name]: next }))
                 }
               />
             );
@@ -450,69 +499,12 @@ function IfFields({ doc, pointer, node, onChange }: FieldsProps) {
   );
 }
 
-function ProblemList({
-  doc,
-  problems,
-  onChange,
-  heading,
-}: {
-  doc: Doc;
-  problems: readonly Problem[];
-  onChange: Change;
-  heading: string;
-}) {
-  return (
-    <section aria-label={heading} className="flex flex-col gap-2">
-      {problems.map((problem, at) => {
-        const fix = fixOf(doc, problem);
-        return (
-          <div
-            key={`${problem.path}-${problem.code}-${String(at)}`}
-            role="group"
-            aria-label={`Error ${problem.code}`}
-            data-slot="problem"
-            className="flex flex-col gap-2 rounded-lg border border-danger bg-danger-soft p-3 text-sm"
-          >
-            <span className="flex flex-wrap items-center gap-2">
-              <Badge variant="danger">{problem.code}</Badge>
-              <code className="text-xs break-all text-muted-foreground">
-                {problem.path === "" ? "/" : problem.path}
-              </code>
-            </span>
-            <span>{problem.message}</span>
-            {problem.available === undefined ||
-            problem.available.length === 0 ? null : (
-              <span className="flex flex-wrap gap-1" aria-label="Available">
-                {problem.available.map((name) => (
-                  <Badge key={name} variant="neutral">
-                    {name}
-                  </Badge>
-                ))}
-              </span>
-            )}
-            {fix === undefined ? null : (
-              <Button
-                variant="secondary"
-                size="sm"
-                className="self-start"
-                onClick={() => onChange(setAt(doc, fix.pointer, fix.value))}
-              >
-                Use “{fix.replacement}”
-              </Button>
-            )}
-          </div>
-        );
-      })}
-    </section>
-  );
-}
-
 export function Inspector({
   doc,
   pointer,
   problems,
-  documentProblems,
   profiles,
+  headingRef,
   onChange,
   onRemove,
   onMove,
@@ -520,9 +512,9 @@ export function Inspector({
   doc: Doc;
   pointer: Pointer;
   problems: readonly Problem[];
-  /** Errors that belong to no node (the name, the budget, the number of steps). */
-  documentProblems: readonly Problem[];
   profiles: readonly ProfileOption[];
+  /** The builder moves focus here when a card is picked. */
+  headingRef: Ref<HTMLHeadingElement>;
   onChange: Change;
   onRemove: () => void;
   onMove: (direction: -1 | 1) => void;
@@ -538,14 +530,6 @@ export function Inspector({
         <p className="text-sm text-muted-foreground">
           {BUILDER_COPY.inspectorEmpty}
         </p>
-        {documentProblems.length === 0 ? null : (
-          <ProblemList
-            doc={doc}
-            problems={documentProblems}
-            onChange={onChange}
-            heading={BUILDER_COPY.documentErrors}
-          />
-        )}
       </section>
     );
   const described = describeNode(node, kind);
@@ -567,7 +551,11 @@ export function Inspector({
         <span className="text-xs font-semibold text-muted-foreground uppercase">
           {described.kindLabel}
         </span>
-        <h2 className="text-base font-semibold break-words">
+        <h2
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-base font-semibold break-words outline-none"
+        >
           {described.title}
         </h2>
       </div>

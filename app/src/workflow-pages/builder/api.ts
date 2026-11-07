@@ -28,8 +28,11 @@ export type SavedWorkflow = {
 };
 
 export type BuilderApi = {
-  /** Checks a document; stores nothing. An invalid document is an answer (`valid: false`), not a failure. */
-  validate(document: unknown): Promise<RequestResult<ValidateAnswer>>;
+  /** Checks a document; stores nothing. An invalid document is an answer (`valid: false`), not a failure. A `signal` cancels a check nobody waits for any more. */
+  validate(
+    document: unknown,
+    signal?: AbortSignal,
+  ): Promise<RequestResult<ValidateAnswer>>;
   /** Saves the document as the next version, only if `expectedVersion` is still the current one. */
   save(
     workflowId: string,
@@ -43,12 +46,13 @@ export function createBuilderApi(
   workspaceSlug: string,
 ): BuilderApi {
   return {
-    validate: (document) =>
+    validate: (document, signal) =>
       requestJson<ValidateAnswer>(
         fetchImpl,
         "POST",
         workspaceApiPath(workspaceSlug, "/workflows/validate"),
         document,
+        signal,
       ),
     save: (workflowId, document, expectedVersion) =>
       requestJson<{ workflow: SavedWorkflow }>(

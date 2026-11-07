@@ -5,6 +5,7 @@
 // the real validator accepts, and every change is validated live: a red count on the card, the sentence in the header, no save while the
 // lane is invalid. The validator here is the real one; only the transport is replaced.
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -143,7 +144,7 @@ describe("the round trip", () => {
   });
 
   // #926-T55
-  it("opens a document written with the single trigger of before and saves it with triggers", async () => {
+  it("opens a document written with the single trigger of before and saves it in that shape while the trigger is untouched", async () => {
     const old = { ...shippedLane() } as Record<string, unknown>;
     delete old.triggers;
     old.trigger = { kind: "github.issueLabeled", label: "agent implement" };
@@ -159,15 +160,44 @@ describe("the round trip", () => {
     await waitFor(() => expect(save.disabled).toBe(false));
     fireEvent.click(save);
     await waitFor(() => expect(saved).toHaveLength(1));
-    expect((saved[0] as Doc).triggers).toEqual([
+    const body = saved[0] as Doc;
+    expect(body.trigger).toEqual({
+      kind: "github.issueLabeled",
+      label: "agent implement",
+    });
+    expect(body).not.toHaveProperty("triggers");
+    expect(getAt(body, "/steps/0/id")).toBe("begin");
+    expect(answerOf(body).valid).toBe(true);
+  });
+
+  // #926-T55b
+  it("saves triggers once the person edited the trigger of an old document", async () => {
+    const old = { ...shippedLane() } as Record<string, unknown>;
+    delete old.triggers;
+    old.trigger = { kind: "github.issueLabeled", label: "agent implement" };
+    const { card, saved } = open({ document: old });
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/triggers/0"));
+    fireEvent.change(screen.getByLabelText("Label"), {
+      target: { value: "agent go" },
+    });
+    const save = screen.getByRole("button", {
+      name: "Save as v4",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(saved).toHaveLength(1));
+    const body = saved[0] as Doc;
+    expect(body).not.toHaveProperty("trigger");
+    expect(body.triggers).toEqual([
       {
         id: "labeled",
         kind: "github.issueLabeled",
-        label: "agent implement",
+        label: "agent go",
         steps: [],
       },
     ]);
-    expect(answerOf(saved[0]).valid).toBe(true);
+    expect(answerOf(body).valid).toBe(true);
   });
 
   // #926-T56
@@ -352,5 +382,125 @@ describe("run now", () => {
     expect(
       await screen.findByText(/Your unsaved changes are not part of it/),
     ).toBeTruthy();
+  });
+});
+
+describe("errors of the lane as a whole", () => {
+  // #926-T64
+  it("shows an error that belongs to no step under the header, whatever is selected", async () => {
+    const { card, container } = open();
+    await screen.findByText(/^Valid/);
+    for (let at = 0; at < 12 && card("/steps/0") !== null; at += 1) {
+      fireEvent.click(card("/steps/0"));
+      fireEvent.click(screen.getByRole("button", { name: "Remove step" }));
+    }
+    await screen.findByText(/errors?, not saved/);
+    const list = screen.getByRole("region", {
+      name: "Errors in the lane as a whole",
+    });
+    expect(within(list).getAllByText("/steps").length).toBeGreaterThan(0);
+    // A trigger is selected now; picking another node leaves the list where it is.
+    fireEvent.click(card("/triggers/0"));
+    expect(
+      screen.getByRole("region", { name: "Errors in the lane as a whole" }),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-slot="problem"]')).not.toBeNull();
+  });
+});
+
+describe("saving and checking", () => {
+  // #926-T65
+  it("sends one save for two clicks that come before the first answer", async () => {
+    let release: () => void = () => {};
+    const fake = fakeBuilderApi(3);
+    let calls = 0;
+    const api: BuilderApi = {
+      validate: fake.api.validate,
+      save: (workflowId, document, expectedVersion) => {
+        calls += 1;
+        return new Promise((resolve) => {
+          release = () =>
+            resolve(fake.api.save(workflowId, document, expectedVersion));
+        });
+      },
+    };
+    const { card } = open({ api });
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/0"));
+    fireEvent.change(screen.getByLabelText("Id"), {
+      target: { value: "begin" },
+    });
+    const save = screen.getByRole("button", {
+      name: "Save as v4",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    act(() => {
+      save.click();
+      save.click();
+    });
+    expect(calls).toBe(1);
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByText("Saved.");
+    expect(calls).toBe(1);
+  });
+
+  // #926-T66
+  it("cancels the check of a document the person has already changed", async () => {
+    const { card, validate } = open();
+    await waitFor(() => expect(validate).toHaveBeenCalledTimes(1));
+    const first = validate.mock.calls[0]?.[1] as AbortSignal;
+    expect(first.aborted).toBe(false);
+    fireEvent.click(card("/steps/0"));
+    fireEvent.change(screen.getByLabelText("Id"), {
+      target: { value: "begin" },
+    });
+    expect(first.aborted).toBe(true);
+    await screen.findByText(/^Valid/);
+  });
+});
+
+describe("focus", () => {
+  // #926-T67
+  it("moves focus to the heading of the inspector when a card is picked", async () => {
+    const { card } = open();
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/0"));
+    const heading = within(
+      screen.getByRole("region", { name: "Inspector" }),
+    ).getByRole("heading", { level: 2 });
+    expect(document.activeElement).toBe(heading);
+    fireEvent.click(card("/steps/1"));
+    expect(document.activeElement).toBe(
+      within(screen.getByRole("region", { name: "Inspector" })).getByRole(
+        "heading",
+        { level: 2 },
+      ),
+    );
+  });
+
+  // #926-T68
+  it("moves focus to the next card after a step is removed, to the inspector heading when it was the last", async () => {
+    const { card } = open();
+    await screen.findByText(/^Valid/);
+    fireEvent.click(card("/steps/0"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove step" }));
+    // The step that was after it is the first one now.
+    expect(document.activeElement).toBe(card("/steps/0"));
+    for (let at = 0; at < 12 && card("/steps/1") !== null; at += 1) {
+      fireEvent.click(card("/steps/0"));
+      fireEvent.click(screen.getByRole("button", { name: "Remove step" }));
+    }
+    fireEvent.click(card("/steps/0"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove step" }));
+    expect(card("/steps/0")).toBeNull();
+    expect(document.activeElement).toBe(
+      within(screen.getByRole("region", { name: "Inspector" })).getByRole(
+        "heading",
+        { level: 2 },
+      ),
+    );
   });
 });
