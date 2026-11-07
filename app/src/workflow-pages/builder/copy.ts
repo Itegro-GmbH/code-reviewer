@@ -20,7 +20,7 @@ export const BUILDER_COPY = {
   checkResult: (valid: boolean, count: number, more: boolean): string =>
     valid
       ? `Check finished: the lane is valid, ${String(count)} ${count === 1 ? "step" : "steps"}.`
-      : `Check finished: ${String(count)}${more ? " or more" : ""} ${count === 1 && !more ? "error" : "errors"}, the lane is not saved.`,
+      : `Check finished: ${String(count)}${more ? " or more" : ""} ${count === 1 && !more ? "error" : "errors"}, the lane cannot be saved.`,
   couldNotCheck:
     "Could not check the lane. The last result is shown; change something to try again.",
   jsonShow: "JSON",
@@ -75,6 +75,13 @@ export const PICKER_COPY = {
   failed: "Could not load the values. Close this and try again.",
   empty: "This step can reach no value of this kind.",
   noMatch: (query: string): string => `No value matches “${query}”.`,
+  matches: (count: number): string =>
+    count === 1 ? "1 value" : `${String(count)} values`,
+  typeNote:
+    "These are the values this step can reach; the validator still checks that their type fits the field.",
+  wantsText: "Takes text: an object is not offered, use one of its fields.",
+  wantsComparable: "Compares a text, a number or true/false.",
+  wantsEmptiable: "Asks whether a list or a text is empty.",
   sampled: "Samples are from the latest run of this lane.",
   notSampled: "No run of this lane yet, so there are no samples.",
   truncated: "Only the first values are listed: search for the rest.",

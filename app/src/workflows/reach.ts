@@ -4,7 +4,9 @@
 // types and, when the lane has run, a sample. The reach is the validator's own: the document is checked with a probe that reads the
 // scope at the node, so what the picker offers is what the validator accepts there (trigger facts, the steps that ran before on every
 // path, `previous.*` only inside a loop body, `failure.*` only in `onFailure`) and nothing is worked out a second time. A target input
-// is held to the same rule as in the validator (`targetVerdict`): only the values it takes are listed.
+// is held to the same rule as in the validator (`targetVerdict`): only the values it takes are listed. A field that wants a kind of
+// value (`wants`: a text, an operand of a comparison, an operand of `empty`) lists the values of that kind by the validator's own type
+// rules, and both filters apply before the answer is cut at `REACH_ENTRIES_MAX`.
 import { targetVerdict, type TargetCheck } from "./check-values.ts";
 import type { StepState } from "./check-steps.ts";
 import {
@@ -62,9 +64,17 @@ export type ReachSamples = {
   failure?: unknown;
 };
 
+/**
+ * What a field takes by type, where the validator holds it to one: `text` (no object: it has no text form), `comparable` (an operand of
+ * `equals`: a text, a choice, a number or true/false) and `emptiable` (an operand of `empty`: a list or a text). Left out: every value.
+ */
+export const REACH_WANTS = ["text", "comparable", "emptiable"] as const;
+export type ReachWants = (typeof REACH_WANTS)[number];
+
 export type ReachOptions = {
   /** Set for an input that decides a target: only the references it takes are listed. */
   target?: TargetCheck;
+  wants?: ReachWants;
   samples?: ReachSamples;
   maxBudgetUsd?: number;
 };
@@ -210,12 +220,39 @@ function sampleOf(
   return sampleText(valueAt(samples.steps[step], fields));
 }
 
+/** Whether a value of this type is one the field takes, by the validator's rules (`isAssignable`, `scalarKind`, `empty`). */
+export function fitsWants(type: ValueType, wants: ReachWants): boolean {
+  if (type.kind === "unknown") return true;
+  if (type.kind === "oneOf") {
+    // A union is used as one of its options only where every option is accepted (`isAssignable`); the comparison and `empty` read it as no kind at all.
+    return wants === "text"
+      ? type.options.every((option) => fitsWants(option, wants))
+      : false;
+  }
+  switch (wants) {
+    case "text":
+      return type.kind !== "object";
+    case "comparable":
+      return (
+        type.kind === "string" ||
+        type.kind === "enum" ||
+        type.kind === "number" ||
+        type.kind === "integer" ||
+        type.kind === "boolean"
+      );
+    case "emptiable":
+      return type.kind === "list" || type.kind === "string";
+  }
+}
+
 type Walk = {
   entries: ReachEntry[];
   truncated: boolean;
   samples: ReachSamples | undefined;
   /** `previous.` needs a default (it exists from round two) unless the text is the `next` instruction. */
   previousNeedsDefault: boolean;
+  /** The values the field takes, asked before an entry counts towards the limit. */
+  takes: (path: readonly string[], type: ValueType) => boolean;
 };
 
 function addEntry(
@@ -224,6 +261,7 @@ function addEntry(
   type: ValueType,
   optional: boolean,
 ): void {
+  if (!walk.takes(path, type)) return;
   if (walk.entries.length >= REACH_ENTRIES_MAX) {
     walk.truncated = true;
     return;
@@ -284,11 +322,30 @@ function entriesOf(
   place: Place,
   options: ReachOptions,
 ): { entries: ReachEntry[]; truncated: boolean } {
+  const { target, wants } = options;
+  const use: Use | undefined = (() => {
+    if (target === undefined) return undefined;
+    const scope = new Scope();
+    for (const binding of snapshot.bindings) scope.set(binding.id, binding);
+    const env: Env = { scope, loops: snapshot.loops };
+    return {
+      path: place.wanted,
+      env,
+      previousOk: place.previousOk,
+      nodePath: place.node,
+      branches: snapshot.state.branches,
+    };
+  })();
   const walk: Walk = {
     entries: [],
     truncated: false,
     samples: options.samples,
     previousNeedsDefault: !place.previousOk,
+    takes: (path, type) =>
+      (wants === undefined || fitsWants(type, wants)) &&
+      (target === undefined ||
+        use === undefined ||
+        targetVerdict({ path: [...path] }, target, use) === "ok"),
   };
   for (const binding of snapshot.bindings) {
     if (binding.kind === "reserved" || binding.type.kind !== "object") continue;
@@ -299,26 +356,7 @@ function entriesOf(
     for (const binding of frame.previous.values())
       if (binding.type.kind === "object")
         walkFields(walk, ["previous", binding.id], binding.type, false);
-  if (options.target === undefined) return walk;
-  const scope = new Scope();
-  for (const binding of snapshot.bindings) scope.set(binding.id, binding);
-  const env: Env = { scope, loops: snapshot.loops };
-  const use: Use = {
-    path: place.wanted,
-    env,
-    previousOk: place.previousOk,
-    nodePath: place.node,
-    branches: snapshot.state.branches,
-  };
-  const target = options.target;
-  return {
-    entries: walk.entries.filter(
-      (entry) =>
-        targetVerdict({ path: entry.reference.split(".") }, target, use) ===
-        "ok",
-    ),
-    truncated: walk.truncated,
-  };
+  return { entries: walk.entries, truncated: walk.truncated };
 }
 
 /**

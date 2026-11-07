@@ -14,7 +14,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReachSamples } from "../../workflows/reach.ts";
+import type { ReachSamples, ReachWants } from "../../workflows/reach.ts";
 import type { ReachLookup } from "./api.ts";
 import { ReachProvider } from "./reach-context.tsx";
 import { ReferenceControl } from "./reference-control.tsx";
@@ -32,6 +32,7 @@ function Harness({
   at = "/steps/1/body/1",
   multiline = false,
   target,
+  wants,
   lookup = reachLookupFor(shippedLane(), SAMPLES),
   seen,
 }: {
@@ -39,6 +40,7 @@ function Harness({
   at?: string;
   multiline?: boolean;
   target?: readonly string[];
+  wants?: ReachWants;
   lookup?: ReachLookup;
   seen?: (text: string) => void;
 }) {
@@ -52,6 +54,7 @@ function Harness({
         value={value}
         multiline={multiline}
         {...(target === undefined ? {} : { target })}
+        {...(wants === undefined ? {} : { wants })}
         onChange={(text) => {
           seen?.(text);
           setValue(text);
@@ -232,6 +235,121 @@ describe("the picker", () => {
     expect(field().selectionStart).toBe("Fix {{trigger.ticket.title}}".length);
   });
 
+  // #927-R09
+  it("closes with the + as it opened with it: a press on the + while the picker is open closes it and it stays closed", async () => {
+    render(<Harness />);
+    await openPicker();
+    await userEvent.click(plus());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(plus().getAttribute("aria-expanded")).toBe("false");
+    await userEvent.click(plus());
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    fireEvent.mouseDown(plus());
+    plus().focus();
+    fireEvent.click(plus());
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // #927-R10
+  it("inserts where the caret is when the value is picked, not where it was when the picker opened", async () => {
+    const seen = vi.fn();
+    render(<Harness start="ab cd" seen={seen} />);
+    field().focus();
+    field().setSelectionRange(0, 0);
+    await openPicker();
+    field().setSelectionRange(5, 5);
+    await userEvent.click(
+      screen
+        .getAllByRole("option")
+        .find(
+          (option) =>
+            option.getAttribute("data-reference") === "trigger.ticket.title",
+        )!,
+    );
+    expect(seen).toHaveBeenLastCalledWith("ab cd{{trigger.ticket.title}}");
+  });
+
+  // #927-R11
+  it("never puts the value inside a reference or right after a backslash", async () => {
+    const seen = vi.fn();
+    render(<Harness start={"a {{x.y}} b \\"} seen={seen} />);
+    field().focus();
+    field().setSelectionRange(5, 5);
+    await openPicker();
+    await userEvent.click(
+      screen
+        .getAllByRole("option")
+        .find(
+          (option) =>
+            option.getAttribute("data-reference") === "trigger.ticket.title",
+        )!,
+    );
+    expect(seen).toHaveBeenLastCalledWith(
+      "a {{trigger.ticket.title}}{{x.y}} b \\",
+    );
+    field().focus();
+    field().setSelectionRange(field().value.length, field().value.length);
+    await openPicker();
+    await userEvent.click(
+      screen
+        .getAllByRole("option")
+        .find(
+          (option) =>
+            option.getAttribute("data-reference") === "trigger.ticket.number",
+        )!,
+    );
+    expect(seen).toHaveBeenLastCalledWith(
+      "a {{trigger.ticket.title}}{{x.y}} b {{trigger.ticket.number}}\\",
+    );
+  });
+
+  // #927-R12
+  it("announces how many values are listed, in a live region that exists before it is filled", async () => {
+    render(<Harness />);
+    await userEvent.click(plus());
+    const region = document.querySelector("[data-slot='match-count']")!;
+    expect(region.getAttribute("aria-live")).toBe("polite");
+    await screen.findByRole("listbox", { name: "Values" });
+    await waitFor(() => expect(region.textContent).toMatch(/^\d+ values$/));
+    await userEvent.type(
+      screen.getByRole("combobox", { name: "Search values" }),
+      "ticket.title",
+    );
+    expect(region.textContent).toBe("1 value");
+    await userEvent.type(
+      screen.getByRole("combobox", { name: "Search values" }),
+      "zzzz",
+    );
+    expect(region.textContent).toBe("0 values");
+  });
+
+  // #927-R13
+  it("asks for the kind of value the field takes, lists only those, and says what the others are for", async () => {
+    const lookup = vi.fn(reachLookupFor(shippedLane()));
+    render(<Harness wants="text" at="/steps/1" lookup={lookup} />);
+    await openPicker();
+    expect(lookup).toHaveBeenCalledWith(
+      { at: "/steps/1", wants: "text" },
+      expect.any(AbortSignal),
+    );
+    expect(optionNames()).not.toContain("trigger.ticket");
+    expect(optionNames()).toContain("trigger.ticket.title");
+    expect(
+      within(screen.getByRole("dialog")).getByText(/Takes text/),
+    ).toBeTruthy();
+  });
+
+  // #927-R14
+  it("says that the validator still checks the type where the field takes any value", async () => {
+    render(<Harness />);
+    await openPicker();
+    expect(
+      within(screen.getByRole("dialog")).getByText(
+        /the validator still checks that their type fits/,
+      ),
+    ).toBeTruthy();
+  });
+
   // #927-T47
   it("is used from the keyboard: type, arrow down, Enter; Escape closes it and focus returns to the field", async () => {
     const seen = vi.fn();
@@ -353,6 +471,24 @@ describe("a field that takes one value", () => {
     );
     expect(seen).toHaveBeenLastCalledWith("");
     expect((plus() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // #927-R15
+  it("takes no tab stop for the hidden box while the chip is shown, and puts focus on the chip after a pick", async () => {
+    render(<Harness start="{{trigger.ticket}}" target={["ticket"]} />);
+    expect(field().tabIndex).toBe(-1);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove Ticket · ticket" }),
+    );
+    expect(field().tabIndex).toBe(0);
+    await openPicker();
+    await userEvent.click(screen.getAllByRole("option")[0]!);
+    expect(field().tabIndex).toBe(-1);
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Remove Ticket · ticket" }),
+      ),
+    );
   });
 
   // #927-T53

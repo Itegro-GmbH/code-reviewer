@@ -7,7 +7,7 @@ import {
   type FetchLike,
   type RequestResult,
 } from "../../ui/json-request.ts";
-import type { ScopeAnswer } from "../../workflows/reach.ts";
+import type { ReachWants, ScopeAnswer } from "../../workflows/reach.ts";
 import { workspaceApiPath } from "../../workspaces/paths.ts";
 import type { Problem } from "./problems.ts";
 
@@ -28,10 +28,11 @@ export type SavedWorkflow = {
   versions: { version: number; savedAt: string }[];
 };
 
-/** What the picker asks for (#927): the values the node at `at` can reach; `targetRoots` for a field that takes one trusted value. */
+/** What the picker asks for (#927): the values the node at `at` can reach; `targetRoots` for a field that takes one trusted value, `wants` for a field the validator holds to a kind of value. */
 export type ScopeRequest = {
   at: string;
   targetRoots?: readonly string[];
+  wants?: ReachWants;
 };
 
 /** The values a field can reach, asked of the current document of the builder; the builder fills in the document and the lane. */
@@ -85,6 +86,7 @@ export function createBuilderApi(
           ...(request.targetRoots === undefined
             ? {}
             : { targetRoots: request.targetRoots }),
+          ...(request.wants === undefined ? {} : { wants: request.wants }),
           workflowId,
         },
         signal,

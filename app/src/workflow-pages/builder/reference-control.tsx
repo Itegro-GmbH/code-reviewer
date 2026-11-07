@@ -14,7 +14,7 @@ import {
   FormField,
   type ControlProps,
 } from "../../implementer/ui/form-field.tsx";
-import type { ReachEntry } from "../../workflows/reach.ts";
+import type { ReachEntry, ReachWants } from "../../workflows/reach.ts";
 import { chipsOf, withReference, withoutChip, type Chip } from "./chips.ts";
 import { PICKER_COPY, describeTargetRule } from "./copy.ts";
 import { TargetMark } from "./controls.tsx";
@@ -63,6 +63,8 @@ export type ReferenceInputProps = {
   multiline?: boolean;
   /** A target field: the roots it takes (`[]`: a literal only). Left out: free text. */
   target?: readonly string[];
+  /** The kind of value the field takes by type, where the validator holds it to one (a text, an operand of a comparison). */
+  wants?: ReachWants;
   disabled?: boolean;
   placeholder?: string;
   /** The wiring of a `FormField`; a field without one names itself with `label`. */
@@ -77,6 +79,7 @@ export function ReferenceInput({
   onBlur,
   multiline,
   target,
+  wants,
   disabled,
   placeholder,
   control,
@@ -85,6 +88,7 @@ export function ReferenceInput({
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement & HTMLTextAreaElement>(null);
+  const plusButton = useRef<HTMLButtonElement>(null);
   const selection = useRef({ start: 0, end: 0 });
   const restore = useRef<{ caret?: number } | undefined>(undefined);
   const chips = chipsOf(value);
@@ -103,6 +107,18 @@ export function ReferenceInput({
     restore.current = undefined;
     const element = field.current;
     if (element === null) return;
+    // A field that shows its one chip in place of the box hides the box: focus goes to the cross of the chip, which is on screen.
+    const shown = box.current?.querySelector<HTMLElement>(
+      "[data-slot='chip'] button",
+    );
+    if (
+      element.classList.contains("sr-only") &&
+      shown !== null &&
+      shown !== undefined
+    ) {
+      shown.focus();
+      return;
+    }
     element.focus();
     if (pending.caret !== undefined)
       element.setSelectionRange(pending.caret, pending.caret);
@@ -131,7 +147,16 @@ export function ReferenceInput({
   };
 
   const pick = (entry: ReachEntry): void => {
-    const next = withReference(value, selection.current, entry.insert, single);
+    // Read again now: the caret may have moved since the picker opened.
+    const element = field.current;
+    const caret =
+      element?.selectionStart != null
+        ? {
+            start: element.selectionStart,
+            end: element.selectionEnd ?? element.selectionStart,
+          }
+        : selection.current;
+    const next = withReference(value, caret, entry.insert, single);
     restore.current = { caret: next.caret };
     setOpen(false);
     onChange(next.text);
@@ -148,6 +173,8 @@ export function ReferenceInput({
     value,
     disabled: disabled === true,
     ...(placeholder === undefined ? {} : { placeholder }),
+    // The box is only for the screen reader while the chip stands in for it: it takes no tab stop that shows nothing.
+    ...(onlyChip === undefined ? {} : { tabIndex: -1 }),
     onChange: (event: { target: { value: string } }) =>
       onChange(event.target.value),
     ...(onBlur === undefined ? {} : { onBlur }),
@@ -184,6 +211,7 @@ export function ReferenceInput({
           )}
         </div>
         <Button
+          ref={plusButton}
           variant="secondary"
           size="sm"
           className="h-10 shrink-0"
@@ -218,6 +246,8 @@ export function ReferenceInput({
           label={label}
           at={at}
           {...(target === undefined ? {} : { target })}
+          {...(wants === undefined ? {} : { wants })}
+          keepOpenFor={plusButton}
           lookup={lookup}
           onPick={pick}
           onClose={(restoreFocus) => {

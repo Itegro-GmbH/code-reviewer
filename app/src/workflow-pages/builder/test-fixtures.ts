@@ -49,6 +49,7 @@ export function reachLookupFor(
       ...(request.targetRoots === undefined
         ? {}
         : { target: { input: "this field", roots } }),
+      ...(request.wants === undefined ? {} : { wants: request.wants }),
       ...(samples === undefined ? {} : { samples }),
     });
     return Promise.resolve(

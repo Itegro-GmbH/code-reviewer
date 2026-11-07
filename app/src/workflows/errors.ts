@@ -68,7 +68,8 @@ export type WorkflowRequestIssue = {
     | "project_unknown"
     | "body_invalid"
     | "scope_at_unknown"
-    | "scope_target_unknown";
+    | "scope_target_unknown"
+    | "scope_wants_unknown";
   message: string;
   available: string[];
 };

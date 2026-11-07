@@ -157,4 +157,33 @@ describe("the scope lookup of the service", () => {
     });
     expect(badRoot.issues[0]?.available).toContain("ticket");
   });
+
+  // #927-R05
+  it("lists the values of the kind the field wants, and refuses a kind the format does not have, naming the ones it has", async () => {
+    const service = serviceWith();
+
+    const text = await service.scope({
+      document: DOCUMENT,
+      at: "/steps/1",
+      wants: "text",
+    });
+    const badKind = await refusal(
+      service.scope({ document: DOCUMENT, at: "/steps/1", wants: "nope" }),
+    );
+
+    expect(text.entries.map((entry) => entry.type)).not.toContain("object");
+    expect(text.entries.map((entry) => entry.reference)).toContain(
+      "trigger.ticket.title",
+    );
+    expect(badKind.code).toBe("WORKFLOW_REQUEST_INVALID");
+    expect(badKind.issues[0]).toMatchObject({
+      path: "wants",
+      code: "scope_wants_unknown",
+    });
+    expect(badKind.issues[0]?.available).toEqual([
+      "text",
+      "comparable",
+      "emptiable",
+    ]);
+  });
 });

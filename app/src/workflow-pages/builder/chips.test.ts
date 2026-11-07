@@ -85,6 +85,54 @@ describe("parts and chips", () => {
     );
   });
 
+  // #927-R06
+  it("never insert inside a reference: the cursor moves to the nearest edge of the chip", () => {
+    const text = "a {{b.c}} d";
+    // 2 is the start of the chip, 9 its end
+    expect(withReference(text, { start: 4, end: 4 }, "{{x.y}}").text).toBe(
+      "a {{x.y}}{{b.c}} d",
+    );
+    expect(withReference(text, { start: 7, end: 7 }, "{{x.y}}").text).toBe(
+      "a {{b.c}}{{x.y}} d",
+    );
+    const inside = withReference(text, { start: 5, end: 5 }, "{{x.y}}");
+    expect(chipsOf(inside.text).map((chip) => chip.source)).toEqual([
+      "{{x.y}}",
+      "{{b.c}}",
+    ]);
+    expect(inside.caret).toBe(2 + "{{x.y}}".length);
+  });
+
+  // #927-R07
+  it("replace a selection that reaches into a reference together with the whole reference", () => {
+    const text = "a {{b.c}} d";
+    const next = withReference(text, { start: 5, end: 11 }, "{{x.y}}");
+    expect(next.text).toBe("a {{x.y}}");
+    expect(withReference(text, { start: 0, end: 4 }, "{{x.y}}").text).toBe(
+      "{{x.y}} d",
+    );
+  });
+
+  // #927-R08
+  it("never insert right after a backslash or a brace: that would turn the reference into text", () => {
+    expect(withReference("a\\", { start: 2, end: 2 }, "{{x.y}}").text).toBe(
+      "a{{x.y}}\\",
+    );
+    expect(withReference("a {", { start: 3, end: 3 }, "{{x.y}}").text).toBe(
+      "a {{x.y}}{",
+    );
+    for (const text of ["a\\", "a {", "a {{b.c}}\\", "\\ b", "x\\{y"]) {
+      for (let at = 0; at <= text.length; at += 1) {
+        const next = withReference(text, { start: at, end: at }, "{{x.y}}");
+        expect(
+          chipsOf(next.text).some((chip) => chip.source === "{{x.y}}"),
+          `${JSON.stringify(text)} at ${String(at)}`,
+        ).toBe(true);
+        expect(chipsOf(next.text).length).toBe(chipsOf(text).length + 1);
+      }
+    }
+  });
+
   // #927-T36
   it("make the reference the whole text in a field that takes one value", () => {
     expect(

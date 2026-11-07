@@ -78,8 +78,36 @@ export function withoutChip(
 export type Selection = { start: number; end: number };
 
 /**
- * The text with `insert` (a `{{…}}`) where the cursor is, and the cursor after it. A selection is replaced. In a field that takes one
- * value (`replaceAll`), the reference is the whole text.
+ * Where a reference may go for a cursor or selection: the same, moved where the text around it stays what it was. Never inside a
+ * reference (the start moves to its start, the end to its end, a cursor to the nearer edge), and never right after a `\` or a `{`,
+ * which would turn the reference into text (`\{{` is the escape, `{{{` no reference): the position moves before them.
+ */
+export function insertSpan(text: string, selection: Selection): Selection {
+  const clamp = (at: number): number => Math.max(0, Math.min(at, text.length));
+  let start = clamp(selection.start);
+  let end = Math.max(start, clamp(selection.end));
+  const collapsed = start === end;
+  for (const chip of chipsOf(text)) {
+    const inside = (at: number): boolean => at > chip.start && at < chip.end;
+    if (collapsed && inside(start)) {
+      start = start - chip.start < chip.end - start ? chip.start : chip.end;
+      end = start;
+      break;
+    }
+    if (!collapsed) {
+      if (inside(start)) start = chip.start;
+      if (inside(end)) end = chip.end;
+    }
+  }
+  while (start > 0 && (text[start - 1] === "\\" || text[start - 1] === "{"))
+    start -= 1;
+  return { start, end: collapsed ? start : Math.max(start, end) };
+}
+
+/**
+ * The text with `insert` (a `{{…}}`) where the cursor is, and the cursor after it. A selection is replaced. The reference is never put
+ * inside another one or where it would not stay one (`insertSpan`). In a field that takes one value (`replaceAll`), the reference is the
+ * whole text.
  */
 export function withReference(
   text: string,
@@ -88,8 +116,7 @@ export function withReference(
   replaceAll = false,
 ): { text: string; caret: number } {
   if (replaceAll) return { text: insert, caret: insert.length };
-  const start = Math.max(0, Math.min(selection.start, text.length));
-  const end = Math.max(start, Math.min(selection.end, text.length));
+  const { start, end } = insertSpan(text, selection);
   return {
     text: text.slice(0, start) + insert + text.slice(end),
     caret: start + insert.length,

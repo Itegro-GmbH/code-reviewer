@@ -119,6 +119,7 @@ function Operand({
           <ReferenceInput
             label={label}
             at={at}
+            wants="comparable"
             value={operandText(value)}
             placeholder={placeholder}
             onChange={(text) => onChange(operandFrom(text, "text"))}
@@ -187,6 +188,7 @@ export function ConditionEditor({
         <ReferenceInput
           label={`${label} operand`}
           at={at}
+          wants="emptiable"
           value={operandText(body)}
           placeholder="{{step.field}}"
           onChange={(text) =>

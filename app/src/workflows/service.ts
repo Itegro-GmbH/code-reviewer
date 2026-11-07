@@ -30,7 +30,13 @@ import {
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
 import { isRecord } from "./json.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
-import { reachAt, type ReachSamples, type ScopeAnswer } from "./reach.ts";
+import {
+  REACH_WANTS,
+  reachAt,
+  type ReachSamples,
+  type ReachWants,
+  type ScopeAnswer,
+} from "./reach.ts";
 import { createResolver, type WorkflowResolver } from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
 
@@ -78,7 +84,7 @@ export type WorkflowService = {
   validate(body: unknown): Promise<ValidationResult>;
   /**
    * The values a step of an unsaved document can reach (#927), by the validator's own scope rules. The body is
-   * `{ document, at, targetRoots?, workflowId? }`: `at` is a JSON pointer into the document, `targetRoots` the roots a target input
+   * `{ document, at, targetRoots?, wants?, workflowId? }`: `at` is a JSON pointer into the document, `targetRoots` the roots a target input
    * takes (only those values are listed), `workflowId` the lane whose latest run gives the samples.
    */
   scope(body: unknown): Promise<ScopeAnswer>;
@@ -214,6 +220,21 @@ export function createWorkflowService({
         },
         "targetRoots names a root the format does not have.",
       );
+    const wants = body.wants;
+    if (
+      wants !== undefined &&
+      !(REACH_WANTS as readonly unknown[]).includes(wants)
+    )
+      throw badScope(
+        {
+          path: "wants",
+          code: "scope_wants_unknown",
+          message:
+            "wants is the kind of value the field takes: text, comparable or emptiable.",
+          available: [...REACH_WANTS],
+        },
+        "wants names a kind of value the format does not have.",
+      );
     const workflowId =
       typeof body.workflowId === "string" &&
       body.workflowId.length > 0 &&
@@ -231,6 +252,7 @@ export function createWorkflowService({
         ...(roots === undefined
           ? {}
           : { target: { input: "this field", roots: roots as TargetRoot[] } }),
+        ...(wants === undefined ? {} : { wants: wants as ReachWants }),
         ...(held === undefined ? {} : { samples: held }),
       },
     );

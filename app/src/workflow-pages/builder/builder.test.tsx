@@ -536,7 +536,7 @@ describe("variables in the builder (#927)", () => {
     expect(field.value).toBe(typed);
     expect(scope).toHaveBeenCalledWith(
       expect.objectContaining({ version: 1 }),
-      { at: "/steps/1/body/1/instruction" },
+      { at: "/steps/1/body/1/instruction", wants: "text" },
       "wf-1",
       expect.any(AbortSignal),
     );

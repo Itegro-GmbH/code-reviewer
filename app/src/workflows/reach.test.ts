@@ -2,7 +2,13 @@
 
 // What a step can reach (#927): the picker's list is the validator's own scope at the node.
 import { describe, expect, it } from "vitest";
-import { placeOf, reachAt, sampleText, type ReachEntry } from "./reach.ts";
+import {
+  REACH_ENTRIES_MAX,
+  placeOf,
+  reachAt,
+  sampleText,
+  type ReachEntry,
+} from "./reach.ts";
 import { FAKE_RESOLVER } from "./test-fixtures.ts";
 import { validateWorkflow } from "./validate.ts";
 
@@ -356,6 +362,100 @@ describe("reachAt", () => {
     };
     const reach = reachAt(document, FAKE_RESOLVER, "/steps/0");
     expect(reach).toBeDefined();
+  });
+});
+
+describe("reachAt, by what the field takes", () => {
+  const typeOf = (reach: ReturnType<typeof reachAt>, name: string) =>
+    reach?.entries.find((entry) => entry.reference === name)?.type;
+
+  // #927-R01
+  it("leaves out an object where a text is wanted: it has no text form, and a list has one", () => {
+    const reach = reachAt(lane(), FAKE_RESOLVER, "/steps/1", {
+      wants: "text",
+    });
+    const found = names(reach?.entries ?? []);
+    expect(found).not.toContain("trigger.ticket");
+    expect(found).not.toContain("trigger.ticket.repo");
+    expect(found).toContain("trigger.ticket.title");
+    expect(found).toContain("trigger.ticket.number");
+    expect(found).toContain("trigger.ticket.labels");
+    expect(
+      (reach?.entries ?? []).every((entry) => entry.type !== "object"),
+    ).toBe(true);
+  });
+
+  // #927-R02
+  it("offers an operand of a comparison only a text, a number or true/false, as the validator compares", () => {
+    const reach = reachAt(lane(), FAKE_RESOLVER, "/steps/1/until/equals/0", {
+      wants: "comparable",
+    });
+    expect(reach).toBeDefined();
+    const kinds = new Set((reach?.entries ?? []).map((entry) => entry.type));
+    for (const kind of kinds)
+      expect(
+        kind === "text" ||
+          kind === "whole number" ||
+          kind === "number" ||
+          kind === "true/false" ||
+          kind.startsWith("one of ") ||
+          kind === "a value",
+        kind,
+      ).toBe(true);
+    expect(typeOf(reach, "trigger.ticket.labels")).toBeUndefined();
+    expect(typeOf(reach, "trigger.ticket")).toBeUndefined();
+  });
+
+  // #927-R03
+  it("offers an operand of empty only a list or a text", () => {
+    const reach = reachAt(lane(), FAKE_RESOLVER, "/steps/1", {
+      wants: "emptiable",
+    });
+    expect(typeOf(reach, "trigger.ticket.labels")).toBe("list of text");
+    expect(typeOf(reach, "trigger.ticket.title")).toBe("text");
+    expect(typeOf(reach, "trigger.ticket.number")).toBeUndefined();
+    expect(typeOf(reach, "trigger.ticket")).toBeUndefined();
+  });
+
+  // #927-R04
+  it("cuts the answer at the limit after the filter, so a value the field takes is not lost behind ones it does not", () => {
+    const steps = Array.from({ length: 120 }, (_, index) => ({
+      id: `s${String(index)}`,
+      kind: "agent",
+      profile: "implementer@1",
+      environment: "node",
+      instruction: "x",
+      result: {
+        type: "object",
+        required: ["a"],
+        properties: { a: { type: "string" } },
+      },
+    }));
+    const document = {
+      version: 1,
+      name: "Many",
+      triggers: [{ id: "labeled", kind: "ticket.labeled", label: "go" }],
+      steps: [
+        ...steps,
+        {
+          id: "last",
+          kind: "action",
+          connector: "github.issue.comment",
+          issue: "{{trigger.ticket}}",
+          body: "x",
+        },
+      ],
+    };
+    const at = "/steps/120";
+    const open = reachAt(document, FAKE_RESOLVER, at);
+    expect(open?.entries).toHaveLength(REACH_ENTRIES_MAX);
+    expect(open?.truncated).toBe(true);
+    expect(names(open?.entries ?? [])).not.toContain("s119.branch");
+    const target = reachAt(document, FAKE_RESOLVER, at, {
+      target: { input: "branch", roots: ["branch"] },
+    });
+    expect(names(target?.entries ?? [])).toContain("s119.branch");
+    expect(target?.truncated).toBe(false);
   });
 });
 

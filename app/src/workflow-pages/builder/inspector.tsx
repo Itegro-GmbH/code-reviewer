@@ -11,6 +11,7 @@ import { Input } from "../../components/ui/input.tsx";
 import { canonicalJson, isRecord } from "../../workflows/json.ts";
 import { LOOP_ROUNDS_MAX } from "../../workflows/limits.ts";
 import { START_BRANCH_ROOTS } from "../../workflows/connectors.ts";
+import type { ReachWants } from "../../workflows/reach.ts";
 import { TRIGGER_KINDS } from "../../workflows/triggers.ts";
 import {
   CONNECTOR_NAMES,
@@ -224,6 +225,7 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
       <>
         <ReferenceControl
           name="instruction-first"
+          wants="text"
           label="Instruction, first round"
           at={`${pointer}/instruction/first`}
           value={textOf(instruction.first)}
@@ -232,6 +234,7 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
         />
         <ReferenceControl
           name="instruction-next"
+          wants="text"
           label="Instruction, next rounds"
           at={`${pointer}/instruction/next`}
           value={textOf(instruction.next)}
@@ -253,6 +256,7 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
     <>
       <ReferenceControl
         name="instruction"
+        wants="text"
         label="Instruction"
         at={`${pointer}/instruction`}
         value={textOf(instruction)}
@@ -347,6 +351,7 @@ function ValueControl({
   value,
   multiline,
   target,
+  wants,
   placeholder,
   onChange,
 }: {
@@ -358,6 +363,7 @@ function ValueControl({
   value: unknown;
   multiline: boolean;
   target?: readonly string[];
+  wants?: ReachWants;
   placeholder?: string;
   onChange: (value: unknown) => void;
 }) {
@@ -375,6 +381,7 @@ function ValueControl({
       value={stands ? draft : textOfValue(value)}
       multiline={multiline}
       {...(target === undefined ? {} : { target })}
+      {...(wants === undefined ? {} : { wants })}
       {...(placeholder === undefined ? {} : { placeholder })}
       onChange={(text) => {
         setDraft(text);
@@ -457,6 +464,9 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
                 {...(input.target === undefined
                   ? {}
                   : { target: input.target })}
+                {...(input.target === undefined && input.type.kind === "string"
+                  ? { wants: "text" as const }
+                  : {})}
                 {...(control === "list" || control === "listOrText"
                   ? { placeholder: "one entry to a line, or one {{reference}}" }
                   : control === "numberOrText"

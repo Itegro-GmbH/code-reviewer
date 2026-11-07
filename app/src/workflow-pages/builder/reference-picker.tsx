@@ -4,15 +4,32 @@
 // The picker under a field (#927): search, the categories on the left, the values on the right with their name, type and a sample of the
 // last run. It lists what the server says the step can reach (`POST .../workflows/scope`), nothing it works out itself. Keyboard: the
 // search box has focus; arrow keys move through the values, Enter picks, Escape closes; Tab reaches the categories.
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import {
   REACH_CATEGORIES,
   REACH_CATEGORY_LABEL,
   type ReachCategory,
 } from "../../workflows/reach-categories.ts";
-import type { ReachEntry, ScopeAnswer } from "../../workflows/reach.ts";
+import type {
+  ReachEntry,
+  ReachWants,
+  ScopeAnswer,
+} from "../../workflows/reach.ts";
 import type { ReachLookup } from "./api.ts";
 import { PICKER_COPY, describeTargetRule } from "./copy.ts";
+
+const WANTS_NOTE: Record<ReachWants, string> = {
+  text: PICKER_COPY.wantsText,
+  comparable: PICKER_COPY.wantsComparable,
+  emptiable: PICKER_COPY.wantsEmptiable,
+};
 
 type Choice = ReachCategory | "all";
 
@@ -33,6 +50,8 @@ export function ReferencePicker({
   label,
   at,
   target,
+  wants,
+  keepOpenFor,
   lookup,
   onPick,
   onClose,
@@ -43,6 +62,10 @@ export function ReferencePicker({
   at: string;
   /** The roots a target field takes; left out for a field of free text. */
   target?: readonly string[];
+  /** The kind of value the field takes by type, when the validator holds it to one. */
+  wants?: ReachWants;
+  /** The control that opened the picker: focus moving to it is not leaving the picker (it closes the picker itself). */
+  keepOpenFor?: RefObject<HTMLElement | null>;
   lookup: ReachLookup;
   onPick: (entry: ReachEntry) => void;
   /** `restoreFocus`: the person is done with the picker (Escape), so the field gets focus back. */
@@ -56,13 +79,17 @@ export function ReferencePicker({
   const root = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   // What was asked when the picker opened: the list is a snapshot of that moment, however the document changes while it is open.
-  const [asked] = useState({ lookup, at, target });
+  const [asked] = useState({ lookup, at, target, wants });
 
   useEffect(() => {
     const controller = new AbortController();
-    const { lookup: ask, at: where, target: roots } = asked;
+    const { lookup: ask, at: where, target: roots, wants: kind } = asked;
     void ask(
-      { at: where, ...(roots === undefined ? {} : { targetRoots: roots }) },
+      {
+        at: where,
+        ...(roots === undefined ? {} : { targetRoots: roots }),
+        ...(kind === undefined ? {} : { wants: kind }),
+      },
       controller.signal,
     ).then((result) => {
       if (controller.signal.aborted) return;
@@ -178,7 +205,11 @@ export function ReferencePicker({
       }}
       onBlur={(event) => {
         const next = event.relatedTarget;
-        if (next instanceof Node && !event.currentTarget.contains(next))
+        if (
+          next instanceof Node &&
+          !event.currentTarget.contains(next) &&
+          next !== keepOpenFor?.current
+        )
           onClose(false);
       }}
     >
@@ -217,6 +248,14 @@ export function ReferencePicker({
           }}
         />
       </div>
+      <p
+        data-slot="match-count"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {loaded.state === "ready" ? PICKER_COPY.matches(visible.length) : ""}
+      </p>
       {body}
       {loaded.state === "ready" ? (
         <div className="grid min-h-0 grid-cols-[minmax(0,8.5rem)_minmax(0,1fr)]">
@@ -287,6 +326,10 @@ export function ReferencePicker({
         className="flex flex-col gap-1 border-t border-line p-2 text-xs text-muted-foreground"
       >
         {target === undefined ? null : <p>{describeTargetRule(target)}</p>}
+        {wants === undefined ? null : <p>{WANTS_NOTE[wants]}</p>}
+        {target === undefined && wants === undefined ? (
+          <p>{PICKER_COPY.typeNote}</p>
+        ) : null}
         {loaded.state === "ready" ? (
           <p>
             {loaded.answer.sampled
