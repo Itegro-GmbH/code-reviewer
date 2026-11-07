@@ -264,9 +264,8 @@ function parseOutput(text: string | null): unknown {
  * by hand or through the API stored its input as handed in, or `{ input, ticket }` when it has a ticket (`readStoredInput`); a run a
  * label started stored `{ ticket, issue, repo }` (`label-trigger.ts`).
  *
- * TODO(#923): `workflow_runs.ticket_ref` (the ticket's reference, `github:owner/repo#128`) comes with the ticket mirror of #923, in a
- * migration of its own. This change does not add the column; once it exists, `createRun` of the label trigger and of the start service
- * set it from the ticket they hold (`ticket.ts`).
+ * The ticket's reference (`workflow_runs.ticket_ref`, `github:owner/repo#128`, #923) is not read from here: the label trigger and the
+ * start service write it with the run, from the ticket they hold.
  */
 function triggerValueOf(run: StoredWorkflowRun): Record<string, unknown> {
   const stored = parseOutput(run.triggerInput);

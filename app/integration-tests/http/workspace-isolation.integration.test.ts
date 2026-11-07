@@ -216,6 +216,27 @@ const ENTRIES: Entry[] = [
     file: "repositories/[repositoryId]/pull-requests/route.ts",
   },
   {
+    // #923: the tickets of the project from the ticket mirror, read by every member; the full sync is a project setting.
+    name: "GET repositories/[repositoryId]/issues",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/repositories/${ids.repositoryId}/issues`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/issues/route.ts",
+    implementer: true,
+  },
+  {
+    name: "POST repositories/[repositoryId]/issues/sync",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
+    method: "POST",
+    minRole: MINIMUM_ROLE.change_project_settings,
+    path: (ids) => `/repositories/${ids.repositoryId}/issues/sync`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/issues/sync/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST repositories/[repositoryId]/reviews",
     route: "/api/w/[workspace]/repositories/[repositoryId]/reviews",
     method: "POST",

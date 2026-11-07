@@ -121,6 +121,9 @@ export function addressesOf(
         route.pattern === "/w/:workspace/profiles" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/todos" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/lanes" ||
+        // The tickets of a project from the ticket mirror (#923): read by the factory's cockpit only.
+        route.pattern ===
+          "/api/w/:workspace/repositories/:repositoryId/issues" ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];

@@ -265,20 +265,45 @@ answered `IMPLEMENTER_WRITE_NOT_GRANTED` (a job that gets that far ends `git_wri
 
 ## Events
 
-Under *Subscribe to events* tick **Pull request** and **Issue comment**, and **Issues** when workflows with the
-[label trigger](workflows.md#the-label-trigger) are used (the `issues` row below). The other two events below have
-no checkbox: GitHub sends them to every app that has a webhook.
+Under *Subscribe to events* tick **Pull request**, **Issue comment**, **Issues**, **Sub issues** and **Check suite**, and
+**Projects v2 item** when the project board is used ("The project board" below). The one-click way ticks the first five. The
+other two events below have no checkbox: GitHub sends them to every app that has a webhook.
+
+The events marked "mirror" also feed the [ticket mirror](ticket-mirror.md), the read cache of the issues and pull requests of
+a project's repository: each of them updates the row of its ticket, for a repository with an active project only.
 
 | Event | Subscription | What the app does with it |
 |---|---|---|
-| `pull_request` | Tick "Pull request" | A pull request was opened, reopened, marked ready for review or got new commits: becomes a review trigger |
-| `issue_comment` | Tick "Issue comment" | A comment on a pull request that starts with `/review` from somebody with write access becomes a command trigger (the removed `/ask`, `/improve` and `/describe` are ordinary comments) |
-| `issues` | Tick "Issues" (only for the [label trigger](workflows.md#the-label-trigger) of a workflow; an App made from the manifest does not subscribe to it yet, tick it by hand) | A label put on an open issue by a user account (sender type `User`; a machine account with a personal access token is one) starts the workflows of the workspace that wait for that label, but only one running run of a workflow for one issue. Pull requests, bots, organizations, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing. **An issue created from a template or form with `labels:` gets them when it is created, and that starts a run: keep the trigger label out of every issue template, above all in a public repository** |
+| `pull_request` | Tick "Pull request" | A pull request was opened, reopened, marked ready for review or got new commits: becomes a review trigger. Mirror: every action (`opened`, `closed` and `merged`, `review_requested`, `synchronize`, `edited`, `labeled`, ...) updates the ticket of the pull request; a new commit clears its checks |
+| `issue_comment` | Tick "Issue comment" | A comment on a pull request that starts with `/review` from somebody with write access becomes a command trigger (the removed `/ask`, `/improve` and `/describe` are ordinary comments). Mirror: a comment created or edited on an issue or a pull request refreshes its ticket (the time of the last change, and the rest of what the delivery carries) |
+| `issues` | Tick "Issues" (the one-click way ticks it) | A label put on an open issue by a user account (sender type `User`; a machine account with a personal access token is one) starts the workflows of the workspace that wait for that label, but only one running run of a workflow for one issue. Pull requests, bots, organizations, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing. **An issue created from a template or form with `labels:` gets them when it is created, and that starts a run: keep the trigger label out of every issue template, above all in a public repository**. Mirror: every action (`opened`, `edited`, `closed`, `reopened`, `labeled`, `assigned`, `typed`, ..., `deleted` and `transferred` remove the ticket) updates the ticket |
+| `sub_issues` | Tick "Sub issues" (the one-click way ticks it) | Mirror only: an issue got a parent or lost it (`parent_issue_added`, `sub_issue_added`, `parent_issue_removed`, `sub_issue_removed`); only when both issues are in the same repository |
+| `check_suite` | Tick "Check suite" (the one-click way ticks it) | Mirror only: the checks of a commit started or finished; the app asks GitHub for the state of the checks of that commit and stores it on the open pull requests that have it as head (a pull request from a fork is not listed by GitHub in the suite, and its checks are read by the next full sync) |
+| `projects_v2_item` | Tick "Projects v2 item" by hand, see "The project board" | Mirror only: an item of an organization project board got another **Status**, or left the board |
 | `installation` | Always sent, nothing to tick | The app was installed, removed, suspended or unsuspended: creates or disables the installation in the app |
 | `installation_repositories` | Always sent, nothing to tick | Repositories were added to or removed from an installation: keeps the repository list current |
 
+### The project board
+
+The status column of a ticket in the mirror is the **Status** of the item on an organization's project board (GitHub
+Projects), shown as the board names it. Reading a board needs the organization permission **Projects** (`organization_projects`),
+**Read-only**, which the manifest does not ask for: no App holds it yet, and the portal would report it as missing for every
+App that exists. Without it the mirror works as before and the status stays empty; nothing fails. To show the status:
+
+1. In the App's settings (*Permissions & events > Organization permissions*) set **Projects** to **Read-only**, and under
+   *Subscribe to events* tick **Projects v2 item**. Save.
+2. Every installation has to accept the changed permissions on GitHub (the account that installed the App is asked).
+3. Press **Resync** in the project's setup, or wait for the next change of an item: the sync reads the status of every item of the
+   boards that list the repository (when an item is on several boards, the board read last wins).
+
+The token that reads the boards is made for the one call, limited to one repository and to `organization_projects: read` and
+`metadata: read` (`TRACKER_BOARD_TOKEN_PERMISSIONS`); the token of the other reads of the sync holds `issues`, `pull_requests` and
+`checks`, all `read`, and `metadata: read` (`TRACKER_READ_TOKEN_PERMISSIONS`). Both are in `job-access.ts` and are switched off
+after the call. Boards of a personal account cannot be read with an installation token: their items show no status.
+
 Every other event (for example GitHub's `ping`, or `push`) is answered with `202` and ignored. The list is the
-set of events the webhook code reads (`webhook-fields.ts` next to `job-access.ts`).
+set of events the webhook code reads (`webhook-fields.ts` next to `job-access.ts`: `WEBHOOK_READ_FIELDS` for the reviews and workflows,
+`TRACKER_WEBHOOK_FIELDS` for the ticket mirror).
 
 ## Sign in with GitHub
 
@@ -398,7 +423,7 @@ it reads the workspace's own connections) if the repository is missing, and swit
       deployment with the Implementer, see "The Implementer"), Metadata Read-only, Checks Read and write, Email addresses
       Read-only, Members Read-only, and nothing else (Projects Read and write only for lanes that use `ticket.setStatus`,
       see "Optional: Projects")
-- [ ] Events: Pull request and Issue comment ticked
+- [ ] Events: Pull request, Issue comment, Issues, Sub issues and Check suite ticked (and Projects v2 item if the project board is used)
 - [ ] The tile on Integrations shows **Configured**, and **Sign in with GitHub** is enabled
 - [ ] Only for the way by hand: the `.pem` file is in the password manager and deleted from the laptop
 - [ ] `ping` redelivered: 202

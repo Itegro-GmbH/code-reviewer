@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// What a start writes as `trigger_input` (#916). Without a ticket it is the input as handed in, the shape every version stored: the
-// version that still runs during a deploy reads `{{trigger.input.repo}}` from it. With a ticket it is `{ input, ticket }`.
+// What a start writes as `trigger_input` (#916) and as `ticket_ref` (#923). Without a ticket the input is stored as handed in, the shape every
+// version stored: the version that still runs during a deploy reads `{{trigger.input.repo}}` from it. With a ticket it is `{ input, ticket }`.
 import { describe, expect, it } from "vitest";
 import type { NewWorkflowRun } from "../db/repositories/workflow-runs-repository.ts";
 import type { StoredWorkflowRun } from "../db/repositories/workflow-runs-repository.ts";
+import { labelTicketRef } from "./label-trigger.ts";
 import { createWorkflowRunService } from "./service.ts";
 import { readStoredInput, storedInputOf } from "./ticket.ts";
 
@@ -147,6 +148,49 @@ describe("the trigger_input of a run started by hand", () => {
       input: {},
       ticket: { number: 128, repo: { fullName: "acme/widgets" } },
     });
+  });
+
+  // #923-T86
+  it("names the ticket of the run as the label trigger does, and names none for a run without a ticket", async () => {
+    const lane = harness({
+      version: 1,
+      name: "Lane",
+      triggers: [
+        {
+          id: "with-ticket",
+          kind: "manual",
+          input: {
+            type: "object",
+            required: ["ticket"],
+            properties: { ticket: { type: "ticket" } },
+          },
+        },
+        {
+          id: "plain",
+          kind: "manual",
+          input: {
+            type: "object",
+            required: ["repo"],
+            properties: { repo: { type: "string" } },
+          },
+        },
+      ],
+      steps: [STEP],
+    });
+    await lane.service.start(USER, "wf-1", {
+      trigger: "with-ticket",
+      input: { ticket: "github:acme/widgets#128" },
+      clientRequestId: "r-4",
+    });
+    await lane.service.start(USER, "wf-1", {
+      trigger: "plain",
+      input: { repo: "acme/widgets" },
+      clientRequestId: "r-5",
+    });
+    expect(lane.created.map((c) => c.ticketRef)).toEqual([
+      labelTicketRef("acme/widgets", 128),
+      undefined,
+    ]);
   });
 });
 

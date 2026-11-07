@@ -17,7 +17,14 @@ export function getProjectHooks(workspaceId: string): ProjectHooks {
 }
 
 /** The project service of one workspace. */
-export function projectServiceFor(workspaceId: string): ProjectService {
+export function projectServiceFor(
+  workspaceId: string,
+  /**
+   * What the caller does after a project was created or switched on (the route that switches it on starts the first sync of the ticket
+   * mirror, #923: the ticket mirror depends on this module, so it is handed in and never imported here).
+   */
+  onProjectActivated?: ProjectHooks["onProjectActivated"],
+): ProjectService {
   return createProjectService({
     projects: createProjectsRepository(
       getDatabase(),
@@ -27,6 +34,9 @@ export function projectServiceFor(workspaceId: string): ProjectService {
       undefined,
       newProjectSettings,
     ),
-    hooks: getProjectHooks(workspaceId),
+    hooks: {
+      ...getProjectHooks(workspaceId),
+      ...(onProjectActivated === undefined ? {} : { onProjectActivated }),
+    },
   });
 }

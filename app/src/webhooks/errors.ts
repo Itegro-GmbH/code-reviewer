@@ -53,6 +53,8 @@ export const WEBHOOK_ACCEPTED_OUTCOMES = [
   "ticket_answered",
   /** A comment `/answer ...` (#920) that no waiting run takes: none waits on this ticket, or the answer cannot be used, or somebody answered first. */
   "no_answer_taken",
+  /** The ticket mirror (#923) took something from the delivery: a ticket, its parent, its board status or its checks were written. */
+  "tracker_updated",
   "installation_changed",
   /** An installation that no workspace has linked: noted as unclaimed, nothing was created. */
   "installation_unclaimed",

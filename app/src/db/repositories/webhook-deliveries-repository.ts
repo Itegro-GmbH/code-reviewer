@@ -68,6 +68,8 @@ export const WEBHOOK_DELIVERY_OUTCOMES = [
   "ticket_answered",
   /** A comment `/answer ...` that no waiting run takes (not final: an answer that came too early may be sent again by a redelivery). */
   "no_answer_taken",
+  /** The ticket mirror took something from the delivery (#923). */
+  "tracker_updated",
   /** The installation or its repositories were synchronized. */
   "installation_changed",
   /** An installation no workspace has linked: noted as unclaimed, nothing was created (not final: it can be redelivered). */
@@ -80,6 +82,7 @@ export const WEBHOOK_DELIVERY_FINAL_OUTCOMES = [
   "trigger_enqueued",
   "workflow_runs_started",
   "ticket_answered",
+  "tracker_updated",
   "installation_changed",
 ] as const satisfies readonly WebhookDeliveryOutcome[];
 

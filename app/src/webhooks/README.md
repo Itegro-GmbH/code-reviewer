@@ -37,7 +37,7 @@ Each step ends the request when it fails; nothing before step 5 writes anything.
 Answers carry only an error code or `{ "status": "accepted", "outcome": ... }`, never the body, a
 signature or a secret. Log lines name the delivery id, the event and the outcome, and nothing else.
 
-The outcomes of step 6 to 8 are `workflow_runs_started` and `no_workflow_matched` (a label on an issue, see below), `ticket_answered` and `no_answer_taken` (a comment `/answer ...`, see below), `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
+The outcomes of step 6 to 8 are `tracker_updated` (the ticket mirror took something from the delivery, see below), `workflow_runs_started` and `no_workflow_matched` (a label on an issue, see below), `ticket_answered` and `no_answer_taken` (a comment `/answer ...`, see below), `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
 turned down, with the reason in the log), `waiting_jobs_discarded` (a pull request was closed or turned into a draft),
 `installation_changed`, `ignored` (a genuine event that starts nothing, such as a `labeled` pull
 request, or a command from a user without write access),
@@ -256,3 +256,17 @@ signed requests built by `fakes/github/webhooks.ts` from the recorded payloads i
 covers every behavior above; `github-app-route-file.integration.test.ts` calls the real `route.ts`
 with the production wiring; `review-trigger-jobs.integration.test.ts` runs the handler with the real
 job queue intake.
+
+## The ticket mirror (#923)
+
+The events `issues`, `issue_comment`, `pull_request`, `sub_issues`, `projects_v2_item` and `check_suite` also update the ticket mirror
+(`src/tracker/`, [`docs/ticket-mirror.md`](../../../docs/ticket-mirror.md)). Between the claim of the delivery and `parseEvent` the handler asks the
+provider what the delivery changes in the cache (`parseTrackerChange`) and hands the change to the mirror of the delivery's workspace
+(`tracker` of `WorkspaceCollaborators`, wired in by the route like the workflows):
+
+- an event only the mirror reads (`sub_issues`, `projects_v2_item`, `check_suite`) is answered `tracker_updated` when a row changed and
+  `ignored` otherwise; when the cache cannot be written the delivery fails (503, `WEBHOOK_PROCESSING_FAILED`) and GitHub redelivers it;
+- an event that also starts a review or a workflow (`issues`, `issue_comment`, `pull_request`) does that as before, and a failure of the
+  mirror is only logged (by its code), so a broken cache never costs a review its start. When such a delivery starts nothing (an `edited`
+  issue) and the mirror took it, the answer is `tracker_updated` instead of `ignored`;
+- only a repository with an active project is mirrored; a delivery for another is not an error.

@@ -62,6 +62,23 @@ interface IntegrationProvider {
     repo: RepoRef,
     signal?: AbortSignal,
   ): Promise<PullRequestRef[]>;
+  // The ticket mirror (#923, `src/tracker/`); optional, a provider without tickets has none of the three:
+  parseTrackerChange?(
+    i: Integration,
+    req: Request,
+  ): Promise<TrackerChangeResult>; // what a delivery changes in the cache
+  readTrackerPage?(
+    i: Integration,
+    repo: RepoRef,
+    step: TrackerPageStep,
+    signal?: AbortSignal,
+  ): Promise<TrackerPage>; // one page of the full sync
+  readChecksState?(
+    i: Integration,
+    repo: RepoRef,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>; // the checks of a commit
 }
 ```
 

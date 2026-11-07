@@ -11,7 +11,8 @@ import { GithubAppError, type GithubRefusalReason } from "./errors.ts";
 import { isRecord } from "./guards.ts";
 import { createAppJwt } from "./jwt.ts";
 import { toPullRequestRef } from "./mappers.ts";
-import type { PullRequestRef } from "../../types.ts";
+import type { PullRequestRef, TrackerItemFields } from "../../types.ts";
+import { checksStateOf, toCheckSuites, toTrackerItem } from "./tracker-map.ts";
 
 export type RemoteInstallation = {
   /** The installation id as text. */
@@ -410,6 +411,59 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<void>;
   /**
+   * One page (100) of the issues and pull requests of a repository, any state, the least recently changed first (#923), read with a
+   * token of its own limited to `scope`. A pull request comes back as such (`kind`). `since` (ISO 8601, UTC) leaves out what changed
+   * before it: a list longer than `MAX_PAGES` pages is walked by asking again from the time of the last item, so a repository of any
+   * size can be read (the one thing that still stops it is `MAX_PAGES` pages of items that all changed in the same second). `last` is
+   * true when the page is the last one; `skipped` counts the tickets of the page that could not be read and are not in `items`.
+   */
+  readTrackerIssues(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    page: number,
+    since?: string,
+    signal?: AbortSignal,
+  ): Promise<{ items: TrackerItemFields[]; last: boolean; skipped: number }>;
+  /**
+   * One page (30) of the open pull requests of a repository with the state of the checks of the head of each (#923): one more call per
+   * pull request, which is why the page is small.
+   */
+  readTrackerChecks(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    page: number,
+    signal?: AbortSignal,
+  ): Promise<{
+    pullRequests: { number: number; checksState: string | null }[];
+    last: boolean;
+  }>;
+  /** The state of the checks of one commit (#923), or null when it has no check suite. */
+  readChecksState(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
+  /**
+   * One page of the items of the project boards of a repository, with the status of each (#923; GraphQL, the one place REST has nothing).
+   * `after` is the position `next` of the last page named, null for the first page. A board the token may not read (the permission
+   * "Projects" is missing, or the repository belongs to a user and has no organization board) is `available: false`, not a failure.
+   */
+  readTrackerBoard(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    after: string | null,
+    signal?: AbortSignal,
+  ): Promise<{
+    available: boolean;
+    items: { nodeId: string; status: string | null }[];
+    next: string | null;
+  }>;
+  /**
    * Mints a fresh installation access token, never from the cache, limited to the given repositories
    * and permissions. The one place a token for a job is created. Refuses (without a request) a scope
    * with no repository or no permission, and a token GitHub reports as broader than asked for.
@@ -446,6 +500,13 @@ export type GithubAppClientOptions = {
 };
 
 const PAGE_SIZE = 100;
+/** A time the issue list can start from (`since`): ISO 8601 in UTC, as the sync writes it. */
+const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+/** The pull requests of one page of the checks read: each costs a call. */
+const CHECKS_PAGE_SIZE = 30;
+/** The boards of one repository the mirror reads, and the items of one page of a board. */
+const BOARDS_MAX = 20;
+const BOARD_PAGE_SIZE = 100;
 /** How many branch names `listBranches` returns at most. */
 export const BRANCH_LIST_LIMIT = 100;
 /** A hard stop so a misbehaving server cannot loop us forever; reaching it is an error, not a cut. */
@@ -464,6 +525,68 @@ function shapeError(call: string): GithubAppError {
     "GITHUB_APP_REQUEST_FAILED",
     `GitHub answered ${call} in an unexpected format.`,
   );
+}
+
+function checkPage(page: number): void {
+  if (!Number.isInteger(page) || page < 1 || page > MAX_PAGES)
+    throw new GithubAppError(
+      "GITHUB_APP_REQUEST_FAILED",
+      `The page ${page} is outside the pages a list may have.`,
+    );
+}
+
+/** The `type` of the GraphQL errors that mean the app may not read the board; any other error is a failure to try again. */
+const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
+  "FORBIDDEN",
+  "INSUFFICIENT_SCOPES",
+  "NOT_FOUND",
+]);
+
+const BOARDS_QUERY =
+  "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
+const BOARD_ITEMS_QUERY =
+  'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
+
+/** The ids of the boards a `BOARDS_QUERY` answer lists; null when the answer is not that. */
+function boardIdsOf(data: Record<string, unknown>): string[] | null {
+  const repository = data.repository;
+  if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
+  const nodes = repository.projectsV2.nodes;
+  if (!Array.isArray(nodes)) return null;
+  return nodes.flatMap((node: unknown) =>
+    isRecord(node) && typeof node.id === "string" ? [node.id] : [],
+  );
+}
+
+/** One page of a board: its items with their status (null for none), and where the next page is. */
+function boardPageOf(data: Record<string, unknown>): {
+  items: { nodeId: string; status: string | null }[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+} | null {
+  const { node } = data;
+  if (!isRecord(node) || !isRecord(node.items)) return null;
+  const { nodes, pageInfo } = node.items;
+  if (!Array.isArray(nodes) || !isRecord(pageInfo)) return null;
+  const result: { nodeId: string; status: string | null }[] = [];
+  for (const item of nodes as unknown[]) {
+    if (!isRecord(item) || !isRecord(item.content)) continue;
+    if (typeof item.content.id !== "string") continue;
+    const value = item.fieldValueByName;
+    result.push({
+      nodeId: item.content.id,
+      status:
+        isRecord(value) && typeof value.name === "string" && value.name !== ""
+          ? value.name
+          : null,
+    });
+  }
+  return {
+    items: result,
+    hasNextPage: pageInfo.hasNextPage === true,
+    endCursor:
+      typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null,
+  };
 }
 
 /**
@@ -1096,6 +1219,71 @@ export function createGithubAppClient(
     } catch {
       return false;
     }
+  }
+
+  /** The state of the checks of one commit: its check suites in one state (`checksStateOf`). */
+  async function readCommitChecks(
+    token: string,
+    path: string,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!/^[0-9a-f]{7,64}$/i.test(headSha))
+      throw new GithubAppError(
+        "GITHUB_APP_REQUEST_FAILED",
+        "The commit is not a hexadecimal object name.",
+      );
+    const json = await request(
+      token,
+      "GET",
+      `${path}/commits/${headSha}/check-suites?per_page=${PAGE_SIZE}`,
+      undefined,
+      signal,
+    );
+    const suites = toCheckSuites(json);
+    if (suites === null)
+      throw shapeError("GET /repos/{owner}/{repo}/commits/{ref}/check-suites");
+    return checksStateOf(suites);
+  }
+
+  /**
+   * One GraphQL query. Null when GitHub says the board is not ours to read: every error of the answer is `FORBIDDEN`,
+   * `INSUFFICIENT_SCOPES` or `NOT_FOUND`; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
+   * a query GitHub could not run) and anything else wrong (no answer, not JSON) fails as for REST, so the sync keeps its place and goes
+   * on from there.
+   */
+  async function graphql(
+    token: string,
+    query: string,
+    variables: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown> | null> {
+    const json = await request(
+      token,
+      "POST",
+      "/graphql",
+      { query, variables },
+      signal,
+    );
+    if (!isRecord(json)) throw shapeError("POST /graphql");
+    if (Array.isArray(json.errors) && json.errors.length > 0) {
+      const types = (json.errors as unknown[]).map((error) =>
+        isRecord(error) && typeof error.type === "string" ? error.type : "",
+      );
+      if (types.every((type) => BOARD_UNAVAILABLE_ERRORS.has(type)))
+        return null;
+      if (types.includes("RATE_LIMITED"))
+        throw new GithubAppError(
+          "GITHUB_APP_RATE_LIMITED",
+          "GitHub rate limit reached for POST /graphql.",
+        );
+      throw new GithubAppError(
+        "GITHUB_APP_REQUEST_FAILED",
+        "GitHub answered POST /graphql with errors.",
+      );
+    }
+    if (!isRecord(json.data)) throw shapeError("POST /graphql");
+    return json.data;
   }
 
   /** `default_branch` of `GET /repos/{owner}/{repo}`. */
@@ -2206,6 +2394,186 @@ export function createGithubAppClient(
     },
 
     revokeInstallationToken,
+
+    async readTrackerIssues(
+      installationId,
+      scope,
+      repoFullName,
+      page,
+      since,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPage(page);
+      if (since !== undefined && !SINCE_PATTERN.test(since))
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The time to read the issues from is not an ISO 8601 time in UTC.",
+        );
+      // GitHub takes whole seconds: the time is cut down to the second (the item it names is read once more, which is harmless).
+      const from =
+        since === undefined
+          ? ""
+          : `&since=${encodeURIComponent(since.replace(/\.\d+Z$/, "Z"))}`;
+      const path = `${repoPath(repoFullName)}/issues?state=all&sort=updated&direction=asc&per_page=${PAGE_SIZE}&page=${page}${from}`;
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(token, "GET", path, undefined, signal);
+          if (!Array.isArray(json))
+            throw shapeError("GET /repos/{owner}/{repo}/issues");
+          const items: TrackerItemFields[] = [];
+          let skipped = 0;
+          for (const entry of json) {
+            const item = toTrackerItem(entry, repoFullName);
+            // One odd record cannot block the sync: it is left out and the rest is read. The sync is told, and removes nothing.
+            if (item === null) {
+              skipped += 1;
+              warn("A ticket of the list could not be read and was left out.");
+            } else items.push(item);
+          }
+          return { items, last: json.length < PAGE_SIZE, skipped };
+        },
+        signal,
+      );
+    },
+
+    async readTrackerChecks(installationId, scope, repoFullName, page, signal) {
+      checkInstallationId(installationId);
+      checkPage(page);
+      const path = repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(
+            token,
+            "GET",
+            `${path}/pulls?state=open&sort=created&direction=asc&per_page=${CHECKS_PAGE_SIZE}&page=${page}`,
+            undefined,
+            signal,
+          );
+          if (!Array.isArray(json))
+            throw shapeError("GET /repos/{owner}/{repo}/pulls");
+          const pullRequests: { number: number; checksState: string | null }[] =
+            [];
+          for (const entry of json) {
+            const pr = toPullRequestRef(entry);
+            if (pr === null) {
+              warn(
+                "A pull request of the list could not be read and was left out.",
+              );
+              continue;
+            }
+            pullRequests.push({
+              number: pr.number,
+              checksState: await readCommitChecks(
+                token,
+                path,
+                pr.headSha,
+                signal,
+              ),
+            });
+          }
+          return { pullRequests, last: json.length < CHECKS_PAGE_SIZE };
+        },
+        signal,
+      );
+    },
+
+    async readChecksState(
+      installationId,
+      scope,
+      repoFullName,
+      headSha,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      const path = repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        (token) => readCommitChecks(token, path, headSha, signal),
+        signal,
+      );
+    },
+
+    async readTrackerBoard(installationId, scope, repoFullName, after, signal) {
+      checkInstallationId(installationId);
+      const slash = repoFullName.indexOf("/");
+      repoPath(repoFullName);
+      const unavailable: {
+        available: boolean;
+        items: { nodeId: string; status: string | null }[];
+        next: string | null;
+      } = { available: false, items: [], next: null };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            // `after` is "<index of the board>:<cursor within it>"; the first page starts at board 0.
+            const separator = after === null ? -1 : after.indexOf(":");
+            const index =
+              after === null || separator < 0
+                ? 0
+                : Number(after.slice(0, separator));
+            // "<index>:" is the start of that board: no cursor within it yet.
+            const within =
+              after === null || separator < 0 ? "" : after.slice(separator + 1);
+            const cursor = within === "" ? null : within;
+            if (!Number.isInteger(index) || index < 0 || index >= BOARDS_MAX)
+              return { available: true, items: [], next: null };
+
+            const projects = await graphql(
+              token,
+              BOARDS_QUERY,
+              {
+                owner: repoFullName.slice(0, slash),
+                name: repoFullName.slice(slash + 1),
+                first: BOARDS_MAX,
+              },
+              signal,
+            );
+            if (projects === null) return unavailable;
+            const boards = boardIdsOf(projects);
+            if (boards === null) return unavailable;
+            const board = boards[index];
+            if (board === undefined)
+              return { available: true, items: [], next: null };
+
+            const data = await graphql(
+              token,
+              BOARD_ITEMS_QUERY,
+              { project: board, after: cursor, first: BOARD_PAGE_SIZE },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const page = boardPageOf(data);
+            if (page === null) return unavailable;
+            const next =
+              page.endCursor !== null && page.hasNextPage
+                ? `${index}:${page.endCursor}`
+                : index + 1 < boards.length
+                  ? `${index + 1}:`
+                  : null;
+            return { available: true, items: page.items, next };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
 
     async mintInstallationToken(installationId, scope) {
       if (scope.repositoryIds.length === 0)

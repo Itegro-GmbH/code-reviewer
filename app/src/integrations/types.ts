@@ -288,6 +288,114 @@ export type PullRequestRef = {
   author: TriggerActor;
 };
 
+/**
+ * An issue or a pull request as the platform delivers it, for the ticket mirror (#923). The values are the platform's own: nothing is
+ * mapped (`state`, `type` and the reason are shown as they come); the texts are those of whoever wrote the ticket, bounded, and data like
+ * any other text.
+ */
+export type TrackerItemFields = {
+  number: number;
+  /** The platform's global id; how an item of a project board is matched with its ticket. */
+  nodeId: string;
+  kind: "issue" | "pull_request";
+  state: "open" | "closed";
+  /** The platform's reason (`completed`, `not_planned`, `reopened`); `merged` for a merged pull request; null for none. */
+  stateReason: string | null;
+  /** The issue type of the organization; null for none and for a pull request. */
+  type: string | null;
+  title: string;
+  /** The start of the description, at most `TRACKER_EXCERPT_CHARS` characters. */
+  bodyExcerpt: string;
+  labels: { name: string; color: string }[];
+  assignees: { login: string }[];
+  /**
+   * The issue this one is a sub-issue of, in the same repository; null for none; `undefined` when the delivery does not say (the cache
+   * then keeps what it has).
+   */
+  parentNumber?: number | null;
+  /** For a pull request: the issues of the same repository it closes (`Closes #12`). Empty for an issue. */
+  closes: number[];
+  /** ISO 8601 text in UTC: the platform's time of the last change. */
+  updatedAt: string;
+};
+
+/** How much of a description the mirror keeps. */
+export const TRACKER_EXCERPT_CHARS = 500;
+
+/** What a verified delivery changed in the ticket mirror (#923), whatever the platform called the event. */
+export type TrackerChange =
+  /** An issue or pull request was created or changed. `resetChecks`: the commit of the pull request changed, its checks are not known. */
+  | {
+      kind: "item_changed";
+      repo: RepoRef;
+      item: TrackerItemFields;
+      resetChecks: boolean;
+    }
+  /** An issue was deleted or moved to another repository. `at`: the platform's time of the issue as the delivery shows it (ISO 8601, UTC). */
+  | { kind: "item_removed"; repo: RepoRef; number: number; at: string }
+  /**
+   * A sub-issue got a parent (`parent` is its number), or lost it (null). `at`: the platform's time of the sub-issue as the delivery shows
+   * it, the clock of `TrackerItemFields.updatedAt` (a delivery older than what the cache holds is dropped).
+   */
+  | {
+      kind: "parent_changed";
+      repo: RepoRef;
+      child: number;
+      parent: number | null;
+      at: string;
+    }
+  /** An item of a project board got another status (`null`: it has none now, or left the board). */
+  | { kind: "board_status_changed"; nodeId: string; status: string | null }
+  /** The checks of a commit changed: the cache asks the platform for the state of these pull requests. */
+  | {
+      kind: "checks_changed";
+      repo: RepoRef;
+      headSha: string;
+      pullRequests: number[];
+    };
+
+/** What a delivery says about the ticket mirror: a change, or why it is none. */
+export type TrackerChangeResult =
+  | { kind: "change"; change: TrackerChange }
+  | { kind: "ignored"; reason: string }
+  | { kind: "invalid_payload"; reason: string };
+
+/** Where a full sync of a repository's tickets stands, as far as the platform is asked: one page of one phase at a time. */
+export type TrackerPageStep =
+  /**
+   * Every issue and pull request, any state, the least recently changed first. `since` (ISO 8601, UTC) leaves out what changed before it:
+   * a sync continues a list that is longer than the platform lets one walk by asking from the time of the last item it read, with `page`
+   * counting from there.
+   */
+  | { phase: "issues"; page: number; since?: string }
+  /** The open pull requests, and the state of the checks of each. */
+  | { phase: "checks"; page: number }
+  /** The status of the items of the project boards of the repository. `after` is the opaque position the last page returned. */
+  | { phase: "board"; after: string | null };
+
+/** One page of a phase, and where the next one is. */
+export type TrackerPage =
+  | {
+      phase: "issues";
+      items: TrackerItemFields[];
+      last: boolean;
+      /** How many tickets of the page could not be read and are not in `items` (absent: none). */
+      skipped?: number;
+    }
+  | {
+      phase: "checks";
+      pullRequests: { number: number; checksState: string | null }[];
+      last: boolean;
+    }
+  | {
+      phase: "board";
+      /** False when the platform does not let the app read boards (a permission is missing): the phase has nothing to say. */
+      available: boolean;
+      items: { nodeId: string; status: string | null }[];
+      /** The position to ask for next; null on the last page. */
+      next: string | null;
+    };
+
 /** What a connection has accepted on the platform (#749): whether the app may write the contents of its repositories. */
 export type ConnectionPermissions = { contentsWrite: boolean };
 
