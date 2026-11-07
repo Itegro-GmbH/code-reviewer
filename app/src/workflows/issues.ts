@@ -76,6 +76,10 @@ export const SEMANTIC_ISSUE_CODES = [
   "profile_version_unknown",
   /** No environment of that name in the workspace. */
   "environment_unknown",
+  /** The step names an environment other than the one of its profile (#919): a profile says where it works. `available` names the profile's. */
+  "environment_mismatch",
+  /** The profile names no environment (a version saved before #919) and the step names none either (#919). `available` names the environments. */
+  "environment_required",
   /** A step runs a profile with a managed model (the platform's key) in a runner environment; a runner works with the owner's own key (#854). */
   "runner_needs_own_key",
   /** A step runs a profile whose harness is not OpenCode in an environment that is not a runner's (#854). */

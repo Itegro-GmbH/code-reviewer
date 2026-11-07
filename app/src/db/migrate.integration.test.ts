@@ -149,6 +149,7 @@ describe("the migrations of both epics", () => {
       "20261107150000_add_implementer_turn_time_limit",
       "20261107160000_create_tracker_mirror",
       "20261107170000_add_workflow_run_waiting",
+      "20261107180000_add_profile_environment",
       "20261107190000_project_ticket_source",
     ]);
   });

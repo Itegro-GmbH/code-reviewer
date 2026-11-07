@@ -50,6 +50,7 @@ describe("docs/profiles.md", () => {
     expect(reviewer).toEqual({
       name: "reviewer",
       model: { entryId: "..." },
+      environment: "node",
       ...REVIEWER_PROFILE,
     });
   });

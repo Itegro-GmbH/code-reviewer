@@ -1,6 +1,6 @@
 # Profiles: versioned data for the agents (#843, milestone 2 of #833)
 
-A profile is what a member of a workspace writes to say how an agent works: model, standing instructions, push right and an optional default
+A profile is what a member of a workspace writes to say who works and where: harness, model, standing instructions, push right, the environment it runs in (#919) and an optional default
 result schema. The format, the fields, the API, the push right and how a task uses a profile: [`docs/profiles.md`](../../../docs/profiles.md). This folder is
 the **validator** and the **API** behind it; the storage is `profiles` and `profile_versions` in
 `src/db/repositories/profiles-repository.ts` (scoped to a workspace; every save an immutable version, archived rather than deleted, the name fixed for
@@ -14,6 +14,10 @@ the life of the profile).
 | `limits.ts`                         | The bounds: name pattern, lengths, counts per workspace                                                                                                                                                                                                                              |
 
 ## Decisions where the plan left room
+
+- **The environment is part of the profile (#919).** The body names it (`environment`, a name); the service resolves it against the workspace's environments, stores its id
+  (`profile_versions.environment_id`, no foreign key: a version is history, the environment may go) and shows the name again in the `document`. A version saved before has none
+  (`null`) and its workflow steps name the environment (an id of a removed environment shows `null` too, but with `environmentGone: true` in the view, so the page can say "removed" instead of "saved before"); every new version needs one (`missing_field`), and `runner_needs_own_key` and `harness_needs_runner` are checked here too.
 
 - **Nothing is built in and nothing is seeded.** A task without a profile runs with the platform's own defaults, exactly as before profiles. Today's
   Implementer is reproducible as the profile `{"name": "implementer", "model": ..., "canPush": true}`: a task started with it is identical (the prompt text is

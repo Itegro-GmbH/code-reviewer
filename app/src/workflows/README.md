@@ -51,7 +51,9 @@ deleted: hidden from the list, no new version, free name, versions kept.
   certain to exist afterwards. After a **loop**: the body's own steps with the last round's values (a body runs at least once and a round runs to its
   end; the budget is checked between rounds). `previous.*`: direct steps of the innermost loop body only, from round two.
 - **A loop's own result** is `exit` and `rounds`; the plan's `{{fix.findings}}` is `{{review.findings}}` in version 1.
-- **`environment` is a name**, a literal only (names are unique in a workspace, case ignored): a reference is `target_from_untrusted_value`.
+- **`environment` is a name**, a literal only (names are unique in a workspace, case ignored): a reference is `target_from_untrusted_value`. Since #919 it is optional and
+  deprecated: the profile version names the environment (`environmentId` in its facts, matched with the `id` of the resolver's environments), the step must not name another
+  (`environment_mismatch`), and only a version saved before #919 needs it (`environment_required`).
   `trigger.repo.defaultEnvironment` of the plan's example does not exist: nothing maps a repository to an environment yet.
 - **One repository per run.** The run's repository is the ticket's (`trigger.ticket.repo`: a label trigger, or a manual or api trigger whose input declares `ticket`) or the input `repo` a manual trigger declares; no node names another one.
 - **Several triggers (#916).** `triggers` is a list, each entry with an `id` and `steps` (pre-steps); the single `trigger` of before is read as a list of one, `github.issueLabeled` as `ticket.labeled`. The pre-steps of a trigger see that
