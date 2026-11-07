@@ -33,6 +33,12 @@ vi.mock("@/workflows/shared", () => ({
 vi.mock("@/workflow-runs/shared", () => ({
   workflowRunServiceFor: services.workflowRunServiceFor,
 }));
+// The builder of a workflow (#926) lists the workspace's profiles for its agent steps.
+vi.mock("@/profiles/shared", () => ({
+  profileServiceFor: vi.fn(() => ({
+    list: async () => ({ profiles: [] }),
+  })),
+}));
 
 import { WorkflowError } from "@/workflows/errors";
 import { WorkflowRunError } from "@/workflow-runs/errors";

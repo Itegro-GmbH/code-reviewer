@@ -163,4 +163,22 @@ describe("requesting JSON from the app", () => {
       issues: [{ field: "model", code: "EMPTY" }],
     });
   });
+
+  it("hands an abort signal to fetch", async () => {
+    const seen: (AbortSignal | null | undefined)[] = [];
+    const controller = new AbortController();
+    await requestJson(
+      (_url, init) => {
+        seen.push(init?.signal);
+        return Promise.resolve(
+          new Response(JSON.stringify({}), { status: 200 }),
+        );
+      },
+      "POST",
+      "/api/x",
+      {},
+      controller.signal,
+    );
+    expect(seen).toEqual([controller.signal]);
+  });
 });

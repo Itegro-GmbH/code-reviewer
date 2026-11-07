@@ -76,6 +76,8 @@ export async function requestJson<T>(
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   url: string,
   body?: unknown,
+  /** Aborting it ends the call as a `NETWORK_ERROR`; the caller that aborted ignores the result. */
+  signal?: AbortSignal,
 ): Promise<RequestResult<T>> {
   let response: Response;
   try {
@@ -87,6 +89,7 @@ export async function requestJson<T>(
         ...(body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal === undefined ? {} : { signal }),
     });
   } catch {
     return failure(null, "NETWORK_ERROR");
