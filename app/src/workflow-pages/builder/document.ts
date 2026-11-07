@@ -176,18 +176,6 @@ export function insertNode(
   return { doc: setList(doc, list, entries), pointer: child(list, at) };
 }
 
-/** The pointer, once `pointer` is removed, of the node that was after it in its list (it moves into the place); undefined when it was the last. */
-export function successorAfterRemoval(
-  doc: Doc,
-  pointer: Pointer,
-): Pointer | undefined {
-  const place = splitNode(pointer);
-  if (place === undefined) return undefined;
-  return place.index + 1 < listAt(doc, place.list).length
-    ? child(place.list, place.index)
-    : undefined;
-}
-
 /** Removes a node of a list; the pointer of the node that takes its place in the view (the previous one, else the list's owner). */
 export function removeNode(
   doc: Doc,

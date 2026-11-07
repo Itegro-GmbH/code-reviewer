@@ -13,7 +13,11 @@ import type {
   WorkflowsRepository,
 } from "../db/repositories/workflows-repository.ts";
 import { builtInLaneDocument, type BuiltInLaneKey } from "./built-in-lanes.ts";
-import { WorkflowError, type WorkflowErrorCode } from "./errors.ts";
+import {
+  WorkflowError,
+  type WorkflowErrorCode,
+  type WorkflowRequestIssue,
+} from "./errors.ts";
 import type { Issue } from "./issues.ts";
 import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
@@ -23,8 +27,17 @@ import {
   WORKFLOW_ID_MAX_LENGTH,
   WORKFLOWS_PER_WORKSPACE_MAX,
 } from "./limits.ts";
+import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
+import { isRecord } from "./json.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
-import { createResolver } from "./resolver.ts";
+import {
+  REACH_WANTS,
+  reachAt,
+  type ReachSamples,
+  type ReachWants,
+  type ScopeAnswer,
+} from "./reach.ts";
+import { createResolver, type WorkflowResolver } from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
 
 export type WorkflowSummaryView = {
@@ -69,6 +82,12 @@ export type WorkflowView = WorkflowSummaryView & {
 export type WorkflowService = {
   /** Checks a document against the format and the workspace's environments. Stores nothing. */
   validate(body: unknown): Promise<ValidationResult>;
+  /**
+   * The values a step of an unsaved document can reach (#927), by the validator's own scope rules. The body is
+   * `{ document, at, targetRoots?, wants?, workflowId? }`: `at` is a JSON pointer into the document, `targetRoots` the roots a target input
+   * takes (only those values are listed), `workflowId` the lane whose latest run gives the samples.
+   */
+  scope(body: unknown): Promise<ScopeAnswer>;
   /** The lanes of one project (#922). Throws `WORKFLOW_PROJECT_REQUIRED` when `projectId` is missing or no project of the workspace. */
   list(projectId: string | undefined): Promise<WorkflowList>;
   /** The workflow with its current version, or with the version asked for. */
@@ -115,6 +134,8 @@ export type WorkflowServiceDependencies = {
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
   archivedMax?: number;
+  /** What the latest run of a workflow held, for the samples of the scope lookup (#927); none: no samples. */
+  samples?: (workflowId: string) => Promise<ReachSamples | undefined>;
 };
 
 function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
@@ -136,8 +157,10 @@ export function createWorkflowService({
   profiles,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
+  samples,
 }: WorkflowServiceDependencies): WorkflowService {
-  async function validateDocument(body: unknown): Promise<ValidationResult> {
+  /** The resolver of the workspace for a document: its environments, and the profiles (with the facts) the document runs. */
+  async function resolverFor(body: unknown): Promise<WorkflowResolver> {
     const known = await environments.listSummaries();
     // The profiles of the workspace, with the facts of the versions the document runs and no others.
     const live = (await profiles.list()).map((profile) => ({
@@ -147,15 +170,103 @@ export function createWorkflowService({
     }));
     const { wanted, build } = profileInfosOf(live, profileRefsIn(body));
     const facts = await profiles.versionFacts(wanted);
-    return validateWorkflow(
-      body,
-      createResolver({
-        environments: known,
-        profiles: build(facts),
-        archivedProfiles: await profiles.archivedNames(),
-      }),
-      { maxBudgetUsd },
+    return createResolver({
+      environments: known,
+      profiles: build(facts),
+      archivedProfiles: await profiles.archivedNames(),
+    });
+  }
+
+  async function validateDocument(body: unknown): Promise<ValidationResult> {
+    return validateWorkflow(body, await resolverFor(body), { maxBudgetUsd });
+  }
+
+  const badScope = (
+    issue: WorkflowRequestIssue,
+    message: string,
+  ): WorkflowError =>
+    new WorkflowError("WORKFLOW_REQUEST_INVALID", message, {
+      issues: [issue],
+    });
+
+  async function scopeOf(body: unknown): Promise<ScopeAnswer> {
+    if (!isRecord(body) || typeof body.at !== "string")
+      throw badScope(
+        {
+          path: "at",
+          code: "body_invalid",
+          message:
+            "The body is {document, at}: at is the JSON pointer of the step, like /steps/1.",
+          available: [],
+        },
+        "The body must be an object with document and at.",
+      );
+    const roots = body.targetRoots;
+    if (
+      roots !== undefined &&
+      (!Array.isArray(roots) ||
+        !roots.every(
+          (root): root is TargetRoot =>
+            typeof root === "string" &&
+            (TARGET_ROOTS as readonly string[]).includes(root),
+        ))
+    )
+      throw badScope(
+        {
+          path: "targetRoots",
+          code: "scope_target_unknown",
+          message: "targetRoots is a list of the roots a target input takes.",
+          available: [...TARGET_ROOTS],
+        },
+        "targetRoots names a root the format does not have.",
+      );
+    const wants = body.wants;
+    if (
+      wants !== undefined &&
+      !(REACH_WANTS as readonly unknown[]).includes(wants)
+    )
+      throw badScope(
+        {
+          path: "wants",
+          code: "scope_wants_unknown",
+          message:
+            "wants is the kind of value the field takes: text, comparable or emptiable.",
+          available: [...REACH_WANTS],
+        },
+        "wants names a kind of value the format does not have.",
+      );
+    const workflowId =
+      typeof body.workflowId === "string" &&
+      body.workflowId.length > 0 &&
+      body.workflowId.length <= WORKFLOW_ID_MAX_LENGTH
+        ? body.workflowId
+        : undefined;
+    const held =
+      workflowId === undefined ? undefined : await samples?.(workflowId);
+    const reach = reachAt(
+      body.document,
+      await resolverFor(body.document),
+      body.at,
+      {
+        maxBudgetUsd,
+        ...(roots === undefined
+          ? {}
+          : { target: { input: "this field", roots: roots as TargetRoot[] } }),
+        ...(wants === undefined ? {} : { wants: wants as ReachWants }),
+        ...(held === undefined ? {} : { samples: held }),
+      },
     );
+    if (reach === undefined)
+      throw badScope(
+        {
+          path: "at",
+          code: "scope_at_unknown",
+          message: "at is not a step of the document.",
+          available: [],
+        },
+        "at is not a step of the document.",
+      );
+    return { ...reach, sampled: held !== undefined };
   }
 
   async function viewOf(
@@ -286,6 +397,8 @@ export function createWorkflowService({
 
   return {
     validate: validateDocument,
+
+    scope: scopeOf,
 
     async list(projectId) {
       const project = await projectOf(projectId);

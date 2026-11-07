@@ -27,6 +27,7 @@ import { integrationRegistry } from "../integrations/registry.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { loadAuthConfig } from "../auth/config.ts";
+import type { ReachSamples } from "../workflows/reach.ts";
 import { createGithubAskChannel } from "./ask-channel.ts";
 import { runPagePath } from "./ask-comment.ts";
 import { createTicketAnswers, type TicketAnswers } from "./ticket-answers.ts";
@@ -41,6 +42,7 @@ import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
 import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
+import { latestRunSamples } from "./samples.ts";
 import {
   createWorkflowRunService,
   type WorkflowRunService,
@@ -355,4 +357,12 @@ export function reconcileWorkflowRuns(
       );
     },
   });
+}
+
+/** What the latest run of a workflow of one workspace held, for the samples of the picker of the lane builder (#927). */
+export function runSamplesFor(
+  workspaceId: string,
+): (workflowId: string) => Promise<ReachSamples | undefined> {
+  const runs = createWorkflowRunsRepository(getDatabase(), workspaceId);
+  return (workflowId) => latestRunSamples(runs, workflowId);
 }

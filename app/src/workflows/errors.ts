@@ -63,7 +63,13 @@ export const WORKFLOW_ERROR_STATUS: Record<WorkflowErrorCode, number> = {
 /** A request value that cannot be used (#922), with the names that would have been accepted. */
 export type WorkflowRequestIssue = {
   path: string;
-  code: "project_required" | "project_unknown";
+  code:
+    | "project_required"
+    | "project_unknown"
+    | "body_invalid"
+    | "scope_at_unknown"
+    | "scope_target_unknown"
+    | "scope_wants_unknown";
   message: string;
   available: string[];
 };

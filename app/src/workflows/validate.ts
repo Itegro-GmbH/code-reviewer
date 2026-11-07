@@ -55,6 +55,12 @@ type Report = (found: Issue) => void;
 export type ValidateOptions = {
   /** The most a workflow may be given to spend, in USD: the operator's limit. */
   maxBudgetUsd?: number;
+  /**
+   * For the scope lookup (`reach.ts`): called with where every node sits and what it can reach (see `Checker.probe`). `done` ends the
+   * check as soon as it is true, so a lookup does not read the rest of the document.
+   */
+  probe?: Checker["probe"];
+  done?: () => boolean;
 };
 
 export type ValidationResult = {
@@ -729,8 +735,12 @@ export function validateWorkflow(
     resolver,
     index,
     report,
-    halted: sink.halted,
+    halted:
+      options.done === undefined
+        ? sink.halted
+        : () => sink.halted() || options.done?.() === true,
     retriggerLabels,
+    ...(options.probe === undefined ? {} : { probe: options.probe }),
   };
   const state: StepState = {
     depth: 0,

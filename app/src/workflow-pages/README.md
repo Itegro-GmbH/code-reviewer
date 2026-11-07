@@ -25,7 +25,7 @@ Everything a step returned (an agent's result, what a connector got from GitHub)
 
 ## The lane builder
 
-`builder/` (#926) is the editor on the page of one workflow: what it does is in [`docs/workflows.md`](../../../docs/workflows.md#the-lane-builder). The document is the only state and is edited as plain JSON; the validator is asked through the validate route, never reimplemented.
+`builder/` (#926) is the editor on the page of one workflow: what it does is in [`docs/workflows.md`](../../../docs/workflows.md#the-lane-builder). The document is the only state and is edited as plain JSON; the validator is asked through the validate route, never reimplemented; the values a field can reach come from the scope route (#927), which reads the validator's own scope.
 
 | File                                                       | Role                                                                                                                                                 |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -35,5 +35,8 @@ Everything a step returned (an agent's result, what a connector got from GitHub)
 | `schema.ts`, `action-fields.ts`                            | A result schema as a table of fields; the inputs of an action from the connectors' own specs (`workflows/connectors.ts`)                             |
 | `builder.tsx`                                              | The client component: state, the validation after each change, save with `expectedVersion`, JSON, Run now                                            |
 | `flow.tsx`, `inspector.tsx`, `lane-card.tsx`               | The flow, the fields of the selected node, the limits and versions                                                                                   |
+| `chips.ts`                                                 | A text as plain stretches and chips (`{{…}}` kept as written, so the stored text is never rewritten); insert at the cursor, remove one chip (#927)   |
+| `reference-control.tsx`, `reference-picker.tsx`            | A text field with chips and a + (`ReferenceControl`, `ReferenceInput`), and the popup under it: search, categories, values with type and sample      |
+| `reach-context.tsx`                                        | The lookup the fields ask for the values they can reach; the builder binds it to its document and lane                                               |
 | `controls.tsx`, `condition-editor.tsx`, `schema-table.tsx` | The small controls                                                                                                                                   |
-| `api.ts`, `copy.ts`                                        | The calls to the validate and save routes; the copy (the validator's own sentences are shown as they come, every other sentence is here)             |
+| `api.ts`, `copy.ts`                                        | The calls to the validate, scope and save routes; the copy (the validator's own sentences are shown as they come, every other sentence is here)      |

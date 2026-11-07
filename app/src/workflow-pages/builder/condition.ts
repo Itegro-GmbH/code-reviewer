@@ -29,7 +29,8 @@ export function operandKind(operand: unknown): OperandKind {
 
 /**
  * The operand a text stands for, for the kind the person chose: a text stays a text however much it looks like a number (`"3"` is not
- * `3`); only a number field turns what is typed into a number (an empty one is 0, text that is no number leaves the operand as it was).
+ * `3`); only a number field turns what is typed into a number. Text that is no number yet (empty, a lone `-`, `1e`) leaves the operand
+ * as it was: the field keeps what is typed as a draft (`condition-editor.tsx`), the document is not written to guess.
  */
 export function operandFrom(
   text: string,
@@ -38,7 +39,7 @@ export function operandFrom(
 ): unknown {
   if (kind === "boolean") return text === "true";
   if (kind === "text") return text;
-  if (text.trim() === "") return 0;
+  if (text.trim() === "") return previous;
   const number = Number(text);
   return Number.isFinite(number) ? number : previous;
 }
