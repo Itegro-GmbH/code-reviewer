@@ -4,9 +4,11 @@
 // "Resync" on the Setup tab (#937): the full sync of the ticket mirror of the project's repository. One call reads for about twenty seconds
 // and answers 202 while more is left, so the button asks again until the answer is 200 and shows how far it is; what was read stays
 // whatever happens, so an error or the limit of calls ends with "press Resync to go on". The hint above it tells when the tickets may be
-// out of date (`sync-staleness.ts`). The page refreshes afterwards so the hint follows the new state.
+// out of date (`sync-staleness.ts`), or, right after the board was changed, that the tickets still show the old board's statuses (`prompted`).
+// The page refreshes afterwards so the hint follows the new state. Leaving the page aborts the call under way and ends the loop; a second
+// click while the loop runs does nothing (a ref, not the rendered state, which a double click can beat).
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowClockwiseIcon } from "@phosphor-icons/react/dist/ssr";
 import { Button } from "../../components/button.tsx";
 import { Alert } from "../../components/ui/alert.tsx";
@@ -28,12 +30,15 @@ export function ResyncTickets({
   workspaceSlug,
   repositoryId,
   staleness,
+  prompted = false,
   api: apiProp,
 }: {
   workspaceSlug: string;
   repositoryId: string;
   /** The hint the page worked out from the sync state of the tickets, or null for none. */
   staleness: SyncStaleness | null;
+  /** The board was just changed: the tickets still carry the old board's statuses until this has run. Takes the place of the staleness hint. */
+  prompted?: boolean;
   /** Only tests pass this. */
   api?: SetupApi;
 }) {
@@ -46,12 +51,37 @@ export function ResyncTickets({
   const api = apiProp ?? defaultApi;
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const running = outcome?.kind === "running";
+  const busy = useRef(false);
+  const controller = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      controller.current?.abort();
+    },
+    [],
+  );
 
   async function run() {
+    if (busy.current) return;
+    busy.current = true;
+    const abort = new AbortController();
+    controller.current = abort;
+    try {
+      await loop(abort.signal);
+    } finally {
+      busy.current = false;
+      if (controller.current === abort) controller.current = null;
+    }
+  }
+
+  async function loop(signal: AbortSignal) {
     let written = 0;
     for (let call = 1; call <= RESYNC_MAX_CALLS; call += 1) {
+      if (signal.aborted) return;
       setOutcome({ kind: "running", call });
-      const result = await api.resync(repositoryId);
+      const result = await api.resync(repositoryId, signal);
+      // The page was left: nothing to show, nothing to refresh.
+      if (signal.aborted) return;
       if (!result.ok) {
         setOutcome({
           kind: "stopped",
@@ -83,7 +113,11 @@ export function ResyncTickets({
 
   return (
     <div className="flex flex-col gap-2">
-      {staleness !== null ? (
+      {prompted && outcome?.kind !== "done" ? (
+        <Alert variant="warning" role="note">
+          {RESYNC_COPY.boardChanged}
+        </Alert>
+      ) : staleness !== null ? (
         <Alert variant="warning" role="note">
           {staleness.kind === "never"
             ? RESYNC_COPY.never
@@ -92,7 +126,9 @@ export function ResyncTickets({
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Button
-          variant="secondary"
+          variant={
+            prompted && outcome?.kind !== "done" ? "primary" : "secondary"
+          }
           disabled={running}
           onClick={() => void run()}
         >
@@ -103,7 +139,12 @@ export function ResyncTickets({
           {outcome?.kind === "done" ? (
             outcome.text.map((line) => <span key={line}>{line}</span>)
           ) : outcome?.kind === "stopped" ? (
-            <span className="text-destructive">{outcome.text}</span>
+            <>
+              <span className="text-destructive">{outcome.text}</span>
+              {outcome.written > 0 ? (
+                <span>{RESYNC_COPY.kept(outcome.written)}</span>
+              ) : null}
+            </>
           ) : null}
         </StatusRegion>
       </div>

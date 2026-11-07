@@ -280,4 +280,27 @@ describe("a manual start within the project of the lane (#922)", () => {
     expect(other.code).toBe("WORKFLOW_RUN_REQUEST_REUSED");
     expect(created).toEqual([]);
   });
+
+  // #937-T23
+  it("does not answer a replay that leaves repo out with a run that named it on a lane without a project", async () => {
+    const earlier = {
+      id: "run-1",
+      workflowId: "wf-1",
+      triggerId: "manual",
+      triggerInput: JSON.stringify({ repo: "acme/widgets" }),
+    } as unknown as StoredWorkflowRun;
+    const { service, created } = harness(BY_REPO, null, earlier);
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", { input: {}, clientRequestId: "r-1" }),
+    );
+    const same = await service.start(USER, "wf-1", {
+      input: { repo: "acme/widgets" },
+      clientRequestId: "r-1",
+    });
+
+    expect(failure.code).toBe("WORKFLOW_RUN_REQUEST_REUSED");
+    expect(same.created).toBe(false);
+    expect(created).toEqual([]);
+  });
 });

@@ -12,9 +12,9 @@ import { projectPath } from "@/projects/ui/project-cards";
 import { ProjectToggle } from "@/projects/ui/project-toggle";
 import { SyncButton } from "@/projects/ui/sync-button";
 import { TicketSourceCard } from "@/projects/ui/project-tabs";
-import { ResyncTickets } from "@/projects/ui/resync-tickets";
 import { syncStaleness, type SyncState } from "@/projects/ui/sync-staleness";
-import { TicketBoardPicker } from "@/projects/ui/ticket-board-picker";
+import { TicketSourceControls } from "@/projects/ui/ticket-source-controls";
+import { TrackerError } from "@/tracker/errors";
 import { trackerServiceFor } from "@/tracker/shared";
 import { ACTIVATION_BLOCKED_TEXT } from "@/projects/ui/projects-page";
 import { StartReviewDialog } from "@/manual-reviews/ui/start-review-dialog";
@@ -55,19 +55,31 @@ export default async function ProjectSetupPage({
   );
 }
 
-/** Where the ticket cache stands, or null when it cannot be read (the project is off, the platform is gone): no hint then. */
+/** Codes that only say there is nothing to tell: the repository is gone or its project is off, so the page has no hint. */
+const NO_STATE_CODES: ReadonlySet<string> = new Set([
+  "TRACKER_REPOSITORY_NOT_FOUND",
+  "TRACKER_PROJECT_NOT_ACTIVE",
+]);
+
+/**
+ * Where the ticket cache stands, or null for no hint. A project that is off or a repository that is gone is expected; anything else is
+ * logged by its code (never the message) and the page renders without the hint.
+ */
 async function syncStateOf(
   workspaceId: string,
   repositoryId: string,
 ): Promise<SyncState | null> {
   try {
-    const list = await trackerServiceFor(workspaceId).listIssues(repositoryId, {
-      state: "open",
-      limit: 1,
-      offset: 0,
-    });
-    return list.sync;
-  } catch {
+    return await trackerServiceFor(workspaceId).syncState(repositoryId);
+  } catch (error) {
+    const code =
+      error instanceof TrackerError
+        ? error.code
+        : error instanceof Error
+          ? error.name
+          : "unknown";
+    if (!NO_STATE_CODES.has(code))
+      console.error(`[setup] reading the sync state failed (${code})`);
     return null;
   }
 }
@@ -111,21 +123,16 @@ async function SetupContent({
       <TicketSourceCard row={row}>
         {project === null ? null : (
           <>
-            <TicketBoardPicker
-              key={`${project.id}:${project.ticketSource.board?.projectV2Id ?? ""}`}
+            <TicketSourceControls
+              key={project.id}
               workspaceSlug={workspaceSlug}
               projectId={project.id}
               repositoryId={row.repositoryId}
               board={project.ticketSource.board?.projectV2Id ?? null}
               canChange={canManage}
+              showResync={canChangeSettings && row.switchedOn}
+              staleness={syncStaleness(sync, new Date())}
             />
-            {canChangeSettings && row.switchedOn ? (
-              <ResyncTickets
-                workspaceSlug={workspaceSlug}
-                repositoryId={row.repositoryId}
-                staleness={syncStaleness(sync, new Date())}
-              />
-            ) : null}
           </>
         )}
       </TicketSourceCard>

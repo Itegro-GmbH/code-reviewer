@@ -47,6 +47,7 @@ function renderPicker(
     setBoard?: SetupApi["setBoard"];
     board?: string | null;
     canChange?: boolean;
+    onSaved?: () => void;
   } = {},
 ) {
   const boards = vi.fn<SetupApi["boards"]>(
@@ -56,17 +57,25 @@ function renderPicker(
     options.setBoard ??
       (async () => ({ ok: true, data: { project: { id: "p-1" } } })),
   );
-  render(
+  const api = { boards, setBoard, resync: vi.fn() };
+  const element = (board: string | null) => (
     <TicketBoardPicker
       workspaceSlug="acme"
       projectId="p-1"
       repositoryId="repo-1"
-      board={options.board ?? null}
+      board={board}
       canChange={options.canChange ?? true}
-      api={{ boards, setBoard, resync: vi.fn() }}
-    />,
+      {...(options.onSaved === undefined ? {} : { onSaved: options.onSaved })}
+      api={api}
+    />
   );
-  return { boards, setBoard };
+  const { rerender } = render(element(options.board ?? null));
+  return {
+    boards,
+    setBoard,
+    /** What the page does after `router.refresh()`: the same picker with the project's new board. */
+    refreshWith: (board: string | null) => rerender(element(board)),
+  };
 }
 
 describe("the board picker", () => {
@@ -89,9 +98,10 @@ describe("the board picker", () => {
   });
 
   // #937-T51
-  it("saves a chosen board at once, says so and refreshes the page", async () => {
+  it("saves a chosen board at once, says the old statuses stay until Resync, tells the page and refreshes it", async () => {
     const user = userEvent.setup();
-    const { setBoard } = renderPicker();
+    const onSaved = vi.fn();
+    const { setBoard } = renderPicker({ onSaved });
     const select = await screen.findByLabelText("Board (optional)");
     await waitFor(() =>
       expect((select as HTMLSelectElement).disabled).toBe(false),
@@ -100,9 +110,74 @@ describe("the board picker", () => {
     await user.selectOptions(select, "PVT_1");
 
     expect(setBoard).toHaveBeenCalledWith("p-1", "PVT_1");
-    expect(await screen.findByText(/Board saved/)).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /Board saved.*old board.*press Resync to read the new board/,
+      ),
+    ).toBeTruthy();
     expect((select as HTMLSelectElement).value).toBe("PVT_1");
     expect(navigation.refresh).toHaveBeenCalledTimes(1);
+    expect(onSaved).toHaveBeenCalledTimes(1);
+  });
+
+  // #937-T56
+  it("keeps the saved message and does not read the boards again when the page refreshes with the new board", async () => {
+    const user = userEvent.setup();
+    const { boards, refreshWith } = renderPicker();
+    const select = (await screen.findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(false));
+    await user.selectOptions(select, "PVT_1");
+    await screen.findByText(/Board saved/);
+
+    refreshWith("PVT_1");
+
+    expect(screen.getByText(/Board saved/)).toBeTruthy();
+    expect(
+      (screen.getByLabelText("Board (optional)") as HTMLSelectElement).value,
+    ).toBe("PVT_1");
+    expect(boards).toHaveBeenCalledTimes(1);
+  });
+
+  // #937-T57
+  it("follows the board the page says the project has, for example after a change elsewhere", async () => {
+    const { refreshWith } = renderPicker({ board: "PVT_1" });
+    const select = (await screen.findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(false));
+
+    refreshWith(null);
+
+    await waitFor(() => expect(select.value).toBe(""));
+  });
+
+  // #937-T58
+  it.each([
+    ["unknown_board", /not one of the boards of this repository/],
+    ["board_without_status", /has no Status field/],
+    ["board_unavailable", /did not let the App read the boards/],
+  ])("says why a refused board was refused: %s", async (code, sentence) => {
+    const user = userEvent.setup();
+    renderPicker({
+      setBoard: async () => ({
+        ok: false,
+        status: 400,
+        code: "PROJECT_REQUEST_INVALID",
+        issues: [{ field: "board.projectV2Id", code }],
+      }),
+    });
+    const select = (await screen.findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(false));
+
+    await user.selectOptions(select, "PVT_1");
+
+    expect(await screen.findByText(sentence)).toBeTruthy();
+    expect(screen.queryByText(/was not understood/)).toBeNull();
+    expect(select.value).toBe("");
   });
 
   // #937-T52
@@ -117,7 +192,7 @@ describe("the board picker", () => {
     await user.selectOptions(select, "");
 
     expect(setBoard).toHaveBeenCalledWith("p-1", null);
-    expect(await screen.findByText("Board removed.")).toBeTruthy();
+    expect(await screen.findByText(/Board removed.*press Resync/)).toBeTruthy();
   });
 
   // #937-T53

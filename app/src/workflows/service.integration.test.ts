@@ -605,7 +605,9 @@ describe("the workflow service", () => {
         create: (input, maximum) => {
           creates += 1;
           if (creates === 2)
-            return Promise.reject(new Error("connection lost"));
+            return Promise.reject(
+              Object.assign(new Error("connection lost"), { code: "08006" }),
+            );
           return real.create(input, maximum);
         },
       },
@@ -630,7 +632,10 @@ describe("the workflow service", () => {
     expect((await service.list(mine)).workflows.map((w) => w.name)).toEqual([
       "Issue to PR",
     ]);
-    // Only the name of the error is logged, never its text.
+    // The lane and the code of the error are logged, never its text.
+    expect(quiet).toHaveBeenCalledWith(
+      "[workflows] copying the built-in lane review-a-pull-request failed (08006)",
+    );
     expect(JSON.stringify(quiet.mock.calls)).not.toContain("connection lost");
     quiet.mockRestore();
   });

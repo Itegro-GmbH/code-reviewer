@@ -18,6 +18,7 @@ import {
   type BuiltInLaneKey,
 } from "./built-in-lanes.ts";
 import { WorkflowError, type WorkflowErrorCode } from "./errors.ts";
+import { isRecord } from "./json.ts";
 import type { Issue } from "./issues.ts";
 import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
@@ -348,9 +349,15 @@ export function createWorkflowService({
         } catch (error) {
           // One lane failing - a database error after the lane before was saved - is that lane's failure, never the failure of the others.
           if (!(error instanceof WorkflowError)) {
+            // The lane and the code of the failure (a database error's own code, else its name), never its text.
+            const code =
+              isRecord(error) && typeof error.code === "string"
+                ? error.code
+                : error instanceof Error
+                  ? error.name
+                  : "unknown";
             console.error(
-              "[workflows] copying a built-in lane failed:",
-              error instanceof Error ? error.name : "unknown",
+              `[workflows] copying the built-in lane ${key} failed (${code})`,
             );
             results.push({
               key,

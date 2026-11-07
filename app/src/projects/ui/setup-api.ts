@@ -29,8 +29,11 @@ export type SetupApi = {
     projectId: string,
     projectV2Id: string | null,
   ): Promise<RequestResult<{ project: { id: string } }>>;
-  /** `POST .../repositories/:id/issues/sync`: one call of the full sync. */
-  resync(repositoryId: string): Promise<RequestResult<ResyncProgress>>;
+  /** `POST .../repositories/:id/issues/sync`: one call of the full sync; aborting `signal` ends the call as a `NETWORK_ERROR`. */
+  resync(
+    repositoryId: string,
+    signal?: AbortSignal,
+  ): Promise<RequestResult<ResyncProgress>>;
 };
 
 export function createSetupApi(
@@ -57,7 +60,7 @@ export function createSetupApi(
         ),
         { board: projectV2Id === null ? null : { projectV2Id } },
       ),
-    resync: (repositoryId) =>
+    resync: (repositoryId, signal) =>
       requestJson<ResyncProgress>(
         fetchImpl,
         "POST",
@@ -65,6 +68,8 @@ export function createSetupApi(
           workspaceSlug,
           `/repositories/${encodeURIComponent(repositoryId)}/issues/sync`,
         ),
+        undefined,
+        signal,
       ),
   };
 }

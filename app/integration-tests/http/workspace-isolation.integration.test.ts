@@ -255,7 +255,7 @@ const ENTRIES: Entry[] = [
     name: "PUT projects/[projectId]",
     route: "/api/w/[workspace]/projects/[projectId]",
     method: "PUT",
-    minRole: MINIMUM_ROLE.change_project_settings,
+    minRole: MINIMUM_ROLE.manage_projects,
     path: (ids) => `/projects/${ids.projectId}`,
     body: () => ({ board: null }),
     params: (ids) => ({ projectId: ids.projectId }),

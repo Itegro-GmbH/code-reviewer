@@ -5,7 +5,9 @@
 // boards are the ones of the project's repository, read from GitHub when the page opens (`GET .../repositories/:id/boards`, which an
 // Admin or an Owner may call, so only they get the picker; a Member sees whether a board is set). Choosing one saves it at once
 // (`PUT .../projects/:id`): the server checks it against the boards GitHub has and takes the Status field from them. A board without a
-// Status field cannot be chosen. A failed save leaves the choice where it was and says why.
+// Status field cannot be chosen. A failed save leaves the choice where it was and says why. A saved board changes nothing in the tickets that
+// are mirrored already: they keep the statuses of the old board until a full sync, so the message says to press Resync and `onSaved` lets
+// the page put that button forward.
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useState } from "react";
 import { NativeSelect } from "../../components/native-select.tsx";
@@ -28,6 +30,7 @@ export function TicketBoardPicker({
   repositoryId,
   board,
   canChange,
+  onSaved,
   api: apiProp,
 }: {
   workspaceSlug: string;
@@ -37,6 +40,8 @@ export function TicketBoardPicker({
   board: string | null;
   /** Whether the person may read the boards and change the choice (`manage_projects`). */
   canChange: boolean;
+  /** Called after a board was saved or removed: the tickets still carry the old board's statuses. */
+  onSaved?: () => void;
   /** Only tests pass this. */
   api?: SetupApi;
 }) {
@@ -55,6 +60,14 @@ export function TicketBoardPicker({
   const [outcome, setOutcome] = useState<
     { kind: "saved"; text: string } | { kind: "failed"; text: string } | null
   >(null);
+
+  // The page refreshes after a save and hands in the project's board again; the picker stays mounted (its key is the project), so it
+  // follows the prop instead of starting over.
+  const [seenBoard, setSeenBoard] = useState(board);
+  if (seenBoard !== board) {
+    setSeenBoard(board);
+    setCurrent(board ?? "");
+  }
 
   useEffect(() => {
     if (!canChange) return;
@@ -79,7 +92,7 @@ export function TicketBoardPicker({
     if (!result.ok) {
       setOutcome({
         kind: "failed",
-        text: describeSetupFailure(product, result.code),
+        text: describeSetupFailure(product, result.code, result.issues),
       });
       return;
     }
@@ -88,6 +101,7 @@ export function TicketBoardPicker({
       kind: "saved",
       text: next === "" ? BOARD_COPY.cleared : BOARD_COPY.saved,
     });
+    onSaved?.();
     router.refresh();
   }
 

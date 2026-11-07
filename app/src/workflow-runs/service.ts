@@ -400,11 +400,6 @@ export function createWorkflowRunService(
   }
 
   /**
-   * The run an earlier request with this id made, when the body is the same one. The inputs are compared by content: the same input
-   * written with its keys in another order is the same request. A body that names a trigger must name the one the run was started by;
-   * a ticket is the same when it names the same issue (the repository's letters are not told apart).
-   */
-  /**
    * `input`, with `repo` set to the repository of the project when the input of the trigger declares `repo`, the caller names neither a
    * `repo` nor a `ticket`, and the lane belongs to a project (#937). Anything else is returned as it is.
    */
@@ -424,19 +419,34 @@ export function createWorkflowRunService(
     return name === undefined ? input : { ...input, repo: name };
   }
 
+  /** Whether the workflow is a lane of a project, which is when a start may leave `repo` out (#937). */
+  async function belongsToProject(workflowId: string): Promise<boolean> {
+    const found = await deps.workflows.get(workflowId);
+    return found !== undefined && found.workflow.projectId !== null;
+  }
+
+  /**
+   * The run an earlier request with this id made, when the body is the same one. The inputs are compared by content: the same input
+   * written with its keys in another order is the same request. A body that names a trigger must name the one the run was started by;
+   * a ticket is the same when it names the same issue (the repository's letters are not told apart). On a lane of a project
+   * (`projectLane`, #937) a replay may leave out the `repo` the project filled in; on a lane without one a `repo` the run was started
+   * with is part of the request.
+   */
   function sameRequest(
     earlier: StoredWorkflowRun,
     workflowId: string,
     trigger: string | undefined,
     input: Record<string, unknown>,
+    projectLane: boolean,
   ): StoredWorkflowRun {
     const { [TICKET_INPUT]: ticket, ...rest } = input;
-    // A `repo` the project filled in (#937) is not in a replay that left it out.
-    const { repo: filledRepo, ...earlierWithoutRepo } = inputHandedIn(earlier);
+    const handedIn = inputHandedIn(earlier);
     const earlierRest =
-      rest.repo === undefined
-        ? earlierWithoutRepo
-        : { ...earlierWithoutRepo, repo: filledRepo };
+      projectLane && rest.repo === undefined
+        ? Object.fromEntries(
+            Object.entries(handedIn).filter(([key]) => key !== "repo"),
+          )
+        : handedIn;
     const resolved = readStoredInput(jsonOrNull(earlier.triggerInput)).ticket;
     const earlierName = isRecord(resolved?.repo)
       ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.number)}`
@@ -531,7 +541,15 @@ export function createWorkflowRunService(
       const earlier = await deps.runs.findByRequest(clientRequestId);
       if (earlier !== undefined)
         return {
-          run: await view(sameRequest(earlier, workflowId, named, input)),
+          run: await view(
+            sameRequest(
+              earlier,
+              workflowId,
+              named,
+              input,
+              input.repo === undefined && (await belongsToProject(workflowId)),
+            ),
+          ),
           created: false,
         };
 
@@ -684,7 +702,15 @@ export function createWorkflowRunService(
       });
       if (created.status === "existing")
         return {
-          run: await view(sameRequest(created.run, workflowId, named, input)),
+          run: await view(
+            sameRequest(
+              created.run,
+              workflowId,
+              named,
+              input,
+              project !== undefined,
+            ),
+          ),
           created: false,
         };
       deps.kick(created.run.id);

@@ -20,13 +20,26 @@ export const BOARD_COPY = {
   failed:
     "GitHub could not be asked for the boards right now. Reload the page to try again.",
   noBoards: "This repository has no board. A project works without one.",
-  picked: "Tickets move on this board; its Status field gives the columns.",
-  noneSet: "No board: tickets keep no status from a board.",
+  picked:
+    "Its Status field gives the columns of the tickets, once they are read again (Resync).",
+  noneSet:
+    "No board is set on this project, so its tickets get no status from a board.",
   currentUnread:
     "The board set on this project (its boards cannot be read now)",
   saving: "Saving the board",
-  saved: "Board saved. Resync reads the statuses of the new board.",
-  cleared: "Board removed.",
+  saved:
+    "Board saved. The tickets still show the statuses of the old board: press Resync to read the new board.",
+  cleared:
+    "Board removed. The tickets still show the statuses of the old board: press Resync to drop them.",
+  /** What a refused save says, by the `code` of the issue the route named. */
+  refused: {
+    unknown_board:
+      "That is not one of the boards of this repository. Reload the page to see the current ones.",
+    board_without_status:
+      "That board has no Status field, so it cannot give the tickets a status. Pick a board that has one.",
+    board_unavailable:
+      "GitHub did not let the App read the boards of this repository, so the board could not be checked.",
+  },
   readOnly:
     "Only an Admin or an Owner changes the board of a project; a Member sees it.",
   readOnlySet: "A board is set on this project.",
@@ -43,6 +56,10 @@ export const RESYNC_COPY = {
     "GitHub did not let the App read the boards, so board statuses stay empty.",
   gaveUp:
     "Still reading after many calls. What was read is kept: press Resync to go on.",
+  kept: (written: number) =>
+    `${String(written)} ${written === 1 ? "ticket was" : "tickets were"} read and ${written === 1 ? "is" : "are"} kept.`,
+  boardChanged:
+    "The board of this project changed, but the tickets still show the statuses of the old one: press Resync to read the new board.",
   hint: "Reads every ticket of the repository again, in steps of about twenty seconds, and shows how far it is. It cannot lose what is read.",
   staleDays: (days: number) =>
     `The tickets were last read in full ${String(days)} days ago and nothing has been delivered since. GitHub may have missed a change: press Resync.`,
@@ -68,7 +85,16 @@ const SETUP_FAILURE: Record<string, string> = {
 export function describeSetupFailure(
   product: ProductIdentity,
   code: string,
+  issues: readonly { code: string }[] = [],
 ): string {
+  if (code === "PROJECT_REQUEST_INVALID") {
+    // The first issue the page has a sentence for; the body the page sends is only ever `{ board }`, so these are the ones a person can meet.
+    for (const issue of issues)
+      if (Object.hasOwn(BOARD_COPY.refused, issue.code))
+        return BOARD_COPY.refused[
+          issue.code as keyof typeof BOARD_COPY.refused
+        ];
+  }
   return Object.hasOwn(SETUP_FAILURE, code)
     ? SETUP_FAILURE[code]!
     : describeFailure(product, code);

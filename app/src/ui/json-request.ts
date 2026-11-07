@@ -56,14 +56,17 @@ function readIssues(value: unknown): RequestIssue[] {
   const issues: RequestIssue[] = [];
   for (const entry of value as unknown[]) {
     if (typeof entry !== "object" || entry === null) continue;
-    const { field, code, maximumCents } = entry as {
+    // The older routes name the place `field`, the project and tracker routes `path`.
+    const { field, path, code, maximumCents } = entry as {
       field?: unknown;
+      path?: unknown;
       code?: unknown;
       maximumCents?: unknown;
     };
-    if (typeof field === "string" && typeof code === "string")
+    const place = typeof field === "string" ? field : path;
+    if (typeof place === "string" && typeof code === "string")
       issues.push({
-        field,
+        field: place,
         code,
         ...(typeof maximumCents === "number" ? { maximumCents } : {}),
       });
