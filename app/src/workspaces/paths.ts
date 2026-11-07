@@ -85,3 +85,15 @@ export function workspaceHome(
   const hasProjects = capabilities === undefined || capabilities.has("review");
   return workspacePath(slug, hasProjects ? "/projects" : "/connections");
 }
+
+/**
+ * The page of a workspace that shows its connections, the GitHub App: the Integrations tab of the settings in the factory (#925),
+ * `/connections` in every other deployment. Without a set the deployment is code-review.com.
+ */
+export function connectionsPlace(
+  capabilities?: CapabilitySet,
+): "/connections" | "/settings/integrations" {
+  return capabilities?.has("implementer") === true
+    ? "/settings/integrations"
+    : "/connections";
+}

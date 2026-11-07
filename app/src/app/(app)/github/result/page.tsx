@@ -4,6 +4,7 @@ import { getProductIdentity } from "@/product-identity/current";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
+import { getCapabilities } from "@/capabilities/shared";
 import { currentLookup } from "@/auth/session";
 import { loginPath } from "@/auth/session-user";
 import { Button } from "@/components/button";
@@ -12,7 +13,7 @@ import { isBindingResultCode } from "@/installation-binding/errors";
 import { describeResultCode } from "@/installation-binding/ui/messages";
 import { ResultBanner } from "@/installation-binding/ui/result-banner";
 import { loadAccountView } from "@/workspaces/account-view";
-import { workspacePath } from "@/workspaces/paths";
+import { connectionsPlace, workspacePath } from "@/workspaces/paths";
 
 export const metadata: Metadata = { title: "Connections" };
 
@@ -56,5 +57,5 @@ async function connectionsPath(): Promise<string> {
   const [first] = view.memberships;
   return first === undefined
     ? "/no-access"
-    : `${workspacePath(first.workspace.slug)}/connections`;
+    : `${workspacePath(first.workspace.slug)}${connectionsPlace(getCapabilities())}`;
 }

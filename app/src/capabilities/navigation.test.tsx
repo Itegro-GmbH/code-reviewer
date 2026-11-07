@@ -143,63 +143,101 @@ describe("the name of the QA area in the sidebar", () => {
   });
 });
 
-describe("the Implementer item in the sidebar", () => {
+describe("the places of the factory in the sidebar", () => {
+  // #756-T01, #818-T10, #873-T90, #925: without the capability `implementer` no list has a place of the Implementer, whatever the
+  // product, and the list is the old one of code-review.com.
+  it("has none of the places of the Implementer in a list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
+    for (const product of [
+      identityFor("code-review-com"),
+      identityFor("factory"),
+    ])
+      for (const set of [
+        undefined,
+        createCapabilitySet(PRODUCTS["code-review-com"].default),
+        createCapabilitySet(FACTORY),
+        createCapabilitySet(["review"]),
+        createCapabilitySet([]),
+      ])
+        for (const place of [
+          "Implementer",
+          "Environments",
+          "Workflows",
+          "Runners",
+          "ToDos",
+          "Profiles",
+        ])
+          expect(
+            navItemsFor("/w/acme", product, set).map((item) => item.label),
+          ).not.toContain(place);
+  });
+});
+
+describe("the sidebar of the factory (#925)", () => {
   const WITH_IMPLEMENTER = createCapabilitySet([
     "review",
     "dynamic-review",
     "implementer",
   ]);
 
-  // #756-T01: the sidebar has no input for a role, so the item is the same for an Owner, an Admin, a Member and the instance
-  // admin: it depends on the capability set alone.
-  it("sits between the QA area and Runs where the deployment has the capability, and points to the page", () => {
-    const product = identityFor("factory");
-
+  // #925: the sidebar of the factory is the prototype's: ToDos, Projects, Runs, Profiles, Runners, Settings, in that order.
+  it("is ToDos, Projects, Runs, Profiles, Runners and Settings for the factory, with the addresses of the pages", () => {
     expect(
-      navItemsFor("/w/acme", product, WITH_IMPLEMENTER).map((item) => [
-        item.label,
-        item.href,
-      ]),
+      navItemsFor("/w/acme", identityFor("factory"), WITH_IMPLEMENTER).map(
+        (item) => [item.label, item.href],
+      ),
     ).toEqual([
-      ["QA", "/w/acme/projects"],
-      ["Implementer", "/w/acme/implementer"],
-      ["Environments", "/w/acme/environments"],
-      ["Runners", "/w/acme/runners"],
+      ["ToDos", "/w/acme/todos"],
+      ["Projects", "/w/acme/projects"],
       ["Runs", "/w/acme/runs"],
-      ["Workflows", "/w/acme/workflows"],
-      ["Connections", "/w/acme/connections"],
-      ["Members", "/w/acme/members"],
+      ["Profiles", "/w/acme/profiles"],
+      ["Runners", "/w/acme/runners"],
       ["Settings", "/w/acme/settings"],
     ]);
   });
 
-  // #756-T01
-  it("is not in the list of code-review.com, nor of the factory without the capability", () => {
-    for (const product of [
-      identityFor("code-review-com"),
+  // #925
+  it("carries the count of open ToDos on the ToDos place only", () => {
+    const items = navItemsFor(
+      "/w/acme",
       identityFor("factory"),
-    ]) {
-      expect(
-        navItemsFor("/w/acme", product).map((item) => item.label),
-      ).not.toContain("Implementer");
-      expect(
-        navItemsFor(
-          "/w/acme",
-          product,
-          createCapabilitySet(PRODUCTS["code-review-com"].default),
-        ).map((item) => item.label),
-      ).not.toContain("Implementer");
-      expect(
-        navItemsFor("/w/acme", product, createCapabilitySet(FACTORY)).map(
-          (item) => item.label,
-        ),
-      ).not.toContain("Implementer");
-    }
+      WITH_IMPLEMENTER,
+    );
+
+    expect(
+      items.filter((item) => item.badge !== undefined).map((i) => i.label),
+    ).toEqual(["ToDos"]);
   });
 
-  // #756-T01
-  it("is what the rendered sidebar shows with the capability, marked as the current page on its page, and is absent without it", () => {
-    navigation.pathname = "/w/acme/implementer";
+  // #925
+  it("is Projects in the factory too: the area is the project cockpit, no longer named QA", () => {
+    expect(
+      navItemsFor("/w/acme", identityFor("factory"), WITH_IMPLEMENTER).map(
+        (item) => item.label,
+      ),
+    ).toContain("Projects");
+  });
+
+  // #925: the places of the old sidebar are gone from it; their pages are tabs of the settings or lead from the pages that need them.
+  it("has no Implementer, Environments, Workflows, Connections or Members place any more", () => {
+    const names = navItemsFor(
+      "/w/acme",
+      identityFor("factory"),
+      WITH_IMPLEMENTER,
+    ).map((item) => item.label);
+
+    for (const gone of [
+      "Implementer",
+      "Environments",
+      "Workflows",
+      "Connections",
+      "Members",
+    ])
+      expect(names).not.toContain(gone);
+  });
+
+  // #925
+  it("is what the rendered sidebar shows with the capability, marked as the current page on its page", () => {
+    navigation.pathname = "/w/acme/profiles";
     const { rerender } = render(
       <CapabilitiesProvider
         capabilities={[...FACTORY, "implementer" satisfies Capability]}
@@ -211,16 +249,18 @@ describe("the Implementer item in the sidebar", () => {
     );
 
     expect(labels()).toEqual(
-      expect.arrayContaining(["QA", "Implementer", "Runs"]),
+      expect.arrayContaining(["ToDos", "Projects", "Profiles", "Runners"]),
     );
     expect(
-      screen.getByRole("link", { name: "Implementer" }).getAttribute("href"),
-    ).toBe("/w/acme/implementer");
-    expect(
       screen
-        .getByRole("link", { name: "Implementer" })
+        .getByRole("link", { name: "Profiles" })
         .getAttribute("aria-current"),
     ).toBe("page");
+    expect(
+      screen
+        .getByRole("link", { name: "Runners" })
+        .getAttribute("aria-current"),
+    ).toBeNull();
 
     rerender(
       <CapabilitiesProvider capabilities={FACTORY}>
@@ -229,100 +269,14 @@ describe("the Implementer item in the sidebar", () => {
         </AppShell>
       </CapabilitiesProvider>,
     );
-    expect(labels()).not.toContain("Implementer");
-  });
-});
-
-describe("the Workflows item in the sidebar (#873)", () => {
-  const WITH_IMPLEMENTER = createCapabilitySet([
-    "review",
-    "dynamic-review",
-    "implementer",
-  ]);
-
-  // #873-T90
-  it("follows Runs where the deployment has the capability, and points to the page", () => {
-    const items = navItemsFor(
-      "/w/acme",
-      identityFor("factory"),
-      WITH_IMPLEMENTER,
-    );
-    const labels = items.map((item) => item.label);
-
-    expect(labels.indexOf("Workflows")).toBe(labels.indexOf("Runs") + 1);
-    expect(items.find((item) => item.label === "Workflows")?.href).toBe(
-      "/w/acme/workflows",
-    );
+    expect(labels()).not.toContain("Profiles");
   });
 
-  // #873-T90
-  it("is in no list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
-    for (const product of [
-      identityFor("code-review-com"),
-      identityFor("factory"),
-    ])
-      for (const set of [
-        undefined,
-        createCapabilitySet(PRODUCTS["code-review-com"].default),
-        createCapabilitySet(FACTORY),
-        createCapabilitySet(["review"]),
-        createCapabilitySet([]),
-      ])
-        expect(
-          navItemsFor("/w/acme", product, set).map((item) => item.label),
-        ).not.toContain("Workflows");
-  });
-});
-
-describe("the Environments item in the sidebar (#818)", () => {
-  const WITH_IMPLEMENTER = createCapabilitySet([
-    "review",
-    "dynamic-review",
-    "implementer",
-  ]);
-
-  // #818-T10
-  it("sits between Implementer and Runs where the deployment has the capability", () => {
-    const labelsOf = (set: ReturnType<typeof createCapabilitySet>) =>
-      navItemsFor("/w/acme", identityFor("factory"), set).map(
-        (item) => item.label,
-      );
-
-    const labels = labelsOf(WITH_IMPLEMENTER);
-
-    expect(labels.indexOf("Environments")).toBe(
-      labels.indexOf("Implementer") + 1,
-    );
-    // #854: the runners of the workspace follow the environments, which name the labels they ask for.
-    expect(labels.indexOf("Runners")).toBe(labels.indexOf("Environments") + 1);
-    expect(labels.indexOf("Runs")).toBe(labels.indexOf("Runners") + 1);
-  });
-
-  // #818-T10
-  it("is in no list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
-    for (const product of [
-      identityFor("code-review-com"),
-      identityFor("factory"),
-    ])
-      for (const set of [
-        undefined,
-        createCapabilitySet(PRODUCTS["code-review-com"].default),
-        createCapabilitySet(FACTORY),
-        createCapabilitySet(["review"]),
-        createCapabilitySet([]),
-      ])
-        expect(
-          navItemsFor("/w/acme", product, set).map((item) => item.label),
-        ).not.toContain("Environments");
-  });
-
-  // #818-T10
-  it("is the current page on its page and not on the Implementer's, and the Implementer is not current on it", () => {
-    navigation.pathname = "/w/acme/environments";
+  // #925: Settings is the current place on every page of its tabs.
+  it("keeps Settings the current place on a page below it", () => {
+    navigation.pathname = "/w/acme/settings/members";
     render(
-      <CapabilitiesProvider
-        capabilities={[...FACTORY, "implementer" satisfies Capability]}
-      >
+      <CapabilitiesProvider capabilities={FACTORY}>
         <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
           <h1>Page</h1>
         </AppShell>
@@ -331,14 +285,9 @@ describe("the Environments item in the sidebar (#818)", () => {
 
     expect(
       screen
-        .getByRole("link", { name: "Environments" })
+        .getByRole("link", { name: "Settings" })
         .getAttribute("aria-current"),
     ).toBe("page");
-    expect(
-      screen
-        .getByRole("link", { name: "Implementer" })
-        .getAttribute("aria-current"),
-    ).toBeNull();
   });
 });
 
@@ -392,6 +341,64 @@ describe("the settings navigation", () => {
     );
     expect(sections()).toContain("Review defaults");
     expect(sections()).toContain("Billing");
+  });
+});
+
+describe("the settings navigation of the factory (#925)", () => {
+  const WITH_IMPLEMENTER: Capability[] = [...FACTORY, "implementer"];
+  const tabs = () =>
+    screen
+      .getAllByRole("link", {
+        name: /^(General|Members|Billing|Integrations)$/,
+      })
+      .map((link) => link.textContent);
+  const links = () =>
+    screen
+      .getAllByRole("link")
+      .map((link) => link.textContent)
+      .filter((text): text is string => text !== null);
+
+  // #731-T06, #925
+  it.each([
+    ["Owner", true],
+    ["Admin", false],
+    ["Member", false],
+  ])(
+    "lists no Billing tab in the factory set, and Advanced only for the Owner, for the %s",
+    (_role, advanced) => {
+      render(
+        <CapabilitiesProvider capabilities={WITH_IMPLEMENTER}>
+          <SettingsNav
+            workspaceSlug="acme"
+            current=""
+            showBilling
+            showAdvanced={advanced}
+          />
+        </CapabilitiesProvider>,
+      );
+
+      expect(tabs()).toEqual(["General", "Members", "Integrations"]);
+      expect(links().includes("Advanced")).toBe(advanced);
+    },
+  );
+
+  // #731-T06, #925
+  it("lists Review defaults only with review, and the Billing tab only with billing", () => {
+    const { rerender } = render(
+      <CapabilitiesProvider capabilities={["implementer"]}>
+        <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
+      </CapabilitiesProvider>,
+    );
+    expect(links()).not.toContain("Review defaults");
+    expect(tabs()).not.toContain("Billing");
+
+    rerender(
+      <CapabilitiesProvider capabilities={["review", "billing", "implementer"]}>
+        <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
+      </CapabilitiesProvider>,
+    );
+    expect(links()).toContain("Review defaults");
+    expect(tabs()).toContain("Billing");
   });
 });
 

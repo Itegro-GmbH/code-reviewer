@@ -109,6 +109,18 @@ export function addressesOf(
         route.pattern.startsWith("/api/w/:workspace/profiles") ||
         route.pattern.startsWith("/api/w/:workspace/runners") ||
         route.pattern === "/w/:workspace/runners" ||
+        // The shell of the factory (#925): the ToDos and the profiles, the tabs of a project's cockpit, the settings tabs that moved from
+        // `/connections` and `/members`, and the review settings below a project.
+        route.pattern === "/w/:workspace/settings/integrations" ||
+        route.pattern === "/w/:workspace/settings/members" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/review" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/runs" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/setup" ||
+        route.pattern === "/w/:workspace/todos" ||
+        route.pattern === "/api/w/:workspace/todos/count" ||
+        route.pattern === "/w/:workspace/profiles" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/todos" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/lanes" ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];
