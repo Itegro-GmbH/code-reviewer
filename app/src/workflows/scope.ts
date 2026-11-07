@@ -39,6 +39,8 @@ export type Binding = {
   unavailable: Readonly<Record<string, string>>;
   /** The result schema of the step failed its own check, which is reported where it is written: any other name is unknown, not an error. */
   open?: boolean;
+  /** Of an action: the connector it names, so a reference to its output can tell what produced the value (#917). */
+  connector?: string;
   /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
   agent?: { profile?: string; environment?: string };
   /**

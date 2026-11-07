@@ -129,6 +129,15 @@ export type OpenedPullRequest = {
   existing: boolean;
 };
 
+/** What moving an issue to a status of a GitHub Project board came to (#917). */
+export type BoardMove =
+  | { kind: "moved"; status: string }
+  /** The project of that number or id is not there for the App (it is not the owner's, or the App cannot see it). */
+  | { kind: "board_not_found" }
+  | { kind: "issue_not_found" }
+  /** The board has no option of that name on its `Status` field (or no `Status` field); `available` are the option names it has. */
+  | { kind: "status_unknown"; available: string[] };
+
 /** A review of a pull request (#405), as far as the app needs it. */
 export type PullRequestReview = {
   id: string;
@@ -289,6 +298,36 @@ export type GithubAppClient = {
     change: { add: readonly string[]; remove: readonly string[] },
     signal?: AbortSignal,
   ): Promise<string[]>;
+  /**
+   * Requests a review of a pull request from these GitHub users (#917; `POST .../pulls/{n}/requested_reviewers`), with a token limited
+   * to `scope`. Answers the logins that are requested afterwards, as GitHub spells them. A user who has already been asked stays
+   * asked, so it can be done twice. GitHub refuses the whole request when one of them cannot review (not a collaborator, the author of
+   * the pull request): that is a 422, `GITHUB_APP_REQUEST_FAILED`. With `skipRefused` the users are asked one by one and the ones
+   * GitHub refuses are left out instead. 404 when there is no such pull request. Aborts like `getPullRequest`.
+   */
+  requestPullRequestReviewers(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    prNumber: number,
+    reviewers: readonly string[],
+    options?: { skipRefused?: boolean; signal?: AbortSignal },
+  ): Promise<string[]>;
+  /**
+   * Sets the `Status` field of an issue on a GitHub Project (projects_v2) board of the repository's owner to the option named `status`
+   * (#917), with a token limited to `scope`; GraphQL, because Projects have no REST API for this. `board` is the number of the project
+   * or its node id. The issue is added to the board when it is not on it. The status is a literal option name of the board's
+   * `Status` field, never created. Idempotent. Failures that the board or issue decide are an answer (`BoardMove`); a token without
+   * the Projects permission, a rate limit and the like reject like the other calls. Aborts like `getPullRequest`.
+   */
+  moveIssueOnBoard(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    issueNumber: number,
+    move: { board: string; status: string },
+    signal?: AbortSignal,
+  ): Promise<BoardMove>;
   /**
    * Creates the check run of a review on a commit (#405), as the app, with a token of its own limited to `scope`
    * (minted for this call and switched off after it, also when the call fails). Rejects with the stable code of
@@ -672,6 +711,72 @@ function checkPullRequestNumber(prNumber: number): void {
       "GITHUB_APP_REQUEST_FAILED",
       "The pull request number is not a positive whole number.",
     );
+}
+
+/** A GitHub login: letters, digits and single hyphens, up to 39 characters. */
+function checkLogin(login: string): void {
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login))
+    throw new GithubAppError(
+      "GITHUB_APP_REQUEST_FAILED",
+      "The login is not a GitHub user name.",
+    );
+}
+
+/** The number of a project or its node id: digits, or GitHub's `PVT_…` id (letters, digits, `_` and `-`). */
+function boardReference(
+  board: string,
+): { number: number } | { nodeId: string } {
+  if (/^[1-9]\d{0,9}$/.test(board) && Number(board) <= 2147483647)
+    return { number: Number(board) };
+  if (/^PVT_[A-Za-z0-9_-]{1,200}$/.test(board)) return { nodeId: board };
+  throw new GithubAppError(
+    "GITHUB_APP_REQUEST_FAILED",
+    "The board is not the number of a GitHub Project or its node id.",
+  );
+}
+
+const BOARD_FIELDS = `id field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }`;
+const BOARD_BY_NUMBER_QUERY = `query($owner: String!, $name: String!, $issue: Int!, $board: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $issue) { id }
+    owner { ... on ProjectV2Owner { projectV2(number: $board) { ${BOARD_FIELDS} } } }
+  }
+}`;
+const BOARD_BY_ID_QUERY = `query($owner: String!, $name: String!, $issue: Int!, $board: ID!) {
+  repository(owner: $owner, name: $name) { issue(number: $issue) { id } }
+  node(id: $board) { ... on ProjectV2 { ${BOARD_FIELDS} } }
+}`;
+const ADD_TO_BOARD_MUTATION = `mutation($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+}`;
+const SET_STATUS_MUTATION = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
+}`;
+
+/** A board as far as a status change needs it: its id and the options of its `Status` field. */
+type BoardFacts = {
+  id: string;
+  field: { id: string; options: { id: string; name: string }[] } | null;
+};
+
+function toBoardFacts(json: unknown): BoardFacts | null {
+  if (!isRecord(json) || typeof json.id !== "string") return null;
+  const field = json.field;
+  if (
+    !isRecord(field) ||
+    typeof field.id !== "string" ||
+    !Array.isArray(field.options)
+  )
+    return { id: json.id, field: null };
+  const options: { id: string; name: string }[] = [];
+  for (const option of field.options as unknown[])
+    if (
+      isRecord(option) &&
+      typeof option.id === "string" &&
+      typeof option.name === "string"
+    )
+      options.push({ id: option.id, name: option.name });
+  return { id: json.id, field: { id: field.id, options } };
 }
 
 const PERMISSION_LEVELS = ["read", "write", "admin"];
@@ -1662,6 +1767,173 @@ export function createGithubAppClient(
             change.remove.every((name) => !present.includes(name))
             ? present
             : labelsOf();
+        },
+        signal,
+      );
+    },
+
+    async requestPullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      options = {},
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(prNumber);
+      for (const login of reviewers) checkLogin(login);
+      const { skipRefused = false, signal } = options;
+      const path = `${repoPath(repoFullName)}/pulls/${prNumber}/requested_reviewers`;
+      const asked = new Set(reviewers.map((login) => login.toLowerCase()));
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const requested = new Map<string, string>();
+          const ask = async (logins: readonly string[]): Promise<void> => {
+            const json = await request(
+              token,
+              "POST",
+              path,
+              { reviewers: logins },
+              signal,
+            );
+            if (!isRecord(json) || !Array.isArray(json.requested_reviewers))
+              throw shapeError(
+                "POST /repos/{owner}/{repo}/pulls/{n}/requested_reviewers",
+              );
+            for (const entry of json.requested_reviewers as unknown[])
+              if (
+                isRecord(entry) &&
+                typeof entry.login === "string" &&
+                asked.has(entry.login.toLowerCase())
+              )
+                requested.set(entry.login.toLowerCase(), entry.login);
+          };
+          if (!skipRefused) {
+            if (reviewers.length > 0) await ask(reviewers);
+            return [...requested.values()];
+          }
+          for (const login of reviewers) {
+            try {
+              await ask([login]);
+            } catch (error) {
+              // A user who cannot review this pull request (not a collaborator, its author) is left out.
+              if (
+                !(error instanceof GithubAppError) ||
+                error.code !== "GITHUB_APP_REQUEST_FAILED" ||
+                error.status !== 422
+              )
+                throw error;
+            }
+          }
+          return [...requested.values()];
+        },
+        signal,
+      );
+    },
+
+    async moveIssueOnBoard(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      move,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(issueNumber);
+      const board = boardReference(move.board);
+      const [owner, name] = repoFullName.split("/") as [string, string];
+      repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token): Promise<BoardMove> => {
+          // GraphQL answers 200 with `errors`; a refusal of the token's rights is told apart from a thing that is not there.
+          const graphql = async (
+            query: string,
+            variables: Record<string, unknown>,
+          ): Promise<Record<string, unknown>> => {
+            const json = await request(
+              token,
+              "POST",
+              "/graphql",
+              { query, variables },
+              signal,
+            );
+            if (!isRecord(json)) throw shapeError("POST /graphql");
+            const errors = Array.isArray(json.errors)
+              ? (json.errors as unknown[]).filter(isRecord)
+              : [];
+            const typeOf = (type: string): boolean =>
+              errors.some((entry) => entry.type === type);
+            if (typeOf("RATE_LIMITED"))
+              throw new GithubAppError(
+                "GITHUB_APP_RATE_LIMITED",
+                "GitHub rate limit reached for POST /graphql.",
+                { status: 200 },
+              );
+            if (typeOf("FORBIDDEN"))
+              throw new GithubAppError(
+                "GITHUB_APP_FORBIDDEN",
+                "GitHub answered FORBIDDEN for POST /graphql.",
+                { status: 403, refusal: "permission_missing" },
+              );
+            const data = json.data;
+            if (isRecord(data)) return data;
+            // No data and no reason this code knows: not what was asked for.
+            if (errors.length === 0 || !typeOf("NOT_FOUND"))
+              throw shapeError("POST /graphql");
+            return {};
+          };
+          const found = await graphql(
+            "number" in board ? BOARD_BY_NUMBER_QUERY : BOARD_BY_ID_QUERY,
+            {
+              owner,
+              name,
+              issue: issueNumber,
+              board: "number" in board ? board.number : board.nodeId,
+            },
+          );
+          const repository = found.repository;
+          const issue = isRecord(repository) ? repository.issue : null;
+          if (!isRecord(issue) || typeof issue.id !== "string")
+            return { kind: "issue_not_found" };
+          const boardJson =
+            "number" in board
+              ? isRecord(repository) && isRecord(repository.owner)
+                ? repository.owner.projectV2
+                : null
+              : found.node;
+          const facts = toBoardFacts(boardJson);
+          if (facts === null) return { kind: "board_not_found" };
+          const option = facts.field?.options.find(
+            (candidate) => candidate.name === move.status,
+          );
+          if (facts.field === null || option === undefined)
+            return {
+              kind: "status_unknown",
+              available: facts.field?.options.map((entry) => entry.name) ?? [],
+            };
+          // Adding an issue that is on the board already answers its card, so the same call works for both.
+          const added = await graphql(ADD_TO_BOARD_MUTATION, {
+            project: facts.id,
+            content: issue.id,
+          });
+          const item = isRecord(added.addProjectV2ItemById)
+            ? added.addProjectV2ItemById.item
+            : null;
+          if (!isRecord(item) || typeof item.id !== "string")
+            throw shapeError("POST /graphql");
+          await graphql(SET_STATUS_MUTATION, {
+            project: facts.id,
+            item: item.id,
+            field: facts.field.id,
+            option: option.id,
+          });
+          return { kind: "moved", status: option.name };
         },
         signal,
       );

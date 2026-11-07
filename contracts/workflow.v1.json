@@ -197,6 +197,15 @@
         },
         {
           "$ref": "#/$defs/TicketLabelsAction"
+        },
+        {
+          "$ref": "#/$defs/TicketSetStatusAction"
+        },
+        {
+          "$ref": "#/$defs/TicketRequestReviewAction"
+        },
+        {
+          "$ref": "#/$defs/PullRequestCommentAction"
         }
       ]
     },
@@ -215,7 +224,8 @@
           "const": "action"
         },
         "connector": {
-          "const": "github.pullRequest.open"
+          "description": "`pullRequest.open` is the provider-neutral name of `github.pullRequest.open` (#917); saved lanes keep the old name.",
+          "enum": ["github.pullRequest.open", "pullRequest.open"]
         },
         "head": {
           "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
@@ -319,6 +329,110 @@
           }
         }
       ]
+    },
+    "PullRequestInput": {
+      "description": "A pull request: a positive whole number up to 2147483647, or exactly one reference to the number of a pull request an earlier `pullRequest.open` (or `github.pullRequest.open`) action opened (`{{<step id>.number}}`) or to an input of a manual trigger that is declared `integer`. The validator refuses anything else (`target_from_untrusted_value`), and the engine checks the number again when it runs.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        {
+          "$ref": "#/$defs/Reference"
+        }
+      ]
+    },
+    "PullRequestCommentAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "pullRequest", "body"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "pullRequest.comment"
+        },
+        "pullRequest": {
+          "$ref": "#/$defs/PullRequestInput"
+        },
+        "body": {
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "TicketSetStatusAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "ticket", "board", "status"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.setStatus"
+        },
+        "ticket": {
+          "$ref": "#/$defs/TicketTarget"
+        },
+        "board": {
+          "description": "The GitHub Project (projects_v2) of the repository's owner that holds the board: its number (\"7\") or its node id (\"PVT_…\"). A literal, no reference (`target_from_untrusted_value`; `invalid_value` for another form). Until the project carries its board (#922) the board is named here.",
+          "$ref": "#/$defs/Template"
+        },
+        "status": {
+          "description": "The name of an option of the board's Status field, as the board spells it: a literal, no reference. The engine looks it up when the step runs and ends the step with `board_status_unknown`, naming the options the board has, when there is none of that name.",
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "TicketRequestReviewAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "pullRequest", "reviewers"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.requestReview"
+        },
+        "pullRequest": {
+          "$ref": "#/$defs/PullRequestInput"
+        },
+        "reviewers": {
+          "description": "The text \"project members\" (the members of the project that has a GitHub login; the ones that cannot review this pull request are left out), or a list of GitHub logins (literals and references to inputs of a manual trigger, one reference per entry), or exactly one reference to a list input. `invalid_value` names \"project members\" in `available` for another text.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Template"
+              }
+            }
+          ]
+        }
+      }
     },
     "IssueInput": {
       "description": "A positive whole number up to 2147483647, or exactly one reference to the issue of the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`) or to an input of a manual trigger that is declared `integer`. The default of a reference is held to the same rule. The validator refuses the title, body and labels of the issue, and the engine checks the number again when it runs.",
