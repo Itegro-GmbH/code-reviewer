@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { getCapabilities } from "@/capabilities/shared";
 import { Badge } from "@/components/ui/badge";
 import { billingPageLinkedFor } from "@/billing/shared";
 import { planPageLinkedFor } from "@/usage/shared";
@@ -22,6 +24,8 @@ export const metadata: Metadata = { title: "Members" };
 export default async function MembersPage({
   params,
 }: PageProps<"/w/[workspace]/settings/members">) {
+  // A tab of the factory's settings only (the proxy answers the same, `capabilities/routes.ts`; asked again here like a route file).
+  if (!getCapabilities().has("implementer")) notFound();
   const { workspace: slug } = await params;
   const { workspace, role, user } = await requireWorkspace(
     slug,

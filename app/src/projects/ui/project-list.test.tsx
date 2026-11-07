@@ -69,7 +69,7 @@ describe("the project list without repositories", () => {
       screen.getByRole("heading", { name: "No repositories yet" }),
     ).toBeTruthy();
     const action = screen.getByRole("link", { name: "Connect GitHub" });
-    expect(action.getAttribute("href")).toBe("/w/acme/settings/integrations");
+    expect(action.getAttribute("href")).toBe("/w/acme/connections");
 
     const trigger = screen.getByRole("button", {
       name: "How to connect GitHub",

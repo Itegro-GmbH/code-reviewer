@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
+import { getCapabilities } from "@/capabilities/shared";
 import { projectServiceFor } from "@/projects/shared";
 import { loadRunsPage, RunsPageContent } from "@/runs/ui/runs-page";
 import { lastRunSourceFor, runsServiceFor } from "@/runs/shared";
@@ -24,7 +25,12 @@ export default async function RunsPage({
     <>
       <PageHeader
         title="Runs"
-        description="What the environments are doing. Open a run to follow it."
+        {...(getCapabilities().has("implementer")
+          ? {
+              description:
+                "What the environments are doing. Open a run to follow it.",
+            }
+          : {})}
       />
       <RunsContent
         workspaceId={workspace.id}

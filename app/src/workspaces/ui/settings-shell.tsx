@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The frame of the workspace settings area (#178): the sub-nav with one link per sub-page and the
-// shared heading (#925: the four tabs, and the second row of a tab with several pages). The settings index ("General", at `/settings`) is the area root and carries no
+// shared heading (in the factory, #925: the four tabs, and the second row of a tab with several pages). The settings index ("General", at `/settings`) is the area root and carries no
 // breadcrumb; the sub-pages show `Settings / <page>` (epic #165 breadcrumb rule). The links are
 // `settings-nav.tsx`; one source (`SETTINGS_SECTIONS`, `settings-sections.ts`) feeds them and the headings.
 import type { ReactNode } from "react";
@@ -10,7 +10,7 @@ import { PageHeader } from "../../components/page-header.tsx";
 import { workspacePath } from "../paths.ts";
 import { SettingsNav } from "./settings-nav.tsx";
 import {
-  SETTINGS_SECTIONS,
+  settingsSectionTitle,
   type SettingsSection,
 } from "./settings-sections.ts";
 
@@ -43,14 +43,13 @@ export function SettingsScreen({
   showBilling?: boolean;
   /** Lists the Advanced page. Left out, the settings layout decides (the Owner sees it, #658). */
   showAdvanced?: boolean;
-  /** A line under the title. */
+  /** A line under the title (the factory's pages, #925). */
   description?: string;
-  /** A short status next to the title. */
+  /** A short status next to the title (the factory's pages, #925). */
   badge?: ReactNode;
   children: ReactNode;
 }) {
-  const section = SETTINGS_SECTIONS.find((item) => item.segment === current);
-  const title = section?.title ?? "Settings";
+  const title = settingsSectionTitle(current);
   return (
     <>
       <PageHeader

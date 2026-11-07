@@ -106,13 +106,6 @@ const renders = [
   },
 ];
 
-const TAB_OF: Record<string, string> = {
-  general: "General",
-  "review-defaults": "Integrations",
-  llm: "Integrations",
-  advanced: "General",
-};
-
 describe("the workspace settings sub-pages", () => {
   // #178-T02
   it("each renders its own screen with the sub-nav marking it and at most one form", () => {
@@ -120,25 +113,17 @@ describe("the workspace settings sub-pages", () => {
       const { container, unmount } = render(<div key={key}>{element}</div>);
 
       expect(container.querySelectorAll("form"), label).toHaveLength(forms);
-      // The tab of the page is marked; a page of a tab with several pages is marked in the second row too (#925).
       const nav = screen.getByRole("navigation", { name: "Settings sections" });
       expect(
         within(nav)
-          .getByRole("link", { name: TAB_OF[key] })
+          .getByRole("link", { name: label })
           .getAttribute("aria-current"),
         label,
       ).toBe("page");
-      if (key !== "general") {
-        const pages = screen.getByRole("navigation", {
-          name: `${TAB_OF[key]} pages`,
-        });
-        expect(
-          within(pages)
-            .getByRole("link", { name: label })
-            .getAttribute("aria-current"),
-          label,
-        ).toBe("page");
-      }
+      // The Owner's navigation has Advanced (the Advanced page itself says so); the others have three links.
+      expect(within(nav).getAllByRole("link")).toHaveLength(
+        key === "advanced" ? 4 : 3,
+      );
       unmount();
     }
   });

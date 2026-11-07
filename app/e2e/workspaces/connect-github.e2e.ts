@@ -108,7 +108,7 @@ async function connectGithub(
   slug: string,
   options: { installOn: string; authorizeAs: GithubAccount },
 ): Promise<void> {
-  await page.goto(`/w/${slug}/settings/integrations`);
+  await page.goto(`/w/${slug}/connections`);
   await page.getByRole("button", { name: "Connect GitHub" }).click();
   await page
     .getByRole("button", {
@@ -122,9 +122,7 @@ async function connectGithub(
       exact: true,
     })
     .click();
-  await expect(page).toHaveURL(
-    new RegExp(`/w/${slug}/settings/integrations\\?github=`),
-  );
+  await expect(page).toHaveURL(new RegExp(`/w/${slug}/connections\\?github=`));
 }
 
 test.describe.configure({ mode: "serial" });
@@ -347,7 +345,7 @@ test.describe("connecting GitHub to a workspace", () => {
     await expect(waiting).toHaveCount(0);
 
     // The workspace now has the connection and its repositories.
-    await o.page.goto(`/w/${o.slug}/settings/integrations`);
+    await o.page.goto(`/w/${o.slug}/connections`);
     await expect(
       o.page.getByRole("list", { name: "Installations" }),
     ).toContainText(ORG_OPAQUE.login);
@@ -376,7 +374,7 @@ test.describe("connecting GitHub to a workspace", () => {
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await expect(page).toHaveURL(/\/w\/connect-a\/projects$/);
 
-    await page.goto("/w/connect-a/settings/integrations");
+    await page.goto("/w/connect-a/connections");
     await page
       .getByRole("button", { name: `Disconnect ${ORG_A.login}` })
       .click();

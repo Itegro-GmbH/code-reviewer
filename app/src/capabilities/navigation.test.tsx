@@ -2,12 +2,12 @@
 
 // @vitest-environment jsdom
 // A navigation entry of a capability the deployment does not have is not rendered, for anybody (#731): the workspace
-// sidebar, the settings navigation and the admin menu all read the capability set the root layout hands down.
+// sidebar, the settings sub-navigation and the admin menu all read the capability set the root layout hands down.
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
-const navigation = vi.hoisted(() => ({ pathname: "/w/acme/settings" }));
+const navigation = vi.hoisted(() => ({ pathname: "/w/acme/members" }));
 vi.mock("next/navigation", () => ({
   usePathname: () => navigation.pathname,
 }));
@@ -26,7 +26,7 @@ import { PRODUCTS } from "./products.ts";
 
 afterEach(() => {
   cleanup();
-  navigation.pathname = "/w/acme/settings";
+  navigation.pathname = "/w/acme/members";
 });
 
 const FACTORY: Capability[] = ["review", "dynamic-review"];
@@ -35,7 +35,7 @@ const labels = () =>
 
 describe("the workspace sidebar", () => {
   // #731-T06
-  it("lists Projects and Runs where the deployment has review, and Settings always", () => {
+  it("lists Projects and Runs where the deployment has review, and the rest of the workspace always", () => {
     render(
       <CapabilitiesProvider capabilities={FACTORY}>
         <AppShell product={getProductIdentity()} userMenu={<span>menu</span>}>
@@ -45,11 +45,14 @@ describe("the workspace sidebar", () => {
     );
 
     expect(labels()).toEqual(
-      expect.arrayContaining(["Projects", "Runs", "Settings"]),
+      expect.arrayContaining([
+        "Projects",
+        "Runs",
+        "Connections",
+        "Members",
+        "Settings",
+      ]),
     );
-    // The members and the GitHub App are tabs of the settings (#925), not places of the sidebar.
-    expect(labels()).not.toContain("Members");
-    expect(labels()).not.toContain("Connections");
   });
 
   // #731-T06
@@ -64,7 +67,9 @@ describe("the workspace sidebar", () => {
 
     expect(labels()).not.toContain("Projects");
     expect(labels()).not.toContain("Runs");
-    expect(labels()).toContain("Settings");
+    expect(labels()).toEqual(
+      expect.arrayContaining(["Connections", "Members", "Settings"]),
+    );
   });
 
   it("shows the whole product where no capability set was provided", () => {
@@ -82,17 +87,92 @@ describe("the workspace sidebar", () => {
     const product = getProductIdentity();
     expect(
       navItemsFor("/w/acme", product, none).map((item) => item.label),
-    ).toEqual(["Settings"]);
+    ).toEqual(["Connections", "Members", "Settings"]);
     expect(navGroupsFor("/w/acme", product, none)).toHaveLength(1);
     expect(workspaceHome("acme")).toBe("/w/acme/projects");
     expect(workspaceHome("acme", createCapabilitySet(FACTORY))).toBe(
       "/w/acme/projects",
     );
-    expect(workspaceHome("acme", none)).toBe("/w/acme/settings/integrations");
+    expect(workspaceHome("acme", none)).toBe("/w/acme/connections");
   });
 });
 
-describe("the places of the sidebar (#925)", () => {
+describe("the name of the QA area in the sidebar", () => {
+  // #757-T01
+  it("is Projects for code-review.com, with the address it always had", () => {
+    const product = identityFor("code-review-com");
+
+    expect(
+      navItemsFor("/w/acme", product).map((item) => [item.label, item.href]),
+    ).toEqual([
+      ["Projects", "/w/acme/projects"],
+      ["Runs", "/w/acme/runs"],
+      ["Connections", "/w/acme/connections"],
+      ["Members", "/w/acme/members"],
+      ["Settings", "/w/acme/settings"],
+    ]);
+  });
+
+  // #757-T02
+  it("is QA for the factory, and the address stays /projects", () => {
+    const product = identityFor("factory");
+
+    expect(
+      navItemsFor("/w/acme", product).map((item) => [item.label, item.href]),
+    ).toEqual([
+      ["QA", "/w/acme/projects"],
+      ["Runs", "/w/acme/runs"],
+      ["Connections", "/w/acme/connections"],
+      ["Members", "/w/acme/members"],
+      ["Settings", "/w/acme/settings"],
+    ]);
+  });
+
+  // #757-T02
+  it("is what the rendered sidebar of the factory shows", () => {
+    render(
+      <CapabilitiesProvider capabilities={FACTORY}>
+        <AppShell product={identityFor("factory")} userMenu={<span>menu</span>}>
+          <h1>Page</h1>
+        </AppShell>
+      </CapabilitiesProvider>,
+    );
+
+    expect(labels()).toEqual(expect.arrayContaining(["QA", "Runs"]));
+    expect(labels()).not.toContain("Projects");
+  });
+});
+
+describe("the places of the factory in the sidebar", () => {
+  // #756-T01, #818-T10, #873-T90, #925: without the capability `implementer` no list has a place of the Implementer, whatever the
+  // product, and the list is the old one of code-review.com.
+  it("has none of the places of the Implementer in a list without the capability: code-review.com's, the factory's without it, a review-only set", () => {
+    for (const product of [
+      identityFor("code-review-com"),
+      identityFor("factory"),
+    ])
+      for (const set of [
+        undefined,
+        createCapabilitySet(PRODUCTS["code-review-com"].default),
+        createCapabilitySet(FACTORY),
+        createCapabilitySet(["review"]),
+        createCapabilitySet([]),
+      ])
+        for (const place of [
+          "Implementer",
+          "Environments",
+          "Workflows",
+          "Runners",
+          "ToDos",
+          "Profiles",
+        ])
+          expect(
+            navItemsFor("/w/acme", product, set).map((item) => item.label),
+          ).not.toContain(place);
+  });
+});
+
+describe("the sidebar of the factory (#925)", () => {
   const WITH_IMPLEMENTER = createCapabilitySet([
     "review",
     "dynamic-review",
@@ -128,28 +208,6 @@ describe("the places of the sidebar (#925)", () => {
     ).toEqual(["ToDos"]);
   });
 
-  // #757-T01
-  it("is Projects, Runs and Settings for code-review.com, with the addresses it always had, and has nothing of the factory", () => {
-    const expected = [
-      ["Projects", "/w/acme/projects"],
-      ["Runs", "/w/acme/runs"],
-      ["Settings", "/w/acme/settings"],
-    ];
-    expect(
-      navItemsFor("/w/acme", identityFor("code-review-com")).map((item) => [
-        item.label,
-        item.href,
-      ]),
-    ).toEqual(expected);
-    expect(
-      navItemsFor(
-        "/w/acme",
-        identityFor("code-review-com"),
-        createCapabilitySet(PRODUCTS["code-review-com"].default),
-      ).map((item) => [item.label, item.href]),
-    ).toEqual(expected);
-  });
-
   // #925
   it("is Projects in the factory too: the area is the project cockpit, no longer named QA", () => {
     expect(
@@ -157,26 +215,6 @@ describe("the places of the sidebar (#925)", () => {
         (item) => item.label,
       ),
     ).toContain("Projects");
-  });
-
-  // #925
-  it("leaves ToDos, Profiles and Runners out of every list without the capability `implementer`", () => {
-    for (const product of [
-      identityFor("code-review-com"),
-      identityFor("factory"),
-    ])
-      for (const set of [
-        createCapabilitySet(PRODUCTS["code-review-com"].default),
-        createCapabilitySet(FACTORY),
-        createCapabilitySet(["review"]),
-        createCapabilitySet([]),
-      ]) {
-        const names = navItemsFor("/w/acme", product, set).map(
-          (item) => item.label,
-        );
-        for (const place of ["ToDos", "Profiles", "Runners"])
-          expect(names).not.toContain(place);
-      }
   });
 
   // #925: the places of the old sidebar are gone from it; their pages are tabs of the settings or lead from the pages that need them.
@@ -254,6 +292,60 @@ describe("the places of the sidebar (#925)", () => {
 });
 
 describe("the settings navigation", () => {
+  const sections = () =>
+    screen
+      .getAllByRole("link")
+      .map((link) => link.textContent)
+      .filter((text): text is string => text !== null);
+
+  // #731-T06
+  it.each([
+    ["Owner", true],
+    ["Admin", false],
+    ["Member", false],
+  ])(
+    "lists neither Billing nor anything of billing in the factory set, for the %s",
+    (_role, advanced) => {
+      render(
+        <CapabilitiesProvider capabilities={FACTORY}>
+          <SettingsNav
+            workspaceSlug="acme"
+            current=""
+            showPlan
+            showBilling
+            showAdvanced={advanced}
+          />
+        </CapabilitiesProvider>,
+      );
+
+      expect(sections()).not.toContain("Billing");
+      expect(sections()).toContain("Review defaults");
+      expect(sections().includes("Advanced")).toBe(advanced);
+    },
+  );
+
+  // #731-T06
+  it("lists Review defaults only with review, and Billing only with billing", () => {
+    const { rerender } = render(
+      <CapabilitiesProvider capabilities={[]}>
+        <SettingsNav workspaceSlug="acme" current="" showBilling />
+      </CapabilitiesProvider>,
+    );
+    expect(sections()).not.toContain("Review defaults");
+    expect(sections()).not.toContain("Billing");
+
+    rerender(
+      <CapabilitiesProvider capabilities={["review", "billing"]}>
+        <SettingsNav workspaceSlug="acme" current="" showBilling />
+      </CapabilitiesProvider>,
+    );
+    expect(sections()).toContain("Review defaults");
+    expect(sections()).toContain("Billing");
+  });
+});
+
+describe("the settings navigation of the factory (#925)", () => {
+  const WITH_IMPLEMENTER: Capability[] = [...FACTORY, "implementer"];
   const tabs = () =>
     screen
       .getAllByRole("link", {
@@ -275,7 +367,7 @@ describe("the settings navigation", () => {
     "lists no Billing tab in the factory set, and Advanced only for the Owner, for the %s",
     (_role, advanced) => {
       render(
-        <CapabilitiesProvider capabilities={FACTORY}>
+        <CapabilitiesProvider capabilities={WITH_IMPLEMENTER}>
           <SettingsNav
             workspaceSlug="acme"
             current=""
@@ -293,7 +385,7 @@ describe("the settings navigation", () => {
   // #731-T06, #925
   it("lists Review defaults only with review, and the Billing tab only with billing", () => {
     const { rerender } = render(
-      <CapabilitiesProvider capabilities={[]}>
+      <CapabilitiesProvider capabilities={["implementer"]}>
         <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
       </CapabilitiesProvider>,
     );
@@ -301,7 +393,7 @@ describe("the settings navigation", () => {
     expect(tabs()).not.toContain("Billing");
 
     rerender(
-      <CapabilitiesProvider capabilities={["review", "billing"]}>
+      <CapabilitiesProvider capabilities={["review", "billing", "implementer"]}>
         <SettingsNav workspaceSlug="acme" current="integrations" showBilling />
       </CapabilitiesProvider>,
     );

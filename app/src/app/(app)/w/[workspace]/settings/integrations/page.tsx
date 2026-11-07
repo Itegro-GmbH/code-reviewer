@@ -2,6 +2,8 @@
 
 import { getProductIdentity } from "@/product-identity/current";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { getCapabilities } from "@/capabilities/shared";
 import { lookupSessionId } from "@/auth/session";
 import { createInstallationLinkRequestsRepository } from "@/db/repositories/installation-link-requests-repository";
 import { createIntegrationsRepository } from "@/db/repositories/integrations-repository";
@@ -28,6 +30,8 @@ export default async function ConnectionsPage({
   params,
   searchParams,
 }: PageProps<"/w/[workspace]/settings/integrations">) {
+  // A tab of the factory's settings only (the proxy answers the same, `capabilities/routes.ts`; asked again here like a route file).
+  if (!getCapabilities().has("implementer")) notFound();
   const { workspace: slug } = await params;
   const { workspace, role, user } = await requireWorkspace(slug);
   const query = await searchParams;
@@ -83,6 +87,7 @@ async function ConnectionsContent({
         workspaceSlug={workspaceSlug}
         canManage={canManage}
         data={data}
+        heading={false}
       />
     </SettingsScreen>
   );

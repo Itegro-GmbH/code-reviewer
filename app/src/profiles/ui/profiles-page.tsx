@@ -261,6 +261,7 @@ function ProfileDrawer({
             api={api}
             profile={shown}
             notice={notice}
+            onSaveStart={() => setNotice(null)}
             onSaved={(profile) => {
               setNotice(DRAWER_COPY.saved(profile.version));
               onSaved(profile);
@@ -294,11 +295,14 @@ function DrawerBody({
   api,
   profile,
   notice,
+  onSaveStart,
   onSaved,
 }: {
   api: ProfilesApi;
   profile: ProfileView;
   notice: string | null;
+  /** A save begins: the notice of the one before is no longer true. */
+  onSaveStart: () => void;
   onSaved: (profile: ProfileView) => void;
 }) {
   const { document } = profile;
@@ -312,6 +316,7 @@ function DrawerBody({
   const save = useCallback(async () => {
     setPending(true);
     setProblem(null);
+    onSaveStart();
     const result = await api.saveVersion(
       profile.id,
       nextVersionBody(profile, { harness, instructions, canPush }),
@@ -327,7 +332,7 @@ function DrawerBody({
       return;
     }
     onSaved(result.data.profile);
-  }, [api, profile, harness, instructions, canPush, onSaved]);
+  }, [api, profile, harness, instructions, canPush, onSaveStart, onSaved]);
 
   const modelText = modelTextOf(document.model);
   return (

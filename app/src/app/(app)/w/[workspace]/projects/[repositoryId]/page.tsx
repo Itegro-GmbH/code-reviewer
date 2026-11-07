@@ -1,24 +1,32 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
 import { getCapabilities } from "@/capabilities/shared";
 import { IssuesTab } from "@/projects/ui/project-tabs";
-import { projectPath } from "@/projects/ui/project-cards";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { CockpitFrame } from "./cockpit-frame";
+import ProjectSettingsPage from "./review/page";
 
-export const metadata: Metadata = { title: "Project · Issues" };
+// The title is the one of the page: the cockpit in the factory, the review settings elsewhere (a function, as the capability is read
+// from the environment).
+export function generateMetadata(): Metadata {
+  return {
+    title: getCapabilities().has("implementer")
+      ? "Project · Issues"
+      : "Project settings",
+  };
+}
 
-// The cockpit of one project (#925): its Issues tab. The address names the workspace and the repository by its id in this app. A
-// deployment without the factory has no issues to show and opens the review settings of the project, as the page was before.
-export default async function ProjectIssuesPage({
+// One project. In the factory (#925) it is the cockpit, and this address is its Issues tab; the review settings are at `/review`. A
+// deployment without the factory has no cockpit: the address shows the review settings, as it always did.
+export default async function ProjectPage({
   params,
+  searchParams,
 }: PageProps<"/w/[workspace]/projects/[repositoryId]">) {
+  if (!getCapabilities().has("implementer"))
+    return ProjectSettingsPage({ params, searchParams });
   const { workspace: slug, repositoryId } = await params;
   const { workspace } = await requireWorkspace(slug);
-  if (!getCapabilities().has("implementer"))
-    redirect(projectPath(workspace.slug, repositoryId, "review"));
   return (
     <CockpitFrame
       workspaceId={workspace.id}

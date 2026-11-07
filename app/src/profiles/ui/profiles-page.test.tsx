@@ -211,6 +211,40 @@ describe("the drawer of a profile", () => {
   });
 
   // #925
+  it("clears the notice of the last save when the next save starts", async () => {
+    const { api, saveVersion } = fakeApi();
+    const next = view({ version: 4 });
+    let finish: (value: {
+      ok: true;
+      data: { profile: ProfileView };
+    }) => void = () => undefined;
+    saveVersion.mockResolvedValueOnce({
+      ok: true,
+      data: { profile: view({ version: 3 }) },
+    });
+    saveVersion.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    await within(dialog).findByLabelText("Instructions");
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save as new version" }),
+    );
+    await within(dialog).findByText("Saved as version 3.");
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "Save as new version" }),
+    );
+
+    await waitFor(() => expect(saveVersion).toHaveBeenCalledTimes(2));
+    expect(within(dialog).queryByText("Saved as version 3.")).toBeNull();
+    finish({ ok: true, data: { profile: next } });
+    expect(await within(dialog).findByText("Saved as version 4.")).toBeTruthy();
+  });
+
+  // #925
   it("shows the saved harness, rights and version in the row of the list", async () => {
     const saved = view({
       version: 3,

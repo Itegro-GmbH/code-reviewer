@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// A smoke per page of the app shell (#925), in a real browser against a production build next to the fake GitHub: every page of the
-// product (code-review.com: no ToDos, Profiles or Runners, which belong to the factory and are covered by the capability journey of the
-// hosted lane and the component tests) opens from the sidebar or its tab, shows its heading, and the old addresses lead to their new place.
+// A smoke per page that the shell of the factory (#925) touches, in a real browser against a production build next to the fake GitHub.
+// This app is code-review.com (no `implementer` capability): it looks and navigates as before the shell, so the sidebar, the settings
+// navigation, Members and Connections, and the address of a project are asserted in their old form, and the places that belong to the
+// factory (its tabs, ToDos, Profiles) do not exist. The factory's layout is covered by the capability journey of the hosted lane and
+// the component tests.
 import { expect, test } from "@playwright/test";
 import { syncFromGithubAsAdmin } from "../helpers/admin-api";
 import {
@@ -34,86 +36,91 @@ test.describe("the pages of the app shell", () => {
   });
 
   // #925
-  test("@smoke the tabs of the settings open one after the other, each marked as the current one", async ({
+  test("@smoke the sidebar and the settings navigation are the ones of code-review.com: one row of pages, no tabs", async ({
     page,
   }) => {
     await signInThroughTheForm(page, account);
-    await page
-      .getByRole("navigation", { name: "Main" })
-      .getByRole("link", { name: "Settings" })
-      .click();
-    const tabs = page.getByRole("navigation", { name: "Settings sections" });
+    const nav = page.getByRole("navigation", { name: "Main" });
+    await expect(nav.getByRole("link")).toHaveText([
+      "Projects",
+      "Runs",
+      "Connections",
+      "Members",
+      "Settings",
+    ]);
+    await nav.getByRole("link", { name: "Settings" }).click();
+    const sections = page.getByRole("navigation", {
+      name: "Settings sections",
+    });
+    await expect(
+      sections.getByRole("link", { name: "General", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
+    await expect(sections.getByRole("link", { name: "Members" })).toHaveCount(
+      0,
+    );
+    await expect(
+      sections.getByRole("link", { name: "Integrations" }),
+    ).toHaveCount(0);
 
-    for (const [tab, heading] of [
-      ["Members", "Members"],
-      ["Integrations", "Integrations"],
-      ["General", "General"],
-    ] as const) {
-      await tabs.getByRole("link", { name: tab, exact: true }).click();
+    for (const name of ["Review defaults", "LLM"]) {
+      await sections.getByRole("link", { name, exact: true }).click();
 
+      await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
       await expect(
-        page.getByRole("heading", { level: 1, name: heading }),
-      ).toBeVisible();
-      await expect(
-        tabs.getByRole("link", { name: tab, exact: true }),
+        sections.getByRole("link", { name, exact: true }),
       ).toHaveAttribute("aria-current", "page");
     }
-
-    // The LLM key and the review defaults are pages of the Integrations tab.
-    await tabs.getByRole("link", { name: "Integrations" }).click();
-    const pages = page.getByRole("navigation", { name: "Integrations pages" });
-    await pages.getByRole("link", { name: "LLM" }).click();
-    await expect(
-      page.getByRole("heading", { level: 1, name: "LLM" }),
-    ).toBeVisible();
-    await expect(
-      tabs.getByRole("link", { name: "Integrations" }),
-    ).toHaveAttribute("aria-current", "page");
-    await pages.getByRole("link", { name: "Review defaults" }).click();
-    await expect(
-      page.getByRole("heading", { level: 1, name: "Review defaults" }),
-    ).toBeVisible();
+    // One row: no second navigation of a tab.
+    await expect(page.getByRole("navigation", { name: /pages$/ })).toHaveCount(
+      0,
+    );
   });
 
   // #925
-  test("@smoke the old addresses of Members and Connections lead to their tabs of the settings", async ({
+  test("@smoke Members and Connections are the pages they were, at their own addresses; the settings tabs do not exist", async ({
     page,
   }) => {
     await signInThroughTheForm(page, account);
     const slug = /\/w\/([a-z0-9-]+)\//.exec(page.url())?.[1] ?? "default";
 
     await page.goto(`/w/${slug}/members`);
-    await expect(page).toHaveURL(new RegExp(`/w/${slug}/settings/members$`));
+    await expect(page).toHaveURL(new RegExp(`/w/${slug}/members$`));
     await expect(
       page.getByRole("heading", { level: 1, name: "Members" }),
     ).toBeVisible();
 
     await page.goto(`/w/${slug}/connections`);
-    await expect(page).toHaveURL(
-      new RegExp(`/w/${slug}/settings/integrations$`),
-    );
+    await expect(page).toHaveURL(new RegExp(`/w/${slug}/connections$`));
     await expect(
-      page.getByRole("heading", { level: 1, name: "Integrations" }),
+      page.getByRole("heading", { level: 1, name: "Connections" }),
     ).toBeVisible();
+
+    for (const tab of ["members", "integrations"]) {
+      await page.goto(`/w/${slug}/settings/${tab}`);
+
+      await expect(
+        page.getByRole("heading", { level: 1, name: "Page not found" }),
+      ).toBeVisible();
+    }
   });
 
   // #925
-  test("@smoke a project's own address opens the review settings where there is no factory, and the cockpit tabs do not exist", async ({
+  test("@smoke a project's own address is its review settings, and the cockpit tabs and the review address do not exist", async ({
     page,
   }) => {
     await signInThroughTheForm(page, account);
     await page.getByRole("link", { name: REPOSITORY, exact: true }).click();
-    // Without the factory the project's address is the review settings (the page it always was).
+    // The project's address is the review settings (the page it always was), not a redirect.
     await expect(
       page.getByRole("heading", { level: 1, name: REPOSITORY }),
     ).toBeVisible();
-    await expect(page).toHaveURL(/\/projects\/[^/]+\/review$/);
+    await expect(page).toHaveURL(/\/projects\/[^/]+$/);
     await expect(page.getByRole("navigation", { name: "Project" })).toHaveCount(
       0,
     );
-    const repositoryPath = page.url().replace(/\/review$/, "");
+    const repositoryPath = page.url();
 
-    for (const tab of ["runs", "setup", "lanes", "todos"]) {
+    for (const tab of ["review", "runs", "setup", "lanes", "todos"]) {
       await page.goto(`${repositoryPath}/${tab}`);
 
       await expect(
@@ -131,7 +138,7 @@ test.describe("the pages of the app shell", () => {
 
     // The data sits behind the layout's Suspense, so the response is already streaming and its status stays 200: what is
     // proven is the page, not the status.
-    await page.goto(`/w/${slug}/projects/no-such-project/review`);
+    await page.goto(`/w/${slug}/projects/no-such-project`);
 
     await expect(
       page.getByRole("heading", { level: 1, name: "Page not found" }),

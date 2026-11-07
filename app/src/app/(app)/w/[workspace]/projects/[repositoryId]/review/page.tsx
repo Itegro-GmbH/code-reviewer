@@ -26,8 +26,8 @@ import { getProductIdentity } from "@/product-identity/current";
 
 export const metadata: Metadata = { title: "Review settings" };
 
-// The review settings of one project (#925: `/projects/<id>/review`; the Setup tab links here, and in a deployment without the factory the
-// project's own address opens it). The address names the workspace and the repository by its id in this
+// The review settings of one project, at `/projects/<id>/review` in the factory (#925; the Setup tab links here). A deployment without
+// the factory has no such address: the project's own address renders this page (`../page.tsx`). The address names the workspace and the repository by its id in this
 // app. An id nobody has in this workspace (also one of another workspace) shows the not-found page; with
 // Cache Components the data sits behind the layout's <Suspense>, so the response is already streaming and
 // its HTTP status stays 200 (a status of 404 would need the lookup before the first byte, which only data

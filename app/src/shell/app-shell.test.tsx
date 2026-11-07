@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // @vitest-environment jsdom
-// Pins down the frame around every signed in page: the sidebar with its group of workspace
+// Pins down the frame around every signed in page: the sidebar with its two groups of workspace
 // places, the current one marked, the brand link, the skip link and the user menu slot, and the
 // narrow-screen drawer (its trigger advertises the drawer it opens, Escape closes it and returns the
 // focus, a chosen link closes it, a page change closes it). Whether it looks right is checked by
@@ -59,13 +59,13 @@ function mainNavigation() {
 
 describe("the sidebar", () => {
   // #168-T01
-  it("shows the workspace places in one group and marks only the current page", () => {
+  it("shows the workspace places in two groups, separated, and marks only the current page", () => {
     renderShell();
 
     const nav = mainNavigation();
     const groups = nav.querySelectorAll('[data-slot="sidebar-group"]');
 
-    expect(groups).toHaveLength(1);
+    expect(groups).toHaveLength(2);
     expect(
       Array.from(groups[0].querySelectorAll("a")).map((link) => [
         link.textContent,
@@ -75,11 +75,15 @@ describe("the sidebar", () => {
     ).toEqual([
       ["Projects", "/w/acme/projects", null],
       ["Runs", "/w/acme/runs", "page"],
-      ["Settings", "/w/acme/settings", null],
     ]);
     expect(
+      Array.from(groups[1].querySelectorAll("a")).map(
+        (link) => link.textContent,
+      ),
+    ).toEqual(["Connections", "Members", "Settings"]);
+    expect(
       nav.querySelectorAll('[data-slot="sidebar-separator"]'),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
   });
 
   it("keeps a place marked while a page below it is open", () => {
@@ -116,6 +120,8 @@ describe("the sidebar", () => {
     ).toEqual([
       "/w/other-team/projects",
       "/w/other-team/runs",
+      "/w/other-team/connections",
+      "/w/other-team/members",
       "/w/other-team/settings",
     ]);
   });

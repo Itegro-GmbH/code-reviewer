@@ -10,6 +10,7 @@ import {
   createBindingHarness,
   type BindingHarness,
 } from "../test-support/binding-harness.ts";
+import { createCapabilitySet } from "../capabilities/capability.ts";
 import { BINDING_REQUEST_MAX_BYTES } from "./http.ts";
 import type { BindingActor } from "./service.ts";
 
@@ -322,7 +323,7 @@ describe("the redirects of GitHub", () => {
 
     expect(landed?.status).toBe(302);
     expect(landed?.headers.get("location")).toBe(
-      "/w/a/settings/integrations?github=linked",
+      "/w/a/connections?github=linked",
     );
     expect(landed?.headers.get("referrer-policy")).toBe("no-referrer");
   });
@@ -357,6 +358,28 @@ describe("the redirects of GitHub", () => {
 
     const response = await h
       .handlers(owner)
+      .setupCallback(new Request(back.toString()));
+
+    expect(response.headers.get("location")).toBe(
+      "/w/a/connections?github=waiting_for_github_approval",
+    );
+  });
+
+  // #925
+  it("ends on the Integrations tab of the settings in the factory, where the connections moved", async () => {
+    const { h, a, owner } = await scene();
+    const started = await h.binding.service.startConnect(owner, a.id);
+    if (!started.ok) throw new Error("Connect did not start");
+    const back = await h.confirmInstallation(started.url, {
+      installationId: 4242,
+      action: "request",
+    });
+
+    const response = await h
+      .handlers(owner, {
+        capabilities: () =>
+          createCapabilitySet(["review", "dynamic-review", "implementer"]),
+      })
       .setupCallback(new Request(back.toString()));
 
     expect(response.headers.get("location")).toBe(

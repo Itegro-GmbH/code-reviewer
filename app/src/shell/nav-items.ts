@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The places of the signed in app, as the sidebar shows them. One list feeds the navigation, so the labels, the links and the active
-// state cannot drift apart. The places belong to a workspace: their addresses are below `/w/<slug>` (src/workspaces/paths.ts), and the
-// navigation shows them while the page is in a workspace. The list is the one of the factory's app shell (#925): ToDos (with the
-// count of what waits for the person), Projects, Runs, Profiles, Runners, Settings. The workspace administration (members, the GitHub
-// App, billing) is one place, Settings, with tabs; there are no favorites and no lanes outside a project.
+// The places of the signed in app, grouped the way the sidebar shows them. One list feeds the
+// navigation, so the labels, the links and the active state cannot drift apart. The places belong to
+// a workspace: their addresses are below `/w/<slug>` (src/workspaces/paths.ts), and the navigation
+// shows them while the page is in a workspace. A deployment without the `implementer` capability (code-review.com) has the groups
+// daily work (Projects, Runs), then a separator, then the workspace administration (Connections, Members, Settings); #168 says
+// Members stays a top-level item. The first place is the QA area, which the product names (`qaAreaName`, #757): its address is
+// `/projects` in every product. The factory (#925) has the list of its app shell instead: ToDos (with the count of what waits for
+// the person), Projects, Runs, Profiles, Runners, Settings. Its workspace administration (members, the GitHub App, billing) is one
+// place, Settings, with tabs; there are no favorites and no lanes outside a project.
 import {
   createCapabilitySet,
   type Capability,
@@ -23,6 +27,27 @@ type NavPlace = {
   badge?: NavBadge;
 };
 const NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
+  {
+    items: [
+      {
+        path: "/projects",
+        label: (product) => product.qaAreaName,
+        capability: "review",
+      },
+      { path: "/runs", label: "Runs", capability: "review" },
+    ],
+  },
+  {
+    items: [
+      { path: "/connections", label: "Connections" },
+      { path: "/members", label: "Members" },
+      { path: "/settings", label: "Settings" },
+    ],
+  },
+];
+
+/** The places of the factory (#925); a deployment with the `implementer` capability shows these and no other. */
+const FACTORY_NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
   {
     items: [
       {
@@ -69,19 +94,27 @@ export function navGroupsFor(
 ): NavGroup[] {
   const slug = pathname === null ? undefined : workspaceSlugOfPath(pathname);
   if (typeof slug !== "string") return [];
-  return NAV_GROUPS.map((group) => ({
-    items: group.items
-      .filter(
-        (place) =>
-          place.capability === undefined || capabilities.has(place.capability),
-      )
-      .map((place) => ({
-        href: workspacePath(slug, place.path),
-        label:
-          typeof place.label === "string" ? place.label : place.label(product),
-        ...(place.badge === undefined ? {} : { badge: place.badge }),
-      })),
-  })).filter((group) => group.items.length > 0);
+  const groups = capabilities.has("implementer")
+    ? FACTORY_NAV_GROUPS
+    : NAV_GROUPS;
+  return groups
+    .map((group) => ({
+      items: group.items
+        .filter(
+          (place) =>
+            place.capability === undefined ||
+            capabilities.has(place.capability),
+        )
+        .map((place) => ({
+          href: workspacePath(slug, place.path),
+          label:
+            typeof place.label === "string"
+              ? place.label
+              : place.label(product),
+          ...(place.badge === undefined ? {} : { badge: place.badge }),
+        })),
+    }))
+    .filter((group) => group.items.length > 0);
 }
 
 /** Every place in one list, in the order the sidebar shows them. */

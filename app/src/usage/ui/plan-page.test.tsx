@@ -323,7 +323,7 @@ describe("the plan page, for people who do not see colours", () => {
     for (const region of screen.getAllByRole("region"))
       expect(region.getAttribute("aria-labelledby")).toBeTruthy();
 
-    // The only things a keyboard stops at are the tabs of the settings navigation (and the breadcrumb).
+    // The only things a keyboard stops at are the links of the settings navigation (and the breadcrumb).
     const stops: string[] = [];
     for (let i = 0; i < 12; i += 1) {
       await user.tab();
@@ -335,9 +335,9 @@ describe("the plan page, for people who do not see colours", () => {
     expect(stops).toEqual([
       "Settings",
       "General",
-      "Members",
-      "Billing",
-      "Integrations",
+      "Review defaults",
+      "LLM",
+      "Plan",
     ]);
   });
 });

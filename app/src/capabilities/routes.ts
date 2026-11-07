@@ -129,10 +129,7 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/w/[workspace]/members", class: "core" },
   { route: "/w/[workspace]/settings", class: "core" },
   { route: "/w/[workspace]/settings/advanced", class: "core" },
-  // The tabs of the settings (#925): the GitHub App page and the members list moved here from `/connections` and `/members`.
-  { route: "/w/[workspace]/settings/integrations", class: "core" },
   { route: "/w/[workspace]/settings/llm", class: "core" },
-  { route: "/w/[workspace]/settings/members", class: "core" },
   { route: "/w/[workspace]/settings/plan", class: "core" },
   { route: "/workspaces/new", class: "core" },
 
@@ -171,8 +168,6 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/runs/[[...rest]]", class: "review" },
   { route: "/w/[workspace]/projects", class: "review" },
   { route: "/w/[workspace]/projects/[repositoryId]", class: "review" },
-  // The review settings of a project (#925: they were the project's own address; where there is no factory that address still opens them).
-  { route: "/w/[workspace]/projects/[repositoryId]/review", class: "review" },
   { route: "/w/[workspace]/runs", class: "review" },
   { route: "/w/[workspace]/runs/[id]", class: "review" },
   { route: "/w/[workspace]/settings/review-defaults", class: "review" },
@@ -225,8 +220,16 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
-  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, and the tabs of a project's
-  // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory).
+  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
+  // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
+  // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review
+  // settings at their own address below the project.
+  { route: "/w/[workspace]/settings/integrations", class: "implementer" },
+  { route: "/w/[workspace]/settings/members", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/review",
+    class: "implementer",
+  },
   { route: "/api/w/[workspace]/todos/count", class: "implementer" },
   { route: "/w/[workspace]/todos", class: "implementer" },
   { route: "/w/[workspace]/profiles", class: "implementer" },

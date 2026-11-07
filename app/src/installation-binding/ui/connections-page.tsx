@@ -9,6 +9,7 @@
 // `ConnectionsPageContent` renders it. The page file only wires the real services. Names that come from
 // GitHub (account logins) are untrusted and rendered as text.
 import type { ProductIdentity } from "../../product-identity/identity.ts";
+import { PageHeader } from "../../components/page-header.tsx";
 import type { InstallationLinkRequestsRepository } from "../../db/repositories/installation-link-requests-repository.ts";
 import type { IntegrationsRepository } from "../../db/repositories/integrations-repository.ts";
 import type { RepositoriesRepository } from "../../db/repositories/repositories-repository.ts";
@@ -135,21 +136,32 @@ export function ConnectionsPageContent({
   workspaceSlug,
   canManage,
   data,
+  heading = true,
   api,
 }: {
   workspaceSlug: string;
   /** Whether the person may connect and disconnect (an Admin or an Owner). */
   canManage: boolean;
   data: ConnectionsPageData;
+  /** The heading "Connections"; the factory's settings tab (#925) has its own and passes false. */
+  heading?: boolean;
   /** Only tests pass this: a server component cannot hand functions to the client panel. */
   api?: BindingApi;
 }) {
-  return (
+  const panel = (
     <ConnectionsPanel
       workspaceSlug={workspaceSlug}
       canManage={canManage}
       data={data}
       {...(api === undefined ? {} : { api })}
     />
+  );
+  return heading ? (
+    <>
+      <PageHeader title="Connections" />
+      {panel}
+    </>
+  ) : (
+    panel
   );
 }

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// The navigation of the workspace settings (#178, #925): the four tabs (General, Members, Billing, Integrations) and, for a tab that
-// has more than one page, a second row with its pages. The current tab and page carry `aria-current="page"`, which the styling turns
-// into a fill as well, so the location is never shown by colour alone.
+// The sub-navigation of the workspace settings (#178): one link per sub-page, the current one carries `aria-current="page"`,
+// which the styling turns into an underline as well, so the location is never shown by colour alone. The factory (#925) has the four
+// tabs (General, Members, Billing, Integrations) and, for a tab that has more than one page, a second row with its pages.
 //
 // "Advanced" (#658) only holds the deletion of the workspace and is the Owner's alone, so only an Owner sees the link. The
 // settings layout (`app/(app)/w/[workspace]/settings/layout.tsx`) knows the role and hands it down through
@@ -21,6 +21,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  FACTORY_SETTINGS_SECTIONS,
   SETTINGS_SECTIONS,
   SETTINGS_TABS,
   settingsSectionHref,
@@ -72,7 +73,56 @@ function SettingsNavWithAccess(props: SettingsNavProps) {
   return <SettingsLinks {...props} advanced={advanced} />;
 }
 
-function SettingsLinks({
+function SettingsLinks(props: SettingsNavProps & { advanced: boolean }) {
+  const capabilities = useCapabilities();
+  return capabilities.has("implementer") ? (
+    <FactorySettingsLinks {...props} />
+  ) : (
+    <SectionLinks {...props} />
+  );
+}
+
+function SectionLinks({
+  workspaceSlug,
+  current,
+  showPlan = false,
+  showBilling = false,
+  advanced,
+}: SettingsNavProps & { advanced: boolean }) {
+  const capabilities = useCapabilities();
+  return (
+    <nav aria-label="Settings sections">
+      <ul className="flex flex-wrap items-center gap-1">
+        {SETTINGS_SECTIONS.filter((section) => {
+          if (
+            section.capability !== undefined &&
+            !capabilities.has(section.capability)
+          )
+            return false;
+          if (section.segment === "plan") return showPlan && !showBilling;
+          if (section.segment === "billing") return showBilling;
+          if (section.segment === "advanced") return advanced;
+          return true;
+        }).map((section) => {
+          const active = section.segment === current;
+          return (
+            <li key={section.segment || "general"}>
+              <Link
+                href={settingsSectionHref(workspaceSlug, section.segment)}
+                aria-current={active ? "page" : undefined}
+                className={PILL_LINK_CLASS}
+              >
+                {section.label}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
+function FactorySettingsLinks({
   workspaceSlug,
   current,
   showPlan = false,
@@ -81,7 +131,7 @@ function SettingsLinks({
 }: SettingsNavProps & { advanced: boolean }) {
   const capabilities = useCapabilities();
   // The page that is open is always listed, even where its capability or flag would hide it (a bookmarked address), so its tab is marked.
-  const listed = SETTINGS_SECTIONS.filter((section) => {
+  const listed = FACTORY_SETTINGS_SECTIONS.filter((section) => {
     if (section.segment === current) return true;
     if (
       section.capability !== undefined &&
