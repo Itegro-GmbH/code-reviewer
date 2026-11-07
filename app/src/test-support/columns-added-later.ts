@@ -61,8 +61,12 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "trigger_id",
     "ticket_ref",
   ],
+  // #920: the question a step ended with and the comment that carries it; null for every step that exists.
+  workflow_step_runs: ["ask", "waiting_on_comment_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
+  // #919: the environment a profile version runs in; null for every version that exists (its step names the environment).
+  profile_versions: ["environment_id"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
   usage_records: ["cost_basis"],
 };

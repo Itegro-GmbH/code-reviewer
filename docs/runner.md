@@ -148,15 +148,15 @@ GET /api/runners/v1/jobs/{id}/resume-session?part=n
 ### Validator rules
 
 The validator of workflows (`POST .../workflows/validate`, and every save) knows the kind of each environment and, for each profile version it runs, whether
-its model is managed and which harness it runs with:
+its model is managed and which harness it runs with. Since #919 the environment is part of the profile, so the same two rules are checked when a **profile** is saved
+(`POST .../profiles`, at `/environment`), and again for a step at its `/profile` (at its `/environment` for a profile version saved before #919, whose step names the environment):
 
 | Code                   | When                                                                                                                                   |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `runner_needs_own_key` | An agent step runs a profile with a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
-| `harness_needs_runner` | An agent step runs a profile whose **harness is not OpenCode** in an environment that is not a runner's.                               |
+| `runner_needs_own_key` | A profile (or an agent step) runs a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
+| `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
 
-Profiles know only OpenCode today. The field `harness` is accepted in a profile document (`"opencode"` and nothing else: no other value is a harness a profile
-can name), nothing is stored for it, and the second rule is prepared for the first harness a runner announces; this change adds none.
+A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
 
 ### Known limits and follow-ups
 

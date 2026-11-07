@@ -31,6 +31,7 @@ import {
 import { issue, listNames, pointer, shown } from "./issues.ts";
 import {
   parseProfileRef,
+  type EnvironmentInfo,
   type ProfileInfo,
   type ProfileVersionFacts,
   type WorkflowResolver,
@@ -201,12 +202,44 @@ function findProfile(
   };
 }
 
-/** The profile name and the environment (lower case, a literal only) an agent step is written with: what makes two steps share a session. */
-function setupOf(node: Record<string, unknown>): NonNullable<Binding["agent"]> {
-  const environment =
+/**
+ * The environment an agent step runs in (#919): the one of its profile version, else the one the step names (a version saved before
+ * profiles had one). `fromProfile` says which; `info` is undefined when the environment is not one of the workspace (reported where it
+ * is written) and `name` is then what the step wrote, if it wrote a literal.
+ */
+function environmentOf(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+):
+  | { fromProfile: boolean; info: EnvironmentInfo | undefined; name?: string }
+  | undefined {
+  const id = findProfile(node.profile, resolver)?.facts?.environmentId;
+  if (typeof id === "string")
+    return {
+      fromProfile: true,
+      info: resolver.environments().find((e) => e.id === id),
+    };
+  const name =
     typeof node.environment === "string"
-      ? literalText(parseTemplate(node.environment))?.toLowerCase()
+      ? literalText(parseTemplate(node.environment))
       : undefined;
+  if (name === undefined) return undefined;
+  return {
+    fromProfile: false,
+    name,
+    info: resolver
+      .environments()
+      .find((e) => e.name.toLowerCase() === name.toLowerCase()),
+  };
+}
+
+/** The profile name and the environment (lower case) an agent step runs with: what makes two steps share a session. */
+function setupOf(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+): NonNullable<Binding["agent"]> {
+  const found = environmentOf(node, resolver);
+  const environment = (found?.info?.name ?? found?.name)?.toLowerCase();
   const profile =
     typeof node.profile === "string"
       ? parseProfileRef(node.profile)?.name
@@ -259,7 +292,7 @@ export function agentBinding(
     ...(node.result !== undefined && declared === undefined
       ? { open: true }
       : {}),
-    agent: setupOf(node),
+    agent: setupOf(node, resolver),
   };
 }
 
@@ -407,6 +440,7 @@ function checkEnvironment(
     path,
     "the name of an environment of the workspace.",
     c,
+    false,
   );
   if (name === undefined) return;
   const where = pointer(path, "environment");
@@ -431,33 +465,83 @@ function checkEnvironment(
 }
 
 /**
+ * #919: a profile says where it works, so the environment of a step is optional and must be the profile's when it is written. A version
+ * saved before profiles had an environment names none: its step names one, as before.
+ */
+function checkProfileEnvironment(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const facts = findProfile(node.profile, c.resolver)?.facts;
+  // A profile nobody knows is reported where it is written; a version with no facts is not known, and nothing is refused on a guess.
+  if (facts === undefined) return;
+  const profile = shown(parseProfileRef(node.profile as string)?.name ?? "");
+  const names = c.resolver.environments().map((e) => e.name);
+  const id = facts.environmentId;
+  if (typeof id !== "string") {
+    if (node.environment === undefined)
+      c.report(
+        issue(
+          pointer(path, "environment"),
+          "environment_required",
+          `The profile ${profile} names no environment (this version was saved before profiles had one), so the step names one. Environments: ${listNames(names)}. Or save a new version of the profile with an "environment".`,
+          names,
+        ),
+      );
+    return;
+  }
+  const own = c.resolver.environments().find((e) => e.id === id);
+  if (own === undefined) {
+    c.report(
+      issue(
+        pointer(path, "profile"),
+        "environment_unknown",
+        `The profile ${profile} runs in an environment that is no longer in this workspace. Save a new version of the profile with one of: ${listNames(names)}.`,
+        names,
+      ),
+    );
+    return;
+  }
+  const written =
+    typeof node.environment === "string"
+      ? literalText(parseTemplate(node.environment))
+      : undefined;
+  if (written !== undefined && written.toLowerCase() !== own.name.toLowerCase())
+    c.report(
+      issue(
+        pointer(path, "environment"),
+        "environment_mismatch",
+        `The profile ${profile} runs in the environment ${shown(own.name)}, not ${shown(written)}. A profile says where it works: leave "environment" out of the step, or write ${shown(own.name)}.`,
+        [own.name],
+      ),
+    );
+}
+
+/**
  * #854: what a profile and an environment can only do together. A runner works with its owner's own key, so a profile with a managed
  * model has no place in a runner environment; and a harness the platform's catalog does not hold (any but OpenCode) exists only on a
- * runner. Both are reported where the environment is written. A name nobody knows is reported by the checks above and not again here.
+ * runner. Both are reported where the environment is written, or at the profile when the environment is the profile's (#919). A name
+ * nobody knows is reported by the checks above and not again here.
  */
 function checkRunnerRules(
   node: Record<string, unknown>,
   path: string,
   c: Checker,
 ): void {
-  const environment =
-    typeof node.environment === "string"
-      ? literalText(parseTemplate(node.environment))
-      : undefined;
-  if (environment === undefined) return;
-  const known = c.resolver
-    .environments()
-    .find((e) => e.name.toLowerCase() === environment.toLowerCase());
+  const found = environmentOf(node, c.resolver);
+  const known = found?.info;
   const facts = findProfile(node.profile, c.resolver)?.facts;
-  if (known === undefined || facts === undefined) return;
-  const where = pointer(path, "environment");
+  if (found === undefined || known === undefined || facts === undefined) return;
+  const where = pointer(path, found.fromProfile ? "profile" : "environment");
+  const profile = shown(parseProfileRef(node.profile as string)?.name ?? "");
   const onRunner = known.kind === "runner";
   if (onRunner && facts.managedModel === true)
     c.report(
       issue(
         where,
         "runner_needs_own_key",
-        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
+        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${profile} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
       ),
     );
   const harness = harnessOfProfile(facts);
@@ -466,7 +550,7 @@ function checkRunnerRules(
       issue(
         where,
         "harness_needs_runner",
-        `The profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+        `The profile ${profile} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
       ),
     );
 }
@@ -652,7 +736,7 @@ function checkSession(
     return;
   }
   // A session belongs to one profile in one environment: it holds the files and the conversation of that setup.
-  const mine = setupOf(node);
+  const mine = setupOf(node, c.resolver);
   const theirs = found.agent ?? {};
   for (const [what, a, b] of [
     ["profile", mine.profile, theirs.profile],
@@ -731,6 +815,7 @@ function checkAgent(
     c,
     reachOf(env, pointer(path, "environment"), state),
   );
+  checkProfileEnvironment(node, path, c);
   checkRunnerRules(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);

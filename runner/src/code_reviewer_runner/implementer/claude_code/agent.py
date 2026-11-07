@@ -107,6 +107,7 @@ class ClaudeCodeAgent:
         check_deadline: Callable[[], None],
         instructions: str | None = None,
         result_schema: Mapping[str, Any] | None = None,
+        can_ask: bool = False,
         max_budget_usd: str | None = None,
         resume_from: str | None = None,
         base_url: str | None = None,
@@ -118,6 +119,7 @@ class ClaudeCodeAgent:
         self._check_deadline = check_deadline
         self._instructions = instructions
         self._schema = result_schema
+        self._can_ask = can_ask
         self._budget = max_budget_usd
         self._base_url = base_url
         # A follow-up turn resumes the stored session under its own id.
@@ -176,7 +178,7 @@ class ClaudeCodeAgent:
         user. Raises `EngineError`."""
         files: dict[str, tuple[bytes, int]] = {}
         if self._schema is not None:
-            files.update(finish_files(self._schema))
+            files.update(finish_files(self._schema, can_ask=self._can_ask))
         if files:
             self._place.write_files(files)
         done = self._place.run_command(

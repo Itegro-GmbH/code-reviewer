@@ -29,6 +29,11 @@ export const RUN_STATUS_COPY = {
     label: "Running",
     description: "The workflow is running. This page updates by itself.",
   },
+  waiting: {
+    label: "Waiting for an answer",
+    description:
+      "The agent asked a question and the run waits for an answer, as long as it takes. Answer on this page, or on the ticket with /answer. Nothing else runs meanwhile.",
+  },
   succeeded: {
     label: "Succeeded",
     description: "Every step finished.",
@@ -47,6 +52,7 @@ export const RUN_STATUS_COPY = {
 export const STEP_STATUS_COPY = {
   pending: { label: "Waiting" },
   running: { label: "Running" },
+  waiting: { label: "Waiting for an answer" },
   succeeded: { label: "Succeeded" },
   failed: { label: "Failed" },
   skipped: { label: "Skipped" },
@@ -113,6 +119,8 @@ const STEP_FAILURE_TEXT: Record<
   profile_not_found:
     "The profile of the step no longer exists, is archived, or has no such version.",
   environment_not_found: "The environment of the step does not exist.",
+  environment_mismatch:
+    "The step names another environment than its profile runs in.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:
@@ -301,6 +309,23 @@ export const PAGE_COPY = {
   stepCreated: "This was created by the step.",
   profile: "Profile",
   openRun: "Open the run",
+  askHeading: "The agent asks",
+  askChoose: "Answer",
+  askAnswerLabel: "Your answer",
+  askNoteLabel:
+    "A note to go with the answer (or a text of your own, instead of an option)",
+  askSend: "Send answer",
+  askSending: "Sending the answer",
+  askSent:
+    "The answer was sent. The run goes on: the agent gets it as its next instruction, and this page updates by itself.",
+  askWaitingHint:
+    "The run waits for as long as it takes. You can also answer on the ticket with /answer.",
+  askNotPosted:
+    "The question could not be posted to the ticket, so it can only be answered here.",
+  askAnswered: "Answered",
+  askAnsweredBy: "Answered by",
+  askViaPage: "on this page",
+  askViaComment: "in a comment",
   cancelRun: "Cancel run",
   cancelling: "Stopping the run",
   cancelHint:
@@ -353,6 +378,12 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
+  WORKFLOW_RUN_NOT_WAITING:
+    "This run does not wait for an answer any more: it was answered already, or it is being stopped.",
+  WORKFLOW_RUN_QUESTION_CHANGED:
+    "This question was already answered or replaced.",
+  WORKFLOW_RUN_ANSWER_INVALID:
+    "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
     "GitHub could not be asked right now. Try again in a moment.",

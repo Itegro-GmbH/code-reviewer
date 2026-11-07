@@ -37,7 +37,7 @@ Each step ends the request when it fails; nothing before step 5 writes anything.
 Answers carry only an error code or `{ "status": "accepted", "outcome": ... }`, never the body, a
 signature or a secret. Log lines name the delivery id, the event and the outcome, and nothing else.
 
-The outcomes of step 6 to 8 are `tracker_updated` (the ticket mirror took something from the delivery, see below), `workflow_runs_started` and `no_workflow_matched` (a label on an issue, see below), `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
+The outcomes of step 6 to 8 are `tracker_updated` (the ticket mirror took something from the delivery, see below), `workflow_runs_started` and `no_workflow_matched` (a label on an issue, see below), `ticket_answered` and `no_answer_taken` (a comment `/answer ...`, see below), `trigger_enqueued`, `trigger_skipped` (a pull request event the policy
 turned down, with the reason in the log), `waiting_jobs_discarded` (a pull request was closed or turned into a draft),
 `installation_changed`, `ignored` (a genuine event that starts nothing, such as a `labeled` pull
 request, or a command from a user without write access),
@@ -204,6 +204,14 @@ a closed issue and every other action are `ignored`. No project is needed. The h
 `gh-<delivery id>-<workflow id>`, and no workflow that already has a running run for the issue (`trigger_key`, one running run per workflow and issue): the outcome is `workflow_runs_started` when at least one workflow has a run for the delivery (the delivery id then stays claimed, so a
 redelivery is a `duplicate`) and `no_workflow_matched` otherwise (the id can be claimed again). What a run is made of and why the title and the body of the issue are
 defused in the text of an action: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger). A server without a workflow engine leaves `workflows` out; a label is then `ignored`.
+
+**A comment `/answer <n>` or `/answer <text>` (#920).** An `issue_comment` on an issue or a pull request that starts with `/answer` is the answer to the question a workflow run waits for
+([`docs/workflows.md`](../../../docs/workflows.md#a-question-done-or-ask-920)). The parser reads it like `/review`: not from a bot, and only from a commenter whose association can have write access (`OWNER`, `MEMBER`,
+`COLLABORATOR`) and who really has it (one more GitHub call); anybody else is `ignored`. On an issue and on a pull request the state does not matter (a run that waits is answered on a closed or merged pull request too; `/review` there still needs an open one). The handler gives the answer to `answers`
+(`TicketAnswers` of `src/workflow-runs/`), which finds the run in the database: the runs of the workspace that wait on that repository, whose open question belongs to this ticket (or pull request). The outcome is
+`ticket_answered` (the delivery id stays claimed) when the run took the answer, and `no_answer_taken` otherwise (no run waits on it, the answer cannot be used, somebody answered first, or the comment is older than the question:
+its id must be greater than the id of the question's comment and its `created_at` not before the step began to wait, so a redelivery never answers a later question). A comment that has write access and could not answer
+gets a short reply of the App (fixed words, nothing of the comment). A server without a workflow engine leaves `answers` out; such a comment is then `ignored`.
 
 ## The review trigger intake
 

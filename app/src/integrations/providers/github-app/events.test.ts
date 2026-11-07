@@ -6,6 +6,7 @@
 // (src/webhooks/automatic-review-policy.ts), so the translation passes the draft flag on.
 import { describe, expect, it } from "vitest";
 import { webhookFixture } from "../../../../../fakes/github/webhooks.ts";
+import { isIntegrationEvent } from "../../normalized.ts";
 import { mayHaveWriteAccess, parseGithubEvent } from "./events.ts";
 
 async function eventOfPayload(eventName: string, payload: unknown) {
@@ -386,5 +387,215 @@ describe("which issue events start a workflow (#845)", () => {
       kind: "issue_labeled",
       labeled: { issue: { labels: ["a", "c"] } },
     });
+  });
+});
+
+describe("a comment /answer on an issue or a pull request (#920)", () => {
+  function answerPayload(
+    fixture: "issue_comment.created.on-issue" | "issue_comment.created.review",
+    changes: {
+      body: string;
+      association?: string;
+      senderType?: string;
+      issueState?: string;
+      createdAt?: string;
+    },
+  ) {
+    const payload = webhookFixture(fixture) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    payload.comment = {
+      ...payload.comment,
+      body: changes.body,
+      author_association: changes.association ?? "COLLABORATOR",
+      ...(changes.createdAt === undefined
+        ? {}
+        : { created_at: changes.createdAt }),
+    };
+    if (changes.senderType !== undefined)
+      payload.sender = { ...payload.sender, type: changes.senderType };
+    if (changes.issueState !== undefined)
+      payload.issue = { ...payload.issue, state: changes.issueState };
+    return payload;
+  }
+
+  const asking = (writes: boolean | Error) => ({
+    hasWriteAccess: async () => {
+      if (writes instanceof Error) throw writes;
+      return writes;
+    },
+    headShaOf: async () => {
+      throw new Error("an answer needs no head commit");
+    },
+  });
+
+  const parse = (payload: unknown, writes: boolean | Error = true) =>
+    parseGithubEvent({
+      integrationId: "integration-1",
+      eventName: "issue_comment",
+      payload,
+      ...asking(writes),
+    });
+
+  // #920-T101
+  it("is an answer when a commenter with write access writes /answer on an issue, open or not", async () => {
+    for (const issueState of ["open", "closed"]) {
+      const event = await parse(
+        answerPayload("issue_comment.created.on-issue", {
+          body: "/answer 2 and log it",
+          issueState,
+        }),
+      );
+
+      expect(event).toMatchObject({
+        kind: "ticket_answer",
+        answer: {
+          choice: 2,
+          text: "and log it",
+          raw: "2 and log it",
+          actor: { login: expect.any(String) as string },
+        },
+      });
+      expect(isIntegrationEvent(event)).toBe(true);
+    }
+  });
+
+  // #920-T102
+  it("is an answer on an open pull request too, and /review there is still a review", async () => {
+    const answer = await parse(
+      answerPayload("issue_comment.created.review", {
+        body: "/answer Use Redis.",
+      }),
+    );
+    expect(answer).toMatchObject({
+      kind: "ticket_answer",
+      answer: { raw: "Use Redis." },
+    });
+    const review = await parseGithubEvent({
+      integrationId: "integration-1",
+      eventName: "issue_comment",
+      payload: answerPayload("issue_comment.created.review", {
+        body: "/review",
+      }),
+      hasWriteAccess: async () => true,
+      headShaOf: async () => "a".repeat(40),
+    });
+    expect(review).toMatchObject({ kind: "review_trigger" });
+  });
+
+  // #920-T103
+  it("is no answer from a bot, from a commenter who cannot have write access, or who has none", async () => {
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.on-issue", {
+          body: "/answer 1",
+          senderType: "Bot",
+        }),
+      ),
+    ).toMatchObject({ kind: "ignored" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.on-issue", {
+          body: "/answer 1",
+          association: "NONE",
+        }),
+      ),
+    ).toMatchObject({ kind: "ignored" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.on-issue", { body: "/answer 1" }),
+        false,
+      ),
+    ).toEqual({ kind: "ignored", reason: "the commenter has no write access" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", { body: "/answer 1" }),
+        false,
+      ),
+    ).toEqual({ kind: "ignored", reason: "the commenter has no write access" });
+  });
+
+  // #920-T104
+  it("keeps an ordinary comment on an issue ignored, and asks nobody for permissions for it", async () => {
+    const event = await parse(
+      answerPayload("issue_comment.created.on-issue", { body: "thanks!" }),
+      new Error("must not be asked"),
+    );
+
+    expect(event).toEqual({
+      kind: "ignored",
+      reason: "the comment is on an issue, not on a pull request",
+    });
+  });
+
+  // #920-T105
+  it("asks GitHub for write access only after the text said /answer", async () => {
+    const event = await parse(
+      answerPayload("issue_comment.created.on-issue", {
+        body: "/answer\n",
+      }),
+      new Error("must not be asked"),
+    );
+
+    expect(event).toMatchObject({ kind: "ignored" });
+  });
+
+  // #920-T95
+  it("is an answer on a closed pull request too, while a closed pull request still starts no review", async () => {
+    const answer = await parse(
+      answerPayload("issue_comment.created.review", {
+        body: "/answer 1",
+        issueState: "closed",
+      }),
+    );
+    expect(answer).toMatchObject({
+      kind: "ticket_answer",
+      answer: { choice: 1 },
+    });
+    expect(isIntegrationEvent(answer)).toBe(true);
+
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/review",
+          issueState: "closed",
+        }),
+      ),
+    ).toEqual({ kind: "ignored", reason: "the pull request is not open" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/answer 1",
+          issueState: "closed",
+          senderType: "Bot",
+        }),
+      ),
+    ).toEqual({ kind: "ignored", reason: "the pull request is not open" });
+    expect(
+      await parse(
+        answerPayload("issue_comment.created.review", {
+          body: "/answer 1",
+          issueState: "closed",
+        }),
+        false,
+      ),
+    ).toEqual({ kind: "ignored", reason: "the commenter has no write access" });
+  });
+
+  // #920-T96
+  it("carries the time the comment was written, when the delivery says", async () => {
+    const event = await parse(
+      answerPayload("issue_comment.created.on-issue", {
+        body: "/answer 1",
+        createdAt: "2026-11-07T09:30:00Z",
+      }),
+    );
+
+    expect(event).toMatchObject({
+      kind: "ticket_answer",
+      answer: { createdAt: "2026-11-07T09:30:00Z" },
+    });
+    expect(isIntegrationEvent(event)).toBe(true);
   });
 });

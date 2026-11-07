@@ -116,7 +116,7 @@
     "AgentStep": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "profile", "environment", "instruction"],
+      "required": ["id", "kind", "profile", "instruction"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -133,7 +133,7 @@
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
         },
         "environment": {
-          "description": "The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator).",
+          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
           "type": "string",
           "maxLength": 20000
         },

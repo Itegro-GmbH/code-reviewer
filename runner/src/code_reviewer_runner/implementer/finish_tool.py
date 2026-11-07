@@ -23,6 +23,7 @@ one of a list of names), numbers, whole numbers, booleans, lists and objects; ev
 closed.
 """
 
+import contextlib
 import json
 import math
 import os
@@ -33,6 +34,11 @@ from typing import Any, NamedTuple, cast
 
 TOOL_NAME = "submit_result"
 COMMAND_NAME = "factory-submit"
+# #920: a turn ends with a result (`done`) or with a question (`ask`). The question is the `ask`
+# property of the tool
+# (`submit_result({ask: {...}})`) and the flag of the command (`factory-submit --ask`).
+ASK_PROPERTY = "ask"
+ASK_FLAG = "--ask"
 
 # Where the container finds them. The agent can change both files and its environment; Control
 # checks again.
@@ -40,6 +46,12 @@ SCHEMA_PATH = "/etc/code-reviewer/result-schema.json"
 RESULT_PATH = "/work/result/result.json"
 SCHEMA_VARIABLE = "FACTORY_RESULT_SCHEMA"
 RESULT_VARIABLE = "FACTORY_RESULT_FILE"
+# #920: the question file next to the result file, and the marker file Control writes only for a
+# turn that may ask.
+ASK_PATH = "/work/result/ask.json"
+ASK_ENABLED_PATH = "/etc/code-reviewer/ask-enabled"
+ASK_VARIABLE = "FACTORY_ASK_FILE"
+ASK_ENABLED_VARIABLE = "FACTORY_ASK_ENABLED_FILE"
 
 # The bounds of a result, applied to the bytes before anything is parsed. A result is data for the
 # steps after this one, not a report: 256 KiB is far more than the fields of any schema need.
@@ -49,6 +61,14 @@ MAX_RESULT_BYTES = 256 * 1024
 MAX_VALUE_DEPTH = 8
 # Values in all (list entries, fields, nested lists and objects).
 MAX_VALUE_ITEMS = 20_000
+
+# #920: the bounds of a question (`ASK_*` in `app/src/workflow-runs/limits.ts`). People read it on
+# a ticket.
+MAX_ASK_BYTES = 32 * 1024
+ASK_QUESTION_MAX_LENGTH = 2000
+ASK_OPTIONS_MAX = 10
+ASK_OPTION_MAX_LENGTH = 200
+ASK_CONTEXT_MAX_LENGTH = 4000
 
 # The format's own bounds (`app/src/workflows/limits.ts`).
 RESULT_DEPTH_MAX = 4
@@ -483,22 +503,213 @@ def problem_sentence(parsed: Parsed) -> str:
     return "\n".join(lines)
 
 
+# -- the question (#920) ------------------------------------------------------------------------
+
+_ASK_KEYS = ("question", "options", "context")
+
+
+def _units(text: str) -> int:
+    """The length of a text in UTF-16 code units: how the app counts (`String.length`), so a text
+    the runner lets through is one the app accepts. A character outside the Basic Multilingual
+    Plane (an emoji) is two."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+def ask_possible(schema: Mapping[str, Any], *, enabled: bool) -> bool:
+    """Whether a turn may end with a question: Control asked for it, and the result schema has no
+    field
+    of its own named `ask` (the property of the tool would be ambiguous)."""
+    properties = _as_object(schema.get("properties")) or {}
+    return enabled and ASK_PROPERTY not in properties
+
+
+def check_ask(value: object) -> list[Issue]:
+    """The problems of a question: a closed object with a `question` (a text), and optionally
+    `options`
+    (a short list of texts a person can choose from) and `context` (a text)."""
+    given = _as_object(value)
+    if given is None:
+        return [_issue("", "wrong_type", f"Expected an object, got {_type_name(value)}.")]
+    issues: list[Issue] = []
+    question = given.get("question")
+    if question is None:
+        issues.append(
+            _issue("/question", "missing_field", "The required field 'question' is missing.")
+        )
+    elif not isinstance(question, str):
+        issues.append(
+            _issue("/question", "wrong_type", f"Expected a string, got {_type_name(question)}.")
+        )
+    elif question.strip() == "" or _units(question) > ASK_QUESTION_MAX_LENGTH:
+        issues.append(
+            _issue(
+                "/question",
+                "limit_exceeded",
+                f"The question is 1 to {ASK_QUESTION_MAX_LENGTH} characters.",
+            )
+        )
+    options = given.get("options")
+    if options is not None:
+        entries = _as_list(options)
+        if entries is None:
+            issues.append(
+                _issue("/options", "wrong_type", f"Expected a list, got {_type_name(options)}.")
+            )
+        elif len(entries) > ASK_OPTIONS_MAX:
+            issues.append(
+                _issue(
+                    "/options",
+                    "limit_exceeded",
+                    f"The list has {len(entries)} entries; at most {ASK_OPTIONS_MAX}.",
+                )
+            )
+        else:
+            for index, entry in enumerate(entries):
+                if (
+                    not isinstance(entry, str)
+                    or entry.strip() == ""
+                    or _units(entry) > ASK_OPTION_MAX_LENGTH
+                ):
+                    issues.append(
+                        _issue(
+                            _pointer("/options", index),
+                            "invalid_value",
+                            f"An option is a text of 1 to {ASK_OPTION_MAX_LENGTH} characters.",
+                        )
+                    )
+    context = given.get("context")
+    if context is not None:
+        if not isinstance(context, str):
+            issues.append(
+                _issue("/context", "wrong_type", f"Expected a string, got {_type_name(context)}.")
+            )
+        elif _units(context) > ASK_CONTEXT_MAX_LENGTH:
+            issues.append(
+                _issue(
+                    "/context",
+                    "limit_exceeded",
+                    f"The text is {_units(context)} characters; at most {ASK_CONTEXT_MAX_LENGTH}.",
+                )
+            )
+    for key in given:
+        if key not in _ASK_KEYS:
+            issues.append(
+                _issue(
+                    _pointer("", key),
+                    "unknown_field",
+                    f"{_shown(key)} is not a field of a question.",
+                    _ASK_KEYS,
+                )
+            )
+    return _sorted(issues)
+
+
+class ParsedAsk(NamedTuple):
+    """What `parse_ask` made of the bytes of a question file: the value when it is in bounds, JSON
+    and a
+    question; else `problem` (a word) and the issues."""
+
+    value: dict[str, Any] | None
+    problem: str | None
+    issues: tuple[Issue, ...] = ()
+
+
+def parse_ask(raw: bytes) -> ParsedAsk:
+    """Bounds first, then JSON, then the shape of a question. Nothing about `raw` is trusted. The
+    value is the question as it is kept: `question`, `options`, `context` (left out when none)."""
+    if len(raw) > MAX_ASK_BYTES:
+        return ParsedAsk(None, TOO_LARGE)
+    bound = scan_bounds(raw)
+    if bound is not None:
+        return ParsedAsk(None, bound)
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=_refuse_constant)
+    except (ValueError, RecursionError):
+        return ParsedAsk(None, NOT_JSON)
+    issues = check_ask(value)
+    if issues:
+        return ParsedAsk(None, "invalid", tuple(issues))
+    given = cast("dict[str, Any]", value)
+    kept: dict[str, Any] = {"question": given["question"].strip()}
+    if given.get("options"):
+        kept["options"] = [option.strip() for option in given["options"]]
+    if given.get("context") and given["context"].strip():
+        kept["context"] = given["context"].strip()
+    try:
+        json.dumps(kept, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return ParsedAsk(None, NOT_JSON)
+    return ParsedAsk(kept, None)
+
+
+def ask_problem_sentence(parsed: ParsedAsk) -> str:
+    """The refusal of a question for the agent."""
+    if parsed.problem == TOO_LARGE:
+        return f"Rejected: the question is larger than {MAX_ASK_BYTES // 1024} KiB."
+    if parsed.problem != "invalid":
+        return "Rejected: the question is not valid JSON."
+    lines = ["Rejected: the question does not fit its shape (question, options, context)."]
+    for found in parsed.issues[:ERRORS_SHOWN]:
+        where = found.path or "(the question itself)"
+        names = f" Allowed: {', '.join(found.available)}." if found.available else ""
+        lines.append(f"- {where}: {found.message}{names}")
+    lines.append("Fix every problem and call the tool again.")
+    return "\n".join(lines)
+
+
+def _remove(path: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
 # -- what the agent sees --------------------------------------------------------------------------
 
 
-def tool_definition(schema: Mapping[str, Any]) -> dict[str, Any]:
+def tool_definition(schema: Mapping[str, Any], *, can_ask: bool = False) -> dict[str, Any]:
     """The tool made from the schema: its name, a description and the parameters (the schema itself,
-    which is a subset of JSON Schema; the objects are closed explicitly)."""
+    which is a subset of JSON Schema; the objects are closed explicitly). A turn that may end with a
+    question (#920) has the property `ask` next to the fields of the result: a call is either the
+    result or `{ask: {...}}`, so no field is required by the parameters; the tool checks that."""
     purpose = schema.get("description")
+    parameters = _closed(schema)
+    asking = ""
+    if can_ask:
+        parameters["properties"] = {
+            **parameters["properties"],
+            ASK_PROPERTY: {
+                "type": "object",
+                "description": (
+                    "Instead of the result: a question for a person, when you cannot go on without "
+                    "an answer. The turn ends and goes on with the answer."
+                ),
+                "properties": {
+                    "question": {"type": "string", "maxLength": ASK_QUESTION_MAX_LENGTH},
+                    "options": {
+                        "type": "array",
+                        "maxItems": ASK_OPTIONS_MAX,
+                        "items": {"type": "string", "maxLength": ASK_OPTION_MAX_LENGTH},
+                    },
+                    "context": {"type": "string", "maxLength": ASK_CONTEXT_MAX_LENGTH},
+                },
+                "required": ["question"],
+                "additionalProperties": False,
+            },
+        }
+        parameters.pop("required", None)
+        asking = (
+            " If you cannot go on without the answer of a person, call it with only `ask` "
+            "instead (a question, optionally a short list of options and some context)."
+        )
     return {
         "name": TOOL_NAME,
         "description": (
             "Hand in the final result of your task. Call it when the work is done: it checks "
             "the result against the required shape and answers with the problems to fix, "
             "or accepts it. Calling it again replaces an accepted result."
+            + asking
             + (f" The result: {purpose}" if isinstance(purpose, str) and purpose else "")
         ),
-        "inputSchema": _closed(schema),
+        "inputSchema": parameters,
     }
 
 
@@ -523,17 +734,37 @@ def write_result(path: str, raw: bytes) -> None:
     os.replace(scratch, path)
 
 
-def submit(schema: Mapping[str, Any], raw: bytes, path: str) -> tuple[bool, str]:
+def submit(
+    schema: Mapping[str, Any], raw: bytes, path: str, ask_path: str | None = None
+) -> tuple[bool, str]:
     """Check what the agent handed in and, when it fits, write it. The answer is the sentence the
-    agent reads either way."""
+    agent reads either way. The last call wins (#920): an accepted result takes a question that was
+    handed in before it away."""
     parsed = parse_result(schema, raw)
     if parsed.value is None:
         return False, problem_sentence(parsed)
     # Written as it was parsed, so the file holds JSON and nothing else.
     write_result(path, json.dumps(parsed.value, ensure_ascii=False).encode("utf-8"))
+    if ask_path is not None:
+        _remove(ask_path)
     return True, (
         "Result accepted. You do not need to call this again unless you change the result; "
         "finish your work and end your turn."
+    )
+
+
+def submit_ask(raw: bytes, ask_path: str, result_path: str) -> tuple[bool, str]:
+    """Check a question and, when it fits, write it, and take a result that was handed in before it
+    away: the turn ends with the question, and the answer starts the next turn."""
+    parsed = parse_ask(raw)
+    if parsed.value is None:
+        return False, ask_problem_sentence(parsed)
+    write_result(ask_path, json.dumps(parsed.value, ensure_ascii=False).encode("utf-8"))
+    _remove(result_path)
+    return True, (
+        "Question recorded. Your turn ends with it: do not do anything else, and end your turn "
+        "now. "
+        "The answer of the person comes as the next instruction."
     )
 
 
@@ -554,9 +785,13 @@ SERVER_NAME = "factory"
 
 
 def handle_message(
-    message: object, schema: Mapping[str, Any], result_path: str
+    message: object,
+    schema: Mapping[str, Any],
+    result_path: str,
+    ask_path: str | None = None,
 ) -> dict[str, Any] | None:
-    """One JSON-RPC message of a stdio MCP client; the answer, or None for a notification."""
+    """One JSON-RPC message of a stdio MCP client; the answer, or None for a notification.
+    `ask_path` (#920): where a question is written; None for a turn that may not ask."""
     request = _as_object(message)
     if request is None:
         return _error(None, -32600, "invalid request")
@@ -579,13 +814,29 @@ def handle_message(
     if method == "ping":
         return _reply(ident, {})
     if method == "tools/list":
-        return _reply(ident, {"tools": [tool_definition(schema)]})
+        return _reply(ident, {"tools": [tool_definition(schema, can_ask=ask_path is not None)]})
     if method == "tools/call":
         if arguments.get("name") != TOOL_NAME:
             return _error(ident, -32602, "unknown tool")
         given = arguments.get("arguments")
+        if ask_path is not None and isinstance(given, dict) and ASK_PROPERTY in given:
+            body = cast("dict[str, Any]", given)
+            if set(body) != {ASK_PROPERTY}:
+                accepted, text = (
+                    False,
+                    (
+                        "Rejected: a question is handed in alone, as {ask: {...}}, without the "
+                        "fields of the result."
+                    ),
+                )
+            else:
+                raw = json.dumps(body[ASK_PROPERTY]).encode("utf-8")
+                accepted, text = submit_ask(raw, ask_path, result_path)
+            return _reply(
+                ident, {"content": [{"type": "text", "text": text}], "isError": not accepted}
+            )
         raw = json.dumps(given if isinstance(given, dict) else None).encode("utf-8")
-        accepted, text = submit(schema, raw, result_path)
+        accepted, text = submit(schema, raw, result_path, ask_path)
         return _reply(ident, {"content": [{"type": "text", "text": text}], "isError": not accepted})
     return _error(ident, -32601, "method not found")
 
@@ -603,6 +854,7 @@ def serve(
     write: Callable[[str], None],
     schema: Mapping[str, Any],
     result_path: str,
+    ask_path: str | None = None,
 ) -> None:
     """Newline-delimited JSON-RPC until the client closes its end."""
     while line := lines():
@@ -613,7 +865,7 @@ def serve(
         except ValueError:
             answer: dict[str, Any] | None = _error(None, -32700, "parse error")
         else:
-            answer = handle_message(message, schema, result_path)
+            answer = handle_message(message, schema, result_path, ask_path)
         if answer is not None:
             write(json.dumps(answer))
 
@@ -622,9 +874,14 @@ def serve(
 
 USAGE = (
     "usage: factory-submit < result.json\n"
+    "       factory-submit --ask < question.json\n"
     "Reads your final result as JSON on standard input, checks it against the required shape and\n"
     "records it. Exit code 0: accepted. Exit code 2: rejected, the problems are listed on\n"
     "standard error; fix them and run it again.\n"
+    "With --ask, standard input is a question for a person instead of the result:\n"
+    '{"question": "...", "options": ["...", "..."], "context": "..."} (options and context are\n'
+    "optional). Your turn ends with the question; the answer starts the next turn. Only when this\n"
+    "task allows questions.\n"
 )
 
 
@@ -644,12 +901,26 @@ def main(argv: Sequence[str], environment: Mapping[str, str] | None = None) -> i
         sys.stderr.write("factory-submit: the result schema of this task cannot be read\n")
         return 1
     result_path = env.get(RESULT_VARIABLE, RESULT_PATH)
+    ask_path = (
+        env.get(ASK_VARIABLE, ASK_PATH)
+        if ask_possible(
+            schema, enabled=os.path.exists(env.get(ASK_ENABLED_VARIABLE, ASK_ENABLED_PATH))
+        )
+        else None
+    )
     if argv[:1] == ["mcp"]:
-        serve(sys.stdin.readline, _send, schema, result_path)
+        serve(sys.stdin.readline, _send, schema, result_path, ask_path)
         return 0
-    raw = sys.stdin.buffer.read(MAX_RESULT_BYTES + 1)
+    asking = ASK_FLAG in argv
+    if asking and ask_path is None:
+        sys.stderr.write("factory-submit: this task does not allow questions\n")
+        return 2
+    raw = sys.stdin.buffer.read((MAX_ASK_BYTES if asking else MAX_RESULT_BYTES) + 1)
     try:
-        accepted, text = submit(schema, raw, result_path)
+        if asking and ask_path is not None:
+            accepted, text = submit_ask(raw, ask_path, result_path)
+        else:
+            accepted, text = submit(schema, raw, result_path, ask_path)
     except OSError:
         sys.stderr.write("factory-submit: the result could not be recorded\n")
         return 1

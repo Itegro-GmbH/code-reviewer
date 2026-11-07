@@ -44,6 +44,7 @@ import {
   STEP_KIND_COPY,
   TRIGGER_COPY,
 } from "./messages.ts";
+import { AskBlock } from "./ask-block.tsx";
 import { StepStatusBadge, WorkflowRunStatusBadge } from "./status-badge.tsx";
 import {
   actionResultOf,
@@ -313,12 +314,18 @@ function Step({
   repeated,
   workspaceSlug,
   repository,
+  workflowId,
+  runId,
+  api,
 }: {
   step: StepView;
   /** The step ran more than once in this run (the rounds of a loop): its round is told. */
   repeated: boolean;
   workspaceSlug: string;
   repository: string | undefined;
+  workflowId: string;
+  runId: string;
+  api: WorkflowRunsApi;
 }) {
   const duration = stepDurationMs(step);
   const failure = describeStepFailure(step.errorCode, step.errorMessage);
@@ -386,6 +393,15 @@ function Step({
           </Link>
         </p>
       ) : null}
+      {/* #920: the question the step asked, and the way to answer while it waits. */}
+      {/* A step may ask again after an answer: each question is its own block, so what the last one sent does not stay on the next. */}
+      <AskBlock
+        key={`${step.id}-${String(step.ask?.n ?? 0)}`}
+        step={step}
+        workflowId={workflowId}
+        runId={runId}
+        api={api}
+      />
       {step.kind === "agent" ? (
         <AgentOutcome step={step} repository={repository} />
       ) : step.kind === "action" ? (
@@ -418,7 +434,7 @@ function CancelControl({
   const product = useProductIdentity();
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  if (run.status !== "running") return null;
+  if (run.status !== "running" && run.status !== "waiting") return null;
   if (requested)
     return (
       <p
@@ -489,7 +505,9 @@ export function WorkflowRunDetail({
   const { data, failed, failureCode, stopped } = useLiveSnapshot({
     initial,
     fetchLatest: () => api.run(workflowId, initial.run.id),
-    isSettled: (snapshot) => snapshot.run.status !== "running",
+    // A run that waits for an answer (#920) changes when somebody answers, on this page or on the ticket: it is polled like a running one.
+    isSettled: (snapshot) =>
+      snapshot.run.status !== "running" && snapshot.run.status !== "waiting",
     activeIntervalMs: WORKFLOW_RUN_POLL_MS,
     // A run that has ended does not change any more: no more requests.
     idleIntervalMs: null,
@@ -576,6 +594,9 @@ export function WorkflowRunDetail({
                 )}
                 workspaceSlug={workspaceSlug}
                 repository={repository}
+                workflowId={workflowId}
+                runId={run.id}
+                api={api}
               />
             ))}
           </ol>

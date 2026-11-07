@@ -242,6 +242,33 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
       return undefined;
     }
 
+    // #920: a comment of an issue is edited by its id alone (`PATCH /issues/comments/{id}`); one that is below a pull request is `review-api.ts`'s.
+    const editMatch = /^\/issues\/comments\/(\d+)$/.exec(rest);
+    if (editMatch !== null && method === "PATCH") {
+      const id = Number(editMatch[1]);
+      const found = [...comments.values()]
+        .flat()
+        .find((candidate) => candidate.id === id);
+      if (found === undefined) return undefined;
+      if (!mayDo(["issues"], "write")) return forbidden;
+      const input = JSON.parse((await request.body()) || "{}") as {
+        body?: unknown;
+      };
+      if (typeof input.body !== "string" || input.body === "")
+        return validation("body is missing", "body");
+      found.body = input.body;
+      return {
+        status: 200,
+        body: {
+          id: found.id,
+          body: found.body,
+          user: { login: found.login, id: 1, type: "Bot" },
+          html_url: `${options.webBase()}/${repository.fullName}/issues/${String(found.number)}#issuecomment-${String(found.id)}`,
+          issue_url: `${options.apiBase()}/repos/${repository.fullName}/issues/${String(found.number)}`,
+        },
+      };
+    }
+
     // Comments below an issue that is no pull request (those of a pull request are `review-api.ts`'s).
     const commentsMatch = /^\/issues\/(\d+)\/comments$/.exec(rest);
     if (commentsMatch !== null && (method === "POST" || method === "GET")) {

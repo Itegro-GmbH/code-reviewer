@@ -1467,7 +1467,10 @@ export interface WorkflowStepRunsTable {
   step_id: string;
   /** `agent`, `action`, or a control step the run decided: `if` or `loop` (#846). */
   kind: string;
-  /** `pending`, `running`, `succeeded`, `failed`, or `skipped` (a step in the branch of an `if` that was not taken, #846). */
+  /**
+   * `pending`, `running`, `waiting` (#920: the turn ended with a question and nobody answered yet), `succeeded`, `failed`, or `skipped` (a
+   * step in the branch of an `if` that was not taken, #846).
+   */
   status: string;
   /** How often the step has run in the run, from 1: the rounds of a loop (#846). */
   round: number;
@@ -1487,6 +1490,14 @@ export interface WorkflowStepRunsTable {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** #920: JSON text, the question the step's turn ended with and what became of it (`workflow-runs/ask.ts`); null for a step that never asked. */
+  ask: ColumnType<string | null, string | null | undefined, string | null>;
+  /** #920: the id of the comment that carries the question on the ticket or the pull request; null before it is posted and for a step that never asked. */
+  waiting_on_comment_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
@@ -1565,6 +1576,8 @@ export interface ProfileVersionsTable {
   default_result: string | null;
   /** #856: `opencode` or `claude-code`; null reads as OpenCode (a version saved before harnesses were stored). */
   harness: string | null;
+  /** #919: the environment of the workspace the version runs in; null for a version saved before it (its step names the environment). No foreign key: an environment may be removed. */
+  environment_id: string | null;
   created_by: string;
   created_at: string;
 }

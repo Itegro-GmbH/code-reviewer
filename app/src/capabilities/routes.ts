@@ -298,6 +298,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
     class: "implementer",
   },
+  // Answers the question a run waits for (#920).
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
+    class: "implementer",
+  },
   { route: "/w/[workspace]/workflows", class: "implementer" },
   { route: "/w/[workspace]/workflows/[workflowId]", class: "implementer" },
   {

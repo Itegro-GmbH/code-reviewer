@@ -194,13 +194,13 @@ again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
 
-A run of an agent step gets a **profile** and an **environment**, separately: who works and where.
+A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
 
 | Field | Needed | What |
 | --- | --- | --- |
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
 | `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
-| `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). |
+| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
@@ -656,6 +656,70 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
 
+### A question: `done` or `ask` (#920)
+
+Every agent turn ends with one of two things: **`done`**, its result, or **`ask`**, a question for a person. The agent hands in the question through the same finish tool,
+`factory-submit --ask` (the JSON `{"question": "...", "options": ["...", "..."], "context": "..."}` on standard input; `options` and `context` are optional) or
+`submit_result({ "ask": { "question": "...", "options": [...], "context": "..." } })`; the last call of a turn wins. A question is at most 2000 characters, at most 10 options of at most
+200 characters, and a context of at most 4000 (counted in UTF-16 code units, as the app counts; an emoji is two). Only a turn that a workflow step started is offered `ask`: a plain Implementer task or follow-up with a result schema is not, since nobody would answer it. Only a step that has a result schema (its own `result`, or the default of its profile version) has the finish tool, so only such a step can ask. A step whose result schema has a field named `ask` cannot ask (the tool would be ambiguous), and an agent step that runs on a Worker that does not name
+the claim feature `implementer_ask` cannot either: its turn runs as before, ending with a result or failing, and the agent is not told that `ask` exists. `ask` is not a failure: `onFailure` is not touched.
+
+What the engine does when a turn ends with a question:
+
+- the step becomes **`waiting`** and so does the run (a new status, next to `running`); nothing else of the run runs. The turn's cost is charged to the budget at once, and the step keeps it whatever
+  becomes of it (a step that fails or is cancelled while it waits still shows what its turns cost: the costs of the steps add up to what the run spent). **The run waits as long as it
+  takes: there is no deadline and no fallback.** A run is active or discarded: cancel it to give up (`cancel` also works on a waiting run: the step ends `cancelled`, the run `cancelled`, the comment of the question is edited to `<!-- factory cancelled … -->` ("cancelled before it was answered") and the label `agent waiting` goes);
+- the question is stored with the step (`steps[].ask`: `question`, `options`, `context`, `n` for which question of the step this is, `askedAt`, `state` and, once answered, `answer`) and shown on the run page. The agent's
+  sandbox is gone, as after `done`; the Implementer session and its snapshot stay;
+- one run per ticket, one open question per run: the run holds the ticket's slot (`trigger_key`) while it waits, so a second run for the same ticket is `busy`, not started.
+
+**The answer** starts a new turn of the same session with the question and the answer as its instruction; the step goes back to `running` and reads that turn like any other (it may end with `done` or ask again).
+It costs what a turn costs, against what is left of the budget; if less than one cent is left the step fails `budget_exhausted`. An answer is one of:
+
+- a click on the run page, or `POST /api/w/<slug>/workflows/<id>/runs/<runId>/answer` with `{ "question": { "stepRunId": "…", "n": 1 }, "choice": 2 }` (`question` names the question that is answered: the step run that asked it, which the
+  run shows as the `id` of the step, and its number; an option by its number, from 1), `{ "question": …, "text": "..." }`, or both (the text is a note to the option); for
+  every member who may start a run (`start_implementer_task`). `202 { run }` when the step goes on, `409 WORKFLOW_RUN_NOT_WAITING` when nothing waits for an answer or it was answered before,
+  `409 WORKFLOW_RUN_QUESTION_CHANGED` when another question waits than the one named (the step asked again after the page was loaded; the page shows "This question was already answered or replaced"), `400 WORKFLOW_RUN_REQUEST_INVALID` for a body without `question`,
+  `422 WORKFLOW_RUN_ANSWER_INVALID` for an empty or too long answer or an option the question does not have (an answer is at most 4000 characters);
+- a comment `/answer <n>` or `/answer <text>` on the ticket or the pull request of the run (open, closed or merged: the run still waits), by somebody with write access to the repository (the check `/review` uses); bot comments never count.
+
+An answer belongs to the question that was open when it was written, and the engine checks that under the lock of the run: the page and a `/answer` comment both send the question they are for (`question`: the step run and `n`), and an answer for another question than the one that waits is refused (`question_changed`), so a page that was open while the agent asked again never answers the new question with the old answer. A comment answers only a question that is older than it: its id must be greater than the id of the comment that carries the question (when that comment is known the ids alone decide; a question without a comment yet is judged by the moment its step began to wait, with 30 seconds of grace for clocks that differ), and it must not have been
+written before the step began to wait (`askedAt`). So a late comment, or the redelivery of one, never answers a question that came after it. An answer from the page names the person by GitHub login, or by none for an
+account without one (an email address is never written on a ticket or into the instruction of the agent).
+
+Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
+
+**Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (`workflow_runs.ticket_ref`, #923: the issue of its `ticket` input or of the label that started it; a run written before the column was backfilled, and one that has none reads the issue from the input of its trigger),
+else on the **pull request** an action step of the run opened, else nowhere. There it is a comment of the GitHub App of the workspace:
+
+```
+<!-- factory ask run=<run id> step=<step id> q=<n> -->
+The agent has a question and waits for the answer:
+
+**Retry which failures?**
+
+1. Network errors only
+2. Network errors and 5xx answers
+
+Reply with `/answer <n>` (a note may follow) or answer in the factory: https://…/w/acme/workflows/…/runs/…
+
+@alice @bob
+```
+
+The first line is the hidden marker (`q` counts the questions of the step); a question without options says "Reply with `/answer <your answer>`". The question, the options and the context are the agent's text: defused
+(no mention, no link that reaches somebody, no direction marks) and bounded, like every text an agent writes into a comment. The people asked are the members of the workspace that have a GitHub login (the first 10;
+there is no project of members yet). The ticket also gets the label **`agent waiting`** and loses **`agent working`**. Posting is best effort: a comment or a label GitHub refuses does not stop the run, and the question is on
+the run page whatever happens (a repeated attempt finds its comment by the marker and writes no second one). A question whose comment could not be posted is posted again by the next look at the run (the sweep looks at
+a waiting run that has no comment yet, and so does every `advance`), at most ten more times and not once an hour has passed since it was asked: then the engine gives up and writes that on the step (`ask.announce.ended = "gave_up"`), the sweep stops looking, and the run page says "The question could not be posted to the ticket" (it can still be answered there). A run with no ticket and no pull request is not announced again at all (`ended = "no_place"`): the run page shows the question. Two announcements that post at once keep one comment: the one the step records stays, the other is edited to say that another comment is the question (`<!-- factory superseded … -->`); an answer that came before the comment was posted turns it into the answered state instead of an open question.
+
+**The answer on the ticket.** A comment `/answer <n>` (an option, a note may follow) or `/answer <text>` on the issue or the pull request, by a commenter with write access, answers the question; the app finds the run in its
+own tables (a run of the workspace that waits and whose `ticket_ref` is that ticket, else one about no ticket whose pull request it is; the newest if two workflows wait on the same ticket), never by what the comment says, so a copied marker answers nothing. A number the question has
+no option for starts a free text (`/answer 3 retries`). A bot never answers (our own comments are the App's), and a commenter without write access is ignored without a reply. A comment that has write access and still cannot answer (an answer that is empty once cleaned, or too long, no question
+waits on this ticket, it was answered first) gets a short reply of the App in fixed words that repeat nothing of the comment; a comment that is older than the question gets none, and neither does a comment on a repository the workspace never ran a workflow on (the reply "no question is waiting" is only for one where runs exist; the marker of a reply is looked up among the comments since the comment it answers). The comment of the question is then edited
+to `<!-- factory answered … -->` with the question and **"Answered by @login: …"**, and the labels go back (`agent waiting` removed, `agent working` restored). An answer given **on the run page** posts one more comment in the
+name of the person ("Answer by @login: …") so that the ticket holds the whole record; a `/answer` comment is that record itself. The webhook is described in
+[`app/src/webhooks/README.md`](../app/src/webhooks/README.md).
+
 ### Cancelling a run
 
 `POST /api/w/<slug>/workflows/<id>/runs/<runId>/cancel` (no body), for every member (`start_implementer_task`: whoever may start a run may stop one). The answer says what the call did
@@ -684,7 +748,7 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 An action that runs is not interrupted (it is a call of at most 60 seconds and may have happened); the run ends after it. A cancel changes no label by itself: a workflow with [`onFailure`](#after-a-failure-onfailure) cleans up after the agent has stopped (the facts have `status` `cancelled`); without it the issue keeps `agent working` and the label is taken off by hand. Stopping the task of an agent step on its own (the [Implementer route](implementer.md#cancelling-a-run-891)) ends
 the run `cancelled` the same way, not `failed`.
 
-A run looks like this (a step is `pending` when written, `running` once claimed, then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
+A run looks like this (a step is `pending` when written, `running` once claimed, `waiting` while its turn's question is not answered (#920), then `succeeded` or `failed`; a step of the branch an `if` did not take is written `skipped`):
 
 ```json
 {
@@ -695,7 +759,7 @@ A run looks like this (a step is `pending` when written, `running` once claimed,
     "steps": [
       { "id": "plan", "position": 0, "kind": "agent", "status": "succeeded", "round": 1, "profile": {"name": "worker", "version": 1},
         "jobId": "…", "turnId": "…", "costUsd": 0.42, "costBasis": "reported", "output": {"summary": "…", "costUsd": 0.42, "branch": "workflow/7f0c…/plan"},
-        "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
+        "ask": null, "waitingOnCommentId": null, "errorCode": null, "errorMessage": null, "createdAt": "…", "startedAt": "…", "finishedAt": "…" }
     ]
   }
 }
@@ -710,7 +774,7 @@ For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The la
 
 - **An agent step starts an Implementer turn** through the same service as a task started by hand (`startTask`), as the person who started the
   run (a run a label started has no person: its turns belong to the account that owns the workflow, see [The label trigger](#the-label-trigger)). The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
-  and that version is stored with the step run. The **environment** is found by name (case ignored). The **instruction** is the step's text with its
+  and that version is stored with the step run. The **environment** is the one of the profile version (a version saved before #919 names none, and the step's `environment` is found by name, case ignored). The **instruction** is the step's text with its
   references filled in. The step's `result` schema (or the default of the profile version) becomes the finish tool. The turn works on a branch
   the platform names, `workflow/<run id>/<step id>`, which starts from the base branch of the run (the default branch of the repository at the start of the run) or, when the step names
   one, from its `branch` ([Branches](#branches-and-what-a-step-starts-from)).
@@ -1038,7 +1102,7 @@ the issue and the repository:
 The bounds leave room for the workflow's own text: the instruction of an agent step is at most 20,000 characters, and the title (256), the labels (1,000 at most) and the
 body (8,000) take at most about 9,300 of them.
 
-The environment of an agent step is a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
+The environment of an agent step is its profile's (#919), or, for an older profile version, a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
 are removed from the texts, as from every value that goes into a text.
 
 **The title, the body and the labels are the words of whoever opened the issue**, which can be anybody who may open an issue. They are data, never read again as a
@@ -1074,7 +1138,8 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
-| `environment_not_found` | step | The environment is not one of the workspace. |
+| `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
+| `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
 | `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |
@@ -1105,11 +1170,14 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_TICKET_NOT_FOUND` | 404 | The repository has no issue of the number the `ticket` names (a pull request is none). |
 | `WORKFLOW_RUN_WORKFLOW_ARCHIVED` | 409 | The workflow is archived and is not started. |
 | `WORKFLOW_RUN_REQUEST_REUSED` | 409 | The request id made another run (`runId` is the first). |
+| `WORKFLOW_RUN_NOT_WAITING` | 409 | `answer`: the run does not wait for an answer (it never did, it was answered before, or it is being stopped). |
+| `WORKFLOW_RUN_QUESTION_CHANGED` | 409 | `answer`: another question waits than the one the body names (`question`). |
 | `WORKFLOW_RUN_BODY_TOO_LARGE` | 413 | The body is over 128 KB. |
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |
+| `WORKFLOW_RUN_ANSWER_INVALID` | 422 | `answer`: the answer is empty, over 4000 characters, or names an option the question does not have. |
 | `WORKFLOW_RUN_DOCUMENT_UNUSABLE` | 500 | The saved document cannot be read. |
 | `WORKFLOW_RUN_GITHUB_UNAVAILABLE` | 503 | GitHub could not be asked for the repository. |
 
@@ -1132,10 +1200,13 @@ not exist.
     workflow the run started with. It is updated every few seconds while a run runs.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
-  - **Status.** `running`, `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
+  - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed` or `cancelled`. A run that runs has a button **Cancel run** ([Cancelling a run](#cancelling-a-run)); once asked, the page says the run is stopping. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is
     used up"), never as the code itself; a code the page does not know is "failed for a reason not listed here". The message a step stored is a fixed sentence (no code,
     nothing a runner or an exception wrote; the details go to the log of the engine) and is shown under the sentence as text, unless it contains a code
     (`IMPLEMENTER_X`, `agent_start_failed`): then only the sentence of the `errorCode` is shown.
+  - **A question** (#920). A step whose agent asked shows the question, the numbered options and the context as plain text, and, while the run waits, a button for each option, a field for a note or a text of your
+    own, and **Send answer** (`POST .../runs/<runId>/answer`). Once answered it shows who answered what and from where (this page or a comment). A waiting run is polled like a running one, so an answer given on the ticket shows up
+    here, and **Cancel run** works while it waits.
   - **Budget.** What was spent of the budget, as a bar and in dollars. Each step that was charged shows its cost with its **basis**:
     - *reported*: the runner reported the cost;
     - *estimated*: the runner reported none, so it is the token counts at the catalog price of the model;
@@ -1223,7 +1294,9 @@ Beyond the form:
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
-| `environment_unknown` | No such environment in the workspace. | Use one of `available`, or create it on the Environments page. |
+| `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile. |
+| `environment_mismatch` | The step names an `environment` other than the one of its profile (#919). `available` is the profile's. | Leave `environment` out of the step. |
+| `environment_required` | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
 | `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
 | `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |

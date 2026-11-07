@@ -147,6 +147,27 @@ export type IssueLabeled = {
   actor: TriggerActor;
 };
 
+/**
+ * A comment `/answer ...` on an issue or a pull request by somebody with write access (#920): the answer to the question a workflow run
+ * waits for. The text is the commenter's and untrusted; which run it answers is decided by the app, not by the comment.
+ */
+export type TicketAnswer = {
+  repo: RepoRef;
+  /** The number of the issue or pull request the comment is on. */
+  number: number;
+  /** The platform's id of the comment. */
+  commentId: string;
+  /** When the comment was written (the platform's clock, ISO 8601), when the delivery says; an answer older than its question is no answer to it. */
+  createdAt?: string;
+  actor: TriggerActor;
+  /** The option the answer names by its number, from 1. */
+  choice?: number;
+  /** The note after the number, or none. */
+  text?: string;
+  /** Everything after `/answer`: the answer itself where the question has no such option. */
+  raw: string;
+};
+
 /** The person or bot that caused the event. */
 export type TriggerActor = {
   login: string;
@@ -430,6 +451,11 @@ export type IntegrationEvent =
    * that are started by this label take it from here. Title, body and labels are the words of whoever opened the issue.
    */
   | { kind: "issue_labeled"; labeled: IssueLabeled }
+  /**
+   * A comment `/answer ...` on an issue or a pull request by somebody with write access (#920). It starts no review: the workflow run that
+   * waits for an answer on this ticket takes it from here.
+   */
+  | { kind: "ticket_answer"; answer: TicketAnswer }
   /**
    * A delivery of an event the app uses whose payload lacks fields the app reads (or has them with
    * the wrong type). Nothing can be done with it and a redelivery would not change that; `reason`

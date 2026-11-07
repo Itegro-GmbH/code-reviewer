@@ -6,6 +6,7 @@
 // write token is switched off at GitHub as soon as it is not needed any more: when it never reached the Worker, and when the
 // turn is over (review of #776). A deployment without the capability reaches none of this.
 import type { NetworkRule } from "../../src/network-rule/network.ts";
+import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import {
   createFakeAdapter,
@@ -1914,5 +1915,164 @@ describe("the result of a turn (#843)", () => {
       .select("result_value")
       .executeTakeFirstOrThrow();
     expect(turn.result_value).toBeNull();
+  });
+});
+
+// #920: a turn that may end with a question. `implementer.canAsk` travels only with a result schema and only to a Worker that names the
+// feature that reads it; a turn that ends with a question succeeds, keeps no result and is not `no_result`.
+describe("a turn that ends with a question (#920)", () => {
+  const WITH_ASK = `${WORKER_FEATURES},implementer_result,implementer_ask`;
+  const WITHOUT_ASK = `${WORKER_FEATURES},implementer_result`;
+  const SCHEMA = {
+    type: "object" as const,
+    required: ["summary"],
+    properties: { summary: { type: "string" as const } },
+  };
+  const QUESTION = {
+    question: "Retry which failures?",
+    options: ["Network errors", "Network errors and 5xx answers"],
+  };
+
+  /**
+   * The step a workflow made before it started the turn: a run with one agent step, whose request id (the delivery id of the turn's job)
+   * is `wf-<run>-<position>`. Written after `h.turn`, which makes the user the rows need.
+   */
+  async function stepOf(h: Started, runId: string): Promise<void> {
+    const at = "2026-11-07T08:00:00.000Z";
+    const workspace = h.workspaceId;
+    await sql`insert into workflows (id, workspace_id, name, current_version, created_by, created_at, updated_at)
+      values ('wf-1', ${workspace}, 'Flow', 1, 'turn-user', ${at}, ${at})`.execute(
+      h.db,
+    );
+    await sql`insert into workflow_versions (workflow_id, version, workspace_id, document, created_by, created_at)
+      values ('wf-1', 1, ${workspace}, '{}', 'turn-user', ${at})`.execute(h.db);
+    await sql`insert into workflow_runs (id, workspace_id, workflow_id, workflow_version, repository_id, base_branch, trigger_input,
+        status, budget_micro_usd, client_request_id, trigger_kind, created_by, actor_login, created_at, updated_at)
+      values (${runId}, ${workspace}, 'wf-1', 1, ${h.repositoryId}, 'main', '{}', 'running', 20000000, ${runId}, 'manual', 'turn-user', 'octocat', ${at}, ${at})`.execute(
+      h.db,
+    );
+    await sql`insert into workflow_step_runs (id, run_id, workspace_id, position, step_id, kind, status, created_at)
+      values ('plan', ${runId}, ${workspace}, 0, 'plan', 'agent', 'running', ${at})`.execute(
+      h.db,
+    );
+  }
+
+  // #920-T80
+  it("tells a Worker that names the feature that the turn of a workflow step may ask, in an input the contract accepts", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA, clientRequestId: "wf-run-1-0" });
+    await stepOf(h, "run-1");
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(contract.check("RunnerJobInput", input).valid).toBe(true);
+    expect(input).toMatchObject({
+      implementer: { resultSchema: SCHEMA, canAsk: true },
+    });
+  });
+
+  // #920-T81
+  it("does not tell any other Worker, and does not refuse the turn: it runs as before", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA, clientRequestId: "wf-run-1-0" });
+    await stepOf(h, "run-1");
+
+    const { input } = await fetched(h, WITHOUT_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+    expect(input).toMatchObject({ implementer: { resultSchema: SCHEMA } });
+  });
+
+  // #920-T82
+  it("carries no canAsk for a turn without a result schema, whatever the Worker names", async () => {
+    const h = await start();
+    await h.turn({ clientRequestId: "wf-run-1-0" });
+    await stepOf(h, "run-1");
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+  });
+
+  // #920-T91
+  it("carries no canAsk for a plain task with a result schema: no workflow step is waiting to take its question", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA });
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+    expect(input).toMatchObject({ implementer: { resultSchema: SCHEMA } });
+  });
+
+  // #920-T92
+  it("carries no canAsk for a request id that only looks like a step's: the step must exist in the workspace", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA, clientRequestId: "wf-run-9-0" });
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(JSON.stringify(input)).not.toContain("canAsk");
+  });
+
+  // #920-T93
+  it("offers the question to the turn that goes on after an answer (request id with -q<n>) of a step", async () => {
+    const h = await start();
+    await h.turn({ resultSchema: SCHEMA, clientRequestId: "wf-run-1-0-q2" });
+    await stepOf(h, "run-1");
+
+    const { input } = await fetched(h, WITH_ASK);
+
+    expect(input).toMatchObject({ implementer: { canAsk: true } });
+  });
+
+  // #920-T83
+  it("completes with the question: a success, the question in the stored report, no result kept", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const { credential } = await fetched(h, WITH_ASK);
+
+    const response = await h.worker.result(
+      jobId,
+      credential,
+      turnResult({
+        implementer: { ...TURN_BLOCK, agentAsk: QUESTION } as never,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const job = await h.queue.get(jobId);
+    expect(job).toMatchObject({ status: "succeeded", errorCode: null });
+    expect(job?.result).toMatchObject({
+      implementer: { agentAsk: QUESTION },
+    });
+    const turn = await h.db
+      .selectFrom("implementer_turns")
+      .select(["result_value"])
+      .executeTakeFirstOrThrow();
+    expect(turn.result_value).toBeNull();
+  });
+
+  // #920-T84
+  it("leaves out a question that is over its bounds, and then the turn has neither: no_result", async () => {
+    const h = await start();
+    const { jobId } = await h.turn({ resultSchema: SCHEMA });
+    const { credential } = await fetched(h, WITH_ASK);
+
+    await h.worker.result(
+      jobId,
+      credential,
+      turnResult({
+        implementer: {
+          ...TURN_BLOCK,
+          agentAsk: { question: "q".repeat(2001) },
+        } as never,
+      }),
+    );
+
+    expect(await h.queue.get(jobId)).toMatchObject({
+      status: "failed",
+      errorCode: "no_result",
+    });
   });
 });

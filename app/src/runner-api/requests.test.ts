@@ -1307,6 +1307,45 @@ describe("the implementer block of a result (#754)", () => {
     });
   });
 
+  describe("the question the agent ended the turn with (#920)", () => {
+    const parsed = (agentAsk: unknown) =>
+      parseCompleteRequest(bodyWith({ ...block(), agentAsk }));
+
+    // #920-T08
+    it("keeps a question within its bounds as sent, and leaves the field out when the runner sent none", () => {
+      const value = {
+        question: "Retry which failures?",
+        options: ["Network errors", "Network errors and 5xx answers"],
+        context: "client.ts tells the two apart.",
+      };
+      const done = parsed(value);
+      const absent = parseCompleteRequest(bodyWith(block()));
+
+      expect(done.ok && done.value.result.implementer?.agentAsk).toEqual(value);
+      expect(
+        absent.ok && "agentAsk" in (absent.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+
+    // #920-T08
+    it.each<[string, unknown]>([
+      ["a list", []],
+      ["a text", "why"],
+      ["no question", {}],
+      ["an empty question", { question: "" }],
+      ["an answer next to it", { question: "q", answer: "x" }],
+      ["too many options", { question: "q", options: Array(11).fill("a") }],
+      ["an option that is no text", { question: "q", options: [3] }],
+    ])("leaves out %s and keeps the report", (_, value) => {
+      const done = parsed(value);
+
+      expect(done.ok).toBe(true);
+      expect(
+        done.ok && "agentAsk" in (done.value.result.implementer ?? {}),
+      ).toBe(false);
+    });
+  });
+
   describe("the result the agent handed in (#843)", () => {
     const parsed = (agentResult: unknown) =>
       parseCompleteRequest(bodyWith({ ...block(), agentResult }));

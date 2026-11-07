@@ -22,11 +22,20 @@ const version = (costLimitCents: number | null) => ({
 });
 
 describe("the document of a profile", () => {
+  // #919-T08
+  it("shows the environment it is given, and none for a version saved before profiles had one", () => {
+    expect(documentOf("reviewer", version(null), "node").environment).toBe(
+      "node",
+    );
+    expect(documentOf("reviewer", version(null)).environment).toBeNull();
+  });
+
   // #918-T12
   it("accepts a body without costLimitCents", () => {
     const result = validateProfile({
       name: "reviewer",
       model: { entryId: "entry-1" },
+      environment: "node",
       canPush: false,
     });
 
