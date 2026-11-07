@@ -290,6 +290,22 @@ export type WorkflowRunsRepository = {
    */
   summarizeTickets(ticketRefs: readonly string[]): Promise<TicketRunSummary[]>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
+  /** #924: the runs of the workspace that wait for an answer, the one that began to wait last first; at most `limit`. */
+  listWaiting(limit: number): Promise<StoredWorkflowRun[]>;
+  /**
+   * #924: the newest steps (at most `limit`) whose question has an answer (`ask.state` is `answered` or `resumed`), each with its run. The
+   * time of an answer is in the question (`ask.answer.at`); the caller orders by it.
+   */
+  listAnsweredAskSteps(
+    limit: number,
+  ): Promise<{ run: StoredWorkflowRun; step: StoredStepRun }[]>;
+  /**
+   * #924: the newest succeeded action steps (at most `limit`) whose output names a pull request (`/pull/<n>`), each with its run: the pull
+   * requests a lane opened. The caller reads the number from the output.
+   */
+  listPullRequestSteps(
+    limit: number,
+  ): Promise<{ run: StoredWorkflowRun; step: StoredStepRun }[]>;
   /** #920: whether the workspace has any run, in any state, on the repository. */
   hasRunOnRepository(repositoryId: string): Promise<boolean>;
   /** The step an Implementer job belongs to, if a workflow started it. */
@@ -436,6 +452,27 @@ export function createWorkflowRunsRepository(
   const inTransaction = <T>(
     run: (trx: Kysely<Database>) => Promise<T>,
   ): Promise<T> => (db.isTransaction ? run(db) : db.transaction().execute(run));
+
+  /** Each step with its run, in the order of the steps; a step whose run is not this workspace's is left out. */
+  const withRuns = async (
+    steps: readonly Selectable<WorkflowStepRunsTable>[],
+  ): Promise<{ run: StoredWorkflowRun; step: StoredStepRun }[]> => {
+    if (steps.length === 0) return [];
+    const runs = new Map(
+      (
+        await db
+          .selectFrom("workflow_runs")
+          .selectAll()
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "in", [...new Set(steps.map((step) => step.run_id))])
+          .execute()
+      ).map((row) => [row.id, runFrom(row)]),
+    );
+    return steps.flatMap((row) => {
+      const run = runs.get(row.run_id);
+      return run === undefined ? [] : [{ run, step: stepFrom(row) }];
+    });
+  };
 
   const stepsOf = async (
     executor: Kysely<Database>,
@@ -650,6 +687,54 @@ export function createWorkflowRunsRepository(
     },
 
     listSteps: (runId) => stepsOf(db, runId),
+
+    async listWaiting(limit) {
+      const rows = await db
+        .selectFrom("workflow_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("status", "=", "waiting")
+        .orderBy("updated_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return rows.map(runFrom);
+    },
+
+    async listAnsweredAskSteps(limit) {
+      const steps = await db
+        .selectFrom("workflow_step_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("ask", "is not", null)
+        // A first look in SQL (the JSON text of `serializeAsk` has no spaces); the caller reads the question and decides.
+        .where((where) =>
+          where.or([
+            where("ask", "like", '%"state":"answered"%'),
+            where("ask", "like", '%"state":"resumed"%'),
+          ]),
+        )
+        .orderBy("created_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return withRuns(steps);
+    },
+
+    async listPullRequestSteps(limit) {
+      const steps = await db
+        .selectFrom("workflow_step_runs")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("kind", "=", "action")
+        .where("status", "=", "succeeded")
+        .where("output", "like", "%/pull/%")
+        .orderBy("created_at", "desc")
+        .orderBy("id")
+        .limit(limit)
+        .execute();
+      return withRuns(steps);
+    },
 
     async listWaitingForTicket(ticketRef, limit) {
       const rows = await db

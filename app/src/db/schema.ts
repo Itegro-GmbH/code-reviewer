@@ -1450,6 +1450,8 @@ export interface TrackerItemsTable {
   deleted_at: string | null;
   /** When a board last said something about the item (a delivery or the board phase of a full sync). */
   board_seen_at: string | null;
+  /** #924: JSON text, the logins a review of the pull request is asked from; null when the mirror was not told (read as nobody). */
+  review_requested_from: string | null;
 }
 
 /** #923: where the full sync of a repository's tickets stands. */

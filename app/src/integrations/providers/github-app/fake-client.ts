@@ -43,7 +43,11 @@ export type FakeGithubAppClientData = {
   /** The pages `readTrackerChecks` answers, by "owner/name" (#923). */
   trackerCheckPages?: Record<
     string,
-    { number: number; checksState: string | null }[][]
+    {
+      number: number;
+      checksState: string | null;
+      reviewRequestedFrom?: string[];
+    }[][]
   >;
   /** What `readChecksState` answers, by "owner/name@sha" (#923); a commit not listed has no checks. */
   trackerChecks?: Record<string, string | null>;
@@ -544,7 +548,10 @@ export function fakeGithubAppClient(
       if (data.trackerFailure) throw data.trackerFailure;
       const pages = data.trackerCheckPages?.[repoFullName] ?? [];
       return {
-        pullRequests: pages[page - 1] ?? [],
+        pullRequests: (pages[page - 1] ?? []).map((pullRequest) => ({
+          ...pullRequest,
+          reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
+        })),
         last: page >= pages.length,
       };
     },

@@ -36,6 +36,7 @@ them**: no status, type or label is mapped to a vocabulary of ours.
 | `parent_number` | The issue this one is a sub-issue of, in the same repository |
 | `pull_requests`, `closes` | For an issue, the numbers of the pull requests that close it; for a pull request, the issues it closes. A pull request closes an issue when its description says so with GitHub's keywords (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved` followed by `#12` or `owner/repo#12` of the same repository). `pull_requests` is computed from the `closes` of the cached pull requests |
 | `checks_state` | The state of the checks of an open pull request, in GitHub's words: the worst conclusion of its check suites (`failure`, `timed_out`, `startup_failure`, `action_required`, `cancelled`, `stale`), else `in_progress` or `queued`, else `success`, else `neutral` or `skipped`. Empty when it has no suite |
+| `review_requested_from` | For a pull request: the logins a review is asked from (GitHub's `requested_reviewers`; teams are not read), JSON `["login", ...]` (#924). Empty for an issue and until somebody says; the ToDo list reads it ([ToDos](todos.md)) |
 | `updated_at`, `synced_at` | GitHub's time of the last change (the newest one the row has taken: see [Deliveries out of order](#deliveries-out-of-order)), and when we last wrote the row |
 | `deleted_at` | Set when GitHub deleted or moved the issue: the row stays as a **tombstone**, hidden from every read, so that a late delivery cannot bring the issue back. Empty for a ticket that exists |
 | `board_seen_at` | When a board last said something about the item (a delivery, or the board phase of a full sync): what the end of a full sync resets the board statuses by |
@@ -59,14 +60,15 @@ come from two sources, and both write the same shape:
 | Event and action | Effect on the cache |
 |---|---|
 | `issues`, any action | The ticket is written (created or replaced); `deleted` and `transferred` hide it (tombstone) |
-| `pull_request`, any action (`opened`, `closed`, merged, `review_requested`, `synchronize`, `edited`, ...) | The ticket of the pull request is written; `opened`, `reopened` and `synchronize` clear its checks (they belong to a commit), a closed pull request has none; the issues it closes (before and now) are linked again |
+| `pull_request`, any action (`opened`, `closed`, merged, `review_requested`, `review_request_removed`, `synchronize`, `edited`, ...) | The ticket of the pull request is written, with who a review is asked from (the object always carries the whole list, so `review_requested` and `review_request_removed` need no case of their own); `opened`, `reopened` and `synchronize` clear its checks (they belong to a commit), a closed pull request has none; the issues it closes (before and now) are linked again |
 | `issue_comment`, `created` or `edited` | The ticket (issue or pull request) is written from the delivery: the time of its last change moves. A deleted comment changes nothing. The comments themselves, and the markers of a question of a run, are not stored: the ask of a run is read from the run |
 | `sub_issues` | `parent_number` of the sub-issue is set, or emptied (as of the time of the sub-issue in the delivery, `sub_issue.updated_at`) |
 | `projects_v2_item` | `board_status` of the item's ticket is set to the new **Status**, or emptied when the item left the board. The item is found by the node id of its content, in any repository of the workspace |
 | `check_suite` | For each open pull request the suite lists (same repository), the app asks GitHub for the check suites of the commit and stores their state (`checks_state`) |
 
-What a delivery does not carry stays as it was: a ticket written again keeps its `board_status`, its `pull_requests` and its
-`checks_state`. A delivery the mirror cannot use (a repository without a project, a ticket it does not hold) is not an error. A
+What a delivery does not carry stays as it was: a ticket written again keeps its `board_status`, its `pull_requests`, its
+`checks_state` and (a comment event, the list of the issues) its `review_requested_from`. The checks phase of the full sync reads the list of the open
+pull requests, which carries the reviewers, and writes them with the checks. A delivery the mirror cannot use (a repository without a project, a ticket it does not hold) is not an error. A
 delivery that only the mirror reads fails with a 5xx if the cache cannot be written (GitHub redelivers it); a delivery that also starts a
 review or a workflow never fails because of the mirror (the failure is logged by its code).
 

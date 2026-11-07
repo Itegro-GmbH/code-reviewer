@@ -12,7 +12,12 @@ import { isRecord } from "./guards.ts";
 import { createAppJwt } from "./jwt.ts";
 import { toPullRequestRef } from "./mappers.ts";
 import type { PullRequestRef, TrackerItemFields } from "../../types.ts";
-import { checksStateOf, toCheckSuites, toTrackerItem } from "./tracker-map.ts";
+import {
+  checksStateOf,
+  requestedReviewersOf,
+  toCheckSuites,
+  toTrackerItem,
+} from "./tracker-map.ts";
 
 export type RemoteInstallation = {
   /** The installation id as text. */
@@ -436,7 +441,11 @@ export type GithubAppClient = {
     page: number,
     signal?: AbortSignal,
   ): Promise<{
-    pullRequests: { number: number; checksState: string | null }[];
+    pullRequests: {
+      number: number;
+      checksState: string | null;
+      reviewRequestedFrom: string[];
+    }[];
     last: boolean;
   }>;
   /** The state of the checks of one commit (#923), or null when it has no check suite. */
@@ -2517,8 +2526,11 @@ export function createGithubAppClient(
           );
           if (!Array.isArray(json))
             throw shapeError("GET /repos/{owner}/{repo}/pulls");
-          const pullRequests: { number: number; checksState: string | null }[] =
-            [];
+          const pullRequests: {
+            number: number;
+            checksState: string | null;
+            reviewRequestedFrom: string[];
+          }[] = [];
           for (const entry of json) {
             const pr = toPullRequestRef(entry);
             if (pr === null) {
@@ -2529,6 +2541,7 @@ export function createGithubAppClient(
             }
             pullRequests.push({
               number: pr.number,
+              reviewRequestedFrom: requestedReviewersOf(entry) ?? [],
               checksState: await readCommitChecks(
                 token,
                 path,

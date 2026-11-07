@@ -65,6 +65,7 @@ export type TrackerSyncDependencies = {
     | "upsertItem"
     | "setBoardStatusByNode"
     | "setChecksState"
+    | "setReviewRequestedFrom"
     | "linkPullRequests"
     | "clearBoardStatusesNotSeenSince"
     | "clearChecksStates"
@@ -240,12 +241,18 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
             next = { phase: "checks", page: 1, ...skippedSoFar };
           }
         } else if (page.phase === "checks" && cursor.phase === "checks") {
-          for (const pullRequest of page.pullRequests)
+          for (const pullRequest of page.pullRequests) {
             await tracker.setChecksState(
               repository.id,
               pullRequest.number,
               pullRequest.checksState,
             );
+            await tracker.setReviewRequestedFrom(
+              repository.id,
+              pullRequest.number,
+              pullRequest.reviewRequestedFrom,
+            );
+          }
           next = page.last
             ? { phase: "board", after: null, ...carried }
             : { phase: "checks", page: cursor.page + 1, ...carried };

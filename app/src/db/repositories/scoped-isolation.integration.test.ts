@@ -2422,6 +2422,23 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // #924: the seeded workspaces have no run that waits, no answered question and no pull request a lane opened; what the three read
+    // for the ToDos stays inside the workspace (`todos.integration.test.ts` proves it with rows in both).
+    name: "workflowRuns.listWaiting",
+    run: (a) => a.workflowRuns.listWaiting(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.listAnsweredAskSteps",
+    run: (a) => a.workflowRuns.listAnsweredAskSteps(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.listPullRequestSteps",
+    run: (a) => a.workflowRuns.listPullRequestSteps(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     // #920: B's repository holds no run of A that waits.
     name: "workflowRuns.listWaitingWithoutTicket",
     run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
@@ -2532,6 +2549,19 @@ const CASES: Case[] = [
     name: "tracker.setChecksState",
     run: (a, b) => a.tracker.setChecksState(b.repository.id, 1, "failure"),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // #924: who a review is asked from is B's to write.
+    name: "tracker.setReviewRequestedFrom",
+    run: (a, b) =>
+      a.tracker.setReviewRequestedFrom(b.repository.id, 1, ["intruder"]),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // #924: B's tickets are not A's to read by number.
+    name: "tracker.listItemsByNumbers",
+    run: (a, b) => a.tracker.listItemsByNumbers(b.repository.id, [1]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
     name: "tracker.linkPullRequests",

@@ -6,7 +6,12 @@
 // nothing here decides what a value means, the values are stored as the provider delivers them.
 import "server-only";
 import { sql, type Kysely, type Selectable } from "kysely";
-import { decodeJson, encodeJson, formatTimestamp } from "../codecs.ts";
+import {
+  decodeJson,
+  encodeJson,
+  formatTimestamp,
+  tryDecodeJson,
+} from "../codecs.ts";
 import type {
   Database,
   TrackerItemsTable,
@@ -45,6 +50,8 @@ export type TrackerItem = {
   /** The numbers of the issues the pull request closes. */
   closes: number[];
   checksState: string | null;
+  /** #924: the logins a review of the pull request is asked from (the provider's `requested_reviewers`); empty for an issue and for none. */
+  reviewRequestedFrom: string[];
   /** The provider's time of the last change. */
   updatedAt: string;
   /** When the row was last written from the provider. */
@@ -77,6 +84,11 @@ export type TrackerItemWrite = Pick<
    * it).
    */
   parentNumber?: number | null;
+  /**
+   * #924: who a review of the pull request is asked from; `undefined` leaves what the row has (an issue, a comment event and the list of
+   * the issues say nothing about it).
+   */
+  reviewRequestedFrom?: string[];
 };
 
 export type TrackerItemFilter = {
@@ -150,6 +162,17 @@ export type TrackerRepository = {
     number: number,
     state: string | null,
   ): Promise<boolean>;
+  /** #924: who a review of the pull request is asked from (the full sync reads it from the list of the open pull requests). */
+  setReviewRequestedFrom(
+    repositoryId: string,
+    number: number,
+    logins: readonly string[],
+  ): Promise<boolean>;
+  /** #924: the items of the repository with these numbers (at most 200 are looked at), in no particular order. */
+  listItemsByNumbers(
+    repositoryId: string,
+    numbers: readonly number[],
+  ): Promise<TrackerItem[]>;
   /**
    * Computes `pullRequests` again for these issues (all issues of the repository when none are named) from the `closes` of the cached
    * pull requests: an issue lists the pull requests that close it.
@@ -218,9 +241,21 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     pullRequests: decodeJson<number[]>(row.pull_requests),
     closes: decodeJson<number[]>(row.closes),
     checksState: row.checks_state,
+    reviewRequestedFrom: loginsFrom(row.review_requested_from),
     updatedAt: row.updated_at,
     syncedAt: row.synced_at,
   };
+}
+
+/** The logins of the column: null and a text that is no list of texts read as nobody. */
+function loginsFrom(text: string | null): string[] {
+  if (text === null) return [];
+  const decoded = tryDecodeJson<unknown>(text);
+  return decoded.ok && Array.isArray(decoded.value)
+    ? decoded.value.filter(
+        (login): login is string => typeof login === "string",
+      )
+    : [];
 }
 
 function syncStateFrom(
@@ -271,16 +306,20 @@ export function createTrackerRepository(
         item.parentNumber === undefined
           ? sql`tracker_items.parent_number`
           : sql`excluded.parent_number`;
+      const requested =
+        item.reviewRequestedFrom === undefined
+          ? sql`tracker_items.review_requested_from`
+          : sql`excluded.review_requested_from`;
       const written = await sql<{ number: number }>`insert into tracker_items (
           workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
-          deleted_at, board_seen_at
+          deleted_at, board_seen_at, review_requested_from
         )
         select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
           ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
-          null, null
+          null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
         on conflict (repository_id, number) do update set
@@ -298,6 +337,7 @@ export function createTrackerRepository(
           assignees = excluded.assignees,
           closes = excluded.closes,
           parent_number = ${parent},
+          review_requested_from = ${requested},
           updated_at = excluded.updated_at,
           synced_at = excluded.synced_at,
           deleted_at = null
@@ -390,6 +430,31 @@ export function createTrackerRepository(
         .where("deleted_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
+    },
+
+    async setReviewRequestedFrom(repositoryId, number, logins) {
+      const result = await own(repositoryId, number)
+        .set({
+          review_requested_from: encodeJson([...logins]),
+          synced_at: formatTimestamp(now()),
+        })
+        .where("deleted_at", "is", null)
+        .where("kind", "=", "pull_request")
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) > 0;
+    },
+
+    async listItemsByNumbers(repositoryId, numbers) {
+      if (numbers.length === 0) return [];
+      const rows = await db
+        .selectFrom("tracker_items")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("deleted_at", "is", null)
+        .where("number", "in", numbers.slice(0, 200))
+        .execute();
+      return rows.map(itemFrom);
     },
 
     async linkPullRequests(repositoryId, issueNumbers) {

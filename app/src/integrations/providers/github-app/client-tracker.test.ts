@@ -246,7 +246,13 @@ describe("the checks of the full sync", () => {
   it("reads the open pull requests and the check suites of the head of each", async () => {
     const { client, calls } = scripted((call) => {
       if (call.path.startsWith("/repos/acme/widgets/pulls?"))
-        return { json: [pull(7), pull(8)] };
+        return {
+          json: [
+            // #924-T04: the list says who a review is asked from
+            { ...pull(7), requested_reviewers: [{ login: "carol" }] },
+            pull(8),
+          ],
+        };
       if (
         call.path.startsWith(`/repos/acme/widgets/commits/${SHA}/check-suites`)
       )
@@ -270,8 +276,8 @@ describe("the checks of the full sync", () => {
 
     expect(page).toEqual({
       pullRequests: [
-        { number: 7, checksState: "failure" },
-        { number: 8, checksState: "failure" },
+        { number: 7, checksState: "failure", reviewRequestedFrom: ["carol"] },
+        { number: 8, checksState: "failure", reviewRequestedFrom: [] },
       ],
       last: true,
     });

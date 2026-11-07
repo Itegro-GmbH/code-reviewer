@@ -50,7 +50,11 @@ type GitHub = {
   issues: TrackerItemFields[];
   /** How many items one page of the list holds. */
   pageSize: number;
-  checks: { number: number; checksState: string | null }[][];
+  checks: {
+    number: number;
+    checksState: string | null;
+    reviewRequestedFrom?: string[];
+  }[][];
   /** Pages of board items; null: the app may not read boards. */
   board: { nodeId: string; status: string | null }[][] | null;
   /** How many tickets of each page cannot be read (`skipped` of the page). */
@@ -84,7 +88,9 @@ const GITHUB: GitHub = {
       updatedAt: at(5),
     }),
   ],
-  checks: [[{ number: 7, checksState: "failure" }]],
+  checks: [
+    [{ number: 7, checksState: "failure", reviewRequestedFrom: ["ada"] }],
+  ],
   board: [
     [{ nodeId: "N_12", status: "In Progress" }],
     [{ nodeId: "N_3", status: "Todo" }],
@@ -125,7 +131,12 @@ function provider(github: GitHub) {
       if (step.phase === "checks")
         return {
           phase: "checks",
-          pullRequests: github.checks[step.page - 1] ?? [],
+          pullRequests: (github.checks[step.page - 1] ?? []).map(
+            (pullRequest) => ({
+              ...pullRequest,
+              reviewRequestedFrom: pullRequest.reviewRequestedFrom ?? [],
+            }),
+          ),
           last: step.page >= github.checks.length,
         };
       if (github.board === null)
@@ -203,8 +214,13 @@ describe("the full sync of the ticket mirror", () => {
     expect(await tracker.getItem("r-1", 13)).toMatchObject({
       pullRequests: [8],
     });
+    // #924-T05: the checks phase reads who a review of the open pull request is asked from
     expect(await tracker.getItem("r-1", 7)).toMatchObject({
       checksState: "failure",
+      reviewRequestedFrom: ["ada"],
+    });
+    expect(await tracker.getItem("r-1", 8)).toMatchObject({
+      reviewRequestedFrom: [],
     });
     expect(await tracker.getItem("r-1", 3)).toMatchObject({
       boardStatus: "Todo",
@@ -423,7 +439,18 @@ describe("the rebuild rule", () => {
       await mirror.apply(INTEGRATION, {
         kind: "item_changed",
         repo,
-        item: ticket,
+        // The object of a pull request in a webhook carries who a review is asked from; the list of the issues does not (the checks do).
+        item:
+          ticket.kind === "pull_request"
+            ? {
+                ...ticket,
+                reviewRequestedFrom:
+                  GITHUB.checks
+                    .flat()
+                    .find((pull) => pull.number === ticket.number)
+                    ?.reviewRequestedFrom ?? [],
+              }
+            : ticket,
         resetChecks: false,
       });
     for (const page of GITHUB.board ?? [])

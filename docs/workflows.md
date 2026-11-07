@@ -719,6 +719,8 @@ account without one (an email address is never written on a ticket or into the i
 
 Of two answers at the same time one wins (under the lock of the run), the other finds the question answered.
 
+The questions that wait, and the reviews that are asked for, of a whole workspace or one project are listed by `GET /api/w/<slug>/todos` and `GET /api/w/<slug>/projects/<id>/todos`; see [`todos.md`](todos.md).
+
 **Where the question is shown.** On the run page always. Besides, on the **ticket** of the run (`workflow_runs.ticket_ref`, #923: the issue of its `ticket` input or of the label that started it; a run written before the column was backfilled, and one that has none reads the issue from the input of its trigger),
 else on the **pull request** an action step of the run opened, else nowhere. There it is a comment of the GitHub App of the workspace:
 

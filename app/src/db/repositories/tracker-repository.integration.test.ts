@@ -109,9 +109,65 @@ describe("the tickets of the mirror", () => {
       pullRequests: [],
       closes: [],
       checksState: null,
+      reviewRequestedFrom: [],
       updatedAt: "2026-11-06T10:02:00.000Z",
       syncedAt: expect.any(String),
     });
+  });
+
+  // #924-T80
+  it("stores who a review is asked from, keeps it for a write that says nothing, replaces it for one that does, and lists tickets by number", async () => {
+    const { tracker, first, second } = await setup();
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: ["alice", "bob"] }),
+    );
+    await tracker.upsertItem(first.id, item(8, { kind: "pull_request" }));
+    await tracker.upsertItem(first.id, item(12));
+
+    // a write without the list (a comment event, the list of the issues) leaves it
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", title: "Renamed" }),
+    );
+    expect((await tracker.getItem(first.id, 7))?.reviewRequestedFrom).toEqual([
+      "alice",
+      "bob",
+    ]);
+    expect((await tracker.getItem(first.id, 8))?.reviewRequestedFrom).toEqual(
+      [],
+    );
+
+    // a write with the list replaces it, and so does the full sync (a pull request only)
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: ["carol"] }),
+    );
+    expect(await tracker.setReviewRequestedFrom(first.id, 8, ["dave"])).toBe(
+      true,
+    );
+    expect(await tracker.setReviewRequestedFrom(first.id, 12, ["dave"])).toBe(
+      false,
+    );
+    expect(await tracker.setReviewRequestedFrom(first.id, 99, ["dave"])).toBe(
+      false,
+    );
+    expect(await tracker.setReviewRequestedFrom(second.id, 8, ["dave"])).toBe(
+      false,
+    );
+
+    const listed = await tracker.listItemsByNumbers(first.id, [7, 8, 12, 99]);
+    expect(
+      listed
+        .map((ticket) => [ticket.number, ticket.reviewRequestedFrom])
+        .sort(),
+    ).toEqual([
+      [12, []],
+      [7, ["carol"]],
+      [8, ["dave"]],
+    ]);
+    expect(await tracker.listItemsByNumbers(first.id, [])).toEqual([]);
+    expect(await tracker.listItemsByNumbers(second.id, [7])).toEqual([]);
   });
 
   // #923-T88

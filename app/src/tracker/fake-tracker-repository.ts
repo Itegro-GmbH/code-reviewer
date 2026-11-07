@@ -75,6 +75,8 @@ export function createFakeTrackerRepository(
         deletedAt: null,
         pullRequests: before?.pullRequests ?? [],
         checksState: before?.checksState ?? null,
+        reviewRequestedFrom:
+          item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
         parentNumber:
           item.parentNumber === undefined
             ? (before?.parentNumber ?? null)
@@ -165,6 +167,21 @@ export function createFakeTrackerRepository(
         syncedAt: stamp(),
       });
       return true;
+    },
+    async setReviewRequestedFrom(repositoryId, number, logins) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewRequestedFrom: [...logins],
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async listItemsByNumbers(repositoryId, numbers) {
+      return rowsOf(repositoryId)
+        .filter((item) => numbers.includes(item.number))
+        .map(strip);
     },
     async linkPullRequests(repositoryId, issueNumbers) {
       for (const issue of rowsOf(repositoryId)) {

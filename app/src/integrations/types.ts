@@ -315,6 +315,11 @@ export type TrackerItemFields = {
   parentNumber?: number | null;
   /** For a pull request: the issues of the same repository it closes (`Closes #12`). Empty for an issue. */
   closes: number[];
+  /**
+   * For a pull request: the logins a review is asked from (#924). `undefined` when the object does not say (an issue, and the pull requests
+   * of the list of issues): the cache then keeps what it has.
+   */
+  reviewRequestedFrom?: string[];
   /** ISO 8601 text in UTC: the platform's time of the last change. */
   updatedAt: string;
 };
@@ -384,7 +389,12 @@ export type TrackerPage =
     }
   | {
       phase: "checks";
-      pullRequests: { number: number; checksState: string | null }[];
+      pullRequests: {
+        number: number;
+        checksState: string | null;
+        /** #924: the logins a review of the pull request is asked from. */
+        reviewRequestedFrom: string[];
+      }[];
       last: boolean;
     }
   | {
