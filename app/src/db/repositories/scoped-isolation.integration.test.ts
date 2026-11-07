@@ -2525,6 +2525,16 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    name: "tracker.findItemByNode",
+    run: (a, b) => a.tracker.findItemByNode(`node-${b.externalRepositoryId}`),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "tracker.newestWriteAt",
+    run: (a, b) => a.tracker.newestWriteAt(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toBeNull(),
+  },
+  {
     name: "tracker.listItems",
     run: (a, b) =>
       a.tracker.listItems(b.repository.id, { state: "open", limit: 10 }),
@@ -2568,8 +2578,8 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
-    name: "tracker.clearChecksStates",
-    run: (a, b) => a.tracker.clearChecksStates(b.repository.id),
+    name: "tracker.clearChecksStatesOfClosed",
+    run: (a, b) => a.tracker.clearChecksStatesOfClosed(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {

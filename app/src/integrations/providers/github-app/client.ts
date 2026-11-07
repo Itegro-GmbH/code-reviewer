@@ -464,9 +464,20 @@ export type GithubAppClient = {
     next: string | null;
   }>;
   /**
+   * The status the project boards give one issue or pull request now, by its node id (#932): the status on the first board that has one,
+   * null for a ticket on no board or without a status. A board the token may not read is `available: false`, not a failure.
+   */
+  readTrackerBoardStatus(
+    installationId: string,
+    scope: JobTokenScope,
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+  /**
    * The boards (GitHub Projects, projects_v2) of a repository (#922; GraphQL): id, number, title and the Status field with its option
    * names, at most `BOARDS_MAX` of them, closed ones left out. A board the token may not read (the permission "Projects" is missing, or
-   * the repository belongs to a user and has no organization board) is `available: false`, not a failure.
+   * the repository belongs to a user and has no organization board) is `available: false`, not a failure; so is a list in which one board
+   * came back null (it may not be read and cannot be named): the list is never silently short.
    */
   listRepositoryBoards(
     installationId: string,
@@ -570,14 +581,42 @@ const REPOSITORY_BOARDS_QUERY =
 const BOARD_ITEMS_QUERY =
   'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
 
-/** The ids of the boards a `BOARDS_QUERY` answer lists; null when the answer is not that. */
-function boardIdsOf(data: Record<string, unknown>): string[] | null {
+const BOARD_STATUS_FIELDS =
+  'projectItems(first:20,includeArchived:false){nodes{fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}';
+const BOARD_STATUS_QUERY = `query($id:ID!){node(id:$id){... on Issue{${BOARD_STATUS_FIELDS}} ... on PullRequest{${BOARD_STATUS_FIELDS}}}}`;
+
+/** The status of the first board item of a ticket that has one; null when it has none; undefined when the answer is not that of a ticket. */
+function boardStatusOf(
+  data: Record<string, unknown>,
+): string | null | undefined {
+  const { node } = data;
+  if (node === null) return null;
+  if (!isRecord(node)) return undefined;
+  if (!isRecord(node.projectItems)) return undefined;
+  const { nodes } = node.projectItems;
+  if (!Array.isArray(nodes)) return undefined;
+  // Board items GitHub could not give are null: when nothing but those came there is no answer, and "no status" would be a guess.
+  if (nodes.length > 0 && nodes.every((item: unknown) => item === null))
+    return undefined;
+  for (const item of nodes as unknown[]) {
+    if (!isRecord(item) || !isRecord(item.fieldValueByName)) continue;
+    const { name } = item.fieldValueByName;
+    if (typeof name === "string" && name !== "") return name;
+  }
+  return null;
+}
+
+/**
+ * The ids of the boards a `BOARDS_QUERY` answer lists, in the order GitHub gives them; null when the answer is not that. A board the token
+ * may not read keeps its place as `null`: the position of the boards after it must not shift, the cursor of a sync names them by it.
+ */
+function boardIdsOf(data: Record<string, unknown>): (string | null)[] | null {
   const repository = data.repository;
   if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
   const nodes = repository.projectsV2.nodes;
   if (!Array.isArray(nodes)) return null;
-  return nodes.flatMap((node: unknown) =>
-    isRecord(node) && typeof node.id === "string" ? [node.id] : [],
+  return nodes.map((node: unknown) =>
+    isRecord(node) && typeof node.id === "string" ? node.id : null,
   );
 }
 
@@ -589,6 +628,7 @@ function repositoryBoardsOf(
   if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
   const nodes = repository.projectsV2.nodes;
   if (!Array.isArray(nodes)) return null;
+  // A board GitHub could not give (null: the token may not read it) is left out: it can be neither synced nor moved on, so it is no choice.
   const boards: RepositoryBoard[] = [];
   for (const node of nodes as unknown[]) {
     if (
@@ -1308,8 +1348,9 @@ export function createGithubAppClient(
   }
 
   /**
-   * One GraphQL query. Null when GitHub says the board is not ours to read: every error of the answer is `FORBIDDEN`,
-   * `INSUFFICIENT_SCOPES` or `NOT_FOUND`; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
+   * One GraphQL query. When every error of the answer is `FORBIDDEN`, `INSUFFICIENT_SCOPES` or `NOT_FOUND` (some board is not ours to
+   * read), the data that came with them is returned when there is any (the boards we may read, #932): the nodes GitHub could not give
+   * are null in it. Null when there is none; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
    * a query GitHub could not run) and anything else wrong (no answer, not JSON) fails as for REST, so the sync keeps its place and goes
    * on from there.
    */
@@ -1332,7 +1373,10 @@ export function createGithubAppClient(
         isRecord(error) && typeof error.type === "string" ? error.type : "",
       );
       if (types.every((type) => BOARD_UNAVAILABLE_ERRORS.has(type)))
-        return null;
+        return isRecord(json.data) &&
+          Object.values(json.data).some((value) => value !== null)
+          ? json.data
+          : null;
       if (types.includes("RATE_LIMITED"))
         throw new GithubAppError(
           "GITHUB_APP_RATE_LIMITED",
@@ -2600,26 +2644,76 @@ export function createGithubAppClient(
             if (projects === null) return unavailable;
             const boards = boardIdsOf(projects);
             if (boards === null) return unavailable;
-            const board = boards[index];
-            if (board === undefined)
+            // A board the token may not read is skipped, the indexes of the others stay what they were.
+            let at = index;
+            while (at < boards.length && boards[at] === null) at += 1;
+            const board = boards[at];
+            if (board === undefined || board === null)
               return { available: true, items: [], next: null };
 
             const data = await graphql(
               token,
               BOARD_ITEMS_QUERY,
-              { project: board, after: cursor, first: BOARD_PAGE_SIZE },
+              {
+                project: board,
+                // The cursor belongs to the board it was saved for: another board starts from its first page.
+                after: at === index ? cursor : null,
+                first: BOARD_PAGE_SIZE,
+              },
               signal,
             );
             if (data === null) return unavailable;
             const page = boardPageOf(data);
             if (page === null) return unavailable;
+            let following = at + 1;
+            while (following < boards.length && boards[following] === null)
+              following += 1;
             const next =
               page.endCursor !== null && page.hasNextPage
-                ? `${index}:${page.endCursor}`
-                : index + 1 < boards.length
-                  ? `${index + 1}:`
+                ? `${at}:${page.endCursor}`
+                : following < boards.length
+                  ? `${following}:`
                   : null;
             return { available: true, items: page.items, next };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
+
+    async readTrackerBoardStatus(installationId, scope, nodeId, signal) {
+      checkInstallationId(installationId);
+      if (nodeId === "" || nodeId.length > 200)
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The node id of the ticket is not usable.",
+        );
+      const unavailable = { available: false, status: null };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            const data = await graphql(
+              token,
+              BOARD_STATUS_QUERY,
+              { id: nodeId },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const status = boardStatusOf(data);
+            if (status === undefined) return unavailable;
+            return { available: true, status };
           },
           signal,
         );
