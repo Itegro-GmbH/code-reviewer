@@ -2,15 +2,15 @@
 
 A **workflow** is a JSON document that says what the factory does when something happens: a trigger, and a list of steps that
 run in order. A GitHub issue gets a label, an agent implements it, another reviews, the first fixes what the review found, and a pull
-request is opened. Workflows are written by an AI through the API (there is no editor), checked by a strict validator, and saved per
+request is opened. Workflows are written by an AI through the API or edited in the [lane builder](#the-lane-builder), checked by a strict validator, and saved per
 workspace with versions.
 
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
 workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
-either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run), and a workflow can clean up after a failed or cancelled run with [`onFailure`](#after-a-failure-onfailure). Not yet: an editor.
+either runs its steps in the order the document says, in rounds where there is a loop. A member can [cancel a run](#cancelling-a-run), and a workflow can clean up after a failed or cancelled run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
-a deployment with the capability `implementer` (the factory); there is no editor, but the routes below and, for the runs, [pages](#the-run-page). Every member of a workspace may
+a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
 use them (the permission `start_implementer_task`).
 
 The format is described by two JSON Schemas, [`contracts/workflow.v1.json`](../contracts/workflow.v1.json) and
@@ -1116,13 +1116,13 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 ## The run page
 
 *Milestone 3c of epic #833; the code is [`app/src/workflow-pages/`](../app/src/workflow-pages/README.md), the pages are below `/w/<slug>/workflows`.*
-There is no editor for workflows (an AI writes them through the API), but a member can see them, start one by hand and watch a run. The pages exist
+A member can edit a workflow in the [lane builder](#the-lane-builder), start one by hand and watch a run. The pages exist
 only in a deployment with the capability `implementer`, are reached from the **Lanes** tab of a project (no sidebar place of their own since #925), and are open to every member (the permission
 `start_implementer_task`, like the routes). A workflow, or a run, that is none of the workspace's is the not-found page, the same as one that does
 not exist.
 
 - **Workflows** (`/w/<slug>/workflows`): the workflows of the workspace that are not archived, with their version and the time of the last save.
-- **One workflow** (`/w/<slug>/workflows/<id>`): the **Start form** and the newest 50 runs.
+- **One workflow** (`/w/<slug>/workflows/<id>`): the [lane builder](#the-lane-builder) (its **Run now** opens the Start form) and the newest 50 runs.
   - The form has one field for each field of the `input` of the manual trigger, the repository (`repo`) or the ticket first: a text (a ticket is a text like `github:owner/repo#128`), a whole number, a number, a
     choice (a text with a list of names), a checkbox, and a box for JSON for a list or an object. A workflow with several manual triggers shows one form for each. It sends `{trigger, input, clientRequestId}` (`trigger` when the workflow has `triggers`) to
     `POST .../workflows/<id>/runs`. The `clientRequestId` is made when the form is sent and kept for the same input: sending it again after a lost
@@ -1162,6 +1162,24 @@ not exist.
   - **Links.** The only links made from a step's output go to GitHub: a value is linked only if `new URL` reads it as `https://github.com/<owner>/<name>` or
     below it, of **the repository of the run** (`input.repo`, case ignored), with no user name or port in it; `javascript:`, another host or another
     repository are shown as text and not linked. The link of a branch is made from the repository and the branch name, not taken from the output.
+
+## The lane builder
+
+*#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of a project; the route moves when lanes belong to a project (#922).*
+
+The builder reads a workflow and edits **the document itself**: there is no second format, what it shows is what the validator checks and what it saves. A document written with the single `trigger` of before #916 opens as `triggers` with that one entry (the id the engine gives it) and is saved in that form; everything else in a document is kept as it is.
+
+- **Flow** (left). Each trigger is a dashed group with its pre-steps; then the shared steps top down. A loop is a container with its body indented and a footer (until, max rounds, exits); an `if` shows then and else side by side; `onFailure` is a group of its own at the bottom and offers comments, labels and `if` only. The **+** below a card inserts a step of the kind picked (agent step, action, loop, if) after it, at any depth; a step can be added to an empty branch, body or pre-step list too.
+- **Inspector** (right) for the selected node, with the id (editable: references to the old id are **not** renamed, the validator reports them), remove, and move up and down within the list:
+  - *trigger*: kind (changing it starts the fields of the new kind), label, cron, or the input as a table of fields (name, type, required);
+  - *agent step*: profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step has one (#919 removes it) or the validator asks for it. No model, no key;
+  - *action*: the connector and its inputs, taken from the connector's own spec, so the inputs, the required ones and the **targets** (marked "target · one value", or "target · literal") are the validator's; a list of labels is one entry to a line, or one reference to a list;
+  - *loop*: max rounds (1 to 10) and the `until` condition; *if*: the `when` condition. A condition is an operator (`empty`, `notEmpty`, `equals`, `notEquals`, `all`, `any`, `not`) and its operands or conditions.
+
+  Fields are plain text with `{{…}}`; chips and the variable picker are #927.
+- **Validation on every change.** The document is sent to `POST .../workflows/validate` after a short pause. An error's `path` is a JSON pointer; the node it belongs to is the deepest step or trigger it runs through, which gets a red count on its card, and the inspector of that node shows the error in full: code, path, the validator's message and `available` as chips. Where `available` holds **exactly one** name and the value at `path` is a plain text (`profile_unknown`, `profile_archived`, `profile_version_unknown`, `environment_unknown`, `unknown_connector`, `unknown_trigger_kind`, `session_target_invalid`) the error has a one-click fix; nothing else is guessed. Errors about the lane as a whole (the name, the budget) show when no node is picked. The header says "Valid · n steps · $budget", or the number of errors and "not saved".
+- **Header**: **JSON** shows the document read only; **Run now** opens the Start form of the manual trigger (it starts the *saved* version, and says so when there are unsaved changes); **Save as vN** is on only for a document the validator accepted as it stands that differs from the saved one. It is `PUT .../workflows/<id>?expectedVersion=<current>`, so a lane saved by someone else since the page was opened is `WORKFLOW_VERSION_CONFLICT` (the page says so and keeps the changes). A saved document is always one the validator accepts, so the engine runs it.
+- **Lane card** (right column): the limits of the lane (`budgetUsd`, `turnTimeLimitMinutes`; a limit left out shows the default and is written when changed), the versions, and the sentence that a turn ends with done or ask.
 
 ## Error codes
 

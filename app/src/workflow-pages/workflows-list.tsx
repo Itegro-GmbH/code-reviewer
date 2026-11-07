@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The workflows of a workspace as a small table (#873): there is no editor, so this page is only the way to a workflow's runs and its
+// The workflows of a workspace as a small table (#873): the way to a workflow's builder, its runs and its
 // Start form. The names are free text of whoever wrote the workflow: rendered as text.
 import Link from "next/link";
 import {

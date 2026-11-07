@@ -5,7 +5,7 @@
 // pages read them. A workflow or run of another workspace is `not_found` through the other workspace's services (the page then shows
 // the not-found page and nothing of the other), the list holds only the workspace's own workflows, and a run whose cost was not
 // reported shows the basis it was charged on.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -141,7 +141,8 @@ describe("the pages with real data", () => {
         api={NO_POLL}
       />,
     );
-    // The manual trigger of the test workflow asks for the repository and a topic.
+    // The Start form is behind "Run now" (#926). The manual trigger of the test workflow asks for the repository and a topic.
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
     expect(screen.getByLabelText("Repository")).toBeTruthy();
     expect(screen.getByLabelText("topic")).toBeTruthy();
     expect(
@@ -170,6 +171,7 @@ describe("the pages with real data", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Run now" }));
     expect(screen.queryByLabelText("Repository")).toBeNull();
     expect(screen.getByText(/does not allow/)).toBeTruthy();
   });
