@@ -1072,6 +1072,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
 | `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
+| `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
 | `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |

@@ -206,4 +206,65 @@ describe("the environment an agent step runs in", () => {
       }),
     );
   });
+
+  // #919-T44
+  it("ends the step without a turn when the step names another environment than its profile version runs in", async () => {
+    const app = harness({ step: "python", profileEnvironmentId: "env-box" });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.startTask).not.toHaveBeenCalled();
+    expect(app.settleOwnStep).toHaveBeenCalledWith(
+      "step-0",
+      expect.objectContaining({
+        status: "failed",
+        errorCode: "environment_mismatch",
+        errorMessage: expect.stringContaining("Box"),
+      }),
+    );
+  });
+
+  // #919-T45
+  it("does not run in the environment of a lane saved against a profile version without one, once the profile it follows has one", async () => {
+    // The lane was valid against version 1 (no environment, so the step named "python"); the profile it follows has since got a version
+    // 2 that runs in "Box". The step is not silently moved, and not run where the profile no longer says.
+    const app = harness({ step: "python", profileEnvironmentId: "env-box" });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.startTask).not.toHaveBeenCalled();
+    expect(app.settleOwnStep).toHaveBeenCalledWith(
+      "step-0",
+      expect.objectContaining({ errorCode: "environment_mismatch" }),
+    );
+  });
+
+  // #919-T46
+  it("ends the step with environment_not_found when the environment of the profile version belongs to another workspace", async () => {
+    // The environments the engine lists are those of the workspace of the run; the id of one of another workspace is not among them.
+    const app = harness({
+      step: undefined,
+      profileEnvironmentId: "env-of-another-workspace",
+    });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.startTask).not.toHaveBeenCalled();
+    expect(app.settleOwnStep).toHaveBeenCalledWith(
+      "step-0",
+      expect.objectContaining({ errorCode: "environment_not_found" }),
+    );
+  });
+
+  // #919-T47
+  it("ends with environment_not_found, not a mismatch, when the profile's environment is gone and the step names one", async () => {
+    const app = harness({ step: "python", profileEnvironmentId: "env-gone" });
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.settleOwnStep).toHaveBeenCalledWith(
+      "step-0",
+      expect.objectContaining({ errorCode: "environment_not_found" }),
+    );
+  });
 });

@@ -85,6 +85,8 @@ export const STEP_FAILURE_CODES = [
   "profile_not_found",
   /** The environment is not one of the workspace. */
   "environment_not_found",
+  /** The step names another environment than the version of its profile runs in (#919). */
+  "environment_mismatch",
   /** The Implementer refused the turn, or could not start it. */
   "agent_start_failed",
   /** The turn ended, but its job, its result or its session cannot be read. */

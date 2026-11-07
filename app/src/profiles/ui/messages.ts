@@ -25,6 +25,7 @@ export const PROFILES_COPY = {
   hostedSandbox: "Hosted sandbox",
   runnerOwn: "Your runner",
   noEnvironment: "Not set",
+  environmentGone: "Environment removed – choose another",
   noEnvironmentHint: "Saved before profiles had an environment",
   none: "–",
   version: (version: number) => `v${String(version)}`,
@@ -55,6 +56,9 @@ export const DRAWER_COPY = {
     kind === "runner" ? "runner" : "hosted",
   runsOnRequired:
     "This version was saved before profiles had an environment. Choose one to save a new version.",
+  runsOnGone: "Environment removed – choose another",
+  runsOnNeedsRunnerAndOwnKey:
+    "This harness needs your own runner and your own key; the model is managed — change the model through the API until the model picker is enabled.",
   runsOnNeedsRunner:
     "This harness runs only on a runner. Choose an environment that runs on a runner.",
   runsOnNeedsOwnKey:

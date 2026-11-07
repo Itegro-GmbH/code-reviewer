@@ -38,6 +38,7 @@ function view(overrides: Partial<ProfileView> = {}): ProfileView {
     updatedAt: "2026-11-02T10:00:00.000Z",
     archivedAt: null,
     documentVersion: 2,
+    environmentGone: false,
     versions: [],
     document: {
       name: "implementer",
@@ -133,6 +134,34 @@ describe("the list of profiles", () => {
     expect(
       within(row).getByText("Saved before profiles had an environment"),
     ).toBeTruthy();
+  });
+
+  // #919-T09b
+  it("says the environment of a profile was removed, not that the version had none", () => {
+    render(
+      <ProfilesPageContent
+        workspaceSlug="acme"
+        profiles={[
+          profileRowOf(
+            view({
+              environmentGone: true,
+              document: { ...view().document, environment: null },
+            }),
+          ),
+        ]}
+        environments={ENVIRONMENTS}
+        api={fakeApi().api}
+      />,
+    );
+
+    const row = screen.getByRole("row", { name: /implementer/ });
+    expect(
+      within(row).getByText("Environment removed – choose another"),
+    ).toBeTruthy();
+    expect(within(row).queryByText("Not set")).toBeNull();
+    expect(
+      within(row).queryByText("Saved before profiles had an environment"),
+    ).toBeNull();
   });
 
   // #925
@@ -293,6 +322,70 @@ describe("the drawer of a profile", () => {
     expect(saveVersion.mock.calls[0]?.[1]).toMatchObject({
       environment: "laptop",
     });
+  });
+
+  // #919-T14b
+  it("says the environment was removed and asks for another one, saving only after one is chosen", async () => {
+    const { api, saveVersion } = fakeApi(
+      view({
+        environmentGone: true,
+        document: { ...view().document, environment: null },
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+
+    expect((runsOn as HTMLSelectElement).value).toBe("");
+    expect(
+      within(dialog).getByText("Environment removed – choose another"),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/saved before profiles had/)).toBeNull();
+    const save = within(dialog).getByRole("button", {
+      name: "Save as new version",
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    await user.selectOptions(runsOn, "node");
+    await user.click(save);
+
+    await waitFor(() => expect(saveVersion).toHaveBeenCalledTimes(1));
+  });
+
+  // #919-T12b
+  it("says one problem for a harness of a runner with a managed model, not two that contradict each other", async () => {
+    const { api } = fakeApi(
+      view({
+        document: {
+          ...view().document,
+          harness: "claude-code",
+          model: { entryId: "entry-1" },
+        },
+      }),
+    );
+    const { user, dialog } = await openDrawer(api);
+    const runsOn = await within(dialog).findByLabelText("Runs on");
+    const combined =
+      /needs your own runner and your own key; the model is managed/;
+
+    for (const name of ["node", "laptop"]) {
+      await user.selectOptions(runsOn, name);
+      expect(within(dialog).getAllByText(combined)).toHaveLength(1);
+      expect(
+        within(dialog).queryByText(/Choose a hosted environment/),
+      ).toBeNull();
+      expect(
+        within(dialog).queryByText(
+          /Choose an environment that runs on a runner/,
+        ),
+      ).toBeNull();
+    }
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Save as new version",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
   });
 
   // #919-T12

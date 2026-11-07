@@ -91,6 +91,10 @@ export function fitProblemOf(
   harness: ProfileHarness,
   environment: EnvironmentOption | undefined,
 ): string | null {
+  // A harness of a runner needs the runner's own key, and a managed model is not one: no environment fits both, so the problem is
+  // one, and it is said without an environment chosen.
+  if (harness !== "opencode" && "entryId" in profile.document.model)
+    return DRAWER_COPY.runsOnNeedsRunnerAndOwnKey;
   if (environment === undefined) return null;
   if (environment.kind === "hosted" && harness !== "opencode")
     return DRAWER_COPY.runsOnNeedsRunner;
@@ -109,6 +113,8 @@ export type ProfileRowData = {
   model: string;
   /** The name of the environment the profile runs in; null for a version saved before profiles had one. */
   environment: string | null;
+  /** The environment the version names was removed since (the name is null then, as for a version saved before there was one). */
+  environmentGone: boolean;
   canPush: boolean;
 };
 
@@ -126,6 +132,7 @@ export function profileRowOf(view: ProfileView): ProfileRowData {
     harness: view.document.harness,
     model: modelTextOf(view.document.model),
     environment: view.document.environment,
+    environmentGone: view.environmentGone,
     canPush: view.document.canPush,
   };
 }
@@ -244,15 +251,19 @@ function ProfileRow({
       <TableCell className="whitespace-normal">
         <span className="flex flex-col gap-0.5">
           <span className="break-words">
-            {profile.environment ?? PROFILES_COPY.noEnvironment}
+            {profile.environmentGone
+              ? PROFILES_COPY.environmentGone
+              : (profile.environment ?? PROFILES_COPY.noEnvironment)}
           </span>
-          <span className="text-xs text-muted-foreground">
-            {profile.environment === null
-              ? PROFILES_COPY.noEnvironmentHint
-              : kind === "runner"
-                ? PROFILES_COPY.runnerOwn
-                : PROFILES_COPY.hostedSandbox}
-          </span>
+          {profile.environmentGone ? null : (
+            <span className="text-xs text-muted-foreground">
+              {profile.environment === null
+                ? PROFILES_COPY.noEnvironmentHint
+                : kind === "runner"
+                  ? PROFILES_COPY.runnerOwn
+                  : PROFILES_COPY.hostedSandbox}
+            </span>
+          )}
         </span>
       </TableCell>
       <TableCell className="text-muted-foreground">
@@ -534,7 +545,9 @@ function DrawerBody({
           </Alert>
         ) : environment === "" && environments.length > 0 ? (
           <Alert variant="info" role="status">
-            {DRAWER_COPY.runsOnRequired}
+            {profile.environmentGone
+              ? DRAWER_COPY.runsOnGone
+              : DRAWER_COPY.runsOnRequired}
           </Alert>
         ) : null}
         {problem !== null ? (

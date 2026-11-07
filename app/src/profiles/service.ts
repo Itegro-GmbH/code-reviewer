@@ -57,6 +57,11 @@ export type ProfileView = ProfileSummaryView & {
   documentVersion: number;
   /** What that version says, in the shape of the body that made it, every optional field filled in. */
   document: ProfileDocument;
+  /**
+   * #919: the version names an environment that is no longer one of the workspace (removed since). Its `document.environment` is null
+   * then, as for a version saved before profiles had one, and this tells the two apart.
+   */
+  environmentGone: boolean;
   /** Every saved version, the newest first. */
   versions: ProfileVersionInfo[];
 };
@@ -248,6 +253,7 @@ export function createProfileService({
       ...summaryOf(profile),
       documentVersion: shown.version,
       document: documentOf(profile.name, shown, environment),
+      environmentGone: environmentId !== null && environment === null,
       versions: versions.map((v) => ({
         version: v.version,
         savedAt: v.createdAt,

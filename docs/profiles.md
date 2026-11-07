@@ -92,7 +92,7 @@ pass the validator is `422 PROFILE_INVALID` with `errors` (every problem; see be
 | `POST /profiles/validate` | Checks a profile (the body) and stores nothing. `200` with `{"valid", "errors", "truncated"}`; a profile with problems is a normal answer. |
 | `POST /profiles` | Saves a new profile as version 1. `201` with `{"profile": {...}}`. |
 | `GET /profiles` | The profiles that are not archived, by name: `{"profiles": [{id, name, version, createdAt, updatedAt, archivedAt}], "maximum": 100}`. |
-| `GET /profiles/<id>[?version=n]` | The profile with the version asked for (default: the current one) as `document` (the body shape, every optional field filled in), `documentVersion`, and every saved version in `versions`. |
+| `GET /profiles/<id>[?version=n]` | The profile with the version asked for (default: the current one) as `document` (the body shape, every optional field filled in), `documentVersion`, and every saved version in `versions`. `environmentGone` is `true` when the version names an environment that was removed since: `document.environment` is `null` then, as for a version saved before #919, and this tells the two apart (the page says "Environment removed – choose another"). |
 | `PUT /profiles/<id>[?expectedVersion=n]` | Saves the body as the next version. |
 | `DELETE /profiles/<id>` | Archives. |
 
@@ -221,7 +221,7 @@ and the validator checks the rules there:
 | --- | --- | --- | --- |
 | names no `environment` | names one | accepts | runs in the profile's environment |
 | names an `environment` | names the same one (case ignored) | accepts | runs in it |
-| names an `environment` | names another one | `environment_mismatch` at `/environment`, `available` is the profile's | |
+| names an `environment` | names another one | `environment_mismatch` at `/environment`, `available` is the profile's | ends the step with `environment_mismatch`, no turn starts (the step is not moved to the profile's environment) |
 | names no `environment` | names none (saved before #919) | `environment_required` at `/environment`, `available` lists the environments | |
 | names an `environment` | names none (saved before #919) | accepts, as before (`environment_unknown` for a name the workspace does not have) | runs in the step's environment |
 
@@ -229,8 +229,13 @@ So **every workflow written before #919 keeps validating and running unchanged**
 existed. The moment a profile gets a version with an environment, a step of a workflow that pins or follows it has to name that environment
 or none. `runner_needs_own_key` and `harness_needs_runner` are checked for the environment the step runs in: for a profile's environment
 they are reported at the step's `/profile` (and already when the profile is saved), for a step's own environment at `/environment`. If the
-environment of a profile version was removed since, the step is `environment_unknown` at `/profile` and a run fails the step with
-`environment_not_found`; save a new version of the profile with an environment that exists.
+environment of a profile version was removed since (or is not one of the workspace), the step is `environment_unknown` at `/profile` and a
+run fails the step with `environment_not_found`; save a new version of the profile with an environment that exists.
+
+A workflow is not re-checked when a profile it follows gets a new version, so the two can drift apart: a workflow saved against version 1
+of a profile without an environment names one in its step; the profile then gets a version 2 with another environment. The run does not
+silently go to the new environment, and does not ignore what the step says: it ends the step with `environment_mismatch` (the message
+names both). Take the environment out of the step, or save a new version of the profile with the environment the step names.
 
 A session (`session.continue`) belongs to one profile name and one environment: two steps that run the same profile in the profile's
 environment share it, and a step may not continue the session of a step that runs in another environment.

@@ -21,6 +21,7 @@ import {
   sortIssues,
   type Issue,
 } from "../workflows/issues.ts";
+import { ENVIRONMENT_NAME_MAX_LENGTH } from "../implementer/environments/limits.ts";
 import { FACT_NAMES } from "../workflows/facts.ts";
 import { ERRORS_MAX } from "../workflows/limits.ts";
 import { isRecord, jsonTypeName, textLength } from "../workflows/json.ts";
@@ -344,7 +345,7 @@ export function validateProfile(body: unknown): ProfileCheck {
     );
   else if (
     environment.trim() === "" ||
-    environment.length > MODEL_FIELD_MAX_LENGTH ||
+    environment.length > ENVIRONMENT_NAME_MAX_LENGTH ||
     CONTROL_OR_NEWLINE.test(environment)
   )
     report(
