@@ -89,7 +89,7 @@ const REF = "github:acme/widgets#12";
 describe("the runs of a ticket", () => {
   // #923-T108
   it("adds up the money of every run of the ticket and names the run that is going on, with its workflow and its step", async () => {
-    const { runs, run, db } = await setup();
+    const { runs, run, db, workflowId } = await setup();
     const ended = await run(REF, 1_500_000);
     await db
       .updateTable("workflow_runs")
@@ -127,10 +127,60 @@ describe("the runs of a ticket", () => {
         spentMicroUsd: 3_750_000,
         activeRun: {
           runId: active.id,
+          workflowId,
           workflowName: "Issue to PR",
           // The step that waits next: the first one has ended.
           stepId: "implement",
           status: "running",
+        },
+      },
+    ]);
+  });
+
+  // #925-T01
+  it("names a run that waits for an answer as the active run, with the step that asks", async () => {
+    const { runs, run, db, workflowId } = await setup();
+    const waiting = await run(REF, 500_000);
+    await runs.lockRun(waiting.id, async (lock) => {
+      await lock.addStep({
+        position: 0,
+        stepId: "plan",
+        kind: "action",
+        round: 1,
+        profile: null,
+        capMicroUsd: null,
+      });
+      await lock.addStep({
+        position: 1,
+        stepId: "implement",
+        kind: "agent",
+        round: 1,
+        profile: null,
+        capMicroUsd: null,
+      });
+    });
+    await db
+      .updateTable("workflow_runs")
+      .set({ status: "waiting" })
+      .where("id", "=", waiting.id)
+      .execute();
+    await db
+      .updateTable("workflow_step_runs")
+      .set({ status: "waiting" })
+      .where("run_id", "=", waiting.id)
+      .where("step_id", "=", "implement")
+      .execute();
+
+    expect(await runs.summarizeTickets([REF])).toEqual([
+      {
+        ticketRef: REF,
+        spentMicroUsd: 500_000,
+        activeRun: {
+          runId: waiting.id,
+          workflowId,
+          workflowName: "Issue to PR",
+          stepId: "implement",
+          status: "waiting",
         },
       },
     ]);

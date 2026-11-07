@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The contents of the tabs of a project's cockpit (#925). Issues, ToDos and Lanes show what the prototype shows, with what has no data
-// yet empty: the issues come with the ticket source (#923), the ToDos with the answer panel (#924) and the lanes of a project with
-// the lane rework (#922). The Lanes tab lists the workspace's lanes (workflows) until a lane belongs to a project.
+// The contents of the tabs of a project's cockpit (#925). ToDos, Lanes and Setup show what the prototype shows, with what has no data
+// yet empty: the ToDos come with the answer panel (#924). The Issues tab is `src/issues/` (the ticket mirror, #923); the Lanes tab lists the lanes of the project (#922).
 import Link from "next/link";
 import {
   Empty,
@@ -22,7 +21,6 @@ import { Badge } from "../../components/ui/badge.tsx";
 import { formatUtc } from "../../ui/format-time.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
 import {
-  ISSUES_COPY,
   LANES_COPY,
   PROJECT_TODOS_COPY,
   SETUP_COPY,
@@ -36,65 +34,6 @@ export type LaneRow = {
   version: number;
   updatedAt: string;
 };
-
-const TILES = [
-  { name: "Open issues", note: "closed this month: –" },
-  { name: "Lanes working", note: "issues with a lane on them" },
-  { name: "Wait for you", note: "questions, reviews, red checks" },
-  { name: "Spent this month", note: "all lanes of this project" },
-] as const;
-
-export function IssuesTab() {
-  return (
-    <div className="flex flex-col gap-8">
-      <ul className="m-0 grid list-none grid-cols-2 gap-3 p-0 lg:grid-cols-4">
-        {TILES.map((tile) => (
-          <li
-            key={tile.name}
-            className="flex flex-col gap-1 rounded-2xl border border-border bg-surface p-4"
-          >
-            <span className="text-sm text-muted-foreground">{tile.name}</span>
-            <span className="font-mono text-3xl leading-9">–</span>
-            <span className="text-xs text-muted-foreground">{tile.note}</span>
-          </li>
-        ))}
-      </ul>
-      <section aria-labelledby="issues-heading" className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="issues-heading" className="text-lg leading-7 font-semibold">
-            {ISSUES_COPY.title}
-          </h2>
-          <p className="text-sm text-muted-foreground">{ISSUES_COPY.hint}</p>
-        </div>
-        <Table aria-label="Issues" className="min-w-[760px]">
-          <TableHeader>
-            <TableRow>
-              <TableHead scope="col">Issue</TableHead>
-              <TableHead scope="col">In GitHub</TableHead>
-              <TableHead scope="col">Lane</TableHead>
-              <TableHead scope="col">Waits for</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow>
-              <TableCell colSpan={4} className="whitespace-normal">
-                <Empty>
-                  <EmptyHeader>
-                    <EmptyTitle>{ISSUES_COPY.emptyTitle}</EmptyTitle>
-                    <EmptyDescription>
-                      {ISSUES_COPY.emptyDescription}
-                    </EmptyDescription>
-                  </EmptyHeader>
-                </Empty>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-        <p className="text-xs text-muted-foreground">{ISSUES_COPY.footnote}</p>
-      </section>
-    </div>
-  );
-}
 
 export function ProjectTodosTab() {
   return (

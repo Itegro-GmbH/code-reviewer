@@ -146,8 +146,8 @@ tickets as they arrive.
 
 The list adds two things that are **never stored** (they are read from `workflow_runs` when the list is asked for, by `ticket_ref`):
 
-- `lane`: the run that is going on for the ticket (the newest running one): its id, the name of its workflow, its current step and its
-  status; `null` when no run is going on;
+- `lane`: the run that is going on for the ticket (the newest one that is `running` or `waiting` for an answer): its id, its workflow's id and name, its current step (the one that asks, while it waits) and its
+  status (`running` or `waiting`); `null` when no run is going on;
 - `costUsd`: the sum of what all runs of the ticket spent so far, whatever their status.
 
 The ask of a run (a question the run put to a person) is read from the run in the same way; the engine has no such step yet, so the
