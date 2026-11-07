@@ -21,7 +21,6 @@ const REVIEWER = {
   description: "Reads a branch.",
   model: { entryId: "entry-1" },
   instructions: "Review only.",
-  costLimitCents: 200,
   canPush: false,
   defaultResult: {
     type: "object",
@@ -166,7 +165,6 @@ describe("the profile service", () => {
       description: "",
       model: { entryId: "entry-1" },
       instructions: "",
-      costLimitCents: null,
       canPush: true,
       defaultResult: null,
       harness: "opencode",

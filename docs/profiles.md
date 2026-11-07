@@ -10,7 +10,7 @@ AI can write one. Every member of a workspace may do all of it (the permission `
 exist only in a deployment with the capability `implementer` (the factory).
 
 **Status (milestone 2 of epic #833, first half).** Profiles are stored with versions, the workflow validator resolves `profile` against them,
-and a task can run with one: the version's model and cost limit become the task's, its instructions go into the agent's prompt, and a version
+and a task can run with one: the version's model becomes the task's, its instructions go into the agent's prompt, and a version
 without the right to push is not pushed. The profile's default result schema is stored, used by the validator and, when a task runs with the
 profile, becomes the task's [result schema](implementer.md#the-finish-tool): the agent gets a finish tool made from it.
 
@@ -22,7 +22,6 @@ profile, becomes the task's [result schema](implementer.md#the-finish-tool): the
   "description": "Reads a branch and reports what is wrong. Changes nothing that leaves the container.",
   "model": { "entryId": "..." },
   "instructions": "You review code. Read the task and the work, run the tests if there are any, and report each problem as a finding. Do not change any file.",
-  "costLimitCents": 300,
   "canPush": false,
   "defaultResult": {
     "type": "object",
@@ -47,7 +46,7 @@ profile, becomes the task's [result schema](implementer.md#the-finish-tool): the
 ```
 
 This is the reviewer of the workflow ["Issue to PR"](workflows.md#the-first-workflow), and it is data like any other: created through the API, nothing is seeded. It may not push
-(`canPush: false`: Control never pushes for it, and a step that runs it yields no `branch` or `commits`), it has a cost limit of its own, and its default result is a list of findings, so
+(`canPush: false`: Control never pushes for it, and a step that runs it yields no `branch` or `commits`), and its default result is a list of findings, so
 a review step may leave out its `result` and take this one (the example of the workflow declares it anyway, so that it validates and reads without the profile at hand). A finding is a `bug`, a `risk` or a `nit`, with a name and a description; an empty list means the reviewer found nothing, which is what ends
 the loop of the workflow.
 
@@ -57,7 +56,7 @@ the loop of the workflow.
 | `description` | no | A note for people, 1,000 characters at most. |
 | `model` | yes | The model a turn runs on, in the two shapes the Implementer form takes: `{"entryId": "<id>"}` (a released catalog entry, for a workspace on the operator's key) or `{"provider": "<slug>", "model": "<id>"}` (a model of the workspace's own key). `GET /api/w/<slug>/implementer/models` lists what this workspace can use. A model the workspace cannot run is refused (`model_not_allowed`, with the reason). |
 | `instructions` | no | The standing, system-level text the agent is given, 20,000 characters at most. It is **not** the task: the task is what a person (or a workflow step) sends with each run. Tabs and line breaks are kept as written. Text that is only white space is refused (`invalid_value`); leave the field out instead. |
-| `costLimitCents` | no | The most one turn may cost, in whole US cents (1 to 10,000), the brake of the turn. Left out (or `null`), the operator's maximum alone applies. Above the operator's maximum it is refused (`cost_limit_above_maximum`), and it is checked again when a task starts, because the maximum can change. |
+| `costLimitCents` | no | **Deprecated (#918); leave it out.** Limits belong to the lane: the cost of a turn of a [workflow](workflows.md#the-limits-of-a-lane) is what is left of its budget, and its time is the workflow's `turnTimeLimitMinutes`, so a workflow never reads this field. It is still accepted (whole US cents, 1 to 10,000 as `(1 to 10,000)`; above the operator's maximum it is `cost_limit_above_maximum`), stored in the column `profile_versions.cost_limit_cents`, and **ignored**: no task reads it any more, neither a workflow's nor one started by hand (its cap is the operator's maximum, as for a version without a limit). The column is kept for the versions already written. **The API does not show it**: the `document` of a profile has no `costLimitCents`, and a profile saved without it has none. |
 | `canPush` | yes | `true` if a turn of this profile may push branches, `false` if not. See [the push right](#the-push-right). Required on purpose: decide it. |
 | `harness` | no | The harness the agent runs with. Only `"opencode"` is one a profile can name today (the platform's catalog holds nothing else), and it is what every version runs with, named or not; nothing is stored for it. The field and its rule are prepared for the harnesses a runner announces ([`runner.md`](runner.md#registration-and-routing-r1a-854)): a profile whose harness is not OpenCode will run only in an [environment that runs on a runner](workflows.md#error-codes), and the validator already says `harness_needs_runner` for it. |
 | `defaultResult` | no | A [result schema](workflows.md#result-schemas) (the same format and the same validator as a step's `result`). A workflow step that declares no `result` yields this one, and the validator uses it for the references in the workflow. A task that runs with the profile and brings no `result` of its own gets this one as the schema of its turn, and with it a finish tool ([`implementer.md`](implementer.md#the-finish-tool)). Its fields may not be named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`): that is refused with `result_field_reserved`, as in a step's `result`. |
@@ -73,7 +72,7 @@ workflow can pin one (`"profile": "reviewer@1"`) or take the newest (`"profile":
 `PUT ...?expectedVersion=3` saves only if version 3 is still the current one; otherwise `PROFILE_VERSION_CONFLICT` with `current`. Use
 it whenever two writers might change the same profile, so that nobody overwrites a change they have not seen.
 
-A **task copies the version it runs with** when it starts (model, cost limit, instructions, push right). Changing, archiving or removing
+A **task copies the version it runs with** when it starts (model, instructions, push right; its deprecated cost limit is not read). Changing, archiving or removing
 the profile afterwards does not reach a task that has started.
 
 **Archive** (`DELETE`) hides a profile from the list, frees its name, and refuses new versions and new tasks; its versions stay readable
@@ -158,12 +157,12 @@ differs is what Control does with the branches the agent made in its container:
 ## Running a task with a profile
 
 `POST /api/w/<slug>/implementer/tasks` (the route behind the Implementer form) takes an optional `profile`: a name (the newest version) or
-`name@version`. With a profile the body names **neither `model` nor `costLimitCents`** (`not_with_profile`): the version brings both, and
-they are checked at the start like the form's (`IMPLEMENTER_MODEL_NOT_ALLOWED`, `EXCEEDS_OPERATOR_MAXIMUM`). A profile that is not there, is
+`name@version`. With a profile the body names **neither `model` nor `costLimitCents`** (`not_with_profile`): the version brings the model, and
+they are checked at the start like the form's (`IMPLEMENTER_MODEL_NOT_ALLOWED`); the cost limit of the version is not read (#918), so an older version that holds one starts like one without. A profile that is not there, is
 archived, or has no such version is `IMPLEMENTER_PROFILE_NOT_FOUND`. The environment is chosen separately (`environmentId`), as before.
 The Implementer form offers it too: an optional **Profile** select lists the workspace's profiles that are not archived (by name, with the
 newest version) and **No profile**, the default, which leaves the form as it always was. With a profile chosen, the form shows the model and
-the cost limit of its newest version at the time of loading and does not let them be edited, says in one sentence when the profile does not push ("This profile
+the model of its newest version at the time of loading and does not let it be edited (there is no cost limit field with a profile since #918), says in one sentence when the profile does not push ("This profile
 does not push: the result stays in the run."), and sends `profile: "<name>@<version>"` without `model` and `costLimitCents`. The form pins
 the version it shows, so a version made after the page loaded does not change what the task runs with. When the model of that version is
 not among the models the workspace offers, the model field says so and the form does not send the task. The environment stays a

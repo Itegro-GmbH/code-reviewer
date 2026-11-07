@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// Choosing a profile when a task is sent (#843), with the real service, queue and a real Postgres: the version's model and cost limit
-// become the turn's own, its instructions and push right are copied into the turn (what the profile says at that moment is what the
+// Choosing a profile when a task is sent (#843), with the real service, queue and a real Postgres: the version's model becomes the
+// turn's own (its cost limit is not read, #918), its instructions and push right are copied into the turn (what the profile says at that moment is what the
 // task runs with, whatever is done to it afterwards), a task without a profile is exactly the task of before, and a profile that is
 // not this workspace's, is archived or has no such version starts nothing.
 import { describe, expect, it } from "vitest";
@@ -67,7 +67,7 @@ async function turnOf(
 
 describe("a task with a profile", () => {
   // #843-T170
-  it("takes the model and the cost limit of the profile's newest version as the turn's own, and copies instructions and push right", async () => {
+  it("takes the model of the profile's newest version as the turn's own, ignores its cost limit, and copies instructions and push right", async () => {
     const app = await setup();
 
     const started = await app.service.startTask(
@@ -77,7 +77,7 @@ describe("a task with a profile", () => {
 
     expect(await turnOf(app, started.sessionId)).toMatchObject({
       model_choice: JSON.stringify({ entryId: "entry-profile" }),
-      cost_limit_cents: 200,
+      cost_limit_cents: null,
       profile_id: app.profile.id,
       profile_name: "reviewer",
       profile_version: 1,
@@ -119,7 +119,7 @@ describe("a task with a profile", () => {
     expect(await turnOf(app, pinned.sessionId)).toMatchObject({
       profile_version: 1,
       profile_instructions: "Review only.\nDo not edit files.",
-      cost_limit_cents: 200,
+      cost_limit_cents: null,
     });
     expect(await turnOf(app, newest.sessionId)).toMatchObject({
       profile_version: 2,
@@ -218,19 +218,18 @@ describe("a task with a profile", () => {
     expect(await app.counts()).toEqual({ jobs: 0, sessions: 0, turns: 0 });
   });
 
-  // #843-T176
-  it("holds the profile's cost limit to the operator's maximum at the start, as it holds the form's", async () => {
+  // #918-T12
+  it("does not read the profile's cost limit: a version above the operator's maximum starts, and the turn has no limit of its own", async () => {
     const app = await setup({ operatorCostLimitCents: 150 });
 
-    const failure = await failureOf(
-      app.service.startTask(USER, withProfile(app, "reviewer")),
+    const started = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
     );
 
-    expect(failure).toMatchObject({
-      code: "EXCEEDS_OPERATOR_MAXIMUM",
-      maximumCents: 150,
-    });
-    expect(await app.counts()).toEqual({ jobs: 0, sessions: 0, turns: 0 });
+    // The claim then takes the operator's maximum (`costLimitCents ?? operatorCents`).
+    expect((await turnOf(app, started.sessionId)).cost_limit_cents).toBeNull();
+    expect((await app.counts()).turns).toBe(1);
   });
 
   // #843-T177
@@ -322,8 +321,8 @@ describe("a task with a cost cap of the caller", () => {
     sessionId: string,
   ) => (await turnOf(app, sessionId)).cost_limit_cents;
 
-  // #844-T250
-  it("lowers the cost limit of the profile's version and never raises it", async () => {
+  // #844-T250, #918-T10
+  it("is the cost limit of the task, whatever the profile's version says, held to the operator's maximum", async () => {
     const app = await setup();
 
     const lower = await app.service.startTask(
@@ -343,7 +342,31 @@ describe("a task with a cost cap of the caller", () => {
     );
 
     expect(await limitOf(app, lower.sessionId)).toBe(150);
-    expect(await limitOf(app, higher.sessionId)).toBe(200);
+    // The version's 200 is not read: a cap above it is the limit, up to the operator's 500.
+    expect(await limitOf(app, higher.sessionId)).toBe(500);
+  });
+
+  // #918-T11
+  it("keeps the turn's time limit when the caller names one, and none when it does not", async () => {
+    const app = await setup();
+    const timed = async (sessionId: string) =>
+      (await turnOf(app, sessionId)).time_limit_minutes;
+
+    const lane = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer"),
+      { costCapCents: 100, timeLimitMinutes: 15 },
+    );
+    const form = await app.service.startTask(
+      USER,
+      withProfile(app, "reviewer", {
+        branch: "implementer/other",
+        clientRequestId: "request-2",
+      }),
+    );
+
+    expect(await timed(lane.sessionId)).toBe(15);
+    expect(await timed(form.sessionId)).toBeNull();
   });
 
   // #844-T251
@@ -384,7 +407,7 @@ describe("a task with a cost cap of the caller", () => {
     expect(await limitOf(app, uncapped.sessionId)).toBeNull();
   });
 
-  // #844-T252
+  // #844-T252, #918-T12
   it("is no field of the body: a request cannot ask for it", async () => {
     const app = await setup();
 
@@ -393,7 +416,7 @@ describe("a task with a cost cap of the caller", () => {
       withProfile(app, "reviewer", { costCapCents: 1 }),
     );
 
-    expect(await limitOf(app, started.sessionId)).toBe(200);
+    expect(await limitOf(app, started.sessionId)).toBeNull();
   });
 });
 

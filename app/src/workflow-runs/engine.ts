@@ -890,6 +890,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     values: RunValues,
     context: RoundContext,
     profile: { name: string; version: number },
+    timeLimitMinutes: number,
   ): Promise<Begun> {
     const environmentName =
       typeof node.environment === "string" ? node.environment : "";
@@ -936,7 +937,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ...(node.result === undefined ? {} : { result: node.result }),
           clientRequestId: requestIdOf(run, step),
         },
-        { costCapCents: capCents(step.capMicroUsd) },
+        { costCapCents: capCents(step.capMicroUsd), timeLimitMinutes },
       );
       return { runId: started.runId };
     } catch (error) {
@@ -957,6 +958,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     context: RoundContext,
     target: StoredStepRun,
     byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+    timeLimitMinutes: number,
   ): Promise<Begun> {
     // A session keeps the result schema of its last turn, so a step that goes on in another step's session must ask for the same result.
     if (
@@ -994,14 +996,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         {
           instruction,
           clientRequestId: requestIdOf(run, step),
-          costLimitCents: Math.max(
-            1,
-            Math.min(
-              capCents(step.capMicroUsd),
-              read.ended.turn.costLimitCents ?? Number.MAX_SAFE_INTEGER,
-            ),
-          ),
         },
+        // #918: the cost of a turn is what is left of the lane's budget, whatever the turn before was held to.
+        { costCapCents: capCents(step.capMicroUsd), timeLimitMinutes },
       );
       return continued.runId === null
         ? { queued: true }
@@ -1055,13 +1052,22 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     context: RoundContext,
     steps: readonly StoredStepRun[],
     byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+    timeLimitMinutes: number,
   ): Promise<StepOutcome | undefined> {
     if (step.profile === null)
       return failed("profile_not_found", "The step has no profile version.");
     const target = continuedStep(node, steps, step.position);
     const begun =
       target === undefined
-        ? await beginSession(run, step, node, values, context, step.profile)
+        ? await beginSession(
+            run,
+            step,
+            node,
+            values,
+            context,
+            step.profile,
+            timeLimitMinutes,
+          )
         : await continueSessionOf(
             run,
             step,
@@ -1070,6 +1076,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             context,
             target,
             byId,
+            timeLimitMinutes,
           );
     if ("outcome" in begun) return begun.outcome;
     // An instruction behind a turn that still runs starts when that turn ends. The step stays as it is, claimed and without a job; a
@@ -1260,6 +1267,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
                   context,
                   steps,
                   byId,
+                  document.turnTimeLimitMinutes,
                 )
               : await runAction(run, claimed, node, values);
         }

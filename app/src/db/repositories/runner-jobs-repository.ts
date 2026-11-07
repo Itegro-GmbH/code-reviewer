@@ -18,10 +18,11 @@ import {
 } from "../dynamic-review-lock.ts";
 import { createInstanceSettingsRepository } from "./instance-settings-repository.ts";
 import { isDeepStrictEqual } from "node:util";
-import type { ExpressionBuilder, Kysely } from "kysely";
+import { sql, type ExpressionBuilder, type Kysely } from "kysely";
 import {
   DEFAULT_JOB_QUEUE_LIMITS,
   IMPLEMENTER_MAX_ATTEMPTS,
+  IMPLEMENTER_RUNTIME_GRACE_MS,
   type JobQueueLimits,
 } from "../job-limits.ts";
 import {
@@ -427,11 +428,17 @@ export function createRunnerJobsRepository(
   const limits = { ...DEFAULT_JOB_QUEUE_LIMITS, ...options.limits };
   /**
    * Whether a running job was claimed longer ago than its hard limit allows (#752): a turn of the Implementer has its own,
-   * longer one (`implementerMaxRuntimeMs`), every other kind keeps `maxRuntimeMs`.
+   * longer one (`implementerMaxRuntimeMs`), every other kind keeps `maxRuntimeMs`. A turn that carries a time limit of its own
+   * (#918) is held to that limit and the grace instead; `claimed_at` and the cutoff are the same ISO 8601 UTC text, so they compare.
    */
   const pastHardLimit =
-    (current: Date) => (eb: ExpressionBuilder<Database, "jobs">) =>
-      eb.or([
+    (current: Date) => (eb: ExpressionBuilder<Database, "jobs">) => {
+      const withOwnLimit = eb
+        .selectFrom("implementer_turns")
+        .select("implementer_turns.id")
+        .whereRef("implementer_turns.job_id", "=", "jobs.id")
+        .where("implementer_turns.time_limit_minutes", "is not", null);
+      return eb.or([
         eb.and([
           eb("review_kind", "<>", "implementer"),
           eb(
@@ -442,6 +449,7 @@ export function createRunnerJobsRepository(
         ]),
         eb.and([
           eb("review_kind", "=", "implementer"),
+          eb.not(eb.exists(withOwnLimit)),
           eb(
             "claimed_at",
             "<=",
@@ -450,7 +458,21 @@ export function createRunnerJobsRepository(
             ),
           ),
         ]),
+        eb.and([
+          eb("review_kind", "=", "implementer"),
+          eb.exists(
+            withOwnLimit.where(
+              sql<boolean>`jobs.claimed_at <= to_char(
+                (${formatTimestamp(current)}::timestamptz
+                  - make_interval(mins => implementer_turns.time_limit_minutes)
+                  - make_interval(secs => ${IMPLEMENTER_RUNTIME_GRACE_MS / 1000})
+                ) at time zone 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+            ),
+          ),
+        ]),
       ]);
+    };
   // The transaction guard already holds the exclusive gate lock; read without taking another lock
   // after job rows. This keeps every transition on the documented gate-before-rows order.
   async function dynamicReviewAllowed(

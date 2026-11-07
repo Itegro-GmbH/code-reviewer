@@ -57,8 +57,12 @@ export type ProfileDocument = {
   model: ModelChoice;
   /** The system-level text the agent is given; empty for none. */
   instructions: string;
-  /** The most one turn may cost in whole US cents; null: the operator's maximum alone. */
-  costLimitCents: number | null;
+  /**
+   * The most one turn may cost in whole US cents; null: the operator's maximum alone. Deprecated (#918): the cost of a workflow's turn
+   * is what is left of the workflow's budget, so a workflow never reads it, and `documentOf` does not show it. Left out of a body, it is
+   * null; a body that still has it is accepted and checked as before.
+   */
+  costLimitCents?: number | null;
   /** Whether a turn of this profile may push branches. */
   canPush: boolean;
   /** The result schema a step takes when it declares none; null for none. */

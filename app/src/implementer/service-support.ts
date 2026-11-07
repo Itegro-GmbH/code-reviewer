@@ -211,7 +211,6 @@ export async function copyProfile(
 ): Promise<{
   profile: TurnProfile;
   model: ModelChoice;
-  costLimitCents: number | null;
   defaultResult: string | null;
 }> {
   const found = await profiles.findByName(ref.name, ref.version ?? undefined);
@@ -231,7 +230,6 @@ export async function copyProfile(
       harness: content.harness ?? OPENCODE_HARNESS,
     },
     model: content.model,
-    costLimitCents: content.costLimitCents,
     defaultResult: content.defaultResult,
   };
 }

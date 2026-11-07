@@ -9,10 +9,10 @@ import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
-import { migration } from "./20261107140000_create_tracker_mirror.ts";
+import { migration } from "./20261107160000_create_tracker_mirror.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 
-const THIS = "20261107140000_create_tracker_mirror";
+const THIS = "20261107160000_create_tracker_mirror";
 const T = "2026-11-06T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {

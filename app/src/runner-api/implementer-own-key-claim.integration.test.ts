@@ -249,6 +249,28 @@ describe("the claim of a turn of the Implementer with a start branch", () => {
       (job.input as { implementer: Record<string, unknown> }).implementer,
     ).not.toHaveProperty("startBranch");
   });
+
+  // #918-T08
+  it("hands the Worker the time limit of the turn, and 3600 seconds when the turn has none", async () => {
+    const h = await start();
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+      timeLimitMinutes: 15,
+    });
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const limited = await h.claimed(claimOptions());
+    const plain = await h.claimed(claimOptions());
+    const limitOf = (job: { input: unknown }) =>
+      (job.input as { implementer: { limits: { timeLimitSeconds: number } } })
+        .implementer.limits.timeLimitSeconds;
+
+    expect(limitOf(limited.job)).toBe(900);
+    expect(limitOf(plain.job)).toBe(3600);
+  });
 });
 
 describe("a turn of the Implementer on the operator's key", () => {

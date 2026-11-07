@@ -130,6 +130,7 @@ async function turnOf(app: EngineHarness, jobId: string) {
       "implementer_turns.number",
       "implementer_turns.instruction",
       "implementer_turns.cost_limit_cents",
+      "implementer_turns.time_limit_minutes",
       "implementer_turns.session_id",
       "implementer_turns.profile_name",
       "implementer_sessions.branch",
@@ -445,7 +446,12 @@ describe("the budget over the rounds of a loop", () => {
     // 25 cents are left: the second turn may spend that, whatever the limit of the first was.
     expect(state.steps[1]?.capMicroUsd).toBe(250_000);
     const second = await turnOf(app, jobOf(state, "work", 2));
-    expect(second).toMatchObject({ number: 2, cost_limit_cents: 25 });
+    // #918-T16: the turn of a `session.continue` step has the time limit of the document too.
+    expect(second).toMatchObject({
+      number: 2,
+      cost_limit_cents: 25,
+      time_limit_minutes: 60,
+    });
     expect(second.instruction).toBe("Go on after: more");
 
     await endTurn(app, { agentResult: { summary: "more" }, costUsd: 0.25 });
