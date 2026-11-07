@@ -28,11 +28,80 @@ import type { WorkspaceId } from "../workspace-scope.ts";
 
 export type ProjectSettings = { [key: string]: JsonValue };
 
+/** The GitHub Project (projects_v2) that is the board of a project's tickets (#922): its node id and the node id of its `Status` field. */
+export type TicketBoard = { projectV2Id: string; statusFieldId: string };
+
+/**
+ * What a project is in the factory (#922): the GitHub issues of one repository and, optionally, the GitHub Project that is their board.
+ * `repositoryId` is always the repository of the project row (one project per repository), repeated so that a reader of the source
+ * needs nothing else.
+ */
+export type TicketSource = {
+  provider: "github";
+  repositoryId: string;
+  board: TicketBoard | null;
+};
+
+/** What a row without a stored source (every project an older version wrote) is: the issues of its repository, no board. */
+export function defaultTicketSource(repositoryId: string): TicketSource {
+  return { provider: "github", repositoryId, board: null };
+}
+
+/**
+ * The ticket source of a row. Damaged or foreign text reads as the default with a warning that names the project (never the text), like
+ * damaged settings; the repository is always the row's.
+ */
+function readTicketSource(
+  text: string | null,
+  repositoryId: string,
+  projectId: string,
+  warn: (message: string) => void,
+): TicketSource {
+  if (text === null) return defaultTicketSource(repositoryId);
+  const decoded = tryDecodeJson<unknown>(text);
+  const value = decoded.ok ? decoded.value : undefined;
+  const board =
+    typeof value === "object" && value !== null && "board" in value
+      ? value.board
+      : undefined;
+  const wellFormed =
+    typeof value === "object" &&
+    value !== null &&
+    "provider" in value &&
+    value.provider === "github" &&
+    (board === null ||
+      (typeof board === "object" &&
+        board !== null &&
+        "projectV2Id" in board &&
+        typeof board.projectV2Id === "string" &&
+        "statusFieldId" in board &&
+        typeof board.statusFieldId === "string"));
+  if (!wellFormed) {
+    warn(
+      `[db] PROJECT_TICKET_SOURCE_UNREADABLE: the stored ticket source of project ${projectId} is not usable and reads as the issues of its repository without a board.`,
+    );
+    return defaultTicketSource(repositoryId);
+  }
+  return {
+    provider: "github",
+    repositoryId,
+    board:
+      board === null
+        ? null
+        : {
+            projectV2Id: (board as TicketBoard).projectV2Id,
+            statusFieldId: (board as TicketBoard).statusFieldId,
+          },
+  };
+}
+
 /** A project as stored. */
 export type StoredProject = {
   id: string;
   repositoryId: string;
   active: boolean;
+  /** The tickets the project is about (#922); the issues of its repository unless a board was set. */
+  ticketSource: TicketSource;
   /** The project's setting overrides (src/review-settings); empty until some are saved. */
   settings: ProjectSettings;
   createdAt: string;
@@ -68,6 +137,12 @@ export type ProjectListEntry = {
   project: StoredProject | null;
   status: ProjectStatus;
 };
+
+/**
+ * What a project created in the factory says beyond the switch (#922): `board` is the GitHub Project that is its board, or `null` for none.
+ * Left out (the review switch of every other deployment), the stored ticket source is not touched.
+ */
+export type ActivateOptions = { board?: TicketBoard | null };
 
 export type ActivateResult =
   | {
@@ -134,7 +209,12 @@ export type ProjectsRepository = {
    * Switches the project of a repository on, creating it the first time, in one transaction. A
    * repository the platform no longer lists, or that does not exist, is refused without a write.
    */
-  activate(repositoryId: string): Promise<ActivateResult>;
+  activate(
+    repositoryId: string,
+    options?: ActivateOptions,
+  ): Promise<ActivateResult>;
+  /** A project by its own id (#922), switched on or not; undefined for an id of another workspace. */
+  getById(projectId: string): Promise<StoredProject | undefined>;
   /**
    * Switches the project of a repository off and keeps the row; an unknown repository is reported.
    * `afterDeactivate` runs in the same
@@ -211,6 +291,12 @@ function toStoredProject(
     id: row.id,
     repositoryId: row.repository_id,
     active: decodeBoolean(row.active),
+    ticketSource: readTicketSource(
+      row.ticket_source,
+      row.repository_id,
+      row.id,
+      warn,
+    ),
     settings: readSettings(row.settings, row.id, warn),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -275,6 +361,7 @@ export function createProjectsRepository(
         "projects.repository_id",
         "projects.active",
         "projects.settings",
+        "projects.ticket_source",
         "projects.created_at",
         "projects.updated_at",
       ])
@@ -307,6 +394,7 @@ export function createProjectsRepository(
           "projects.id as project_id",
           "projects.active as project_active",
           "projects.settings as project_settings",
+          "projects.ticket_source as project_ticket_source",
           "projects.created_at as project_created_at",
           "projects.updated_at as project_updated_at",
         ])
@@ -341,6 +429,12 @@ export function createProjectsRepository(
             id: row.project_id,
             repositoryId: row.repository_id,
             active: decodeBoolean(row.project_active),
+            ticketSource: readTicketSource(
+              row.project_ticket_source,
+              row.repository_id,
+              row.project_id,
+              warn,
+            ),
             settings: readSettings(row.project_settings, row.project_id, warn),
             createdAt: row.project_created_at,
             updatedAt: row.project_updated_at,
@@ -448,6 +542,17 @@ export function createProjectsRepository(
       return row === undefined ? undefined : toStored(row);
     },
 
+    async getById(projectId) {
+      const row = await db
+        .selectFrom("projects")
+        .innerJoin("repositories", "repositories.id", "projects.repository_id")
+        .selectAll("projects")
+        .where("repositories.workspace_id", "=", workspaceId)
+        .where("projects.id", "=", projectId)
+        .executeTakeFirst();
+      return row === undefined ? undefined : toStored(row);
+    },
+
     findActiveForRepository(repositoryId) {
       return findActive((query) =>
         query.where("projects.repository_id", "=", repositoryId),
@@ -462,7 +567,7 @@ export function createProjectsRepository(
       );
     },
 
-    activate(repositoryId) {
+    activate(repositoryId, options = {}) {
       // The repository row is locked (`FOR UPDATE`, only that row, not the integration's) before anything is read:
       // the check of the repository and the write happen under it, so a sync that deactivates the repository cannot
       // slip in between, two activations cannot both insert, and a first settings save (which takes the same lock)
@@ -496,6 +601,14 @@ export function createProjectsRepository(
           .selectAll()
           .where("repository_id", "=", repositoryId)
           .executeTakeFirst();
+        const ticketSource =
+          options.board === undefined
+            ? undefined
+            : encodeJson({
+                provider: "github",
+                repositoryId,
+                board: options.board,
+              });
 
         if (existing === undefined) {
           const row = await trx
@@ -505,6 +618,9 @@ export function createProjectsRepository(
               repository_id: repositoryId,
               active: encodeBoolean(true),
               settings: encodeJson(await newProjectSettings(trx, workspaceId)),
+              ...(ticketSource === undefined
+                ? {}
+                : { ticket_source: ticketSource }),
               created_at: timestamp,
               updated_at: timestamp,
             })
@@ -517,7 +633,7 @@ export function createProjectsRepository(
           };
         }
 
-        if (decodeBoolean(existing.active))
+        if (decodeBoolean(existing.active) && ticketSource === undefined)
           return {
             kind: "activated",
             project: toStored(existing),
@@ -526,7 +642,13 @@ export function createProjectsRepository(
 
         const row = await trx
           .updateTable("projects")
-          .set({ active: encodeBoolean(true), updated_at: timestamp })
+          .set({
+            active: encodeBoolean(true),
+            ...(ticketSource === undefined
+              ? {}
+              : { ticket_source: ticketSource }),
+            updated_at: timestamp,
+          })
           .where("id", "=", existing.id)
           .returningAll()
           .executeTakeFirstOrThrow();

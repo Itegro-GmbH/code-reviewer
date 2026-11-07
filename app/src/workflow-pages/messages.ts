@@ -261,11 +261,6 @@ export const COST_COPY = {
 } as const;
 
 export const PAGE_COPY = {
-  workflowsTitle: "Workflows",
-  workflowsDescription:
-    "The workflows of this workspace. Open one to start it and see its runs.",
-  workflowsEmpty:
-    "This workspace has no workflows yet. Workflows are written through the API.",
   workflowVersion: "Version",
   workflowUpdated: "Last saved",
   runsHeading: "Runs",
@@ -277,7 +272,7 @@ export const PAGE_COPY = {
   columnBudget: "Spent of budget",
   columnVersion: "Version",
   of: "of",
-  breadcrumbRoot: "Workflows",
+  breadcrumbRoot: "Projects",
   allRuns: "All runs of this workflow",
   runTitle: "Run",
   runStartedAt: "Started",
@@ -350,6 +345,10 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_BODY_TOO_LARGE: "The input is too large.",
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: REQUEST_NOT_UNDERSTOOD,
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: "This workflow is not started by hand.",
+  WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT:
+    "That ticket is not in the repository this project takes its tickets from.",
+  WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
+    "That repository is not the one this project takes its tickets from.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,

@@ -409,6 +409,18 @@ export interface IntegrationProvider {
   ): Promise<TrackerPage>;
 
   /**
+   * Only where tickets sit on a board (#922, GitHub: the GitHub Projects, projects_v2, of the repository): the boards a project may take as
+   * its own, with the Status field of each and the names of its options, read with a token of its own that holds the read permission of
+   * the boards and nothing else. A repository whose boards the app may not read (the Projects permission is missing, the repository
+   * belongs to a user) is `available: false`, never a failure; any other failure rejects like the reads of the mirror.
+   */
+  listBoards?(
+    integration: Integration,
+    repo: RepoRef,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; boards: BoardInfo[] }>;
+
+  /**
    * Only together with `parseTrackerChange`: the state of the checks of a commit as the platform names it (`success`, `failure`,
    * `in_progress`, ...), or null when it has none. The same rule as the sync uses for each open pull request.
    */
@@ -419,3 +431,16 @@ export interface IntegrationProvider {
     signal?: AbortSignal,
   ): Promise<string | null>;
 }
+
+/** A board of a repository as the picker of a new project needs it (#922). */
+export type BoardInfo = {
+  /** The platform's global id of the board. */
+  projectV2Id: string;
+  /** The number the board has in its owner's list. */
+  number: number;
+  title: string;
+  /** The global id of its Status field; null when it has none (a status cannot be set on such a board). */
+  statusFieldId: string | null;
+  /** The names of the Status field's options, as the board spells them. */
+  statuses: string[];
+};

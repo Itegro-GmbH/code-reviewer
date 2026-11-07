@@ -117,12 +117,10 @@ describe("the tabs", () => {
     expect(
       screen.getByRole("link", { name: "issue-to-pr" }).getAttribute("href"),
     ).toBe("/w/acme/workflows/wf-1");
-    expect(screen.getByText(/shared by the whole workspace/)).toBeTruthy();
+    expect(screen.getByText(/starts from a label on a ticket/)).toBeTruthy();
     expect(
-      screen
-        .getByRole("link", { name: "All lanes of the workspace" })
-        .getAttribute("href"),
-    ).toBe("/w/acme/workflows");
+      screen.queryByRole("link", { name: "All lanes of the workspace" }),
+    ).toBeNull();
     expect(
       screen.getByRole("link", { name: "send a task" }).getAttribute("href"),
     ).toBe("/w/acme/implementer");
@@ -134,8 +132,8 @@ describe("the tabs", () => {
 
     expect(screen.getByText("No lanes yet")).toBeTruthy();
     expect(
-      screen.getByRole("link", { name: "All lanes of the workspace" }),
-    ).toBeTruthy();
+      screen.queryByRole("link", { name: "All lanes of the workspace" }),
+    ).toBeNull();
   });
 
   // #925

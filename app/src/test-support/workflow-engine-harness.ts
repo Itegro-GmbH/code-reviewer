@@ -17,6 +17,7 @@ import {
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
@@ -166,6 +167,12 @@ export async function startEngineHarness(
   if (!environment.ok) throw new Error("seeding failed");
 
   const workflows = createWorkflowsRepository(h.db, workspaceId);
+  // The project of the repository "acme/widgets" (#922): the lanes of a test belong to it, so a label on a ticket of that repository starts
+  // them and a run is held to that repository.
+  const projects = createProjectsRepository(h.db, workspaceId);
+  const activated = await projects.activate(app.repository.id, { board: null });
+  if (activated.kind !== "activated") throw new Error("seeding failed");
+  const project = activated.project;
   // The owner of the workflows of a test is a member of the workspace; a test that wants them gone removes them.
   const members = createWorkspaceMembersRepository(h.db, workspaceId);
   await members.add(USER.id, "member");
@@ -203,6 +210,8 @@ export async function startEngineHarness(
   const service: WorkflowRunService = createWorkflowRunService({
     runs,
     workflows,
+    projects,
+    repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     async resolveRepository(fullName) {
       const found = (await h.repositories.list({ active: true })).find(
         (candidate) =>
@@ -243,6 +252,7 @@ export async function startEngineHarness(
         name: String(document.name),
         document: JSON.stringify(document),
         createdBy: USER.id,
+        projectId: project.id,
       },
       100,
     );
@@ -376,6 +386,7 @@ export async function startEngineHarness(
     kicked,
     engineLines,
     environment: environment.environment,
+    project,
     saveWorkflow,
     start,
     finishTurn,

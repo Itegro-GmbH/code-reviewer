@@ -5,10 +5,11 @@
 // settled; this decides which workflows start and writes their runs. It serves ONE workspace.
 //
 //  - A workflow starts when one of its triggers is `ticket.labeled` (or `github.issueLabeled`, its name before #916) with exactly this
-//    label (the spelling GitHub reports; case counts) and the repository of the issue is an active repository of the workspace. The
-//    run starts through that trigger: its pre-steps run first, then the shared steps. A workflow with two triggers for one label
-//    starts once, through the first. The format has no repository of its own for a label trigger: the run works on the repository
-//    the ticket is in (`trigger.ticket.repo`), so every active repository of the workspace fits.
+//    label (the spelling GitHub reports; case counts), the repository of the issue is an active repository of the workspace, and the
+//    workflow is a lane of the active project whose ticket source is that repository (#922): a lane of another project, and a lane
+//    without a project, wait for no label here. The run starts through that trigger: its pre-steps run first, then the shared steps. A
+//    workflow with two triggers for one label starts once, through the first. The format has no repository of its own for a label
+//    trigger: the run works on the repository the ticket is in (`trigger.ticket.repo`), which is the project's.
 //    A workflow with a step the engine does not run (a kind the validator refuses, so none that was saved) is left out and says so in
 //    the log: a run that ends halfway through, after its first action already changed the issue, is worse than none.
 //  - There is no check of our own about who put the label on (owner decision 2 of the plan): GitHub decides who may label. The login
@@ -69,6 +70,7 @@ export type LabelTrigger = {
 
 export type LabelTriggerDependencies = {
   runs: Pick<WorkflowRunsRepository, "createRun">;
+  /** The lanes of the project whose ticket source is the repository (#922) that wait for a label. */
   workflows: Pick<WorkflowsRepository, "listWithIssueTrigger">;
   /** The repository of the workspace the delivery is about, or undefined when it is none of the workspace's or not active. */
   activeRepository(
@@ -162,7 +164,7 @@ export function createLabelTrigger(
       for (const {
         workflow,
         current,
-      } of await deps.workflows.listWithIssueTrigger()) {
+      } of await deps.workflows.listWithIssueTrigger(repository.id)) {
         const read = readRunDocument(current.document);
         const trigger = read?.triggers.find(
           (candidate) =>

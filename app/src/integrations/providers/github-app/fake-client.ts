@@ -52,6 +52,17 @@ export type FakeGithubAppClientData = {
     string,
     { nodeId: string; status: string | null }[][]
   >;
+  /** What `listRepositoryBoards` answers, by "owner/name"; `available: false` for a repository not listed (#922). */
+  repositoryBoards?: Record<
+    string,
+    {
+      projectV2Id: string;
+      number: number;
+      title: string;
+      statusFieldId: string | null;
+      statuses: string[];
+    }[]
+  >;
   /** Makes the tracker reads reject with this error (#923). */
   trackerFailure?: Error;
   /** Makes `createIssueComment` reject with this error. */
@@ -534,6 +545,14 @@ export function fakeGithubAppClient(
         items: pages[index] ?? [],
         next: index + 1 < pages.length ? String(index + 1) : null,
       };
+    },
+    async listRepositoryBoards(installationId, scope, repoFullName) {
+      record("listRepositoryBoards", installationId, scope, repoFullName);
+      if (data.trackerFailure) throw data.trackerFailure;
+      const boards = data.repositoryBoards?.[repoFullName];
+      return boards === undefined
+        ? { available: false, boards: [] }
+        : { available: true, boards };
     },
     async revokeInstallationToken(token) {
       record("revokeInstallationToken", token);

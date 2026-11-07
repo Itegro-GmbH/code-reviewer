@@ -9,6 +9,7 @@ import { createImplementerRepository } from "../db/repositories/implementer-repo
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
@@ -68,6 +69,25 @@ const connectors = createConnectorRegistry(
         },
       };
     },
+    // #922: the board of the project the run's lane belongs to.
+    async projectBoard(call) {
+      const db = getDatabase();
+      const run = await createWorkflowRunsRepository(
+        db,
+        call.workspaceId,
+      ).getRun(call.runId);
+      if (run === undefined) return undefined;
+      const workflow = await createWorkflowsRepository(
+        db,
+        call.workspaceId,
+      ).get(run.workflowId);
+      if (workflow?.workflow.projectId == null) return undefined;
+      const project = await createProjectsRepository(
+        db,
+        call.workspaceId,
+      ).getById(workflow.workflow.projectId);
+      return project?.ticketSource.board?.projectV2Id;
+    },
     // The members of the workspace are the people of its projects until a project has members of its own (#922).
     projectMembers: (call) =>
       createWorkspaceMembersRepository(
@@ -109,6 +129,8 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
+    projects: createProjectsRepository(db, workspaceId),
+    repositoryName: async (id) => (await repositories.get(id))?.fullName,
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();
       const repository = (await repositories.list({ active: true })).find(

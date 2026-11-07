@@ -378,7 +378,7 @@
     "TicketSetStatusAction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "connector", "ticket", "board", "status"],
+      "required": ["id", "kind", "connector", "ticket", "status"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -396,7 +396,7 @@
           "$ref": "#/$defs/TicketTarget"
         },
         "board": {
-          "description": "The GitHub Project (projects_v2) of the repository's owner that holds the board: its number (\"7\") or its node id (\"PVT_…\"). A literal, no reference (`target_from_untrusted_value`; `invalid_value` for another form). Until the project carries its board (#922) the board is named here.",
+          "description": "The GitHub Project (projects_v2) of the repository's owner that holds the board: its number (\"7\") or its node id (\"PVT_…\"). A literal, no reference (`target_from_untrusted_value`; `invalid_value` for another form). Optional (#922): left out, the board of the project the lane belongs to is used; named, it overrides that board.",
           "$ref": "#/$defs/Template"
         },
         "status": {

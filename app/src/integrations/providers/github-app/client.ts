@@ -451,6 +451,17 @@ export type GithubAppClient = {
     next: string | null;
   }>;
   /**
+   * The boards (GitHub Projects, projects_v2) of a repository (#922; GraphQL): id, number, title and the Status field with its option
+   * names, at most `BOARDS_MAX` of them, closed ones left out. A board the token may not read (the permission "Projects" is missing, or
+   * the repository belongs to a user and has no organization board) is `available: false`, not a failure.
+   */
+  listRepositoryBoards(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; boards: RepositoryBoard[] }>;
+  /**
    * Mints a fresh installation access token, never from the cache, limited to the given repositories
    * and permissions. The one place a token for a job is created. Refuses (without a request) a scope
    * with no repository or no permission, and a token GitHub reports as broader than asked for.
@@ -522,6 +533,15 @@ function checkPage(page: number): void {
     );
 }
 
+/** A board of a repository as `listRepositoryBoards` answers it. */
+export type RepositoryBoard = {
+  projectV2Id: string;
+  number: number;
+  title: string;
+  statusFieldId: string | null;
+  statuses: string[];
+};
+
 /** The `type` of the GraphQL errors that mean the app may not read the board; any other error is a failure to try again. */
 const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
   "FORBIDDEN",
@@ -531,6 +551,8 @@ const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
 
 const BOARDS_QUERY =
   "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
+const REPOSITORY_BOARDS_QUERY =
+  'query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id number title closed field(name:"Status"){... on ProjectV2SingleSelectField{id options{name}}}}}}}';
 const BOARD_ITEMS_QUERY =
   'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
 
@@ -543,6 +565,44 @@ function boardIdsOf(data: Record<string, unknown>): string[] | null {
   return nodes.flatMap((node: unknown) =>
     isRecord(node) && typeof node.id === "string" ? [node.id] : [],
   );
+}
+
+/** The open boards a `REPOSITORY_BOARDS_QUERY` answer lists; null when the answer is not that. */
+function repositoryBoardsOf(
+  data: Record<string, unknown>,
+): RepositoryBoard[] | null {
+  const repository = data.repository;
+  if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
+  const nodes = repository.projectsV2.nodes;
+  if (!Array.isArray(nodes)) return null;
+  const boards: RepositoryBoard[] = [];
+  for (const node of nodes as unknown[]) {
+    if (
+      !isRecord(node) ||
+      typeof node.id !== "string" ||
+      typeof node.number !== "number" ||
+      typeof node.title !== "string" ||
+      node.closed === true
+    )
+      continue;
+    const field = isRecord(node.field) ? node.field : null;
+    boards.push({
+      projectV2Id: node.id,
+      number: node.number,
+      title: node.title,
+      statusFieldId:
+        field !== null && typeof field.id === "string" ? field.id : null,
+      statuses:
+        field !== null && Array.isArray(field.options)
+          ? (field.options as unknown[]).flatMap((option) =>
+              isRecord(option) && typeof option.name === "string"
+                ? [option.name]
+                : [],
+            )
+          : [],
+    });
+  }
+  return boards;
 }
 
 /** One page of a board: its items with their status (null for none), and where the next page is. */
@@ -2525,6 +2585,46 @@ export function createGithubAppClient(
                   ? `${index + 1}:`
                   : null;
             return { available: true, items: page.items, next };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
+
+    async listRepositoryBoards(installationId, scope, repoFullName, signal) {
+      checkInstallationId(installationId);
+      const slash = repoFullName.indexOf("/");
+      repoPath(repoFullName);
+      const unavailable = { available: false, boards: [] };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            const data = await graphql(
+              token,
+              REPOSITORY_BOARDS_QUERY,
+              {
+                owner: repoFullName.slice(0, slash),
+                name: repoFullName.slice(slash + 1),
+                first: BOARDS_MAX,
+              },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const boards = repositoryBoardsOf(data);
+            if (boards === null) return unavailable;
+            return { available: true, boards };
           },
           signal,
         );

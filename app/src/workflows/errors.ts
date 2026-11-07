@@ -32,6 +32,12 @@ export const WORKFLOW_ERROR_CODES = [
   "WORKFLOW_VERSION_CONFLICT",
   /** The workflow is archived and takes no new version. */
   "WORKFLOW_ARCHIVED",
+  /** A lane is listed and created within a project (#922): `projectId` is missing; `issues` names it and the projects there are. */
+  "WORKFLOW_PROJECT_REQUIRED",
+  /** `projectId` is not a project of this workspace (another workspace's looks the same); `issues` names the projects there are. */
+  "WORKFLOW_PROJECT_NOT_FOUND",
+  /** The project is switched off (a deactivated project takes no new lane). */
+  "WORKFLOW_PROJECT_INACTIVE",
 ] as const;
 export type WorkflowErrorCode = (typeof WORKFLOW_ERROR_CODES)[number];
 
@@ -49,6 +55,17 @@ export const WORKFLOW_ERROR_STATUS: Record<WorkflowErrorCode, number> = {
   WORKFLOW_VERSION_LIMIT_REACHED: 409,
   WORKFLOW_VERSION_CONFLICT: 409,
   WORKFLOW_ARCHIVED: 409,
+  WORKFLOW_PROJECT_REQUIRED: 400,
+  WORKFLOW_PROJECT_NOT_FOUND: 404,
+  WORKFLOW_PROJECT_INACTIVE: 409,
+};
+
+/** A request value that cannot be used (#922), with the names that would have been accepted. */
+export type WorkflowRequestIssue = {
+  path: string;
+  code: "project_required" | "project_unknown";
+  message: string;
+  available: string[];
 };
 
 export class WorkflowError extends Error {
@@ -61,6 +78,8 @@ export class WorkflowError extends Error {
   readonly maximum: number | undefined;
   /** On `WORKFLOW_VERSION_CONFLICT`: the version that is current. */
   readonly current: number | undefined;
+  /** On `WORKFLOW_PROJECT_REQUIRED`: the request value that cannot be used. */
+  readonly issues: readonly WorkflowRequestIssue[];
   readonly safeMessage = true as const;
 
   constructor(
@@ -71,6 +90,7 @@ export class WorkflowError extends Error {
       truncated?: boolean;
       maximum?: number;
       current?: number;
+      issues?: readonly WorkflowRequestIssue[];
     } = {},
   ) {
     super(message);
@@ -80,5 +100,6 @@ export class WorkflowError extends Error {
     this.truncated = details.truncated;
     this.maximum = details.maximum;
     this.current = details.current;
+    this.issues = details.issues ?? [];
   }
 }

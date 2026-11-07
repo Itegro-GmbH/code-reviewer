@@ -503,11 +503,14 @@ async function seed(
   );
   if (!created.ok) throw new Error("seeding failed");
   // A workflow with a second version (#833) in every workspace, under the same name.
+  const project = await repos.projects.get(repository.id);
+  if (project === undefined) throw new Error("seeding failed");
   const workflow = await repos.workflows.create(
     {
       name: "Issue to PR",
       document: `{"tag":"${tag}"}`,
       createdBy: `user-${tag}`,
+      projectId: project.id,
     },
     100,
   );
@@ -606,6 +609,7 @@ async function seed(
     runnerId: `runner-${tag}`,
     environment: created.environment,
     workflow: secondVersion.workflow,
+    project,
     workflowRun: workflowRun.run,
     workflowStep,
     agentProfile: secondProfileVersion.profile,
@@ -2265,16 +2269,38 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.get(b.workflow.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
+  // #922: the lanes of another workspace's project are not listed, and that project is not found by its id
+  {
+    name: "workflows.list (project filter)",
+    run: (a, b) => a.workflows.list({ projectId: b.project.id }),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "projects.getById",
+    run: (a, b) => a.projects.getById(b.project.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  // #922: a lane cannot be created in the project of another workspace
+  {
+    name: "workflows.create (foreign project)",
+    run: (a, b) =>
+      a.workflows.create(
+        {
+          name: "Foreign",
+          document: "{}",
+          createdBy: "user-a",
+          projectId: b.project.id,
+        },
+        100,
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "project_not_found" }),
+  },
   // #845-T40: the workflows a label starts are read in the workspace of the installation only
   {
     name: "workflows.listWithIssueTrigger",
-    run: (a) => a.workflows.listWithIssueTrigger(),
-    expectAnswer: (answer, a) =>
-      expect(
-        (answer as { workflow: { id: string } }[]).map(
-          (found) => found.workflow.id,
-        ),
-      ).toEqual([a.workflow.id]),
+    run: (a, b) => a.workflows.listWithIssueTrigger(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
     name: "workflows.getVersion",

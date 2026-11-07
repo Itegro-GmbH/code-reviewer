@@ -43,6 +43,11 @@ export type GithubConnectorDeps = {
    * left out where nothing says who they are, which makes that value an `action_input_invalid` of the step.
    */
   projectMembers?(call: ActionCall): Promise<string[]>;
+  /**
+   * The node id of the board of the project the run's lane belongs to (#922), for a `ticket.setStatus` that names no `board`; undefined
+   * when the project has none or nothing says which project it is.
+   */
+  projectBoard?(call: ActionCall): Promise<string | undefined>;
 };
 
 /** What each action needs of the App, as the settings page of the GitHub App words it. */
@@ -532,7 +537,15 @@ export function createGithubConnectors(
     async run(call) {
       const name = "ticket.setStatus";
       const issue = issueNumber(call.inputs.ticket);
-      const board = boardReference(call.inputs.board);
+      // The board of the project, unless the step names one (an override that stays accepted).
+      const named = call.inputs.board;
+      const projectBoard =
+        named === undefined ? await deps.projectBoard?.(call) : undefined;
+      if (named === undefined && projectBoard === undefined)
+        throw new ActionInputError(
+          "The project of this lane has no board: set one on the project, or name it with board.",
+        );
+      const board = boardReference(named ?? projectBoard);
       const status = statusName(call.inputs.status);
       const { provider, integration, repo } = await targetOrFail(deps, call);
       if (provider.setTicketStatus === undefined) throw unavailable(name);

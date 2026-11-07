@@ -19,7 +19,7 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: navigation.push, refresh: () => undefined }),
 }));
 
-import type { ProjectsApi } from "./api.ts";
+import type { NewProjectApi } from "./api.ts";
 import type { ProjectRowView } from "./list-view.ts";
 import { NewProjectDialog } from "./new-project-dialog.tsx";
 import { ProjectCards } from "./project-cards.tsx";
@@ -145,17 +145,66 @@ describe("the project cards", () => {
 });
 
 describe("the New project dialog", () => {
-  function fakeApi() {
-    const setActive = vi.fn<ProjectsApi["setActive"]>(async (repositoryId) => ({
+  const BOARDS = [
+    {
+      projectV2Id: "PVT_board1",
+      number: 1,
+      title: "Roadmap",
+      hasStatusField: true,
+      statuses: ["Todo", "Done"],
+    },
+    {
+      projectV2Id: "PVT_board2",
+      number: 2,
+      title: "Loose list",
+      hasStatusField: false,
+      statuses: [],
+    },
+  ];
+
+  function fakeApi(
+    boards: ReturnType<NewProjectApi["boards"]> = Promise.resolve({
       ok: true,
-      data: { repositoryId, projectId: "p1", active: true, changed: true },
-    }));
-    const api: ProjectsApi = { setActive, sync: vi.fn<ProjectsApi["sync"]>() };
-    return { api, setActive };
+      data: { available: true, boards: BOARDS },
+    }),
+  ) {
+    const createProject = vi.fn<NewProjectApi["createProject"]>(
+      async (body) => ({
+        ok: true,
+        data: {
+          project: { id: "p1", repositoryId: body.repositoryId, active: true },
+          lanes: body.lanes.map((key) => ({ key, ok: true, workflowId: key })),
+        },
+      }),
+    );
+    const boardsCall = vi.fn<NewProjectApi["boards"]>(() => boards);
+    const api: NewProjectApi = { boards: boardsCall, createProject };
+    return { api, createProject, boardsCall };
+  }
+
+  async function openAndChoose(
+    api: NewProjectApi,
+    repository = "repo-2",
+  ): Promise<HTMLElement> {
+    const user = userEvent.setup();
+    render(
+      <NewProjectDialog
+        workspaceSlug="acme"
+        choices={[{ repositoryId: "repo-2", fullName: "acme/api" }]}
+        api={api}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "New project" }));
+    const dialog = screen.getByRole("dialog", { name: "New project" });
+    await user.selectOptions(
+      within(dialog).getByLabelText("Ticket source (one)"),
+      repository,
+    );
+    return dialog;
   }
 
   // #925
-  it("offers the repositories that are no project yet as the ticket source, and the board disabled with its hint", async () => {
+  it("offers the repositories that are no project yet as the ticket source, and the board disabled until one is chosen", async () => {
     const user = userEvent.setup();
     render(
       <NewProjectDialog
@@ -181,65 +230,157 @@ describe("the New project dialog", () => {
     const board = within(dialog).getByLabelText("Board (optional)");
     expect((board as HTMLSelectElement).disabled).toBe(true);
     expect(
-      within(dialog).getByText("Boards come with the ticket source."),
+      within(dialog).getByText(
+        "Choose a repository first: its boards are read from GitHub.",
+      ),
     ).toBeTruthy();
   });
 
-  // #925
-  it("switches the chosen repository on and opens its cockpit", async () => {
+  // #922-T30
+  it("reads the boards of the chosen repository and offers them, a board without a Status field disabled", async () => {
+    const { api, boardsCall } = fakeApi();
+    const dialog = await openAndChoose(api);
+
+    const board = (await within(dialog).findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(board.disabled).toBe(false));
+
+    expect(boardsCall).toHaveBeenCalledWith("repo-2");
+    expect(
+      within(board)
+        .getAllByRole("option")
+        .map((option) => [
+          option.textContent,
+          (option as HTMLOptionElement).disabled,
+        ]),
+    ).toEqual([
+      ["None", false],
+      ["#1 Roadmap", false],
+      ["#2 Loose list (no Status field)", true],
+    ]);
+  });
+
+  // #922-T31
+  it("creates the project with the board and the built-in lanes that are ticked, and opens its cockpit", async () => {
     const user = userEvent.setup();
-    const { api, setActive } = fakeApi();
-    render(
-      <NewProjectDialog
-        workspaceSlug="acme"
-        choices={[{ repositoryId: "repo-2", fullName: "acme/api" }]}
-        api={api}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "New project" }));
-    const dialog = screen.getByRole("dialog", { name: "New project" });
+    const { api, createProject } = fakeApi();
+    const dialog = await openAndChoose(api);
     const create = within(dialog).getByRole("button", {
       name: "Create and read from GitHub",
     });
-    expect((create as HTMLButtonElement).disabled).toBe(true);
+    const board = (await within(dialog).findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(board.disabled).toBe(false));
 
-    await user.selectOptions(
-      within(dialog).getByLabelText("Ticket source (one)"),
-      "repo-2",
-    );
+    await user.selectOptions(board, "PVT_board1");
+    await user.click(within(dialog).getByLabelText("Review a pull request"));
     await user.click(create);
 
-    await waitFor(() => expect(setActive).toHaveBeenCalledWith("repo-2", true));
+    await waitFor(() =>
+      expect(createProject).toHaveBeenCalledWith({
+        repositoryId: "repo-2",
+        board: { projectV2Id: "PVT_board1" },
+        lanes: ["issue-to-pr"],
+      }),
+    );
     await waitFor(() =>
       expect(navigation.push).toHaveBeenCalledWith("/w/acme/projects/repo-2"),
     );
   });
 
+  // #922-T32
+  it("creates a project without a board when the repository has none, and with both lanes by default", async () => {
+    const user = userEvent.setup();
+    const { api, createProject } = fakeApi(
+      Promise.resolve({ ok: true, data: { available: true, boards: [] } }),
+    );
+    const dialog = await openAndChoose(api);
+    expect(
+      await within(dialog).findByText(
+        "This repository has no board. A project works without one.",
+      ),
+    ).toBeTruthy();
+
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Create and read from GitHub",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(createProject).toHaveBeenCalledWith({
+        repositoryId: "repo-2",
+        board: null,
+        lanes: ["issue-to-pr", "review-a-pull-request"],
+      }),
+    );
+  });
+
+  // #922-T33
+  it("says the boards cannot be read when the App may not read them, and still creates a project", async () => {
+    const { api } = fakeApi(
+      Promise.resolve({ ok: true, data: { available: false, boards: [] } }),
+    );
+    const dialog = await openAndChoose(api);
+
+    expect(
+      await within(dialog).findByText(/did not let the App read the boards/),
+    ).toBeTruthy();
+    expect(
+      (
+        within(dialog).getByRole("button", {
+          name: "Create and read from GitHub",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+  });
+
+  // #922-T34
+  it("stays open and names the lanes that could not be copied, with the way to the project", async () => {
+    const user = userEvent.setup();
+    const { api, createProject } = fakeApi();
+    createProject.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        project: { id: "p1", repositoryId: "repo-2", active: true },
+        lanes: [
+          { key: "issue-to-pr", ok: false, code: "WORKFLOW_INVALID" },
+          { key: "review-a-pull-request", ok: true, workflowId: "w1" },
+        ],
+      },
+    });
+    const dialog = await openAndChoose(api);
+
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Create and read from GitHub",
+      }),
+    );
+
+    expect(await within(dialog).findByRole("alert")).toBeTruthy();
+    expect(within(dialog).getByRole("alert").textContent).toContain(
+      "Issue to PR",
+    );
+    expect(navigation.push).not.toHaveBeenCalled();
+    await user.click(
+      within(dialog).getByRole("button", { name: "Open the project" }),
+    );
+    expect(navigation.push).toHaveBeenCalledWith("/w/acme/projects/repo-2");
+  });
+
   // #925
   it("says what went wrong and stays open when the route refuses", async () => {
     const user = userEvent.setup();
-    const api: ProjectsApi = {
-      setActive: async () => ({
-        ok: false,
-        status: 503,
-        code: "NETWORK_ERROR",
-        issues: [],
-      }),
-      sync: vi.fn<ProjectsApi["sync"]>(),
-    };
-    render(
-      <NewProjectDialog
-        workspaceSlug="acme"
-        choices={[{ repositoryId: "repo-2", fullName: "acme/api" }]}
-        api={api}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "New project" }));
-    const dialog = screen.getByRole("dialog", { name: "New project" });
-    await user.selectOptions(
-      within(dialog).getByLabelText("Ticket source (one)"),
-      "repo-2",
-    );
+    const { api, createProject } = fakeApi();
+    createProject.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      code: "NETWORK_ERROR",
+      issues: [],
+    });
+    const dialog = await openAndChoose(api);
     await user.click(
       within(dialog).getByRole("button", {
         name: "Create and read from GitHub",

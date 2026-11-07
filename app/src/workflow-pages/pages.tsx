@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The content of the three workflow pages (#873): the list of workflows, one workflow (its Start form and its runs) and one run. The
+// The content of the two workflow pages (#873): one workflow (its Start form and its runs) and one run. The list of the lanes of a project
+// is the Lanes tab of its cockpit (#922); the workspace has no list of workflows any more. The
 // `load…` functions gather the data from the services (passed in); an id nobody has in this workspace, also the id of another
 // workspace's, gives `not_found` and the page shows the not-found page, nothing of anything else. The `…Content` components render it.
 import Link from "next/link";
@@ -10,11 +11,7 @@ import { PageHeader } from "../components/page-header.tsx";
 import { Alert } from "../components/ui/alert.tsx";
 import { ROLE_NOT_ALLOWED } from "../copy/messages.ts";
 import { WorkflowError } from "../workflows/errors.ts";
-import type {
-  WorkflowList,
-  WorkflowService,
-  WorkflowView,
-} from "../workflows/service.ts";
+import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { WorkflowRunError } from "../workflow-runs/errors.ts";
 import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
@@ -29,7 +26,6 @@ import { WorkflowRunDetail } from "./run-detail.tsx";
 import { WorkflowRunsList } from "./runs-list.tsx";
 import { StartForm } from "./start-form.tsx";
 import { startFormOf, type StartFormSpec } from "./start-form-spec.ts";
-import { WorkflowsList } from "./workflows-list.tsx";
 
 type NotFound = { kind: "not_found" };
 
@@ -47,32 +43,6 @@ async function orNotFound<T>(work: () => Promise<T>): Promise<T | undefined> {
       return undefined;
     throw error;
   }
-}
-
-// --- the list of workflows
-
-export async function loadWorkflowsPage(deps: {
-  workflows: Pick<WorkflowService, "list">;
-}): Promise<WorkflowList> {
-  return deps.workflows.list();
-}
-
-export function WorkflowsPageContent({
-  workspaceSlug,
-  data,
-}: {
-  workspaceSlug: string;
-  data: WorkflowList;
-}) {
-  return (
-    <>
-      <PageHeader
-        title={PAGE_COPY.workflowsTitle}
-        description={PAGE_COPY.workflowsDescription}
-      />
-      <WorkflowsList workspaceSlug={workspaceSlug} workflows={data.workflows} />
-    </>
-  );
 }
 
 // --- one workflow
@@ -193,7 +163,7 @@ export function WorkflowPageContent({
             items={[
               {
                 label: PAGE_COPY.breadcrumbRoot,
-                href: workspacePath(workspaceSlug, "/workflows"),
+                href: workspacePath(workspaceSlug, "/projects"),
               },
               { label: workflow.name },
             ]}
@@ -279,7 +249,7 @@ export function RunPageContent({
             items={[
               {
                 label: PAGE_COPY.breadcrumbRoot,
-                href: workspacePath(workspaceSlug, "/workflows"),
+                href: workspacePath(workspaceSlug, "/projects"),
               },
               { label: workflow.name, href: workflowHref },
               { label: PAGE_COPY.runTitle },

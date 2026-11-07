@@ -189,3 +189,17 @@ describe("the inputs of ticket.setStatus", () => {
     });
   });
 });
+
+describe("the board of ticket.setStatus (#922)", () => {
+  // #922-T50
+  it("may leave the board out: the connector takes the one of the project", () => {
+    expect(
+      resolveActionInputs(
+        { ticket: 5, status: "Done" },
+        TICKET_SET_STATUS,
+        values,
+      ),
+    ).toEqual({ ticket: 5, status: "Done" });
+    expect(TICKET_SET_STATUS.inputs.board?.required).toBe(false);
+  });
+});

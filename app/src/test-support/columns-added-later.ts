@@ -61,6 +61,10 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "trigger_id",
     "ticket_ref",
   ],
+  // #922: the ticket source of a project (the migration writes one for every project that exists, so no test of an older migration holds a
+  // project that has none) and the project a lane belongs to; null for every workflow that exists.
+  projects: ["ticket_source"],
+  workflows: ["project_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.

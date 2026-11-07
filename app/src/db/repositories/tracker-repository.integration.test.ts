@@ -9,6 +9,7 @@ import type { RepoRef } from "../../integrations/types.ts";
 import { createTestDatabase } from "../../test-support/test-database.ts";
 import { defaultWorkspaceId } from "../../test-support/workspaces.ts";
 import { createIntegrationsRepository } from "./integrations-repository.ts";
+import { createProjectsRepository } from "./projects-repository.ts";
 import { createRepositoriesRepository } from "./repositories-repository.ts";
 import {
   createTrackerRepository,
@@ -678,5 +679,52 @@ describe("claiming a sync", () => {
       cursor: "E",
       lastFullSyncAt: "2026-11-07T13:00:00.000Z",
     });
+  });
+});
+
+describe("the project of the rows of the mirror (#922)", () => {
+  // #922-T68
+  it("writes the project of the repository with a ticket and with the state of a sync, and keeps it when the row is written again", async () => {
+    const { tracker, first, second, db, workspaceId } = await setup();
+    const projects = createProjectsRepository(db, workspaceId);
+    const activated = await projects.activate(first.id);
+    if (activated.kind !== "activated") throw new Error("seeding failed");
+    const projectId = activated.project.id;
+
+    await tracker.upsertItem(first.id, item(12));
+    await tracker.upsertItem(second.id, item(12, { repo: "acme/repo-2" }));
+    await tracker.saveSyncState(first.id, { cursor: "{}", startedAt: "x" });
+    await tracker.claimSync(second.id, {
+      cursor: "{}",
+      startedAt: "2026-11-06T12:00:00.000Z",
+      staleBefore: "2026-11-06T11:00:00.000Z",
+    });
+
+    expect((await tracker.getItem(first.id, 12))?.projectId).toBe(projectId);
+    // A repository without a project has none.
+    expect((await tracker.getItem(second.id, 12))?.projectId).toBeNull();
+    const states = await db
+      .selectFrom("tracker_sync_state")
+      .select(["repository_id", "project_id"])
+      .orderBy("repository_id")
+      .execute();
+    expect(
+      Object.fromEntries(states.map((s) => [s.repository_id, s.project_id])),
+    ).toEqual({ [first.id]: projectId, [second.id]: null });
+
+    // The project of the second repository is made afterwards: the next write of a ticket takes it up.
+    const later = await projects.activate(second.id);
+    if (later.kind !== "activated") throw new Error("seeding failed");
+    await tracker.upsertItem(
+      second.id,
+      item(12, {
+        repo: "acme/repo-2",
+        title: "Changed",
+        updatedAt: "2026-11-06T11:00:00.000Z",
+      }),
+    );
+    expect((await tracker.getItem(second.id, 12))?.projectId).toBe(
+      later.project.id,
+    );
   });
 });
