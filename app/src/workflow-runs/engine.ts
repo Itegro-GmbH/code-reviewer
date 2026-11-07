@@ -1115,17 +1115,38 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     profile: { name: string; version: number },
     timeLimitMinutes: number,
   ): Promise<Begun> {
+    // #919: a profile says where it works. The environment is the profile version's; only a version saved before profiles had one
+    // (and so every document written before) runs where its step says. A step that names another environment than its profile
+    // version's is not overridden: the lane was saved against an older version, and the version it runs now has moved.
+    const ownId = (
+      await deps.profiles.findByName(profile.name, profile.version)
+    )?.version.content.environmentId;
     const environmentName =
       typeof node.environment === "string" ? node.environment : "";
     const environment = (await deps.environments.listSummaries()).find(
       (candidate) =>
-        candidate.name.toLowerCase() === environmentName.toLowerCase(),
+        typeof ownId === "string"
+          ? candidate.id === ownId
+          : candidate.name.toLowerCase() === environmentName.toLowerCase(),
     );
     if (environment === undefined)
       return {
         outcome: failed(
           "environment_not_found",
-          "The environment of this step is not one of the workspace.",
+          typeof ownId === "string"
+            ? "The environment of the profile of this step is not one of the workspace."
+            : "The environment of this step is not one of the workspace.",
+        ),
+      };
+    if (
+      typeof ownId === "string" &&
+      environmentName !== "" &&
+      environment.name.toLowerCase() !== environmentName.toLowerCase()
+    )
+      return {
+        outcome: failed(
+          "environment_mismatch",
+          `The step names the environment "${environmentName}", but version ${String(profile.version)} of the profile ${profile.name} runs in "${environment.name}". Take the environment out of the step, or name the one of the profile.`,
         ),
       };
     // The instruction is built from the values of earlier steps. They are text in it and nothing else: the profile, the environment,

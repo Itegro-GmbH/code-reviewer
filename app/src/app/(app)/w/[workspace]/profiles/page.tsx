@@ -4,6 +4,8 @@ import type { Metadata } from "next";
 import { PageHeader } from "@/components/page-header";
 import { Alert } from "@/components/ui/alert";
 import { ROLE_NOT_ALLOWED } from "@/copy/messages";
+import { createImplementerEnvironmentsRepository } from "@/db/repositories/implementer-environments-repository";
+import { getDatabase } from "@/db/startup";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { PROFILES_COPY } from "@/profiles/ui/messages";
 import { ProfilesPageContent, profileRowOf } from "@/profiles/ui/profiles-page";
@@ -56,10 +58,16 @@ async function ProfilesContent({
   const views = await Promise.all(
     profiles.map((profile) => service.get(profile.id)),
   );
+  // #919: a profile runs in an environment of the workspace: the drawer offers them.
+  const environments = await createImplementerEnvironmentsRepository(
+    getDatabase(),
+    workspaceId,
+  ).listSummaries();
   return (
     <ProfilesPageContent
       workspaceSlug={workspaceSlug}
       profiles={views.map(profileRowOf)}
+      environments={environments.map(({ name, kind }) => ({ name, kind }))}
     />
   );
 }

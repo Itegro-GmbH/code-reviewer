@@ -27,6 +27,7 @@ function profile(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     name: "implementer",
     model: { entryId: "entry-1" },
+    environment: "node",
     canPush: true,
     ...extra,
   };
@@ -51,6 +52,7 @@ describe("a profile document", () => {
       canPush: true,
       defaultResult: null,
       harness: "opencode",
+      environment: "node",
     });
   });
 
@@ -83,11 +85,43 @@ describe("a profile document", () => {
       ["", "missing_field"],
       ["", "missing_field"],
       ["", "missing_field"],
+      ["", "missing_field"],
     ]);
     const messages = validateProfile({}).errors.map((e) => e.message);
     expect(messages.join(" ")).toMatch(/name/);
     expect(messages.join(" ")).toMatch(/model/);
     expect(messages.join(" ")).toMatch(/canPush/);
+    expect(messages.join(" ")).toMatch(/environment/);
+  });
+
+  // #919-T01
+  it("refuses a profile without an environment with missing_field", () => {
+    for (const environment of [undefined, null]) {
+      const result = validateProfile(profile({ environment }));
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual([
+        expect.objectContaining({
+          path: "",
+          code: "missing_field",
+          message: expect.stringContaining('"environment"'),
+        }),
+      ]);
+    }
+  });
+
+  // #919-T02
+  it("takes the environment as the name of an environment and refuses what is not one", () => {
+    const named = validateProfile(profile({ environment: "Node 24" }));
+    expect(named.profile?.environment).toBe("Node 24");
+
+    expect(problems(profile({ environment: 3 }))).toEqual([
+      ["/environment", "wrong_type"],
+    ]);
+    for (const environment of ["", "  ", "a\nb", "x".repeat(201)])
+      expect(problems(profile({ environment })), environment).toEqual([
+        ["/environment", "invalid_value"],
+      ]);
   });
 
   // #843-T04
@@ -177,6 +211,7 @@ describe("a profile document", () => {
           "canPush",
           "defaultResult",
           "harness",
+          "environment",
         ],
       }),
     ]);
@@ -361,6 +396,7 @@ describe("a profile document", () => {
       extra: 1,
     });
     expect(result.errors.map((e) => e.path)).toEqual([
+      "",
       "/canPush",
       "/costLimitCents",
       "/extra",

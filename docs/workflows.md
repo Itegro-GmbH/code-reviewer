@@ -194,13 +194,13 @@ again when it runs**.
 
 ### The agent step (`"kind": "agent"`)
 
-A run of an agent step gets a **profile** and an **environment**, separately: who works and where.
+A run of an agent step gets a **profile**, and the profile says who works **and where** (#919): its harness, model, rights and its environment. The step names no environment.
 
 | Field | Needed | What |
 | --- | --- | --- |
 | `id` | yes | The name other steps use to refer to it: a letter, then letters, digits, `_` or `-` (64 at most). `trigger` and `previous` are taken. Unique in the whole document, also inside branches and loops. |
 | `profile` | yes | `name` (the newest version) or `name@version` (a pinned version) of a [profile](profiles.md) of the workspace that is not archived. No profile is built in: people create them through `/api/w/<slug>/profiles`, and the validator lists the names that exist (`profile_unknown`; `profile_archived` for one that was archived) and the versions (`profile_version_unknown`). The version the step runs decides what it yields: whether it may push (`branch`, `commits`) and its default result schema. |
-| `environment` | yes | The name of an environment of the workspace (the Environments page; case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). |
+| `environment` | no, deprecated (#919) | The name of an environment of the workspace (case is ignored), as a literal: a [target](#one-repository-per-run-and-targets), so no reference (`target_from_untrusted_value`). **Leave it out**: the engine runs the step in the environment of its profile version ([`profiles.md`](profiles.md#where-profiles-meet-workflows)). When it is written next to a profile that names one it must be that one (`environment_mismatch`). Only a profile version saved before #919, which names no environment, needs it here (`environment_required` without it). Documents that name it keep validating and running. |
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
@@ -783,7 +783,7 @@ For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The la
 
 - **An agent step starts an Implementer turn** through the same service as a task started by hand (`startTask`), as the person who started the
   run (a run a label started has no person: its turns belong to the account that owns the workflow, see [The label trigger](#the-label-trigger)). The **profile** is the version the step pins; a profile **without a version** means the newest version **at the moment the step starts**,
-  and that version is stored with the step run. The **environment** is found by name (case ignored). The **instruction** is the step's text with its
+  and that version is stored with the step run. The **environment** is the one of the profile version (a version saved before #919 names none, and the step's `environment` is found by name, case ignored). The **instruction** is the step's text with its
   references filled in. The step's `result` schema (or the default of the profile version) becomes the finish tool. The turn works on a branch
   the platform names, `workflow/<run id>/<step id>`, which starts from the base branch of the run (the default branch of the repository at the start of the run) or, when the step names
   one, from its `branch` ([Branches](#branches-and-what-a-step-starts-from)).
@@ -1111,7 +1111,7 @@ the issue and the repository:
 The bounds leave room for the workflow's own text: the instruction of an agent step is at most 20,000 characters, and the title (256), the labels (1,000 at most) and the
 body (8,000) take at most about 9,300 of them.
 
-The environment of an agent step is a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
+The environment of an agent step is its profile's (#919), or, for an older profile version, a literal of the workflow (a [target](#one-repository-per-run-and-targets)), so there is no `defaultEnvironment`. Control characters
 are removed from the texts, as from every value that goes into a text.
 
 **The title, the body and the labels are the words of whoever opened the issue**, which can be anybody who may open an issue. They are data, never read again as a
@@ -1147,7 +1147,8 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `template_invalid` | step | A reference holds an object, or the text is not a template. |
 | `template_too_large` | step | The text does not fit where it goes. |
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
-| `environment_not_found` | step | The environment is not one of the workspace. |
+| `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
+| `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
 | `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |
@@ -1285,7 +1286,9 @@ Beyond the form:
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |
-| `environment_unknown` | No such environment in the workspace. | Use one of `available`, or create it on the Environments page. |
+| `environment_unknown` | No such environment in the workspace; or, at the step's `/profile`, the environment of the profile version was removed. | Use one of `available`, or create it on the Environments page; for a removed one save a new version of the profile. |
+| `environment_mismatch` | The step names an `environment` other than the one of its profile (#919). `available` is the profile's. | Leave `environment` out of the step. |
+| `environment_required` | The step names no `environment` and its profile version names none (saved before #919). `available` lists the environments. | Name one in the step, or save a new version of the profile with an `environment`. |
 | `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
 | `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |

@@ -44,6 +44,7 @@ const CONTENT: ProfileContent = {
   canPush: true,
   defaultResult: null,
   harness: "opencode",
+  environmentId: null,
 };
 const NEW: NewProfile = {
   name: "implementer",
@@ -93,6 +94,7 @@ describe("the profiles repository", () => {
           canPush: true,
           defaultResult: SCHEMA,
           harness: "opencode",
+          environmentId: null,
         },
         createdBy: "u-1",
         createdAt: "2026-11-04T08:00:00.000Z",
@@ -373,6 +375,7 @@ describe("the profiles repository", () => {
         defaultResult: SCHEMA,
         managedModel: true,
         harness: "opencode",
+        environmentId: null,
       },
       {
         profileId: "pr-1",
@@ -381,9 +384,33 @@ describe("the profiles repository", () => {
         defaultResult: null,
         managedModel: true,
         harness: "opencode",
+        environmentId: null,
       },
     ]);
     expect(await a.versionFacts([])).toEqual([]);
+  });
+
+  // #919-T50
+  it("keeps the environment of a version, and reads none for a version saved without one", async () => {
+    const { a } = await setup();
+    await a.create(
+      { ...NEW, content: { ...CONTENT, environmentId: "env-1" } },
+      100,
+    );
+    await a.saveVersion(
+      "pr-1",
+      { content: { ...CONTENT, environmentId: undefined }, createdBy: "u-1" },
+      100,
+    );
+
+    expect((await a.getVersion("pr-1", 1))?.content.environmentId).toBe(
+      "env-1",
+    );
+    expect((await a.getVersion("pr-1", 2))?.content.environmentId).toBeNull();
+    expect(
+      (await a.versionFacts([{ profileId: "pr-1", version: 1 }]))[0]
+        ?.environmentId,
+    ).toBe("env-1");
   });
 
   // #854-T230
