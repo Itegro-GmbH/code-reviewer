@@ -19,6 +19,7 @@ Rules that hold here:
 
 - **Nothing is mapped.** State, type, labels, board status and checks are GitHub's words. The lane, its step and the cost are the only things the factory adds.
 - **No machine, profile or model is asked.** The profile of a step carries the harness, the model, the key and the runner; the dialog asks which lane and nothing else.
-- **Review means an open pull request.** `waitsFor` offers Review for the newest open pull request linked to the issue; closed and merged ones leave Start, and so does one the loaded list does not hold (its state is unknown, and the list is only the tickets that changed last).
+- **Review means an open pull request.** `waitsFor` offers Review for the newest open pull request linked to the issue; closed and merged ones leave Start. The state of a linked pull request comes from the tracker service (`pullRequestStates`, read from the mirror also outside of the loaded 200 tickets); one the mirror has no row for is "state unknown" in the drawer and does not count as open, so Start stays offered.
+- **A refusal is said once.** Why Start is refused (no right, no lane) is one line above the table that every refused Start points at with `aria-describedby`; a refused Start is not pressed down (`active:scale-100`).
 - **A field we do not have is left out**, not made up (no tokens or lines of code yet).
 - This module imports `tracker`, `workflow-pages`, `workflows` and `projects`; none of them imports it (the pages of `src/app` wire it in).

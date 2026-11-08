@@ -227,11 +227,21 @@ function LiveBoard({
   const [filter, setFilter] = useState<Filter>("open");
   const [opened, setOpened] = useState<number | null>(null);
   const [starting, setStarting] = useState<number | null>(null);
+  const reasonId = useId();
   const drawerFocus = useReturnFocus();
   const startFocus = useReturnFocus();
   const issues = issuesOf(data);
   const shown =
     filter === "open" ? issues.filter((item) => item.state === "open") : issues;
+  // Why Start is refused is the same for every row: it is said once, above the table, and each refused Start points at it.
+  const refusal = !mayStart
+    ? WAITS_COPY.notAllowed
+    : lanes.length === 0
+      ? WAITS_COPY.noLanes
+      : undefined;
+  const refusalShown =
+    refusal !== undefined &&
+    shown.some((item) => waitsFor(data, item)?.kind === "start");
   // The list is the issues that changed last: an issue can fall out of it while its drawer is open. The drawer then keeps the last data
   // it had instead of closing under the person's hands.
   const found =
@@ -275,6 +285,11 @@ function LiveBoard({
               )
             : ""}
         </StatusRegion>
+        {refusalShown ? (
+          <p id={reasonId} className="m-0 text-sm text-muted-foreground">
+            {refusal}
+          </p>
+        ) : null}
         <BoardTable>
           {shown.length === 0 ? (
             <TableRow>
@@ -303,8 +318,7 @@ function LiveBoard({
                 repositoryId={repositoryId}
                 list={data}
                 item={item}
-                mayStart={mayStart}
-                hasLanes={lanes.length > 0}
+                refusedBy={refusalShown ? reasonId : undefined}
                 onOpen={(button) => {
                   drawerFocus.remember(button);
                   setOpened(item.number);
@@ -363,8 +377,7 @@ function IssueRow({
   repositoryId,
   list,
   item,
-  mayStart,
-  hasLanes,
+  refusedBy,
   onOpen,
   onStart,
 }: {
@@ -372,8 +385,8 @@ function IssueRow({
   repositoryId: string;
   list: TicketList;
   item: TicketListItem;
-  mayStart: boolean;
-  hasLanes: boolean;
+  /** The id of the banner that says why Start is refused, or undefined when it is not. */
+  refusedBy: string | undefined;
   onOpen: (button: HTMLElement) => void;
   onStart: (button: HTMLElement) => void;
 }) {
@@ -449,8 +462,7 @@ function IssueRow({
           repositoryId={repositoryId}
           number={item.number}
           waits={waitsFor(list, item)}
-          mayStart={mayStart}
-          hasLanes={hasLanes}
+          refusedBy={refusedBy}
           onStart={onStart}
         />
       </TableCell>
@@ -463,19 +475,16 @@ function WaitsCell({
   repositoryId,
   number,
   waits,
-  mayStart,
-  hasLanes,
+  refusedBy,
   onStart,
 }: {
   workspaceSlug: string;
   repositoryId: string;
   number: number;
   waits: WaitsFor | undefined;
-  mayStart: boolean;
-  hasLanes: boolean;
+  refusedBy: string | undefined;
   onStart: (button: HTMLElement) => void;
 }) {
-  const reasonId = useId();
   if (waits === undefined)
     return <span className="text-muted-foreground">{WAITS_COPY.none}</span>;
   if (waits.kind === "answer")
@@ -502,36 +511,25 @@ function WaitsCell({
         </a>
       </Button>
     );
-  const reason = !mayStart
-    ? WAITS_COPY.notAllowed
-    : !hasLanes
-      ? WAITS_COPY.noLanes
-      : undefined;
-  // A refused Start stays focusable (`aria-disabled`, not `disabled`) so a keyboard or screen reader user reaches it and hears why.
+  // A refused Start stays focusable (`aria-disabled`, not `disabled`) so a keyboard or screen reader user reaches it and hears why (the
+  // banner above the table); it does not press down like a button that works.
   return (
-    <span className="inline-flex flex-col gap-1">
-      <Button
-        size="sm"
-        variant="secondary"
-        onClick={(event) => {
-          if (reason === undefined) onStart(event.currentTarget);
-        }}
-        aria-disabled={reason === undefined ? undefined : true}
-        aria-describedby={reason === undefined ? undefined : reasonId}
-        aria-label={WAITS_COPY.startLabel(number)}
-        className={
-          reason === undefined
-            ? undefined
-            : "cursor-not-allowed opacity-50 hover:translate-y-0"
-        }
-      >
-        {WAITS_COPY.start}
-      </Button>
-      {reason === undefined ? null : (
-        <span id={reasonId} className="max-w-48 text-xs text-muted-foreground">
-          {reason}
-        </span>
-      )}
-    </span>
+    <Button
+      size="sm"
+      variant="secondary"
+      onClick={(event) => {
+        if (refusedBy === undefined) onStart(event.currentTarget);
+      }}
+      aria-disabled={refusedBy === undefined ? undefined : true}
+      aria-describedby={refusedBy}
+      aria-label={WAITS_COPY.startLabel(number)}
+      className={
+        refusedBy === undefined
+          ? undefined
+          : "cursor-not-allowed opacity-50 hover:translate-y-0 active:scale-100"
+      }
+    >
+      {WAITS_COPY.start}
+    </Button>
   );
 }

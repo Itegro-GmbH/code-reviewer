@@ -79,12 +79,18 @@ export function createFakeTrackerRepository(
         checksState: before?.checksState ?? null,
         reviewRequestedFrom:
           item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
-        // As the SQL: a list that lacks a login says nothing against its mark; nobody asked ends them all.
-        reviewActedBy: liveReviewMarks(
-          before?.reviewActedBy ?? [],
-          item.reviewRequestedFrom,
-          undefined,
-        ),
+        // As the SQL: a list that lacks a login says nothing against its mark; nobody asked ends them all, by a delivery newer than the
+        // row only.
+        reviewActedBy:
+          before !== undefined &&
+          item.reviewRequestedFrom?.length === 0 &&
+          item.updatedAt <= before.updatedAt
+            ? [...before.reviewActedBy]
+            : liveReviewMarks(
+                before?.reviewActedBy ?? [],
+                item.reviewRequestedFrom,
+                undefined,
+              ),
         parentNumber:
           item.parentNumber === undefined
             ? (before?.parentNumber ?? null)
@@ -214,8 +220,20 @@ export function createFakeTrackerRepository(
           (candidate) => candidate.toLowerCase() !== login.toLowerCase(),
         ),
         reviewActedBy: withReviewMark(item.reviewActedBy, login, sha),
-        // One millisecond on, as the SQL does: a delivery of the same second is older.
-        updatedAt: new Date(Date.parse(item.updatedAt) + 1).toISOString(),
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async forgetReviewActed(repositoryId, number, login) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      const acted = item.reviewActedBy.filter(
+        (mark) => mark.login.toLowerCase() !== login.toLowerCase(),
+      );
+      if (acted.length === item.reviewActedBy.length) return false;
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewActedBy: acted,
         syncedAt: stamp(),
       });
       return true;

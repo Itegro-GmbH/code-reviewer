@@ -46,6 +46,7 @@ export type TrackerMirrorDependencies = {
     | "setParent"
     | "setChecksState"
     | "clearReviewActed"
+    | "forgetReviewActed"
     | "linkPullRequests"
   >;
   /**
@@ -176,6 +177,18 @@ export function createTrackerMirror(
               // #924: a person who acted on a review ToDo did so for the commit that was the head; a request that stands is for the new one.
               await tracker.clearReviewActed(repositoryId, item.number);
             }
+            // #954: a person who is asked again for the same commit has a ToDo again. Only a request newer than the row counts: the
+            // same request delivered again (or of the same second, which GitHub cannot tell apart) must not bring back a review that was done.
+            if (
+              change.reviewRequestedOf !== undefined &&
+              before !== undefined &&
+              item.updatedAt > before.updatedAt
+            )
+              await tracker.forgetReviewActed(
+                repositoryId,
+                item.number,
+                change.reviewRequestedOf,
+              );
             // The issues the pull request closed before and the ones it closes now list it, or do not any more.
             const affected = new Set([
               ...(before?.closes ?? []),

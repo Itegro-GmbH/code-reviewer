@@ -25,7 +25,6 @@ export type TrackerItemState = "open" | "closed";
 export type TrackerLabel = { name: string; color: string };
 export type TrackerAssignee = { login: string };
 
-/** A cached issue or pull request. */
 /** One person who acted on a review ToDo, and the head commit of the pull request at that time. */
 export type ReviewMark = { login: string; sha: string };
 
@@ -56,6 +55,7 @@ export function liveReviewMarks(
     : marks.filter((mark) => mark.sha === headSha);
 }
 
+/** A cached issue or pull request. */
 export type TrackerItem = {
   repositoryId: string;
   /** Reserved for #922; null until a project is the ticket source. */
@@ -221,7 +221,8 @@ export type TrackerRepository = {
   /**
    * #924: takes one login (compared without regard to case) out of who a review is asked from, right after its request was taken away,
    * and marks that it acted for the commit `sha`, so that a delivery that still lists it does not bring the ToDo back. The row's time
-   * moves one millisecond on: GitHub tells seconds only, and a delivery of the same second that listed the login is older than this.
+   * stays: GitHub tells seconds only, and a change of the same second must still be taken (the mark, not the time, keeps a stale list
+   * of that second from bringing the ToDo back).
    */
   removeReviewRequested(
     repositoryId: string,
@@ -235,6 +236,12 @@ export type TrackerRepository = {
     number: number,
     login: string,
     sha: string,
+  ): Promise<boolean>;
+  /** #954: forgets that this login (compared without regard to case) acted: it is asked for a review again for the same commit. */
+  forgetReviewActed(
+    repositoryId: string,
+    number: number,
+    login: string,
   ): Promise<boolean>;
   /** #924: forgets who acted: the pull request has a new commit, so a request that stands is for that commit. */
   clearReviewActed(repositoryId: string, number: number): Promise<boolean>;
@@ -347,12 +354,6 @@ function marksFrom(text: string | null): ReviewMark[] {
   });
 }
 
-/** The ISO time one millisecond after this one (the text itself when it is no time). */
-function afterInstant(text: string): string {
-  const time = Date.parse(text);
-  return Number.isNaN(time) ? text : new Date(time + 1).toISOString();
-}
-
 function syncStateFrom(
   row: Selectable<TrackerSyncStateTable>,
 ): TrackerSyncState {
@@ -462,11 +463,12 @@ export function createTrackerRepository(
           ? sql`tracker_items.review_requested_from`
           : sql`excluded.review_requested_from`;
       // The marks stay with the row: a list of the people asked that lacks a login says nothing against its mark (a member of the fan-out
-      // is never asked by name). They go when nobody is asked (a later request is a new ToDo); a new commit clears them on its own.
-      // Decided in this statement, so no read comes before the write.
+      // is never asked by name). They go when nobody is asked (a later request is a new ToDo) by a delivery newer than the row: an empty
+      // list of the same second (GitHub's answer to our own removal) keeps them, so a stale list of that second cannot bring the review
+      // back. A new commit clears them on its own. Decided in this statement, so no read comes before the write.
       const acted =
         item.reviewRequestedFrom?.length === 0
-          ? sql`null`
+          ? sql`case when excluded.updated_at > tracker_items.updated_at then null else tracker_items.review_acted_by end`
           : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
           workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
@@ -631,8 +633,19 @@ export function createTrackerRepository(
           (other) => other.toLowerCase() !== login.toLowerCase(),
         ),
         acted: withReviewMark(lists.acted, login, sha),
-        updatedAt: afterInstant(lists.updatedAt),
+        updatedAt: lists.updatedAt,
       }));
+    },
+
+    forgetReviewActed(repositoryId, number, login) {
+      return changeReviewLists(repositoryId, number, (lists) => {
+        const acted = lists.acted.filter(
+          (mark) => mark.login.toLowerCase() !== login.toLowerCase(),
+        );
+        return acted.length === lists.acted.length
+          ? undefined
+          : { requested: lists.requested, acted, updatedAt: lists.updatedAt };
+      });
     },
 
     markReviewActed(repositoryId, number, login, sha) {

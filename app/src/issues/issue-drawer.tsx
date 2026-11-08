@@ -29,6 +29,7 @@ import {
   formatSince,
   formatUsd,
   pullRequestOf,
+  pullRequestState,
   pullRequestUrl,
   subIssuesOf,
   ticketUrl,
@@ -337,6 +338,7 @@ function PullRequests({
     <ul className="m-0 flex list-none flex-col gap-2 p-0 text-sm">
       {item.pullRequests.map((number) => {
         const pull = pullRequestOf(list, number);
+        const state = pullRequestState(list, item, number);
         const address = pullRequestUrl(list.repo, number);
         return (
           <li key={number} className="flex flex-wrap items-center gap-2">
@@ -345,16 +347,19 @@ function PullRequests({
             ) : (
               <ExternalLink href={address}>#{number}</ExternalLink>
             )}
+            {state === undefined ? (
+              <span className="text-muted-foreground">
+                {DRAWER_COPY.pullStateUnknown}
+              </span>
+            ) : (
+              <Badge variant={state === "open" ? "success" : "neutral"}>
+                {state}
+              </Badge>
+            )}
             {pull === undefined ? null : (
-              <>
-                <Badge variant={pull.state === "open" ? "success" : "neutral"}>
-                  {pull.state}
-                </Badge>
-                <span className="text-muted-foreground">
-                  {DRAWER_COPY.checks}:{" "}
-                  {pull.checksState ?? DRAWER_COPY.noChecks}
-                </span>
-              </>
+              <span className="text-muted-foreground">
+                {DRAWER_COPY.checks}: {pull.checksState ?? DRAWER_COPY.noChecks}
+              </span>
             )}
           </li>
         );

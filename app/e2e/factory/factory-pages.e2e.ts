@@ -25,8 +25,8 @@ import {
 const REPOSITORY = "factory-journey/widgets";
 const QUESTION = "Which database should the cache use?";
 
-// The journey builds on itself: the lane is started on the first ticket, discarded on the run page, and the question of the second ticket is
-// answered from the ToDos page.
+// The journey builds on itself: the lane is started on the first ticket, discarded on the run page, the waiting run of the second ticket is
+// looked at (its page, then the Answer link of the Issues tab) and its question is answered from the ToDos page.
 test.describe.configure({ mode: "serial" });
 
 test.describe("the pages of the factory", () => {
@@ -35,6 +35,9 @@ test.describe("the pages of the factory", () => {
   let waitingRunId = "";
   // The address of the run the lane made on the first issue.
   let startedRunPath = "";
+
+  const waitingRunPath = () =>
+    `/w/default/workflows/${laneId}/runs/${waitingRunId}`;
 
   const projectPath = (segment = "") =>
     `/w/default/projects/${repositoryId}${segment === "" ? "" : `/${segment}`}`;
@@ -144,10 +147,67 @@ test.describe("the pages of the factory", () => {
     await signInAsFactoryAdmin(page);
     await page.goto(startedRunPath);
     await page.getByRole("button", { name: "Discard this run" }).click();
+    const discarded = page.getByText(
+      "Discarded: no longer active, nothing counts against the ticket.",
+    );
+    await expect(discarded).toBeVisible();
+    // The state is the run's, not the page's: it is still there after a reload.
+    await page.reload();
+    await expect(discarded).toBeVisible();
     await expect(
-      page.getByText(
-        "Discarded: no longer active, nothing counts against the ticket.",
+      page.getByRole("button", { name: "Discard this run" }),
+    ).toBeHidden();
+  });
+
+  // #954
+  test("@smoke the run page of the waiting run shows its question, pauses and resumes it", async ({
+    page,
+  }) => {
+    await signInAsFactoryAdmin(page);
+    await page.goto(waitingRunPath());
+    // The step that asked waits (the run's own badge says the same; the step is the one that is unique on the page).
+    await expect(
+      page
+        .locator('[data-slot="run-step"]')
+        .getByText("Waiting for an answer", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "The agent asks" }),
+    ).toBeVisible();
+    await expect(page.getByText(QUESTION)).toBeVisible();
+    await expect(
+      page.getByText("The cache has to survive a restart."),
+    ).toBeVisible();
+    await expect(page.getByText("Postgres", { exact: true })).toBeVisible();
+
+    const paused = page.getByText(/^Paused: the step that runs goes on/);
+    await expect(paused).toBeHidden();
+    await page.getByRole("button", { name: "Pause after this step" }).click();
+    await expect(paused).toBeVisible();
+    // Resumed, so that the answer of the ToDos page below starts a turn as it does for a person.
+    await page.getByRole("button", { name: "Resume", exact: true }).click();
+    await expect(paused).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Pause after this step" }),
+    ).toBeVisible();
+  });
+
+  // #954
+  test("@smoke the Answer link of the Issues tab opens the ToDos tab of the project on the question", async ({
+    page,
+  }) => {
+    await openProject(page);
+    await page
+      .getByRole("link", { name: "Answer the question on issue #2" })
+      .click();
+
+    await expect(page).toHaveURL(
+      new RegExp(
+        `/w/default/projects/${repositoryId}/todos\\?run=${waitingRunId}$`,
       ),
+    );
+    await expect(
+      page.getByRole("complementary").getByText(QUESTION),
     ).toBeVisible();
   });
 

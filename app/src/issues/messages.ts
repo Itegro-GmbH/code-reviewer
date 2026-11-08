@@ -30,7 +30,7 @@ export const BOARD_COPY = {
     "Updating failed. The list shows the last data it got; it keeps trying.",
   updating: "Updating the list",
   limited: (listed: number) =>
-    `Showing the ${String(listed)} issues that changed last.`,
+    `Showing the ${String(listed)} tickets that changed last (issues and pull requests).`,
   lastSync: (when: string) => `Read from GitHub ${when}.`,
   neverSynced: "Not read from GitHub yet.",
   syncing: "The first read from GitHub is still going on.",
@@ -80,6 +80,7 @@ export const DRAWER_COPY = {
   nobody: "nobody",
   pullRequest: "Pull request",
   noPullRequest: "none yet",
+  pullStateUnknown: "state unknown",
   checks: "Checks",
   noChecks: "none reported",
   lane: "Lane",

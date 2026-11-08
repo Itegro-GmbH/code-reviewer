@@ -549,7 +549,7 @@ for the reviews. No new product code, no new fake: the fake LLM already offers t
 - **Apps.** `plain-instance.e2e.ts` (project `operator-plain`) runs on the app of the real-runner journey (the second app), after that
   journey (`dependencies: ["jobs"]`; two Worker drivers must not claim from one app): an instance with no `OPERATOR_API_TOKEN` and no entitlements.
   `limited-workspace.e2e.ts` (project `operator`) has an app of its own, the seventh, a `next start` of the same build on
-  `E2E_OPERATOR_PORT` (default `E2E_PORT` + 6; the apps of the lane sit on consecutive ports from `E2E_PORT`, so two checkouts less than eight ports apart collide (the catalog app of #435 sits at `E2E_PORT` + 7), give each its own `E2E_PORT`), multi-tenant, with `OPERATOR_API_TOKEN` (a dummy in `e2eEnv.operatorApiToken`), the
+  `E2E_OPERATOR_PORT` (default `E2E_PORT` + 6; the apps of the lane sit on consecutive ports from `E2E_PORT`, so two checkouts less than eleven ports apart collide (the catalog app of #435 sits at `E2E_PORT` + 7, the factory app of #951 at `E2E_PORT` + 10), give each its own `E2E_PORT`), multi-tenant, with `OPERATOR_API_TOKEN` (a dummy in `e2eEnv.operatorApiToken`), the
   instance's `LLM_MODEL` and `LLM_MAX_TOKENS` and `LLM_API_BASE_URL` at the journey's fake LLM (`E2E_OPERATOR_LLM_PORT`, random and free,
   below the ephemeral range, which answers the reviews and the model metadata of the catalog entries). It has two workspaces made the way people make them
   (sign-up, "Create a workspace", "Connect GitHub" through the fake's installation page: `e2e/helpers/multi-tenant.ts`): A takes the
@@ -664,10 +664,13 @@ that starts on an issue reads it there.
   The mirror of the tickets and the run that waits for an answer are written through the real repositories of the app by a child process
   (`src/test-support/e2e-factory-child.ts`, `e2e/helpers/factory.ts`): the sync of the ticket source and a turn that asks need GitHub's GraphQL
   and a model, which the journey does not have. The run is what `lock.askStep` leaves, the same rows the integration tests of the ToDos seed.
-- **Steps.** Issues tab (the mirror, the issue drawer, the start dialog: the lane is started and its run page opens) and the run page (discard);
-  the ToDos page (the question of the waiting run is answered from the panel and moves to Done); the lane builder (one value from the variable
-  picker, saved as the next version, read back from the route); the tabs ToDos, Runs, Lanes and Setup of the project; the sidebar with Profiles,
-  Runners and Settings (the Integrations and Members tabs that moved there). All of them are tagged `@smoke` (the journey takes about twenty seconds) and so run on the pull requests into `development`; they depend on each other, so no one is tagged alone.
+- **Steps.** Issues tab (the mirror, the issue drawer, the start dialog: the lane is started and its run page opens) and the run page (discard,
+  still discarded after a reload); the run page of the waiting run (its question and options, pause and resume); the Answer link of the Issues
+  tab (it opens the ToDos tab of the project on that question, `?run=`); the ToDos page (the question of the waiting run is answered from the
+  panel and moves to Done); the lane builder (one value from the variable picker, saved as the next version, read back from the route); the tabs
+  ToDos, Runs, Lanes and Setup of the project; the sidebar with Profiles, Runners and Settings (the Integrations and Members tabs that moved
+  there). All of them are tagged `@smoke` (the journey takes about twenty seconds) and so run on the pull requests into `development`; they
+  depend on each other, so no one is tagged alone.
 - **Not covered:** what the engine does after the answer or after the start (a turn on a runner: the harness of the engine and the privileged
   lane), the sync of the ticket source (`Resync`), the review actions of the ToDos page and the creation of a project in the dialog.
 

@@ -118,6 +118,32 @@ async function setup(
   return { service, run, summarizeTickets, tracker };
 }
 
+async function writeTicket(
+  tracker: ReturnType<typeof createFakeTrackerRepository>,
+  number: number,
+  kind: "issue" | "pull_request",
+  state: "open" | "closed",
+  closes: number[],
+  updatedAt: string,
+) {
+  await tracker.upsertItem("r-1", {
+    provider: "github",
+    repo: "acme/widgets",
+    number,
+    nodeId: `N_${number}`,
+    kind,
+    state,
+    stateReason: null,
+    type: null,
+    title: `Ticket ${number}`,
+    bodyExcerpt: "",
+    labels: [],
+    assignees: [],
+    closes,
+    updatedAt,
+  });
+}
+
 const OPEN = { state: "open", limit: 100, offset: 0 } as const;
 
 describe("the list of the tickets of a project's repository", () => {
@@ -150,6 +176,7 @@ describe("the list of the tickets of a project's repository", () => {
       boardStatus: null,
       parentNumber: null,
       pullRequests: [3],
+      pullRequestStates: { 3: "open" },
       checksState: null,
       updatedAt: "2026-11-06T10:01:00.000Z",
       syncedAt: expect.any(String),
@@ -163,6 +190,79 @@ describe("the list of the tickets of a project's repository", () => {
       },
       costUsd: 1.234567,
     });
+  });
+
+  // #954
+  it("tells the state of a linked pull request the page does not hold, from the mirror", async () => {
+    const { service, tracker } = await setup();
+    await writeTicket(
+      tracker,
+      4,
+      "pull_request",
+      "open",
+      [6],
+      "2026-11-01T10:04:00.000Z",
+    );
+    await writeTicket(
+      tracker,
+      5,
+      "pull_request",
+      "closed",
+      [6],
+      "2026-11-01T10:05:00.000Z",
+    );
+    await writeTicket(
+      tracker,
+      6,
+      "issue",
+      "open",
+      [],
+      "2026-11-06T10:06:00.000Z",
+    );
+    await tracker.linkPullRequests("r-1");
+
+    // Only the newest ticket: its pull requests are not on the page.
+    const list = await service.listIssues("r-1", {
+      state: "open",
+      limit: 1,
+      offset: 0,
+    });
+
+    expect(list.items.map((item) => item.number)).toEqual([6]);
+    expect(list.items[0]?.pullRequests).toEqual([4, 5]);
+    expect(list.items[0]?.pullRequestStates).toEqual({
+      4: "open",
+      5: "closed",
+    });
+  });
+
+  // #954
+  it("leaves the state of a linked pull request out when the mirror does not hold it", async () => {
+    const { service, tracker } = await setup();
+    await writeTicket(
+      tracker,
+      7,
+      "issue",
+      "open",
+      [],
+      "2026-11-06T10:07:00.000Z",
+    );
+    await writeTicket(
+      tracker,
+      8,
+      "pull_request",
+      "open",
+      [7],
+      "2026-11-06T10:08:00.000Z",
+    );
+    await tracker.linkPullRequests("r-1");
+    await tracker.deleteItem("r-1", 8, "2026-11-06T10:09:00.000Z");
+
+    const list = await service.listIssues("r-1", OPEN);
+
+    const seven = list.items.find((entry) => entry.number === 7);
+    expect(seven?.pullRequests).toEqual([8]);
+    expect(seven?.pullRequestStates).toEqual({});
   });
 
   // #923-T55

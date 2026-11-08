@@ -335,7 +335,7 @@ describe("the tickets of the mirror", () => {
   });
 
   // #924-T84
-  it("moves the time of the row on when a request is taken away, so that a stale delivery of the same second is not accepted", async () => {
+  it("keeps the time of the row when a request is taken away, so that a change of the same second is taken, and the mark keeps a stale list from bringing the review back", async () => {
     const { tracker, first } = await setup();
     const same = {
       kind: "pull_request" as const,
@@ -345,11 +345,16 @@ describe("the tickets of the mirror", () => {
     await tracker.upsertItem(first.id, item(7, same));
     await tracker.removeReviewRequested(first.id, 7, "alice", "sha-1");
 
-    expect(await tracker.upsertItem(first.id, item(7, same))).toBe(false);
     expect(await tracker.getItem(first.id, 7)).toMatchObject({
       reviewRequestedFrom: ["bob"],
       reviewActedBy: [{ login: "alice", sha: "sha-1" }],
-      updatedAt: "2026-11-06T10:00:00.001Z",
+      updatedAt: "2026-11-06T10:00:00.000Z",
+    });
+    // a change of that second is taken (#954); the stale list names alice again, and her mark stays
+    expect(await tracker.upsertItem(first.id, item(7, same))).toBe(true);
+    expect(await tracker.getItem(first.id, 7)).toMatchObject({
+      reviewRequestedFrom: ["alice", "bob"],
+      reviewActedBy: [{ login: "alice", sha: "sha-1" }],
     });
     // the next second is taken
     expect(
@@ -358,6 +363,68 @@ describe("the tickets of the mirror", () => {
         item(7, { ...same, updatedAt: "2026-11-06T10:00:01.000Z" }),
       ),
     ).toBe(true);
+  });
+
+  // #954-T10: removal, then GitHub's own empty list of the same second, then a stale list of that second naming alice: the empty
+  // list of the same second does not end her mark, so the stale list cannot bring the review back
+  it("keeps the marks when an empty list comes in the same second as the row, and ends them on a newer one", async () => {
+    const { tracker, first } = await setup();
+    const at = "2026-11-06T10:00:00.000Z";
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["alice"],
+        updatedAt: at,
+      }),
+    );
+    await tracker.removeReviewRequested(first.id, 7, "alice", "sha-1");
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: [], updatedAt: at }),
+    );
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["alice"],
+        updatedAt: at,
+      }),
+    );
+    expect((await tracker.getItem(first.id, 7))?.reviewActedBy).toEqual([
+      { login: "alice", sha: "sha-1" },
+    ]);
+
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: [],
+        updatedAt: "2026-11-06T10:00:01.000Z",
+      }),
+    );
+    expect((await tracker.getItem(first.id, 7))?.reviewActedBy).toEqual([]);
+  });
+
+  // #954
+  it("forgets the mark of one login, without regard to case, and only for a pull request of the repository", async () => {
+    const { tracker, first, second } = await setup();
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: ["alice", "bob"] }),
+    );
+    await tracker.markReviewActed(first.id, 7, "alice", "sha-1");
+    await tracker.markReviewActed(first.id, 7, "bob", "sha-1");
+
+    expect(await tracker.forgetReviewActed(first.id, 7, "ALICE")).toBe(true);
+    expect((await tracker.getItem(first.id, 7))?.reviewActedBy).toEqual([
+      { login: "bob", sha: "sha-1" },
+    ]);
+    // nobody to forget: no write
+    expect(await tracker.forgetReviewActed(first.id, 7, "alice")).toBe(false);
+    expect(await tracker.forgetReviewActed(second.id, 7, "bob")).toBe(false);
+    await tracker.upsertItem(first.id, item(12));
+    expect(await tracker.forgetReviewActed(first.id, 12, "bob")).toBe(false);
   });
 
   // #923-T88

@@ -76,8 +76,12 @@ login. The mark is kept for a member of a fan-out too, who is never asked by nam
 end it, so a later `pull_request` delivery or the nightly resync cannot bring the review back and invite a second, contradicting one. The
 mark ends when the pull request gets a new commit (a request that stands is for the new head: the delivery clears it, and the full sync
 drops the marks made for another head), when the pull request is over, and when nobody is asked any more (a request after that is a new
-ToDo). One edge stays: a person whose request was taken away and who is asked again on the same commit does not see it until the commit
-changes. The other members asked by a fan-out keep seeing the review until they act or the pull request ends. Team reviewers are not read
+ToDo). A person whose request was taken away and who is **asked again on the same commit** sees the review again: a `review_requested` delivery that
+names the login (`requested_reviewer`) drops that login's mark, if the delivery is newer than the row (the same request delivered again, or one of
+the same second, which GitHub cannot tell apart, drops nothing; a team names no login). The row's time does not move when the App takes a
+request away, so a change of the same second is taken; the mark, not the time, keeps a stale list of that second from bringing the review back,
+and an empty list ends the marks only when it is newer than the row (GitHub's answer to our own removal comes in the same second and keeps
+them). The other members asked by a fan-out keep seeing the review until they act or the pull request ends. Team reviewers are not read
 (a request for a team is nobody's ToDo here).
 
 A pull request that no lane opened is not a ToDo, whoever is asked. The entry has `id: "review:<repositoryId>:<number>"`, `number`, `title`,
@@ -186,7 +190,7 @@ service, which reads the waiting runs and the pull requests of the lanes like th
 is kept 10 s per workspace and person, in the memory of the server instance that answered: another instance has its own cache and its own 10 s, so two
 instances can show numbers that differ for a moment; reads that arrive at the same time share one pass, and so do reads with `?fresh=1` that arrive
 while another fresh read is on its way: they share one more pass that starts when it is over, so no fresh read costs more than one pass of its own and
-none is answered with a pass that began before it). The two badges are one request in the browser; one read per page change, never one per ToDo, and a
+none is answered with a pass that began before it; a pass that has not ended after 15 s no longer holds the fresh reads after it back, they start their own). The two badges are one request in the browser; one read per page change, never one per ToDo, and a
 read that finishes after a newer one was started is thrown away. The page sends the browser event `factory:todos-changed` after an answer or a review
 and when its own poll finds other open ToDos than the read before; the badges then read again with `?fresh=1`. Nothing is shown for none, for a
 repository that is not a project yet, or when the read fails.
