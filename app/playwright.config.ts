@@ -373,9 +373,9 @@ export default defineConfig({
       dependencies: ["prepare", "connect"],
     },
   ],
-  // Nine apps under test (the port `E2E_PORT` + 5 is the one the update journey starts itself) and the two
+  // Ten apps under test (the port `E2E_PORT` + 5 is the one the update journey starts itself) and the two
   // fake servers they share, GitHub and SMTP; the journeys start their own fake LLMs. The apps take consecutive ports
-  // from `E2E_PORT` up to `E2E_PORT` + 7. The fake GitHub stands in for github.com (sign in) and api.github.com; the app
+  // from `E2E_PORT` up to `E2E_PORT` + 10 (the fake Stripe has +9). The fake GitHub stands in for github.com (sign in) and api.github.com; the app
   // under test is pointed at it by environment variables. The journeys always run against a
   // production build, never the dev server, with a fresh Postgres database each (E2E_DATABASE_URL names the server;
   // `pnpm migrate` migrates it before the app starts). All values are fixed dummies.

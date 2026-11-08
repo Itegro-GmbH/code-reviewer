@@ -138,7 +138,7 @@ test.describe("the pages of the factory", () => {
   });
 
   // #951
-  test("the run page discards the run", async ({ page }) => {
+  test("@smoke the run page discards the run", async ({ page }) => {
     await signInAsFactoryAdmin(page);
     await page.goto(startedRunPath);
     await page.getByRole("button", { name: "Discard this run" }).click();
@@ -180,9 +180,7 @@ test.describe("the pages of the factory", () => {
       .getByRole("link", { name: LANE_DOCUMENT.name })
       .click();
     // The only step of the lane is open in the inspector.
-    await expect(
-      page.getByRole("region", { name: "Inspector" }),
-    ).toBeVisible();
+    await expect(page.getByRole("region", { name: "Inspector" })).toBeVisible();
     await page
       .getByRole("button", { name: "Insert a value into body" })
       .click();
@@ -210,7 +208,7 @@ test.describe("the pages of the factory", () => {
   });
 
   // #951
-  test("the tabs of the project open: ToDos, Runs, Lanes and Setup", async ({
+  test("@smoke the tabs of the project open: ToDos, Runs, Lanes and Setup", async ({
     page,
   }) => {
     await openProject(page);
@@ -226,11 +224,13 @@ test.describe("the pages of the factory", () => {
     await expect(
       page.getByRole("heading", { name: "Ticket source" }),
     ).toBeVisible();
-    await expect(page.getByText("GitHub issues", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("GitHub issues", { exact: true }),
+    ).toBeVisible();
   });
 
   // #951
-  test("Profiles, Runners and Settings open from the sidebar", async ({
+  test("@smoke Profiles, Runners and Settings open from the sidebar", async ({
     page,
   }) => {
     await signInAsFactoryAdmin(page);

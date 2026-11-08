@@ -11,7 +11,7 @@ import { createWorkspaceMembersRepository } from "../db/repositories/workspace-m
 import { getDatabase } from "../db/startup.ts";
 import { projectServiceFor } from "../projects/shared.ts";
 import { connectorTargetOf } from "../workflow-runs/shared.ts";
-import { createCountCache } from "./count-cache.ts";
+import { createCountCache, openCountKey } from "./count-cache.ts";
 import { createReviewActions, type ReviewActions } from "./review.ts";
 import {
   createTodosService,
@@ -55,9 +55,8 @@ export function openTodoCountFor(
   viewer: TodoViewer,
   { fresh = false }: { fresh?: boolean } = {},
 ): Promise<OpenCounts> {
-  const person = viewer.githubLogin?.toLowerCase() ?? "";
   return counts.read(
-    `${workspaceId}\u0000${person}`,
+    openCountKey(workspaceId, viewer),
     () => todosServiceFor(workspaceId).countOpen(viewer),
     { fresh },
   );
