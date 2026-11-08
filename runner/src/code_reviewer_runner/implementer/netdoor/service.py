@@ -24,6 +24,7 @@ from code_reviewer_runner.job_loop.jsonvalues import as_object
 from ..network_rule import MODE_OFF, NetworkRule, RuleError, parse_door_rule
 from .addresses import Resolver, ci_public_network, system_resolver
 from .connections import ConnectionLog
+from .intercept import RegistryGate, UpstreamTls, system_upstream_tls
 from .protocol import (
     MAX_COMMAND_BYTES,
     MAX_START_BYTES,
@@ -31,12 +32,14 @@ from .protocol import (
     MESSAGE_REFUSED,
     MESSAGE_STATUS,
     OP_STOP,
+    REFUSED_CA_FAILED,
     REFUSED_LISTEN_FAILED,
     REFUSED_RULE_INVALID,
     REFUSED_START_INVALID,
     VERSION,
 )
 from .proxy import Connector, Decider, ProxyServer, tcp_connector
+from .registries import rule_has_registries
 
 _log = logging.getLogger(__name__)
 
@@ -114,8 +117,11 @@ class _Reporter:
         self._said = -1
         self._last = float("-inf")
 
-    def ready(self) -> None:
-        _emit(self._stdout, {"t": MESSAGE_READY})
+    def ready(self, ca_pem: bytes | None = None) -> None:
+        document: dict[str, Any] = {"t": MESSAGE_READY}
+        if ca_pem is not None:
+            document["ca"] = ca_pem.decode("ascii")
+        _emit(self._stdout, document)
 
     def report(self, *, final: bool = False) -> None:
         version = self._log.version
@@ -154,6 +160,24 @@ def _read_stop(stdin: TextIO, stop: threading.Event) -> None:
         stop.set()
 
 
+def make_gate(
+    start: NetStart, log: ConnectionLog, upstream_tls: UpstreamTls
+) -> RegistryGate | None:
+    """The read-only registry gate (#784) when the rule names a registry, else None. Its authority
+    lives as long as the door: the turn's deadline, the linger and an hour. Raises `StartRefused`
+    when it cannot be made."""
+    if not rule_has_registries(start.rule):
+        return None
+    try:
+        # Imported here: a door whose rule names no registry never loads the crypto library.
+        from .authority import Authority
+
+        authority = Authority(lifetime_seconds=start.deadline_seconds + LINGER_SECONDS + 3600)
+    except Exception:
+        raise StartRefused(REFUSED_CA_FAILED) from None
+    return RegistryGate(authority, log, upstream_tls=upstream_tls)
+
+
 def run_netdoor(
     stdin: TextIO,
     stdout: TextIO,
@@ -161,6 +185,7 @@ def run_netdoor(
     bind: tuple[str, int] | None = None,
     resolver: Resolver = system_resolver,
     connector: Connector = tcp_connector,
+    upstream_tls: UpstreamTls = system_upstream_tls,
     clock: Callable[[], float] = time.monotonic,
     poll_seconds: float = POLL_SECONDS,
 ) -> int:
@@ -171,9 +196,13 @@ def run_netdoor(
     try:
         start = parse_start(stdin.readline(MAX_START_BYTES + 1))
         decider = Decider(start.rule, log, resolver=resolver, test_network=ci_public_network())
+        gate = make_gate(start, log, upstream_tls)
         try:
             server = ProxyServer(
-                bind or (NETWORK_DOOR_ADDRESS, start.port), decider, connector=connector
+                bind or (NETWORK_DOOR_ADDRESS, start.port),
+                decider,
+                connector=connector,
+                registry_gate=gate,
             ).start()
         except OSError:
             raise StartRefused(REFUSED_LISTEN_FAILED) from None
@@ -184,7 +213,7 @@ def run_netdoor(
     reporter = _Reporter(log, stdout, clock)
     stop = threading.Event()
     threading.Thread(target=_read_stop, args=(stdin, stop), daemon=True).start()
-    reporter.ready()
+    reporter.ready(None if gate is None else gate.ca_pem)
     try:
         while not stop.wait(poll_seconds):
             if clock() - began > start.deadline_seconds + LINGER_SECONDS:

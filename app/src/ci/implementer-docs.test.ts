@@ -505,7 +505,11 @@ describe("the operator guide states what the owner decided", () => {
     const risks = flat(section(guide, "## What is accepted, and until when"));
     expect(risks).toContain("own repositories");
     expect(risks).toContain("internal use");
-    expect(risks).toMatch(/#784 .*(closed|closes) before/);
+    // #784: publishing is closed, the slow channel through GET URLs is stated as accepted.
+    expect(risks).toMatch(/publishing is closed.*#784/);
+    expect(risks).toContain(
+      "covert channel through GET URLs remains and is accepted",
+    );
     expect(risks).toContain("external users");
   });
 

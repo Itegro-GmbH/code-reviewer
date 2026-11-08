@@ -92,6 +92,10 @@ NETDOOR_MEMORY_MB: Final = 96
 NETDOOR_MEMORY_BYTES: Final = NETDOOR_MEMORY_MB * 1024 * 1024
 # 128 connections (`proxy.MAX_CONNECTIONS`), two threads each, and the process's own.
 NETDOOR_PIDS_LIMIT: Final = 400
+# The public certificate the door may send in `ready` (#784): one PEM certificate, a few hundred
+# bytes; anything that is not one is ignored.
+CA_PEM_START: Final = "-----BEGIN CERTIFICATE-----"
+MAX_CA_CHARS: Final = 8192
 # The doors outlive the agent's processes: under memory pressure the VM's OOM killer takes the
 # agent first (it has 1000), and the doors, which hold nothing the agent can use, last.
 NETDOOR_OOM_SCORE_ADJ: Final = -500
@@ -248,6 +252,7 @@ class NetDoorState:
     """What the reader thread learned from the door's output."""
 
     ready: threading.Event = field(default_factory=threading.Event)
+    ca: bytes | None = None
     refusal: str | None = None
     status: dict[str, Any] | None = None
     end: DoorEnd | None = None
@@ -305,6 +310,10 @@ class RunningNetDoor:
         if given is None:
             return
         if kind == MESSAGE_READY:
+            ca = given.get("ca")
+            if isinstance(ca, str) and ca.startswith(CA_PEM_START) and len(ca) <= MAX_CA_CHARS:
+                with self._lock:
+                    self._state.ca = ca.encode("ascii", "replace")
             self._state.ready.set()
         elif kind == MESSAGE_REFUSED:
             reason = given.get("reason")
@@ -333,6 +342,13 @@ class RunningNetDoor:
 
     def wait_ready(self, seconds: float) -> None:
         self._state.ready.wait(seconds)
+
+    @property
+    def registry_ca(self) -> bytes | None:
+        """The public certificate of the door's authority (#784), when the rule names a package
+        registry: the agent's tools are told to trust it (`agent_container.trust_environment`)."""
+        with self._lock:
+            return self._state.ca
 
     @property
     def refusal(self) -> str | None:

@@ -7,6 +7,9 @@ license = { text = "Proprietary" }
 classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "pr-agent==0.47.0",
+    # The network door's certificate authority for the package registries (#784); pr-agent pulls it
+    # in through azure-identity, and the door must not depend on that staying so.
+    "cryptography>=50.0.2",
 ]
 
 [project.scripts]
@@ -33,7 +36,6 @@ dev = [
     "pyright",
     "jsonschema",
     "pyjwt>=2.15.1",
-    "cryptography>=50.0.2",
 ]
 
 [tool.pytest.ini_options]

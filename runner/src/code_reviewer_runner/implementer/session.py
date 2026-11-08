@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from code_reviewer_runner.dynamic_review.adapter import (
@@ -73,6 +74,9 @@ from .agent_container import (
     ENGINE_PORT,
     KILL_SECONDS,
     STOP_SECONDS,
+    SYSTEM_ROOTS_PATH,
+    TRUST_BUNDLE_NAME,
+    TRUST_CA_NAME,
 )
 from .claude_code.agent import ClaudeCodeAgent
 from .claude_code.gates import ANTHROPIC_HOST, subscription_rule
@@ -97,6 +101,7 @@ from .history import CommitInfo, FileChange
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
+from .netdoor.registries import rule_has_registries
 from .netdoor_launcher import NetDoorSeams, RunningNetDoor, start_network_door
 from .network_report import (
     VM_POLICY_NARROWED,
@@ -220,6 +225,9 @@ class SessionSeams:
     netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
     switch_post: Post = urllib_post
     switch_pause_seconds: float = 2.0
+    # The system's root certificates, which the agent's trust bundle (#784) starts with: this
+    # container has the agent's image's roots (the same Debian bundle); a test brings its own.
+    system_roots: Callable[[], bytes] = lambda: Path(SYSTEM_ROOTS_PATH).read_bytes()
 
 
 class AgentPlace(EngineRuntime, Protocol):
@@ -501,6 +509,7 @@ class ImplementerSession:
             place = self._place_factory()
             for note in place.create():
                 self._note(note)
+            self._install_registry_trust(place)
             if self._subscription is not None:
                 agent = self._start_claude(place)
             else:
@@ -794,6 +803,34 @@ class ImplementerSession:
                 pause_seconds=self.seams.switch_pause_seconds,
             )
             self._vm_policy = VM_POLICY_NARROWED
+
+    def _install_registry_trust(self, place: AgentPlace) -> None:
+        """The door's certificate authority into the agent's container (#784), before anything runs
+        in it: the variables of `agent_container.trust_environment` point at these two files, and a
+        tool that cannot read its roots fails every connection, so a rule that names a registry
+        without them ends the turn `setup_failed`, free."""
+        if not rule_has_registries(self.rule):
+            return
+        door = self._netdoor
+        ca = None if door is None else door.registry_ca
+        if ca is None:
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "network_door_unavailable: the door sent no certificate for the package registries",
+            )
+        try:
+            roots = self.seams.system_roots()
+        except OSError:
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "network_door_unavailable: the system's root certificates could not be read",
+            ) from None
+        place.write_files(
+            {
+                TRUST_CA_NAME: (ca, 0o644),
+                TRUST_BUNDLE_NAME: (roots.rstrip(b"\n") + b"\n" + ca, 0o644),
+            }
+        )
 
     def _stop_network(self) -> None:
         """End the network door and keep its log. Safe to call twice."""
