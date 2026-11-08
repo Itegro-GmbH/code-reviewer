@@ -55,7 +55,16 @@ type GitHub = {
   issues: TrackerItemFields[];
   /** How many items one page of the list holds. */
   pageSize: number;
-  checks: { number: number; checksState: string | null }[][];
+  checks: {
+    number: number;
+    checksState: string | null;
+    /** Left out: the list does not say who is asked (the object has no `requested_reviewers`). */
+    reviewRequestedFrom?: string[];
+    /** The time of the pull request in the list; default: later than every delivery of the fixtures. */
+    updatedAt?: string;
+    /** The commit the pull request has now; default: `head-1`. */
+    headSha?: string;
+  }[][];
   /** Pages of board items; null: the app may not read boards. */
   board: { nodeId: string; status: string | null }[][] | null;
   /** Pages of the items of the board a project chose, by the board's id (#937); a board that is not listed cannot be read. */
@@ -91,7 +100,9 @@ const GITHUB: GitHub = {
       updatedAt: at(5),
     }),
   ],
-  checks: [[{ number: 7, checksState: "failure" }]],
+  checks: [
+    [{ number: 7, checksState: "failure", reviewRequestedFrom: ["ada"] }],
+  ],
   board: [
     [{ nodeId: "N_12", status: "In Progress" }],
     [{ nodeId: "N_3", status: "Todo" }],
@@ -138,7 +149,11 @@ function provider(github: GitHub) {
         const pullRequests = index < 0 ? [] : (pages[index] ?? []);
         return {
           phase: "checks",
-          pullRequests,
+          pullRequests: pullRequests.map((pullRequest) => ({
+            ...pullRequest,
+            updatedAt: pullRequest.updatedAt ?? at(59),
+            headSha: pullRequest.headSha ?? "head-1",
+          })),
           last: pages.slice(index + 1).every((listed) => listed.length === 0),
           lastNumber: pullRequests.at(-1)?.number ?? null,
         };
@@ -223,8 +238,13 @@ describe("the full sync of the ticket mirror", () => {
     expect(await tracker.getItem("r-1", 13)).toMatchObject({
       pullRequests: [8],
     });
+    // #924-T05: the checks phase reads who a review of the open pull request is asked from
     expect(await tracker.getItem("r-1", 7)).toMatchObject({
       checksState: "failure",
+      reviewRequestedFrom: ["ada"],
+    });
+    expect(await tracker.getItem("r-1", 8)).toMatchObject({
+      reviewRequestedFrom: [],
     });
     expect(await tracker.getItem("r-1", 3)).toMatchObject({
       boardStatus: "Todo",
@@ -233,6 +253,99 @@ describe("the full sync of the ticket mirror", () => {
       cursor: null,
       startedAt: null,
       lastFullSyncAt: expect.any(String),
+    });
+  });
+
+  // #924-T08
+  it("does not overwrite who a review is asked from with a list that is older than what a delivery said", async () => {
+    // the list the sync reads was taken before that delivery: it shows the request of ada, which carol's delivery replaced
+    const { tracker, run } = setup({
+      ...GITHUB,
+      checks: [
+        [
+          {
+            number: 7,
+            checksState: "failure",
+            reviewRequestedFrom: ["ada"],
+            updatedAt: at(10),
+          },
+        ],
+      ],
+    });
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["carol"],
+        updatedAt: at(30),
+      }),
+    });
+
+    await run();
+
+    expect((await tracker.getItem("r-1", 7))?.reviewRequestedFrom).toEqual([
+      "carol",
+    ]);
+  });
+
+  // #924-T16
+  it("drops the marks of a review that were made for another head commit, keeps the others, and does not touch the list when it is unknown", async () => {
+    const asked = (headSha: string, reviewRequestedFrom?: string[]) => ({
+      ...GITHUB,
+      checks: [
+        [
+          {
+            number: 7,
+            checksState: "failure",
+            ...(reviewRequestedFrom === undefined
+              ? {}
+              : { reviewRequestedFrom }),
+            headSha,
+          },
+        ],
+      ],
+    });
+    const { tracker, run } = setup(asked("head-2", ["ada"]));
+    await tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["ada"],
+        updatedAt: at(4),
+      }),
+    });
+    await tracker.markReviewActed("r-1", 7, "carol", "head-1");
+    await tracker.markReviewActed("r-1", 7, "dave", "head-2");
+
+    await run();
+
+    // carol acted for the commit before: a new commit is a new ToDo; dave acted for this one
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "dave", sha: "head-2" },
+    ]);
+
+    // the list does not say who is asked: neither the list nor the marks of this head are changed ("unknown" is not "nobody")
+    const unknown = setup(asked("head-2"));
+    await unknown.tracker.upsertItem("r-1", {
+      provider: "github",
+      repo: "acme/widgets",
+      ...item(7, {
+        kind: "pull_request",
+        title: "Pull request",
+        reviewRequestedFrom: ["ada"],
+        updatedAt: at(4),
+      }),
+    });
+    await unknown.tracker.markReviewActed("r-1", 7, "dave", "head-2");
+    await unknown.tracker.markReviewActed("r-1", 7, "carol", "head-1");
+    await unknown.run();
+    expect(await unknown.tracker.getItem("r-1", 7)).toMatchObject({
+      reviewRequestedFrom: ["ada"],
+      reviewActedBy: [{ login: "dave", sha: "head-2" }],
     });
   });
 
@@ -447,7 +560,18 @@ describe("the rebuild rule", () => {
       await mirror.apply(INTEGRATION, {
         kind: "item_changed",
         repo,
-        item: ticket,
+        // The object of a pull request in a webhook carries who a review is asked from; the list of the issues does not (the checks do).
+        item:
+          ticket.kind === "pull_request"
+            ? {
+                ...ticket,
+                reviewRequestedFrom:
+                  GITHUB.checks
+                    .flat()
+                    .find((pull) => pull.number === ticket.number)
+                    ?.reviewRequestedFrom ?? [],
+              }
+            : ticket,
         resetChecks: false,
       });
     for (const page of GITHUB.board ?? [])

@@ -125,6 +125,19 @@ describe("what a delivery says about the ticket mirror", () => {
     expect(parse("pull_request.review_requested.mirror")).toMatchObject({
       change: { resetChecks: false },
     });
+    // #924-T01: the object carries the whole list of who is asked; the other deliveries carry none and say nothing about it
+    expect(parse("pull_request.review_requested.mirror")).toMatchObject({
+      change: { item: { reviewRequestedFrom: ["carol"] } },
+    });
+    expect(parse("pull_request.synchronize.mirror")).toMatchObject({
+      change: { item: { number: 7 } },
+    });
+    const synchronized = parse("pull_request.synchronize.mirror");
+    expect(
+      synchronized.kind === "change" &&
+        synchronized.change.kind === "item_changed" &&
+        "reviewRequestedFrom" in synchronized.change.item,
+    ).toBe(false);
   });
 
   // #923-T14

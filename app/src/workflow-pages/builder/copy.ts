@@ -17,6 +17,10 @@ export const BUILDER_COPY = {
   elseLabel: "else",
   thenLabel: "then",
   checking: "Checking…",
+  checkResult: (valid: boolean, count: number, more: boolean): string =>
+    valid
+      ? `Check finished: the lane is valid, ${String(count)} ${count === 1 ? "step" : "steps"}.`
+      : `Check finished: ${String(count)}${more ? " or more" : ""} ${count === 1 && !more ? "error" : "errors"}, the lane cannot be saved.`,
   couldNotCheck:
     "Could not check the lane. The last result is shown; change something to try again.",
   jsonShow: "JSON",
@@ -58,6 +62,54 @@ export const BUILDER_COPY = {
   loopFooter: (rounds: unknown): string =>
     `Ends when until holds, after ${typeof rounds === "number" ? String(rounds) : "?"} rounds, or when the budget runs out between two rounds · yields exit and rounds`,
 } as const;
+
+/** The picker (#927) and the chips of a field. */
+export const PICKER_COPY = {
+  insertInto: (field: string): string => `Insert a value into ${field}`,
+  dialog: (field: string): string => `Values for ${field}`,
+  search: "Search values",
+  categories: "Categories",
+  all: "All values",
+  values: "Values",
+  loading: "Loading the values…",
+  failed: "Could not load the values. Close this and try again.",
+  empty: "This step can reach no value of this kind.",
+  noMatch: (query: string): string => `No value matches “${query}”.`,
+  matches: (count: number): string =>
+    count === 1 ? "1 value" : `${String(count)} values`,
+  typeNote:
+    "These are the values this step can reach; the validator still checks that their type fits the field.",
+  wantsText: "Takes text: an object is not offered, use one of its fields.",
+  wantsComparable: "Compares a text, a number or true/false.",
+  wantsEmptiable: "Asks whether a list or a text is empty.",
+  sampled: "Samples are from the latest run of this lane.",
+  notSampled: "No run of this lane yet, so there are no samples.",
+  truncated: "Only the first values are listed: search for the rest.",
+  sample: "last run",
+  removeChip: (label: string): string => `Remove ${label}`,
+  variablesIn: (field: string): string => `Values in ${field}`,
+  literalOnly: "Takes a literal only: a name, no reference.",
+  oneValue: (words: string): string =>
+    `Takes a literal or exactly one value: ${words}. Nothing else is offered.`,
+  oneValueDone: "This field holds its one value. Remove it to pick another.",
+} as const;
+
+/** What a target root means, in words for the footer of a target field. */
+export const TARGET_ROOT_WORDS: Record<string, string> = {
+  input: "an input of the trigger",
+  issue: "the issue that started the run",
+  ticket: "the ticket the run is about",
+  defaultBranch: "the default branch of the repository",
+  branch: "the branch of an agent step",
+  pullRequest: "the pull request an action opened",
+};
+
+export function describeTargetRule(roots: readonly string[]): string {
+  if (roots.length === 0) return PICKER_COPY.literalOnly;
+  return PICKER_COPY.oneValue(
+    roots.map((root) => TARGET_ROOT_WORDS[root] ?? root).join(", or "),
+  );
+}
 
 export const KIND_HELP = {
   trigger:

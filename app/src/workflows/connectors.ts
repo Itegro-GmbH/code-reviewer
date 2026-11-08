@@ -31,8 +31,22 @@ import {
  *
  * An input with no root at all (`target: []`) takes a literal only: a name the platform looks up on the provider (a board, a status).
  */
-export type TargetRoot =
-  "input" | "issue" | "ticket" | "defaultBranch" | "branch" | "pullRequest";
+export const TARGET_ROOTS = [
+  "input",
+  "issue",
+  "ticket",
+  "defaultBranch",
+  "branch",
+  "pullRequest",
+] as const;
+export type TargetRoot = (typeof TARGET_ROOTS)[number];
+
+/** Where a reference in the `branch` of an agent step may start: the branch it starts its own session from is a target. */
+export const START_BRANCH_ROOTS: readonly TargetRoot[] = [
+  "input",
+  "defaultBranch",
+  "branch",
+];
 
 export type InputSpec = {
   type: ValueType;

@@ -92,6 +92,7 @@ export type TrackerSyncDependencies = {
     | "upsertItem"
     | "setBoardStatusByNode"
     | "setChecksState"
+    | "setReviewRequestedFrom"
     | "linkPullRequests"
     | "clearBoardStatusesNotSeenSince"
     | "clearChecksStatesOfClosed"
@@ -348,12 +349,21 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
               next = { phase: "checks", after: 0, ...skippedSoFar };
             }
           } else if (page.phase === "checks" && cursor.phase === "checks") {
-            for (const pullRequest of page.pullRequests)
+            for (const pullRequest of page.pullRequests) {
               await tracker.setChecksState(
                 repository.id,
                 pullRequest.number,
                 pullRequest.checksState,
               );
+              await tracker.setReviewRequestedFrom(
+                repository.id,
+                pullRequest.number,
+                // Undefined: the list does not say who is asked, which is not "nobody".
+                pullRequest.reviewRequestedFrom,
+                pullRequest.updatedAt,
+                pullRequest.headSha,
+              );
+            }
             if (page.last)
               // Every open pull request was read (a state the platform does not know is written as none): what is left is not one.
               await tracker.clearChecksStatesOfClosed(repository.id);

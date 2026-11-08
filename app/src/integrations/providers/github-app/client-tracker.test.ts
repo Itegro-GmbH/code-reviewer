@@ -246,7 +246,17 @@ describe("the checks of the full sync", () => {
   it("reads the open pull requests and the check suites of the head of each", async () => {
     const { client, calls } = scripted((call) => {
       if (call.path.startsWith("/repos/acme/widgets/pulls?"))
-        return { json: [pull(7), pull(8)] };
+        return {
+          json: [
+            // #924-T04: the list says who a review is asked from
+            {
+              ...pull(7),
+              requested_reviewers: [{ login: "carol" }],
+              updated_at: "2026-11-07T08:30:00Z",
+            },
+            pull(8),
+          ],
+        };
       if (
         call.path.startsWith(`/repos/acme/widgets/commits/${SHA}/check-suites`)
       )
@@ -270,8 +280,22 @@ describe("the checks of the full sync", () => {
 
     expect(page).toEqual({
       pullRequests: [
-        { number: 7, checksState: "failure" },
-        { number: 8, checksState: "failure" },
+        {
+          number: 7,
+          checksState: "failure",
+          reviewRequestedFrom: ["carol"],
+          // #924-T17: the head commit now, which the marks of a review that was acted on are held against
+          headSha: SHA,
+          // #924-T10: the time the list read, which a newer delivery is compared with; the epoch when the entry says none
+          updatedAt: "2026-11-07T08:30:00.000Z",
+        },
+        {
+          number: 8,
+          checksState: "failure",
+          // an entry without a list of reviewers says nothing about them (#924-T18): the key is left out, it is not an empty list
+          headSha: SHA,
+          updatedAt: "1970-01-01T00:00:00.000Z",
+        },
       ],
       last: true,
       lastNumber: 8,

@@ -4,6 +4,7 @@
 // needs is missing, so the caller can report an unexpected answer instead of passing on garbage.
 import { isRecord } from "./guards.ts";
 import type { PullRequestRef, PullRequestState } from "../../types.ts";
+import { requestedReviewersOf } from "./tracker-map.ts";
 
 export function toPullRequestRef(json: unknown): PullRequestRef | null {
   if (!isRecord(json) || !isRecord(json.head) || !isRecord(json.base))
@@ -22,6 +23,7 @@ export function toPullRequestRef(json: unknown): PullRequestRef | null {
   )
     return null;
 
+  const requestedReviewers = requestedReviewersOf(json);
   const merged = json.merged === true || typeof json.merged_at === "string";
   const state: PullRequestState = merged
     ? "merged"
@@ -41,5 +43,6 @@ export function toPullRequestRef(json: unknown): PullRequestRef | null {
       login: user.login,
       externalId: typeof user.id === "number" ? String(user.id) : null,
     },
+    ...(requestedReviewers === undefined ? {} : { requestedReviewers }),
   };
 }

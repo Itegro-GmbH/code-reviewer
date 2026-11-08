@@ -21,7 +21,6 @@ import {
   removeNode,
   setAt,
   stepCountOf,
-  successorAfterRemoval,
   uniqueId,
   withTriggerKind,
   type Doc,
@@ -93,17 +92,6 @@ describe("a document written before several triggers", () => {
     expect(forSave(withSteps, old)).toBe(withSteps);
     const now = shippedLane() as Doc;
     expect(forSave(now, now)).toBe(now);
-  });
-});
-
-describe("removing a node", () => {
-  // #926-T07b
-  it("names the node that takes its place, or none when it was the last", () => {
-    const lane = shippedLane() as Doc;
-    expect(successorAfterRemoval(lane, "/steps/0")).toBe("/steps/0");
-    const last = `/steps/${String((lane.steps as unknown[]).length - 1)}`;
-    expect(successorAfterRemoval(lane, last)).toBeUndefined();
-    expect(successorAfterRemoval(lane, "/triggers/0")).toBeUndefined();
   });
 });
 

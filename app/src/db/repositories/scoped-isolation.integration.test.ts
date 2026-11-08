@@ -150,6 +150,8 @@ function trackerItem(tag: string) {
     labels: [],
     assignees: [],
     closes: [],
+    // #924: a review is asked from ada, and somebody acted on it: a write that leaks into this row shows in the snapshot of the workspace.
+    reviewRequestedFrom: ["ada"],
     updatedAt: "2026-11-06T10:00:00.000Z",
   };
 }
@@ -569,6 +571,7 @@ async function seed(
   if (workflowAgentStep === undefined) throw new Error("seeding failed");
   // A ticket in every workspace (#923), with a board status and checks, and the state of a sync that is under way.
   await repos.tracker.upsertItem(repository.id, trackerItem(tag));
+  await repos.tracker.markReviewActed(repository.id, 1, "seeded", "sha-seed");
   await repos.tracker.setBoardStatusByNode(`node-repo-${tag}`, "In Progress");
   await repos.tracker.setChecksState(repository.id, 1, "success");
   await repos.tracker.saveSyncState(repository.id, {
@@ -2436,6 +2439,30 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // #924: the seeded workspaces have no run that waits, no answered question and no pull request a lane opened; what the three read
+    // for the ToDos stays inside the workspace (`todos/service.integration.test.ts` proves it with rows in both).
+    name: "workflowRuns.listWaiting",
+    run: (a) => a.workflowRuns.listWaiting(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #924: the steps of B's run are not read for A, only an empty list answers for the id.
+    name: "workflowRuns.listStepsOfRuns",
+    run: (a, b) => a.workflowRuns.listStepsOfRuns([b.workflowRun.id]),
+    expectAnswer: (answer) =>
+      expect([...(answer as Map<string, unknown[]>).values()]).toEqual([[]]),
+  },
+  {
+    name: "workflowRuns.listAnsweredAskSteps",
+    run: (a) => a.workflowRuns.listAnsweredAskSteps(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflowRuns.listPullRequestSteps",
+    run: (a) => a.workflowRuns.listPullRequestSteps(10),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     // #920: B's repository holds no run of A that waits.
     name: "workflowRuns.listWaitingWithoutTicket",
     run: (a, b) => a.workflowRuns.listWaitingWithoutTicket(b.repository.id, 10),
@@ -2562,6 +2589,42 @@ const CASES: Case[] = [
     name: "tracker.setChecksState",
     run: (a, b) => a.tracker.setChecksState(b.repository.id, 1, "failure"),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // #924: who a review is asked from is B's to write.
+    name: "tracker.setReviewRequestedFrom",
+    run: (a, b) =>
+      a.tracker.setReviewRequestedFrom(
+        b.repository.id,
+        1,
+        ["intruder"],
+        "2999-01-01T00:00:00.000Z",
+        "sha-intruder",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.removeReviewRequested",
+    run: (a, b) =>
+      a.tracker.removeReviewRequested(b.repository.id, 1, "ada", "sha-seed"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.markReviewActed",
+    run: (a, b) =>
+      a.tracker.markReviewActed(b.repository.id, 1, "intruder", "sha-seed"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "tracker.clearReviewActed",
+    run: (a, b) => a.tracker.clearReviewActed(b.repository.id, 1),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    // #924: B's tickets are not A's to read by number.
+    name: "tracker.listItemsByNumbers",
+    run: (a, b) => a.tracker.listItemsByNumbers(b.repository.id, [1]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
     name: "tracker.linkPullRequests",
