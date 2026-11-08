@@ -19,14 +19,16 @@ import { TrackerError } from "./errors.ts";
 import { TRACKER_PROVIDER } from "./mirror.ts";
 import type { SyncProgress, TrackerSync } from "./sync.ts";
 
-/** The run that is going on for a ticket. */
+/** The run that is going on for a ticket: running, or waiting for an answer (#925). */
 export type TicketLane = {
   runId: string;
+  /** The workflow (lane) of the run: the address of the run page. */
+  workflowId: string;
   /** The name of the workflow. */
   name: string;
-  /** The step that runs now (or the next one that waits); null before the first step is written. */
+  /** The step that runs now, or asks (or the next one that waits); null before the first step is written. */
   step: string | null;
-  status: "running";
+  status: "running" | "waiting";
 };
 
 /** One ticket of the list: the provider's fields as the cache holds them, plus what is read at the time of the question. */
@@ -208,9 +210,13 @@ export function createTrackerService(
                 ? null
                 : {
                     runId: summary.activeRun.runId,
+                    workflowId: summary.activeRun.workflowId,
                     name: summary.activeRun.workflowName,
                     step: summary.activeRun.stepId,
-                    status: "running",
+                    status:
+                      summary.activeRun.status === "waiting"
+                        ? "waiting"
+                        : "running",
                   },
             costUsd: (summary?.spentMicroUsd ?? 0) / MICRO,
           };

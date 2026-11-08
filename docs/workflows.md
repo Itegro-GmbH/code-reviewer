@@ -1306,6 +1306,33 @@ not exist.
     below it, of **the repository of the run** (`input.repo`, case ignored), with no user name or port in it; `javascript:`, another host or another
     repository are shown as text and not linked. The link of a branch is made from the repository and the branch name, not taken from the output.
 
+## The Issues tab (#925)
+
+*Part 2 of #925, epic #915; the code is [`app/src/issues/`](../app/src/issues/README.md). The tab is the project's own address (`/w/<slug>/projects/<id>`) and exists only with the capability `implementer`.*
+
+The tab lists the issues of the project's ticket source from the [ticket mirror](ticket-mirror.md) (`GET .../projects/<id>/issues?state=all&limit=200`, polled every 4 s while a lane is running on an issue, every 15 s otherwise, also while a lane only waits for an answer). Nothing is mapped: state, type, labels, board status and checks are GitHub's words.
+
+| Column | Shows |
+| --- | --- |
+| Issue | `#number`, title (opens the drawer), type, labels, link to GitHub |
+| In GitHub | state (`open` / `closed`) and the board status, or "not on a board" |
+| Lane | the lane (workflow) that is on the issue and its current step; "No lane" otherwise |
+| Waits for | **Answer**, **Review** or **Start** (below), or "–" |
+
+| Waits for | When | Goes to |
+| --- | --- | --- |
+| Answer | the lane's run `waits` for an answer | the run page, where the question is answered inline (the ToDo answer panel comes with #924) |
+| Review | open issue, no lane on it, a linked pull request is **open** (the newest open one; closed and merged ones do not count, nor one the list does not hold) | the pull request on GitHub |
+| Start | open issue, no lane, no open pull request | the start dialog; refused (`aria-disabled`, still focusable, the reason as text) for a person without `start_implementer_task` and for a project with no lane to start |
+
+The tiles count the issues of the list (open, with a lane, waiting for the person) and add up what their runs cost; a line under them says whether that is all issues of the repository or only the tickets that changed last. The filter shows open issues (default) or all; the list holds the 200 issues that changed last.
+
+**The issue drawer** is a side sheet (focus trap, Escape closes, focus returns to the row's button; it stays on the issue when a later list no longer holds it): state with its reason, type, labels, board status, assignees; the linked pull requests with their state and checks; the lane, its step and a link to the run; the effort (what the runs of the issue cost; for a run that is running also how long it has been going, and the rounds and the questions asked); the steps of that run as a short history; the sub-issues; and a technical section (ticket reference, repository and project ids, run id, the times of GitHub and of the last read). Fields the data does not have (tokens, lines of code) are left out, not invented. The run is read through `GET .../workflows/<id>/runs/<runId>`; when it cannot be read the rest stays.
+
+**The start dialog** asks one question, **Which lane?**: the lanes of the project whose manual trigger takes a `ticket` and no other required input. For the chosen lane it shows what it does (its `description`), its first steps and its limits (`budgetUsd`, `turnTimeLimitMinutes`). It sends `{ trigger, input: { ticket: "github:owner/repo#N" }, clientRequestId }` to `POST .../workflows/<id>/runs` (the same route as the start form; the ticket must be an issue of the project's repository) and opens the run. No machine, profile or model is asked: the profile of each step carries the harness, the model, the key and the runner.
+
+The start dialog's Start button gets the focus back when it closes. The list's `lane` now also names a run that **waits** for an answer (`status: "waiting"`) and carries `workflowId`; before, only a running run was a lane. No new route and no migration.
+
 ## The lane builder
 
 *#926 of epic #915; the code is [`app/src/workflow-pages/builder/`](../app/src/workflow-pages/README.md#the-lane-builder). It is the page of one workflow (`/w/<slug>/workflows/<id>`), reached from the Lanes tab of its project (#922).*

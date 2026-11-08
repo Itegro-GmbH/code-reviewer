@@ -59,6 +59,7 @@ async function setup(
             spentMicroUsd: 1_234_567,
             activeRun: {
               runId: "run-1",
+              workflowId: "wf-1",
               workflowName: "Implement",
               stepId: "review",
               status: "running" as const,
@@ -144,6 +145,7 @@ describe("the list of the tickets of a project's repository", () => {
       url: "https://github.com/acme/widgets/issues/1",
       lane: {
         runId: "run-1",
+        workflowId: "wf-1",
         name: "Implement",
         step: "review",
         status: "running",
