@@ -452,6 +452,25 @@ for its memory (exit code 137). Only the agent's own turn ends: the key stays in
 size of a body is set (the owner's rule: guard money, key and exits). The outcome says so: "the container was killed for its memory (exit code 137);
 a request body too large for the door's memory ends the turn this way".
 
+### What the door refuses in a message (#950)
+
+The conversation through the door is opaque (#810): the door guards money, the key and the way out, and does not read what the model and the engine say to each other. One thing inside it is a way out, so it is closed: **a message part that makes the provider fetch a URL**. The provider requests that URL from its own network, outside every rule of the network door, so a hostile agent (or text it was steered by) could put what it read into the path or the query of a URL and send it out through the model.
+
+The door therefore refuses the whole request (`request_not_allowed`, 403, which ends the turn like any other refused request; the log of the turn has the path of the part, for example `messages[3].content[1].source (url source)`, never a value) when its conversation holds, in any wire family:
+
+| Family | Refused | Passes |
+|---|---|---|
+| Anthropic Messages | `source: {"type": "url"}` on any block (image, document, inside a `tool_result` or a `content` source) | `source` of type `base64`, `text` or `file` |
+| OpenAI Chat (and the compatible providers) | `image_url`, `video_url`, `audio_url`, `file_url`, `document_url` with anything but a `data:` URI (as a string or as `{"url": ...}`) | `data:` URIs, `input_audio` (base64), `file` with `file_data` or `file_id` |
+| OpenAI Responses | the same keys (`input_image.image_url`, `input_file.file_url`), also in a `function_call_output` | `data:` URIs, `file_data`, `file_id` |
+| Google | `fileData.fileUri` / `file_data.file_uri` (a Files API URI, `gs://`, a YouTube or any other URL), also in `systemInstruction` and a `functionResponse` part | `inlineData` |
+
+What goes through is every part with inline content (base64 or a `data:` URI), text (a URL written as text is only text), tool calls and tool results as text. The engine does not need a URL part: it reads a file of the work tree itself and sends its bytes inline, so a normal turn (text, tool calls, an inline image) is unchanged and its bytes go out as they came in. The arguments of a tool call (`tool_use.input`, a `functionCall`'s `args`, a `functionResponse`'s `response`, the `arguments` string of Chat and Responses) are the agent's own JSON; the provider never fetches from them and the door does not read them.
+
+This is a deny-walk of a few keys in the conversation (`passthrough/fetch_parts.py`), not a closed schema of it, so the engine's SDK can still add fields the door has not seen. It looks wherever the key stands in the conversation, the system prompt and the instruction, so a new nesting of a known part is caught. A part with a key it does not know is passed over: a future API that fetches through a new key would need that key added here.
+
+**Tools that make the provider fetch are not passed either, and need no new rule.** The tool schema is closed to function tools (`body_schema.py`), so a server-side web fetch, web search, code execution or computer-use tool, and `mcp_servers`, are refused as before (`tools[n].type (invalid value)`, `mcp_servers (unknown key)`). There is no allowed-URL path that the door would resolve itself: resolving a URL under the egress rule would make the door a second network door, and the agent does not need it. Reviews (Dynamic Review) use the same proxy and are covered by the same rule.
+
 ## The agent's container
 
 From #745 step 4 the agent no longer runs in the Control container. It runs in a container of its own, under the **Sysbox**
@@ -1726,8 +1745,8 @@ These are decisions of the owner, not oversights.
   **What this does not close, and is accepted:** an agent can still put data into the **URLs it GETs**, and the registry or whoever watches it can read them back: for example the per-version download counters of a package that was published beforehand (one request per bit or per symbol, a target of at most 2,048 characters), or a request log of a registry or CDN. It is slow (a request each, the cost limit and the time limit of the turn bound the volume), and the door keeps no path to tell it from an install. It is **not** counted as closed; it is accepted for internal use on own repositories like the items below.
   **Still accepted, for internal use on own repositories only, and for the owner's decision on each environment:** with `open` the agent can `POST` to any public host; a `list` that names a host that takes
   uploads (a registry that is not in the door's table, Docker Hub, GitHub Packages, `github.com` itself) lets a hostile agent upload to it, because both walls know the name and not the content of those tunnels;
-  and the conversation through the model proxy is opaque, so a message may carry an image or document URL that the provider fetches (#811), which a hostile agent can put data into. The form says so where the rule is
-  chosen. Nothing the agent sends is kept, in the report or anywhere. **Before external users or a repository that is not ours** those, and the covert channel above, remain to be decided (follow-ups below).
+  The form says so where the rule is chosen. Nothing the agent sends is kept, in the report or anywhere. **Before external users or a repository that is not ours** those, and the covert channel above, remain to be decided
+  (follow-ups below). **Closed, no longer accepted (#950):** a message through the model proxy can no longer make the provider fetch a URL the agent chose (section "The model door", "What the door refuses in a message").
 - **The model provider's host in the second wall is the App's word, signed by the Dispatcher** (review of #830: it used to be the Worker's). The policy is built from the signed rule, the signed
   provider host, GitHub's two hosts, the App's and its own; a taken-over Control cannot add a host, and the token expires with the VM.
 - **IPv6 does not go through the door.** The door looks up IPv4 only (its table is an `ip` table and its container has IPv6 off), so a host that has only an AAAA record is not
@@ -1747,7 +1766,7 @@ Open issues at the time of this change (2026-11-04):
 - **#745**, the epic of the first vertical slice, and **#768**, the operator guide and the live smoke test: the smoke test
   ([`implementer-smoke-test.md`](implementer-smoke-test.md)) is the first run of the whole path on the platform and has not
   been run for this git model.
-- **#784**: read-only registry access: publishing is closed for the package registries of a `list` (above); the GET-URL channel stays accepted. Follow-ups before external users, each its own issue: the model proxy's image and document URLs (#811), other upload-capable listed hosts (Docker Hub push, GitHub Packages) and the rule `open`.
+- **#784**: read-only registry access: publishing is closed for the package registries of a `list` (above); the GET-URL channel stays accepted. The model proxy's image and document URLs are closed (#950, "What the door refuses in a message"). Follow-ups before external users, each its own issue: the other upload-capable listed hosts (Docker Hub push, GitHub Packages, `github.com`) and the rule `open`.
 - **The Sysbox verdict in the deploy** is written and read (the fourth member of the pair), and `unrecorded` is gone: the first release
   after it has no verdict anywhere, so the Implementer is refused (`sandbox_unproven`) until that release has built a snapshot and
   promoted it (the changed image inputs rebuild it by themselves). **Before the first release that carries this change the owner must
