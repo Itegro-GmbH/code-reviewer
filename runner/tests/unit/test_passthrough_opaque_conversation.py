@@ -195,7 +195,7 @@ def test_nothing_inside_the_conversation_is_walked_whatever_it_holds(family: Wir
         {"anything": {"at": ["all", 1, None, True, 1.5]}},
         {"role": "assistant", "content": {"not": "a list"}, "caller": {"type": "direct"}},
         {"role": 5, "content": None, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
-        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+        {"type": "image", "source": {"type": "base64", "data": "iVBORw0KGgo="}},
         {},
     ]
     for shape in shapes:
