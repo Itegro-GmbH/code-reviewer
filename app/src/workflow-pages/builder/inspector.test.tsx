@@ -16,6 +16,7 @@ import userEvent from "@testing-library/user-event";
 import { getAt, nodeAt, patchNode, type Doc } from "./document.ts";
 import { Inspector, type ProfileOption } from "./inspector.tsx";
 import { sortProblems, type Problem } from "./problems.ts";
+import { REVIEW_INSTRUCTION } from "../../workflows/built-in-lanes.ts";
 import type { ReachSamples } from "../../workflows/reach.ts";
 import { answerOf, reachLookupFor, shippedLane } from "./test-fixtures.ts";
 
@@ -124,11 +125,7 @@ describe("an agent step", () => {
     );
     expect(
       getAt(seen.mock.lastCall?.[0] as Doc, "/steps/1/body/1/instruction"),
-    ).toEqual({
-      first:
-        "Review branch {{implement.branch}} against the issue. Do not change anything.",
-      next: "Review branch {{implement.branch}} against the issue. Do not change anything.",
-    });
+    ).toEqual({ first: REVIEW_INSTRUCTION, next: REVIEW_INSTRUCTION });
     expect(screen.getByLabelText("Instruction, next rounds")).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", { name: "Same instruction in every round" }),

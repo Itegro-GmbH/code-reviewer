@@ -41,6 +41,16 @@ const FINDINGS = {
   },
 };
 
+// #966: the lane opens the pull request after the review, which neither agent knows otherwise.
+const PULL_REQUEST_NOTE =
+  "The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.";
+
+export const REVIEW_INSTRUCTION =
+  `Review branch {{implement.branch}} against this issue. Do not change anything. ${PULL_REQUEST_NOTE}\n\n` +
+  "Issue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n" +
+  "What the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n" +
+  "{{implement.summary}}";
+
 function issueToPr(environment: string): Record<string, unknown> {
   return {
     version: 1,
@@ -101,8 +111,8 @@ function issueToPr(environment: string): Record<string, unknown> {
             environment,
             session: { continue: "implement" },
             instruction: {
-              first: "{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}",
-              next: "Fix these review findings:\n{{previous.review.findings}}",
+              first: `{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n${PULL_REQUEST_NOTE}`,
+              next: `Fix these review findings:\n{{previous.review.findings}}\n\n${PULL_REQUEST_NOTE}`,
             },
             result: {
               type: "object",
@@ -122,8 +132,8 @@ function issueToPr(environment: string): Record<string, unknown> {
             environment,
             session: "new",
             branch: "{{implement.branch}}",
-            instruction:
-              "Review branch {{implement.branch}} against the issue. Do not change anything.",
+            // #966: the reviewer has no other way to the issue, nor to the answers people gave the implementer (its summary names them).
+            instruction: REVIEW_INSTRUCTION,
             result: FINDINGS,
           },
         ],

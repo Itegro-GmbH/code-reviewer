@@ -466,8 +466,8 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
             "continue": "implement"
           },
           "instruction": {
-            "first": "{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}",
-            "next": "Fix these review findings:\n{{previous.review.findings}}"
+            "first": "{{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nThe lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.",
+            "next": "Fix these review findings:\n{{previous.review.findings}}\n\nThe lane opens the pull request itself after the review; do not open one and do not report it as missing or open work."
           },
           "result": {
             "type": "object",
@@ -487,7 +487,7 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
           "environment": "node",
           "session": "new",
           "branch": "{{implement.branch}}",
-          "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",
+          "instruction": "Review branch {{implement.branch}} against this issue. Do not change anything. The lane opens the pull request itself after the review; do not open one and do not report it as missing or open work.\n\nIssue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nWhat the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n{{implement.summary}}",
           "result": {
             "type": "object",
             "required": ["findings"],
