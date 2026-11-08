@@ -20,9 +20,11 @@ export default async function ProjectTodosPage({
   const { workspace: slug, repositoryId } = await params;
   const { run } = await searchParams;
   const { workspace, role, user } = await requireWorkspace(slug);
+  // The id of the membership check, never one from the address.
+  const workspaceId = workspace.id;
   return (
     <CockpitFrame
-      workspaceId={workspace.id}
+      workspaceId={workspaceId}
       workspaceSlug={workspace.slug}
       repositoryId={repositoryId}
       tab="todos"
@@ -30,7 +32,7 @@ export default async function ProjectTodosPage({
       <TodosPageContent
         workspaceSlug={workspace.slug}
         projectId={
-          (await projectServiceFor(workspace.id).findProject(repositoryId))
+          (await projectServiceFor(workspaceId).findProject(repositoryId))
             ?.project?.id
         }
         variant="project"

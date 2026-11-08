@@ -2,7 +2,11 @@
 
 // The words of the ToDos page, of the answer panel and of the ToDos tab of a project (#925), from the prototype of the factory. English.
 import type { ProductIdentity } from "../../product-identity/identity.ts";
-import { ROLE_NOT_ALLOWED } from "../../copy/messages.ts";
+import {
+  CROSS_SITE_REQUEST_RELOAD_PAGE,
+  REQUEST_NOT_UNDERSTOOD,
+  ROLE_NOT_ALLOWED,
+} from "../../copy/messages.ts";
 import { describeTransportFailure } from "../../ui/transport-messages.ts";
 import { describeStartFailure } from "../../workflow-pages/messages.ts";
 
@@ -118,11 +122,9 @@ const REVIEW_FAILURE_TEXT: Record<string, string> = {
     "GitHub could not be asked or refused. Nothing was changed; try again in a moment.",
   TODOS_REQUEST_INVALID:
     "The review cannot be used: the note may be at most 4000 characters.",
-  TODOS_CROSS_SITE_REQUEST:
-    "The request did not come from this page. Reload the page and try again.",
+  TODOS_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,
   TODOS_BODY_TOO_LARGE: "The note is too large.",
-  TODOS_CONTENT_TYPE_UNSUPPORTED:
-    "The request was not understood. Reload the page and try again.",
+  TODOS_CONTENT_TYPE_UNSUPPORTED: REQUEST_NOT_UNDERSTOOD,
   TODOS_PROJECT_NOT_FOUND: "This project does not exist any more.",
   not_found: "This workspace is not available to you.",
 };
