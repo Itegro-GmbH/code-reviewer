@@ -216,6 +216,15 @@ export type ProjectsRepository = {
   /** A project by its own id (#922), switched on or not; undefined for an id of another workspace. */
   getById(projectId: string): Promise<StoredProject | undefined>;
   /**
+   * Sets, changes or clears the board of the ticket source of a project (#937; `null` clears it) and moves `updatedAt`; the rest of the
+   * source stays. Works for a project that is switched off too. Returns the project after the change, or undefined (nothing written)
+   * for an id of another workspace.
+   */
+  setTicketBoard(
+    projectId: string,
+    board: TicketBoard | null,
+  ): Promise<StoredProject | undefined>;
+  /**
    * Switches the project of a repository off and keeps the row; an unknown repository is reported.
    * `afterDeactivate` runs in the same
    * transaction whenever the repository has a project (also when it was off already, so a repeated
@@ -551,6 +560,38 @@ export function createProjectsRepository(
         .where("projects.id", "=", projectId)
         .executeTakeFirst();
       return row === undefined ? undefined : toStored(row);
+    },
+
+    setTicketBoard(projectId, board) {
+      return inTransaction(async (trx) => {
+        const current = await trx
+          .selectFrom("projects")
+          .innerJoin(
+            "repositories",
+            "repositories.id",
+            "projects.repository_id",
+          )
+          .select(["projects.id", "projects.repository_id"])
+          .where("repositories.workspace_id", "=", workspaceId)
+          .where("projects.id", "=", projectId)
+          .forUpdate("projects")
+          .executeTakeFirst();
+        if (current === undefined) return undefined;
+        const row = await trx
+          .updateTable("projects")
+          .set({
+            ticket_source: encodeJson({
+              provider: "github",
+              repositoryId: current.repository_id,
+              board,
+            }),
+            updated_at: formatTimestamp(now()),
+          })
+          .where("id", "=", current.id)
+          .returningAll()
+          .executeTakeFirstOrThrow();
+        return toStored(row);
+      });
     },
 
     findActiveForRepository(repositoryId) {

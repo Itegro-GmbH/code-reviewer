@@ -598,8 +598,8 @@ code from the table below.
 | `DELETE /workflows/<id>` | **Archives** the workflow (a soft delete). Asked again, it answers the same. | `200` `{workflow}` with `archivedAt` set; `404` `WORKFLOW_NOT_FOUND`; `409` `WORKFLOW_ARCHIVE_LIMIT_REACHED` |
 
 Every save is a **new, immutable version**: the database refuses to change a saved version (there is no UPDATE of a version; only the erasure
-of a whole workspace deletes rows). An identical document is saved again as a new version. A workspace holds 100 workflows that are not
-archived and 1000 archived workflows, a workflow 500 versions. Old versions are not pruned: a run will name the version it started with (milestone 3), so none may vanish
+of a whole workspace deletes rows). An identical document is saved again as a new version. A **project** holds 100 workflows that are not
+archived (the lanes without a project count together as one group; the limit was per workspace before #937), a workspace 1000 archived workflows, a workflow 500 versions. Old versions are not pruned: a run will name the version it started with (milestone 3), so none may vanish
 under it. A workflow that reaches its 500 versions is archived and written again under its name.
 
 **Archiving** is the only delete in version 1. An archived workflow is hidden from the list, takes no new version (`409`
@@ -634,10 +634,31 @@ that was written before has no stored source and reads as the issues of its repo
 `{ "repositoryId", "board": { "projectV2Id" } | null, "lanes": ["issue-to-pr", "review-a-pull-request"] }`, `board` and `lanes` optional. The board must be one of the boards of the repository (`GET
 /api/w/<slug>/repositories/<id>/boards` lists them with the options of their Status field, read from GitHub with a token that may read boards and nothing else); the server takes the Status field from that list, never from
 the body. `lanes` copies the built-in lanes into the new project as lanes of its own (validated like any save, with the profiles `implementer` and `reviewer` and the first environment of the workspace by name): a lane that
-cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project (when the copying fails altogether, every lane is `ok: false` with `code: "LANE_COPY_FAILED"`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
+cannot be copied is reported in `lanes: [{ key, ok, workflowId | code }]` and does not undo the project; each lane is caught on its own (#937), so a database error on the second lane is `ok: false` with `code: "LANE_COPY_FAILED"` for that lane only and the first stays saved (when the copying fails altogether, every lane is `LANE_COPY_FAILED`). The answer is `201 { project: { id, repositoryId, active, ticketSource }, lanes }`; a body that cannot be used is
 `400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]` (`unknown_field`, `missing_field`, `wrong_type`, `invalid_value`, `unknown_lane`, `duplicate_lane`, `unknown_board`, `board_without_status`,
 `board_unavailable`; `available` lists what would have been accepted); a repository that is a project already is `409 PROJECT_ALREADY_EXISTS`. The tickets of a project are `GET /api/w/<slug>/projects/<id>/issues`, the same
 answer as the issues of its repository. Switching a repository on or off for review (`PUT .../repositories/<id>/project`) and the review settings are unchanged: a deployment without the factory behaves as before.
+
+**Setting, changing or clearing the board** of an existing project (#937) is `PUT /api/w/<slug>/projects/<id>` with `{ "board": { "projectV2Id" } | null }` (`board` is required; `null` clears it, nothing else is accepted: the repository of a project never changes).
+Admins and Owners may call it (`manage_projects`, like creating a project and reading its boards; a Member gets `403`, and the page shows a Member whether a board is set without the picker). Resync stays with `change_project_settings`. The board is checked against the boards of the project's repository exactly as when a
+project is created, and the Status field is taken from them; the answer is `200 { project: { id, repositoryId, active, ticketSource } }`. A body that cannot be used is `400 PROJECT_REQUEST_INVALID` with `issues: [{ path, code, message, available }]`
+(`missing_field`, `unknown_field`, `wrong_type`, `invalid_value`, `unknown_board`, `board_without_status`, `board_unavailable`; for a board that is not one of the repository's, `available` lists the `projectV2Id` of every board it has, for one without a Status field the ones that have one),
+an unknown project is `404 PROJECT_NOT_FOUND`, boards GitHub cannot be asked for are `503 PROJECT_BOARDS_UNAVAILABLE`. A project that is switched off can be given a board too. **Changing the board does not touch the tickets that are mirrored already**: they keep the statuses of the old board until a full sync, so the page says "press Resync to read the new board" and puts the button forward; after a clear the old statuses stay the same way. A `ticket.setStatus` step **without a literal `board`** follows the board of the project **at the moment it runs**, so a run in flight uses the new board from its next step on, and after a clear it ends with `action_input_invalid` ("The project of this lane has no board"). A step with a literal `board` is not affected. The Setup tab of the project (`/w/<slug>/projects/<repositoryId>/setup`) shows the ticket source with this picker
+("None" and the readable boards; a board without a Status field is out of reach), the **Resync** button of its tickets (`POST .../repositories/<id>/issues/sync` until it answers 200, with a visible count of the calls; one press stops after 30 calls and says to press again, what was read is kept) and a
+hint when the last full sync is **older than 3 days** and no delivery has written a row since (`sync.lastWriteAt` of the issue list is not after `sync.lastFullSyncAt`), or when no full sync has ended yet.
+
+### Built-in lanes
+
+A new project may copy two lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
+
+| Key | Lane | Starts | Does | Budget |
+|---|---|---|---|---|
+| `issue-to-pr` | Issue to PR | label `agent implement` on a ticket of the project's repository, or by hand with `input.ticket` | The first workflow below: implement, review, fix (3 rounds at most), open the pull request, otherwise comment on the ticket | 20 USD |
+| `review-a-pull-request` | Review a pull request | by hand: `input.pullRequest` (the number); `input.repo` may be left out | The `reviewer` reads the pull request (`git fetch origin pull/<n>/head`) against its base and changes nothing; the findings (at most 20: `type` bug, risk or nit, `name`, `description`) are written as one comment on the pull request (`pullRequest.comment`) | 5 USD |
+
+**The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger must declare `ticket` or `repo`), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
+`input.repo` = the full name of the project's repository before the input is checked, and it is stored so (`trigger.input.repo` reads as before). A start that names a repository is still held to the project's (`422 WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`), a start with a `ticket` has its repository, and a lane without a project is not given one (it needs `repo`). Replaying a request id
+with the input left out answers the run it made. Lanes saved before keep working: they declare the same input and may still be started with `repo`.
 
 ### For the engine (milestone 3)
 
@@ -668,7 +689,7 @@ run is started by hand (`WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`, with the step na
 `POST /api/w/<slug>/workflows/<id>/runs` with `{"trigger": "manual", "input": {...}, "clientRequestId": "..."}`, for every member (the permission to start an Implementer
 task, `start_implementer_task`: a run starts tasks). `trigger` is the `id` of one of the workflow's [triggers](#the-triggers-and-their-pre-steps) of the kind `manual` or `api`; it may be left out
 when the workflow has exactly one of them (a workflow written with the single `trigger` has one). `input` must fit the `input` schema of that trigger (checked again here with the same rules as a
-result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
+result: a start knows the values). The repository of the run is the ticket's when the input has a `ticket`, else `input.repo` (`owner/name`, which a lane of a project may leave out: it is then the project's repository, [Built-in lanes](#built-in-lanes)); either is a repository of the workspace and, for a lane of a project, the project's own ([Lanes belong to a project](#lanes-belong-to-a-project)). The answer is
 `201 {"run": {...}}`, with the run and its steps; the pre-steps of the trigger and then the shared steps start right after the answer.
 
 ```jsonc
@@ -1380,7 +1401,7 @@ Beyond the form:
 | `WORKFLOW_PROJECT_NOT_FOUND` | 404 | `projectId` is no project of this workspace (another workspace's looks the same). |
 | `WORKFLOW_PROJECT_INACTIVE` | 409 | The project is switched off and takes no new lane. |
 | `WORKFLOW_NAME_TAKEN` | 409 | The project has a lane of that name that is not archived (case ignored; for a lane without a project, the workspace). |
-| `WORKFLOW_LIMIT_REACHED` | 409 | The workspace holds 100 workflows that are not archived (`maximum`). |
+| `WORKFLOW_LIMIT_REACHED` | 409 | The project holds 100 workflows that are not archived (`maximum`; the lanes without a project count together, #937). |
 | `WORKFLOW_ARCHIVE_LIMIT_REACHED` | 409 | The workspace holds 1000 archived workflows: one more cannot be archived (`maximum`). |
 | `WORKFLOW_VERSION_LIMIT_REACHED` | 409 | The workflow holds 500 versions (`maximum`). |
 | `WORKFLOW_ARCHIVED` | 409 | The workflow is archived and takes no new version. |

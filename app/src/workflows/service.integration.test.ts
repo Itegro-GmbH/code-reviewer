@@ -3,7 +3,7 @@
 // The workflow service with the real repositories on a real Postgres (#833): the validator runs with the workspace's own
 // environments, an invalid document is refused with the full list and nothing is stored, every save is a new version, an older
 // version stays readable, and a workspace never sees the workflows of another.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -588,5 +588,55 @@ describe("the workflow service", () => {
       (await service.list(mine)).workflows.map((w) => w.name).sort(),
     ).toEqual(["Issue to PR", "Review a pull request"]);
     expect(twice[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+  });
+
+  // #937 (from the re-review of #936)
+  it("reports a database error on the second built-in lane as that lane's failure only, and the first stays saved", async () => {
+    const { db, idA, projectIds } = await setup();
+    await createProfilesRepository(db, idA).create(
+      { name: "reviewer", content: PROFILE_CONTENT, createdBy: USER.id },
+      100,
+    );
+    const real = createWorkflowsRepository(db, idA);
+    let creates = 0;
+    const service = createWorkflowService({
+      workflows: {
+        ...real,
+        create: (input, maximum) => {
+          creates += 1;
+          if (creates === 2)
+            return Promise.reject(
+              Object.assign(new Error("connection lost"), { code: "08006" }),
+            );
+          return real.create(input, maximum);
+        },
+      },
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+    });
+    const mine = projectIds.get(idA)!;
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    expect(results[0]).toMatchObject({ key: "issue-to-pr", ok: true });
+    expect(results[1]).toMatchObject({
+      key: "review-a-pull-request",
+      ok: false,
+      code: "LANE_COPY_FAILED",
+    });
+    expect((await service.list(mine)).workflows.map((w) => w.name)).toEqual([
+      "Issue to PR",
+    ]);
+    // The lane and the code of the error are logged, never its text.
+    expect(quiet).toHaveBeenCalledWith(
+      "[workflows] copying the built-in lane review-a-pull-request failed (08006)",
+    );
+    expect(JSON.stringify(quiet.mock.calls)).not.toContain("connection lost");
+    quiet.mockRestore();
   });
 });

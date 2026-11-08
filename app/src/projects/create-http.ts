@@ -11,7 +11,10 @@
 // `Cache-Control: no-store`. The board is never taken from the body as it is: the client names a board, the server reads the repository's
 // boards and takes the Status field from them.
 import type { SessionUser } from "../auth/access-policy.ts";
-import type { StoredProject } from "../db/repositories/projects-repository.ts";
+import type {
+  StoredProject,
+  TicketBoard,
+} from "../db/repositories/projects-repository.ts";
 import { isCrossSite, isJsonRequest } from "../http/request-checks.ts";
 import type { BoardInfo } from "../integrations/provider.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
@@ -21,6 +24,7 @@ import {
   type NewProjectIssue,
   type ProjectErrorCode,
 } from "./errors.ts";
+import { readBoardRequest } from "./board-request.ts";
 import { readNewProjectRequest } from "./new-project-request.ts";
 import type { ProjectService } from "./service.ts";
 
@@ -45,7 +49,7 @@ export type LaneCopy =
 export type NewProjectDependencies = {
   /** The signed in user, or a throw that ends the request. Called first, on every request. */
   requireUser: () => Promise<SessionUser>;
-  service: Pick<ProjectService, "createProject">;
+  service: Pick<ProjectService, "createProject" | "getProject" | "setBoard">;
   boards(repositoryId: string): Promise<BoardsAnswer>;
   /** The names of the built-in lanes a new project may copy (the workflows module owns them). */
   laneKeys: readonly string[];
@@ -58,6 +62,8 @@ export type NewProjectDependencies = {
 
 export type NewProjectHandlers = {
   create(request: Request): Promise<Response>;
+  /** `PUT .../projects/:projectId` (#937): sets, changes or clears the board of a project. */
+  setBoard(request: Request, projectId: string): Promise<Response>;
   boards(request: Request, repositoryId: string): Promise<Response>;
 };
 
@@ -135,6 +141,58 @@ export function createNewProjectHandlers({
     }
   }
 
+  /**
+   * The board a body names, against the boards GitHub has for the repository: the board with its Status field, or the refusal that says
+   * why not (with `available`, the ids that would have been accepted). The Status field is the server's, never the client's.
+   */
+  async function resolveBoard(
+    repositoryId: string,
+    projectV2Id: string,
+  ): Promise<
+    { ok: true; board: TicketBoard } | { ok: false; response: Response }
+  > {
+    const known = await boardsOf(repositoryId);
+    const found = known.boards.find(
+      (candidate) => candidate.projectV2Id === projectV2Id,
+    );
+    if (found === undefined)
+      return {
+        ok: false,
+        response: refusal("PROJECT_REQUEST_INVALID", [
+          {
+            path: "board.projectV2Id",
+            code: known.available ? "unknown_board" : "board_unavailable",
+            message: known.available
+              ? "The repository has no such board. Choose one of the boards it has."
+              : "The boards of this repository cannot be read: the GitHub App may not read Projects (an organization permission the owner of the installation has to grant), or the repository belongs to a user.",
+            available: known.boards.map((entry) => entry.projectV2Id),
+          },
+        ]),
+      };
+    if (found.statusFieldId === null)
+      return {
+        ok: false,
+        response: refusal("PROJECT_REQUEST_INVALID", [
+          {
+            path: "board.projectV2Id",
+            code: "board_without_status",
+            message:
+              "The board has no Status field with options, so no ticket can be moved on it. Add one on GitHub or choose another board.",
+            available: known.boards
+              .filter((entry) => entry.statusFieldId !== null)
+              .map((entry) => entry.projectV2Id),
+          },
+        ]),
+      };
+    return {
+      ok: true,
+      board: {
+        projectV2Id: found.projectV2Id,
+        statusFieldId: found.statusFieldId,
+      },
+    };
+  }
+
   return {
     async create(request) {
       const user = await requireUser();
@@ -148,40 +206,11 @@ export function createNewProjectHandlers({
         if (!read.ok) return refusal("PROJECT_REQUEST_INVALID", read.issues);
         const { repositoryId, board, lanes } = read.request;
 
-        let ticketBoard: { projectV2Id: string; statusFieldId: string } | null =
-          null;
+        let ticketBoard: TicketBoard | null = null;
         if (board !== null) {
-          const known = await boardsOf(repositoryId);
-          const found = known.boards.find(
-            (candidate) => candidate.projectV2Id === board.projectV2Id,
-          );
-          if (found === undefined)
-            return refusal("PROJECT_REQUEST_INVALID", [
-              {
-                path: "board.projectV2Id",
-                code: known.available ? "unknown_board" : "board_unavailable",
-                message: known.available
-                  ? "The repository has no such board. Choose one of the boards it has."
-                  : "The boards of this repository cannot be read: the GitHub App may not read Projects (an organization permission the owner of the installation has to grant), or the repository belongs to a user.",
-                available: known.boards.map((entry) => entry.projectV2Id),
-              },
-            ]);
-          if (found.statusFieldId === null)
-            return refusal("PROJECT_REQUEST_INVALID", [
-              {
-                path: "board.projectV2Id",
-                code: "board_without_status",
-                message:
-                  "The board has no Status field with options, so no ticket can be moved on it. Add one on GitHub or choose another board.",
-                available: known.boards
-                  .filter((entry) => entry.statusFieldId !== null)
-                  .map((entry) => entry.projectV2Id),
-              },
-            ]);
-          ticketBoard = {
-            projectV2Id: found.projectV2Id,
-            statusFieldId: found.statusFieldId,
-          };
+          const resolved = await resolveBoard(repositoryId, board.projectV2Id);
+          if (!resolved.ok) return resolved.response;
+          ticketBoard = resolved.board;
         }
 
         const project = await service.createProject(repositoryId, ticketBoard);
@@ -211,6 +240,42 @@ export function createNewProjectHandlers({
             ),
           },
           { status: 201, headers: NO_STORE },
+        );
+      } catch (error) {
+        if (error instanceof ProjectError) return refusal(error.code);
+        throw error;
+      }
+    },
+
+    async setBoard(request, projectId) {
+      await requireUser();
+      try {
+        if (isCrossSite(request))
+          throw new ProjectError(
+            "PROJECT_CROSS_SITE_REQUEST",
+            "The request does not come from this site.",
+          );
+        const read = readBoardRequest(await readBody(request));
+        if (!read.ok) return refusal("PROJECT_REQUEST_INVALID", read.issues);
+        const project = await service.getProject(projectId);
+        if (project === undefined)
+          throw new ProjectError(
+            "PROJECT_NOT_FOUND",
+            "There is no project with this id.",
+          );
+        let ticketBoard: TicketBoard | null = null;
+        if (read.board !== null) {
+          const resolved = await resolveBoard(
+            project.repositoryId,
+            read.board.projectV2Id,
+          );
+          if (!resolved.ok) return resolved.response;
+          ticketBoard = resolved.board;
+        }
+        const updated = await service.setBoard(project.id, ticketBoard);
+        return Response.json(
+          { project: projectView(updated) },
+          { headers: NO_STORE },
         );
       } catch (error) {
         if (error instanceof ProjectError) return refusal(error.code);

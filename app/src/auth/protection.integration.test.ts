@@ -260,6 +260,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/plan-handoff",
   "/api/w/[workspace]/members/[userId]",
   "/api/w/[workspace]/projects",
+  "/api/w/[workspace]/projects/[projectId]",
   "/api/w/[workspace]/projects/[projectId]/issues",
   "/api/w/[workspace]/repositories/[repositoryId]/boards",
   "/api/w/[workspace]/repositories/[repositoryId]/issues",
