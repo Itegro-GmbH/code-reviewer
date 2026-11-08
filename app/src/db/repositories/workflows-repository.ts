@@ -110,7 +110,7 @@ export type WorkflowsRepository = {
   ): Promise<StoredWorkflowVersion | undefined>;
   /** The versions of a workflow, the newest first. Empty for an id that is not there. */
   listVersions(id: string): Promise<WorkflowVersionSummary[]>;
-  /** `maximum` is how many workflows the workspace may hold, counted with the new one. Saved as version 1. */
+  /** `maximum` is how many workflows the project may hold (the lanes without a project: together), counted with the new one. Saved as version 1. */
   create(input: NewWorkflow, maximum: number): Promise<CreateOutcome>;
   /** Saves a new version (the next number) and makes it current; the name of the workflow becomes `input.name`. */
   saveVersion(
@@ -304,11 +304,17 @@ export function createWorkflowsRepository(
           if (project === undefined)
             return { ok: false, reason: "project_not_found" };
         }
+        // The maximum is held per project (#937); the lanes without a project count together.
         const { count } = await trx
           .selectFrom("workflows")
           .select((eb) => eb.fn.countAll<string>().as("count"))
           .where("workspace_id", "=", workspaceId)
           .where("archived_at", "is", null)
+          .$call((query) =>
+            input.projectId === undefined
+              ? query.where("project_id", "is", null)
+              : query.where("project_id", "=", input.projectId),
+          )
           .executeTakeFirstOrThrow();
         if (Number(count) >= maximum)
           return { ok: false, reason: "limit_reached" };

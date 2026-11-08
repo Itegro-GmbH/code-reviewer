@@ -4,6 +4,7 @@
 // yet empty: the issues come with the ticket source (#923), the ToDos with the answer panel (#924) and the lanes of a project with
 // the lane rework (#922). The Lanes tab lists the workspace's lanes (workflows) until a lane belongs to a project.
 import Link from "next/link";
+import type { ReactNode } from "react";
 import {
   Empty,
   EmptyDescription,
@@ -192,8 +193,14 @@ const SOURCE_STATE = {
   unavailable: { label: SETUP_COPY.stateGone, variant: "warning" },
 } as const;
 
-/** The ticket source card of the Setup tab: exactly one per project, in its own words. */
-export function TicketSourceCard({ row }: { row: ProjectRowView }) {
+/** The ticket source card of the Setup tab: exactly one per project, in its own words. `children` are its controls (the board, the resync). */
+export function TicketSourceCard({
+  row,
+  children,
+}: {
+  row: ProjectRowView;
+  children?: ReactNode;
+}) {
   const state = SOURCE_STATE[row.status];
   return (
     <section
@@ -231,6 +238,7 @@ export function TicketSourceCard({ row }: { row: ProjectRowView }) {
             On GitHub
           </a>
         ) : null}
+        {children}
       </div>
       <p className="text-xs text-muted-foreground">{SETUP_COPY.footnote}</p>
     </section>

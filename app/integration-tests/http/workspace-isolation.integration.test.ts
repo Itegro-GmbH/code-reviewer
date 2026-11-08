@@ -251,6 +251,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #937: the board of a project; the project of the other workspace is not found, and nothing is written (null clears it, so no GitHub call).
+    name: "PUT projects/[projectId]",
+    route: "/api/w/[workspace]/projects/[projectId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/projects/${ids.projectId}`,
+    body: () => ({ board: null }),
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/route.ts",
+    implementer: true,
+  },
+  {
     // #922: the tickets of a project, by its own id; the project of the other workspace is not found.
     name: "GET projects/[projectId]/issues",
     route: "/api/w/[workspace]/projects/[projectId]/issues",

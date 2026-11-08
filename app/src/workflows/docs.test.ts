@@ -17,7 +17,7 @@ import {
   ERRORS_MAX,
   LOOP_ROUNDS_MAX,
   VERSIONS_PER_WORKFLOW_MAX,
-  WORKFLOWS_PER_WORKSPACE_MAX,
+  WORKFLOWS_PER_PROJECT_MAX,
 } from "./limits.ts";
 import { createResolver } from "./resolver.ts";
 import { FAKE_RESOLVER } from "./test-fixtures.ts";
@@ -111,7 +111,7 @@ describe("docs/workflows.md", () => {
   // #833-M1-T360
   it("states the numbers the code keeps: workflows, versions, errors in an answer, rounds of a loop", () => {
     for (const text of [
-      `${WORKFLOWS_PER_WORKSPACE_MAX} workflows`,
+      `${WORKFLOWS_PER_PROJECT_MAX} workflows`,
       `${ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX} archived workflows`,
       `${VERSIONS_PER_WORKFLOW_MAX} versions`,
       `**${ERRORS_MAX} errors at most**`,
