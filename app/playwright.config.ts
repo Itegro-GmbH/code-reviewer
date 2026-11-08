@@ -101,6 +101,7 @@ export default defineConfig({
         /e2e\/reviews\//,
         /e2e\/jobs\//,
         /e2e\/dynamic\//,
+        /e2e\/factory\//,
         /e2e\/hosted\//,
         /e2e\/setup\//,
         /e2e\/auth\/(sign-up|password-reset)\.e2e\.ts$/,
@@ -310,6 +311,18 @@ export default defineConfig({
       use: { ...browser, baseURL: e2eEnv.catalogAdminAppUrl },
       testMatch: /e2e\/billing-journeys\/.*\.e2e\.ts$/,
       dependencies: ["billing-key-mode"],
+    },
+    // The browser journey of the factory pages (#951): an app of its own (the tenth), the product `factory` with the capability
+    // `implementer` on the fake GitHub, so the Issues tab, the ToDos, the lane builder, the run page, Profiles, Runners, Settings and
+    // the Setup tab open in a real browser. The code-review.com apps above have none of them. Nothing else uses that app and the
+    // journey leaves no queue behind that another app could claim.
+    {
+      name: "factory",
+      // No retry: a second attempt would find the lane started, the question answered and the run discarded.
+      retries: 0,
+      use: { ...browser, baseURL: e2eEnv.factoryAppUrl },
+      testMatch: /e2e\/factory\/.*\.e2e\.ts$/,
+      dependencies: ["prepare"],
     },
     // The journey with the real runner and the real PR-Agent. It has an app of its own (its own
     // database, the LLM configured, a real runner polling it), so it cannot disturb the queue of the
@@ -566,6 +579,24 @@ export default defineConfig({
         ALLOW_TEST_STRIPE_ENDPOINTS: "true",
       },
       url: e2eEnv.catalogAdminAppUrl,
+      reuseExistingServer: false,
+      timeout: 60_000,
+    },
+    {
+      // The factory app (#951): the same build, the product `factory` with the capability `implementer` (read when the server starts,
+      // `src/capabilities/shared.ts`), over a database of its own. No Dispatcher and no model: the journey seeds what a lane would have
+      // written (e2e/factory) and the fake GitHub answers the few calls the pages make.
+      command:
+        `${PREPARE_DATABASE} && ` +
+        `pnpm start --hostname 127.0.0.1 --keepAliveTimeout 120000 --port ${e2eEnv.factoryAppPort} > ${e2eEnv.logFiles.factory} 2>&1`,
+      env: {
+        ...appEnv,
+        ...databaseEnv("factory"),
+        BETTER_AUTH_URL: e2eEnv.factoryAppUrl,
+        PRODUCT_ID: "factory",
+        PRODUCT_CAPABILITIES: "review,dynamic-review,implementer",
+      },
+      url: e2eEnv.factoryAppUrl,
       reuseExistingServer: false,
       timeout: 60_000,
     },
