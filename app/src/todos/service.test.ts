@@ -155,6 +155,8 @@ type Asked = {
   steps: (readonly string[])[];
   answered: (readonly string[] | undefined)[];
   pullRequests: (readonly string[] | undefined)[];
+  /** The repositories whose mirror rows were read. */
+  mirror?: string[];
 };
 
 function service(world: World = {}, asked?: Asked) {
@@ -301,6 +303,7 @@ function service(world: World = {}, asked?: Asked) {
     },
     tracker: {
       async listItemsByNumbers(repositoryId, numbers) {
+        asked?.mirror?.push(repositoryId);
         return (world.items ?? []).filter(
           (candidate) =>
             candidate.repositoryId === repositoryId &&
@@ -660,6 +663,95 @@ describe("the reviews that are asked for", () => {
     expect(
       await todos.findReview({ githubLogin: "alice" }, "r-2", 7),
     ).toBeUndefined();
+  });
+
+  // #925: the number on the sidebar's ToDos link
+  it("counts the open questions and the reviews of the viewer for the badge, and nothing of the done list", async () => {
+    const todos = service({
+      waiting: [run("run-1")],
+      steps: { "run-1": [step("run-1")] },
+      prSteps: [opened(7), opened(8)],
+      items: [
+        item(7, { kind: "pull_request", reviewRequestedFrom: ["alice"] }),
+        item(8, { kind: "pull_request", reviewRequestedFrom: ["bob"] }),
+      ],
+    });
+
+    expect(await todos.countOpen({ githubLogin: "alice" })).toMatchObject({
+      open: 2,
+    });
+    expect(await todos.countOpen({ githubLogin: "bob" })).toMatchObject({
+      open: 2,
+    });
+    expect(await todos.countOpen({ githubLogin: "carol" })).toMatchObject({
+      open: 1,
+    });
+    expect(await todos.countOpen({ githubLogin: null })).toMatchObject({
+      open: 1,
+    });
+  });
+
+  // #925: the tab of a project shows its own number, from the same read
+  it("counts per project, as the list of a project narrows, and keeps a ToDo of no project out of every project", async () => {
+    const todos = service({
+      waiting: [
+        run("run-1"),
+        run("run-2", { workflowId: "wf-2", repositoryId: "r-2" }),
+        run("run-3", { workflowId: "wf-3", repositoryId: "r-3" }),
+      ],
+      steps: {
+        "run-1": [step("run-1")],
+        "run-2": [step("run-2")],
+        "run-3": [step("run-3")],
+      },
+      lanes: {
+        "wf-1": { name: "Implement", projectId: "p-1" },
+        "wf-2": { name: "Implement", projectId: "p-2" },
+        "wf-3": { name: "Loose", projectId: null },
+      },
+      prSteps: [opened(7)],
+      items: [
+        item(7, { kind: "pull_request", reviewRequestedFrom: ["alice"] }),
+      ],
+    });
+
+    const counts = await todos.countOpen({ githubLogin: "alice" });
+
+    expect(counts).toEqual({ open: 4, projects: { "p-1": 2, "p-2": 1 } });
+    for (const projectId of ["p-1", "p-2"])
+      expect(
+        (await todos.list({ githubLogin: "alice" }, { projectId })).questions
+          .length +
+          (await todos.list({ githubLogin: "alice" }, { projectId })).reviews
+            .length,
+      ).toBe(counts.projects[projectId]);
+  });
+
+  // #925: the badge is read on every page change
+  it("reads no mirror row for the questions of a count", async () => {
+    const asked: Asked = {
+      waiting: [],
+      steps: [],
+      answered: [],
+      pullRequests: [],
+      mirror: [],
+    };
+    const todos = service(
+      {
+        waiting: [run("run-1"), run("run-2")],
+        steps: { "run-1": [step("run-1")], "run-2": [step("run-2")] },
+        items: [item(12)],
+      },
+      asked,
+    );
+
+    expect(await todos.countOpen({ githubLogin: "alice" })).toMatchObject({
+      open: 2,
+    });
+    expect(asked.mirror).toEqual([]);
+
+    await todos.list({ githubLogin: "alice" });
+    expect(asked.mirror).not.toEqual([]);
   });
 });
 

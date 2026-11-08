@@ -4,20 +4,19 @@
 // The frame of a project's cockpit (#925): the repository as the title with its state, the trail back to the projects, and the five tabs
 // of the factory as links with the current one marked. The tabs' contents show the empty states of the prototype where the data comes later.
 import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProjectRowView } from "./list-view.ts";
 import { ProjectCockpit } from "./project-cockpit.tsx";
-import {
-  LanesTab,
-  type LaneRow,
-  ProjectTodosTab,
-  TicketSourceCard,
-} from "./project-tabs.tsx";
+import { LanesTab, type LaneRow, TicketSourceCard } from "./project-tabs.tsx";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const ROW: ProjectRowView = {
   repositoryId: "repo-1",
+  projectId: "p-1",
   fullName: "acme/widgets",
   url: "https://github.com/acme/widgets",
   installation: "acme",
@@ -64,29 +63,50 @@ describe("the cockpit frame", () => {
   });
 
   // #925
-  it("shows the count of open ToDos on the ToDos tab once there is one", () => {
+  it("shows the number of open ToDos of the project on its ToDos tab, from the route of the sidebar's badge", async () => {
+    const fetchMock = vi.fn(
+      async (url: string) =>
+        ({
+          ok: true,
+          json: async () => ({ open: 5, projects: { "p-1": 3, "p-2": 2 } }),
+          url,
+        }) as unknown as Response,
+    );
+    vi.stubGlobal("fetch", fetchMock);
     render(
-      <ProjectCockpit workspaceSlug="acme" row={ROW} tab="" todoCount={3}>
+      <ProjectCockpit workspaceSlug="acme" row={ROW} tab="">
         <p>content</p>
       </ProjectCockpit>,
     );
 
     expect(
-      within(screen.getByRole("link", { name: /ToDos/ })).getByText("3"),
+      within(await screen.findByRole("link", { name: /ToDos/ })).getByText("3"),
     ).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/w/acme/todos/count");
+  });
+
+  // #925
+  it("shows no number on the ToDos tab of a repository that is not a project yet", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <ProjectCockpit
+        workspaceSlug="acme"
+        row={{ ...ROW, projectId: null }}
+        tab=""
+      >
+        <p>content</p>
+      </ProjectCockpit>,
+    );
+
+    expect(
+      within(screen.getByRole("link", { name: /ToDos/ })).queryByText(/\d/),
+    ).toBeNull();
   });
 });
 
 describe("the tabs", () => {
-  // #925
-  it("says nothing waits on the ToDos tab", () => {
-    render(<ProjectTodosTab />);
-
-    expect(
-      screen.getByText("Nothing waits for you in this project"),
-    ).toBeTruthy();
-  });
-
   // #925
   it("lists the lanes of the workspace with a link to each and a hint that they are shared", () => {
     const lane: LaneRow = {

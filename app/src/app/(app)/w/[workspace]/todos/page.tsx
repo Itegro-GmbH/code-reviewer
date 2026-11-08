@@ -5,26 +5,33 @@ import { PageHeader } from "@/components/page-header";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { TodosPageContent } from "@/todos/ui/todos-page";
 import { requireWorkspace } from "@/workspaces/access-runtime";
+import { can } from "@/workspaces/permissions";
 
 export const metadata: Metadata = { title: "ToDos" };
 
-// What waits for the person across the projects of the workspace (#925): a question of an agent, a review that is asked for, red
-// checks. The page exists only in a deployment with the capability `implementer` (the access proxy answers it as a path that does
-// not exist everywhere else; `requireImplementerCapability()` is the second wall). The ToDos arrive with the ticket source and the
-// answer panel (#923, #924); until then the page says so.
+// What waits for the person across the projects of the workspace (#925): a question of an agent, a review that is asked for. The list
+// is read by the page itself from `GET /api/w/<slug>/todos` (what it shows depends on who looks), with the answer panel next to it. The
+// page exists only in a deployment with the capability `implementer` (the access proxy answers it as a path that does not exist
+// everywhere else; `requireImplementerCapability()` is the second wall).
 export default async function TodosPage({
   params,
 }: PageProps<"/w/[workspace]/todos">) {
   requireImplementerCapability();
   const { workspace: slug } = await params;
-  const { workspace } = await requireWorkspace(slug);
+  const { workspace, role, user } = await requireWorkspace(slug);
   return (
     <>
       <PageHeader
         title="ToDos"
         description="Everything that waits for you, across your projects."
       />
-      <TodosPageContent workspaceSlug={workspace.slug} />
+      <TodosPageContent
+        workspaceSlug={workspace.slug}
+        actor={{
+          mayAct: can(role, "start_implementer_task"),
+          hasLogin: user.githubLogin !== null,
+        }}
+      />
     </>
   );
 }

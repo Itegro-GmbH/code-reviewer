@@ -1,32 +1,522 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // @vitest-environment jsdom
-// The ToDos page (#925): the two lists of the prototype with their empty states.
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+// The ToDos page (#925): the open list (questions and reviews), the done list, the filter by project, loading, empty and error states,
+// the slow polling, and the panel that opens for the ToDo that is picked.
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RequestResult } from "../../ui/json-request.ts";
+import type { TodoList } from "../service.ts";
+import { TODOS_CHANGED_EVENT } from "../../todo-badges/events.ts";
+import { TODOS_POLL_MS } from "./api.ts";
+import {
+  ACTOR,
+  doneQuestion,
+  failed,
+  fakeApi,
+  list,
+  question,
+  review,
+} from "./test-fixtures.ts";
 import { TodosPageContent } from "./todos-page.tsx";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("the ToDos page", () => {
   // #925
-  it("has an Open and a Done list, empty until the answer flow exists, with the way to the projects", () => {
-    render(<TodosPageContent workspaceSlug="acme" />);
+  it("says it is loading until the list is there", async () => {
+    let release: (value: RequestResult<TodoList>) => void;
+    const api = fakeApi();
+    api.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
 
+    expect(screen.getByText("Loading the ToDos")).toBeTruthy();
+    await act(async () => {
+      release({ ok: true, data: list() });
+    });
+    expect(screen.queryByText("Loading the ToDos")).toBeNull();
     expect(
-      screen.getByRole("heading", { level: 2, name: "Open · 0" }),
+      await screen.findByRole("heading", { level: 2, name: "Open · 2" }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("lists the questions and the reviews, newest first, and the done list", async () => {
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
+
+    const rows = within(
+      await screen.findByRole("list", { name: "Open ToDos" }),
+    ).getAllByRole("button");
+    expect(rows.map((row) => row.getAttribute("data-todo-id"))).toEqual([
+      "question:run-1:step-1:1",
+      "review:r-1:7",
+    ]);
+    expect(rows[0]?.textContent).toContain("Retry which failures?");
+    expect(rows[0]?.textContent).toContain("Answer");
+    expect(rows[1]?.textContent).toContain("Add widget caching");
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Done · 1" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("heading", { level: 2, name: "Done · 0" }),
+      screen.getByText(/Answered: Single or double opt-in\?/),
     ).toBeTruthy();
-    expect(screen.getByText("Nothing waits for you")).toBeTruthy();
+    expect(screen.getByText(/by octocat \(on this page\)/)).toBeTruthy();
+    expect(
+      screen.getByText(/Whoever answers first continues the run/),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("shows what the agent wrote as text, never as markup", async () => {
+    const hostile = '<img src=x onerror="alert(1)"> **bold**';
+    const { container } = render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        api={fakeApi({
+          lists: [
+            list({
+              questions: [question({ question: hostile })],
+              reviews: [],
+              done: [],
+            }),
+          ],
+        })}
+      />,
+    );
+
+    expect(await screen.findByText(hostile)).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  // #925
+  it("has an empty state with the way to the projects, and an empty done list", async () => {
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        api={fakeApi({
+          lists: [list({ questions: [], reviews: [], done: [] })],
+        })}
+      />,
+    );
+
+    expect(await screen.findByText("Nothing waits for you")).toBeTruthy();
     expect(
       screen
         .getByRole("link", { name: "Open the projects" })
         .getAttribute("href"),
     ).toBe("/w/acme/projects");
     expect(
-      screen.getByText(/Whoever answers first continues the run/),
+      screen.getByRole("heading", { level: 2, name: "Open · 0" }),
     ).toBeTruthy();
+    expect(screen.getByText("Answered ToDos are listed here.")).toBeTruthy();
+  });
+
+  // #925
+  it("says why the list could not be loaded, and tries again by itself", async () => {
+    vi.useFakeTimers();
+    const api = fakeApi({
+      lists: [failed("TODOS_REVIEW_FAILED", 503), list()],
+    });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+
+    await act(async () => {});
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("The ToDos could not be loaded.");
+    expect(alert.textContent).toContain("tries again by itself");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Open · 2" }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("keeps the last list on screen and says so when a later read fails", async () => {
+    vi.useFakeTimers();
+    const api = fakeApi({ lists: [list(), failed("NETWORK_ERROR", null)] });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+    await act(async () => {});
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Open · 2" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("status", { name: "Updating the ToDos" }).textContent,
+    ).toMatch(/Updating failed/);
+  });
+
+  // #925
+  it("reads the list again at a slow interval", async () => {
+    vi.useFakeTimers();
+    const api = fakeApi({
+      lists: [list(), list({ questions: [], reviews: [] })],
+    });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+    await act(async () => {});
+    expect(api.list).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS - 1);
+    });
+    expect(api.list).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Nothing waits for you")).toBeTruthy();
+  });
+
+  // #925
+  it("tells the badges when its own poll finds that the open ToDos changed, and not for the first read or an unchanged list", async () => {
+    vi.useFakeTimers();
+    const heard = vi.fn();
+    window.addEventListener(TODOS_CHANGED_EVENT, heard);
+    const api = fakeApi({
+      lists: [list(), list(), list({ questions: [] })],
+    });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+    await act(async () => {});
+    expect(heard).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(heard).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+    expect(api.list).toHaveBeenCalledTimes(3);
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(TODOS_CHANGED_EVENT, heard);
+  });
+
+  // #925
+  it("filters by project when the ToDos are about more than one", async () => {
+    const user = userEvent.setup();
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        api={fakeApi({
+          lists: [
+            list({
+              questions: [question()],
+              reviews: [
+                review({
+                  id: "review:r-2:3",
+                  repositoryId: "r-2",
+                  repo: "acme/api",
+                  title: "Rate limit",
+                }),
+              ],
+              done: [],
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const filter = await screen.findByLabelText("Project");
+    await user.selectOptions(filter, "acme/api");
+
+    const rows = within(
+      screen.getByRole("list", { name: "Open ToDos" }),
+    ).getAllByRole("button");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("Rate limit");
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Open · 1" }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("has no filter when all ToDos are of one project", async () => {
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
+
+    await screen.findByRole("list", { name: "Open ToDos" });
+    expect(screen.queryByLabelText("Project")).toBeNull();
+  });
+
+  // #925
+  it("opens the panel of the ToDo that is picked, moves the focus into it and gives it back on close", async () => {
+    const user = userEvent.setup();
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
+    const row = (await screen.findAllByRole("button", { pressed: false }))[0];
+    if (row === undefined) throw new Error("no row");
+
+    await user.click(row);
+
+    const panel = screen.getByRole("complementary", {
+      name: "Retry failed uploads",
+    });
+    expect(row.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(
+      within(panel).getByRole("heading", { level: 2 }),
+    );
+
+    await user.click(within(panel).getByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(document.activeElement).toBe(row));
+    expect(screen.queryByRole("complementary")).toBeNull();
+  });
+
+  // #925
+  it("opens the review panel for a review", async () => {
+    const user = userEvent.setup();
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add widget caching/ }),
+    );
+
+    const panel = screen.getByRole("complementary", {
+      name: "Add widget caching",
+    });
+    expect(within(panel).getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(
+      within(panel).getByRole("button", { name: "Request changes" }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("takes a ToDo out of the open list after it was answered and shows it as done once the list says so", async () => {
+    const user = userEvent.setup();
+    const answered = doneQuestion({
+      id: "question:run-1:step-1:1",
+      question: "Retry which failures?",
+    });
+    const api = fakeApi({
+      lists: [
+        list({ reviews: [], done: [] }),
+        list({ questions: [], reviews: [], done: [answered] }),
+      ],
+    });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Retry which failures/ }),
+    );
+    await user.click(
+      screen.getByRole("radio", { name: /Network errors and 5xx/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "Answer" }));
+
+    expect(
+      await screen.findByText(/The answer went to the agent/),
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: "Open · 0" }),
+      ).toBeTruthy(),
+    );
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Done · 1" }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("tells the sidebar to count again after an answer", async () => {
+    const user = userEvent.setup();
+    const heard = vi.fn();
+    window.addEventListener(TODOS_CHANGED_EVENT, heard);
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        api={fakeApi({ lists: [list({ reviews: [] })] })}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Retry which failures/ }),
+    );
+    await user.click(
+      screen.getByRole("radio", { name: /Network errors and 5xx/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "Answer" }));
+
+    await waitFor(() => expect(heard).toHaveBeenCalled());
+    window.removeEventListener(TODOS_CHANGED_EVENT, heard);
+  });
+});
+
+describe("a question picked by the address", () => {
+  // #925
+  it("opens the question of the run the address names, once the list is there, with the focus in its panel", async () => {
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        projectId="p-1"
+        variant="project"
+        focusRun="run-3"
+        api={fakeApi({
+          lists: [
+            list({
+              questions: [
+                question(),
+                question({
+                  id: "question:run-3:step-3:1",
+                  runId: "run-3",
+                  stepRunId: "step-3",
+                  question: "Which branch?",
+                  since: "2026-11-07T06:00:00.000Z",
+                }),
+              ],
+              reviews: [],
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const panel = await screen.findByRole("complementary");
+    expect(
+      within(panel).getByRole("heading", { level: 2 }).getAttribute("tabindex"),
+    ).toBe("-1");
+    expect(within(panel).getByText("Which branch?")).toBeTruthy();
+    expect(
+      screen
+        .getByRole("button", { name: /Which branch/ })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  // #925
+  it("opens nothing when the run has no open question, and does not pick again after the person closed the panel", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        focusRun="run-unknown"
+        api={fakeApi()}
+      />,
+    );
+    await screen.findByRole("heading", { level: 2, name: "Open · 2" });
+    expect(screen.queryByRole("complementary")).toBeNull();
+    unmount();
+
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        focusRun="run-1"
+        api={fakeApi({ lists: [list(), list()] })}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByRole("complementary")).toBeNull();
+  });
+});
+
+describe("the panel for a role that may not answer", () => {
+  // #925
+  it("opens the ToDo but offers neither Answer nor Approve", async () => {
+    const user = userEvent.setup();
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={{ mayAct: false, hasLogin: true }}
+        api={fakeApi()}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Retry which failures/ }),
+    );
+    const panel = screen.getByRole("complementary");
+    expect(within(panel).queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(within(panel).getByText(/does not allow that/)).toBeTruthy();
+
+    await user.click(
+      screen.getByRole("button", { name: /Add widget caching/ }),
+    );
+    expect(
+      within(screen.getByRole("complementary")).queryByRole("button", {
+        name: "Approve",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("the ToDos tab of a project", () => {
+  // #925
+  it("reads the list of the project and says so when nothing waits", async () => {
+    const api = fakeApi({
+      lists: [list({ projectId: "p-1", questions: [], reviews: [], done: [] })],
+    });
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        projectId="p-1"
+        variant="project"
+        api={api}
+      />,
+    );
+
+    expect(
+      await screen.findByText("Nothing waits for you in this project"),
+    ).toBeTruthy();
+    expect(api.list).toHaveBeenCalledWith("p-1");
+    expect(
+      screen.queryByRole("link", { name: "Open the projects" }),
+    ).toBeNull();
+  });
+
+  // #925
+  it("reads nothing for a repository that is not a project", () => {
+    const api = fakeApi();
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        variant="project"
+        api={api}
+      />,
+    );
+
+    expect(screen.getByText(/not a project yet/)).toBeTruthy();
+    expect(api.list).not.toHaveBeenCalled();
   });
 });

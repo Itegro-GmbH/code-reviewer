@@ -3,13 +3,15 @@
 // The frame of a project's cockpit (#925, prototype board "3 Project"): the header with the repository as the title, its state, the
 // trail `Projects / <project>` and the tabs Issues, ToDos, Runs, Lanes and Setup. Every tab is a page of its own below the project's
 // address, so a tab is a link, reachable and bookmarkable. The cockpit exists only in the factory; a deployment without it keeps the
-// project list and the review settings. The repository name is untrusted GitHub text and is rendered as text.
+// project list and the review settings. The ToDos tab carries the number of open ToDos of the project, read by the client from the
+// route of the sidebar's badge (one request for both, no extra list read on the page). The repository name is untrusted GitHub text and is rendered as text.
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { Breadcrumbs } from "../../components/breadcrumbs.tsx";
 import { PageHeader } from "../../components/page-header.tsx";
 import { PILL_LINK_CLASS } from "../../components/pill-link.ts";
 import { Badge } from "../../components/ui/badge.tsx";
+import { ProjectTodoBadge } from "../../todo-badges/badges.tsx";
 import { workspacePath } from "../../workspaces/paths.ts";
 import { COCKPIT_TABS, type CockpitTab } from "./cockpit-messages.ts";
 import type { ProjectRowView } from "./list-view.ts";
@@ -20,15 +22,12 @@ export function ProjectCockpit({
   workspaceSlug,
   row,
   tab,
-  todoCount = null,
   children,
 }: {
   workspaceSlug: string;
   row: ProjectRowView;
   /** The tab the page is. */
   tab: CockpitTab;
-  /** The open ToDos of the project for the badge of the ToDos tab; `null` until they exist. */
-  todoCount?: number | null;
   children: ReactNode;
 }) {
   return (
@@ -67,12 +66,11 @@ export function ProjectCockpit({
                 className={PILL_LINK_CLASS}
               >
                 {entry.label}
-                {entry.segment === "todos" &&
-                todoCount !== null &&
-                todoCount > 0 ? (
-                  <Badge variant="warning" icon={false} className="ml-2">
-                    {todoCount}
-                  </Badge>
+                {entry.segment === "todos" ? (
+                  <ProjectTodoBadge
+                    workspaceSlug={workspaceSlug}
+                    projectId={row.projectId}
+                  />
                 ) : null}
               </Link>
             </li>

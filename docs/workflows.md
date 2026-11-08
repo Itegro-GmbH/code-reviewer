@@ -1321,7 +1321,7 @@ The tab lists the issues of the project's ticket source from the [ticket mirror]
 
 | Waits for | When | Goes to |
 | --- | --- | --- |
-| Answer | the lane's run `waits` for an answer | the run page, where the question is answered inline (the ToDo answer panel comes with #924) |
+| Answer | the lane's run `waits` for an answer | the ToDos tab of the project with that question picked (`…/todos?run=<runId>`), where the answer panel is ([`todos.md`](todos.md#the-page)) |
 | Review | open issue, no lane on it, a linked pull request is **open** (the newest open one; closed and merged ones do not count, nor one the list does not hold) | the pull request on GitHub |
 | Start | open issue, no lane, no open pull request | the start dialog; refused (`aria-disabled`, still focusable, the reason as text) for a person without `start_implementer_task` and for a project with no lane to start |
 
