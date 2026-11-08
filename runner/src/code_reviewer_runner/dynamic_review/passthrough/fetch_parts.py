@@ -88,17 +88,47 @@ _TOOL_CALL_TYPES: Final = frozenset({"tool_use", "server_tool_use", "mcp_tool_us
 # The agent's own JSON, per parent: skipped, never read.
 _CALL_PARENTS: Final = frozenset({"functioncall", "function"})
 _RESULT_PARENTS: Final = frozenset({"functionresponse"})
-_SCHEME: Final = re.compile(r"[\x00-\x20]*([A-Za-z][A-Za-z0-9+.\-]*):")
+_SCHEME: Final = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
+# What a URL parser drops anywhere in an address (WHATWG: tab and new line) and what a trim drops in
+# front of it (every white space, the no-break space and the byte order mark among them).
+_DROPPED: Final = re.compile(r"[\t\r\n]")
+_LEADING: Final = re.compile(
+    r"^[\x00-\x20\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]+"
+)
+# Base64 (standard or URL-safe), as `file_data` carries it by contract; white space between the
+# lines is allowed.
+_BASE64: Final = re.compile(r"[A-Za-z0-9+/_=-]*")
 
 
 def _normal(key: str) -> str:
     return key.lower().replace("_", "").replace("-", "")
 
 
+def _address(value: str) -> str:
+    """The string as a URL parser reads it: tab and new line dropped, leading space trimmed."""
+    return _LEADING.sub("", _DROPPED.sub("", value))
+
+
 def _has_scheme(value: object) -> bool:
-    """Whether a string starts with a URL scheme other than `data:` (case and spaces ignored)."""
-    found = _SCHEME.match(value) if isinstance(value, str) else None
+    """Whether a string is an address other than inline content: a URL scheme other than
+    `data:`, or a scheme-relative `//host` (case, tab, new line and leading space ignored)."""
+    if not isinstance(value, str):
+        return False
+    address = _address(value)
+    if address.startswith(("//", "\\\\")):
+        return True
+    found = _SCHEME.match(address)
     return found is not None and found.group(1).lower() != "data"
+
+
+def _is_inline_data(value: object) -> bool:
+    """`file_data` as its contract has it: base64, or a `data:` URI. Anything else is refused."""
+    if not isinstance(value, str):
+        return True
+    address = _address(value)
+    if address[:5].lower() == "data:":
+        return True
+    return _BASE64.fullmatch(re.sub(r"\s", "", value)) is not None
 
 
 def _is_inline(url: object) -> bool:
@@ -113,7 +143,9 @@ def _names_a_url(value: Any) -> bool:
 
 
 def _holds_a_scheme(value: Any) -> bool:
-    """A string with a URL scheme, or an object whose `url` or `uri` is one."""
+    """A string with a URL scheme, a list holding one, or an object whose `url` or `uri` is one."""
+    if isinstance(value, list):
+        return any(_holds_a_scheme(element) for element in cast("list[Any]", value))
     if isinstance(value, dict):
         return any(
             _normal(name) in ("url", "uri") and _has_scheme(inner)
@@ -127,7 +159,7 @@ def _is_free_form(key: str, parent: str, kind: object) -> bool:
         return _normal(parent) in _CALL_PARENTS or kind == "function_call"
     if key == "response":
         return _normal(parent) in _RESULT_PARENTS
-    return key == "input" and kind in _TOOL_CALL_TYPES
+    return key == "input" and isinstance(kind, str) and kind in _TOOL_CALL_TYPES
 
 
 def _walk(node: Any, parent: str = "") -> None:
@@ -161,8 +193,8 @@ def _fetches(key: str, value: Any) -> bool:
     if name in _FILE_URI_KEYS:
         return value not in (None, "")
     if name in _FILE_DATA_KEYS:
-        return _has_scheme(value)
-    if name.endswith(("url", "uri")):
+        return not _is_inline_data(value)
+    if name.endswith(("url", "uri", "urls", "uris")):
         return _holds_a_scheme(value)
     # Anthropic: `source: {"type": "url", "url": ...}` on an image or a document (and on any block
     # a later API version gives one).
