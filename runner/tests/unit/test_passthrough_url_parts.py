@@ -11,6 +11,7 @@ anything is reserved or sent; a stream with inline content untouched).
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -190,6 +191,66 @@ URL_PARTS: list[tuple[str, WireFamily, list[dict[str, Any]], str]] = [
         "messages[0].content[0].source.content[0].source (url source)",
     ),
     (
+        "chat-file-data-url",
+        CHAT,
+        [user({"type": "file", "file": {"filename": "a.pdf", "file_data": URL}})],
+        "messages[0].content[0].file.file_data (url source)",
+    ),
+    (
+        "responses-file-data-url",
+        RESPONSES,
+        [user({"type": "input_file", "filename": "a.pdf", "file_data": URL})],
+        "input[0].content[0].file_data (url source)",
+    ),
+    (
+        "chat-image-url-case-variant",
+        CHAT,
+        [user({"type": "image_url", "Image_Url": {"url": URL}})],
+        "messages[0].content[0].Image_Url (url source)",
+    ),
+    (
+        "chat-image-url-camel-case",
+        CHAT,
+        [user({"type": "image_url", "imageUrl": URL})],
+        "messages[0].content[0].imageUrl (url source)",
+    ),
+    (
+        "chat-unfamiliar-url-key",
+        CHAT,
+        [user({"type": "pdf_url", "pdf_url": {"url": URL}})],
+        "messages[0].content[0].pdf_url (url source)",
+    ),
+    (
+        "chat-unfamiliar-uri-key",
+        CHAT,
+        [user({"type": "thumb", "thumbnail-uri": URL})],
+        "messages[0].content[0].thumbnail-uri (url source)",
+    ),
+    (
+        "responses-unfamiliar-nesting",
+        RESPONSES,
+        [user({"type": "input_x", "payload": {"url": URL}})],
+        "input[0].content[0].payload.url (url source)",
+    ),
+    (
+        "messages-url-beside-another-source-type",
+        MESSAGES,
+        [user({"type": "image", "source": {"type": "base64", "url": URL}})],
+        "messages[0].content[0].source.url (url source)",
+    ),
+    (
+        "chat-args-outside-a-function-call",
+        CHAT,
+        [user({"type": "x", "args": {"image_url": URL}})],
+        "messages[0].content[0].args.image_url (url source)",
+    ),
+    (
+        "google-response-outside-a-function-response",
+        GOOGLE,
+        [{"role": "user", "parts": [{"unknown": {"response": {"fileUri": URL}}}]}],
+        "contents[0].parts[0].unknown.response.fileUri (url source)",
+    ),
+    (
         "google-file-data",
         GOOGLE,
         [{"role": "user", "parts": [{"fileData": {"mimeType": "image/png", "fileUri": URL}}]}],
@@ -310,6 +371,82 @@ INLINE: list[tuple[str, WireFamily, list[dict[str, Any]]]] = [
             }
         ],
     ),
+    (
+        "chat-file-data-base64",
+        CHAT,
+        [user({"type": "file", "file": {"filename": "a.pdf", "file_data": BASE64}})],
+    ),
+    (
+        "chat-file-data-data-uri",
+        CHAT,
+        [user({"type": "file", "file": {"file_data": "data:application/pdf;base64," + BASE64}})],
+    ),
+    ("chat-file-id", CHAT, [user({"type": "file", "file": {"file_id": "file-abc"}})]),
+    (
+        "responses-file-data-base64",
+        RESPONSES,
+        [user({"type": "input_file", "filename": "a.pdf", "file_data": BASE64})],
+    ),
+    # What a provider answered and the engine sends back: a citation is a record, not a fetch.
+    (
+        "chat-annotations-echo",
+        CHAT,
+        [
+            {
+                "role": "assistant",
+                "content": "x",
+                "annotations": [
+                    {"type": "url_citation", "url_citation": {"url": URL, "title": "t"}}
+                ],
+            }
+        ],
+    ),
+    (
+        "responses-annotations-echo",
+        RESPONSES,
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "x",
+                        "annotations": [{"type": "url_citation", "url": URL, "title": "t"}],
+                    }
+                ],
+            }
+        ],
+    ),
+    (
+        "messages-citations-echo",
+        MESSAGES,
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "x",
+                        "citations": [{"type": "web_search_result_location", "url": URL}],
+                    }
+                ],
+            }
+        ],
+    ),
+    (
+        "messages-search-result-source-string",
+        MESSAGES,
+        [
+            user(
+                {
+                    "type": "search_result",
+                    "source": URL,
+                    "title": "t",
+                    "content": [{"type": "text", "text": "x"}],
+                }
+            )
+        ],
+    ),
     # A URL as plain text is only text: the provider does not fetch it.
     ("chat-url-in-text", CHAT, [user({"type": "text", "text": f"see {URL}"})]),
     ("messages-url-in-string-content", MESSAGES, [{"role": "user", "content": f"see {URL}"}]),
@@ -394,6 +531,25 @@ FREE_FORM: list[tuple[str, WireFamily, list[dict[str, Any]]]] = [
             },
         ],
     ),
+    (
+        "google-function-call-snake-case",
+        GOOGLE,
+        [
+            {
+                "role": "model",
+                "parts": [{"function_call": {"name": "write", "args": {"file_uri": URL}}}],
+            },
+            {
+                "role": "user",
+                "parts": [{"function_response": {"name": "write", "response": {"url": URL}}}],
+            },
+        ],
+    ),
+    (
+        "chat-legacy-function-call-arguments",
+        CHAT,
+        [{"role": "assistant", "function_call": {"name": "w", "arguments": {"url": URL}}}],
+    ),
 ]
 
 
@@ -464,3 +620,92 @@ def test_a_turn_with_an_inline_image_still_streams_untouched(family: WireFamily)
     # The bytes that went out are the bytes that came in.
     assert r.upstream.requests[0].body == body
     assert r.ledger.failure is None
+
+
+# #950-T09: the schemes a provider fetches from, however the value is written
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://attacker.example/a?" + LEAK,
+        "HTTPS://attacker.example/a?" + LEAK,
+        "  https://attacker.example/a?" + LEAK,
+        "\n\thttps://attacker.example/a?" + LEAK,
+        "gs://bucket/" + LEAK,
+        "s3://bucket/" + LEAK,
+        "ftp://attacker.example/" + LEAK,
+        "Data-Not:" + LEAK,
+    ],
+)
+@pytest.mark.parametrize("family", [CHAT, RESPONSES])
+def test_a_file_data_with_any_url_scheme_is_refused(family: WireFamily, value: str) -> None:
+    part: dict[str, Any] = {"type": "input_file", "file_data": value}
+    if family is CHAT:
+        part = {"type": "file", "file": {"file_data": value}}
+    refused = check(family, body_of(family, user(part)))
+    assert refused is not None and str(refused.where).endswith("file_data (url source)")
+    assert LEAK not in str(refused.where)
+
+
+# #950-T10: a data: URI is inline whatever its case or leading space
+@pytest.mark.parametrize("value", [DATA_URL, " " + DATA_URL, DATA_URL.upper(), ""])
+def test_a_data_uri_is_inline_for_every_url_key(value: str) -> None:
+    parts = [
+        {"image_url": {"url": value}},
+        {"Image_Url": value},
+        {"file": {"file_data": value}},
+        {"some_new_uri": value},
+    ]
+    for part in parts:
+        assert check(CHAT, body_of(CHAT, user(part))) is None
+
+
+# #950-T10b: `file_data` is base64 by contract and has no scheme
+def test_bare_base64_in_file_data_passes() -> None:
+    assert check(CHAT, body_of(CHAT, user({"file": {"file_data": BASE64}}))) is None
+
+
+def _documented_refusals() -> list[str]:
+    """The keys `docs/implementer.md` names in the Refused column of the table of #950."""
+    text = (Path(__file__).resolve().parents[3] / "docs" / "implementer.md").read_text()
+    section = text.split("### What the door refuses in a message (#950)", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    keys: list[str] = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 3 and cells[0] not in ("Family", "---"):
+            for span in re.findall(r"`([^`]+)`", cells[1]):
+                name = re.match(r"[A-Za-z_][\w.]*", span)
+                assert name is not None, f"a code span of the table is not a key: {span}"
+                keys.append(name.group(0).split(".")[-1])
+    return keys
+
+
+# #950-T11: the table of the doc and the walk cannot drift apart
+def test_every_key_the_doc_says_is_refused_is_refused_by_the_walk() -> None:
+    keys = _documented_refusals()
+    assert {"image_url", "file_url", "file_data", "fileUri", "file_uri", "source"} <= set(keys)
+    for key in keys:
+        value: Any = {"type": "url", "url": URL} if key == "source" else URL
+        for family in WireFamily:
+            part = {"type": "x", key: value}
+            document = (
+                body_of(family, {"role": "user", "parts": [part]})
+                if family is GOOGLE
+                else body_of(family, user(part))
+            )
+            refused = check(family, document)
+            assert refused is not None, (family, key)
+            assert str(refused.where).endswith("(url source)")
+
+
+# #950-T12: the engine is told what kind of part it was, never which value
+@pytest.mark.parametrize("family", list(WireFamily))
+def test_the_engine_is_told_a_part_asks_the_provider_to_fetch_a_url(family: WireFamily) -> None:
+    conversation = next(c for _, f, c, _ in URL_PARTS if f is family)
+    r = rig(family, streamed(family))
+    sink = r.post(json.dumps(body_of(family, *conversation)).encode())
+    answer = b"".join(sink.chunks).decode()
+    assert "a message part asks the provider to fetch a URL" in answer
+    assert LEAK not in answer and "attacker" not in answer
+    assert r.ledger.failure is not None
+    assert "a message part asks the provider to fetch a URL" in str(r.ledger.failure)
