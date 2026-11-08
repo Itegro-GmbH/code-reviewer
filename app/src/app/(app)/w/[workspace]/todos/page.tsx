@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/page-header";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { TodosPageContent } from "@/todos/ui/todos-page";
 import { requireWorkspace } from "@/workspaces/access-runtime";
+import { can } from "@/workspaces/permissions";
 
 export const metadata: Metadata = { title: "ToDos" };
 
@@ -17,14 +18,20 @@ export default async function TodosPage({
 }: PageProps<"/w/[workspace]/todos">) {
   requireImplementerCapability();
   const { workspace: slug } = await params;
-  const { workspace } = await requireWorkspace(slug);
+  const { workspace, role, user } = await requireWorkspace(slug);
   return (
     <>
       <PageHeader
         title="ToDos"
         description="Everything that waits for you, across your projects."
       />
-      <TodosPageContent workspaceSlug={workspace.slug} />
+      <TodosPageContent
+        workspaceSlug={workspace.slug}
+        actor={{
+          mayAct: can(role, "start_implementer_task"),
+          hasLogin: user.githubLogin !== null,
+        }}
+      />
     </>
   );
 }

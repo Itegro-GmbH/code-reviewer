@@ -15,8 +15,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../../ui/json-request.ts";
 import type { TodoList } from "../service.ts";
+import { TODOS_CHANGED_EVENT } from "../../todo-badges/events.ts";
 import { TODOS_POLL_MS } from "./api.ts";
 import {
+  ACTOR,
   doneQuestion,
   failed,
   fakeApi,
@@ -42,7 +44,7 @@ describe("the ToDos page", () => {
           release = resolve;
         }),
     );
-    render(<TodosPageContent workspaceSlug="acme" api={api} />);
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
 
     expect(screen.getByText("Loading the ToDos")).toBeTruthy();
     await act(async () => {
@@ -56,7 +58,9 @@ describe("the ToDos page", () => {
 
   // #925
   it("lists the questions and the reviews, newest first, and the done list", async () => {
-    render(<TodosPageContent workspaceSlug="acme" api={fakeApi()} />);
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
 
     const rows = within(
       await screen.findByRole("list", { name: "Open ToDos" }),
@@ -86,6 +90,7 @@ describe("the ToDos page", () => {
     const { container } = render(
       <TodosPageContent
         workspaceSlug="acme"
+        actor={ACTOR}
         api={fakeApi({
           lists: [
             list({
@@ -107,6 +112,7 @@ describe("the ToDos page", () => {
     render(
       <TodosPageContent
         workspaceSlug="acme"
+        actor={ACTOR}
         api={fakeApi({
           lists: [list({ questions: [], reviews: [], done: [] })],
         })}
@@ -131,7 +137,7 @@ describe("the ToDos page", () => {
     const api = fakeApi({
       lists: [failed("TODOS_REVIEW_FAILED", 503), list()],
     });
-    render(<TodosPageContent workspaceSlug="acme" api={api} />);
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
 
     await act(async () => {});
     const alert = screen.getByRole("alert");
@@ -151,7 +157,7 @@ describe("the ToDos page", () => {
   it("keeps the last list on screen and says so when a later read fails", async () => {
     vi.useFakeTimers();
     const api = fakeApi({ lists: [list(), failed("NETWORK_ERROR", null)] });
-    render(<TodosPageContent workspaceSlug="acme" api={api} />);
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
     await act(async () => {});
 
     await act(async () => {
@@ -172,7 +178,7 @@ describe("the ToDos page", () => {
     const api = fakeApi({
       lists: [list(), list({ questions: [], reviews: [] })],
     });
-    render(<TodosPageContent workspaceSlug="acme" api={api} />);
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
     await act(async () => {});
     expect(api.list).toHaveBeenCalledTimes(1);
 
@@ -188,11 +194,38 @@ describe("the ToDos page", () => {
   });
 
   // #925
+  it("tells the badges when its own poll finds that the open ToDos changed, and not for the first read or an unchanged list", async () => {
+    vi.useFakeTimers();
+    const heard = vi.fn();
+    window.addEventListener(TODOS_CHANGED_EVENT, heard);
+    const api = fakeApi({
+      lists: [list(), list(), list({ questions: [] })],
+    });
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
+    await act(async () => {});
+    expect(heard).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+    expect(api.list).toHaveBeenCalledTimes(2);
+    expect(heard).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TODOS_POLL_MS);
+    });
+    expect(api.list).toHaveBeenCalledTimes(3);
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(TODOS_CHANGED_EVENT, heard);
+  });
+
+  // #925
   it("filters by project when the ToDos are about more than one", async () => {
     const user = userEvent.setup();
     render(
       <TodosPageContent
         workspaceSlug="acme"
+        actor={ACTOR}
         api={fakeApi({
           lists: [
             list({
@@ -227,7 +260,9 @@ describe("the ToDos page", () => {
 
   // #925
   it("has no filter when all ToDos are of one project", async () => {
-    render(<TodosPageContent workspaceSlug="acme" api={fakeApi()} />);
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
 
     await screen.findByRole("list", { name: "Open ToDos" });
     expect(screen.queryByLabelText("Project")).toBeNull();
@@ -236,7 +271,9 @@ describe("the ToDos page", () => {
   // #925
   it("opens the panel of the ToDo that is picked, moves the focus into it and gives it back on close", async () => {
     const user = userEvent.setup();
-    render(<TodosPageContent workspaceSlug="acme" api={fakeApi()} />);
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
     const row = (await screen.findAllByRole("button", { pressed: false }))[0];
     if (row === undefined) throw new Error("no row");
 
@@ -259,7 +296,9 @@ describe("the ToDos page", () => {
   // #925
   it("opens the review panel for a review", async () => {
     const user = userEvent.setup();
-    render(<TodosPageContent workspaceSlug="acme" api={fakeApi()} />);
+    render(
+      <TodosPageContent workspaceSlug="acme" actor={ACTOR} api={fakeApi()} />,
+    );
 
     await user.click(
       await screen.findByRole("button", { name: /Add widget caching/ }),
@@ -287,7 +326,7 @@ describe("the ToDos page", () => {
         list({ questions: [], reviews: [], done: [answered] }),
       ],
     });
-    render(<TodosPageContent workspaceSlug="acme" api={api} />);
+    render(<TodosPageContent workspaceSlug="acme" actor={ACTOR} api={api} />);
 
     await user.click(
       await screen.findByRole("button", { name: /Retry which failures/ }),
@@ -314,10 +353,11 @@ describe("the ToDos page", () => {
   it("tells the sidebar to count again after an answer", async () => {
     const user = userEvent.setup();
     const heard = vi.fn();
-    window.addEventListener("factory:todos-changed", heard);
+    window.addEventListener(TODOS_CHANGED_EVENT, heard);
     render(
       <TodosPageContent
         workspaceSlug="acme"
+        actor={ACTOR}
         api={fakeApi({ lists: [list({ reviews: [] })] })}
       />,
     );
@@ -331,7 +371,111 @@ describe("the ToDos page", () => {
     await user.click(screen.getByRole("button", { name: "Answer" }));
 
     await waitFor(() => expect(heard).toHaveBeenCalled());
-    window.removeEventListener("factory:todos-changed", heard);
+    window.removeEventListener(TODOS_CHANGED_EVENT, heard);
+  });
+});
+
+describe("a question picked by the address", () => {
+  // #925
+  it("opens the question of the run the address names, once the list is there, with the focus in its panel", async () => {
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        projectId="p-1"
+        variant="project"
+        focusRun="run-3"
+        api={fakeApi({
+          lists: [
+            list({
+              questions: [
+                question(),
+                question({
+                  id: "question:run-3:step-3:1",
+                  runId: "run-3",
+                  stepRunId: "step-3",
+                  question: "Which branch?",
+                  since: "2026-11-07T06:00:00.000Z",
+                }),
+              ],
+              reviews: [],
+            }),
+          ],
+        })}
+      />,
+    );
+
+    const panel = await screen.findByRole("complementary");
+    expect(
+      within(panel).getByRole("heading", { level: 2 }).getAttribute("tabindex"),
+    ).toBe("-1");
+    expect(within(panel).getByText("Which branch?")).toBeTruthy();
+    expect(
+      screen
+        .getByRole("button", { name: /Which branch/ })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  // #925
+  it("opens nothing when the run has no open question, and does not pick again after the person closed the panel", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        focusRun="run-unknown"
+        api={fakeApi()}
+      />,
+    );
+    await screen.findByRole("heading", { level: 2, name: "Open · 2" });
+    expect(screen.queryByRole("complementary")).toBeNull();
+    unmount();
+
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        focusRun="run-1"
+        api={fakeApi({ lists: [list(), list()] })}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "Close" }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.queryByRole("complementary")).toBeNull();
+  });
+});
+
+describe("the panel for a role that may not answer", () => {
+  // #925
+  it("opens the ToDo but offers neither Answer nor Approve", async () => {
+    const user = userEvent.setup();
+    render(
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={{ mayAct: false, hasLogin: true }}
+        api={fakeApi()}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Retry which failures/ }),
+    );
+    const panel = screen.getByRole("complementary");
+    expect(within(panel).queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(within(panel).getByText(/does not allow that/)).toBeTruthy();
+
+    await user.click(
+      screen.getByRole("button", { name: /Add widget caching/ }),
+    );
+    expect(
+      within(screen.getByRole("complementary")).queryByRole("button", {
+        name: "Approve",
+      }),
+    ).toBeNull();
   });
 });
 
@@ -344,6 +488,7 @@ describe("the ToDos tab of a project", () => {
     render(
       <TodosPageContent
         workspaceSlug="acme"
+        actor={ACTOR}
         projectId="p-1"
         variant="project"
         api={api}
@@ -363,7 +508,12 @@ describe("the ToDos tab of a project", () => {
   it("reads nothing for a repository that is not a project", () => {
     const api = fakeApi();
     render(
-      <TodosPageContent workspaceSlug="acme" variant="project" api={api} />,
+      <TodosPageContent
+        workspaceSlug="acme"
+        actor={ACTOR}
+        variant="project"
+        api={api}
+      />,
     );
 
     expect(screen.getByText(/not a project yet/)).toBeTruthy();

@@ -3,8 +3,8 @@
 "use client";
 // The Issues tab of a project (#925, prototype board "3 Project"): the tiles, the table of its issues and the drawer and the start dialog
 // that open from it. The table says what GitHub says (state and board status, never mapped) and what the factory adds (the lane on the
-// issue and its step) and what the issue waits for: Start (a person starts a lane), Answer (the run asks; the link goes to the question on
-// the run page until the ToDo answer panel, #924, exists) or Review (the pull request on GitHub). The server renders the first list and the
+// issue and its step) and what the issue waits for: Start (a person starts a lane), Answer (the run asks; the link opens the ToDos tab of
+// the project with that question picked, where the answer panel is) or Review (the pull request on GitHub). The server renders the first list and the
 // board asks again while a lane is on an issue (and slowly otherwise), the way the runs list does.
 import Link from "next/link";
 import { useId, useMemo, useState } from "react";
@@ -30,7 +30,7 @@ import { useProductIdentity } from "../product-identity/context.tsx";
 import { formatUtc } from "../ui/format-time.ts";
 import { describePollFailure } from "../runs/ui/poll-messages.ts";
 import { useLiveSnapshot } from "../ui/use-live-snapshot.ts";
-import { workspacePath } from "../workspaces/paths.ts";
+import { projectPath } from "../projects/ui/project-cards.tsx";
 import type { TicketList, TicketListItem } from "../tracker/service.ts";
 import type { WorkflowRunsApi } from "../workflow-pages/api.ts";
 import {
@@ -300,6 +300,7 @@ function LiveBoard({
               <IssueRow
                 key={item.number}
                 workspaceSlug={workspaceSlug}
+                repositoryId={repositoryId}
                 list={data}
                 item={item}
                 mayStart={mayStart}
@@ -359,6 +360,7 @@ function SyncLine({ data }: { data: TicketList }) {
 
 function IssueRow({
   workspaceSlug,
+  repositoryId,
   list,
   item,
   mayStart,
@@ -367,6 +369,7 @@ function IssueRow({
   onStart,
 }: {
   workspaceSlug: string;
+  repositoryId: string;
   list: TicketList;
   item: TicketListItem;
   mayStart: boolean;
@@ -443,6 +446,7 @@ function IssueRow({
       <TableCell className="align-top whitespace-normal">
         <WaitsCell
           workspaceSlug={workspaceSlug}
+          repositoryId={repositoryId}
           number={item.number}
           waits={waitsFor(list, item)}
           mayStart={mayStart}
@@ -456,6 +460,7 @@ function IssueRow({
 
 function WaitsCell({
   workspaceSlug,
+  repositoryId,
   number,
   waits,
   mayStart,
@@ -463,6 +468,7 @@ function WaitsCell({
   onStart,
 }: {
   workspaceSlug: string;
+  repositoryId: string;
   number: number;
   waits: WaitsFor | undefined;
   mayStart: boolean;
@@ -476,10 +482,7 @@ function WaitsCell({
     return (
       <Button asChild size="sm">
         <Link
-          href={workspacePath(
-            workspaceSlug,
-            `/workflows/${encodeURIComponent(waits.workflowId)}/runs/${encodeURIComponent(waits.runId)}`,
-          )}
+          href={`${projectPath(workspaceSlug, repositoryId, "todos")}?run=${encodeURIComponent(waits.runId)}`}
           aria-label={WAITS_COPY.answerLabel(number)}
         >
           {WAITS_COPY.answer}

@@ -5,9 +5,10 @@
 // open ToDos (questions of agents, reviews that are asked for), the done list, and next to them the panel to answer or review the one
 // that is picked. The list is read from `GET /api/w/:workspace/todos` (or the project's) when the page opens and again slowly; what a person
 // does here is posted to the routes that exist and the list is read again at once. Text from outside (the agent's question, titles) is
-// rendered as text. A person who deals with a ToDo moves it out of the list at once; the sidebar's count is told to read again.
+// rendered as text. A person who deals with a ToDo moves it out of the list at once; the badges (the sidebar's and the project tab's) are told to
+// read again, and also when the page's own poll finds that the open ToDos changed.
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NativeSelect } from "../../components/native-select.tsx";
 import { StatusRegion } from "../../components/status-region.tsx";
 import { Alert, AlertDescription } from "../../components/ui/alert.tsx";
@@ -18,7 +19,7 @@ import {
   EmptyTitle,
 } from "../../components/ui/empty.tsx";
 import { Skeleton } from "../../components/ui/skeleton.tsx";
-import { TODOS_CHANGED_EVENT } from "../../shell/todo-count.tsx";
+import { TODOS_CHANGED_EVENT } from "../../todo-badges/events.ts";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { workspacePath } from "../../workspaces/paths.ts";
 import type {
@@ -27,6 +28,7 @@ import type {
   ReviewTodo,
   TodoList,
 } from "../service.ts";
+import type { TodoActor } from "./actor.ts";
 import { browserTodosApi, type TodosApi } from "./api.ts";
 import { describeTodosFailure, TODO_COPY } from "./messages.ts";
 import { Time } from "./panel-parts.tsx";
@@ -132,12 +134,18 @@ export function TodosPageContent({
   workspaceSlug,
   projectId,
   variant = "workspace",
+  focusRun,
+  actor,
   api,
 }: {
   workspaceSlug: string;
   /** The project whose ToDos the list shows (the project's tab); none for the page of the workspace. */
   projectId?: string;
   variant?: "workspace" | "project";
+  /** The run whose open question is picked when the list first arrives (the Answer button of the Issues tab links here). */
+  focusRun?: string;
+  /** Who looks: whether they may answer and review, and whether their account has a GitHub login. */
+  actor: TodoActor;
   /** The calls the page makes; the real ones when not given. */
   api?: TodosApi;
 }) {
@@ -158,6 +166,8 @@ export function TodosPageContent({
       workspaceSlug={workspaceSlug}
       projectId={projectId}
       project={variant === "project"}
+      focusRun={focusRun}
+      actor={actor}
       api={api}
     />
   );
@@ -167,11 +177,15 @@ function TodosView({
   workspaceSlug,
   projectId,
   project,
+  focusRun,
+  actor,
   api,
 }: {
   workspaceSlug: string;
   projectId: string | undefined;
   project: boolean;
+  focusRun: string | undefined;
+  actor: TodoActor;
   api: TodosApi | undefined;
 }) {
   const product = useProductIdentity();
@@ -222,6 +236,34 @@ function TodosView({
     picked === null || list === null
       ? undefined
       : openOf(list).find((todo) => todo.id === picked.id);
+
+  // The badges are told when a read finds other open ToDos than the one before it (the first read is no change: the badge reads on its own).
+  const openKey =
+    list === null
+      ? null
+      : openOf(list)
+          .map((todo) => todo.id)
+          .sort()
+          .join("\n");
+  const seenKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (openKey === null) return;
+    if (seenKey.current !== null && seenKey.current !== openKey)
+      window.dispatchEvent(new Event(TODOS_CHANGED_EVENT));
+    seenKey.current = openKey;
+  }, [openKey]);
+
+  // The address names a run: its open question is picked once, when the first list arrives (not again after the person closed the panel).
+  // State set while rendering is React's way to follow a value that arrives, without an extra pass through an effect.
+  const [focusSettled, setFocusSettled] = useState(false);
+  if (!focusSettled && list !== null) {
+    setFocusSettled(true);
+    const todo =
+      focusRun === undefined
+        ? undefined
+        : list.questions.find((entry) => entry.runId === focusRun);
+    if (todo !== undefined) setPicked(todo);
+  }
 
   function changed(todo: OpenTodo) {
     if (list !== null)
@@ -391,6 +433,7 @@ function TodosView({
             key={picked.id}
             todo={fresh ?? picked}
             open={fresh !== undefined}
+            actor={actor}
             api={calls}
             onChanged={() => changed(picked)}
             onClose={close}

@@ -11,6 +11,7 @@ import type {
   TodoList,
 } from "../service.ts";
 import type { TodosApi } from "./api.ts";
+import type { TodoActor } from "./actor.ts";
 
 export const question = (over: Partial<QuestionTodo> = {}): QuestionTodo => ({
   kind: "question",
@@ -85,6 +86,9 @@ export const list = (over: Partial<TodoList> = {}): TodoList => ({
   done: [doneQuestion()],
   ...over,
 });
+
+/** A member who may answer and review, with a GitHub login. */
+export const ACTOR: TodoActor = { mayAct: true, hasLogin: true };
 
 export const ok = <T>(data: T): RequestResult<T> => ({ ok: true, data });
 export const failed = (

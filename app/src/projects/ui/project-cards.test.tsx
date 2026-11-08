@@ -32,6 +32,7 @@ afterEach(() => {
 function row(overrides: Partial<ProjectRowView> = {}): ProjectRowView {
   return {
     repositoryId: "repo-1",
+    projectId: "p-1",
     fullName: "acme/widgets",
     url: "https://github.com/acme/widgets",
     installation: "acme",

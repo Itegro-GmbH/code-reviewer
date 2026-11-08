@@ -2,6 +2,7 @@
 
 // The words of the ToDos page, of the answer panel and of the ToDos tab of a project (#925), from the prototype of the factory. English.
 import type { ProductIdentity } from "../../product-identity/identity.ts";
+import { ROLE_NOT_ALLOWED } from "../../copy/messages.ts";
 import { describeTransportFailure } from "../../ui/transport-messages.ts";
 import { describeStartFailure } from "../../workflow-pages/messages.ts";
 
@@ -48,28 +49,37 @@ export const TODO_COPY = {
 } as const;
 
 export const PANEL_COPY = {
-  region: "ToDo",
   close: "Close",
   agent: "The agent",
-  askedIn: "asks in",
   lane: "Lane",
   spent: "Spent",
   ticket: "Ticket",
   questionHeading: "Question of the agent",
-  openTicket: "Open the ticket on GitHub",
-  openRun: "Open the run",
-  contextLabel: "Context",
-  optionsLegend: "Your answer, posted as a comment in your name",
+  optionsLegend: (hasLogin: boolean) =>
+    hasLogin
+      ? "Your answer, posted as a comment in your name"
+      : "Your answer, posted as a comment on the ticket",
   noteLabel: "Note for the agent (optional)",
   noteLabelOnly: "Your answer",
   notePlaceholder: "Hints for the agent…",
+  clearChoice: "Clear choice",
   answer: "Answer",
   sending: "Sending the answer",
   sent: "The answer went to the agent as a new turn; the run goes on. It is posted on the ticket in your name.",
-  footnote:
-    "Answering here writes your answer on the ticket as a comment in your name (“Answer by @login: …”); answering in GitHub with /answer works the same. The run then starts a new turn in the same session.",
+  footnote: (hasLogin: boolean) =>
+    `Answering here writes your answer on the ticket as a comment (“${hasLogin ? "Answer by @login" : "Answer by a member of the workspace"}: …”); answering in GitHub with /answer works the same. The run then starts a new turn in the same session.`,
   gone: "This ToDo is not open any more: it was answered, or the run went on. The list has been updated.",
   needChoice: "Choose an option or write an answer.",
+  tooLong: `The option and the note together may be at most ${String(ANSWER_MAX)} characters.`,
+  /** The role does not allow answering and reviewing (the sentence of the run page). */
+  notAllowed: ROLE_NOT_ALLOWED,
+} as const;
+
+/** The text a person typed, kept when the ToDo went away. */
+export const KEPT_COPY = {
+  heading: "Your text",
+  copy: "Copy",
+  copied: "Copied",
 } as const;
 
 export const REVIEW_COPY = {
@@ -86,8 +96,8 @@ export const REVIEW_COPY = {
   approve: "Approve",
   requestChanges: "Request changes",
   sending: "Sending the review",
-  footnote:
-    "Approve and Request changes are posted on the pull request by the GitHub App in your name. Asking for changes does not start the agent again: the request stands on the pull request for whoever works on it next.",
+  footnote: (hasLogin: boolean) =>
+    `Approve and Request changes are posted on the pull request by the GitHub App ${hasLogin ? "in your name" : "as a member of the workspace"}. Asking for changes does not start the agent again: the request stands on the pull request for whoever works on it next.`,
   submitted: (decision: "approve" | "request_changes") =>
     decision === "approve"
       ? "Approved on GitHub. Merge the pull request when you are ready."

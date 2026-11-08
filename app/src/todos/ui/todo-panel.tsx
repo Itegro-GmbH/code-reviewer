@@ -8,6 +8,7 @@ import { useEffect, useId, useRef } from "react";
 import { XIcon } from "@phosphor-icons/react/dist/ssr";
 import { Button } from "../../components/button.tsx";
 import type { QuestionTodo, ReviewTodo } from "../service.ts";
+import type { TodoActor } from "./actor.ts";
 import type { TodosApi } from "./api.ts";
 import { AnswerForm } from "./answer-panel.tsx";
 import { PANEL_COPY, TODO_COPY } from "./messages.ts";
@@ -16,6 +17,7 @@ import { ReviewForm } from "./review-panel.tsx";
 export function TodoPanel({
   todo,
   open,
+  actor,
   api,
   onChanged,
   onClose,
@@ -23,6 +25,7 @@ export function TodoPanel({
   todo: QuestionTodo | ReviewTodo;
   /** The ToDo is still on the list. */
   open: boolean;
+  actor: TodoActor;
   api: TodosApi;
   onChanged: () => void;
   onClose: () => void;
@@ -71,9 +74,21 @@ export function TodoPanel({
         </Button>
       </div>
       {todo.kind === "question" ? (
-        <AnswerForm todo={todo} open={open} api={api} onChanged={onChanged} />
+        <AnswerForm
+          todo={todo}
+          open={open}
+          actor={actor}
+          api={api}
+          onChanged={onChanged}
+        />
       ) : (
-        <ReviewForm todo={todo} open={open} api={api} onChanged={onChanged} />
+        <ReviewForm
+          todo={todo}
+          open={open}
+          actor={actor}
+          api={api}
+          onChanged={onChanged}
+        />
       )}
     </aside>
   );

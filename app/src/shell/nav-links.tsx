@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/sidebar";
 import type { ProductIdentity } from "@/product-identity/identity";
 import { workspaceSlugOfPath } from "@/workspaces/paths";
-import { TodoCount } from "./todo-count.tsx";
+import { TodoCount } from "../todo-badges/badges.tsx";
 import {
   isCurrentPage,
   navGroupsFor,

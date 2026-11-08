@@ -3,11 +3,12 @@
 // @vitest-environment jsdom
 // The review panel (#925): the pull request with its link, approve and request changes with an optional note, the three outcomes of the
 // route (`submitted`, `commented`, `already_there`), its errors, and one decision at a time.
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReviewForm } from "./review-panel.tsx";
-import { failed, fakeApi, ok, review } from "./test-fixtures.ts";
+import type { TodoActor } from "./actor.ts";
+import { ACTOR, failed, fakeApi, ok, review } from "./test-fixtures.ts";
 import type { ReviewOutcome } from "../review.ts";
 
 afterEach(cleanup);
@@ -16,17 +17,26 @@ function setup(
   over: Parameters<typeof review>[0] = {},
   api = fakeApi(),
   open = true,
+  actor: TodoActor = ACTOR,
 ) {
   const onChanged = vi.fn();
-  render(
+  const form = (shown: boolean) => (
     <ReviewForm
       todo={review(over)}
-      open={open}
+      open={shown}
+      actor={actor}
       api={api}
       onChanged={onChanged}
-    />,
+    />
   );
-  return { api, onChanged, user: userEvent.setup() };
+  const { rerender } = render(form(open));
+  return {
+    api,
+    onChanged,
+    user: userEvent.setup(),
+    /** The page reads the list again: the same form with a new `open`. */
+    show: ({ open: shown }: { open: boolean }) => rerender(form(shown)),
+  };
 }
 
 describe("the review panel", () => {
@@ -185,5 +195,57 @@ describe("the review panel", () => {
 
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
     expect(screen.getByRole("status").textContent).toMatch(/not open any more/);
+  });
+
+  // #925
+  it("moves the focus to the alert when the review fails", async () => {
+    const { user } = setup(
+      {},
+      fakeApi({ review: failed("TODOS_REVIEW_FAILED", 503) }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(document.activeElement).toBe(await screen.findByRole("alert"));
+  });
+
+  // #925
+  it("keeps the note, with a way to copy it, when the review is not asked for any more", async () => {
+    const { user, show } = setup();
+    // `userEvent.setup()` has put its own clipboard in place: watch that one.
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    await user.type(
+      screen.getByLabelText("Note for the review (optional)"),
+      "Looks good, one nit",
+    );
+
+    show({ open: false });
+
+    const kept = screen.getByRole("region", { name: "Your text" });
+    expect(within(kept).getByText("Looks good, one nit")).toBeTruthy();
+    await user.click(within(kept).getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith("Looks good, one nit");
+  });
+
+  // #925
+  it("shows the pull request but no buttons to a role that may not review", () => {
+    setup({}, fakeApi(), true, { mayAct: false, hasLogin: true });
+
+    expect(screen.getByText(/Add widget caching/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Request changes" }),
+    ).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe(
+      "Your role in this workspace does not allow that.",
+    );
+  });
+
+  // #925
+  it("says the review is posted for a member of the workspace when the account has no GitHub login", () => {
+    setup({}, fakeApi(), true, { mayAct: true, hasLogin: false });
+
+    expect(screen.getByText(/as a member of the workspace/)).toBeTruthy();
+    expect(screen.queryByText(/in your name/)).toBeNull();
   });
 });

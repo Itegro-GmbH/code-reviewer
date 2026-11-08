@@ -11,9 +11,11 @@ import { createWorkspaceMembersRepository } from "../db/repositories/workspace-m
 import { getDatabase } from "../db/startup.ts";
 import { projectServiceFor } from "../projects/shared.ts";
 import { connectorTargetOf } from "../workflow-runs/shared.ts";
+import { createCountCache } from "./count-cache.ts";
 import { createReviewActions, type ReviewActions } from "./review.ts";
 import {
   createTodosService,
+  type OpenCounts,
   type TodosService,
   type TodoViewer,
 } from "./service.ts";
@@ -40,10 +42,23 @@ export function reviewActionsFor(workspaceId: string): ReviewActions {
   });
 }
 
-/** How many ToDos of the workspace are open for the person: the number on the sidebar's ToDos link. */
-export async function openTodoCountFor(
+/** How long a count is kept: the badge asks on every page change, a count that is a few seconds old is as good. */
+export const COUNT_TTL_MS = 10_000;
+const counts = createCountCache<OpenCounts>({ ttlMs: COUNT_TTL_MS });
+
+/**
+ * How many ToDos of the workspace are open for the person, and in each project: the numbers on the sidebar's ToDos link and on the ToDos tab of a
+ * project. Kept for a few seconds per workspace and person (reviews depend on who asks); `fresh` reads again, for the badge that follows an answer.
+ */
+export function openTodoCountFor(
   workspaceId: string,
   viewer: TodoViewer,
-): Promise<number> {
-  return todosServiceFor(workspaceId).countOpen(viewer);
+  { fresh = false }: { fresh?: boolean } = {},
+): Promise<OpenCounts> {
+  const person = viewer.githubLogin?.toLowerCase() ?? "";
+  return counts.read(
+    `${workspaceId}\u0000${person}`,
+    () => todosServiceFor(workspaceId).countOpen(viewer),
+    { fresh },
+  );
 }

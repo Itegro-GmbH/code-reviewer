@@ -3,11 +3,19 @@
 // @vitest-environment jsdom
 // The answer panel (#925): the question comment-styled, the options as choices, a note, "Answer" through the route of the run, one answer
 // at a time, and the refusals of the route in words.
-import { act, cleanup, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AnswerForm } from "./answer-panel.tsx";
-import { failed, fakeApi, question } from "./test-fixtures.ts";
+import type { TodoActor } from "./actor.ts";
+import { ACTOR, failed, fakeApi, question } from "./test-fixtures.ts";
 
 afterEach(cleanup);
 
@@ -15,17 +23,26 @@ function setup(
   over: Parameters<typeof question>[0] = {},
   api = fakeApi(),
   open = true,
+  actor: TodoActor = ACTOR,
 ) {
   const onChanged = vi.fn();
-  render(
+  const form = (shown: boolean) => (
     <AnswerForm
       todo={question(over)}
-      open={open}
+      open={shown}
+      actor={actor}
       api={api}
       onChanged={onChanged}
-    />,
+    />
   );
-  return { api, onChanged, user: userEvent.setup() };
+  const { rerender } = render(form(open));
+  return {
+    api,
+    onChanged,
+    user: userEvent.setup(),
+    /** The page reads the list again: the same form with a new `open`. */
+    show: ({ open: shown }: { open: boolean }) => rerender(form(shown)),
+  };
 }
 
 describe("the answer panel", () => {
@@ -199,5 +216,121 @@ describe("the answer panel", () => {
 
     expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
     expect(screen.getByRole("status").textContent).toMatch(/not open any more/);
+  });
+
+  // #925
+  it("moves the focus to the alert when the answer fails, so a keyboard user hears why", async () => {
+    const { user } = setup(
+      {},
+      fakeApi({ answer: failed("NETWORK_ERROR", null) }),
+    );
+
+    await user.click(screen.getByRole("radio", { name: /Network errors$/ }));
+    await user.click(screen.getByRole("button", { name: "Answer" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(document.activeElement).toBe(alert);
+  });
+
+  // #925
+  it("keeps what the person typed, with a way to copy it, when the question is not the open one any more", async () => {
+    const { user, show } = setup();
+    // `userEvent.setup()` has put its own clipboard in place: watch that one.
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    await user.click(screen.getByRole("radio", { name: /Network errors$/ }));
+    await user.type(
+      screen.getByLabelText("Note for the agent (optional)"),
+      "Back off twice",
+    );
+
+    // The page reads the list again and the question is not on it any more.
+    show({ open: false });
+
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+    const kept = screen.getByRole("region", { name: "Your text" });
+    expect(within(kept).getByText("Back off twice")).toBeTruthy();
+    expect(within(kept).getByText(/Network errors/)).toBeTruthy();
+    await user.click(within(kept).getByRole("button", { name: "Copy" }));
+    expect(writeText).toHaveBeenCalledWith("Network errors\n\nBack off twice");
+    expect(await screen.findByText("Copied")).toBeTruthy();
+  });
+
+  // #925
+  it("shows no kept text when nothing was typed", () => {
+    const { show } = setup();
+
+    show({ open: false });
+
+    expect(screen.queryByRole("region", { name: "Your text" })).toBeNull();
+  });
+
+  // #925
+  it("shows the question but no form to a role that may not answer, with a sentence like the one of the run page", () => {
+    setup({}, fakeApi(), true, { mayAct: false, hasLogin: true });
+
+    expect(screen.getByText("Retry which failures?")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(screen.getByRole("status").textContent).toBe(
+      "Your role in this workspace does not allow that.",
+    );
+  });
+
+  // #925
+  it("lets a choice be taken back", async () => {
+    const { api, user } = setup();
+
+    await user.click(screen.getByRole("radio", { name: /Network errors$/ }));
+    await user.click(screen.getByRole("button", { name: "Clear choice" }));
+
+    expect(
+      (
+        screen.getByRole("radio", {
+          name: /Network errors$/,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(false);
+    expect(screen.queryByRole("button", { name: "Clear choice" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Answer" }));
+    expect(api.answer).not.toHaveBeenCalled();
+  });
+
+  // #925
+  it("caps the note so that the option and the note together stay within what the route takes", async () => {
+    const { api, user } = setup({ options: ["x".repeat(100), "short"] });
+    const note = screen.getByLabelText(
+      "Note for the agent (optional)",
+    ) as HTMLTextAreaElement;
+
+    expect(note.maxLength).toBe(4000);
+    await user.click(screen.getByRole("radio", { name: /short/ }));
+    // The option and the blank line that joins it to the note are counted.
+    expect(note.maxLength).toBe(4000 - 5 - 2);
+    fireEvent.change(note, { target: { value: "n".repeat(3950) } });
+    // A longer option now makes the two too long together.
+    await user.click(screen.getByRole("radio", { name: /x{100}/ }));
+    expect(note.maxLength).toBe(4000 - 100 - 2);
+
+    expect(
+      screen.getByRole("button", { name: "Answer" }).hasAttribute("disabled"),
+    ).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Answer" }));
+    expect(api.answer).not.toHaveBeenCalled();
+    expect(screen.getByText(/at most 4000 characters/)).toBeTruthy();
+  });
+
+  // #925
+  it("does not name a GitHub login in the footnote of an account that has none", () => {
+    setup({}, fakeApi(), true, { mayAct: true, hasLogin: false });
+
+    expect(screen.getByText(/a member of the workspace/)).toBeTruthy();
+    expect(screen.queryByText(/@login/)).toBeNull();
+  });
+
+  // #925
+  it("names the login in the footnote of an account that has one", () => {
+    setup();
+
+    expect(screen.getByText(/Answer by @login/)).toBeTruthy();
   });
 });

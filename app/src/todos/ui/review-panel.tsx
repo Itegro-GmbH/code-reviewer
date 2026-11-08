@@ -4,13 +4,16 @@
 // A review that is asked for (#925), in the panel next to the list: the pull request (title as text, a link to it on GitHub), who is asked,
 // an optional note, and "Approve" or "Request changes", which post through `POST /api/w/:workspace/todos/reviews`: the GitHub App
 // submits the review in the name of the person (docs/todos.md). The answer says which of the three things happened (a review, the same
-// review as before, or a comment, because GitHub does not let an App review a pull request it opened itself). One decision at a time.
+// review as before, or a comment, because GitHub does not let an App review a pull request it opened itself). One decision at a time; a
+// failure moves the focus to the alert; a review that is not asked for any more keeps the note the person typed; a role that may not
+// review sees the pull request and a sentence, no buttons.
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../components/button.tsx";
 import { Textarea } from "../../components/ui/textarea.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import type { ReviewDecision, ReviewOutcome } from "../review.ts";
 import type { ReviewTodo } from "../service.ts";
+import type { TodoActor } from "./actor.ts";
 import type { TodosApi } from "./api.ts";
 import {
   describeTodosFailure,
@@ -18,19 +21,21 @@ import {
   REVIEW_COPY,
   REVIEW_NOTE_MAX,
 } from "./messages.ts";
-import { ExternalLink, Time } from "./panel-parts.tsx";
+import { ExternalLink, KeptText, Time } from "./panel-parts.tsx";
 
 type Done = { decision: ReviewDecision; outcome: ReviewOutcome };
 
 export function ReviewForm({
   todo,
   open,
+  actor,
   api,
   onChanged,
 }: {
   todo: ReviewTodo;
   /** The review is still on the list the page reads. */
   open: boolean;
+  actor: TodoActor;
   api: TodosApi;
   /** Something changed on the server: the page reads the list again. */
   onChanged: () => void;
@@ -43,10 +48,7 @@ export function ReviewForm({
   const [problem, setProblem] = useState<string | null>(null);
   const posting = useRef(false);
   const resultRef = useRef<HTMLParagraphElement>(null);
-
-  useEffect(() => {
-    if (done !== null) resultRef.current?.focus();
-  }, [done]);
+  const alertRef = useRef<HTMLParagraphElement>(null);
 
   async function decide(decision: ReviewDecision) {
     if (posting.current) return;
@@ -71,8 +73,16 @@ export function ReviewForm({
     if (result.code === "TODOS_REVIEW_NOT_REQUESTED") onChanged();
   }
 
-  const canDecide = open && done === null;
+  const canDecide = open && done === null && actor.mayAct;
   const outcome = done?.outcome;
+
+  useEffect(() => {
+    if (done !== null) resultRef.current?.focus();
+  }, [done]);
+  // Both buttons were off while the review was on its way, so the focus is nowhere: it goes to the reason.
+  useEffect(() => {
+    if (problem !== null) alertRef.current?.focus();
+  }, [problem, canDecide]);
 
   return (
     <div className="flex flex-col gap-5">
@@ -147,12 +157,17 @@ export function ReviewForm({
             </Button>
           </div>
           {problem === null ? null : (
-            <p role="alert" className="text-sm text-destructive">
+            <p
+              ref={alertRef}
+              tabIndex={-1}
+              role="alert"
+              className="text-sm text-destructive outline-none"
+            >
               {problem}
             </p>
           )}
           <p className="text-xs text-muted-foreground">
-            {REVIEW_COPY.footnote}
+            {REVIEW_COPY.footnote(actor.hasLogin)}
           </p>
         </form>
       ) : (
@@ -161,7 +176,9 @@ export function ReviewForm({
           className="flex flex-col gap-2 border-t border-border pt-4 text-sm"
         >
           {done === null ? (
-            <p role="status">{REVIEW_COPY.gone}</p>
+            <p role="status">
+              {open ? PANEL_COPY.notAllowed : REVIEW_COPY.gone}
+            </p>
           ) : (
             <p
               ref={resultRef}
@@ -184,9 +201,17 @@ export function ReviewForm({
             </p>
           ) : null}
           {problem === null ? null : (
-            <p role="alert" className="text-destructive">
+            <p
+              ref={alertRef}
+              tabIndex={-1}
+              role="alert"
+              className="text-destructive outline-none"
+            >
               {problem}
             </p>
+          )}
+          {done !== null || open || note.trim() === "" ? null : (
+            <KeptText parts={[note.trim()]} />
           )}
         </div>
       )}
