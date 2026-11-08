@@ -1230,8 +1230,10 @@ class ImplementerSession:
                 + ", so nothing was pushed",
             )
         elif error is None and not report.branches:
-            # No commit and nothing to commit, on no branch: the agent did not do the task.
-            error = (ErrorCode.AGENT_GAVE_UP, "the agent ended without a commit")
+            # No commit and nothing to commit, on no branch: the agent did not do the task, unless
+            # it ended the turn with a question (#920), which it may ask before changing anything.
+            if self._agent_ask is None:
+                error = (ErrorCode.AGENT_GAVE_UP, "the agent ended without a commit")
         elif error is None and (
             not report.pushed_any
             or (form is not None and not form.pushed)
