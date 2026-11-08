@@ -4,7 +4,8 @@
 // runs and the pull requests of the lanes, so the answer is kept for a few seconds per workspace and person, and reads that arrive while one
 // is on its way share it. A failure is not kept. A read after an answer asks for a fresh count and replaces what was kept; fresh reads that
 // arrive while a fresh read is on its way share one more read that starts when it is over (never one read each), because the one on its way may
-// have looked before their answer. The cache lives in one server instance: another instance has its own and its own seconds.
+// have looked before their answer; a read that does not end within `flightTimeoutMs` no longer holds them back (a hung query must not stall
+// the fresh reads after it for as long as it hangs). The cache lives in one server instance: another instance has its own and its own seconds.
 
 export type CountCache<T> = {
   read(
@@ -24,12 +25,17 @@ export function openCountKey(
   return `${workspaceId}\u0000${viewer.githubLogin?.toLowerCase() ?? ""}`;
 }
 
+/** How long a fresh read holds the fresh reads that came after it back: about as long as a request is allowed to take. */
+export const FLIGHT_TIMEOUT_MS = 15_000;
+
 export function createCountCache<T>({
   ttlMs,
   now = Date.now,
+  flightTimeoutMs = FLIGHT_TIMEOUT_MS,
 }: {
   ttlMs: number;
   now?: () => number;
+  flightTimeoutMs?: number;
 }): CountCache<T> {
   type Entry = { promise: Promise<T>; expiresAt: number };
   const entries = new Map<string, Entry>();
@@ -54,7 +60,17 @@ export function createCountCache<T>({
 
   function beginFresh(key: string, load: () => Promise<T>): Promise<T> {
     const promise = begin(key, load);
-    const flight: Flight = { settled: promise.then(noop, noop) };
+    // Over when the read ended, however it ended, or when it has taken too long to be waited for.
+    const flight: Flight = {
+      settled: new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, flightTimeoutMs);
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        promise.then(done, done);
+      }),
+    };
     flights.set(key, flight);
     void flight.settled.then(() => {
       if (flights.get(key) === flight) flights.delete(key);
@@ -77,8 +93,4 @@ export function createCountCache<T>({
     },
     size: () => entries.size,
   };
-}
-
-function noop(): void {
-  // A settled read, whatever it ended in: the next fresh one may start.
 }

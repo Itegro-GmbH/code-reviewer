@@ -129,6 +129,38 @@ describe("what a delivery says about the ticket mirror", () => {
     expect(parse("pull_request.review_requested.mirror")).toMatchObject({
       change: { item: { reviewRequestedFrom: ["carol"] } },
     });
+    // #954: a request that names a person says who it was, so that the mirror can forget that they acted before
+    expect(parse("pull_request.review_requested.mirror")).toMatchObject({
+      change: { reviewRequestedOf: "carol" },
+    });
+    for (const name of [
+      "pull_request.synchronize.mirror",
+      "pull_request.closed.merged.mirror",
+    ]) {
+      const other = parse(name);
+      expect(
+        other.kind === "change" &&
+          other.change.kind === "item_changed" &&
+          "reviewRequestedOf" in other.change,
+        name,
+      ).toBe(false);
+    }
+    // a team has no login: nothing to forget
+    const requested = webhookFixture("pull_request.review_requested.mirror");
+    const team = parseTrackerChange({
+      integrationId: "i-1",
+      eventName: "pull_request",
+      payload: {
+        ...requested,
+        requested_reviewer: undefined,
+        requested_team: { name: "core" },
+      },
+    });
+    expect(
+      team.kind === "change" &&
+        team.change.kind === "item_changed" &&
+        "reviewRequestedOf" in team.change,
+    ).toBe(false);
     expect(parse("pull_request.synchronize.mirror")).toMatchObject({
       change: { item: { number: 7 } },
     });

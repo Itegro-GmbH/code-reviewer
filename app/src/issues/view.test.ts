@@ -9,6 +9,7 @@ import {
   formatUsd,
   issuesOf,
   pullRequestOf,
+  pullRequestState,
   pullRequestUrl,
   subIssuesOf,
   ticketUrl,
@@ -116,6 +117,37 @@ describe("what an issue waits for", () => {
     const item = ticket(9, { pullRequests: [30] });
 
     expect(waits(item)).toEqual({ kind: "start" });
+  });
+
+  // #954
+  it("takes the state of a linked pull request outside of the list from the item: an open one is a review, a closed one a start", () => {
+    const open = ticket(9, {
+      pullRequests: [30],
+      pullRequestStates: { 30: "open" },
+    });
+    const closed = ticket(10, {
+      pullRequests: [31],
+      pullRequestStates: { 31: "closed" },
+    });
+
+    expect(waits(open)).toEqual({
+      kind: "review",
+      url: "https://github.com/acme/widgets/pull/30",
+    });
+    expect(waits(closed)).toEqual({ kind: "start" });
+  });
+
+  // #954
+  it("tells the pull requests whose state is unknown, so that the drawer can say so", () => {
+    const item = ticket(9, {
+      pullRequests: [30, 31, 32],
+      pullRequestStates: { 31: "closed" },
+    });
+    const list = ticketList([item, ticket(32, { kind: "pull_request" })]);
+
+    expect(pullRequestState(list, item, 30)).toBeUndefined();
+    expect(pullRequestState(list, item, 31)).toBe("closed");
+    expect(pullRequestState(list, item, 32)).toBe("open");
   });
 });
 

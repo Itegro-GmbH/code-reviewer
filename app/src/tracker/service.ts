@@ -46,6 +46,11 @@ export type TicketListItem = {
   boardStatus: string | null;
   parentNumber: number | null;
   pullRequests: number[];
+  /**
+   * The state of each linked pull request the cache holds, wherever it is (also outside of the page). A pull request the cache does not
+   * hold has no entry: its state is unknown (#954).
+   */
+  pullRequestStates: Record<number, TrackerItemState>;
   checksState: string | null;
   /** The provider's time of the last change. */
   updatedAt: string;
@@ -104,7 +109,7 @@ export type TrackerServiceDependencies = {
   projects: Pick<ProjectService, "getActiveProjectForRepository">;
   tracker: Pick<
     TrackerRepository,
-    "listItems" | "getSyncState" | "newestWriteAt"
+    "listItems" | "listItemsByNumbers" | "getSyncState" | "newestWriteAt"
   >;
   runs: Pick<WorkflowRunsRepository, "summarizeTickets">;
   sync: TrackerSync;
@@ -112,6 +117,8 @@ export type TrackerServiceDependencies = {
 
 const MAX_ID_LENGTH = 128;
 const MICRO = 1_000_000;
+/** The most numbers one `listItemsByNumbers` call looks at. */
+const NUMBERS_PER_READ = 200;
 
 /** `github:owner/repo#128`: the form of `workflow_runs.ticket_ref`. */
 export const ticketRefOf = (repo: string, number: number): string =>
@@ -156,6 +163,31 @@ export function createTrackerService(
     };
   }
 
+  /** The state of every pull request that an issue of the page links, from the page or else from the cache, in as few reads as possible. */
+  async function pullRequestStatesOf(
+    repositoryId: string,
+    items: readonly TrackerItem[],
+  ): Promise<Map<number, TrackerItemState>> {
+    const states = new Map<number, TrackerItemState>();
+    for (const item of items)
+      if (item.kind === "pull_request") states.set(item.number, item.state);
+    const missing = [
+      ...new Set(
+        items
+          .filter((item) => item.kind === "issue")
+          .flatMap((item) => item.pullRequests),
+      ),
+    ].filter((number) => !states.has(number));
+    for (let at = 0; at < missing.length; at += NUMBERS_PER_READ)
+      for (const found of await deps.tracker.listItemsByNumbers(
+        repositoryId,
+        missing.slice(at, at + NUMBERS_PER_READ),
+      ))
+        if (found.kind === "pull_request")
+          states.set(found.number, found.state);
+    return states;
+  }
+
   return {
     async syncState(repositoryId) {
       const { repository } = await resolve(repositoryId);
@@ -169,6 +201,7 @@ export function createTrackerService(
         limit: query.limit,
         offset: query.offset,
       });
+      const pullStates = await pullRequestStatesOf(repository.id, items);
       const summaries = new Map(
         (
           await deps.runs.summarizeTickets(
@@ -195,6 +228,14 @@ export function createTrackerService(
             boardStatus: item.boardStatus,
             parentNumber: item.parentNumber,
             pullRequests: item.pullRequests,
+            pullRequestStates: Object.fromEntries(
+              item.pullRequests.flatMap(
+                (number): [number, TrackerItemState][] => {
+                  const state = pullStates.get(number);
+                  return state === undefined ? [] : [[number, state]];
+                },
+              ),
+            ),
             checksState: item.checksState,
             updatedAt: item.updatedAt,
             syncedAt: item.syncedAt,

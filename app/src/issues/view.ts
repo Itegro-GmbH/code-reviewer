@@ -44,16 +44,27 @@ export function ticketUrl(
 }
 
 /**
+ * The state of a pull request linked to the issue, or undefined when it is not known: the cache's answer that came with the issue (it
+ * covers pull requests outside of the loaded list), else the row of the list.
+ */
+export function pullRequestState(
+  list: TicketList,
+  item: TicketListItem,
+  number: number,
+): TicketListItem["state"] | undefined {
+  return item.pullRequestStates[number] ?? pullRequestOf(list, number)?.state;
+}
+
+/**
  * The pull request of the issue that a person can review: the newest (highest number) of its linked pull requests that is open. A pull
- * request the list does not hold has no known state, so it does not count as open: the list holds the tickets that changed last, and an
- * old linked pull request outside of it is most likely over.
+ * request whose state is not known (the cache holds no row for it) does not count as open, so the issue keeps offering Start.
  */
 export function openPullRequestOf(
   list: TicketList,
   item: TicketListItem,
 ): number | undefined {
   const open = item.pullRequests.filter(
-    (number) => pullRequestOf(list, number)?.state === "open",
+    (number) => pullRequestState(list, item, number) === "open",
   );
   return open.length === 0 ? undefined : Math.max(...open);
 }

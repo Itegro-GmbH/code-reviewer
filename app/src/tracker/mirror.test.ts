@@ -91,12 +91,17 @@ function setup(
     boardStatusOf,
     checksStateOf,
   });
-  const changed = (item: TrackerItemFields, resetChecks = false) =>
+  const changed = (
+    item: TrackerItemFields,
+    resetChecks = false,
+    reviewRequestedOf?: string,
+  ) =>
     mirror.apply(INTEGRATION, {
       kind: "item_changed",
       repo: REPO,
       item,
       resetChecks,
+      ...(reviewRequestedOf === undefined ? {} : { reviewRequestedOf }),
     });
   return { tracker, mirror, checksStateOf, boardStatusOf, changed };
 }
@@ -205,7 +210,7 @@ describe("applying a change of a ticket to the mirror", () => {
   });
 
   // #924-T15
-  it("keeps the mark of a person whose request was taken away, and does not take a stale list of the same second back", async () => {
+  it("keeps the mark of a person whose request was taken away, and a stale list of the same second does not bring the review back", async () => {
     const { tracker, changed } = setup();
     await changed(
       pullRequest(7, [], {
@@ -217,7 +222,7 @@ describe("applying a change of a ticket to the mirror", () => {
     expect(
       await tracker.removeReviewRequested("r-1", 7, "alice", "sha-1"),
     ).toBe(true);
-    // GitHub tells seconds only: a delivery of the second that listed alice is older than our removal, not equal to it
+    // GitHub tells seconds only: a delivery of the same second that still lists alice is taken, and her mark hides the review from her
     await changed(
       pullRequest(7, [], {
         reviewRequestedFrom: ["alice", "bob"],
@@ -225,7 +230,7 @@ describe("applying a change of a ticket to the mirror", () => {
       }),
     );
     expect(await tracker.getItem("r-1", 7)).toMatchObject({
-      reviewRequestedFrom: ["bob"],
+      reviewRequestedFrom: ["alice", "bob"],
       reviewActedBy: [{ login: "alice", sha: "sha-1" }],
     });
 
@@ -238,6 +243,84 @@ describe("applying a change of a ticket to the mirror", () => {
     );
     expect((await tracker.getItem("r-1", 7))?.reviewRequestedFrom).toEqual([
       "bob",
+    ]);
+  });
+
+  // #954
+  it("takes a change of the same second as our removal of a reviewer, instead of refusing it until the next change", async () => {
+    const { tracker, changed } = setup();
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+    );
+    await tracker.removeReviewRequested("r-1", 7, "alice", "sha-1");
+
+    // somebody renamed the pull request in the same second, and GitHub says alice is no longer asked
+    expect(
+      await changed(
+        pullRequest(7, [], {
+          title: "Renamed",
+          reviewRequestedFrom: ["bob"],
+          updatedAt: "2026-11-06T10:00:00.000Z",
+        }),
+      ),
+    ).toBe("updated");
+
+    expect(await tracker.getItem("r-1", 7)).toMatchObject({
+      title: "Renamed",
+      reviewRequestedFrom: ["bob"],
+    });
+  });
+
+  // #954
+  it("forgets that a person acted when a request names them again for the same commit, and not for a replay, a request of the same second, or another person", async () => {
+    const { tracker, changed } = setup();
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+    );
+    await tracker.markReviewActed("r-1", 7, "alice", "sha-1");
+    await tracker.markReviewActed("r-1", 7, "bob", "sha-1");
+
+    // the first request, delivered again: older or equal, nothing is forgotten
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:00:00.000Z",
+      }),
+      false,
+      "alice",
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toHaveLength(2);
+
+    // somebody asks alice again, later, for the same commit (the list names her once more)
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob"],
+        updatedAt: "2026-11-06T10:05:00.000Z",
+      }),
+      false,
+      "ALICE",
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "bob", sha: "sha-1" },
+    ]);
+
+    // a request of a person who never acted forgets nothing
+    await changed(
+      pullRequest(7, [], {
+        reviewRequestedFrom: ["alice", "bob", "carol"],
+        updatedAt: "2026-11-06T10:06:00.000Z",
+      }),
+      false,
+      "carol",
+    );
+    expect((await tracker.getItem("r-1", 7))?.reviewActedBy).toEqual([
+      { login: "bob", sha: "sha-1" },
     ]);
   });
 

@@ -148,12 +148,57 @@ describe("the cache of the open ToDo count", () => {
   // #951
   it("reads at once for a fresh read when no fresh read is on its way, and does not wait for an older plain read", async () => {
     const cache = createCountCache({ ttlMs: 10_000 });
+    const pending = vi.fn(
+      () => new Promise<ReturnType<typeof COUNTS>>(() => {}),
+    );
     const load = vi.fn(async () => COUNTS(1));
 
-    await cache.read("k", load, { fresh: true });
-    await cache.read("k", load, { fresh: true });
+    void cache.read("k", pending);
+    expect(await cache.read("k", load, { fresh: true })).toEqual(COUNTS(1));
+    expect(await cache.read("k", load, { fresh: true })).toEqual(COUNTS(1));
 
+    expect(pending).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  // #954
+  it("does not let a fresh read that never ends stall the fresh reads after it: they go on once the time for a read is over", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = createCountCache({ ttlMs: 10_000, flightTimeoutMs: 5_000 });
+      const hung = vi.fn(
+        () => new Promise<ReturnType<typeof COUNTS>>(() => {}),
+      );
+      const load = vi.fn(async () => COUNTS(3));
+
+      void cache.read("k", hung, { fresh: true });
+      const queued = cache.read("k", load, { fresh: true });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(load).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await queued).toEqual(COUNTS(3));
+      // and a fresh read after that starts at once, as no read is on its way any more
+      expect(await cache.read("k", load, { fresh: true })).toEqual(COUNTS(3));
+      expect(hung).toHaveBeenCalledTimes(1);
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // #954
+  it("does not keep a timer behind a fresh read that ended", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = createCountCache({ ttlMs: 10_000 });
+
+      await cache.read("k", async () => COUNTS(1), { fresh: true });
+
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // #951

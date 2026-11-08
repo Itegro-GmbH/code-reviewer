@@ -59,6 +59,14 @@ function timeOf(value: string): string | null {
   return Number.isNaN(time) ? null : new Date(time).toISOString();
 }
 
+/** The login a `review_requested` delivery names (`requested_reviewer`); undefined for a team, which has none. */
+function requestedReviewerLogin(payload: unknown): string | undefined {
+  const reviewer = rawField(payload, "requested_reviewer");
+  if (typeof reviewer !== "object" || reviewer === null) return undefined;
+  const { login } = reviewer as { login?: unknown };
+  return typeof login === "string" && login !== "" ? login : undefined;
+}
+
 function boardStatusChange(
   context: TrackerParseContext,
   action: string,
@@ -235,10 +243,15 @@ export function parseTrackerChange(
       kind: "invalid_payload",
       reason: `the "${eventName}" payload has a ticket the ticket mirror cannot read`,
     };
+  const requestedOf =
+    pullRequest && action === "review_requested"
+      ? requestedReviewerLogin(payload)
+      : undefined;
   return change({
     kind: "item_changed",
     repo,
     item,
     resetChecks: pullRequest && COMMIT_ACTIONS.has(action),
+    ...(requestedOf === undefined ? {} : { reviewRequestedOf: requestedOf }),
   });
 }

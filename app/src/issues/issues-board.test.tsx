@@ -13,13 +13,16 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { IssuesApi } from "./api.ts";
+import { ISSUES_POLL, type IssuesApi } from "./api.ts";
 import { IssuesBoard } from "./issues-board.tsx";
 import { LANE, ticket, ticketList } from "./test-fixtures.ts";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const RUNNING = {
   runId: "run-1",
@@ -328,6 +331,9 @@ describe("the Issues tab", () => {
     );
 
     expect(screen.getByRole("dialog", { name: /Ready to merge/ })).toBeTruthy();
+    // The drawer is portalled: close it so that it does not outlive the test.
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   // #925-T47
@@ -341,6 +347,118 @@ describe("the Issues tab", () => {
         Array.from({ length: 200 }, (_, index) => ticket(index + 1)),
       ),
     });
-    expect(screen.getByText(/200 tickets that changed last/)).toBeTruthy();
+    expect(
+      screen.getByText(/Counted over the 200 tickets that changed last/),
+    ).toBeTruthy();
+  });
+
+  // #954
+  it("counts the tiles over all issues at 199 tickets and says the list is limited at 200, in tickets", () => {
+    board({
+      initial: ticketList(
+        Array.from({ length: 199 }, (_, index) => ticket(index + 1)),
+      ),
+    });
+    expect(screen.getByText(/Counted over all 199 issues/)).toBeTruthy();
+    expect(screen.queryByText(/changed last/)).toBeNull();
+    cleanup();
+
+    board({
+      initial: ticketList(
+        Array.from({ length: 200 }, (_, index) => ticket(index + 1)),
+      ),
+    });
+    expect(screen.getByText(/Counted over the 200 tickets/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Showing the 200 tickets that changed last (issues and pull requests).",
+      ),
+    ).toBeTruthy();
+  });
+
+  // #954
+  it("says why Start is refused once, in a banner every refused Start points at, not in every row", () => {
+    board({
+      mayStart: false,
+      initial: ticketList([ticket(1), ticket(2), ticket(3)]),
+    });
+
+    const banner = screen.getAllByText(/may start/);
+    expect(banner).toHaveLength(1);
+    const starts = screen.getAllByRole("button", { name: /Start a lane/ });
+    expect(starts).toHaveLength(3);
+    for (const start of starts) {
+      expect(start.getAttribute("aria-describedby")).toBe(banner[0]?.id);
+      expect(start.getAttribute("aria-disabled")).toBe("true");
+    }
+    expect(within(rowOf(1)).queryByText(/may start/)).toBeNull();
+  });
+
+  // #954
+  it("shows no banner where Start is not refused or nothing waits for a start", () => {
+    board();
+    expect(screen.queryByText(/may start/)).toBeNull();
+    cleanup();
+
+    board({
+      mayStart: false,
+      initial: ticketList([ticket(2, { lane: RUNNING })]),
+    });
+    expect(screen.queryByText(/may start/)).toBeNull();
+  });
+
+  // #954
+  it.each(["{Enter}", " "])(
+    "does not open the start dialog on %j of a refused Start",
+    async (key) => {
+      board({ mayStart: false });
+      const denied = within(rowOf(1)).getByRole("button", {
+        name: "Start a lane on issue #1",
+      });
+
+      denied.focus();
+      await userEvent.keyboard(key);
+
+      expect(document.activeElement).toBe(denied);
+      expect(screen.queryByRole("dialog")).toBeNull();
+    },
+  );
+
+  // #954
+  it("does not shrink a refused Start on press, as the base button does", () => {
+    board({ mayStart: false });
+
+    const denied = within(rowOf(1)).getByRole("button", {
+      name: "Start a lane on issue #1",
+    });
+    expect(denied.className).toContain("active:scale-100");
+  });
+
+  // #954
+  it("asks again every idle interval while no lane runs, and every active interval while one does", async () => {
+    vi.useFakeTimers();
+    const list = vi.fn(async () => ({ ok: true as const, data: LIST }));
+    const idle = ticketList([ticket(1)]);
+    const { unmount } = board({ initial: idle, api: { ...api, list } });
+
+    await vi.advanceTimersByTimeAsync(ISSUES_POLL.idleMs - 1);
+    expect(list).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith("p-1");
+    unmount();
+
+    const running = vi.fn(async () => ({
+      ok: true as const,
+      data: ticketList([ticket(2, { lane: RUNNING })]),
+    }));
+    board({
+      initial: ticketList([ticket(2, { lane: RUNNING })]),
+      api: { ...api, list: running },
+    });
+    await vi.advanceTimersByTimeAsync(ISSUES_POLL.activeMs - 1);
+    expect(running).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(running).toHaveBeenCalledTimes(1);
   });
 });

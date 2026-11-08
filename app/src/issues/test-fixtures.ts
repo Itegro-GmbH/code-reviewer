@@ -21,6 +21,7 @@ export function ticket(
     boardStatus: null,
     parentNumber: null,
     pullRequests: [],
+    pullRequestStates: {},
     checksState: null,
     updatedAt: "2026-11-06T10:00:00.000Z",
     syncedAt: "2026-11-06T10:05:00.000Z",

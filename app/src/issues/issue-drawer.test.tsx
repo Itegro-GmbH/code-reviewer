@@ -92,6 +92,27 @@ describe("the issue drawer", () => {
     ).toBe("https://github.com/acme/widgets/issues/12");
   });
 
+  // #954
+  it("says that the state of a linked pull request is unknown when the cache does not hold it, and shows the state it holds for one outside of the list", () => {
+    open(
+      ticket(12, {
+        title: "Cache the catalog",
+        pullRequests: [20, 41, 42],
+        pullRequestStates: { 42: "closed" },
+      }),
+    );
+
+    const drawer = screen.getByRole("dialog", { name: /Cache the catalog/ });
+    const pull = (number: number) =>
+      within(drawer)
+        .getByRole("link", { name: `#${String(number)}` })
+        .closest("li") as HTMLElement;
+    expect(within(pull(41)).getByText("state unknown")).toBeTruthy();
+    expect(within(pull(42)).getByText("closed")).toBeTruthy();
+    expect(within(pull(42)).queryByText("state unknown")).toBeNull();
+    expect(within(pull(20)).queryByText("state unknown")).toBeNull();
+  });
+
   // #925-T26
   it("says what is missing instead of inventing it", () => {
     open(ticket(5), apiWith({ ok: false, status: 500, code: "X", issues: [] }));

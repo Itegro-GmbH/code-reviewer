@@ -334,12 +334,17 @@ export const TRACKER_EXCERPT_CHARS = 500;
 
 /** What a verified delivery changed in the ticket mirror (#923), whatever the platform called the event. */
 export type TrackerChange =
-  /** An issue or pull request was created or changed. `resetChecks`: the commit of the pull request changed, its checks are not known. */
+  /**
+   * An issue or pull request was created or changed. `resetChecks`: the commit of the pull request changed, its checks are not known.
+   * `reviewRequestedOf`: the login a review was asked from by this delivery (a request that names a person; left out for any other
+   * delivery and for a team).
+   */
   | {
       kind: "item_changed";
       repo: RepoRef;
       item: TrackerItemFields;
       resetChecks: boolean;
+      reviewRequestedOf?: string;
     }
   /** An issue was deleted or moved to another repository. `at`: the platform's time of the issue as the delivery shows it (ISO 8601, UTC). */
   | { kind: "item_removed"; repo: RepoRef; number: number; at: string }

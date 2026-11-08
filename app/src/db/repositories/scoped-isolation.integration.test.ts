@@ -2626,6 +2626,11 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
+    name: "tracker.forgetReviewActed",
+    run: (a, b) => a.tracker.forgetReviewActed(b.repository.id, 1, "seeded"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
     name: "tracker.clearReviewActed",
     run: (a, b) => a.tracker.clearReviewActed(b.repository.id, 1),
     expectAnswer: (answer) => expect(answer).toBe(false),
