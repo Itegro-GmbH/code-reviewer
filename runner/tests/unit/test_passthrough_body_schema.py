@@ -351,10 +351,25 @@ PARTS: dict[WireFamily, list[Mutation]] = {
 }
 
 
+# The parts above that name a URL the provider would fetch (#950); every other one is the
+# provider's business.
+FETCHING: dict[WireFamily, set[int]] = {
+    WireFamily.OPENAI_CHAT: {0, 4},
+    WireFamily.OPENAI_RESPONSES: {0, 2, 4},
+    WireFamily.ANTHROPIC_MESSAGES: {0, 2},
+    WireFamily.GOOGLE: {0, 1, 5},
+}
+
+
 # #810-S09 (was #550-B1-S09: every one of these was refused; the conversation is opaque now)
 @pytest.mark.parametrize(
     ("family", "index"),
-    [(family, index) for family, parts in PARTS.items() for index in range(len(parts))],
+    [
+        (family, index)
+        for family, parts in PARTS.items()
+        for index in range(len(parts))
+        if index not in FETCHING[family]
+    ],
 )
 def test_a_content_part_of_any_kind_inside_the_conversation_is_the_providers_business(
     family: WireFamily, index: int
@@ -362,6 +377,21 @@ def test_a_content_part_of_any_kind_inside_the_conversation_is_the_providers_bus
     document = captured(family)
     PARTS[family][index](document)
     assert admit(family, document).body
+
+
+# #950-S09 (these were admitted by #810: the provider fetched the URL)
+@pytest.mark.parametrize(
+    ("family", "index"),
+    [(family, index) for family, indexes in FETCHING.items() for index in sorted(indexes)],
+)
+def test_a_part_the_provider_would_fetch_is_refused_inside_the_opaque_conversation(
+    family: WireFamily, index: int
+) -> None:
+    document = captured(family)
+    PARTS[family][index](document)
+    error = refused(family, document)
+    assert error.code is RefusalCode.REQUEST_NOT_ALLOWED
+    assert error.where is not None and error.where.endswith("(url source)")
 
 
 # #550-B1-S10
