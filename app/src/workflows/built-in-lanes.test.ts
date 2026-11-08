@@ -62,6 +62,19 @@ describe("the built-in lanes", () => {
     expect(instruction).toContain("{{implement.summary}}");
   });
 
+  // #966-T02
+  it("Issue to PR tells both agents that the lane opens the pull request", () => {
+    const fix = (
+      builtInLaneDocument("issue-to-pr", "node") as {
+        steps: { id: string; body?: { id: string; instruction?: unknown }[] }[];
+      }
+    ).steps.find((step) => step.id === "fix");
+    const text = JSON.stringify(fix?.body?.map((step) => step.instruction));
+    expect(text.match(/The lane opens the pull request itself/g)).toHaveLength(
+      3,
+    );
+  });
+
   // #922-T04
   it("knows its keys", () => {
     expect(isBuiltInLaneKey("issue-to-pr")).toBe(true);
