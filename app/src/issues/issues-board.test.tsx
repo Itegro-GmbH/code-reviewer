@@ -125,7 +125,7 @@ describe("the Issues tab", () => {
       within(rowOf(3))
         .getByRole("link", { name: "Answer the question on issue #3" })
         .getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-1/runs/run-3");
+    ).toBe("/w/acme/projects/repo-1/todos?run=run-3");
     expect(
       within(rowOf(4))
         .getByRole("link", {

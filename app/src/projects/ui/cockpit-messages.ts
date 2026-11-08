@@ -67,14 +67,6 @@ export const COCKPIT_TABS = [
 ] as const;
 export type CockpitTab = (typeof COCKPIT_TABS)[number]["segment"];
 
-export const PROJECT_TODOS_COPY = {
-  title: "ToDos",
-  hint: "Questions, reviews and red checks of this project. Answer here or in the ticket.",
-  emptyTitle: "Nothing waits for you in this project",
-  emptyDescription:
-    "When an agent asks a question, asks for a review or stops on red checks, it shows up here and in your ToDos.",
-} as const;
-
 export const LANES_COPY = {
   title: "Lanes",
   hint: "The flows that run on this project. A lane belongs to the project and works on its tickets, in its repository.",

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The contents of the tabs of a project's cockpit (#925). ToDos, Lanes and Setup show what the prototype shows, with what has no data
-// yet empty: the ToDos come with the answer panel (#924). The Issues tab is `src/issues/` (the ticket mirror, #923); the Lanes tab lists the lanes of the project (#922).
+// The contents of the tabs of a project's cockpit (#925). Lanes and Setup show what the prototype shows. The ToDos tab is `src/todos/ui/` (the answer panel, #925). The Issues tab is `src/issues/` (the ticket mirror, #923); the Lanes tab lists the lanes of the project (#922).
 import Link from "next/link";
 import type { ReactNode } from "react";
 import {
@@ -21,11 +20,7 @@ import {
 import { Badge } from "../../components/ui/badge.tsx";
 import { formatUtc } from "../../ui/format-time.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
-import {
-  LANES_COPY,
-  PROJECT_TODOS_COPY,
-  SETUP_COPY,
-} from "./cockpit-messages.ts";
+import { LANES_COPY, SETUP_COPY } from "./cockpit-messages.ts";
 import type { ProjectRowView } from "./list-view.ts";
 
 /** What the Lanes tab shows of a lane (a workflow of the workspace until lanes belong to projects). */
@@ -35,29 +30,6 @@ export type LaneRow = {
   version: number;
   updatedAt: string;
 };
-
-export function ProjectTodosTab() {
-  return (
-    <section aria-labelledby="project-todos" className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 id="project-todos" className="text-lg leading-7 font-semibold">
-          {PROJECT_TODOS_COPY.title}
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          {PROJECT_TODOS_COPY.hint}
-        </p>
-      </div>
-      <Empty>
-        <EmptyHeader>
-          <EmptyTitle>{PROJECT_TODOS_COPY.emptyTitle}</EmptyTitle>
-          <EmptyDescription>
-            {PROJECT_TODOS_COPY.emptyDescription}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    </section>
-  );
-}
 
 export function LanesTab({
   workspaceSlug,

@@ -148,12 +148,21 @@ export type TodoList = {
 
 export type TodoViewer = { githubLogin: string | null };
 
+/** What the badges show: the open ToDos of the viewer in the workspace, and how many of them belong to each project (a ToDo of no project is only in `open`). */
+export type OpenCounts = { open: number; projects: Record<string, number> };
+
 export type TodosService = {
   /**
    * The ToDos of the workspace, or of one project (`scope`). Throws `TODOS_PROJECT_NOT_FOUND` for a project the workspace does not have.
    * The questions are the same for every member; the reviews depend on the viewer.
    */
   list(viewer: TodoViewer, scope?: { projectId: string }): Promise<TodoList>;
+  /**
+   * How many ToDos are open for the viewer in the workspace and in each project (questions and reviews: what the badges show). The same
+   * reads as `list` without the done list, and without the ticket of a question (the mirror is read only for the reviews), so a badge costs
+   * a few bounded reads, never one per ToDo.
+   */
+  countOpen(viewer: TodoViewer): Promise<OpenCounts>;
   /** The review ToDo of the viewer for one pull request, or undefined when it is none (what a review action checks first). */
   findReview(
     viewer: TodoViewer,
@@ -326,17 +335,20 @@ export function createTodosService(
     return undefined;
   }
 
-  async function questions(
+  type OpenAsk = {
+    run: StoredWorkflowRun;
+    step: StoredStepRun;
+    ask: StepAsk;
+    place: Place | undefined;
+  };
+
+  /** The waiting runs that hold an open question, with where each one is; no ticket is read for them. */
+  async function openAsks(
     facts: Known,
     inScope: (where: Where) => boolean,
     repositoryIds: readonly string[] | undefined,
-  ): Promise<QuestionTodo[]> {
-    const open: {
-      run: StoredWorkflowRun;
-      step: StoredStepRun;
-      ask: StepAsk;
-      place: Place | undefined;
-    }[] = [];
+  ): Promise<OpenAsk[]> {
+    const open: OpenAsk[] = [];
     const waitingRuns = (
       await deps.runs.listWaiting(LOOK_AT_MAX, repositoryIds)
     ).filter((run) => inScope(whereOf(run, facts)));
@@ -351,6 +363,15 @@ export function createTodosService(
       if (waiting === undefined) continue;
       open.push({ run, ...waiting, place: placeOf(run, steps) });
     }
+    return open;
+  }
+
+  async function questions(
+    facts: Known,
+    inScope: (where: Where) => boolean,
+    repositoryIds: readonly string[] | undefined,
+  ): Promise<QuestionTodo[]> {
+    const open = await openAsks(facts, inScope, repositoryIds);
     const mirror = await ticketsOf(
       open.flatMap(({ run, place }) =>
         place === undefined
@@ -608,6 +629,23 @@ export function createTodosService(
           .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
           .slice(0, DONE_MAX),
       };
+    },
+
+    async countOpen(viewer) {
+      const facts = await known();
+      const everything = () => true;
+      const [asked, review] = await Promise.all([
+        openAsks(facts, everything, undefined),
+        reviews(facts, viewer, everything, undefined),
+      ]);
+      const projects: Record<string, number> = {};
+      for (const { projectId } of [
+        ...asked.map(({ run }) => whereOf(run, facts)),
+        ...review.open,
+      ])
+        if (projectId !== null)
+          projects[projectId] = (projects[projectId] ?? 0) + 1;
+      return { open: asked.length + review.open.length, projects };
     },
 
     async findReview(viewer, repositoryId, number) {
