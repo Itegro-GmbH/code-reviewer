@@ -463,11 +463,12 @@ export function createTrackerRepository(
           ? sql`tracker_items.review_requested_from`
           : sql`excluded.review_requested_from`;
       // The marks stay with the row: a list of the people asked that lacks a login says nothing against its mark (a member of the fan-out
-      // is never asked by name). They go when nobody is asked (a later request is a new ToDo); a new commit clears them on its own.
-      // Decided in this statement, so no read comes before the write.
+      // is never asked by name). They go when nobody is asked (a later request is a new ToDo) by a delivery newer than the row: an empty
+      // list of the same second (GitHub's answer to our own removal) keeps them, so a stale list of that second cannot bring the review
+      // back. A new commit clears them on its own. Decided in this statement, so no read comes before the write.
       const acted =
         item.reviewRequestedFrom?.length === 0
-          ? sql`null`
+          ? sql`case when excluded.updated_at > tracker_items.updated_at then null else tracker_items.review_acted_by end`
           : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
           workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,

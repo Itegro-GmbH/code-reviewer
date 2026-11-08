@@ -149,6 +149,19 @@ describe("what an issue waits for", () => {
     expect(pullRequestState(list, item, 31)).toBe("closed");
     expect(pullRequestState(list, item, 32)).toBe("open");
   });
+
+  // #954-T11: an older server sends no `pullRequestStates`; the board reads the rows of the list instead of crashing
+  it("reads the rows of the list when the server sends no states of the linked pull requests", () => {
+    const item: Partial<ReturnType<typeof ticket>> = ticket(9, {
+      pullRequests: [32],
+    });
+    delete item.pullRequestStates;
+    const issue = item as ReturnType<typeof ticket>;
+    const list = ticketList([issue, ticket(32, { kind: "pull_request" })]);
+
+    expect(pullRequestState(list, issue, 32)).toBe("open");
+    expect(pullRequestState(list, issue, 30)).toBeUndefined();
+  });
 });
 
 describe("the list", () => {

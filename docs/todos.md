@@ -79,7 +79,9 @@ drops the marks made for another head), when the pull request is over, and when 
 ToDo). A person whose request was taken away and who is **asked again on the same commit** sees the review again: a `review_requested` delivery that
 names the login (`requested_reviewer`) drops that login's mark, if the delivery is newer than the row (the same request delivered again, or one of
 the same second, which GitHub cannot tell apart, drops nothing; a team names no login). The row's time does not move when the App takes a
-request away, so a change of the same second is taken; the mark, not the time, keeps a stale list of that second from bringing the review back. The other members asked by a fan-out keep seeing the review until they act or the pull request ends. Team reviewers are not read
+request away, so a change of the same second is taken; the mark, not the time, keeps a stale list of that second from bringing the review back,
+and an empty list ends the marks only when it is newer than the row (GitHub's answer to our own removal comes in the same second and keeps
+them). The other members asked by a fan-out keep seeing the review until they act or the pull request ends. Team reviewers are not read
 (a request for a team is nobody's ToDo here).
 
 A pull request that no lane opened is not a ToDo, whoever is asked. The entry has `id: "review:<repositoryId>:<number>"`, `number`, `title`,

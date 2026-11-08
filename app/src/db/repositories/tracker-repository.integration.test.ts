@@ -365,6 +365,47 @@ describe("the tickets of the mirror", () => {
     ).toBe(true);
   });
 
+  // #954-T10: removal, then GitHub's own empty list of the same second, then a stale list of that second naming alice: the empty
+  // list of the same second does not end her mark, so the stale list cannot bring the review back
+  it("keeps the marks when an empty list comes in the same second as the row, and ends them on a newer one", async () => {
+    const { tracker, first } = await setup();
+    const at = "2026-11-06T10:00:00.000Z";
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["alice"],
+        updatedAt: at,
+      }),
+    );
+    await tracker.removeReviewRequested(first.id, 7, "alice", "sha-1");
+    await tracker.upsertItem(
+      first.id,
+      item(7, { kind: "pull_request", reviewRequestedFrom: [], updatedAt: at }),
+    );
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: ["alice"],
+        updatedAt: at,
+      }),
+    );
+    expect((await tracker.getItem(first.id, 7))?.reviewActedBy).toEqual([
+      { login: "alice", sha: "sha-1" },
+    ]);
+
+    await tracker.upsertItem(
+      first.id,
+      item(7, {
+        kind: "pull_request",
+        reviewRequestedFrom: [],
+        updatedAt: "2026-11-06T10:00:01.000Z",
+      }),
+    );
+    expect((await tracker.getItem(first.id, 7))?.reviewActedBy).toEqual([]);
+  });
+
   // #954
   it("forgets the mark of one login, without regard to case, and only for a pull request of the repository", async () => {
     const { tracker, first, second } = await setup();

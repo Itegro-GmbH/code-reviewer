@@ -79,12 +79,18 @@ export function createFakeTrackerRepository(
         checksState: before?.checksState ?? null,
         reviewRequestedFrom:
           item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
-        // As the SQL: a list that lacks a login says nothing against its mark; nobody asked ends them all.
-        reviewActedBy: liveReviewMarks(
-          before?.reviewActedBy ?? [],
-          item.reviewRequestedFrom,
-          undefined,
-        ),
+        // As the SQL: a list that lacks a login says nothing against its mark; nobody asked ends them all, by a delivery newer than the
+        // row only.
+        reviewActedBy:
+          before !== undefined &&
+          item.reviewRequestedFrom?.length === 0 &&
+          item.updatedAt <= before.updatedAt
+            ? [...before.reviewActedBy]
+            : liveReviewMarks(
+                before?.reviewActedBy ?? [],
+                item.reviewRequestedFrom,
+                undefined,
+              ),
         parentNumber:
           item.parentNumber === undefined
             ? (before?.parentNumber ?? null)

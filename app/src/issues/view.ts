@@ -52,7 +52,10 @@ export function pullRequestState(
   item: TicketListItem,
   number: number,
 ): TicketListItem["state"] | undefined {
-  return item.pullRequestStates[number] ?? pullRequestOf(list, number)?.state;
+  // An older server sends no `pullRequestStates`: the rows of the list are all there is then.
+  return (
+    (item.pullRequestStates ?? {})[number] ?? pullRequestOf(list, number)?.state
+  );
 }
 
 /**
