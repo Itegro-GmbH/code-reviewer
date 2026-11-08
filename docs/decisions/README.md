@@ -30,3 +30,4 @@ Every record is a file `NNNN-short-title.md` (four digits, counting up) with the
 | [0002](0002-dynamic-review-deployment.md) | How Dynamic Review is deployed and switched on | Accepted |
 | [0003](0003-dynamic-engine-boundary.md) | The engine boundary of Dynamic Review | Accepted |
 | [0004](0004-dynamic-runner-image-and-self-check.md) | The Dynamic runner image and the startup self-check | Accepted |
+| [0005](0005-providers-model-catalog-and-paddle-billing.md) | LLM providers, the model catalog and billing with Paddle | Proposed, billing part superseded by [0006](0006-prepaid-billing-via-stripe-managed-payments.md) |
