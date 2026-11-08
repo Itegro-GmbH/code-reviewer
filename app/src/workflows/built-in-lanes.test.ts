@@ -47,6 +47,21 @@ describe("the built-in lanes", () => {
     expect(document).toContain('"name":"Review a pull request"');
   });
 
+  // #966-T01
+  it("Issue to PR hands the reviewer the issue and the implementer's report", () => {
+    const document = builtInLaneDocument("issue-to-pr", "node") as {
+      steps: { id: string; body?: { id: string; instruction?: unknown }[] }[];
+    };
+    const review = document.steps
+      .find((step) => step.id === "fix")
+      ?.body?.find((step) => step.id === "review");
+    expect(review?.instruction).toEqual(expect.any(String));
+    const instruction = String(review?.instruction);
+    expect(instruction).toContain("{{trigger.ticket.title}}");
+    expect(instruction).toContain("{{trigger.ticket.body}}");
+    expect(instruction).toContain("{{implement.summary}}");
+  });
+
   // #922-T04
   it("knows its keys", () => {
     expect(isBuiltInLaneKey("issue-to-pr")).toBe(true);

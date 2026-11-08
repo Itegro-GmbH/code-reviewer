@@ -41,6 +41,12 @@ const FINDINGS = {
   },
 };
 
+export const REVIEW_INSTRUCTION =
+  "Review branch {{implement.branch}} against this issue. Do not change anything.\n\n" +
+  "Issue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\n" +
+  "What the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n" +
+  "{{implement.summary}}";
+
 function issueToPr(environment: string): Record<string, unknown> {
   return {
     version: 1,
@@ -122,8 +128,8 @@ function issueToPr(environment: string): Record<string, unknown> {
             environment,
             session: "new",
             branch: "{{implement.branch}}",
-            instruction:
-              "Review branch {{implement.branch}} against the issue. Do not change anything.",
+            // #966: the reviewer has no other way to the issue, nor to the answers people gave the implementer (its summary names them).
+            instruction: REVIEW_INSTRUCTION,
             result: FINDINGS,
           },
         ],

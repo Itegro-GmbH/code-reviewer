@@ -487,7 +487,7 @@ clean; this block is checked against [`contracts/examples/workflow/Workflow.json
           "environment": "node",
           "session": "new",
           "branch": "{{implement.branch}}",
-          "instruction": "Review branch {{implement.branch}} against the issue. Do not change anything.",
+          "instruction": "Review branch {{implement.branch}} against this issue. Do not change anything.\n\nIssue: {{trigger.ticket.title}}\n\n{{trigger.ticket.body}}\n\nWhat the implementer reports it did. It names the answers people gave to its questions; those answers are binding, so do not report them as findings:\n{{implement.summary}}",
           "result": {
             "type": "object",
             "required": ["findings"],
