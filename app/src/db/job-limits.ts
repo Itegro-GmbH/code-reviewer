@@ -43,6 +43,13 @@ export const IMPLEMENTER_MAX_ATTEMPTS = 1;
 export const DEFAULT_IMPLEMENTER_MAX_RUNTIME_MS = 70 * 60 * 1000;
 
 /**
+ * #918: a turn that carries its own time limit (`implementer_turns.time_limit_minutes`, the `turnTimeLimitMinutes` of a workflow) is
+ * cut by the app that long after the limit, the grace the 70 minutes above are made of (60 plus 10): the runner holds the turn to its
+ * limit itself and keeps the last minutes of it for the final commit and push.
+ */
+export const IMPLEMENTER_RUNTIME_GRACE_MS = 10 * 60 * 1000;
+
+/**
  * #854: how long a turn of a runner environment waits for a runner of its workspace with its labels. After this it is cancelled with
  * `no_runner_available`, free. The operator owns the value (`RUNNER_WAIT_DEADLINE_MINUTES`).
  */

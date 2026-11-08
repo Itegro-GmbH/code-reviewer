@@ -33,6 +33,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     // #843: the result schema a task ran with and the result the agent handed in; null for every turn that exists.
     "result_schema",
     "result_value",
+    // #918: the minutes a turn may run, from the workflow that started it; null for every turn that exists (the platform's 60).
+    "time_limit_minutes",
   ],
   // #841: the next instruction of a session and the one that could not start; null for every session that exists.
   implementer_sessions: [
@@ -50,9 +52,30 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   job_vm_runs: ["vcpus"],
   // #845: what started a run; every run that exists was started by hand (`DEFAULTS_OF_COLUMNS`).
   // #891: when a member asked for the run to stop; null for every run that exists.
-  workflow_runs: ["trigger_kind", "cancel_requested_at"],
+  // #916: the trigger of the document that started the run; null for every run that exists.
+  // #923: the ticket a run is about; null for every run that exists (the label trigger's runs are backfilled by the migration, and no
+  // test of an older migration holds such a run).
+  // #921: when a run was discarded and when a member asked it to pause; null for every run that exists.
+  workflow_runs: [
+    "trigger_kind",
+    "cancel_requested_at",
+    "trigger_id",
+    "ticket_ref",
+    "discarded_at",
+    "pause_requested_at",
+  ],
+  // #922: the ticket source of a project (null reads as the issues of its repository without a board) and the project a lane belongs to
+  // (the migration places the lanes that exist, but not at the time an older migration's test seeds them); null for every row that exists.
+  projects: ["ticket_source"],
+  workflows: ["project_id"],
+  // #924: who a review of a pull request is asked from, and who acted on it while the request stood; null for every row that exists.
+  tracker_items: ["review_requested_from", "review_acted_by"],
+  // #920: the question a step ended with and the comment that carries it; null for every step that exists.
+  workflow_step_runs: ["ask", "waiting_on_comment_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   jobs: ["cancel_requested_at"],
+  // #919: the environment a profile version runs in; null for every version that exists (its step names the environment).
+  profile_versions: ["environment_id"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
   usage_records: ["cost_basis"],
 };

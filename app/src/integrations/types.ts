@@ -136,11 +136,36 @@ export type IssueLabeled = {
     url: string;
     /** The names of all labels the issue has now, the new one included. */
     labels: string[];
+    /** The logins of the people the issue is assigned to; left out when it has none (#916). */
+    assignees?: string[];
+    /** GitHub's issue type (`Bug`); left out when the issue has none (#916). */
+    type?: string;
   };
   /** The label that was just put on. */
   label: string;
   /** Who put it on. */
   actor: TriggerActor;
+};
+
+/**
+ * A comment `/answer ...` on an issue or a pull request by somebody with write access (#920): the answer to the question a workflow run
+ * waits for. The text is the commenter's and untrusted; which run it answers is decided by the app, not by the comment.
+ */
+export type TicketAnswer = {
+  repo: RepoRef;
+  /** The number of the issue or pull request the comment is on. */
+  number: number;
+  /** The platform's id of the comment. */
+  commentId: string;
+  /** When the comment was written (the platform's clock, ISO 8601), when the delivery says; an answer older than its question is no answer to it. */
+  createdAt?: string;
+  actor: TriggerActor;
+  /** The option the answer names by its number, from 1. */
+  choice?: number;
+  /** The note after the number, or none. */
+  text?: string;
+  /** Everything after `/answer`: the answer itself where the question has no such option. */
+  raw: string;
 };
 
 /** The person or bot that caused the event. */
@@ -261,7 +286,167 @@ export type PullRequestRef = {
   draft: boolean;
   state: PullRequestState;
   author: TriggerActor;
+  /**
+   * #924: the logins a review is asked from now (`requested_reviewers`; teams are not read), once each. Left out when the answer carries
+   * no such list: the reader then knows nothing about it.
+   */
+  requestedReviewers?: string[];
 };
+
+/**
+ * An issue or a pull request as the platform delivers it, for the ticket mirror (#923). The values are the platform's own: nothing is
+ * mapped (`state`, `type` and the reason are shown as they come); the texts are those of whoever wrote the ticket, bounded, and data like
+ * any other text.
+ */
+export type TrackerItemFields = {
+  number: number;
+  /** The platform's global id; how an item of a project board is matched with its ticket. */
+  nodeId: string;
+  kind: "issue" | "pull_request";
+  state: "open" | "closed";
+  /** The platform's reason (`completed`, `not_planned`, `reopened`); `merged` for a merged pull request; null for none. */
+  stateReason: string | null;
+  /** The issue type of the organization; null for none and for a pull request. */
+  type: string | null;
+  title: string;
+  /** The start of the description, at most `TRACKER_EXCERPT_CHARS` characters. */
+  bodyExcerpt: string;
+  labels: { name: string; color: string }[];
+  assignees: { login: string }[];
+  /**
+   * The issue this one is a sub-issue of, in the same repository; null for none; `undefined` when the delivery does not say (the cache
+   * then keeps what it has).
+   */
+  parentNumber?: number | null;
+  /** For a pull request: the issues of the same repository it closes (`Closes #12`). Empty for an issue. */
+  closes: number[];
+  /**
+   * For a pull request: the logins a review is asked from (#924). `undefined` when the object does not say (an issue, and the pull requests
+   * of the list of issues): the cache then keeps what it has.
+   */
+  reviewRequestedFrom?: string[];
+  /** ISO 8601 text in UTC: the platform's time of the last change. */
+  updatedAt: string;
+};
+
+/** How much of a description the mirror keeps. */
+export const TRACKER_EXCERPT_CHARS = 500;
+
+/** What a verified delivery changed in the ticket mirror (#923), whatever the platform called the event. */
+export type TrackerChange =
+  /**
+   * An issue or pull request was created or changed. `resetChecks`: the commit of the pull request changed, its checks are not known.
+   * `reviewRequestedOf`: the login a review was asked from by this delivery (a request that names a person; left out for any other
+   * delivery and for a team).
+   */
+  | {
+      kind: "item_changed";
+      repo: RepoRef;
+      item: TrackerItemFields;
+      resetChecks: boolean;
+      reviewRequestedOf?: string;
+    }
+  /** An issue was deleted or moved to another repository. `at`: the platform's time of the issue as the delivery shows it (ISO 8601, UTC). */
+  | { kind: "item_removed"; repo: RepoRef; number: number; at: string }
+  /**
+   * A sub-issue got a parent (`parent` is its number), or lost it (null). `at`: the platform's time of the sub-issue as the delivery shows
+   * it, the clock of `TrackerItemFields.updatedAt` (a delivery older than what the cache holds is dropped).
+   */
+  | {
+      kind: "parent_changed";
+      repo: RepoRef;
+      child: number;
+      parent: number | null;
+      at: string;
+    }
+  /**
+   * An item of a project board got another status (`null`: it has none now, or left the board). `projectId`: the platform's id of the
+   * board the item is on, when the delivery names it (a project that has its own board does not take the status of another one).
+   */
+  | {
+      kind: "board_status_changed";
+      nodeId: string;
+      status: string | null;
+      projectId?: string;
+    }
+  /**
+   * An item was added to a board, restored on it, archived or deleted: the delivery names no status, and the ticket may be on other boards,
+   * so the cache asks the platform where the ticket stands now. `removed`: the item left this board; it is what the cache falls back to
+   * (an empty status) when the boards cannot be read. `projectId`: the board of the item, as for `board_status_changed`.
+   */
+  | {
+      kind: "board_item_reread";
+      nodeId: string;
+      removed: boolean;
+      projectId?: string;
+    }
+  /** The checks of a commit changed: the cache asks the platform for the state of these pull requests. */
+  | {
+      kind: "checks_changed";
+      repo: RepoRef;
+      headSha: string;
+      pullRequests: number[];
+    };
+
+/** What a delivery says about the ticket mirror: a change, or why it is none. */
+export type TrackerChangeResult =
+  | { kind: "change"; change: TrackerChange }
+  | { kind: "ignored"; reason: string }
+  | { kind: "invalid_payload"; reason: string };
+
+/** Where a full sync of a repository's tickets stands, as far as the platform is asked: one page of one phase at a time. */
+export type TrackerPageStep =
+  /**
+   * Every issue and pull request, any state, the least recently changed first. `since` (ISO 8601, UTC) leaves out what changed before it:
+   * a sync continues a list that is longer than the platform lets one walk by asking from the time of the last item it read, with `page`
+   * counting from there.
+   */
+  | { phase: "issues"; page: number; since?: string }
+  /**
+   * The open pull requests, and the state of the checks of each, in the order of their numbers. `after` is the number of the last pull
+   * request the page before read (0 for the first page): the walk continues after a number, not at a page, so a pull request that closes
+   * between two calls cannot move another one past the walk.
+   */
+  | { phase: "checks"; after: number }
+  /**
+   * The status of the items of the project boards of the repository. `after` is the opaque position the last page returned. `boardId`:
+   * the platform's id of the board the project chose (#922); only that board is read. Left out: every board of the repository.
+   */
+  | { phase: "board"; after: string | null; boardId?: string };
+
+/** One page of a phase, and where the next one is. */
+export type TrackerPage =
+  | {
+      phase: "issues";
+      items: TrackerItemFields[];
+      last: boolean;
+      /** How many tickets of the page could not be read and are not in `items` (absent: none). */
+      skipped?: number;
+    }
+  | {
+      phase: "checks";
+      pullRequests: {
+        number: number;
+        checksState: string | null;
+        /** #924: the logins a review of the pull request is asked from; absent when the list does not say (not the same as nobody). */
+        reviewRequestedFrom?: string[];
+        /** #924: the head commit of the pull request now: what the marks of a review that was acted on are held against. */
+        headSha: string;
+        /** #924: the provider's time of the last change of the pull request, as the list read it (what a newer delivery is compared with). */
+        updatedAt: string;
+      }[];
+      last: boolean;
+      /** The number of the last pull request of the page (read or not), what the next page continues after; null for an empty page. */
+      lastNumber: number | null;
+    }
+  | {
+      phase: "board";
+      /** False when the platform does not let the app read boards (a permission is missing): the phase has nothing to say. */
+      available: boolean;
+      items: { nodeId: string; status: string | null }[];
+      /** The position to ask for next; null on the last page. */
+      next: string | null;
+    };
 
 /** What a connection has accepted on the platform (#749): whether the app may write the contents of its repositories. */
 export type ConnectionPermissions = { contentsWrite: boolean };
@@ -318,6 +503,11 @@ export type IntegrationEvent =
    * that are started by this label take it from here. Title, body and labels are the words of whoever opened the issue.
    */
   | { kind: "issue_labeled"; labeled: IssueLabeled }
+  /**
+   * A comment `/answer ...` on an issue or a pull request by somebody with write access (#920). It starts no review: the workflow run that
+   * waits for an answer on this ticket takes it from here.
+   */
+  | { kind: "ticket_answer"; answer: TicketAnswer }
   /**
    * A delivery of an event the app uses whose payload lacks fields the app reads (or has them with
    * the wrong type). Nothing can be done with it and a redelivery would not change that; `reason`

@@ -46,10 +46,11 @@ describe("app/vercel.json", () => {
   });
 
   // #403-T10
-  it("keeps its two crons", () => {
+  it("keeps its crons", () => {
     expect((config.crons ?? []).map(({ path }) => path).sort()).toEqual([
       "/api/internal/dispatch-sweep",
       "/api/internal/repository-sync",
+      "/api/internal/tracker-resync",
     ]);
   });
 

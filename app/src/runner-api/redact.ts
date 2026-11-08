@@ -4,6 +4,7 @@
 // output (that is the first line of defense); this is the second one, for a runner that got it
 // wrong: strings that look like credentials, and the secrets the app itself holds.
 import "server-only";
+import type { AgentAsk } from "../db/agent-ask.ts";
 import {
   AGENT_RESULT_MAX_DEPTH,
   AGENT_RESULT_MAX_VALUES,
@@ -104,6 +105,22 @@ export function redactAgentResult(
   return walk(value, 0) as AgentResultValue;
 }
 
+/** The question the agent ended the turn with (#920), with the secrets taken out of every text of it; the same second look as for the result. */
+export function redactAgentAsk(
+  ask: AgentAsk,
+  secrets: readonly string[],
+): AgentAsk {
+  return {
+    question: redactBlockText(ask.question, secrets),
+    ...(ask.options === undefined
+      ? {}
+      : { options: ask.options.map((o) => redactBlockText(o, secrets)) }),
+    ...(ask.context === undefined
+      ? {}
+      : { context: redactBlockText(ask.context, secrets) }),
+  };
+}
+
 /**
  * The text of an implementer block that a person or an agent wrote: the summary, the subjects of the commits and the paths of the
  * files (#754), and the result the agent handed in (#843). The shas, the statuses, the flag and the saved agent session are not text of that kind and stay as they are. The names of the branches are the agent's text too.
@@ -135,6 +152,10 @@ function redactImplementer(
     ...(block.agentResult === undefined
       ? {}
       : { agentResult: redactAgentResult(block.agentResult, secrets) }),
+    // #920: the question the agent ended the turn with is the agent's text too.
+    ...(block.agentAsk === undefined
+      ? {}
+      : { agentAsk: redactAgentAsk(block.agentAsk, secrets) }),
     // #745, step 7: the hosts are what the agent asked the network door for, text the agent chose.
     ...(block.network === undefined
       ? {}

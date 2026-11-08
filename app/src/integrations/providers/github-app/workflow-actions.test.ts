@@ -92,6 +92,17 @@ const forbidden = new GithubAppError(
   "GitHub answered 403 for POST /repos/{owner}/{repo}/pulls.",
   { status: 403, refusal: "permission_missing" },
 );
+/** A 422 of the call itself (not of the token request) with the reason the GitHub client read from the answer, if it read one. */
+const refusedFor = (reason: string | undefined) =>
+  new GithubAppError(
+    "GITHUB_APP_REQUEST_FAILED",
+    "GitHub answered 422 for POST /repos/{owner}/{repo}/pulls.",
+    {
+      status: 422,
+      refusal: "other",
+      ...(reason === undefined ? {} : { reason }),
+    },
+  );
 const tokenRefused = new GithubAppError(
   "GITHUB_APP_REQUEST_FAILED",
   "GitHub answered 422 for POST /app/installations/{id}/access_tokens.",
@@ -100,7 +111,7 @@ const tokenRefused = new GithubAppError(
 
 describe("github.pullRequest.open", () => {
   // #844-T300
-  it("opens a pull request on the repository of the run with a token for pull requests only, and reports number and url", async () => {
+  it("opens a pull request on the repository of the run with a token for pull requests and the contents it reads, and reports number and url", async () => {
     const { client, connector } = setup();
 
     const output = await connector("github.pullRequest.open").run(
@@ -122,7 +133,11 @@ describe("github.pullRequest.open", () => {
       "4242",
       {
         repositoryIds: [7001],
-        permissions: { pull_requests: "write", metadata: "read" },
+        permissions: {
+          pull_requests: "write",
+          contents: "read",
+          metadata: "read",
+        },
       },
     ]);
     // The base is the branch the run started from when the node names none.
@@ -207,7 +222,9 @@ describe("github.pullRequest.open", () => {
       );
       expect(error).toBeInstanceOf(ConnectorError);
       expect((error as ConnectorError).code).toBe("github_permission_missing");
-      expect(error.message).toContain("Pull requests: Read and write");
+      expect(error.message).toContain(
+        '"Pull requests: Read and write and Contents: Read-only"',
+      );
       expect(error.message).toContain("open pull requests");
     }
   });
@@ -277,6 +294,154 @@ describe("github.pullRequest.open", () => {
       expect((error as ConnectorError).code).toBe(code);
       expect(error.message).toMatch(text);
     }
+  });
+
+  // #913-T03
+  it("names GitHub's reason in the github_validation message, and keeps the generic sentence in front of it", async () => {
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor("PullRequest head invalid"),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect(error).toBeInstanceOf(ConnectorError);
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message).toBe(
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist). GitHub said: PullRequest head invalid.",
+    );
+  });
+
+  // #913-T03
+  it("cuts GitHub's reason to its bound and defuses it: it is untrusted text and no link or token passes", async () => {
+    // Joined at run time: a token-looking literal would trip the scan for committed secrets.
+    const installationToken = [
+      "ghs",
+      "abcdefghijklmnopqrstuvwxyz0123456789",
+    ].join("_");
+    const fineGrainedToken = [
+      "github",
+      "pat",
+      "11ABCDEFG0abcdefghijklmnop",
+    ].join("_");
+    const hostile = [
+      "Ask @org/team to close #12.\n<!-- marker -->\u202e",
+      `see https://evil.example/x?t=${installationToken}`,
+      `token ${installationToken} and ${fineGrainedToken}`,
+      "x".repeat(2_000),
+    ].join(" ");
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor(hostile),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect((error as ConnectorError).code).toBe("github_validation");
+    expect(error.message.length).toBeLessThanOrEqual(300);
+    expect(error.message).not.toMatch(/https?:\/\//);
+    expect(error.message).not.toMatch(/ghs_|github_pat_/);
+    expect(error.message).not.toContain("@org");
+    expect(error.message).not.toContain("<!--");
+    expect(error.message).not.toMatch(/[\u0000-\u001f\u202e]/);
+    expect(error.message).toContain("GitHub said: ");
+    // Defused, not removed: the number is still there with a space of no width in it.
+    expect(error.message).toContain("#\u200b12");
+    // Cut at the bound and the cut shows.
+    expect(error.message).toMatch(/…\.?$/);
+  });
+
+  // #913-T03
+  it("defuses every kind of link and bounds the reason after defusing, which makes the text longer", async () => {
+    const messageFor = async (reason: string) => {
+      const { connector } = setup({
+        openPullRequestFailure: refusedFor(reason),
+      });
+      const error = await failure(
+        connector("github.pullRequest.open").run(
+          call({ head: "workflow/r1/work", title: "T" }),
+        ),
+      );
+      return error.message;
+    };
+    const sayingOf = (message: string) =>
+      message.slice(message.indexOf("GitHub said: ") + "GitHub said: ".length);
+
+    for (const hostile of [
+      "see www.evil.example/x now",
+      "see //evil.example/x now",
+      "see ftp://evil.example/x now",
+      "see javascript:alert(1) now",
+      "see mailto:a@evil.example now",
+      "see HTTPS://EVIL.EXAMPLE/x now",
+    ])
+      expect(sayingOf(await messageFor(hostile)), hostile).toBe(
+        "see [link] now.",
+      );
+    expect(sayingOf(await messageFor("a [click](x) <b>b</b> `c` d"))).toBe(
+      "a clickx bb/b c d.",
+    );
+    expect(sayingOf(await messageFor("title: is missing"))).toBe(
+      "title: is missing.",
+    );
+
+    // Every "@a" grows by a character of no width when it is defused; the cut comes after.
+    const grown = await messageFor("@a ".repeat(400));
+    expect(grown.length).toBeLessThanOrEqual(300);
+    expect(sayingOf(grown).length).toBeLessThanOrEqual(151);
+    expect(grown).toMatch(/…\.?$/);
+    expect(grown).not.toContain("@a");
+  });
+
+  // #913-T03
+  it("strips the invisible characters, takes a whole stop for the end, and treats white space as no reason", async () => {
+    const messageFor = async (reason: string) => {
+      const { connector } = setup({
+        openPullRequestFailure: refusedFor(reason),
+      });
+      const error = await failure(
+        connector("github.pullRequest.open").run(
+          call({ head: "workflow/r1/work", title: "T" }),
+        ),
+      );
+      return error.message;
+    };
+    const generic =
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).";
+
+    expect(
+      await messageFor("a\u0085b\u009fc\u2060d\ufeffe\u00adf\u0080g"),
+    ).toBe(`${generic} GitHub said: abcdefg.`);
+    expect(await messageFor("Head is invalid.")).toBe(
+      `${generic} GitHub said: Head is invalid.`,
+    );
+    expect(await messageFor("Is it valid?")).toBe(
+      `${generic} GitHub said: Is it valid?`,
+    );
+    expect(await messageFor("  \n\u0085 ")).toBe(generic);
+  });
+
+  // #913-T03
+  it("says only the generic sentence when GitHub gave no reason", async () => {
+    const { connector } = setup({
+      openPullRequestFailure: refusedFor(undefined),
+    });
+
+    const error = await failure(
+      connector("github.pullRequest.open").run(
+        call({ head: "workflow/r1/work", title: "T" }),
+      ),
+    );
+
+    expect(error.message).toBe(
+      "GitHub refused the request: one of the values is not accepted (for example a branch that does not exist).",
+    );
   });
 
   // #844-T305
@@ -723,5 +888,52 @@ describe("the codes of a connector", () => {
       ),
     );
     expect((error as ConnectorError).code).toBe("github_not_found");
+  });
+});
+
+describe("ticket.labels and ticket.comment", () => {
+  // #916-T10
+  it("changes the labels of the ticket the way github.issue.labels changes those of an issue", async () => {
+    const { client, connector } = setup({ labelsAfter: ["agent implement"] });
+
+    const output = await connector("ticket.labels").run(
+      call({ ticket: 128, add: ["agent implement"] }),
+    );
+
+    expect(output).toEqual({ labels: ["agent implement"] });
+    const [changed] = client.calls.filter(
+      (c) => c.method === "changeIssueLabels",
+    );
+    expect(changed?.args.slice(2, 5)).toEqual([
+      "acme/widgets",
+      128,
+      { add: ["agent implement"], remove: [] },
+    ]);
+  });
+
+  // #916-T11
+  it("is idempotent like the issue action: a timeout of the labels does not warn that it may have happened", async () => {
+    const { connector } = setup();
+
+    expect(connector("ticket.labels").idempotent).toBe(true);
+    expect(connector("ticket.comment").idempotent).toBeUndefined();
+  });
+
+  // #916-T12
+  it("comments on the ticket under the marker of the step, and refuses a ticket that is no number", async () => {
+    const { client, connector } = setup();
+
+    const output = await connector("ticket.comment").run(
+      call({ ticket: 128, body: "Working on it." }),
+    );
+
+    expect(output).toMatchObject({ existing: false });
+    const [commented] = client.calls.filter(
+      (c) => c.method === "createIssueComment",
+    );
+    expect(commented?.args.slice(2, 4)).toEqual(["acme/widgets", 128]);
+    await expect(
+      connector("ticket.comment").run(call({ ticket: "x", body: "b" })),
+    ).rejects.toBeInstanceOf(ActionInputError);
   });
 });

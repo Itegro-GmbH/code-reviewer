@@ -34,6 +34,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from code_reviewer_runner.dynamic_review.adapter import (
@@ -73,6 +74,9 @@ from .agent_container import (
     ENGINE_PORT,
     KILL_SECONDS,
     STOP_SECONDS,
+    SYSTEM_ROOTS_PATH,
+    TRUST_BUNDLE_NAME,
+    TRUST_CA_NAME,
 )
 from .claude_code.agent import ClaudeCodeAgent
 from .claude_code.gates import ANTHROPIC_HOST, subscription_rule
@@ -97,6 +101,7 @@ from .history import CommitInfo, FileChange
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
+from .netdoor.registries import rule_has_registries
 from .netdoor_launcher import NetDoorSeams, RunningNetDoor, start_network_door
 from .network_report import (
     VM_POLICY_NARROWED,
@@ -109,7 +114,7 @@ from .network_switch import Post, model_host_of, narrow_policy, parse_switch, ur
 from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
-from .report import agent_result_ok
+from .report import agent_ask_ok, agent_result_ok
 from .result_channel import (
     CONFIG_DIRECTORY,
     ResultReader,
@@ -220,6 +225,9 @@ class SessionSeams:
     netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
     switch_post: Post = urllib_post
     switch_pause_seconds: float = 2.0
+    # The system's root certificates, which the agent's trust bundle (#784) starts with: this
+    # container has the agent's image's roots (the same Debian bundle); a test brings its own.
+    system_roots: Callable[[], bytes] = lambda: Path(SYSTEM_ROOTS_PATH).read_bytes()
 
 
 class AgentPlace(EngineRuntime, Protocol):
@@ -419,6 +427,13 @@ class ImplementerSession:
         self._results = results
         self._agent_result: dict[str, Any] | None = None
         self._result_problem = "no result file"
+        # #920: whether the turn may end with a question, and the question it ended with.
+        self._can_ask = (
+            self._schema is not None
+            and job.implementer.can_ask
+            and finish_tool.ask_possible(self._schema, enabled=True)
+        )
+        self._agent_ask: dict[str, Any] | None = None
         self.workspace = workspace
         self.command = tuple(command)
         self._place_factory = place
@@ -494,6 +509,7 @@ class ImplementerSession:
             place = self._place_factory()
             for note in place.create():
                 self._note(note)
+            self._install_registry_trust(place)
             if self._subscription is not None:
                 agent = self._start_claude(place)
             else:
@@ -580,8 +596,10 @@ class ImplementerSession:
                 can_push=self._can_push,
                 profile_instructions=self._profile_instructions,
                 with_result=self._schema is not None,
+                with_ask=self._can_ask,
             ),
             result_schema=self._schema,
+            can_ask=self._can_ask,
             max_budget_usd=subscription.max_budget_usd,
         )
         self._claude = agent
@@ -786,6 +804,34 @@ class ImplementerSession:
             )
             self._vm_policy = VM_POLICY_NARROWED
 
+    def _install_registry_trust(self, place: AgentPlace) -> None:
+        """The door's certificate authority into the agent's container (#784), before anything runs
+        in it: the variables of `agent_container.trust_environment` point at these two files, and a
+        tool that cannot read its roots fails every connection, so a rule that names a registry
+        without them ends the turn `setup_failed`, free."""
+        if not rule_has_registries(self.rule):
+            return
+        door = self._netdoor
+        ca = None if door is None else door.registry_ca
+        if ca is None:
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "network_door_unavailable: the door sent no certificate for the package registries",
+            )
+        try:
+            roots = self.seams.system_roots()
+        except OSError:
+            raise JobError(
+                ErrorCode.SETUP_FAILED,
+                "network_door_unavailable: the system's root certificates could not be read",
+            ) from None
+        place.write_files(
+            {
+                TRUST_CA_NAME: (ca, 0o644),
+                TRUST_BUNDLE_NAME: (roots.rstrip(b"\n") + b"\n" + ca, 0o644),
+            }
+        )
+
     def _stop_network(self) -> None:
         """End the network door and keep its log. Safe to call twice."""
         door, self._netdoor = self._netdoor, None
@@ -888,6 +934,7 @@ class ImplementerSession:
                     can_push=self._can_push,
                     profile_instructions=self._profile_instructions,
                     with_result=self._schema is not None,
+                    with_ask=self._can_ask,
                 ),
             ),
             environment=implementer_environment(
@@ -900,7 +947,9 @@ class ImplementerSession:
             transport=self.seams.transport,
             # Without a channel nothing is recorded, so nothing is queued to be "not taken in time".
             redactor=Redactor(self.secrets()) if self._steps is not None else None,
-            files=None if self._schema is None else finish_files(self._schema),
+            files=None
+            if self._schema is None
+            else finish_files(self._schema, can_ask=self._can_ask),
             **options,
         )
 
@@ -948,7 +997,7 @@ class ImplementerSession:
         message, like the extra message for a dirty tree and for the same reason: the model is
         asked once. What is read now is a first look (the container is still up); the result the
         turn is judged by is read after the container is gone (`_collect_result`)."""
-        if self._read_agent_result() is not None:
+        if self._read_agent_result() is not None or self._read_agent_ask() is not None:
             return
         if not self._time_for_another_turn(agent):
             self._note("no valid result was handed in, and there is no time for a reminder")
@@ -977,6 +1026,19 @@ class ImplementerSession:
             if parsed.problem == "invalid":
                 self._result_problem = f"invalid: {len(parsed.issues)} problems"
         return parsed.value
+
+    def _read_agent_ask(self) -> dict[str, Any] | None:
+        """#920: the question file as `finish_tool.parse_ask` judges it. None when the turn may not
+        ask, there is no file, it cannot be read or it does not fit."""
+        if not self._can_ask or self._results is None:
+            return None
+        try:
+            raw = self._results.read_ask(finish_tool.MAX_ASK_BYTES + 1)
+        except Exception:
+            raw = None
+        if raw is None:
+            return None
+        return finish_tool.parse_ask(raw).value
 
     def _time_for_another_turn(self, agent: ImplementerAgent | ClaudeCodeAgent) -> bool:
         if isinstance(agent, ClaudeCodeAgent):
@@ -1077,12 +1139,30 @@ class ImplementerSession:
                 else:
                     self._result_problem = "too_large once the secrets were taken out"
                     self._note("the result was left out: it is over the bounds without its secrets")
-        if self._agent_result is None and self._error is None:
+        if self._agent_result is None and self._engine_ended:
+            self._collect_ask()
+        if self._agent_result is None and self._agent_ask is None and self._error is None:
             self._error = (
                 ErrorCode.NO_RESULT,
                 f"the agent ended without a result that fits the schema ({self._result_problem})",
             )
             self._note("the turn ended: no_result")
+
+    def _collect_ask(self) -> None:
+        """#920: a turn that handed in no result may have ended with a question. Read like the
+        result,
+        once the container is gone; the job's secrets are taken out of every text of it. A question
+        over the bounds without its secrets is left out, and the turn ends `no_result`."""
+        read = self._read_agent_ask()
+        if read is None:
+            return
+        cleaned = redacted_value(read, Redactor(self.secrets()).redact)
+        if agent_ask_ok(cleaned):
+            self._agent_ask = cleaned
+            self._note("the turn ended with a question")
+        else:
+            self._result_problem = "the question was over the bounds without its secrets"
+            self._note("the question was left out: it is over the bounds without its secrets")
 
     def _quiet(self) -> None:
         """Kill what runs in the readers and start them again (`GitWorkspace.quiet_readers`):
@@ -1207,6 +1287,7 @@ class ImplementerSession:
             network=self._network_block(),
             checked_out=workspace.checked_out,
             agent_result=self._agent_result,
+            agent_ask=self._agent_ask,
             resume=self._resume_block(),
         )
 

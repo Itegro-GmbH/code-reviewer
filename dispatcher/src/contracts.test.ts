@@ -334,6 +334,8 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
         "ImplementerAgentResult",
         "examples/implementer/ImplementerAgentResult.json",
       ],
+      // #920
+      ["ImplementerAgentAsk", "examples/implementer/ImplementerAgentAsk.json"],
       // #838
       ["ImplementerResume", "examples/implementer/ImplementerResume.json"],
     ] as const) {
@@ -346,6 +348,7 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
     expect(
       readdirSync(join(CONTRACTS, "examples", "implementer")).sort(),
     ).toStrictEqual([
+      "ImplementerAgentAsk.json",
       "ImplementerAgentResult.json",
       "ImplementerEnvironment.json",
       "ImplementerProfile.json",

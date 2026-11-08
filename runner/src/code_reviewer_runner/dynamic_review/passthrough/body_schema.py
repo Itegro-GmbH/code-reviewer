@@ -23,9 +23,10 @@ conversation alone:
   block) is not walked: the provider rejects what is invalid, and the SDK of the pinned engine adds
   fields the capture of one run never showed (the `caller` of #810 was the first). This is a
   deliberate decision of the owner (#810): the earlier closed walk refused a healthy turn at its
-  second call. A part that makes the provider fetch a URL, or a one-hour cache write, is therefore
-  no longer refused here; the price book prices the write the provider states, and a write it has
-  no price for is an unknown cost (`pricing.py`).
+  second call. A one-hour cache write is therefore no longer refused here; the price book prices
+  the write the provider states, and a write it has no price for is an unknown cost
+  (`pricing.py`). One exit is closed inside the opaque conversation all the same: a part that makes
+  the provider fetch a URL is refused by a deny-walk of its own (`fetch_parts.py`, #950).
 
 The walk only checks. The body that is forwarded is the bytes that arrived. A refusal carries the
 **path** of what failed (`NotAllowed.path`: `service_tier`, `tools[2].type`; never a value, a key
@@ -77,7 +78,7 @@ class NotAllowed(Exception):
         return f"{text} ({self.reason})"
 
 
-def _name(key: object) -> str:
+def safe_name(key: object) -> str:
     return key if isinstance(key, str) and _SAFE_NAME.fullmatch(key) else _PLACEHOLDER
 
 
@@ -180,7 +181,7 @@ def obj(fields: Mapping[str, Check], required: Collection[str] = ()) -> Check:
         document: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]
         for name in document:
             if name not in fields:
-                raise NotAllowed(UNKNOWN_KEY).within(_name(name))
+                raise NotAllowed(UNKNOWN_KEY).within(safe_name(name))
         for name in required:
             if name not in document:
                 raise NotAllowed(MISSING_KEY).within(name)

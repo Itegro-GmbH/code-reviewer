@@ -25,15 +25,16 @@ const VIEW: ProfileView = {
   updatedAt: "2026-11-04T09:00:00.000Z",
   archivedAt: null,
   documentVersion: 2,
+  environmentGone: false,
   document: {
     name: "reviewer",
     description: "",
     model: { entryId: "e" },
     instructions: "",
-    costLimitCents: null,
     canPush: false,
     defaultResult: null,
     harness: "opencode",
+    environment: "node",
   },
   versions: [
     { version: 2, savedAt: "2026-11-04T09:00:00.000Z" },

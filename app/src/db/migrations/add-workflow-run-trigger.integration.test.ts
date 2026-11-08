@@ -100,7 +100,7 @@ describe("the workflow run trigger migration", () => {
       /workflow_runs_trigger_check/,
     );
     await expect(
-      run("run-unknown", "u-1", "schedule").execute(db),
+      run("run-unknown", "u-1", "webhook").execute(db),
     ).rejects.toThrow(/workflow_runs_trigger_check/);
     await db.destroy();
   });

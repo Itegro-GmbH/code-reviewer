@@ -102,7 +102,7 @@ describe("what the workflow pages take from a run", () => {
     // Names a person can read stay.
     expect(
       readableMessageOf(
-        'Needs the permission "Pull requests: Read and write".',
+        'Needs the permission "Pull requests: Read and write and Contents: Read-only".',
       ),
     ).not.toBeNull();
     expect(
@@ -267,6 +267,102 @@ describe("the form that starts a run", () => {
     expect(startFormOf(document({ kind: "manual", input: 7 }))).toEqual({
       kind: "unusable",
     });
+  });
+
+  // #916-T110
+  it("makes one form for the only manual trigger of a list of triggers, the ticket first, and sends the id of the trigger", () => {
+    const spec = startFormOf({
+      version: 1,
+      triggers: [
+        { id: "labeled", kind: "ticket.labeled", label: "go" },
+        {
+          id: "manual",
+          kind: "manual",
+          input: {
+            type: "object",
+            required: ["ticket"],
+            properties: {
+              note: { type: "string" },
+              ticket: { type: "ticket", description: "What to do" },
+            },
+          },
+        },
+        { id: "api", kind: "api", input: { type: "object" } },
+      ],
+      steps: [],
+    });
+    expect(spec).toEqual({
+      kind: "form",
+      trigger: "manual",
+      fields: [
+        {
+          name: "ticket",
+          required: true,
+          kind: "ticket",
+          description: "What to do",
+        },
+        { name: "note", required: false, kind: "string" },
+      ],
+    });
+  });
+
+  // #916-T111
+  it("makes one form for each manual trigger when there are several, and says when none is manual or one cannot be read", () => {
+    const manual = (id: string) => ({
+      id,
+      kind: "manual",
+      input: {
+        type: "object",
+        required: ["repo"],
+        properties: { repo: { type: "string" } },
+      },
+    });
+    expect(
+      startFormOf({ triggers: [manual("a"), manual("b")], steps: [] }),
+    ).toEqual({
+      kind: "forms",
+      forms: [
+        {
+          trigger: "a",
+          fields: [{ name: "repo", required: true, kind: "string" }],
+        },
+        {
+          trigger: "b",
+          fields: [{ name: "repo", required: true, kind: "string" }],
+        },
+      ],
+    });
+    expect(
+      startFormOf({
+        triggers: [{ id: "labeled", kind: "ticket.labeled", label: "go" }],
+      }),
+    ).toEqual({ kind: "not_manual" });
+    expect(
+      startFormOf({ triggers: [{ id: "m", kind: "manual", input: 7 }] }),
+    ).toEqual({ kind: "unusable" });
+    expect(startFormOf({ triggers: [{ kind: "manual" }] })).toEqual({
+      kind: "unusable",
+    });
+  });
+
+  // #916-T112
+  it("finds the repository of a run in every shape a run stores its input", () => {
+    const repo = {
+      fullName: "acme/widgets",
+      owner: "acme",
+      name: "widgets",
+      defaultBranch: "main",
+    };
+    expect(repositoryOfRun({ input: { ticket: { number: 1, repo } } })).toBe(
+      "acme/widgets",
+    );
+    expect(repositoryOfRun({ input: { input: { repo: "acme/api" } } })).toBe(
+      "acme/api",
+    );
+    expect(repositoryOfRun({ input: { issue: {}, repo } })).toBe(
+      "acme/widgets",
+    );
+    expect(repositoryOfRun({ input: { input: {} } })).toBeUndefined();
   });
 
   // #846-T84

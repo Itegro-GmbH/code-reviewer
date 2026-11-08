@@ -104,6 +104,8 @@ export async function startWebhookHarness(
   // #845: what starts the workflows of a label; a test that needs it sets it after the harness is up (it is built from tables the
   // harness does not own).
   let workflows: WorkspaceCollaborators["workflows"];
+  // #920: what takes the answer of a comment `/answer ...`, set the same way.
+  let answers: WorkspaceCollaborators["answers"];
   const handler = createGithubAppWebhookHandler({
     registry,
     integrations: base.directory,
@@ -114,6 +116,7 @@ export async function startWebhookHarness(
       settingsFor,
       intake,
       ...(workflows === undefined ? {} : { workflows }),
+      ...(answers === undefined ? {} : { answers }),
     }),
     automatic,
     logger,
@@ -232,6 +235,10 @@ export async function startWebhookHarness(
     /** Hands the label trigger to the route's handler (#845). */
     setLabelTrigger(trigger: WorkspaceCollaborators["workflows"]) {
       workflows = trigger;
+    },
+    /** Hands the taker of `/answer` comments to the route's handler (#920). */
+    setTicketAnswers(taker: WorkspaceCollaborators["answers"]) {
+      answers = taker;
     },
     infoLines,
     errorLines,

@@ -52,6 +52,7 @@ export function inputOf(
       continue;
     }
     if (field.kind === "string") input[field.name] = text;
+    else if (field.kind === "ticket") input[field.name] = text.trim();
     else if (field.kind === "integer") {
       if (!/^-?\d+$/.test(text.trim()) || !Number.isSafeInteger(Number(text)))
         errors[field.name] = START_COPY.notInteger;
@@ -83,6 +84,7 @@ function fieldOfPath(path: unknown): string | undefined {
 }
 
 function labelOf(field: StartField): string {
+  if (field.kind === "ticket") return START_COPY.fieldTicket;
   return field.name === "repo" ? START_COPY.fieldRepo : field.name;
 }
 
@@ -90,12 +92,15 @@ export function StartForm({
   workspaceSlug,
   workflowId,
   fields,
+  trigger,
   api: apiProp,
 }: {
   /** The workspace of the page: the call is made in it, and the run it starts is linked in it. */
   workspaceSlug: string;
   workflowId: string;
   fields: readonly StartField[];
+  /** The id of the trigger this form starts, when the workflow has several (#916). */
+  trigger?: string;
   /** Only tests pass this. */
   api?: WorkflowRunsApi;
 }) {
@@ -150,6 +155,7 @@ export function StartForm({
       requestIds.current.get(fingerprint) ?? newClientRequestId();
     requestIds.current.set(fingerprint, clientRequestId);
     const result = await api.start(workflowId, {
+      ...(trigger === undefined ? {} : { trigger }),
       input: checked.input,
       clientRequestId,
     });
@@ -259,7 +265,12 @@ function FieldControl({
 }) {
   const label = labelOf(field);
   // The description is a note from the workflow document: text. The repository has a hint of its own.
-  const hint = field.name === "repo" ? START_COPY.repoHint : field.description;
+  const hint =
+    field.kind === "ticket"
+      ? START_COPY.ticketHint
+      : field.name === "repo"
+        ? START_COPY.repoHint
+        : field.description;
   if (field.choices !== undefined)
     return (
       <ModelSelect

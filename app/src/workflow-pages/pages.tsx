@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The content of the three workflow pages (#873): the list of workflows, one workflow (its Start form and its runs) and one run. The
+// The content of the two workflow pages (#873): one workflow (its Start form and its runs) and one run. The list of the lanes of a project
+// is the Lanes tab of its cockpit (#922); the workspace has no list of workflows any more. The
 // `load…` functions gather the data from the services (passed in); an id nobody has in this workspace, also the id of another
 // workspace's, gives `not_found` and the page shows the not-found page, nothing of anything else. The `…Content` components render it.
 import Link from "next/link";
@@ -9,12 +10,9 @@ import { Button } from "../components/button.tsx";
 import { PageHeader } from "../components/page-header.tsx";
 import { Alert } from "../components/ui/alert.tsx";
 import { ROLE_NOT_ALLOWED } from "../copy/messages.ts";
+import type { ProfileService } from "../profiles/service.ts";
 import { WorkflowError } from "../workflows/errors.ts";
-import type {
-  WorkflowList,
-  WorkflowService,
-  WorkflowView,
-} from "../workflows/service.ts";
+import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { WorkflowRunError } from "../workflow-runs/errors.ts";
 import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
@@ -24,12 +22,14 @@ import type {
   WorkflowRunService,
 } from "../workflow-runs/service.ts";
 import type { WorkflowRunsApi } from "./api.ts";
+import type { BuilderApi } from "./builder/api.ts";
+import { LaneBuilder } from "./builder/builder.tsx";
+import type { ProfileOption } from "./builder/inspector.tsx";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { WorkflowRunsList } from "./runs-list.tsx";
 import { StartForm } from "./start-form.tsx";
 import { startFormOf, type StartFormSpec } from "./start-form-spec.ts";
-import { WorkflowsList } from "./workflows-list.tsx";
 
 type NotFound = { kind: "not_found" };
 
@@ -49,41 +49,20 @@ async function orNotFound<T>(work: () => Promise<T>): Promise<T | undefined> {
   }
 }
 
-// --- the list of workflows
-
-export async function loadWorkflowsPage(deps: {
-  workflows: Pick<WorkflowService, "list">;
-}): Promise<WorkflowList> {
-  return deps.workflows.list();
-}
-
-export function WorkflowsPageContent({
-  workspaceSlug,
-  data,
-}: {
-  workspaceSlug: string;
-  data: WorkflowList;
-}) {
-  return (
-    <>
-      <PageHeader
-        title={PAGE_COPY.workflowsTitle}
-        description={PAGE_COPY.workflowsDescription}
-      />
-      <WorkflowsList workspaceSlug={workspaceSlug} workflows={data.workflows} />
-    </>
-  );
-}
-
 // --- one workflow
 
 export type WorkflowPageData =
   | NotFound
   | {
       kind: "ready";
-      workflow: Pick<WorkflowView, "id" | "name" | "version" | "archivedAt">;
+      workflow: Pick<
+        WorkflowView,
+        "id" | "name" | "version" | "archivedAt" | "versions" | "document"
+      >;
       form: StartFormSpec;
       runs: RunSummaryView[];
+      /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
+      profiles: ProfileOption[];
     };
 
 export async function loadWorkflowPage(
@@ -91,6 +70,8 @@ export async function loadWorkflowPage(
   deps: {
     workflows: Pick<WorkflowService, "get">;
     runs: Pick<WorkflowRunService, "list">;
+    /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
+    profiles?: Pick<ProfileService, "list">;
   },
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
@@ -99,6 +80,8 @@ export async function loadWorkflowPage(
   }));
   if (found === undefined) return { kind: "not_found" };
   const { workflow, runs } = found;
+  const listed =
+    deps.profiles === undefined ? [] : (await deps.profiles.list()).profiles;
   return {
     kind: "ready",
     workflow: {
@@ -106,9 +89,14 @@ export async function loadWorkflowPage(
       name: workflow.name,
       version: workflow.version,
       archivedAt: workflow.archivedAt,
+      versions: workflow.versions,
+      document: workflow.document,
     },
     form: startFormOf(workflow.document),
     runs,
+    profiles: listed
+      .filter((profile) => profile.archivedAt === null)
+      .map((profile) => ({ name: profile.name, version: profile.version })),
   };
 }
 
@@ -140,15 +128,30 @@ function StartSection({
       <h2 id="start-heading" className="text-xl font-semibold">
         {START_COPY.heading}
       </h2>
-      {notice !== null || form.kind !== "form" ? (
+      {notice !== null || (form.kind !== "form" && form.kind !== "forms") ? (
         <Alert variant="info" role="status">
           {notice ?? ""}
         </Alert>
+      ) : form.kind === "forms" ? (
+        form.forms.map((each) => (
+          <div key={each.trigger} className="flex flex-col gap-3">
+            <h3 className="text-base font-semibold">
+              {START_COPY.triggerHeading} {each.trigger}
+            </h3>
+            <StartForm
+              workspaceSlug={workspaceSlug}
+              workflowId={workflow.id}
+              fields={each.fields}
+              trigger={each.trigger}
+            />
+          </div>
+        ))
       ) : (
         <StartForm
           workspaceSlug={workspaceSlug}
           workflowId={workflow.id}
           fields={form.fields}
+          {...(form.trigger === undefined ? {} : { trigger: form.trigger })}
         />
       )}
     </section>
@@ -160,12 +163,15 @@ export function WorkflowPageContent({
   data,
   mayStart,
   api,
+  builderApi,
 }: {
   workspaceSlug: string;
   data: Extract<WorkflowPageData, { kind: "ready" }>;
   mayStart: boolean;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
+  /** Only tests pass this, for the same reason: the builder's calls to the validate and save routes. */
+  builderApi?: BuilderApi;
 }) {
   const { workflow } = data;
   return (
@@ -178,17 +184,28 @@ export function WorkflowPageContent({
             items={[
               {
                 label: PAGE_COPY.breadcrumbRoot,
-                href: workspacePath(workspaceSlug, "/workflows"),
+                href: workspacePath(workspaceSlug, "/projects"),
               },
               { label: workflow.name },
             ]}
           />
         }
       />
-      <StartSection
+      <LaneBuilder
         workspaceSlug={workspaceSlug}
-        data={data}
-        mayStart={mayStart}
+        workflowId={workflow.id}
+        version={workflow.version}
+        versions={workflow.versions}
+        document={workflow.document}
+        profiles={data.profiles}
+        startPanel={
+          <StartSection
+            workspaceSlug={workspaceSlug}
+            data={data}
+            mayStart={mayStart}
+          />
+        }
+        {...(builderApi === undefined ? {} : { api: builderApi })}
       />
       <section aria-labelledby="runs-heading" className="flex flex-col gap-4">
         <h2 id="runs-heading" className="text-xl font-semibold">
@@ -264,7 +281,7 @@ export function RunPageContent({
             items={[
               {
                 label: PAGE_COPY.breadcrumbRoot,
-                href: workspacePath(workspaceSlug, "/workflows"),
+                href: workspacePath(workspaceSlug, "/projects"),
               },
               { label: workflow.name, href: workflowHref },
               { label: PAGE_COPY.runTitle },

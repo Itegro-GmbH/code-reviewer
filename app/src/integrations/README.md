@@ -62,6 +62,23 @@ interface IntegrationProvider {
     repo: RepoRef,
     signal?: AbortSignal,
   ): Promise<PullRequestRef[]>;
+  // The ticket mirror (#923, `src/tracker/`); optional, a provider without tickets has none of the three:
+  parseTrackerChange?(
+    i: Integration,
+    req: Request,
+  ): Promise<TrackerChangeResult>; // what a delivery changes in the cache
+  readTrackerPage?(
+    i: Integration,
+    repo: RepoRef,
+    step: TrackerPageStep,
+    signal?: AbortSignal,
+  ): Promise<TrackerPage>; // one page of the full sync
+  readChecksState?(
+    i: Integration,
+    repo: RepoRef,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>; // the checks of a commit
 }
 ```
 
@@ -118,10 +135,13 @@ the credentials of a job). With `lookForEarlierSince` it first looks for the app
 (only the app's own: anybody can copy a marker) and posts nothing if there is one. A failure is an `IntegrationError` with the
 same provider neutral access codes as the reads above, and never holds a token or the body.
 
+`readIssue` (#916, the `ticket` input of a workflow trigger) reads one issue as a ticket (number, title, body, address, labels, assignees, GitHub's issue type) with a token that reads issues of the repository only; a number that is no issue, a
+pull request included, is `null`. The texts are those of whoever opened the issue: untrusted. `IssueLabeled.issue` may carry `assignees` and `type` as the webhook's payload had them.
+
 `openPullRequest`, `commentOnIssue` and `changeIssueLabels` (#844, the workflow actions, `src/workflow-runs/github-connectors.ts`) write as the app with
-a token of its own limited to the repository and to one permission (pull requests, or issues) and switched off afterwards. A pull request that is open for
+a token of its own limited to the repository and to what the action needs and switched off afterwards: pull requests write plus contents read (and metadata read) for the pull request, issues write for a comment or labels (contents is needed to resolve the head and base refs, #913). A pull request that is open for
 the same head and base is the result (`existing`), labels are idempotent. A failure is an `IntegrationError` with the codes of a write: `..._SCOPE_REFUSED` is an
-App that lacks the permission, `..._NO_CHANGES_TO_COMPARE` a head with nothing the base lacks, `..._REQUEST_REFUSED` any other refusal of the content.
+App that lacks the permission, `..._NO_CHANGES_TO_COMPARE` a head with nothing the base lacks, `..._REQUEST_REFUSED` any other refusal of the content. Only `..._REQUEST_REFUSED` carries `IntegrationError.detail`: what the platform said about the refusal (GitHub: the `message` or the names of `errors`), bounded and cleaned of control characters, links and tokens, but still the platform's text, so untrusted data: whoever shows it defuses it.
 
 ### Rules for implementations
 

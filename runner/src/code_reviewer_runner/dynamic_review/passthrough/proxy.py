@@ -67,6 +67,7 @@ from code_reviewer_runner.dynamic_review.passthrough.admission import (
 )
 from code_reviewer_runner.dynamic_review.passthrough.call_usage import CallUsage
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
+from code_reviewer_runner.dynamic_review.passthrough.fetch_parts import URL_SOURCE
 from code_reviewer_runner.dynamic_review.passthrough.price_book import (
     PriceBook,
     PriceBookError,
@@ -381,6 +382,9 @@ class PassthroughProxy:
 
     def _refuse(self, sink: ResponseSink, refused: Refused) -> None:
         detail = _REFUSAL_DETAIL[refused.code]
+        if refused.where is not None and refused.where.endswith(f"({URL_SOURCE})"):
+            # The kind of part, never its value: the engine can tell what to change.
+            detail += ": a message part asks the provider to fetch a URL"
         if refused.code is not RefusalCode.CAPABILITY_INVALID:
             # An engine that asks for what it may not is misbehaving: the run stops. A caller that
             # proved nothing is not the engine of this job and does not end it. What the run

@@ -38,6 +38,7 @@ function turn(
     instruction: "Work.",
     modelChoice: { entryId: "entry-1" },
     costLimitCents: null,
+    timeLimitMinutes: null,
     jobId: "job-1",
     createdBy: "user-1",
     createdAt: "2026-11-05T10:00:00.000Z",
@@ -651,5 +652,74 @@ describe("the outcome of a turn", () => {
         ),
       ).toMatchObject({ costMicroUsd: 0, costBasis: "subscription" });
     });
+  });
+});
+
+describe("a turn that ends with a question (#920)", () => {
+  const QUESTION = {
+    question: "Retry which failures?",
+    options: ["Network errors", "Network errors and 5xx answers"],
+  };
+  const asking = (patch: Partial<EndedTurn> = {}) =>
+    ended({
+      turn: turn({ resultValue: null }),
+      jobResult: {
+        usage: { costUsd: 0.25 },
+        implementer: { agentAsk: QUESTION },
+      },
+      ...patch,
+    });
+
+  // #920-T40
+  it("yields the question and charges what the turn cost, and has no output", () => {
+    const outcome = outcomeOfTurn(asking(), 1_000_000);
+
+    expect(outcome).toEqual({
+      ok: true,
+      asked: QUESTION,
+      costMicroUsd: 250_000,
+      costBasis: "reported",
+    });
+  });
+
+  // #920-T41
+  it("is the agent's text held to its bounds again: a question over them is a step without a result", () => {
+    const outcome = outcomeOfTurn(
+      asking({
+        jobResult: {
+          usage: { costUsd: 0.25 },
+          implementer: { agentAsk: { question: "q".repeat(2001) } },
+        },
+      }),
+      1_000_000,
+    );
+
+    expect(outcome).toMatchObject({ ok: false, code: "no_result" });
+  });
+
+  // #920-T42
+  it("loses to a result: a turn that handed in a result is done, not asking", () => {
+    const outcome = outcomeOfTurn(
+      asking({ turn: turn({ resultValue: { summary: "Done." } }) }),
+      1_000_000,
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    expect(outcome).not.toHaveProperty("asked");
+  });
+
+  // #920-T43
+  it("is no question for a turn that failed or has no result schema", () => {
+    expect(
+      outcomeOfTurn(
+        asking({ jobStatus: "failed", jobErrorCode: "time_limit_reached" }),
+        1_000_000,
+      ),
+    ).toMatchObject({ ok: false, code: "time_limit_reached" });
+    const without = outcomeOfTurn(
+      asking({ turn: turn({ resultSchema: null, resultValue: null }) }),
+      1_000_000,
+    );
+    expect(without).not.toHaveProperty("asked");
   });
 });

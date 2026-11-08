@@ -64,7 +64,10 @@ export function WorkflowRunsList({
     initial,
     fetchLatest: () => api.list(workflowId),
     isSettled: (snapshot) =>
-      snapshot.runs.every((run) => run.status !== "running"),
+      // A run that waits for an answer (#920) changes when somebody answers, on this page or on the ticket.
+      snapshot.runs.every(
+        (run) => run.status !== "running" && run.status !== "waiting",
+      ),
     activeIntervalMs: WORKFLOW_RUN_POLL_MS,
     idleIntervalMs: null,
   });
@@ -101,7 +104,14 @@ export function WorkflowRunsList({
             {data.runs.map((run) => {
               const failure = describeRunFailure(run.errorCode);
               return (
-                <TableRow key={run.id} data-run-id={run.id}>
+                <TableRow
+                  key={run.id}
+                  data-run-id={run.id}
+                  // #921: a discarded run stays listed, greyed.
+                  className={
+                    run.status === "discarded" ? "opacity-60" : undefined
+                  }
+                >
                   <TableCell className="align-top whitespace-normal">
                     <Link
                       href={runPath(run.id)}

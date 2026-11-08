@@ -201,6 +201,26 @@ is removed on GitHub. A missing permission is told from these by what GitHub ans
 only for "Resource not accessible by integration"). The **Re-run** button of a check run does nothing: the App does
 not subscribe to `check_run` events; a new push, or `/review`, runs the review again.
 
+
+### Optional: Projects (for `ticket.setStatus`)
+
+The workflow action `ticket.setStatus` ([workflows](workflows.md#the-action-kind-action), #917) moves a ticket to a column of a GitHub Project (projects_v2) board. GitHub
+has this only as an **organization permission**, and the App does not ask for it in its manifest: it is **opt-in**, so an installation that never uses boards never grants it.
+To use `ticket.setStatus`:
+
+1. In the App's settings on GitHub (*Permissions & events > Organization permissions*), set **Projects** (`organization_projects`) to **Read and write** and save.
+2. Every installation has to accept the changed permissions (GitHub asks an owner of the organization). Until it does, GitHub refuses the token of the action
+   (HTTP 422) and the step ends with `github_permission_missing`, naming "Projects: Read and write" and "Issues: Read-only".
+3. The action's own token holds exactly `organization_projects: write`, `issues: read` and `metadata: read`
+   (`BOARD_STATUS_TOKEN_PERMISSIONS` in `app/src/integrations/providers/github-app/job-access.ts`). It only reads the project's `Status` field and the issue, adds the issue
+   to the project when it is not on it, and sets that one field.
+
+The token is limited to the one repository of the run **for issues and pull requests**. The Projects permission is an organization permission and has no repository to limit it to: it applies to
+**the owner's projects** (every project of the organization the installation can see), so the action itself keeps to the project of the owner of the run's repository (a project node id of another owner is not found).
+
+The project must belong to the **owner of the repository** (an organization; GitHub does not let an App write the projects of a user with an installation token). The board is
+named by its number (the number in the project's address, `…/projects/7`) or its node id. `ticket.requestReview` needs nothing new: it uses Pull requests: Read and write.
+
 ## The Implementer
 
 This section applies only to a deployment whose capability set has `implementer` (the Software Factory, `PRODUCT_CAPABILITIES`).
@@ -245,20 +265,47 @@ answered `IMPLEMENTER_WRITE_NOT_GRANTED` (a job that gets that far ends `git_wri
 
 ## Events
 
-Under *Subscribe to events* tick **Pull request** and **Issue comment**, and **Issues** when workflows with the
-[label trigger](workflows.md#the-label-trigger) are used (the `issues` row below). The other two events below have
-no checkbox: GitHub sends them to every app that has a webhook.
+Under *Subscribe to events* tick **Pull request**, **Issue comment**, **Issues**, **Sub issues** and **Check suite**, and
+**Projects v2 item** when the project board is used ("The project board" below). The one-click way ticks the first five. The
+other two events below have no checkbox: GitHub sends them to every app that has a webhook.
+
+The events marked "mirror" also feed the [ticket mirror](ticket-mirror.md), the read cache of the issues and pull requests of
+a project's repository: each of them updates the row of its ticket, for a repository with an active project only.
 
 | Event | Subscription | What the app does with it |
 |---|---|---|
-| `pull_request` | Tick "Pull request" | A pull request was opened, reopened, marked ready for review or got new commits: becomes a review trigger |
-| `issue_comment` | Tick "Issue comment" | A comment on a pull request that starts with `/review` from somebody with write access becomes a command trigger (the removed `/ask`, `/improve` and `/describe` are ordinary comments) |
-| `issues` | Tick "Issues" (only for the [label trigger](workflows.md#the-label-trigger) of a workflow; an App made from the manifest does not subscribe to it yet, tick it by hand) | A label put on an open issue by a user account (sender type `User`; a machine account with a personal access token is one) starts the workflows of the workspace that wait for that label, but only one running run of a workflow for one issue. Pull requests, bots, organizations, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing. **An issue created from a template or form with `labels:` gets them when it is created, and that starts a run: keep the trigger label out of every issue template, above all in a public repository** |
+| `pull_request` | Tick "Pull request" | A pull request was opened, reopened, marked ready for review or got new commits: becomes a review trigger. Mirror: every action (`opened`, `closed` and `merged`, `review_requested`, `synchronize`, `edited`, `labeled`, ...) updates the ticket of the pull request; a new commit clears its checks |
+| `issue_comment` | Tick "Issue comment" | A comment on a pull request that starts with `/review` from somebody with write access becomes a command trigger (the removed `/ask`, `/improve` and `/describe` are ordinary comments). Mirror: a comment created or edited on an issue or a pull request refreshes its ticket (the time of the last change, and the rest of what the delivery carries) |
+| `issues` | Tick "Issues" (the one-click way ticks it) | A label put on an open issue by a user account (sender type `User`; a machine account with a personal access token is one) starts the workflows of the workspace that wait for that label, but only one running run of a workflow for one issue. Pull requests, bots, organizations, other actions (`opened`, `edited`, `unlabeled`, ...) and closed issues start nothing. **An issue created from a template or form with `labels:` gets them when it is created, and that starts a run: keep the trigger label out of every issue template, above all in a public repository**. Mirror: every action (`opened`, `edited`, `closed`, `reopened`, `labeled`, `assigned`, `typed`, ..., `deleted` and `transferred` remove the ticket) updates the ticket |
+| `sub_issues` | Tick "Sub issues" (the one-click way ticks it) | Mirror only: an issue got a parent or lost it (`parent_issue_added`, `sub_issue_added`, `parent_issue_removed`, `sub_issue_removed`); only when both issues are in the same repository |
+| `check_suite` | Tick "Check suite" (the one-click way ticks it) | Mirror only: the checks of a commit started or finished; the app asks GitHub for the state of the checks of that commit and stores it on the open pull requests that have it as head (a pull request from a fork is not listed by GitHub in the suite, and its checks are read by the next full sync) |
+| `projects_v2_item` | Tick "Projects v2 item" by hand, see "The project board" | Mirror only: an item of an organization project board got another **Status**, was added, restored, archived or deleted |
 | `installation` | Always sent, nothing to tick | The app was installed, removed, suspended or unsuspended: creates or disables the installation in the app |
 | `installation_repositories` | Always sent, nothing to tick | Repositories were added to or removed from an installation: keeps the repository list current |
 
+### The project board
+
+The status column of a ticket in the mirror is the **Status** of the item on an organization's project board (GitHub
+Projects), shown as the board names it. Reading a board needs the organization permission **Projects** (`organization_projects`),
+**Read-only**, which the manifest does not ask for: no App holds it yet, and the portal would report it as missing for every
+App that exists. Without it the mirror works as before and the status stays empty; nothing fails. To show the status:
+
+1. In the App's settings (*Permissions & events > Organization permissions*) set **Projects** to **Read-only**, and under
+   *Subscribe to events* tick **Projects v2 item**. Save.
+2. Every installation has to accept the changed permissions on GitHub (the account that installed the App is asked).
+3. Press **Resync** in the project's setup, or wait for the next change of an item: the sync reads the status of every item of the
+   boards that list the repository (when an item is on several boards, the board read last wins).
+
+The token that reads the boards is made for the one call, limited to one repository and to `organization_projects: read` and
+`metadata: read` (`TRACKER_BOARD_TOKEN_PERMISSIONS`); the token of the other reads of the sync holds `issues`, `pull_requests` and
+`checks`, all `read`, and `metadata: read` (`TRACKER_READ_TOKEN_PERMISSIONS`). Both are in `job-access.ts` and are switched off
+after the call. When an item is added to a board, restored, archived or deleted (GitHub's delivery names no status for these), the App asks
+GitHub for the status of that one ticket with a token of the same kind and stores what the ticket's remaining boards say, so an item that leaves one board
+keeps the status another board gives it (#932). Boards of a personal account cannot be read with an installation token: their items show no status.
+
 Every other event (for example GitHub's `ping`, or `push`) is answered with `202` and ignored. The list is the
-set of events the webhook code reads (`webhook-fields.ts` next to `job-access.ts`).
+set of events the webhook code reads (`webhook-fields.ts` next to `job-access.ts`: `WEBHOOK_READ_FIELDS` for the reviews and workflows,
+`TRACKER_WEBHOOK_FIELDS` for the ticket mirror).
 
 ## Sign in with GitHub
 
@@ -305,7 +352,7 @@ instance admin.
 Anybody can install a public App, so an installation is **not** reviewed until a workspace has linked it
 (`docs/decisions/0001-editions-setup-and-accounts.md`, section 2.9). An Owner or Admin of the workspace does that:
 
-1. Open the workspace's **Connections** page and press **Connect GitHub**. GitHub shows the App's installation page.
+1. Open the workspace's **Connections** page (in the factory: **Settings**, tab **Integrations**) and press **Connect GitHub**. GitHub shows the App's installation page.
 2. Pick the account or organization, and choose **Only select repositories**. Select the repositories the team
    wants reviewed. Granting "All repositories" is possible but not recommended. Confirm the permission list GitHub
    shows and press Install.
@@ -376,8 +423,9 @@ it reads the workspace's own connections) if the repository is missing, and swit
       verification enabled
 - [ ] Permissions: Pull requests Read and write, Issues Read and write, Contents Read-only (Contents Read and write for a
       deployment with the Implementer, see "The Implementer"), Metadata Read-only, Checks Read and write, Email addresses
-      Read-only, Members Read-only, and nothing else
-- [ ] Events: Pull request and Issue comment ticked
+      Read-only, Members Read-only, and nothing else (Projects Read and write only for lanes that use `ticket.setStatus`,
+      see "Optional: Projects")
+- [ ] Events: Pull request, Issue comment, Issues, Sub issues and Check suite ticked (and Projects v2 item if the project board is used)
 - [ ] The tile on Integrations shows **Configured**, and **Sign in with GitHub** is enabled
 - [ ] Only for the way by hand: the `.pem` file is in the password manager and deleted from the laptop
 - [ ] `ping` redelivered: 202

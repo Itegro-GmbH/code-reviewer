@@ -113,6 +113,7 @@ describe("the route classification", () => {
       "/api/workers/v1/jobs/[id]/result": "dynamic-review",
       "/api/internal/repository-sync": "review",
       "/api/internal/dispatch-sweep": "core",
+      "/api/internal/tracker-resync": "core",
       "/instance-portal/billing/reviews": "billing",
       "/api/instance-portal/billing/webhook-endpoint": "billing",
       "/instance-portal/runs/[id]": "review",

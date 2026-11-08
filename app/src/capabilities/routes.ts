@@ -58,6 +58,9 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/instance-portal/model-catalog/order", class: "core" },
   { route: "/api/instance-portal/settings", class: "core" },
   { route: "/api/internal/dispatch-sweep", class: "core" },
+  // The nightly full sync of the ticket mirror (#932). Core on purpose: the cron entry is in `vercel.json` of every deployment, and a
+  // route that answers 404 would show as a failed cron; the handler answers `skipped` where there is no factory.
+  { route: "/api/internal/tracker-resync", class: "core" },
   { route: "/api/invitations/accept", class: "core" },
   { route: "/api/operator/v1/[...path]", class: "core" },
   { route: "/api/operator/v1/entitlements/default", class: "core" },
@@ -195,6 +198,30 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/runs/[id]/continuation", class: "implementer" },
+  // The tickets of a project's repository, from the ticket mirror (#923), with the run that is going on for each and what its runs spent,
+  // and the full sync that rebuilds it. The mirror itself is fed in every deployment (the webhook route is `review`); what reads it is the
+  // factory's cockpit.
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
+    class: "implementer",
+  },
+  // A project is one ticket source (#922): the factory's new project (its board and its first lanes), the boards of a repository it can
+  // take, and the tickets of a project by its own id (the same answer as the issues of its repository).
+  { route: "/api/w/[workspace]/projects", class: "implementer" },
+  // The board of a project, set or changed on its Setup tab (#937).
+  { route: "/api/w/[workspace]/projects/[projectId]", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/projects/[projectId]/issues",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/repositories/[repositoryId]/boards",
+    class: "implementer",
+  },
   // A member stops a run of the Implementer (#891).
   {
     route: "/api/w/[workspace]/implementer/runs/[runId]/cancel",
@@ -220,6 +247,42 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
+  // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
+  // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
+  // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review
+  // settings at their own address below the project.
+  { route: "/w/[workspace]/settings/integrations", class: "implementer" },
+  { route: "/w/[workspace]/settings/members", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/review",
+    class: "implementer",
+  },
+  { route: "/api/w/[workspace]/todos/count", class: "implementer" },
+  // The ToDos of a workspace and of one project, read from the runs and the ticket mirror (#924), and a review given from the list.
+  { route: "/api/w/[workspace]/todos", class: "implementer", exact: true },
+  { route: "/api/w/[workspace]/todos/reviews", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/todos", class: "implementer" },
+  { route: "/w/[workspace]/profiles", class: "implementer" },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/lanes",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/runs",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/setup",
+    class: "implementer",
+  },
+  {
+    route: "/w/[workspace]/projects/[repositoryId]/todos",
+    class: "implementer",
+  },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },
@@ -236,9 +299,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   },
   { route: "/w/[workspace]/environments", class: "implementer" },
   // The agent workflows, written through the API (#833, milestone 1): the list and the save, the check without storing, one
-  // workflow with its versions. There is no editor; the pages below show and start them.
+  // workflow with its versions. The lane builder and the pages below edit, show and start them.
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
+  // The values a step can reach, for the picker of the lane builder (#927).
+  { route: "/api/w/[workspace]/workflows/scope", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",
     class: "implementer",
@@ -253,9 +318,26 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
     class: "implementer",
   },
-  // Stops a run (#891).
+  // Stops a run (#891); since #921 it forwards to the discard of a run, which has its own route, and a run can be paused and resumed.
   {
     route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+    class: "implementer",
+  },
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
+    class: "implementer",
+  },
+  // Answers the question a run waits for (#920).
+  {
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
     class: "implementer",
   },
   { route: "/w/[workspace]/workflows", class: "implementer" },

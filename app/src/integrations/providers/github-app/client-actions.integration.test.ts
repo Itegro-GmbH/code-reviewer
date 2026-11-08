@@ -23,7 +23,7 @@ const ISSUES: JobTokenScope = {
 };
 const HEAD_SHA = "c".repeat(40);
 
-async function setup() {
+async function setup(options: { fetch?: typeof fetch } = {}) {
   const harness = await startGithubAppHarness();
   const { fake, clock, env } = harness;
   fake.addInstallation({ id: 4242, account: ACME });
@@ -32,6 +32,7 @@ async function setup() {
   const client: GithubAppClient = createGithubAppClient({
     config: loadGithubAppConfig(env),
     now: clock.now,
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
   return { fake, client };
 }
@@ -129,6 +130,243 @@ describe("opening a pull request", () => {
       status: 422,
       refusal: "other",
     });
+  });
+
+  // #913-T02
+  it("names resource, field and code of a refusal whose errors carry no message, and keeps the other classifications", async () => {
+    const answer = (errors: unknown[]) =>
+      (async (input, init) => {
+        if (init?.method === "POST" && String(input).endsWith("/pulls"))
+          return new Response(
+            JSON.stringify({ message: "Validation Failed", errors }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch;
+    const open = async (errors: unknown[]) => {
+      const { client } = await setup({ fetch: answer(errors) });
+      return failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+    };
+
+    const withoutMessage = await open([
+      { resource: "PullRequest", field: "head", code: "invalid" },
+    ]);
+    expect(withoutMessage).toMatchObject({
+      status: 422,
+      refusal: "other",
+      reason: "PullRequest head invalid",
+    });
+
+    const withMessage = await open([
+      { resource: "PullRequest", code: "custom", message: "title is missing" },
+    ]);
+    expect(withMessage).toMatchObject({
+      refusal: "other",
+      reason: "title is missing",
+    });
+
+    expect(
+      await open([
+        {
+          resource: "PullRequest",
+          code: "custom",
+          message: "No commits between main and workflow/r1/work",
+        },
+      ]),
+    ).toMatchObject({ refusal: "no_commits_between" });
+    expect(
+      await open([
+        {
+          resource: "PullRequest",
+          code: "custom",
+          message: "A pull request already exists for acme:workflow/r1/work.",
+        },
+      ]),
+    ).toMatchObject({ refusal: "pull_request_exists" });
+  });
+
+  // #913-T02
+  it("keeps links, tokens and control characters out of the reason and bounds it", async () => {
+    // Joined at run time: a token-looking literal would trip the scan for committed secrets.
+    const token = ["ghs", "abcdefghijklmnopqrstuvwxyz0123456789"].join("_");
+    const hostile = `see https://evil.example/x ${token}\nnext ${"y".repeat(1_000)}`;
+    const { client } = await setup({
+      fetch: (async (input, init) => {
+        if (init?.method === "POST" && String(input).endsWith("/pulls"))
+          return new Response(
+            JSON.stringify({
+              message: "Validation Failed",
+              errors: [{ resource: "PullRequest", message: hostile }],
+            }),
+            { status: 422 },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch,
+    });
+
+    const error = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      }),
+    );
+
+    expect(error.reason).toBeDefined();
+    expect(error.reason).not.toMatch(/https?:|ghs_|[\u0000-\u001f]/);
+    expect(error.reason?.length).toBeLessThanOrEqual(300);
+    // Cut at the bound, and the cut shows.
+    expect(error.reason).toHaveLength(300);
+    expect(error.reason?.endsWith("…")).toBe(true);
+  });
+
+  // #913-T02
+  it("classifies only what GitHub wrote as a message, never the resource, field and code it names", async () => {
+    const open = async (body: unknown) => {
+      const { client } = await setup({
+        fetch: (async (input, init) => {
+          if (init?.method === "POST" && String(input).endsWith("/pulls"))
+            return new Response(JSON.stringify(body), { status: 422 });
+          return fetch(input, init);
+        }) satisfies typeof fetch,
+      });
+      return failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+    };
+
+    // The names of an entry are for the reason only: `archived` here is a field, not GitHub saying the repository is archived.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          { resource: "Repository", field: "archived", code: "invalid" },
+        ],
+      }),
+    ).toMatchObject({
+      refusal: "other",
+      reason: "Repository archived invalid",
+    });
+    // A real message still classifies.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          { resource: "Repository", message: "Repository was archived" },
+        ],
+      }),
+    ).toMatchObject({ refusal: "repository_archived" });
+    // A message of white space says nothing: the names stand in for it.
+    expect(
+      await open({
+        message: "Validation Failed",
+        errors: [
+          {
+            message: "   ",
+            resource: "PullRequest",
+            field: "head",
+            code: "invalid",
+          },
+        ],
+      }),
+    ).toMatchObject({ reason: "PullRequest head invalid" });
+    // Without errors the top-level message is the reason.
+    expect(await open({ message: "Validation Failed" })).toMatchObject({
+      refusal: "other",
+      reason: "Validation Failed",
+    });
+  });
+
+  // #913-T02
+  it("defuses every kind of link and the marks that make one in a reason, and cuts after that so that the bound holds", async () => {
+    const reasonFor = async (text: string) => {
+      const { client } = await setup({
+        fetch: (async (input, init) => {
+          if (init?.method === "POST" && String(input).endsWith("/pulls"))
+            return new Response(
+              JSON.stringify({
+                message: "Validation Failed",
+                errors: [{ resource: "PullRequest", message: text }],
+              }),
+              { status: 422 },
+            );
+          return fetch(input, init);
+        }) satisfies typeof fetch,
+      });
+      const error = await failureOf(
+        client.openPullRequest("4242", PULLS, "acme/widgets", {
+          head: "workflow/r1/work",
+          base: "main",
+          title: "T",
+        }),
+      );
+      return error.reason ?? "";
+    };
+
+    for (const hostile of [
+      "see www.evil.example/x now",
+      "see //evil.example/x now",
+      "see ftp://evil.example/x now",
+      "see javascript:alert(1) now",
+      "see mailto:a@evil.example now",
+      "see HTTPS://EVIL.EXAMPLE/x now",
+    ]) {
+      const reason = await reasonFor(hostile);
+      expect(reason, hostile).toBe("see [link] now");
+    }
+    const marked = await reasonFor("a [click](x) <b>b</b> `c` d");
+    expect(marked).not.toMatch(/[\[\]()<>`]/);
+    // A colon that starts nothing stays.
+    expect(await reasonFor("title: is missing")).toBe("title: is missing");
+
+    // A short word that becomes "[link]" grows: the cut comes after, so the bound still holds.
+    const grown = await reasonFor("a:b ".repeat(400));
+    expect(grown.length).toBeLessThanOrEqual(300);
+    expect(grown.endsWith("…")).toBe(true);
+  });
+
+  // #913-T02
+  it("keeps GitHub's reason out of a refused token request", async () => {
+    const { client } = await setup({
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/access_tokens"))
+          return new Response(
+            JSON.stringify({
+              message: "Validation Failed",
+              errors: [
+                { message: "The permissions requested are not granted" },
+              ],
+            }),
+            { status: 422 },
+          );
+        return fetch(input, init);
+      }) satisfies typeof fetch,
+    });
+
+    const error = await failureOf(
+      client.openPullRequest("4242", PULLS, "acme/widgets", {
+        head: "workflow/r1/work",
+        base: "main",
+        title: "T",
+      }),
+    );
+
+    expect(error).toMatchObject({
+      status: 422,
+      duringTokenRequest: true,
+      refusal: "permission_missing",
+    });
+    expect(error.reason).toBeUndefined();
   });
 
   // #844-T345
@@ -455,6 +693,46 @@ describe("commenting on an issue", () => {
   });
 });
 
+describe("editing a comment of the App (#920)", () => {
+  // #920-T160
+  it("replaces the body of the comment with a token for issues of this repository only", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 7, title: "Cache the widgets" });
+    const comment = await client.createIssueComment(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      7,
+      "The agent has a question.",
+    );
+
+    await client.updateIssueComment(
+      "4242",
+      ISSUES,
+      "acme/widgets",
+      comment.id,
+      "Answered by @octocat: yes.",
+    );
+
+    expect(
+      fake.issueComments("acme/widgets", 7).map((entry) => entry.body),
+    ).toEqual(["Answered by @octocat: yes."]);
+  });
+
+  // #920-T161
+  it("is 404 for a comment that is gone and refuses an id that is no number", async () => {
+    const { client } = await setup();
+
+    const missing = await failureOf(
+      client.updateIssueComment("4242", ISSUES, "acme/widgets", "424242", "x"),
+    );
+    expect(missing.code).toBe("GITHUB_APP_NOT_FOUND");
+    await expect(
+      client.updateIssueComment("4242", ISSUES, "acme/widgets", "../x", "x"),
+    ).rejects.toThrow();
+  });
+});
+
 describe("a comment that GitHub refuses at the call", () => {
   // #844-T352
   it("is 403 with the permission missing when the token lacks the right, and a rate limit when the text says so", async () => {
@@ -653,5 +931,82 @@ describe("changing labels", () => {
         )
       ).code,
     ).toBe("GITHUB_APP_UNAVAILABLE");
+  });
+});
+
+describe("reading an issue as a ticket", () => {
+  const READ: JobTokenScope = {
+    repositoryIds: [7001],
+    permissions: { issues: "read", metadata: "read" },
+  };
+
+  // #916-T01
+  it("reads the number, title, body, address, labels, assignees and issue type with a token that reads issues of this repository only", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", {
+      number: 128,
+      title: "Cache the widget list",
+      body: "Rebuilt on every request.",
+      labels: ["enhancement", "agent implement"],
+      assignees: ["alice", "bob"],
+      type: "Bug",
+    });
+
+    const ticket = await client.getIssue("4242", READ, "acme/widgets", 128);
+
+    expect(ticket).toEqual({
+      number: 128,
+      title: "Cache the widget list",
+      body: "Rebuilt on every request.",
+      url: expect.stringContaining("/acme/widgets/issues/128") as string,
+      labels: ["enhancement", "agent implement"],
+      assignees: ["alice", "bob"],
+      type: "Bug",
+    });
+    expect(fake.tokenRequests().at(-1)).toMatchObject({
+      repositoryIds: [7001],
+      permissions: { issues: "read", metadata: "read" },
+    });
+    expect(fake.revokedInstallationTokens()).toHaveLength(1);
+  });
+
+  // #916-T02
+  it("has an empty body, no assignees and an empty type for an issue that has none", async () => {
+    const { fake, client } = await setup();
+    fake.addIssue("acme/widgets", { number: 5, title: "Plain" });
+
+    expect(
+      await client.getIssue("4242", READ, "acme/widgets", 5),
+    ).toMatchObject({ body: "", assignees: [], type: "", labels: [] });
+  });
+
+  // #916-T03
+  it("is null for a number that is no issue and for a pull request, which is no ticket", async () => {
+    const { client } = await setup();
+    const opened = await client.openPullRequest("4242", PULLS, "acme/widgets", {
+      head: "workflow/r1/work",
+      base: "main",
+      title: "T",
+    });
+
+    expect(await client.getIssue("4242", READ, "acme/widgets", 99)).toBeNull();
+    expect(
+      await client.getIssue("4242", READ, "acme/widgets", opened.number),
+    ).toBeNull();
+  });
+
+  // #916-T04
+  it("honors the abort signal and refuses a number that is no issue number before any request", async () => {
+    const { client } = await setup();
+    const aborted = new AbortController();
+    aborted.abort();
+
+    const stopped = await failureOf(
+      client.getIssue("4242", READ, "acme/widgets", 7, aborted.signal),
+    );
+    expect(stopped).toBeInstanceOf(GithubAppError);
+    await expect(
+      client.getIssue("4242", READ, "acme/widgets", 0),
+    ).rejects.toThrow();
   });
 });

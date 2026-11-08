@@ -60,6 +60,8 @@ export const WEBHOOK_READ_FIELDS = {
     // The id of the comment: a replayed delivery of the same comment must not start a second job.
     { path: "comment.id", type: "number" },
     { path: "comment.body", type: "string" },
+    // #920: when the comment was written; an answer older than its question is no answer to it. GitHub always sends it.
+    { path: "comment.created_at", type: "string", optional: true },
     // Who can write at all: only OWNER, MEMBER and COLLABORATOR can, so others cost no API call.
     { path: "comment.author_association", type: "string" },
     { path: "installation.id", type: "number" },
@@ -112,7 +114,15 @@ export function payloadProblems(
   event: WebhookEventName,
   payload: unknown,
 ): string[] {
-  return WEBHOOK_READ_FIELDS[event]
+  return specProblems(WEBHOOK_READ_FIELDS[event], payload);
+}
+
+/** The paths of `specs` that are missing or have the wrong type in `payload` (empty when it fits). */
+export function specProblems(
+  specs: readonly PayloadFieldSpec[],
+  payload: unknown,
+): string[] {
+  return specs
     .filter((spec: PayloadFieldSpec) => {
       const value = valueAt(payload, spec.path);
       if (value === undefined && spec.optional === true) return false;
@@ -120,6 +130,71 @@ export function payloadProblems(
       return !matches(value, spec.type);
     })
     .map((spec: PayloadFieldSpec) => spec.path);
+}
+
+// #923: what the ticket mirror reads on top of `WEBHOOK_READ_FIELDS`, per event. The mirror is a cache: a delivery that lacks one of these
+// is not an error for the review or the workflows (it is not refused), the mirror just does not learn from it. The contract test checks the
+// recorded payloads of these events against this list. The ticket objects (`issue`, `pull_request`) are read by `toTrackerItem`, which
+// tells a missing or wrongly typed field itself.
+const TRACKER_REPOSITORY: PayloadFieldSpec[] = [
+  { path: "action", type: "string" },
+  { path: "installation.id", type: "number" },
+  { path: "repository.id", type: "number" },
+  { path: "repository.full_name", type: "string" },
+  { path: "repository.html_url", type: "string" },
+];
+
+export const TRACKER_WEBHOOK_FIELDS = {
+  issues: [
+    ...TRACKER_REPOSITORY,
+    { path: "issue", type: "object" },
+    { path: "issue.number", type: "number" },
+    { path: "issue.node_id", type: "string" },
+    { path: "issue.updated_at", type: "string" },
+  ],
+  issue_comment: [
+    ...TRACKER_REPOSITORY,
+    { path: "issue", type: "object" },
+    { path: "issue.node_id", type: "string" },
+    { path: "issue.updated_at", type: "string" },
+  ],
+  pull_request: [
+    ...TRACKER_REPOSITORY,
+    { path: "pull_request", type: "object" },
+    { path: "pull_request.node_id", type: "string" },
+    { path: "pull_request.updated_at", type: "string" },
+  ],
+  sub_issues: [
+    ...TRACKER_REPOSITORY,
+    { path: "parent_issue.number", type: "number" },
+    { path: "sub_issue.number", type: "number" },
+    // The time of the sub-issue as the delivery shows it: what orders this delivery against the others about the same ticket.
+    { path: "sub_issue.updated_at", type: "string" },
+    // Present when the two issues are in different repositories; equal otherwise.
+    { path: "parent_issue_repo.full_name", type: "string", optional: true },
+    { path: "sub_issue_repo.full_name", type: "string", optional: true },
+  ],
+  // A board belongs to the organization, so the delivery has no `repository`: the item is found by the node id of its content.
+  projects_v2_item: [
+    { path: "action", type: "string" },
+    { path: "installation.id", type: "number" },
+    { path: "projects_v2_item.content_node_id", type: "string" },
+    { path: "projects_v2_item.content_type", type: "string" },
+    { path: "changes", type: "object", optional: true },
+  ],
+  check_suite: [
+    ...TRACKER_REPOSITORY,
+    { path: "check_suite.head_sha", type: "string" },
+    { path: "check_suite.pull_requests", type: "array" },
+  ],
+} as const satisfies Record<string, PayloadFieldSpec[]>;
+
+export type TrackerWebhookEventName = keyof typeof TRACKER_WEBHOOK_FIELDS;
+
+export function isTrackerWebhookEvent(
+  name: string,
+): name is TrackerWebhookEventName {
+  return Object.hasOwn(TRACKER_WEBHOOK_FIELDS, name);
 }
 
 /** Reads a path that `payloadProblems` has already accepted. */

@@ -103,6 +103,7 @@ _IMPLEMENTER_FIELDS = {
     "environment",
     "profile",
     "resultSchema",
+    "canAsk",
     "resume",
 }
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
@@ -436,6 +437,10 @@ class ImplementerSpec:
     # finish tool made from it and the turn needs a result that fits. None: no finish tool, and
     # the turn runs as it did before result schemas.
     result_schema: dict[str, Any] | None = None
+    # #920: the turn may end with a question instead of a result (the finish tool offers `ask`).
+    # Only
+    # with a result schema; False: the turn ends with a result or fails, as before.
+    can_ask: bool = False
     # #838: set on a follow-up turn, the branches of the session; None on the first turn.
     resume: ImplementerResume | None = None
     # #909: the branch the session branch is made from on a first turn; None: the base branch.
@@ -1119,6 +1124,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         environment=_implementer_environment(spec),
         profile=profile,
         result_schema=_implementer_result_schema(spec),
+        can_ask=_implementer_can_ask(spec),
         resume=_implementer_resume(spec, branch),
         start_branch=start_branch,
     )
@@ -1328,6 +1334,20 @@ def _implementer_result_schema(spec: dict[str, Any]) -> dict[str, Any] | None:
     if finish_tool.check_schema(schema):
         raise _invalid("implementer.resultSchema is not a valid result schema")
     return cast("dict[str, Any]", schema)
+
+
+def _implementer_can_ask(spec: dict[str, Any]) -> bool:
+    """The `implementer.canAsk` flag (#920): a boolean, and only for a turn with a result schema
+    (the
+    finish tool is what offers the question)."""
+    if "canAsk" not in spec:
+        return False
+    flag = spec["canAsk"]
+    if not isinstance(flag, bool):
+        raise _invalid("implementer.canAsk is not a boolean")
+    if flag and "resultSchema" not in spec:
+        raise _invalid("implementer.canAsk needs implementer.resultSchema")
+    return flag
 
 
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:

@@ -2,7 +2,10 @@
 
 // The values a node carries and the texts in them (#833): templates with references, the inputs of an action held to the types the
 // connector declares, and the conditions of `if` and `until`. Reports issues; it does not stop at the first.
-import type { TargetRoot } from "./connectors.ts";
+import {
+  PULL_REQUEST_OPENING_CONNECTORS,
+  type TargetRoot,
+} from "./connectors.ts";
 import { isRecord, jsonTypeName, textLength } from "./json.ts";
 import {
   CONDITION_DEPTH_MAX,
@@ -113,9 +116,13 @@ const ROOT_WORDS: Record<TargetRoot, string> = {
   input: "an input of the caller of a manual trigger, {{trigger.input.<name>}}",
   issue:
     "the issue that started the run, {{trigger.issue}} or {{trigger.issue.number}}",
+  ticket:
+    "the ticket the run is about, {{trigger.ticket}} or {{trigger.ticket.number}}",
   defaultBranch:
-    "the default branch of the repository, {{trigger.repo.defaultBranch}}",
+    "the default branch of the repository, {{trigger.repo.defaultBranch}} or {{trigger.ticket.repo.defaultBranch}}",
   branch: "the branch of an agent step that may push, {{<step id>.branch}}",
+  pullRequest:
+    "the number of the pull request an action opened, {{<step id>.number}} of a pullRequest.open step",
 };
 
 function refuseTarget(
@@ -127,13 +134,13 @@ function refuseTarget(
     issue(
       path,
       "target_from_untrusted_value",
-      `'${target.input}' decides what the workflow acts on, so it takes a literal or exactly one reference to ${target.roots.map((root) => ROOT_WORDS[root]).join(" or ")}. Text around a reference, the title, body or labels of the issue (whoever opened it wrote them), a value an agent reported, a field of an action or loop and 'previous.…' are refused: such a value is data, not a command.`,
+      `'${target.input}' decides what the workflow acts on, so it takes ${target.roots.length === 0 ? "a literal only, no reference" : `a literal or exactly one reference to ${target.roots.map((root) => ROOT_WORDS[root]).join(" or ")}`}. Text around a reference, the title, body or labels of the issue (whoever opened it wrote them), a value an agent reported, a field of an action or loop and 'previous.…' are refused: such a value is data, not a command.`,
     ),
   );
 }
 
 /** Whether a reference is one a target input takes: `unresolved` when its step is not in reach, which the resolver reports. */
-function targetVerdict(
+export function targetVerdict(
   ref: { path: string[] },
   target: TargetCheck,
   use: Use,
@@ -142,24 +149,37 @@ function targetVerdict(
   const takes = (wanted: TargetRoot): boolean => target.roots.includes(wanted);
   if (root === "trigger") {
     if (field === "input") return takes("input") ? "ok" : "refused";
-    if (field === "issue")
-      return takes("issue") &&
-        (more.length === 0 || (more.length === 1 && more[0] === "number"))
+    const only = (names: readonly string[]): boolean =>
+      more.length === names.length && names.every((n, i) => more[i] === n);
+    if (
+      field === "ticket" &&
+      takes("defaultBranch") &&
+      only(["repo", "defaultBranch"])
+    )
+      return "ok";
+    if (field === "issue" || field === "ticket")
+      return takes(field) && (more.length === 0 || only(["number"]))
         ? "ok"
         : "refused";
-    return field === "repo" &&
-      takes("defaultBranch") &&
-      more.length === 1 &&
-      more[0] === "defaultBranch"
-      ? "ok"
-      : "refused";
+    if (field === "repo")
+      return takes("defaultBranch") && only(["defaultBranch"])
+        ? "ok"
+        : "refused";
+    return "refused";
   }
   if (root === "previous") return "refused";
   const binding = use.env.scope.get(root);
   if (binding === undefined) return "unresolved";
   const branchOfAgent =
     binding.kind === "agent" && field === "branch" && more.length === 0;
-  return branchOfAgent && takes("branch") ? "ok" : "refused";
+  const openedPullRequest =
+    binding.kind === "action" &&
+    field === "number" &&
+    more.length === 0 &&
+    binding.connector !== undefined &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector);
+  if (branchOfAgent) return takes("branch") ? "ok" : "refused";
+  return openedPullRequest && takes("pullRequest") ? "ok" : "refused";
 }
 
 /** What an issue number may be: a whole number a computer can hold exactly, from 1 to `ISSUE_NUMBER_MAX`. */

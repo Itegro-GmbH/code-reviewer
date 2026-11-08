@@ -15,6 +15,9 @@ import type {
   ReviewCheck,
   ReviewTrigger,
   ReviewVerdict,
+  TrackerChangeResult,
+  TrackerPage,
+  TrackerPageStep,
 } from "./types.ts";
 
 /** How a user connects this kind of integration. */
@@ -131,6 +134,27 @@ export interface IntegrationProvider {
   ): Promise<{ number: number; url: string; existing: boolean }>;
 
   /**
+   * Only where tickets can be read (#916, the `ticket` input of a trigger): one issue of the repository with the fields a workflow reads
+   * as `{{trigger.ticket.…}}`, or null when there is no issue of that number (a pull request is none). Read with a token limited to
+   * this repository and to reading its issues. The texts are those of whoever opened the issue: untrusted. Rejects like
+   * `getRepositoryFacts`.
+   */
+  readIssue?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    signal?: AbortSignal,
+  ): Promise<{
+    number: number;
+    title: string;
+    body: string;
+    url: string;
+    labels: string[];
+    assignees: string[];
+    type: string;
+  } | null>;
+
+  /**
    * Only where the app can write a comment (#844, `github.issue.comment`): writes `body` below an issue or pull request, as the
    * app, with a token limited to this repository and the issue permission. With a `marker` (text inside `body`), the comments of the
    * issue are looked at first: the app's own comment that holds the marker is the result (`existing`) and nothing is written, so a
@@ -143,7 +167,19 @@ export interface IntegrationProvider {
     issueNumber: number,
     body: string,
     options?: { signal?: AbortSignal; marker?: string; since?: string },
-  ): Promise<{ url: string; existing: boolean }>;
+  ): Promise<{ url: string; existing: boolean; id?: string }>;
+
+  /**
+   * Only where the app can edit its own comment (#920): replaces the body of the comment `commentId` below an issue or pull request, with
+   * a token limited to this repository and the issue permission. Rejects like `commentOnIssue`; 404 when the comment is gone.
+   */
+  updateIssueComment?(
+    integration: Integration,
+    repo: RepoRef,
+    commentId: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
 
   /**
    * Only where the app can label (#844, `github.issue.labels`): adds and removes labels of an issue or pull request, as the app,
@@ -157,6 +193,54 @@ export interface IntegrationProvider {
     change: { add: readonly string[]; remove: readonly string[] },
     signal?: AbortSignal,
   ): Promise<{ labels: string[] }>;
+
+  /**
+   * Only where the app can ask for a review (#917, `ticket.requestReview`): requests a review of pull request `prNumber` from these users
+   * (logins), as the app, with a token limited to this repository and the pull request permission. Answers the users that are asked
+   * afterwards. Asking twice is harmless. With `skipRefused`, a user the platform refuses (not a collaborator, the author) is left
+   * out instead of failing the call (a refusal for another reason still fails it); `max` stops asking once that many are requested. Rejects like `openPullRequest`; `INTEGRATION_REQUEST_REFUSED` is a user that cannot review.
+   */
+  requestReviewers?(
+    integration: Integration,
+    repo: RepoRef,
+    prNumber: number,
+    reviewers: readonly string[],
+    options?: { skipRefused?: boolean; max?: number; signal?: AbortSignal },
+  ): Promise<{ requested: string[] }>;
+
+  /**
+   * Only where the app can take a review request back (#924; GitHub: `DELETE .../pulls/{n}/requested_reviewers`): takes the requests of
+   * these users (logins) away, as the app, with a token limited to this repository and the pull request permission. Answers the users
+   * that are still asked afterwards. Rejects like `requestReviewers`. The ToDo list uses it after a review the app posted in a person's
+   * name: the app's review does not satisfy the request of the person, so the platform keeps it.
+   */
+  removeReviewers?(
+    integration: Integration,
+    repo: RepoRef,
+    prNumber: number,
+    reviewers: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<{ requested: string[] }>;
+
+  /**
+   * Only where tickets sit on a board (#917, `ticket.setStatus`; GitHub: a Project, projects_v2): puts issue `issueNumber` into the
+   * status column named `status` of the board `board` (its number or id) of the repository's owner, adding the issue to the board when
+   * it is not on it. The token is limited to this repository and to the projects permission of the app, which the owner of the
+   * installation grants on its own (without it the call rejects with `INTEGRATION_ACCESS_SCOPE_REFUSED`). What the board or the issue
+   * decide is an answer, not an error. Idempotent.
+   */
+  setTicketStatus?(
+    integration: Integration,
+    repo: RepoRef,
+    issueNumber: number,
+    move: { board: string; status: string },
+    signal?: AbortSignal,
+  ): Promise<
+    | { kind: "moved"; status: string }
+    | { kind: "board_not_found" }
+    | { kind: "issue_not_found" }
+    | { kind: "status_unknown"; available: string[] }
+  >;
 
   /**
    * Only where a review is posted as a comment (#657): the body of the comment `commentId` below the pull request, so the
@@ -328,4 +412,75 @@ export interface IntegrationProvider {
     repo: RepoRef,
     signal?: AbortSignal,
   ): Promise<PullRequestRef[]>;
+
+  /**
+   * Only where the platform has tickets the app mirrors (#923, the GitHub App): what the delivery says about the ticket mirror. Reads the
+   * payload and no more; a delivery that is no news for the mirror is `ignored` with a reason for the log.
+   */
+  parseTrackerChange?(
+    integration: Integration,
+    request: Request,
+  ): Promise<TrackerChangeResult>;
+
+  /**
+   * Only together with `parseTrackerChange`: one page of one phase of a full sync of a repository's tickets (#923), read with a token
+   * of its own that holds the read permissions of that phase and nothing else. Rejects when the platform cannot be asked; a board the
+   * app may not read is `available: false`, never a failure.
+   */
+  readTrackerPage?(
+    integration: Integration,
+    repo: RepoRef,
+    step: TrackerPageStep,
+    signal?: AbortSignal,
+  ): Promise<TrackerPage>;
+
+  /**
+   * Only together with `parseTrackerChange`: the status the project boards give a ticket now, by the platform's id of the ticket
+   * (#932): the status on the first board that has one, or null when the ticket is on no board or has no status. `boardId` (#937): the
+   * platform's id of the board the project chose; then only the item of the ticket on that board counts, whatever the other boards say.
+   * `available: false` when the app may not read boards. Rejects when the platform cannot be asked.
+   */
+  readBoardStatus?(
+    integration: Integration,
+    repo: RepoRef,
+    nodeId: string,
+    boardId?: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+
+  /**
+   * Only where tickets sit on a board (#922, GitHub: the GitHub Projects, projects_v2, of the repository): the boards a project may take as
+   * its own, with the Status field of each and the names of its options, read with a token of its own that holds the read permission of
+   * the boards and nothing else. A repository whose boards the app may not read (the Projects permission is missing, the repository
+   * belongs to a user) is `available: false`, never a failure; any other failure rejects like the reads of the mirror.
+   */
+  listBoards?(
+    integration: Integration,
+    repo: RepoRef,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; boards: BoardInfo[] }>;
+
+  /**
+   * Only together with `parseTrackerChange`: the state of the checks of a commit as the platform names it (`success`, `failure`,
+   * `in_progress`, ...), or null when it has none. The same rule as the sync uses for each open pull request.
+   */
+  readChecksState?(
+    integration: Integration,
+    repo: RepoRef,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
 }
+
+/** A board of a repository as the picker of a new project needs it (#922). */
+export type BoardInfo = {
+  /** The platform's global id of the board. */
+  projectV2Id: string;
+  /** The number the board has in its owner's list. */
+  number: number;
+  title: string;
+  /** The global id of its Status field; null when it has none (a status cannot be set on such a board). */
+  statusFieldId: string | null;
+  /** The names of the Status field's options, as the board spells them. */
+  statuses: string[];
+};

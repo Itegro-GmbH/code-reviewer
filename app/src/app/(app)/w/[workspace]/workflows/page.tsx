@@ -1,57 +1,22 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
-import { Alert } from "@/components/ui/alert";
-import { PageHeader } from "@/components/page-header";
-import { ROLE_NOT_ALLOWED } from "@/copy/messages";
+import { redirect } from "next/navigation";
 import { requireImplementerCapability } from "@/implementer/shared";
-import {
-  loadWorkflowsPage,
-  WorkflowsPageContent,
-} from "@/workflow-pages/pages";
-import { PAGE_COPY } from "@/workflow-pages/messages";
-import { workflowServiceFor } from "@/workflows/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
-import { can } from "@/workspaces/permissions";
+import { workspacePath } from "@/workspaces/paths";
 
 export const metadata: Metadata = { title: "Workflows" };
 
-// The workflows of the workspace (#873): the way to a workflow's Start form and its runs. The page exists only in a deployment with
-// the capability `implementer` (the access proxy answers it as a path that does not exist everywhere else;
-// `requireImplementerCapability()` is the second wall). The workspace is the one in the address, for a member only: the page asks for
-// it itself.
+// There is no list of the workflows of a workspace any more (#922): a lane belongs to a project and is listed in the Lanes tab of its
+// cockpit, so this address leads to the projects. A workflow's own page (its Start form and its runs) is below it as before. The page
+// exists only in a deployment with the capability `implementer` (the access proxy answers it as a path that does not exist everywhere
+// else; `requireImplementerCapability()` is the second wall).
 export default async function WorkflowsPage({
   params,
 }: PageProps<"/w/[workspace]/workflows">) {
   requireImplementerCapability();
   const { workspace: slug } = await params;
-  const { workspace, role } = await requireWorkspace(slug);
-  if (!can(role, "start_implementer_task"))
-    return (
-      <>
-        <PageHeader title={PAGE_COPY.workflowsTitle} />
-        <Alert variant="info" role="status">
-          {ROLE_NOT_ALLOWED}
-        </Alert>
-      </>
-    );
-  return (
-    <WorkflowsContent
-      workspaceId={workspace.id}
-      workspaceSlug={workspace.slug}
-    />
-  );
-}
-
-async function WorkflowsContent({
-  workspaceId,
-  workspaceSlug,
-}: {
-  workspaceId: string;
-  workspaceSlug: string;
-}) {
-  const data = await loadWorkflowsPage({
-    workflows: workflowServiceFor(workspaceId),
-  });
-  return <WorkflowsPageContent workspaceSlug={workspaceSlug} data={data} />;
+  const { workspace } = await requireWorkspace(slug);
+  redirect(workspacePath(workspace.slug, "/projects"));
 }

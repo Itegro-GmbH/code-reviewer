@@ -342,8 +342,10 @@ untrusted side):
     engine's and the provider's business, and the provider rejects what is invalid. The closed walk that stood here
     before refused the second call of the first real Anthropic run, because the SDK of the pinned OpenCode sends back
     the `caller` (`{"type": "direct"}`) that the Messages API states on every `tool_use`; the engine's SDK adds such
-    fields without notice, so a list of them would only ever be late. What this lets through: a part that makes the
-    provider fetch a URL (an image or document by URL), and a one-hour cache write. The price book prices the write the
+    fields without notice, so a list of them would only ever be late. What this lets through: a one-hour cache
+    write. (A part that makes the provider fetch a URL, an image or document by URL, is refused by a deny-walk of its own:
+    `passthrough/fetch_parts.py`, #950; inline base64 and `data:` URIs pass; see `docs/implementer.md`, "What the door refuses
+    in a message".) The price book prices the write the
     provider states (`ephemeral_1h_input_tokens` at the 1-hour price) and a write the book has no price for is an
     unknown cost that ends a managed run; see "The cost policy of a native job (#553)".
   - The walk only checks: the bytes that go out are the bytes that came in. What the engine sends for a provider that

@@ -55,15 +55,79 @@ export const ISSUE_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
   metadata: "read",
 };
 
-/** What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository and the metadata. */
+/**
+ * What the token that opens a pull request for a workflow (#844) may do: write pull requests of one repository, read its contents
+ * and the metadata. The contents are read-only and needed all the same (#913): without them GitHub cannot resolve the head and base
+ * refs and answers 422 "head invalid" for a branch that exists.
+ */
 export const PULL_REQUEST_ACTION_TOKEN_PERMISSIONS: InstallationPermissions = {
   pull_requests: "write",
+  contents: "read",
   metadata: "read",
+};
+
+/**
+ * What the token that requests reviewers of a pull request for a workflow (#917) may do: write pull requests of one repository and the
+ * metadata. Requesting a review is a pull request write; no issues, no contents.
+ */
+export const REVIEW_REQUEST_TOKEN_PERMISSIONS: InstallationPermissions = {
+  pull_requests: "write",
+  metadata: "read",
+};
+
+/**
+ * What the token that moves an issue on a GitHub Project board for a workflow (#917) may do: write the projects of the owner
+ * (`organization_projects`, the "Projects" organization permission, which the App holds only when its owner opted in), read the issues
+ * of one repository (to find the issue and its card) and the metadata. The projects are the owner's, not the repository's, so this is
+ * the one action token that reaches beyond the repository, and only for the status field of a card.
+ */
+export const BOARD_STATUS_TOKEN_PERMISSIONS: InstallationPermissions = {
+  organization_projects: "write",
+  issues: "read",
+  metadata: "read",
+};
+
+/**
+ * The token a workflow action asks for, one entry per connector (#917), the `github.*` names that saved lanes still use included. The
+ * provider mints exactly this for the action, never a broader one; `job-access.test.ts` holds the map to the connectors of the format.
+ */
+export const WORKFLOW_ACTION_TOKEN_PERMISSIONS: Readonly<
+  Record<string, InstallationPermissions>
+> = {
+  "pullRequest.open": PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  "github.pullRequest.open": PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  "pullRequest.comment": ISSUE_ACTION_TOKEN_PERMISSIONS,
+  "ticket.comment": ISSUE_ACTION_TOKEN_PERMISSIONS,
+  "github.issue.comment": ISSUE_ACTION_TOKEN_PERMISSIONS,
+  "ticket.labels": ISSUE_ACTION_TOKEN_PERMISSIONS,
+  "github.issue.labels": ISSUE_ACTION_TOKEN_PERMISSIONS,
+  "ticket.setStatus": BOARD_STATUS_TOKEN_PERMISSIONS,
+  "ticket.requestReview": REVIEW_REQUEST_TOKEN_PERMISSIONS,
 };
 
 /** What the token that reads a posted review comment (#657) may do: read the comments of one repository and the metadata. */
 export const COMMENT_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
   issues: "read",
+  metadata: "read",
+};
+
+/**
+ * What the token of the ticket mirror's full sync (#923) may do: read the issues, the pull requests and the checks of one repository and
+ * the metadata. Read only, and no code: a leaked token could change nothing.
+ */
+export const TRACKER_READ_TOKEN_PERMISSIONS: InstallationPermissions = {
+  issues: "read",
+  pull_requests: "read",
+  checks: "read",
+  metadata: "read",
+};
+
+/**
+ * What the token that reads the project boards of the mirror (#923) may do: read the organization's projects and the metadata. A token of
+ * its own, so the issue token never holds the board permission and the other way round.
+ */
+export const TRACKER_BOARD_TOKEN_PERMISSIONS: InstallationPermissions = {
+  organization_projects: "read",
   metadata: "read",
 };
 
@@ -231,6 +295,9 @@ export function toWriteError(error: unknown): IntegrationError {
   if (error.code === "GITHUB_APP_REQUEST_FAILED" && error.status === 422)
     return new IntegrationError("INTEGRATION_REQUEST_REFUSED", error.message, {
       cause: error,
+      ...(error.reason === undefined || error.duringTokenRequest
+        ? {}
+        : { detail: error.reason }),
     });
   return toReadError(error);
 }

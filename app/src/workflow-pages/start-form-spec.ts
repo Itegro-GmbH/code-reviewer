@@ -5,28 +5,30 @@
 import { isRecord } from "../workflows/json.ts";
 import { validateResultSchema } from "../workflows/result-schema.ts";
 
-/** One field of the form that starts a run, made from the `input` schema of the manual trigger. */
+/** One field of the form that starts a run by hand, made from the `input` schema of a manual trigger. */
 export type StartField = {
   name: string;
   required: boolean;
   description?: string;
-  kind: "string" | "integer" | "number" | "boolean" | "json";
+  /** `ticket` (#916) is a reference to a ticket, written like `github:owner/repo#128`: a text in the form. */
+  kind: "string" | "integer" | "number" | "boolean" | "json" | "ticket";
   /** The allowed values of a string field with a list of names. */
   choices?: string[];
 };
 
+/** The form of one manual trigger. `trigger` is its id, sent with the start; a document with the single `trigger` of before #916 has none. */
+export type StartFormFields = { fields: StartField[]; trigger?: string };
+
 export type StartFormSpec =
   | { kind: "not_manual" }
   | { kind: "unusable" }
-  | { kind: "form"; fields: StartField[] };
+  | ({ kind: "form" } & StartFormFields)
+  /** Several manual triggers (#916): one form each, the person starts the one they mean. */
+  | { kind: "forms"; forms: (StartFormFields & { trigger: string })[] };
 
-/** The form a workflow document asks for: the fields of the `input` of its manual trigger. */
-export function startFormOf(document: unknown): StartFormSpec {
-  if (!isRecord(document) || !isRecord(document.trigger))
-    return { kind: "unusable" };
-  if (document.trigger.kind !== "manual") return { kind: "not_manual" };
-  const schema = validateResultSchema(document.trigger.input).schema;
-  if (schema === undefined) return { kind: "unusable" };
+function fieldsOf(input: unknown): StartField[] | undefined {
+  const schema = validateResultSchema(input, "", { allowTicket: true }).schema;
+  if (schema === undefined) return undefined;
   const required = new Set(schema.required ?? []);
   const fields = Object.entries(schema.properties).map(
     ([name, node]): StartField => {
@@ -42,7 +44,37 @@ export function startFormOf(document: unknown): StartFormSpec {
       return field;
     },
   );
-  // The repository comes first: every run works on one.
-  fields.sort((a, b) => Number(b.name === "repo") - Number(a.name === "repo"));
-  return { kind: "form", fields };
+  // The repository (or the ticket, which names it) comes first: every run works on one.
+  const first = (name: string): number =>
+    Number(name === "repo" || name === "ticket");
+  fields.sort((a, b) => first(b.name) - first(a.name));
+  return fields;
+}
+
+/**
+ * The form a workflow document asks for: the fields of the `input` of its manual trigger. A document with `triggers` has one form for
+ * each trigger of the kind `manual` (an `api` trigger is started through the API only).
+ */
+export function startFormOf(document: unknown): StartFormSpec {
+  if (!isRecord(document)) return { kind: "unusable" };
+  if (Array.isArray(document.triggers)) {
+    const forms: (StartFormFields & { trigger: string })[] = [];
+    for (const trigger of document.triggers as unknown[]) {
+      if (!isRecord(trigger) || typeof trigger.id !== "string")
+        return { kind: "unusable" };
+      if (trigger.kind !== "manual") continue;
+      const fields = fieldsOf(trigger.input);
+      if (fields === undefined) return { kind: "unusable" };
+      forms.push({ trigger: trigger.id, fields });
+    }
+    const [only, ...more] = forms;
+    if (only === undefined) return { kind: "not_manual" };
+    return more.length === 0
+      ? { kind: "form", ...only }
+      : { kind: "forms", forms };
+  }
+  if (!isRecord(document.trigger)) return { kind: "unusable" };
+  if (document.trigger.kind !== "manual") return { kind: "not_manual" };
+  const fields = fieldsOf(document.trigger.input);
+  return fields === undefined ? { kind: "unusable" } : { kind: "form", fields };
 }

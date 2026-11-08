@@ -124,8 +124,8 @@ is the safety net for what the requests above did not repair: `GET /api/internal
 (`0 */2 * * *`, `app/vercel.json`; sparse on purpose, so that a database that scales to zero can sleep between
 webhooks), with
 `Authorization: Bearer <CRON_SECRET>` like the daily repository sync. A missing or wrong
-secret is `401` with no side effect, and nothing below `/api/internal` is open except the two exact paths of the
-two crons (`src/auth/access.ts`).
+secret is `401` with no side effect, and nothing below `/api/internal` is open except the exact paths of the
+crons (`src/auth/access.ts`).
 
 | File                             | Role                                                                                                                                  |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |

@@ -4,7 +4,11 @@
 // only the fields listed in `webhook-fields.ts`. A genuine delivery of no interest is `ignored` with a
 // reason for the logs; a payload that lacks fields the app reads is `invalid_payload`; a closed pull
 // request is its own event (`pull_request_closed`).
-import { parseCommentCommand } from "../../comment-command.ts";
+import {
+  parseAnswerCommand,
+  parseCommentCommand,
+  type ParsedAnswer,
+} from "../../comment-command.ts";
 import type {
   InstallationAction,
   IntegrationEvent,
@@ -96,6 +100,19 @@ function labelNames(payload: unknown): string[] {
   });
 }
 
+/** The logins of the people an issue is assigned to; an entry that is not an object with a login is left out. */
+function assigneeLogins(payload: unknown): string[] {
+  const assignees = rawField(payload, "issue.assignees");
+  if (!Array.isArray(assignees)) return [];
+  return assignees.flatMap((entry: unknown) => {
+    const login =
+      typeof entry === "object" && entry !== null
+        ? (entry as { login?: unknown }).login
+        : undefined;
+    return typeof login === "string" && login !== "" ? [login] : [];
+  });
+}
+
 /**
  * `issues` (#845): only a label put on an open issue starts anything. A pull request is an issue to GitHub and arrives here too
  * (`issue.pull_request`); it is not one for the workflows. Only a sender of the type "User" starts one: a bot, our own App included,
@@ -125,6 +142,8 @@ function parseIssueEvent(
       reason: 'the "issues" payload lacks the expected fields: label.name',
     };
   const body = rawField(payload, "issue.body");
+  const assignees = assigneeLogins(payload);
+  const issueType = rawField(payload, "issue.type.name");
   return {
     kind: "issue_labeled",
     labeled: {
@@ -136,9 +155,46 @@ function parseIssueEvent(
         body: typeof body === "string" ? body : "",
         url: field<string>(payload, "issue.html_url"),
         labels: labelNames(payload),
+        ...(assignees.length === 0 ? {} : { assignees }),
+        ...(typeof issueType === "string" && issueType !== ""
+          ? { type: issueType }
+          : {}),
       },
       label,
       actor: actorOf(payload),
+    },
+  };
+}
+
+/**
+ * `/answer` (#920): the commenter has been checked for the association that can have write access (no call); this reads the command
+ * and then asks GitHub whether the commenter really has write access, the check `/review` makes. The comment is on an issue or on a pull
+ * request, open, closed or merged: a run that waits for an answer is the app's to find (a pull request that was closed while the run
+ * waits is still what the person answers on), and a comment on anything else changes nothing.
+ */
+async function ticketAnswerEvent(
+  context: ParseContext,
+  answer: ParsedAnswer,
+): Promise<IntegrationEvent> {
+  const { payload } = context;
+  const repo = repoOf(context);
+  const actor = actorOf(payload);
+  if (!(await context.hasWriteAccess(repo.fullName, actor.login)))
+    return ignored("the commenter has no write access");
+  const createdAt = hasField(payload, "comment.created_at")
+    ? field<string>(payload, "comment.created_at")
+    : undefined;
+  return {
+    kind: "ticket_answer",
+    answer: {
+      repo,
+      number: field<number>(payload, "issue.number"),
+      commentId: String(field<number>(payload, "comment.id")),
+      ...(createdAt === undefined || createdAt === "" ? {} : { createdAt }),
+      actor,
+      ...(answer.choice === undefined ? {} : { choice: answer.choice }),
+      ...(answer.text === undefined ? {} : { text: answer.text }),
+      raw: answer.raw,
     },
   };
 }
@@ -226,10 +282,34 @@ export async function parseGithubEvent(
   // issue_comment
   if (action !== "created")
     return ignored(`the comment action "${action}" is not used`);
-  if (!hasField(payload, "issue.pull_request"))
-    return ignored("the comment is on an issue, not on a pull request");
-  if (field<string>(payload, "issue.state") !== "open")
-    return ignored("the pull request is not open");
+  if (!hasField(payload, "issue.pull_request")) {
+    // #920: a comment on an issue is an answer or nothing. A bot never answers (our own comments are the App's), and only a commenter
+    // that can have write access is read at all.
+    if (
+      field<string>(payload, "sender.type") === "Bot" ||
+      !mayHaveWriteAccess(field<string>(payload, "comment.author_association"))
+    )
+      return ignored("the comment is on an issue, not on a pull request");
+    const answer = parseAnswerCommand(field<string>(payload, "comment.body"));
+    return answer === null
+      ? ignored("the comment is on an issue, not on a pull request")
+      : ticketAnswerEvent(context, answer);
+  }
+  if (field<string>(payload, "issue.state") !== "open") {
+    // #920: a closed or merged pull request starts no review, but a run may still wait for an answer on it.
+    const notOpen = "the pull request is not open";
+    if (
+      field<string>(payload, "sender.type") === "Bot" ||
+      !mayHaveWriteAccess(field<string>(payload, "comment.author_association"))
+    )
+      return ignored(notOpen);
+    const closedAnswer = parseAnswerCommand(
+      field<string>(payload, "comment.body"),
+    );
+    return closedAnswer === null
+      ? ignored(notOpen)
+      : ticketAnswerEvent(context, closedAnswer);
+  }
   if (field<string>(payload, "sender.type") === "Bot")
     return ignored("the comment was written by a bot");
 
@@ -240,6 +320,10 @@ export async function parseGithubEvent(
   // use commands is none of our business.
   if (!mayHaveWriteAccess(field<string>(payload, "comment.author_association")))
     return ignored("the commenter cannot have write access");
+
+  // #920: `/answer` on a pull request is read before `/review`; the two words never meet.
+  const answer = parseAnswerCommand(field<string>(payload, "comment.body"));
+  if (answer !== null) return ticketAnswerEvent(context, answer);
 
   const parsed = parseCommentCommand(field<string>(payload, "comment.body"));
   if (parsed === null) return ignored("the comment is not a command");

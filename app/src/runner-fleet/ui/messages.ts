@@ -22,13 +22,28 @@ export const PAGE_COPY = {
   loading: "Loading",
   tryAgain: "Try again",
   empty: "No runner yet. Owners and Admins can add one.",
-  addRunner: "Add a runner",
-  tokenTitle: "Registration token",
+  kindsTitle: "Two kinds, one protocol",
+  kindsHint:
+    "Both talk the Runner API. A profile says on which of them it runs: the Runs on field of the profile, an environment of the workspace.",
+  hostedName: "Hosted sandbox",
+  hostedDescription:
+    "A fresh sandbox of the platform for every run: nothing to install.",
+  hostedBilling: "Billed from the balance of the workspace.",
+  hostedBillingTag: "Billed from the balance",
+  ownName: "Your own runner",
+  ownDescription:
+    "A machine of yours that connects from your network and takes the jobs of this workspace. Claude Code runs only here, on your subscription.",
+  environmentsNote: "The size and the setup script of a sandbox are kept as",
+  environmentsLink: "environments",
+  connected: (count: number) => `Connected · ${String(count)}`,
+  addRunner: "Connect your own runner",
+  tokenTitle: "Connect your own runner",
   tokenNote:
-    "The token is valid for one hour and works once. It is shown now and not kept: copy the command and run it on the machine.",
+    "The code is valid for one hour and works once, and it pairs exactly this machine with this workspace. The token stays on the machine.",
+  tokenRunOn: "Run on the machine",
   tokenCommandLabel: "Command",
   tokenExpires: "Valid until",
-  tokenDismiss: "Done",
+  tokenDismiss: "I copied it",
   revoke: "Revoke",
   revokeTitle: "Revoke this runner?",
   revokeNote:

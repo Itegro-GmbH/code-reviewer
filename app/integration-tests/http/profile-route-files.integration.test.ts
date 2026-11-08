@@ -9,12 +9,14 @@
 // the capability has no such path.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionLookup } from "../../src/auth/session-user.ts";
+import { createImplementerEnvironmentsRepository } from "../../src/db/repositories/implementer-environments-repository.ts";
 import { createInstanceSettingsRepository } from "../../src/db/repositories/instance-settings-repository.ts";
 import { createProfilesRepository } from "../../src/db/repositories/profiles-repository.ts";
 import { closeDatabase, getDatabase } from "../../src/db/startup.ts";
 import type { WorkspaceRole } from "../../src/db/workspace-roles.ts";
 import { signedInMember } from "../../src/test-support/session-lookup.ts";
 import { openRouteTestDatabase } from "../../src/test-support/test-database.ts";
+import { addUser } from "../../src/test-support/workspace-deletion-fixture.ts";
 import {
   addWorkspace,
   defaultWorkspaceId,
@@ -55,8 +57,8 @@ const REVIEWER = {
   name: "reviewer",
   description: "Reads a branch.",
   model: { entryId: "entry-1" },
+  environment: "node",
   instructions: "Review only.",
-  costLimitCents: 200,
   canPush: false,
 };
 
@@ -71,6 +73,12 @@ async function startRoutes(
   const db = getDatabase();
   const workspaceId = await defaultWorkspaceId(db);
   const otherId = await addWorkspace(db, "other");
+  // #919: a profile names the environment it runs in, so the workspace has one.
+  await addUser(db, "u-env");
+  await createImplementerEnvironmentsRepository(db, workspaceId).create(
+    { name: "node", vcpus: 2, setupScript: "", createdBy: "u-env" },
+    50,
+  );
   await createInstanceSettingsRepository(db).set(
     "review_max_cost_cents",
     500,
@@ -221,6 +229,39 @@ describe("the profile route files", () => {
       profile: { documentVersion: 1, version: 2 },
     });
     expect((await get(profile.id, "?version=9")).status).toBe(404);
+  });
+
+  // #919-T200
+  it("refuse a profile that names no environment with missing_field, on validate and on save, and store nothing", async () => {
+    const { validate, create, rows } = await startRoutes();
+    const without: Record<string, unknown> = { ...REVIEWER };
+    delete without.environment;
+
+    const checked = await validate(without);
+    const refused = await create(without);
+
+    expect(await checked.json()).toMatchObject({
+      valid: false,
+      errors: [
+        {
+          path: "",
+          code: "missing_field",
+          message: expect.stringContaining("environment"),
+        },
+      ],
+    });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toMatchObject({
+      error: "PROFILE_INVALID",
+      errors: [
+        {
+          path: "",
+          code: "missing_field",
+          message: expect.stringContaining("environment"),
+        },
+      ],
+    });
+    expect(await rows()).toEqual([]);
   });
 
   // #843-T142

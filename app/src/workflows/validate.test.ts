@@ -140,9 +140,10 @@ describe("the plan's example, broken in one place at a time", () => {
       [["/steps/2/when/equals/1", "condition_value_not_in_enum"]],
     ],
     [
-      "an agent without an environment",
+      // #919: the environment is optional; a profile version saved before it has none, so its step needs one.
+      "an agent without an environment on a profile that names none",
       (d) => delete (body(d)[1] as Json).environment,
-      [["/steps/1/body/1/environment", "missing_field"]],
+      [["/steps/1/body/1/environment", "environment_required"]],
     ],
     [
       "an environment that does not exist",
@@ -198,8 +199,8 @@ describe("the plan's example, broken in one place at a time", () => {
       [["/steps/2/else/0/labels", "unknown_field"]],
     ],
     [
-      "a trigger that is a schedule",
-      (d) => (d.trigger = { kind: "schedule", cron: "0 * * * *" }),
+      "a trigger that is a webhook",
+      (d) => (d.trigger = { kind: "webhook", url: "x" }),
       [["/trigger/kind", "unknown_trigger_kind"]],
     ],
     [
@@ -239,7 +240,9 @@ describe("the document", () => {
           "name",
           "description",
           "trigger",
+          "triggers",
           "budgetUsd",
+          "turnTimeLimitMinutes",
           "steps",
           "onFailure",
         ],
@@ -347,14 +350,21 @@ describe("the trigger", () => {
   // #833-M1-T40
   it("names the triggers that exist when the kind is wrong", () => {
     const result = run(
-      change(tiny(), (d) => (d.trigger = { kind: "schedule" })),
+      change(tiny(), (d) => (d.trigger = { kind: "webhook" })),
     );
 
     expect(result.errors).toEqual([
       expect.objectContaining({
         path: "/trigger/kind",
         code: "unknown_trigger_kind",
-        available: ["manual", "github.issueLabeled"],
+        available: [
+          "manual",
+          "api",
+          "ticket.labeled",
+          "pullRequest.pushed",
+          "schedule",
+          "github.issueLabeled",
+        ],
       }),
     ]);
   });
@@ -571,7 +581,7 @@ describe("the agent step", () => {
     codes(change(base, (d) => edit(agentSteps(d)[0] as Json)));
 
   // #833-M1-T52
-  it("needs profile, environment and instruction, and refuses a field it does not know", () => {
+  it("needs profile and instruction, and refuses a field it does not know", () => {
     expect(
       first((s) => {
         delete s.profile;
@@ -580,7 +590,6 @@ describe("the agent step", () => {
         s.model = "x";
       }),
     ).toEqual([
-      ["/steps/0/environment", "missing_field"],
       ["/steps/0/instruction", "missing_field"],
       ["/steps/0/model", "unknown_field"],
       ["/steps/0/profile", "missing_field"],
@@ -782,6 +791,12 @@ describe("the action", () => {
           "github.issue.comment",
           "github.issue.labels",
           "github.pullRequest.open",
+          "pullRequest.comment",
+          "pullRequest.open",
+          "ticket.comment",
+          "ticket.labels",
+          "ticket.requestReview",
+          "ticket.setStatus",
         ],
       }),
     ]);
@@ -1941,6 +1956,40 @@ describe("conditions", () => {
         }),
       ),
     ).toEqual([["/steps/1/then", "invalid_value"]]);
+  });
+});
+
+describe("the turn time limit", () => {
+  // #918-T01
+  it("falls back to 60 minutes when the workflow names none, and says so", () => {
+    expect(run(tiny()).turnTimeLimitMinutes).toBe(60);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 15)))
+        .turnTimeLimitMinutes,
+    ).toBe(15);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 60)))
+        .turnTimeLimitMinutes,
+    ).toBe(60);
+  });
+
+  // #918-T02
+  it("refuses a limit out of 15 to 60 or not a whole number as invalid_value", () => {
+    for (const value of [14, 61, 120, 0, -5, 30.5])
+      expect(
+        codes(change(tiny(), (d) => (d.turnTimeLimitMinutes = value))),
+      ).toEqual([["/turnTimeLimitMinutes", "invalid_value"]]);
+    expect(
+      run(change(tiny(), (d) => (d.turnTimeLimitMinutes = 14))).errors[0]
+        ?.message,
+    ).toContain("15 to 60");
+  });
+
+  // #918-T03
+  it("refuses a limit that is not a number", () => {
+    expect(
+      codes(change(tiny(), (d) => (d.turnTimeLimitMinutes = "60"))),
+    ).toEqual([["/turnTimeLimitMinutes", "wrong_type"]]);
   });
 });
 

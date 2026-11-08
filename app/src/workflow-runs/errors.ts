@@ -10,23 +10,43 @@ export const WORKFLOW_RUN_ERROR_STATUS = {
   WORKFLOW_RUN_WORKFLOW_NOT_FOUND: 404,
   WORKFLOW_RUN_NOT_FOUND: 404,
   WORKFLOW_RUN_REPOSITORY_NOT_FOUND: 404,
+  WORKFLOW_RUN_TRIGGER_UNKNOWN: 404,
+  WORKFLOW_RUN_TICKET_NOT_FOUND: 404,
   WORKFLOW_RUN_WORKFLOW_ARCHIVED: 409,
+  /** #920: the run does not wait for an answer (never did, was answered before, or was asked to stop). */
+  WORKFLOW_RUN_NOT_WAITING: 409,
+  /** #920: the answer was written for another question than the one that waits (it was answered, and the step asked again). */
+  WORKFLOW_RUN_QUESTION_CHANGED: 409,
   WORKFLOW_RUN_REQUEST_REUSED: 409,
   WORKFLOW_RUN_BODY_TOO_LARGE: 413,
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: 415,
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: 422,
+  WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT: 422,
+  WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT: 422,
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED: 422,
   WORKFLOW_RUN_INPUT_INVALID: 422,
+  /** #920: the answer is empty, too long, or names an option the question does not have. */
+  WORKFLOW_RUN_ANSWER_INVALID: 422,
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: 500,
   WORKFLOW_RUN_GITHUB_UNAVAILABLE: 503,
 } as const;
 
 export type WorkflowRunErrorCode = keyof typeof WORKFLOW_RUN_ERROR_STATUS;
 
+/** A value of the request a lane of a project refuses (#922), with the names that would have been accepted. */
+export type WorkflowRunRequestIssue = {
+  path: string;
+  code: "ticket_outside_project" | "repository_outside_project";
+  message: string;
+  available: string[];
+};
+
 export class WorkflowRunError extends Error {
   readonly code: WorkflowRunErrorCode;
   /** On `WORKFLOW_RUN_INPUT_INVALID`: every problem of the input, as the validator of result schemas lists them. */
   readonly errors: Issue[];
+  /** On `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` and `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`: the value and the repository the project has. */
+  readonly issues: WorkflowRunRequestIssue[];
   /** On `WORKFLOW_RUN_REQUEST_REUSED`: the run the request id made. */
   readonly runId?: string;
   /** On `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED`: the step and its kind. */
@@ -37,6 +57,7 @@ export class WorkflowRunError extends Error {
     message: string,
     details: {
       errors?: Issue[];
+      issues?: WorkflowRunRequestIssue[];
       runId?: string;
       step?: { id: string; kind: string };
     } = {},
@@ -45,6 +66,7 @@ export class WorkflowRunError extends Error {
     this.name = "WorkflowRunError";
     this.code = code;
     this.errors = details.errors ?? [];
+    this.issues = details.issues ?? [];
     if (details.runId !== undefined) this.runId = details.runId;
     if (details.step !== undefined) this.step = details.step;
   }
@@ -83,6 +105,8 @@ export const STEP_FAILURE_CODES = [
   "profile_not_found",
   /** The environment is not one of the workspace. */
   "environment_not_found",
+  /** The step names another environment than the version of its profile runs in (#919). */
+  "environment_mismatch",
   /** The Implementer refused the turn, or could not start it. */
   "agent_start_failed",
   /** The turn ended, but its job, its result or its session cannot be read. */
@@ -101,6 +125,8 @@ export const STEP_FAILURE_CODES = [
   "github_permission_missing",
   /** GitHub has no such issue, pull request or repository, or the installation is gone. */
   "github_not_found",
+  /** `ticket.setStatus` (#917): the board has no status of that name; the message lists the statuses it has. */
+  "board_status_unknown",
   /** GitHub refused what was asked for its content: no commits between the branches, an archived repository, an unusable value. */
   "github_validation",
   /** GitHub's rate limit was reached; the action is not repeated. */
@@ -113,5 +139,7 @@ export const STEP_FAILURE_CODES = [
   "action_interrupted",
   /** A member stopped the run (or the task of the step) before the turn of the step started or while it ran (#891). */
   "cancelled",
+  /** A member discarded the run while the step ran or waited for an answer (#921). The run is `discarded`, not `failed`. */
+  "discarded",
 ] as const;
 export type StepFailureCode = (typeof STEP_FAILURE_CODES)[number];

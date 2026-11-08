@@ -33,6 +33,12 @@ vi.mock("@/workflows/shared", () => ({
 vi.mock("@/workflow-runs/shared", () => ({
   workflowRunServiceFor: services.workflowRunServiceFor,
 }));
+// The builder of a workflow (#926) lists the workspace's profiles for its agent steps.
+vi.mock("@/profiles/shared", () => ({
+  profileServiceFor: vi.fn(() => ({
+    list: async () => ({ profiles: [] }),
+  })),
+}));
 
 import { WorkflowError } from "@/workflows/errors";
 import { WorkflowRunError } from "@/workflow-runs/errors";
@@ -191,27 +197,13 @@ describe("the workflow pages", () => {
     );
   });
 
-  // #873-T82
-  it("hands the list the workflows of the workspace in the address, and shows a role that may not start a sentence instead", async () => {
+  // #922-T40
+  it("leads to the projects, of the workspace in the address: the workspace has no list of workflows any more", async () => {
     stub(FACTORY);
-    services.workflowServiceFor.mockReturnValue({
-      list: async () => ({ workflows: [], maximum: 100 }),
+
+    await expect(WorkflowsPage(listProps())).rejects.toMatchObject({
+      digest: expect.stringContaining("/w/acme/projects"),
     });
-
-    const allowed = await WorkflowsPage(listProps());
-    const content = await contentOf(allowed, "WorkflowsContent");
-    expect(isValidElement(content)).toBe(true);
-    expect(services.workflowServiceFor).toHaveBeenCalledWith("workspace-1");
-
-    permission.allowed = false;
-    const refused = await WorkflowsPage(listProps());
-    expect(JSON.stringify(refused)).toContain("does not allow");
-    expect(
-      elementsOf(refused).some(
-        (element) =>
-          typeof element.type === "function" &&
-          element.type.name === "WorkflowsContent",
-      ),
-    ).toBe(false);
+    expect(access.requireWorkspace).toHaveBeenCalledWith("acme");
   });
 });

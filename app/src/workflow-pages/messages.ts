@@ -29,6 +29,11 @@ export const RUN_STATUS_COPY = {
     label: "Running",
     description: "The workflow is running. This page updates by itself.",
   },
+  waiting: {
+    label: "Waiting for an answer",
+    description:
+      "The agent asked a question and the run waits for an answer, as long as it takes. Answer on this page, or on the ticket with /answer. Nothing else runs meanwhile.",
+  },
   succeeded: {
     label: "Succeeded",
     description: "Every step finished.",
@@ -42,11 +47,17 @@ export const RUN_STATUS_COPY = {
     description:
       "A member of the workspace stopped the run. What the agent had committed was pushed to its branch when possible; the steps that had not started did not run.",
   },
+  discarded: {
+    label: "Discarded",
+    description:
+      "A member of the workspace discarded the run. It is no longer active and nothing counts against the ticket; a new run can start on it.",
+  },
 } as const;
 
 export const STEP_STATUS_COPY = {
   pending: { label: "Waiting" },
   running: { label: "Running" },
+  waiting: { label: "Waiting for an answer" },
   succeeded: { label: "Succeeded" },
   failed: { label: "Failed" },
   skipped: { label: "Skipped" },
@@ -78,7 +89,11 @@ export const CONTROL_COPY = {
 
 export const TRIGGER_COPY = {
   manual: "Started by hand",
+  api: "Started through the API",
+  "ticket.labeled": "A label on a ticket",
   "github.issueLabeled": "A label on an issue",
+  "pullRequest.pushed": "A push to a pull request",
+  schedule: "On a schedule",
 } as const;
 
 /** Why a run failed, in a sentence. */
@@ -109,6 +124,8 @@ const STEP_FAILURE_TEXT: Record<
   profile_not_found:
     "The profile of the step no longer exists, is archived, or has no such version.",
   environment_not_found: "The environment of the step does not exist.",
+  environment_mismatch:
+    "The step names another environment than its profile runs in.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:
@@ -121,6 +138,8 @@ const STEP_FAILURE_TEXT: Record<
     "The GitHub App of this workspace lacks a permission this action needs, or its installation is suspended. The owner of the GitHub installation has to grant the permission and accept the change; then run the workflow again.",
   github_not_found:
     "GitHub has no such issue, pull request or repository, or the GitHub installation of this workspace no longer exists.",
+  board_status_unknown:
+    "The board of the project has no status of that name. Use one of the statuses of its Status field.",
   github_validation:
     "GitHub refused what the action asked for: for example there are no commits between the branches, the repository is archived, or a value is not accepted.",
   github_rate_limited:
@@ -136,6 +155,8 @@ const STEP_FAILURE_TEXT: Record<
     "No runner of this workspace with the labels of the environment took the task in time.",
   cancelled:
     "A member of the workspace stopped the run, so the agent of this step was ended.",
+  discarded:
+    "A member of the workspace stopped using this run, so this step did not go on.",
 };
 type JobFailureCode = "timeout" | "cost_limit_reached" | "no_runner_available";
 
@@ -155,6 +176,8 @@ export function describeRunFailure(code: string | null): string | null {
 
 /** The permissions the actions need, as the settings page of the GitHub App words them. Only these are ever named. */
 const GITHUB_PERMISSIONS = [
+  "Pull requests: Read and write and Contents: Read-only",
+  // What a step of an earlier run says (#913 added the contents to the pull request action).
   "Pull requests: Read and write",
   "Issues: Read and write",
 ] as const;
@@ -253,11 +276,6 @@ export const COST_COPY = {
 } as const;
 
 export const PAGE_COPY = {
-  workflowsTitle: "Workflows",
-  workflowsDescription:
-    "The workflows of this workspace. Open one to start it and see its runs.",
-  workflowsEmpty:
-    "This workspace has no workflows yet. Workflows are written through the API.",
   workflowVersion: "Version",
   workflowUpdated: "Last saved",
   runsHeading: "Runs",
@@ -269,7 +287,7 @@ export const PAGE_COPY = {
   columnBudget: "Spent of budget",
   columnVersion: "Version",
   of: "of",
-  breadcrumbRoot: "Workflows",
+  breadcrumbRoot: "Projects",
   allRuns: "All runs of this workflow",
   runTitle: "Run",
   runStartedAt: "Started",
@@ -293,12 +311,37 @@ export const PAGE_COPY = {
   stepCreated: "This was created by the step.",
   profile: "Profile",
   openRun: "Open the run",
-  cancelRun: "Cancel run",
-  cancelling: "Stopping the run",
-  cancelHint:
-    "Stops the agent that is working and starts no further step. What it has committed is pushed to its branch; only what it used until it stopped is charged.",
+  askHeading: "The agent asks",
+  askChoose: "Answer",
+  askAnswerLabel: "Your answer",
+  askNoteLabel:
+    "A note to go with the answer (or a text of your own, instead of an option)",
+  askSend: "Send answer",
+  askSending: "Sending the answer",
+  askSent:
+    "The answer was sent. The run goes on: the agent gets it as its next instruction, and this page updates by itself.",
+  askWaitingHint:
+    "The run waits for as long as it takes. You can also answer on the ticket with /answer.",
+  askNotPosted:
+    "The question could not be posted to the ticket, so it can only be answered here.",
+  askAnswered: "Answered",
+  askAnsweredBy: "Answered by",
+  askViaPage: "on this page",
+  askViaComment: "in a comment",
+  discardRun: "Discard this run",
+  discarding: "Discarding the run",
+  discardHint:
+    "A run is active or discarded. Discard when the agent went the wrong way and you want to start over in a new run.",
+  discardedNote:
+    "Discarded: no longer active, nothing counts against the ticket. Start a fresh run when you want.",
+  pauseRun: "Pause after this step",
+  pausing: "Pausing the run",
+  resumeRun: "Resume",
+  resuming: "Resuming the run",
+  pausedNote:
+    "Paused: the step that runs goes on, and no further step starts until you resume.",
   cancelRequested:
-    "The run is stopping: the agent is told to stop, which takes up to a minute or two, and the run ends when it has. This page updates by itself.",
+    "A stop was asked for before runs could be discarded: the agent is told to stop and the run ends when it has. You can discard the run instead.",
 } as const;
 
 export const START_COPY = {
@@ -319,6 +362,10 @@ export const START_COPY = {
   choose: "Choose",
   fieldRepo: "Repository",
   repoHint: "owner/name, one of the repositories of this workspace.",
+  fieldTicket: "Ticket",
+  ticketHint:
+    "github:owner/repo#128, an issue of one of the repositories of this workspace.",
+  triggerHeading: "Start through",
 } as const;
 
 const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
@@ -328,6 +375,9 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_NOT_FOUND: "This run no longer exists.",
   WORKFLOW_RUN_REPOSITORY_NOT_FOUND:
     "That repository is not one of this workspace's repositories.",
+  WORKFLOW_RUN_TRIGGER_UNKNOWN: "This workflow has no such trigger.",
+  WORKFLOW_RUN_TICKET_NOT_FOUND:
+    "That ticket does not exist in the repository (a pull request is not a ticket).",
   WORKFLOW_RUN_WORKFLOW_ARCHIVED:
     "This workflow is archived and cannot be started.",
   WORKFLOW_RUN_REQUEST_REUSED:
@@ -335,9 +385,19 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_BODY_TOO_LARGE: "The input is too large.",
   WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED: REQUEST_NOT_UNDERSTOOD,
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: "This workflow is not started by hand.",
+  WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT:
+    "That ticket is not in the repository this project takes its tickets from.",
+  WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
+    "That repository is not the one this project takes its tickets from.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
     "The workflow has a step of a kind the engine does not run (a reserved one), so it cannot be started.",
   WORKFLOW_RUN_INPUT_INVALID: INVALID_VALUES,
+  WORKFLOW_RUN_NOT_WAITING:
+    "This run does not wait for an answer any more: it was answered already, or it is being stopped.",
+  WORKFLOW_RUN_QUESTION_CHANGED:
+    "This question was already answered or replaced.",
+  WORKFLOW_RUN_ANSWER_INVALID:
+    "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
     "GitHub could not be asked right now. Try again in a moment.",

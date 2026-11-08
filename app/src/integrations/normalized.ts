@@ -34,6 +34,19 @@ function hasExactKeys(value: UnknownRecord, keys: readonly string[]): boolean {
   );
 }
 
+/** Own property names: all of `required` and no name beyond `required` and `optional`. */
+function hasKeysWithin(
+  value: UnknownRecord,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const actual = Object.getOwnPropertyNames(value);
+  return (
+    required.every((key) => actual.includes(key)) &&
+    actual.every((key) => required.includes(key) || optional.includes(key))
+  );
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -152,14 +165,46 @@ function isIssueLabeled(value: unknown): boolean {
     isNonEmptyString(value.label) &&
     isActor(value.actor) &&
     isRecord(issue) &&
-    hasExactKeys(issue, ["number", "title", "body", "url", "labels"]) &&
+    hasKeysWithin(
+      issue,
+      ["number", "title", "body", "url", "labels"],
+      ["assignees", "type"],
+    ) &&
     Number.isInteger(issue.number) &&
     (issue.number as number) >= 1 &&
     typeof issue.title === "string" &&
     typeof issue.body === "string" &&
     isNonEmptyString(issue.url) &&
     Array.isArray(issue.labels) &&
-    issue.labels.every((name: unknown) => typeof name === "string")
+    issue.labels.every((name: unknown) => typeof name === "string") &&
+    (issue.assignees === undefined ||
+      (Array.isArray(issue.assignees) &&
+        issue.assignees.every((name: unknown) => typeof name === "string"))) &&
+    (issue.type === undefined || typeof issue.type === "string")
+  );
+}
+
+function isTicketAnswer(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    !hasKeysWithin(
+      value,
+      ["repo", "number", "commentId", "actor", "raw"],
+      ["choice", "text", "createdAt"],
+    )
+  )
+    return false;
+  return (
+    isRepoRef(value.repo) &&
+    Number.isInteger(value.number) &&
+    (value.number as number) >= 1 &&
+    isNonEmptyString(value.commentId) &&
+    isActor(value.actor) &&
+    isNonEmptyString(value.raw) &&
+    (value.choice === undefined ||
+      (Number.isInteger(value.choice) && (value.choice as number) >= 1)) &&
+    (value.text === undefined || isNonEmptyString(value.text)) &&
+    (value.createdAt === undefined || isNonEmptyString(value.createdAt))
   );
 }
 
@@ -193,6 +238,10 @@ export function isIntegrationEvent(value: unknown): value is IntegrationEvent {
   if (value.kind === "issue_labeled")
     return (
       hasExactKeys(value, ["kind", "labeled"]) && isIssueLabeled(value.labeled)
+    );
+  if (value.kind === "ticket_answer")
+    return (
+      hasExactKeys(value, ["kind", "answer"]) && isTicketAnswer(value.answer)
     );
   if (value.kind === "ignored" || value.kind === "invalid_payload")
     return (

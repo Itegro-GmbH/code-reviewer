@@ -178,6 +178,18 @@ export const CLAIM_RELEASE_REASONS = [
  */
 export const IMPLEMENTER_TIME_LIMIT_SECONDS = 3600;
 
+/**
+ * #918: how long this turn may run, in seconds: the `turnTimeLimitMinutes` of the workflow that started it (copied into the turn), else
+ * the constant above for a turn no workflow started and for one written before the field existed.
+ */
+export function timeLimitSecondsOf(turn: {
+  timeLimitMinutes: number | null;
+}): number {
+  return turn.timeLimitMinutes === null
+    ? IMPLEMENTER_TIME_LIMIT_SECONDS
+    : turn.timeLimitMinutes * 60;
+}
+
 /** When the platform does not say how long to wait. */
 export const DEFAULT_RETRY_AFTER_SECONDS = 30;
 const MAX_RETRY_AFTER_SECONDS = 900;
@@ -258,6 +270,11 @@ export type ClaimDeps = {
     job: Job,
     turn: { turn: StoredImplementerTurn; session: StoredImplementerSession },
   ) => Promise<ResumeBlock>;
+  /**
+   * #920: whether a workflow step started the turn of this job (its delivery id is the request id of an agent step of the job's
+   * workspace). Only such a turn may be offered the question: a plain task or follow-up has nobody to answer it.
+   */
+  startedByWorkflow: (job: Job) => Promise<boolean>;
   /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
@@ -377,6 +394,8 @@ export type Checked = {
     startBranch: string | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
+    /** #918: how long the turn may run, in seconds (`timeLimitSecondsOf`). */
+    timeLimitSeconds: number;
     /** #818: the environment the turn copied when it started; null for a task without one. */
     environment: {
       name: string;
@@ -396,6 +415,8 @@ export type Checked = {
     resultSchema: StoredResultSchema | null;
     /** #841: what the turns before it left, for a follow-up turn; null for the first turn of a session. */
     resume: ResumeBlock | null;
+    /** #920: a workflow step started the turn, so a question of the agent has somebody to answer it. */
+    startedByWorkflow: boolean;
   } | null;
 };
 
@@ -1100,6 +1121,7 @@ export async function checkJob(
         baseBranch: turn.session.baseBranch,
         startBranch: turn.session.startBranch,
         cloneUrl,
+        timeLimitSeconds: timeLimitSecondsOf(turn.turn),
         environment:
           turn.turn.environment === null
             ? null
@@ -1123,6 +1145,7 @@ export async function checkJob(
           turn.turn.number >= 2
             ? await deps.implementerResume(job, turn)
             : null,
+        startedByWorkflow: await deps.startedByWorkflow(job),
       },
     };
   }
@@ -1373,7 +1396,7 @@ export async function buildJobInput(
               : { startBranch: implementer.startBranch }),
             branch: implementer.branch,
             instruction: implementer.instruction,
-            limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+            limits: { timeLimitSeconds: implementer.timeLimitSeconds },
             cost,
             modelEntry,
             // #818: only a script travels to the Worker, and only to one that reads it (the refusal above).
@@ -1405,6 +1428,13 @@ export async function buildJobInput(
             ...(implementer.resultSchema === null
               ? {}
               : { resultSchema: implementer.resultSchema }),
+            // #920: the turn may end with a question; only a turn a workflow step started (a plain task has nobody to answer) and only a
+            // Worker that named `implementer_ask` is told, any other runs it as before.
+            ...(implementer.resultSchema !== null &&
+            implementer.startedByWorkflow &&
+            features.includes("implementer_ask")
+              ? { canAsk: true }
+              : {}),
             // #841: only a follow-up turn carries `resume`, and only to a Worker that reads it (the refusal above).
             ...(implementer.resume === null
               ? {}
@@ -1643,6 +1673,7 @@ async function prepareSubscription(
     throw error;
   }
   const profile = turn.turn.profile;
+  const startedByWorkflow = await deps.startedByWorkflow(job);
   const input: SubscriptionJobInput = {
     reviewKind: "implementer",
     implementer: {
@@ -1653,7 +1684,7 @@ async function prepareSubscription(
         : { startBranch: turn.session.startBranch }),
       branch: turn.session.branch,
       instruction: turn.turn.instruction,
-      limits: { timeLimitSeconds: IMPLEMENTER_TIME_LIMIT_SECONDS },
+      limits: { timeLimitSeconds: timeLimitSecondsOf(turn.turn) },
       subscription: {
         model: choice.model,
         maxBudgetUsd: (cents / 100).toFixed(2),
@@ -1670,6 +1701,12 @@ async function prepareSubscription(
       ...(turn.turn.resultSchema === null
         ? {}
         : { resultSchema: turn.turn.resultSchema }),
+      // #920: as for a hosted turn: only one a workflow step started.
+      ...(turn.turn.resultSchema !== null &&
+      startedByWorkflow &&
+      features.includes("implementer_ask")
+        ? { canAsk: true }
+        : {}),
       ...(resume === null
         ? {}
         : {

@@ -17,9 +17,15 @@ from code_reviewer_runner.implementer import session as session_module
 from code_reviewer_runner.implementer.agent_container import (
     NETWORK_DOOR_URL,
     NO_PROXY,
+    TRUST_BUNDLE_NAME,
+    TRUST_BUNDLE_PATH,
+    TRUST_CA_NAME,
+    TRUST_CA_PATH,
     agent_document,
     proxy_environment,
+    trust_environment,
 )
+from code_reviewer_runner.implementer.netdoor.registries import rule_has_registries
 from code_reviewer_runner.implementer.network_report import network_report
 from code_reviewer_runner.implementer.network_rule import (
     MODE_LIST,
@@ -129,6 +135,42 @@ def test_the_model_door_and_the_machine_itself_are_not_proxied() -> None:
     document = agent_document("sha256:x", "vol", 1, rule=LIST)
     joined = " ".join(document["Env"])
     assert "KEY" not in joined and "TOKEN" not in joined and "SECRET" not in joined
+
+
+# #784-T09
+def test_the_tools_trust_the_doors_certificate_only_for_a_rule_that_names_a_registry() -> None:
+    variables = trust_environment(LIST)
+    assert variables["NODE_EXTRA_CA_CERTS"] == TRUST_CA_PATH
+    for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT"):
+        assert variables[name] == TRUST_BUNDLE_PATH
+    assert variables["CARGO_HTTP_CAINFO"] == TRUST_BUNDLE_PATH
+    assert variables.items() <= proxy_environment(LIST).items()
+    for rule in (OFF, OPEN, NetworkRule(MODE_LIST, ("example.com", "api.anthropic.com"))):
+        assert trust_environment(rule) == {}
+        assert not any(name in proxy_environment(rule) for name in variables)
+    document = agent_document("sha256:x", "vol", 1, rule=LIST)
+    assert f"SSL_CERT_FILE={TRUST_BUNDLE_PATH}" in document["Env"]
+    assert "PRIVATE" not in " ".join(document["Env"])
+
+
+# #784-T09
+@pytest.mark.parametrize(
+    ("hosts", "named"),
+    [
+        (("registry.npmjs.org",), True),
+        (("*.pythonhosted.org",), True),
+        (("upload.pypi.org",), True),
+        (("*.npmjs.org", "github.com"), True),
+        (("github.com", "example.com"), False),
+        (("notnpmjs.org",), False),
+        (("npmjs.org.example.com",), False),
+    ],
+)
+def test_a_rule_names_a_registry_when_an_entry_is_one_or_below_one(
+    hosts: tuple[str, ...], named: bool
+) -> None:
+    assert rule_has_registries(NetworkRule(MODE_LIST, hosts)) is named
+    assert rule_has_registries(OPEN) is False and rule_has_registries(OFF) is False
 
 
 # -- the call that narrows the policy ---
@@ -637,3 +679,88 @@ def test_a_hundred_entries_are_the_most_a_block_may_list() -> None:
         valid_block(_with_base(block_with(connections=[entry(i) for i in range(100)]))) is not None
     )
     assert valid_block(_with_base(block_with(connections=[entry(i) for i in range(101)]))) is None
+
+
+# -- the door's certificate in the agent's container (#784) ---
+
+
+CA_PEM = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+
+
+class CaDoor:
+    end = None
+
+    def __init__(self, ca: bytes | None) -> None:
+        self.registry_ca = ca
+
+
+class Place:
+    def __init__(self) -> None:
+        self.files: dict[str, tuple[bytes, int]] = {}
+
+    def write_files(self, files: dict[str, tuple[bytes, int]]) -> None:
+        self.files.update(files)
+
+
+def trust_session(
+    rule: NetworkRule, ca: bytes | None, roots: Callable[[], bytes]
+) -> ImplementerSession:
+    session = ImplementerSession(
+        parse_implementer_input(job_text(environment_of(rule))),
+        workspace=cast("Any", None),
+        command=["opencode"],
+        place=lambda: cast("Any", None),
+        environment={},
+        seams=SessionSeams(system_roots=roots),
+    )
+    session._netdoor = cast("Any", CaDoor(ca))  # pyright: ignore[reportPrivateUsage]
+    return session
+
+
+def install(session: ImplementerSession, place: Place) -> None:
+    session._install_registry_trust(cast("Any", place))  # pyright: ignore[reportPrivateUsage]
+
+
+# #784-T10
+def test_the_ca_and_a_bundle_of_the_system_roots_with_it_are_written_before_the_agent_runs() -> (
+    None
+):
+    place = Place()
+
+    install(trust_session(LIST, CA_PEM, lambda: b"ROOT-A\nROOT-B\n"), place)
+
+    assert place.files == {
+        TRUST_CA_NAME: (CA_PEM, 0o644),
+        TRUST_BUNDLE_NAME: (b"ROOT-A\nROOT-B\n" + CA_PEM, 0o644),
+    }
+
+
+# #784-T10
+def test_a_rule_without_a_registry_writes_nothing() -> None:
+    place = Place()
+
+    install(trust_session(NetworkRule(MODE_LIST, ("example.com",)), None, lambda: b"R"), place)
+    install(trust_session(OPEN, None, lambda: b"R"), place)
+
+    assert place.files == {}
+
+
+# #784-T10
+def test_a_door_that_sent_no_certificate_ends_the_turn_free() -> None:
+    with pytest.raises(JobError) as error:
+        install(trust_session(LIST, None, lambda: b"R"), Place())
+
+    assert error.value.code is ErrorCode.SETUP_FAILED
+    assert "network_door_unavailable" in error.value.detail
+
+
+# #784-T10
+def test_roots_that_cannot_be_read_end_the_turn_free_and_nothing_is_written() -> None:
+    def broken() -> bytes:
+        raise FileNotFoundError
+
+    place = Place()
+    with pytest.raises(JobError) as error:
+        install(trust_session(LIST, CA_PEM, broken), place)
+
+    assert error.value.code is ErrorCode.SETUP_FAILED and place.files == {}

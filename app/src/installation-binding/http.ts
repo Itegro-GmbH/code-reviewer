@@ -17,7 +17,7 @@
 // `application/json` only, a small limit, read and parsed once. The two GET routes are GitHub's own redirects:
 // they take their facts from the query, and what they do with it is the service's (a signed state, used once).
 //
-// Where a browser lands is ALWAYS a fixed page chosen here: `/w/<slug>/connections` for a workspace the person
+// Where a browser lands is ALWAYS a fixed page chosen here: `/w/<slug>/connections` (the Integrations tab of the settings in the factory, #925) for a workspace the person
 // administers, `/github/result` for the rest. Nothing GitHub or the request said, other than a code of our own
 // list, ends up in an address, so a crafted `redirect` or `next` parameter has nothing to act on. Every answer is
 // `Cache-Control: no-store`; the redirects send `Referrer-Policy: no-referrer`, so the state and the code in
@@ -28,9 +28,10 @@ import {
   type JsonBodyErrorCode,
 } from "../http/json-body.ts";
 import { isCrossSite } from "../http/request-checks.ts";
+import type { CapabilitySet } from "../capabilities/capability.ts";
 import type { IntegrationSyncService } from "../integrations/sync/service.ts";
 import { can } from "../workspaces/permissions.ts";
-import { workspacePath } from "../workspaces/paths.ts";
+import { connectionsPlace, workspacePath } from "../workspaces/paths.ts";
 import type { WorkspaceAccess } from "../workspaces/access.ts";
 import type { Connections } from "./connections.ts";
 import { BINDING_ERROR_STATUS, type BindingErrorCode } from "./errors.ts";
@@ -39,8 +40,6 @@ import type { CallbackResult, InstallationBindingService } from "./service.ts";
 
 export const BINDING_REQUEST_MAX_BYTES = 4 * 1024;
 
-/** The page of a workspace that shows its connections, and where a flow of the binding ends. */
-export const CONNECTIONS_PAGE = "/connections";
 /** Where a flow ends when no workspace the person administers can be named. */
 export const BINDING_RESULT_PAGE = "/github/result";
 export const SETUP_CALLBACK_PATH = "/github/connected";
@@ -87,6 +86,8 @@ export type BindingRouteDependencies = {
   syncLimit: (userId: string) => Promise<LimitResult>;
   /** Whether a `state` is one of the authorization of this flow (its signature is ours and so is its purpose). */
   isAuthorizationState: (state: string) => boolean;
+  /** The capability set of the deployment, which says where the connections are shown (`connectionsPlace`); left out, code-review.com. */
+  capabilities?: () => CapabilitySet;
 };
 
 export type BindingRouteHandlers = {
@@ -178,7 +179,7 @@ export function createBindingRouteHandlers(
     const query = new URLSearchParams({ github: result.code });
     if (result.picker !== undefined) query.set("picker", result.picker);
     return redirectTo(
-      `${workspacePath(slug, CONNECTIONS_PAGE)}?${query.toString()}`,
+      `${workspacePath(slug, connectionsPlace(deps.capabilities?.()))}?${query.toString()}`,
     );
   }
 

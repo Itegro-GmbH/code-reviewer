@@ -68,6 +68,8 @@ const HEAD = "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01";
 type Ids = {
   integrationId: string;
   repositoryId: string;
+  /** #922: the project of that repository, whose ticket source it is. */
+  projectId: string;
   runId: string;
   /** #841: a running Implementer session of the workspace and the job of its first turn. */
   sessionId: string;
@@ -214,6 +216,73 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/repositories/${ids.repositoryId}/pull-requests`,
     params: (ids) => ({ repositoryId: ids.repositoryId }),
     file: "repositories/[repositoryId]/pull-requests/route.ts",
+  },
+  {
+    // #923: the tickets of the project from the ticket mirror, read by every member; the full sync is a project setting.
+    name: "GET repositories/[repositoryId]/issues",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/repositories/${ids.repositoryId}/issues`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/issues/route.ts",
+    implementer: true,
+  },
+  {
+    name: "POST repositories/[repositoryId]/issues/sync",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
+    method: "POST",
+    minRole: MINIMUM_ROLE.change_project_settings,
+    path: (ids) => `/repositories/${ids.repositoryId}/issues/sync`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/issues/sync/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the project of a repository in the factory; a repository of the other workspace is not found, and nothing is written.
+    name: "POST projects",
+    route: "/api/w/[workspace]/projects",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: () => "/projects",
+    body: (ids) => ({ repositoryId: ids.repositoryId }),
+    params: () => ({}),
+    file: "projects/route.ts",
+    implementer: true,
+  },
+  {
+    // #937: the board of a project; the project of the other workspace is not found, and nothing is written (null clears it, so no GitHub call).
+    name: "PUT projects/[projectId]",
+    route: "/api/w/[workspace]/projects/[projectId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/projects/${ids.projectId}`,
+    body: () => ({ board: null }),
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the tickets of a project, by its own id; the project of the other workspace is not found.
+    name: "GET projects/[projectId]/issues",
+    route: "/api/w/[workspace]/projects/[projectId]/issues",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/projects/${ids.projectId}/issues`,
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/issues/route.ts",
+    implementer: true,
+  },
+  {
+    // #922: the boards of a repository, read from GitHub for the people who create projects.
+    name: "GET repositories/[repositoryId]/boards",
+    route: "/api/w/[workspace]/repositories/[repositoryId]/boards",
+    method: "GET",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/repositories/${ids.repositoryId}/boards`,
+    params: (ids) => ({ repositoryId: ids.repositoryId }),
+    file: "repositories/[repositoryId]/boards/route.ts",
+    implementer: true,
   },
   {
     name: "POST repositories/[repositoryId]/reviews",
@@ -486,14 +555,14 @@ const ENTRIES: Entry[] = [
   },
   {
     // #833-M1-T228: every member lists the workflows of their own workspace; the other workspace's are not reachable.
+    // #922: the lanes of one project; the project of the other workspace is not there.
     name: "GET workflows",
     route: "/api/w/[workspace]/workflows",
     method: "GET",
     minRole: MINIMUM_ROLE.start_implementer_task,
-    path: () => "/workflows",
+    path: (ids) => `/workflows?projectId=${ids.projectId}`,
     params: () => ({}),
     file: "workflows/route.ts",
-    takesNoIds: true,
     implementer: true,
   },
   {
@@ -501,7 +570,7 @@ const ENTRIES: Entry[] = [
     route: "/api/w/[workspace]/workflows",
     method: "POST",
     minRole: MINIMUM_ROLE.start_implementer_task,
-    path: () => "/workflows",
+    path: (ids) => `/workflows?projectId=${ids.projectId}`,
     body: () => ({
       version: 1,
       name: "Created by the matrix",
@@ -526,7 +595,6 @@ const ENTRIES: Entry[] = [
     }),
     params: () => ({}),
     file: "workflows/route.ts",
-    takesNoIds: true,
     implementer: true,
   },
   {
@@ -538,6 +606,18 @@ const ENTRIES: Entry[] = [
     body: () => ({}),
     params: () => ({}),
     file: "workflows/validate/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    name: "POST workflows/scope",
+    route: "/api/w/[workspace]/workflows/scope",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows/scope",
+    body: () => ({}),
+    params: () => ({}),
+    file: "workflows/scope/route.ts",
     takesNoIds: true,
     implementer: true,
   },
@@ -649,6 +729,71 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #921: a member discards a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/discard",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/discard`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/discard/route.ts",
+    implementer: true,
+  },
+  {
+    // #921: a member pauses a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/pause",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/pause`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/pause/route.ts",
+    implementer: true,
+  },
+  {
+    // #921: a member resumes a run of a workflow; another workspace's run is not found, and nothing changes there.
+    name: "POST workflows/[workflowId]/runs/[runId]/resume",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/resume`,
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/resume/route.ts",
+    implementer: true,
+  },
+  {
+    // #920: a member answers the question of a run; another workspace's run is not found, and nothing is answered there.
+    name: "POST workflows/[workflowId]/runs/[runId]/answer",
+    route: "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: (ids) =>
+      `/workflows/${ids.workflowId}/runs/${ids.workflowRunId}/answer`,
+    // A well-formed answer, so the request reaches the lookup of the run (a body without `question` is refused earlier with 400).
+    body: () => ({
+      text: "Yes, retry on network errors.",
+      question: { stepRunId: "00000000-0000-4000-8000-000000000920", n: 1 },
+    }),
+    params: (ids) => ({
+      workflowId: ids.workflowId,
+      runId: ids.workflowRunId,
+    }),
+    file: "workflows/[workflowId]/runs/[runId]/answer/route.ts",
+    implementer: true,
+  },
+  {
     // #843-T120: every member lists the profiles of their own workspace; the other workspace's are not reachable.
     name: "GET profiles",
     route: "/api/w/[workspace]/profiles",
@@ -714,6 +859,57 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/profiles/${ids.profileId}`,
     params: (ids) => ({ profileId: ids.profileId }),
     file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #924: every member reads the ToDos of their own workspace (the questions and the reviews of its lanes); nothing of another.
+    name: "GET todos",
+    route: "/api/w/[workspace]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/todos",
+    params: () => ({}),
+    file: "todos/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #924: the ToDos of one project, by its own id; the project of the other workspace is not found.
+    name: "GET projects/[projectId]/todos",
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/projects/${ids.projectId}/todos`,
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/todos/route.ts",
+    implementer: true,
+  },
+  {
+    // #924: a review given from the list; a pull request of the other workspace's repository is no ToDo here, and nothing is posted.
+    name: "POST todos/reviews",
+    route: "/api/w/[workspace]/todos/reviews",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/todos/reviews",
+    body: (ids) => ({
+      repositoryId: ids.repositoryId,
+      number: 7,
+      decision: "approve",
+    }),
+    params: () => ({}),
+    file: "todos/reviews/route.ts",
+    implementer: true,
+  },
+  {
+    // #925: every member reads how many ToDos of their own workspace are open (the count on the sidebar link); nothing of another.
+    name: "GET todos/count",
+    route: "/api/w/[workspace]/todos/count",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/todos/count",
+    params: () => ({}),
+    file: "todos/count/route.ts",
+    takesNoIds: true,
     implementer: true,
   },
   {
@@ -1049,7 +1245,11 @@ async function seedWorkspace(
   ]);
   const [repository] = await repositories.list();
   if (repository === undefined) throw new Error("seeding failed");
-  await createProjectsRepository(db, workspace.id).activate(repository.id);
+  const activated = await createProjectsRepository(db, workspace.id).activate(
+    repository.id,
+    { board: null },
+  );
+  if (activated.kind !== "activated") throw new Error("seeding failed");
   const job = await jobQueueFor(workspace.id).enqueue({
     repositoryId: repository.id,
     prNumber: 7,
@@ -1158,6 +1358,7 @@ async function seedWorkspace(
       name: `Workflow of ${slug}`,
       document: `{"of":"${slug}"}`,
       createdBy: names.owner,
+      projectId: activated.project.id,
     },
     100,
   );
@@ -1224,6 +1425,7 @@ async function seedWorkspace(
       runnerId: `runner-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
+      projectId: activated.project.id,
       runId: job.job.id,
       sessionId: started.session.id,
       turnRunId: started.turn.jobId,

@@ -947,6 +947,50 @@ describe("the hard timeout", () => {
   });
 });
 
+describe("the hard timeout of a turn with a time limit of its own", () => {
+  // #918-T06
+  it("cuts a turn of a 15 minute limit after the limit and the 10 minutes of grace, and one without a limit after 70", async () => {
+    const t = await start({ limits: { leaseMs: 200 * MINUTE } });
+    const limited = await t.turn({
+      timeLimitMinutes: 15,
+      clientRequestId: "limited",
+    });
+    const plain = await t.turn({
+      branch: "implementer/plain",
+      clientRequestId: "plain",
+    });
+    await t.fixture.queue.claimNext("r", IMPLEMENTER);
+    await t.fixture.queue.claimNext("r", IMPLEMENTER);
+
+    t.fixture.clock.advance(24 * MINUTE);
+    await t.fixture.queue.expireStaleJobs();
+    expect((await t.fixture.queue.get(limited.job.id))?.status).toBe("running");
+
+    t.fixture.clock.advance(2 * MINUTE); // 26
+    await t.fixture.queue.expireStaleJobs();
+    expect(await t.fixture.queue.get(limited.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "timeout",
+    });
+    expect((await t.fixture.queue.get(plain.job.id))?.status).toBe("running");
+  });
+
+  // #918-T07
+  it("holds a turn of a 45 minute limit for 55 minutes, not for the 70 of a turn without a limit", async () => {
+    const t = await start({ limits: { leaseMs: 300 * MINUTE } });
+    const long = await t.turn({ timeLimitMinutes: 45 });
+    await t.fixture.queue.claimNext("r", IMPLEMENTER);
+
+    t.fixture.clock.advance(54 * MINUTE);
+    await t.fixture.queue.expireStaleJobs();
+    expect((await t.fixture.queue.get(long.job.id))?.status).toBe("running");
+
+    t.fixture.clock.advance(2 * MINUTE); // 56
+    await t.fixture.queue.expireStaleJobs();
+    expect((await t.fixture.queue.get(long.job.id))?.errorCode).toBe("timeout");
+  });
+});
+
 describe("a claim that the entitlements refuse", () => {
   // #752-T09
   it.each([

@@ -14,8 +14,9 @@ family, model and output cap allow, and only the proxy's own copy of the headers
    cookie and proxy header is dropped. A body length that can be measured before it is read.
 4. **The body.** Read as JSON and walked against the closed schema of the family
    (`body_schema.py`): the job's model, exactly one output cap within the allowance, function tools
-   and text only, and no key the pinned engine does not send. The body that is forwarded is the
-   bytes that arrived.
+   and text only, and no key the pinned engine does not send. The conversation is then searched for
+   a part that makes the provider fetch a URL (`fetch_parts.py`, #950); inline content passes. The
+   body that is forwarded is the bytes that arrived.
 
 Every refusal is a stable `RefusalCode`, and the `ErrorCode` the run records for it.
 """
@@ -36,6 +37,7 @@ from code_reviewer_runner.dynamic_review.passthrough.families import (
     WireFamily,
     spec_of,
 )
+from code_reviewer_runner.dynamic_review.passthrough.fetch_parts import refuse_url_parts
 from code_reviewer_runner.dynamic_review.passthrough.last_user import last_user_text
 from code_reviewer_runner.result import ErrorCode
 
@@ -297,6 +299,7 @@ class Admission:
                 raise Refused(RefusalCode.MODEL_NOT_ALLOWED)
         try:
             output_cap = check_body(self._target.family, document, self._target.output_allowance)
+            refuse_url_parts(self._target.family, document)
         except NotAllowed as refusal:
             raise _not_allowed(refusal.path) from None
         except (OverflowError, RecursionError):

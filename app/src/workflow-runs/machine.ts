@@ -25,6 +25,15 @@
 // recorded and the next one runs; a cancel asked for meanwhile changes nothing; the run ends with the status the record holds. An agent
 // step or a loop is never started there (the validator refuses them; the machine does not trust the document).
 //
+// A turn can end with a question (#920): the step is then `waiting` and so is the run, and nothing else of the run runs until somebody answers
+// (there is no deadline). The answer makes both `running` again with the answer on the step (`answerPending`): the next move starts the turn that
+// goes on in the same session (`resume_turn`), and the step reads that turn like any other. A stop asked for while the run waits ends the step as
+// cancelled at once (`cancel_waiting`).
+//
+// A run can be paused (#921, `pauseRequested`): the step that runs goes on and is read, and no further step of the workflow is written or
+// started until the run is resumed. A discarded run (#921) is over for the engine: `nextMove` does nothing for it, and the engine's `discard`
+// ends its steps itself.
+//
 // A run is `running` until the walk is over (`succeeded`), a step failed or the budget ran out (`failed`), or a member stopped it (`cancelled`, #891:
 // once a stop is asked for, no step is written or started any more; a turn that runs is asked to stop, a step that did not start is
 // skipped, and the run ends when nothing runs).
@@ -50,8 +59,11 @@ export type MachineNode =
 
 export type MachineStep = {
   stepId: string;
-  status: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  status:
+    "pending" | "running" | "waiting" | "succeeded" | "failed" | "skipped";
   kind: "agent" | "action" | "if" | "loop";
+  /** #920: the step's question was answered and the turn that goes on has not been started yet. */
+  answerPending?: boolean;
   /** An agent step has a job once its turn is queued. */
   hasJob: boolean;
   /** When the step was written. */
@@ -92,9 +104,12 @@ export type FailureRecord = {
 };
 
 export type MachineState = {
-  runStatus: "running" | "succeeded" | "failed" | "cancelled";
-  /** A member asked for the run to stop (#891). */
+  runStatus:
+    "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "discarded";
+  /** A member asked for the run to stop (#891). Legacy: a member discards a run now (#921), which never reaches the machine. */
   cancelRequested: boolean;
+  /** A member asked the run to stop after its current step (#921): no step of the workflow starts until it is resumed. */
+  pauseRequested?: boolean;
   budgetMicroUsd: number;
   spentMicroUsd: number;
   /** The steps written so far, by position. */
@@ -161,6 +176,10 @@ export type Move =
   | { move: "execute"; position: number; takeOver: boolean }
   /** The step's job may have ended: read it and end the step. */
   | { move: "read_job"; position: number }
+  /** #920: a question was answered: start the turn that goes on in the step's session, with the answer as its instruction. */
+  | { move: "resume_turn"; position: number }
+  /** #920: a stop was asked for while the run waits for an answer: the step ends cancelled, and the run follows. */
+  | { move: "cancel_waiting"; position: number }
   /** #891: a stop was asked for and the step's turn runs: ask its job to stop (asked again at every look, which is harmless). */
   | { move: "cancel_job"; position: number }
   /** #891: a stop was asked for and the step was written and not claimed: it ends skipped. */
@@ -392,7 +411,12 @@ function cancelMove(state: MachineState): Move {
   switch (last.status) {
     case "pending":
       return { move: "skip_step", position };
+    case "waiting":
+      return { move: "cancel_waiting", position };
     case "running":
+      // #920: the answer came and the turn it starts does not exist yet: it is started first (under its request id, so once), and then stopped.
+      if (last.kind === "agent" && last.hasJob && last.answerPending === true)
+        return { move: "resume_turn", position };
       if (last.kind === "agent" && last.hasJob)
         return { move: "cancel_job", position };
       // An agent step whose turn is not recorded yet: the one that claimed it may be starting the turn this moment. The step ends now, the
@@ -430,7 +454,12 @@ function workflowMove(state: MachineState): Move {
         };
       case "pending":
         return { move: "execute", position, takeOver: false };
+      case "waiting":
+        // #920: the run waits for a person; the answer is what makes it move.
+        return { move: "idle" };
       case "running":
+        if (last.kind === "agent" && last.hasJob && last.answerPending === true)
+          return { move: "resume_turn", position };
         if (last.kind === "agent" && last.hasJob)
           return { move: "read_job", position };
         // Claimed, nothing recorded yet: somebody is working on it, or they were interrupted.
@@ -573,10 +602,25 @@ function failureMove(state: MachineState, failure: FailureRecord): Move {
   return moveFor(state, stop, failure);
 }
 
+/** #920: a run that waits for an answer does nothing, unless it was asked to stop. */
+function waitingMove(state: MachineState): Move {
+  const last = state.steps[state.steps.length - 1];
+  return state.cancelRequested && last?.status === "waiting"
+    ? { move: "cancel_waiting", position: state.steps.length - 1 }
+    : { move: "idle" };
+}
+
 export function nextMove(state: MachineState): Move {
+  if (state.runStatus === "waiting") return waitingMove(state);
   if (state.runStatus !== "running") return { move: "idle" };
   if (state.failure !== null) return failureMove(state, state.failure);
   const move = workflowMove(state);
+  // #921: paused. The step that runs goes on and is read; the next one is not written or started (the steps of `onFailure` are not held).
+  if (
+    state.pauseRequested === true &&
+    (move.move === "add_step" || (move.move === "execute" && !move.takeOver))
+  )
+    return { move: "idle" };
   if (
     move.move !== "finish_run" ||
     move.status === "succeeded" ||

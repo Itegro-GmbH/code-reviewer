@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// The runners of the workspace (#854): the list with name, labels, version of the base, the harnesses and capabilities the runner
-// announces, last seen and state, a button that revokes one, and a button that makes a registration token. The token is shown once,
-// with the command to register a runner; the page keeps it only in memory. It talks to the routes of #854 only (`api.ts`), and shows
+// The runners of the workspace (#854, #925): the two kinds of environment (the hosted sandbox of the platform and the runners on the
+// customer's own machines), the list of the runners with name, labels, version of the base, the harnesses and capabilities the runner
+// announces, last seen and state, a button that revokes one, and "Connect your own runner", which makes a registration token. The token is
+// shown once, in a dialog, with the command to register a runner; the page keeps it only in memory. It talks to the routes of #854 only (`api.ts`), and shows
 // no text from an answer: every refusal is a fixed sentence for its code (`messages.ts`).
+import Link from "next/link";
 import { useState } from "react";
 import { Button } from "../../components/button.tsx";
 import { CopyButton } from "../../components/copy-button.tsx";
 import { StatusRegion } from "../../components/status-region.tsx";
 import { Alert, AlertDescription } from "../../components/ui/alert.tsx";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../components/ui/dialog.tsx";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,9 +30,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../../components/ui/alert-dialog.tsx";
+import { useCapabilities } from "../../capabilities/context.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { useRequest } from "../../implementer/ui/use-request.ts";
 import { formatUtc } from "../../ui/format-time.ts";
+import { workspacePath } from "../../workspaces/paths.ts";
 import type { NewTokenView, RunnerList, RunnerView } from "../service.ts";
 import { browserRunnerFleetApi, type RunnerFleetApi } from "./api.ts";
 import {
@@ -33,6 +45,30 @@ import {
 } from "./messages.ts";
 
 const loadList = (api: RunnerFleetApi) => api.list();
+
+/** The two kinds of environment of the prototype: both talk the Runner API. The hosted one is billed only where billing is on. */
+const runnerKinds = (billing: boolean) => [
+  {
+    name: PAGE_COPY.hostedName,
+    description: billing
+      ? `${PAGE_COPY.hostedDescription} ${PAGE_COPY.hostedBilling}`
+      : PAGE_COPY.hostedDescription,
+    capabilities: [
+      "Provided per run",
+      "opencode",
+      ...(billing ? [PAGE_COPY.hostedBillingTag] : []),
+    ],
+  },
+  {
+    name: PAGE_COPY.ownName,
+    description: PAGE_COPY.ownDescription,
+    capabilities: [
+      "Your machine",
+      "opencode",
+      "Claude Code on your subscription",
+    ],
+  },
+];
 
 export function RunnersPanel({
   workspaceSlug,
@@ -70,19 +106,29 @@ export function RunnersPanel({
         </div>
       </div>
     );
-  return <Runners api={api} canManage={canManage} initial={loaded.data} />;
+  return (
+    <Runners
+      api={api}
+      canManage={canManage}
+      initial={loaded.data}
+      workspaceSlug={workspaceSlug}
+    />
+  );
 }
 
 function Runners({
   api,
   canManage,
   initial,
+  workspaceSlug,
 }: {
   api: RunnerFleetApi;
   canManage: boolean;
   initial: RunnerList;
+  workspaceSlug: string;
 }) {
   const product = useProductIdentity();
+  const billing = useCapabilities().has("billing");
   const [runners, setRunners] = useState(initial.runners);
   const [token, setToken] = useState<NewTokenView | null>(null);
   const [toRevoke, setToRevoke] = useState<RunnerView | null>(null);
@@ -147,44 +193,106 @@ function Runners({
       ) : null}
       <StatusRegion>{notice ?? ""}</StatusRegion>
 
-      {!canManage ? null : token === null ? (
+      <section
+        aria-labelledby="runner-kinds-heading"
+        className="flex flex-col gap-3"
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2
+            id="runner-kinds-heading"
+            className="text-lg leading-7 font-semibold"
+          >
+            {PAGE_COPY.kindsTitle}
+          </h2>
+          <p className="text-sm text-muted-foreground">{PAGE_COPY.kindsHint}</p>
+        </div>
+        <ul className="m-0 grid list-none grid-cols-1 gap-4 p-0 md:grid-cols-2">
+          {runnerKinds(billing).map((kind) => (
+            <li
+              key={kind.name}
+              className="flex flex-col gap-2 rounded-2xl border border-border bg-card px-6 py-4"
+            >
+              <span className="font-semibold">{kind.name}</span>
+              <span className="text-sm text-muted-foreground">
+                {kind.description}
+              </span>
+              <ul className="m-0 flex list-none flex-wrap gap-1.5 border-t border-border p-0 pt-2">
+                {kind.capabilities.map((capability) => (
+                  <li
+                    key={capability}
+                    className="rounded-full bg-raised px-2.5 py-1 text-xs font-semibold text-muted-foreground"
+                  >
+                    {capability}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+        <p className="text-sm text-muted-foreground">
+          {PAGE_COPY.environmentsNote}{" "}
+          <Link href={workspacePath(workspaceSlug, "/environments")}>
+            {PAGE_COPY.environmentsLink}
+          </Link>
+        </p>
+      </section>
+
+      {canManage ? (
         <div>
           <Button disabled={busy} onClick={() => void makeToken()}>
             {PAGE_COPY.addRunner}
           </Button>
         </div>
-      ) : (
-        <section
+      ) : null}
+
+      <Dialog
+        open={token !== null}
+        onOpenChange={(open) => {
+          if (!open) setToken(null);
+        }}
+      >
+        {/* The token is shown once: a click beside the dialog or Escape must not throw it away. */}
+        <DialogContent
           aria-label={PAGE_COPY.tokenTitle}
-          className="flex flex-col gap-3 rounded-2xl border border-border bg-card p-5"
+          showCloseButton={false}
+          onInteractOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => event.preventDefault()}
         >
-          <h2 className="text-lg leading-7 font-semibold">
-            {PAGE_COPY.tokenTitle}
-          </h2>
-          <p className="text-sm text-muted-foreground">{PAGE_COPY.tokenNote}</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <code
-              aria-label={PAGE_COPY.tokenCommandLabel}
-              className="min-w-0 flex-1 rounded-lg border border-border bg-background p-3 font-mono text-sm break-all"
-            >
-              {registerCommand(token.token)}
-            </code>
-            <CopyButton
-              value={registerCommand(token.token)}
-              label="Copy the register command"
-            />
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {PAGE_COPY.tokenExpires} {formatUtc(token.expiresAt)}
-          </p>
-          <div>
-            <Button variant="secondary" onClick={() => setToken(null)}>
+          <DialogHeader>
+            <DialogTitle>{PAGE_COPY.tokenTitle}</DialogTitle>
+            <DialogDescription>{PAGE_COPY.tokenNote}</DialogDescription>
+          </DialogHeader>
+          {token === null ? null : (
+            <>
+              <p className="text-sm font-semibold">{PAGE_COPY.tokenRunOn}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <code
+                  aria-label={PAGE_COPY.tokenCommandLabel}
+                  className="min-w-0 flex-1 rounded-lg border border-border bg-background p-3 font-mono text-sm break-all"
+                >
+                  {registerCommand(token.token)}
+                </code>
+                <CopyButton
+                  value={registerCommand(token.token)}
+                  label="Copy the register command"
+                />
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {PAGE_COPY.tokenExpires} {formatUtc(token.expiresAt)}
+              </p>
+            </>
+          )}
+          <DialogFooter>
+            <Button onClick={() => setToken(null)}>
               {PAGE_COPY.tokenDismiss}
             </Button>
-          </div>
-        </section>
-      )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
+      <h2 className="text-lg leading-7 font-semibold">
+        {PAGE_COPY.connected(runners.length)}
+      </h2>
       {runners.length === 0 ? (
         <p className="text-muted-foreground">{PAGE_COPY.empty}</p>
       ) : (

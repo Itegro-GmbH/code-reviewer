@@ -17,13 +17,19 @@ export const PROJECT_ERROR_CODES = [
   "PROJECT_REPOSITORY_UNAVAILABLE",
   /** The repository's installation is suspended or removed (integration `disabled`); it cannot be activated. 409. */
   "PROJECT_INTEGRATION_UNAVAILABLE",
+  /** Creating a project (#922): the repository has a project that is switched on already. 409. */
+  "PROJECT_ALREADY_EXISTS",
+  /** Creating a project (#922): the platform could not be asked for the boards of the repository. 503. */
+  "PROJECT_BOARDS_UNAVAILABLE",
+  /** Setting the board of a project (#937): the workspace has no project with this id. 404. */
+  "PROJECT_NOT_FOUND",
 ] as const;
 export type ProjectErrorCode = (typeof PROJECT_ERROR_CODES)[number];
 
 /** The HTTP status each code is answered with. */
 export const PROJECT_ERROR_STATUS: Record<
   ProjectErrorCode,
-  400 | 403 | 404 | 409 | 413 | 415
+  400 | 403 | 404 | 409 | 413 | 415 | 503
 > = {
   PROJECT_REQUEST_INVALID: 400,
   PROJECT_CROSS_SITE_REQUEST: 403,
@@ -32,6 +38,27 @@ export const PROJECT_ERROR_STATUS: Record<
   PROJECT_REPOSITORY_NOT_FOUND: 404,
   PROJECT_REPOSITORY_UNAVAILABLE: 409,
   PROJECT_INTEGRATION_UNAVAILABLE: 409,
+  PROJECT_ALREADY_EXISTS: 409,
+  // Never a 502: a proxy swaps its body (#690).
+  PROJECT_BOARDS_UNAVAILABLE: 503,
+  PROJECT_NOT_FOUND: 404,
+};
+
+/** A value of the body of a new project that cannot be used (#922), with the values that would have been accepted. */
+export type NewProjectIssue = {
+  path: string;
+  code:
+    | "missing_field"
+    | "wrong_type"
+    | "unknown_field"
+    | "invalid_value"
+    | "unknown_lane"
+    | "duplicate_lane"
+    | "unknown_board"
+    | "board_without_status"
+    | "board_unavailable";
+  message: string;
+  available?: string[];
 };
 
 export class ProjectError extends Error {

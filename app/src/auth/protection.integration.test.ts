@@ -88,6 +88,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/repository-sync",
   // The same cron, once a minute: the sweep of a hosted deployment, a 404 outside serverless mode (#328).
   "/api/internal/dispatch-sweep",
+  // The nightly resync of the ticket mirror (#932): the same credential.
+  "/api/internal/tracker-resync",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",
@@ -131,15 +133,24 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
   "/w/[workspace]/projects/[repositoryId]",
+  "/w/[workspace]/projects/[repositoryId]/lanes",
+  "/w/[workspace]/projects/[repositoryId]/review",
+  "/w/[workspace]/projects/[repositoryId]/runs",
+  "/w/[workspace]/projects/[repositoryId]/setup",
+  "/w/[workspace]/projects/[repositoryId]/todos",
+  "/w/[workspace]/profiles",
   "/w/[workspace]/runners",
   "/w/[workspace]/runs",
   "/w/[workspace]/runs/[id]",
   "/w/[workspace]/settings",
   "/w/[workspace]/settings/advanced",
   "/w/[workspace]/settings/billing",
+  "/w/[workspace]/settings/integrations",
   "/w/[workspace]/settings/llm",
+  "/w/[workspace]/settings/members",
   "/w/[workspace]/settings/plan",
   "/w/[workspace]/settings/review-defaults",
+  "/w/[workspace]/todos",
   // The workflow pages (#873).
   "/w/[workspace]/workflows",
   "/w/[workspace]/workflows/[workflowId]",
@@ -201,14 +212,27 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows",
   "/api/w/[workspace]/workflows/[workflowId]",
   "/api/w/[workspace]/workflows/validate",
+  // The values a step can reach, for the picker of the lane builder (#927).
+  "/api/w/[workspace]/workflows/scope",
   // The runs of a workflow (#844).
   "/api/w/[workspace]/workflows/[workflowId]/runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
+  // Discard, pause and resume a run (#921).
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/discard",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/pause",
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/resume",
+  // The answer to the question a run waits for (#920).
+  "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/answer",
   // The runners on customers' machines (#854).
   "/api/w/[workspace]/runners",
   "/api/w/[workspace]/runners/tokens",
   "/api/w/[workspace]/runners/[runnerId]/revoke",
+  "/api/w/[workspace]/todos",
+  "/api/w/[workspace]/todos/count",
+  // The ToDos of a project and a review given from the list (#924).
+  "/api/w/[workspace]/projects/[projectId]/todos",
+  "/api/w/[workspace]/todos/reviews",
   // The profiles of the agents (#843).
   "/api/w/[workspace]/profiles",
   "/api/w/[workspace]/profiles/[profileId]",
@@ -235,6 +259,12 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/plan",
   "/api/w/[workspace]/plan-handoff",
   "/api/w/[workspace]/members/[userId]",
+  "/api/w/[workspace]/projects",
+  "/api/w/[workspace]/projects/[projectId]",
+  "/api/w/[workspace]/projects/[projectId]/issues",
+  "/api/w/[workspace]/repositories/[repositoryId]/boards",
+  "/api/w/[workspace]/repositories/[repositoryId]/issues",
+  "/api/w/[workspace]/repositories/[repositoryId]/issues/sync",
   "/api/w/[workspace]/repositories/[repositoryId]/project",
   "/api/w/[workspace]/repositories/[repositoryId]/project/settings",
   "/api/w/[workspace]/repositories/[repositoryId]/pull-requests",

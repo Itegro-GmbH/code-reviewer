@@ -7,7 +7,10 @@
 // runner would send (`finishTurn`).
 import type { ActionConnector } from "../workflow-runs/connectors.ts";
 import { createConnectorRegistry } from "../workflow-runs/connectors.ts";
-import { createWorkflowEngine } from "../workflow-runs/engine.ts";
+import {
+  createWorkflowEngine,
+  type AskChannel,
+} from "../workflow-runs/engine.ts";
 import { createTurnReader } from "../workflow-runs/turn-reader.ts";
 import type { TokenPrice } from "../workflow-runs/turn-facts.ts";
 import {
@@ -17,6 +20,7 @@ import {
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { createWorkspaceMembersRepository } from "../db/repositories/workspace-members-repository.ts";
@@ -96,6 +100,8 @@ export type TurnReport = {
   tokens?: { prompt: number; completion: number };
   /** What the finish tool stored; none when the turn has no schema or the agent never called it. */
   agentResult?: JsonValue;
+  /** #920: the question the turn ended with instead of a result. */
+  agentAsk?: JsonValue;
   pushed?: boolean;
   commits?: string[];
   headCommit?: string | null;
@@ -106,6 +112,8 @@ export type TurnReport = {
 export async function startEngineHarness(
   options: {
     connectors?: readonly ActionConnector[];
+    /** #920: where a question is shown and an answer acknowledged. */
+    asks?: AskChannel;
     operatorCostLimitCents?: number;
     maxBudgetUsd?: number;
     /** The catalog price of the model of a turn; left out: no turn has a price. */
@@ -113,6 +121,19 @@ export async function startEngineHarness(
     actionTimeoutMs?: number;
     /** The most connections the pool of the database opens; a test of the engine under a small pool sets it. */
     poolMax?: number;
+    /** The tickets the platform answers for (#916), by `owner/name#number`; a ticket that is not listed does not exist. */
+    tickets?: Record<
+      string,
+      {
+        number: number;
+        title: string;
+        body: string;
+        url: string;
+        labels: string[];
+        assignees: string[];
+        type: string;
+      }
+    >;
   } = {},
 ) {
   const app = await startImplementerHarness({
@@ -153,6 +174,12 @@ export async function startEngineHarness(
   if (!environment.ok) throw new Error("seeding failed");
 
   const workflows = createWorkflowsRepository(h.db, workspaceId);
+  // The project of the repository "acme/widgets" (#922): the lanes of a test belong to it, so a label on a ticket of that repository starts
+  // them and a run is held to that repository.
+  const projects = createProjectsRepository(h.db, workspaceId);
+  const activated = await projects.activate(app.repository.id, { board: null });
+  if (activated.kind !== "activated") throw new Error("seeding failed");
+  const project = activated.project;
   // The owner of the workflows of a test is a member of the workspace; a test that wants them gone removes them.
   const members = createWorkspaceMembersRepository(h.db, workspaceId);
   await members.add(USER.id, "member");
@@ -178,6 +205,7 @@ export async function startEngineHarness(
     jobs,
     turns: turnReader,
     connectors: createConnectorRegistry(options.connectors ?? []),
+    ...(options.asks === undefined ? {} : { asks: options.asks }),
     repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     now,
     ...(options.actionTimeoutMs === undefined
@@ -189,7 +217,10 @@ export async function startEngineHarness(
   const kicked: string[] = [];
   const service: WorkflowRunService = createWorkflowRunService({
     runs,
+    engine,
     workflows,
+    projects,
+    repositoryName: async (id) => (await h.repositories.get(id))?.fullName,
     async resolveRepository(fullName) {
       const found = (await h.repositories.list({ active: true })).find(
         (candidate) =>
@@ -197,7 +228,12 @@ export async function startEngineHarness(
       );
       return found === undefined
         ? undefined
-        : { id: found.id, defaultBranch: "main" };
+        : { id: found.id, fullName: found.fullName, defaultBranch: "main" };
+    },
+    async readTicket(repositoryId, number) {
+      const repository = await h.repositories.get(repositoryId);
+      if (repository === undefined) return undefined;
+      return options.tickets?.[`${repository.fullName}#${String(number)}`];
     },
     kick: (runId) => void kicked.push(runId),
     ...(options.maxBudgetUsd === undefined
@@ -225,6 +261,7 @@ export async function startEngineHarness(
         name: String(document.name),
         document: JSON.stringify(document),
         createdBy: USER.id,
+        projectId: project.id,
       },
       100,
     );
@@ -235,11 +272,16 @@ export async function startEngineHarness(
   const start = (
     workflowId: string,
     overrides: {
+      /** The id of the trigger to start (#916); left out, the one that can be started. */
+      trigger?: string;
       input?: Record<string, unknown>;
       clientRequestId?: string;
     } = {},
   ) =>
     service.start(USER, workflowId, {
+      ...(overrides.trigger === undefined
+        ? {}
+        : { trigger: overrides.trigger }),
       input: overrides.input ?? { repo: "acme/widgets", topic: "caching" },
       clientRequestId: overrides.clientRequestId ?? "run-1",
     });
@@ -301,6 +343,7 @@ export async function startEngineHarness(
         ...(report.agentResult === undefined
           ? {}
           : { agentResult: report.agentResult }),
+        ...(report.agentAsk === undefined ? {} : { agentAsk: report.agentAsk }),
       },
     };
     const outcome =
@@ -353,6 +396,7 @@ export async function startEngineHarness(
     kicked,
     engineLines,
     environment: environment.environment,
+    project,
     saveWorkflow,
     start,
     finishTurn,

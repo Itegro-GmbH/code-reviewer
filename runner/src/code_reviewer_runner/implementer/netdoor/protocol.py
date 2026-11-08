@@ -13,7 +13,10 @@ Control to door:
 
 Door to Control:
 
-* `{"t": "ready"}` once the port answers;
+* `{"t": "ready"}` once the port answers; when the rule names a package registry (`registries.py`,
+  #784) it has `"ca"`, the PEM of the public certificate of the door's authority (`authority.py`),
+  which Control puts into the agent's container so that its tools trust the door for the registries.
+  The authority's private key is never sent;
 * `{"t": "status", "seq", "final", ...}` (the log of `connections.py`) whenever it changed, at most
   once a second, and a last one with `final` true when the door stops;
 * `{"t": "refused", "reason": <word>}` instead of `ready` when the door cannot start.
@@ -28,6 +31,7 @@ MAX_COMMAND_BYTES: Final = 4096
 REFUSED_START_INVALID: Final = "start_invalid"
 REFUSED_RULE_INVALID: Final = "rule_invalid"
 REFUSED_LISTEN_FAILED: Final = "listen_failed"
+REFUSED_CA_FAILED: Final = "ca_failed"
 
 OP_STOP: Final = "stop"
 MESSAGE_READY: Final = "ready"

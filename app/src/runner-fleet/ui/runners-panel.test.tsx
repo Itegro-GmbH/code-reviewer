@@ -5,6 +5,7 @@
 // shown once with the command to copy, revoking after a confirmation, read only for a member, and the sentence of every refusal.
 import {
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -12,6 +13,8 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
+import { CapabilitiesProvider } from "../../capabilities/context.tsx";
+import type { Capability } from "../../capabilities/capability.ts";
 import { ProductIdentityProvider } from "../../product-identity/context.tsx";
 import { identityFor } from "../../product-identity/identities.ts";
 import type { RequestResult } from "../../ui/json-request.ts";
@@ -79,11 +82,17 @@ function fakeApi(
   return { api, revoked };
 }
 
-function show(api: RunnerFleetApi, canManage: boolean) {
+function show(
+  api: RunnerFleetApi,
+  canManage: boolean,
+  capabilities: readonly Capability[] = ["review", "implementer"],
+) {
   return render(
-    <ProductIdentityProvider product={identityFor("factory")}>
-      <RunnersPanel workspaceSlug="acme" canManage={canManage} api={api} />
-    </ProductIdentityProvider>,
+    <CapabilitiesProvider capabilities={capabilities}>
+      <ProductIdentityProvider product={identityFor("factory")}>
+        <RunnersPanel workspaceSlug="acme" canManage={canManage} api={api} />
+      </ProductIdentityProvider>
+    </CapabilitiesProvider>,
   );
 }
 
@@ -119,7 +128,9 @@ describe("the list of runners", () => {
     show(fakeApi().api, false);
 
     await screen.findByText("build-box-1");
-    expect(screen.queryByRole("button", { name: /add a runner/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /connect your own runner/i }),
+    ).toBeNull();
     expect(screen.queryByRole("button", { name: /^revoke/i })).toBeNull();
   });
 
@@ -155,12 +166,12 @@ describe("the list of runners", () => {
 
 describe("a registration token", () => {
   // #854-T74
-  it("is shown once with the command to register a runner, and gone when the person is done", async () => {
+  it("is shown once, in a dialog, with the command to register a runner, and gone when the person is done", async () => {
     const user = userEvent.setup();
     show(fakeApi().api, true);
 
     await user.click(
-      await screen.findByRole("button", { name: /add a runner/i }),
+      await screen.findByRole("button", { name: /connect your own runner/i }),
     );
 
     expect((await screen.findByLabelText("Command")).textContent).toBe(
@@ -170,12 +181,40 @@ describe("a registration token", () => {
     expect(
       screen.getByRole("button", { name: "Copy the register command" }),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /add a runner/i })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /connect your own runner/i }),
+    ).toBeNull();
 
-    await user.click(screen.getByRole("button", { name: /done/i }));
+    await user.click(screen.getByRole("button", { name: "I copied it" }));
 
     expect(screen.queryByText(/crt_token-1/)).toBeNull();
-    expect(screen.getByRole("button", { name: /add a runner/i })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /connect your own runner/i }),
+    ).toBeTruthy();
+  });
+
+  // #925
+  it("stays open on Escape and on a click beside the dialog, until the person says they copied it", async () => {
+    const user = userEvent.setup();
+    show(fakeApi().api, true);
+    await user.click(
+      await screen.findByRole("button", { name: /connect your own runner/i }),
+    );
+    await screen.findByLabelText("Command");
+
+    await user.keyboard("{Escape}");
+    // The open dialog blocks pointer events on the page; a pointer press outside is what Radix listens to.
+    fireEvent.pointerDown(document.body);
+    fireEvent.pointerUp(document.body);
+
+    expect(screen.getByLabelText("Command").textContent).toContain(
+      "crt_token-1",
+    );
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "I copied it" }));
+
+    expect(screen.queryByLabelText("Command")).toBeNull();
   });
 
   // #854-T75
@@ -195,13 +234,40 @@ describe("a registration token", () => {
     );
 
     await user.click(
-      await screen.findByRole("button", { name: /add a runner/i }),
+      await screen.findByRole("button", { name: /connect your own runner/i }),
     );
 
     expect(
       await screen.findByText(/holds 20 registration tokens/),
     ).toBeTruthy();
     expect(screen.queryByLabelText("Command")).toBeNull();
+  });
+});
+
+describe("the two kinds of environment", () => {
+  // #925
+  it("says the hosted sandbox is billed from the balance only where billing is on", async () => {
+    show(fakeApi().api, false, ["review", "implementer", "billing"]);
+    expect(
+      (await screen.findAllByText(/Billed from the balance/)).length,
+    ).toBeGreaterThan(0);
+    cleanup();
+
+    show(fakeApi().api, false, ["review", "implementer"]);
+    await screen.findByText("Hosted sandbox");
+
+    expect(screen.queryByText(/Billed from the balance/i)).toBeNull();
+  });
+
+  // #919
+  it("says that a profile picks its runner, with its Runs on field", async () => {
+    show(fakeApi().api, false);
+    await screen.findByText("Hosted sandbox");
+
+    expect(
+      screen.getByText(/A profile says on which of them it runs/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/#919/)).toBeNull();
   });
 });
 

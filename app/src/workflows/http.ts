@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The handlers behind the workflow routes (#833): `GET/POST .../workflows`, `POST .../workflows/validate` and
+// The handlers behind the workflow routes (#833): `GET/POST .../workflows?projectId=` (a lane belongs to a project, #922), `POST .../workflows/validate`, `POST .../workflows/scope` (#927) and
 // `GET/PUT/DELETE .../workflows/:id` (DELETE archives), with their collaborators passed in so the route files only wire the real ones and tests wire fakes.
 // Order: the user first (nothing is looked at before the caller is known), then where the request comes from, then, for a body, its
 // content type and size, then the service. Every answer is `Cache-Control: no-store`. The body of a write is the workflow document
@@ -23,6 +23,7 @@ export type WorkflowRouteHandlers = {
   list(request: Request): Promise<Response>;
   create(request: Request): Promise<Response>;
   validate(request: Request): Promise<Response>;
+  scope(request: Request): Promise<Response>;
   get(request: Request, workflowId: string): Promise<Response>;
   update(request: Request, workflowId: string): Promise<Response>;
   archive(request: Request, workflowId: string): Promise<Response>;
@@ -41,6 +42,7 @@ function refusal(error: WorkflowError): Response {
         : {}),
       ...(error.maximum === undefined ? {} : { maximum: error.maximum }),
       ...(error.current === undefined ? {} : { current: error.current }),
+      ...(error.issues.length > 0 ? { issues: error.issues } : {}),
     },
     { status: WORKFLOW_ERROR_STATUS[error.code], headers: NO_STORE },
   );
@@ -80,6 +82,11 @@ function numberParam(request: Request, name: string): number | undefined {
   return Number(value);
 }
 
+/** The `projectId` of the query (#922), or undefined when it is not given: the service says what is missing. */
+function projectParam(request: Request): string | undefined {
+  return new URL(request.url).searchParams.get("projectId") ?? undefined;
+}
+
 export function createWorkflowRouteHandlers({
   requireUser,
   service,
@@ -106,7 +113,9 @@ export function createWorkflowRouteHandlers({
   return {
     list: (request) =>
       answer(request, async () =>
-        Response.json(await service.list(), { headers: NO_STORE }),
+        Response.json(await service.list(projectParam(request)), {
+          headers: NO_STORE,
+        }),
       ),
     create: (request) =>
       answer(request, async (user) =>
@@ -114,6 +123,7 @@ export function createWorkflowRouteHandlers({
           {
             workflow: await service.create(
               { id: user.id },
+              projectParam(request),
               await readBody(request),
             ),
           },
@@ -123,6 +133,12 @@ export function createWorkflowRouteHandlers({
     validate: (request) =>
       answer(request, async () =>
         Response.json(await service.validate(await readBody(request)), {
+          headers: NO_STORE,
+        }),
+      ),
+    scope: (request) =>
+      answer(request, async () =>
+        Response.json(await service.scope(await readBody(request)), {
           headers: NO_STORE,
         }),
       ),

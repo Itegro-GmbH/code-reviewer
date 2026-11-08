@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/workflow.v1.json",
   "title": "Code Reviewer workflow, version 1",
-  "description": "A workflow is a JSON document (#833, agent workflows, app/src/workflows/, docs/workflows.md): a trigger and a list of steps that run in order. Five kinds of node: the trigger, the agent step, the action, the control nodes `if` and `loop`, and (reserved) the workflow as a step. Nodes talk to each other only through values: a text may hold `{{step.field}}` references to what an earlier step yielded. The schema states the form, closed everywhere: a key it does not name is refused. What it cannot state is checked by the validator, which also gives every problem a JSON pointer, a stable code, the cause and the names that were available: that every reference points at a step that ran before on every path, the types of the values that flow, the ids, limits, and that profiles and environments exist. A run works on ONE repository: the one of its trigger (`trigger.repo` of an issue trigger, the input `repo` of a manual one), so a node names none. The inputs that decide a TARGET (the issue, the branches, the labels, the environment) take a literal or one whole reference to a value the platform or the caller vouches for (the issue number, the default branch, an input of a manual trigger, the branch of an agent step), never a value an agent reported and never the title, body or labels of the issue, which whoever opened it wrote: the validator holds them to it (`target_from_untrusted_value`). A reader ignores nothing: unknown fields are errors. `forEach`, `approval` and `workflow` are named here so a document can use them later; version 1 refuses them (code `kind_not_supported`). Written by the app (src/workflows/); the version is in the path and in `version`.",
+  "description": "A workflow is a JSON document (#833, agent workflows, app/src/workflows/, docs/workflows.md): one or more triggers and a list of steps that run in order. Five kinds of node: the trigger, the agent step, the action, the control nodes `if` and `loop`, and (reserved) the workflow as a step. Nodes talk to each other only through values: a text may hold `{{step.field}}` references to what an earlier step yielded. The schema states the form, closed everywhere: a key it does not name is refused. What it cannot state is checked by the validator, which also gives every problem a JSON pointer, a stable code, the cause and the names that were available: that every reference points at a step that ran before on every path, the types of the values that flow, the ids, limits, and that profiles and environments exist. A workflow has several triggers (#916), each with pre-steps of its own; when one fires, its pre-steps run and then the shared steps, so the shared steps read only what every trigger yields. A run works on ONE repository: the one of its trigger (the ticket's: `trigger.ticket.repo` of a label trigger and of a manual or api trigger with a `ticket` input, the input `repo` of a manual one), so a node names none. The single `trigger` of format 1 before #916 is still read, as a list of one trigger without pre-steps; `github.issueLabeled` is read as `ticket.labeled`. The inputs that decide a TARGET (the issue, the branches, the labels, the environment) take a literal or one whole reference to a value the platform or the caller vouches for (the issue or ticket number, the default branch, an input of a manual trigger, the branch of an agent step), never a value an agent reported and never the title, body or labels of the issue, which whoever opened it wrote: the validator holds them to it (`target_from_untrusted_value`). A reader ignores nothing: unknown fields are errors. `forEach`, `approval` and `workflow` are named here so a document can use them later; version 1 refuses them (code `kind_not_supported`). Written by the app (src/workflows/); the version is in the path and in `version`.",
   "version": 1,
   "$defs": {
     "Workflow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "name", "trigger", "steps"],
+      "required": ["version", "name", "steps"],
       "properties": {
         "version": {
           "const": 1
@@ -24,21 +24,46 @@
           "$ref": "#/$defs/Description"
         },
         "trigger": {
-          "$ref": "#/$defs/Trigger"
+          "$ref": "#/$defs/Trigger",
+          "description": "The single trigger of format 1 before #916, read as a list of one trigger without pre-steps."
+        },
+        "triggers": {
+          "description": "The triggers that start the workflow, one to ten, each with pre-steps of its own. A workflow has `triggers` or the single `trigger` of the older form, not both.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/TriggerEntry"
+          }
         },
         "budgetUsd": {
           "description": "What the workflow may spend in USD over all its steps; 20 when left out, and not above the operator's maximum (the validator).",
           "type": "number",
           "exclusiveMinimum": 0
         },
+        "turnTimeLimitMinutes": {
+          "description": "How long one agent turn of the workflow may run, in whole minutes (#918): 15 to 60, 60 when left out (the Dispatcher stops an Implementer VM at 3600 seconds). A turn that is still running at the limit is cut. The cost of a turn is not set here: it is capped by what is left of `budgetUsd`.",
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 60,
+          "default": 60
+        },
         "steps": {
           "$ref": "#/$defs/Steps"
         },
         "onFailure": {
-          "description": "Steps that run once after the run ended `failed` or `cancelled`, never after `succeeded` (#902). The run keeps its final status. The form is that of `steps`; the validator holds them to comments (`github.issue.comment`), label changes (`github.issue.labels`) and `if` over them (`on_failure_step_not_allowed`), gives them `{{failure.status}}`, `{{failure.stepId}}`, `{{failure.code}}` and `{{failure.message}}` and none of the steps above, and counts them against the 50 steps of the document.",
+          "description": "Steps that run once after the run ended `failed` or `cancelled` (the old stop), never after `succeeded` and never when a member discards the run (#902, #921). The run keeps its final status. The form is that of `steps`; the validator holds them to comments (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), label changes (`ticket.labels`, `github.issue.labels`) and `if` over them (`on_failure_step_not_allowed`), gives them `{{failure.status}}`, `{{failure.stepId}}`, `{{failure.code}}` and `{{failure.message}}` and none of the steps above, and counts them against the 50 steps of the document.",
           "$ref": "#/$defs/Steps"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": ["trigger"]
+        },
+        {
+          "required": ["triggers"]
+        }
+      ]
     },
     "Steps": {
       "type": "array",
@@ -69,47 +94,6 @@
         "enum": ["trigger", "previous"]
       }
     },
-    "Trigger": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/ManualTrigger"
-        },
-        {
-          "$ref": "#/$defs/IssueLabeledTrigger"
-        }
-      ]
-    },
-    "ManualTrigger": {
-      "description": "Started by hand through the API. `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository, so the validator needs `input` to declare `repo`, a required text (owner/name): the schema cannot say it (`repo_required`).",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind"],
-      "properties": {
-        "kind": {
-          "const": "manual"
-        },
-        "input": {
-          "$ref": "result-schema.v1.json#/$defs/ResultSchema"
-        }
-      }
-    },
-    "IssueLabeledTrigger": {
-      "description": "Started when the label is put on an issue of a repository of the workspace. Steps read `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch`.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "label"],
-      "properties": {
-        "kind": {
-          "const": "github.issueLabeled"
-        },
-        "label": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 100,
-          "pattern": "\\S"
-        }
-      }
-    },
     "Step": {
       "oneOf": [
         {
@@ -132,7 +116,7 @@
     "AgentStep": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "profile", "environment", "instruction"],
+      "required": ["id", "kind", "profile", "instruction"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -149,7 +133,7 @@
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?:@[1-9][0-9]{0,5})?$"
         },
         "environment": {
-          "description": "The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator).",
+          "description": "Deprecated (#919): leave it out, the step runs in the environment of its profile. The name of an environment of the workspace, as a literal: it decides where the agent works, so version 1 takes no reference (`target_from_untrusted_value`, checked by the validator). When the profile names an environment, this must be that one (`environment_mismatch`); a profile version saved before #919 names none and needs it (`environment_required`).",
           "type": "string",
           "maxLength": 20000
         },
@@ -214,6 +198,21 @@
         },
         {
           "$ref": "#/$defs/IssueLabelsAction"
+        },
+        {
+          "$ref": "#/$defs/TicketCommentAction"
+        },
+        {
+          "$ref": "#/$defs/TicketLabelsAction"
+        },
+        {
+          "$ref": "#/$defs/TicketSetStatusAction"
+        },
+        {
+          "$ref": "#/$defs/TicketRequestReviewAction"
+        },
+        {
+          "$ref": "#/$defs/PullRequestCommentAction"
         }
       ]
     },
@@ -232,7 +231,8 @@
           "const": "action"
         },
         "connector": {
-          "const": "github.pullRequest.open"
+          "description": "`pullRequest.open` is the provider-neutral name of `github.pullRequest.open` (#917); saved lanes keep the old name.",
+          "enum": ["github.pullRequest.open", "pullRequest.open"]
         },
         "head": {
           "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
@@ -337,8 +337,112 @@
         }
       ]
     },
+    "PullRequestInput": {
+      "description": "A pull request: a positive whole number up to 2147483647, or exactly one reference to the number of a pull request an earlier `pullRequest.open` (or `github.pullRequest.open`) action opened (`{{<step id>.number}}`) or to an input of a manual trigger that is declared `integer`. The validator refuses anything else (`target_from_untrusted_value`), and the engine checks the number again when it runs.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        {
+          "$ref": "#/$defs/Reference"
+        }
+      ]
+    },
+    "PullRequestCommentAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "pullRequest", "body"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "pullRequest.comment"
+        },
+        "pullRequest": {
+          "$ref": "#/$defs/PullRequestInput"
+        },
+        "body": {
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "TicketSetStatusAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "ticket", "status"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.setStatus"
+        },
+        "ticket": {
+          "$ref": "#/$defs/TicketTarget"
+        },
+        "board": {
+          "description": "The GitHub Project (projects_v2) of the repository's owner that holds the board: its number (\"7\") or its node id (\"PVT_…\"). A literal, no reference (`target_from_untrusted_value`; `invalid_value` for another form). Optional (#922): left out, the board of the project the lane belongs to is used; named, it overrides that board.",
+          "$ref": "#/$defs/Template"
+        },
+        "status": {
+          "description": "The name of an option of the board's Status field, as the board spells it: a literal, no reference. The engine looks it up when the step runs and ends the step with `board_status_unknown`, naming the options the board has, when there is none of that name.",
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "TicketRequestReviewAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "pullRequest", "reviewers"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.requestReview"
+        },
+        "pullRequest": {
+          "$ref": "#/$defs/PullRequestInput"
+        },
+        "reviewers": {
+          "description": "The text \"project members\" (the members of the project that has a GitHub login; the ones that cannot review this pull request are left out), or a list of GitHub logins (literals and references to inputs of a manual trigger, one reference per entry), or exactly one reference to a list input. `invalid_value` names \"project members\" in `available` for another text.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Template"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Template"
+              }
+            }
+          ]
+        }
+      }
+    },
     "IssueInput": {
-      "description": "A positive whole number up to 2147483647, or exactly one reference to the issue of the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`) or to an input of a manual trigger that is declared `integer`. The default of a reference is held to the same rule. The validator refuses the title, body and labels of the issue, and the engine checks the number again when it runs.",
+      "description": "A positive whole number up to 2147483647, or exactly one reference to the issue of the trigger (`{{trigger.issue}}`, `{{trigger.issue.number}}`, `{{trigger.ticket}}`, `{{trigger.ticket.number}}`) or to an input of a manual trigger that is declared `integer`. The default of a reference is held to the same rule. The validator refuses the title, body and labels of the issue, and the engine checks the number again when it runs.",
       "oneOf": [
         {
           "type": "integer",
@@ -535,6 +639,329 @@
       "items": {
         "$ref": "#/$defs/Operand"
       }
+    },
+    "ManualTriggerEntry": {
+      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository: the input declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "enum": ["manual", "api"]
+        },
+        "input": {
+          "$ref": "#/$defs/TriggerInput"
+        },
+        "steps": {
+          "$ref": "#/$defs/TriggerSteps"
+        }
+      }
+    },
+    "TicketLabeledTriggerEntry": {
+      "description": "Started when the label is put on a ticket (an issue of a repository of the workspace). Steps read `{{trigger.ticket.number}}`, `.title`, `.body`, `.url`, `.labels`, `.type`, `.assignees`, `.repo` and, as workflows written before #916 do, `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of `ticket.labeled`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "label"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "enum": ["ticket.labeled", "github.issueLabeled"]
+        },
+        "label": {
+          "description": "The label that starts the workflow. Two `ticket.labeled` triggers of one workflow may not wait for the same label, in any case (`duplicate_trigger_label`: the schema cannot say it, the validator does).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "steps": {
+          "$ref": "#/$defs/TriggerSteps"
+        }
+      }
+    },
+    "PullRequestPushedTriggerEntry": {
+      "description": "Reserved (#916): a push to a pull request. The format validates it, the engine starts no run from it yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "const": "pullRequest.pushed"
+        },
+        "steps": {
+          "$ref": "#/$defs/TriggerSteps"
+        }
+      }
+    },
+    "ScheduleTriggerEntry": {
+      "description": "Reserved (#916): a schedule, `cron` with five fields separated by one space. The format validates it, the engine starts no run from it yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "cron"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "const": "schedule"
+        },
+        "cron": {
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "^[^\\s]+( [^\\s]+){4}$"
+        },
+        "steps": {
+          "$ref": "#/$defs/TriggerSteps"
+        }
+      }
+    },
+    "ManualTrigger": {
+      "description": "Started by hand (`manual`) or through the API (`api`; the start form offers `manual` only). `input` declares what the caller hands in; steps read it as `{{trigger.input.<field>}}`. A run works on one repository: the input declares either `ticket` (type `ticket`, required: a reference like `github:owner/repo#128`; the run works in the repository of the ticket and steps read it as `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo|repo.defaultBranch}}`) or `repo`, a required text (owner/name). The schema cannot say it (`repo_required`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["manual", "api"]
+        },
+        "input": {
+          "$ref": "#/$defs/TriggerInput"
+        }
+      }
+    },
+    "TicketLabeledTrigger": {
+      "description": "Started when the label is put on a ticket (an issue of a repository of the workspace). Steps read `{{trigger.ticket.number}}`, `.title`, `.body`, `.url`, `.labels`, `.type`, `.assignees`, `.repo` and, as workflows written before #916 do, `{{trigger.issue.number}}`, `.title`, `.body`, `.url`, `.labels` and `{{trigger.repo.fullName}}`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of `ticket.labeled`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label"],
+      "properties": {
+        "kind": {
+          "enum": ["ticket.labeled", "github.issueLabeled"]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "PullRequestPushedTrigger": {
+      "description": "Reserved (#916): a push to a pull request. The format validates it, the engine starts no run from it yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "const": "pullRequest.pushed"
+        }
+      }
+    },
+    "ScheduleTrigger": {
+      "description": "Reserved (#916): a schedule, `cron` with five fields separated by one space. The format validates it, the engine starts no run from it yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "cron"],
+      "properties": {
+        "kind": {
+          "const": "schedule"
+        },
+        "cron": {
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "^[^\\s]+( [^\\s]+){4}$"
+        }
+      }
+    },
+    "Trigger": {
+      "description": "The single trigger of the older form: the same kinds, without `id` and `steps`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ManualTrigger"
+        },
+        {
+          "$ref": "#/$defs/TicketLabeledTrigger"
+        },
+        {
+          "$ref": "#/$defs/PullRequestPushedTrigger"
+        },
+        {
+          "$ref": "#/$defs/ScheduleTrigger"
+        }
+      ]
+    },
+    "TriggerEntry": {
+      "description": "One entry of `triggers`: the same kinds, each with an `id` (unique among the triggers, the start API names it) and `steps`, the pre-steps that run first when this trigger started the run.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ManualTriggerEntry"
+        },
+        {
+          "$ref": "#/$defs/TicketLabeledTriggerEntry"
+        },
+        {
+          "$ref": "#/$defs/PullRequestPushedTriggerEntry"
+        },
+        {
+          "$ref": "#/$defs/ScheduleTriggerEntry"
+        }
+      ]
+    },
+    "TriggerSteps": {
+      "description": "The pre-steps of a trigger: the form of `steps`, and may be empty. They see only the values of their own trigger; the shared steps after them see only what every trigger yields.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Step"
+      }
+    },
+    "TriggerInput": {
+      "description": "The input of a manual or api trigger: a result schema (result-schema.v1.json) whose fields may also be `ticket`, a reference to a ticket like `github:owner/repo#128`. Only a field of the input itself may be a ticket, and it is called `ticket`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "properties"],
+      "properties": {
+        "type": {
+          "const": "object"
+        },
+        "description": {
+          "$ref": "result-schema.v1.json#/$defs/Description"
+        },
+        "properties": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 50,
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+          },
+          "additionalProperties": {
+            "$ref": "result-schema.v1.json#/$defs/SchemaNode"
+          },
+          "properties": {
+            "ticket": {
+              "oneOf": [
+                {
+                  "$ref": "result-schema.v1.json#/$defs/SchemaNode"
+                },
+                {
+                  "$ref": "#/$defs/TicketSchema"
+                }
+              ]
+            }
+          }
+        },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": {
+          "const": false
+        }
+      }
+    },
+    "TicketSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "ticket"
+        },
+        "description": {
+          "$ref": "result-schema.v1.json#/$defs/Description"
+        }
+      }
+    },
+    "TicketCommentAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "ticket", "body"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.comment"
+        },
+        "ticket": {
+          "$ref": "#/$defs/TicketTarget"
+        },
+        "body": {
+          "$ref": "#/$defs/Template"
+        }
+      }
+    },
+    "TicketLabelsAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connector", "ticket"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "description": {
+          "$ref": "#/$defs/Description"
+        },
+        "kind": {
+          "const": "action"
+        },
+        "connector": {
+          "const": "ticket.labels"
+        },
+        "ticket": {
+          "$ref": "#/$defs/TicketTarget"
+        },
+        "add": {
+          "$ref": "#/$defs/LabelsInput"
+        },
+        "remove": {
+          "$ref": "#/$defs/LabelsInput"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["add"],
+          "properties": {
+            "add": {
+              "not": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "required": ["remove"],
+          "properties": {
+            "remove": {
+              "not": {
+                "type": "array",
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TicketTarget": {
+      "description": "As `IssueInput`, for the action on a ticket: a positive whole number up to 2147483647, or exactly one reference to the ticket of the trigger (`{{trigger.ticket}}`, `{{trigger.ticket.number}}`, or the issue of a label trigger, `{{trigger.issue}}`) or to an input of a manual trigger that is declared `integer`. A trigger that does not yield a ticket makes the reference `reference_not_in_scope`.",
+      "$ref": "#/$defs/IssueInput"
     }
   }
 }

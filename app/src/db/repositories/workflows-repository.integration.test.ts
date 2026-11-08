@@ -4,7 +4,9 @@
 // its case, a bounded count, every save a new version that is never updated, the next number never taken twice, nothing across workspaces).
 import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
+import { createProjectsRepository } from "./projects-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
+import { seedImplementerRepository } from "../../test-support/implementer.ts";
 import { createTestDatabase } from "../../test-support/test-database.ts";
 import { addUser } from "../../test-support/workspace-deletion-fixture.ts";
 import {
@@ -46,6 +48,7 @@ describe("the workflows repository", () => {
       workflow: {
         id: "wf-1",
         workspaceId: idA,
+        projectId: null,
         name: "Issue to PR",
         version: 1,
         createdBy: "u-1",
@@ -105,6 +108,76 @@ describe("the workflows repository", () => {
       ok: false,
       reason: "limit_reached",
     });
+  });
+
+  // #937: the maximum is held per project, so the built-in lanes of every project cannot use up the room of a workspace.
+  it("holds the maximum of workflows per project: a full project does not close another, nor the lanes without a project", async () => {
+    const { db, a, idA } = await setup();
+    const projects = createProjectsRepository(db, idA);
+    const one = await seedImplementerRepository(db, idA, "one");
+    const two = await seedImplementerRepository(db, idA, "two");
+    const projectOne = (await projects.get(one.repositoryId))!.id;
+    const projectTwo = (await projects.get(two.repositoryId))!.id;
+
+    expect(
+      (await a.create({ ...NEW, name: "a", projectId: projectOne }, 2)).ok,
+    ).toBe(true);
+    expect(
+      (await a.create({ ...NEW, name: "b", projectId: projectOne }, 2)).ok,
+    ).toBe(true);
+    expect(
+      await a.create({ ...NEW, name: "c", projectId: projectOne }, 2),
+    ).toEqual({ ok: false, reason: "limit_reached" });
+
+    expect(
+      (await a.create({ ...NEW, name: "a", projectId: projectTwo }, 2)).ok,
+    ).toBe(true);
+    expect((await a.create({ ...NEW, name: "a" }, 2)).ok).toBe(true);
+    expect((await a.create({ ...NEW, name: "b" }, 2)).ok).toBe(true);
+    expect(await a.create({ ...NEW, name: "c" }, 2)).toEqual({
+      ok: false,
+      reason: "limit_reached",
+    });
+
+    // An archived lane leaves the count of its project.
+    const [first] = await a.list({ projectId: projectOne });
+    await a.archive(first!.id, 100);
+    expect(
+      (await a.create({ ...NEW, name: "c", projectId: projectOne }, 2)).ok,
+    ).toBe(true);
+  });
+
+  // #937 (from the re-review of #936): a lane without a project keeps its name rule among such lanes, on save and on archive.
+  it("keeps the name rule of a lane without a project among such lanes only, when it is saved and archived", async () => {
+    const { db, a, idA } = await setup();
+    const seeded = await seedImplementerRepository(db, idA, "one");
+    const projectId = (await createProjectsRepository(db, idA).get(
+      seeded.repositoryId,
+    ))!.id;
+    const loose = await a.create({ ...NEW, name: "Loose" }, 100);
+    const other = await a.create({ ...NEW, name: "Other" }, 100);
+    const inProject = await a.create(
+      { ...NEW, name: "Shared", projectId },
+      100,
+    );
+    if (!loose.ok || !other.ok || !inProject.ok) throw new Error("setup");
+
+    // A name a lane of a project has is free for a lane without one, and the other way round.
+    expect(
+      (await a.saveVersion(loose.workflow.id, { ...NEW, name: "shared" }, 100))
+        .ok,
+    ).toBe(true);
+    // Among the lanes without a project the name is taken.
+    expect(
+      await a.saveVersion(other.workflow.id, { ...NEW, name: "SHARED" }, 100),
+    ).toEqual({ ok: false, reason: "name_taken" });
+    // Archiving the lane without a project frees its name for the others like it, not for anything else.
+    expect((await a.archive(loose.workflow.id, 100)).ok).toBe(true);
+    expect(
+      (await a.saveVersion(other.workflow.id, { ...NEW, name: "Shared" }, 100))
+        .ok,
+    ).toBe(true);
+    expect((await a.get(inProject.workflow.id))?.workflow.name).toBe("Shared");
   });
 
   // #833-M1-T144

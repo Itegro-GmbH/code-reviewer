@@ -31,6 +31,7 @@ import {
 import { issue, listNames, pointer, shown } from "./issues.ts";
 import {
   parseProfileRef,
+  type EnvironmentInfo,
   type ProfileInfo,
   type ProfileVersionFacts,
   type WorkflowResolver,
@@ -40,7 +41,15 @@ import {
   validateResultSchema,
   type ResultSchema,
 } from "./result-schema.ts";
-import { GITHUB_ISSUE_LABELS, type ConnectorSpec } from "./connectors.ts";
+import {
+  GITHUB_ISSUE_LABELS,
+  PROJECT_MEMBERS,
+  START_BRANCH_ROOTS,
+  TICKET_LABELS,
+  TICKET_REQUEST_REVIEW,
+  TICKET_SET_STATUS,
+  type ConnectorSpec,
+} from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
 import {
   firstOf,
@@ -79,8 +88,16 @@ const COMMON_KEYS = ["id", "kind", "description"] as const;
 
 export type Checker = ScopeContext & {
   resolver: WorkflowResolver;
-  /** The label that starts the workflow, when the trigger has one and it is well formed. */
-  triggerLabel?: string;
+  /**
+   * The labels (trimmed, lower case) a step here may not add, because they start the workflow: those of its label triggers that are
+   * well formed. The pre-steps of a trigger that is not a label trigger have none: the bot's own writes start no run (#916).
+   */
+  retriggerLabels?: readonly string[];
+  /**
+   * Called with where a node sits and what it can reach, before the node is checked (and for the `until` of a loop, with the scope of
+   * the body). The scope lookup of the lane builder (`reach.ts`) reads the reach here, so it is the validator's own and not a copy.
+   */
+  probe?: (path: string, env: Env, state: StepState) => void;
 };
 
 export type StepState = {
@@ -191,12 +208,44 @@ function findProfile(
   };
 }
 
-/** The profile name and the environment (lower case, a literal only) an agent step is written with: what makes two steps share a session. */
-function setupOf(node: Record<string, unknown>): NonNullable<Binding["agent"]> {
-  const environment =
+/**
+ * The environment an agent step runs in (#919): the one of its profile version, else the one the step names (a version saved before
+ * profiles had one). `fromProfile` says which; `info` is undefined when the environment is not one of the workspace (reported where it
+ * is written) and `name` is then what the step wrote, if it wrote a literal.
+ */
+function environmentOf(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+):
+  | { fromProfile: boolean; info: EnvironmentInfo | undefined; name?: string }
+  | undefined {
+  const id = findProfile(node.profile, resolver)?.facts?.environmentId;
+  if (typeof id === "string")
+    return {
+      fromProfile: true,
+      info: resolver.environments().find((e) => e.id === id),
+    };
+  const name =
     typeof node.environment === "string"
-      ? literalText(parseTemplate(node.environment))?.toLowerCase()
+      ? literalText(parseTemplate(node.environment))
       : undefined;
+  if (name === undefined) return undefined;
+  return {
+    fromProfile: false,
+    name,
+    info: resolver
+      .environments()
+      .find((e) => e.name.toLowerCase() === name.toLowerCase()),
+  };
+}
+
+/** The profile name and the environment (lower case) an agent step runs with: what makes two steps share a session. */
+function setupOf(
+  node: Record<string, unknown>,
+  resolver: WorkflowResolver,
+): NonNullable<Binding["agent"]> {
+  const found = environmentOf(node, resolver);
+  const environment = (found?.info?.name ?? found?.name)?.toLowerCase();
   const profile =
     typeof node.profile === "string"
       ? parseProfileRef(node.profile)?.name
@@ -249,7 +298,7 @@ export function agentBinding(
     ...(node.result !== undefined && declared === undefined
       ? { open: true }
       : {}),
-    agent: setupOf(node),
+    agent: setupOf(node, resolver),
   };
 }
 
@@ -272,6 +321,7 @@ export function actionBinding(
     kind: "action",
     type: spec?.output ?? { kind: "unknown" },
     unavailable: {},
+    ...(spec === undefined ? {} : { connector: spec.name }),
   };
 }
 
@@ -396,6 +446,7 @@ function checkEnvironment(
     path,
     "the name of an environment of the workspace.",
     c,
+    false,
   );
   if (name === undefined) return;
   const where = pointer(path, "environment");
@@ -420,33 +471,83 @@ function checkEnvironment(
 }
 
 /**
+ * #919: a profile says where it works, so the environment of a step is optional and must be the profile's when it is written. A version
+ * saved before profiles had an environment names none: its step names one, as before.
+ */
+function checkProfileEnvironment(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const facts = findProfile(node.profile, c.resolver)?.facts;
+  // A profile nobody knows is reported where it is written; a version with no facts is not known, and nothing is refused on a guess.
+  if (facts === undefined) return;
+  const profile = shown(parseProfileRef(node.profile as string)?.name ?? "");
+  const names = c.resolver.environments().map((e) => e.name);
+  const id = facts.environmentId;
+  if (typeof id !== "string") {
+    if (node.environment === undefined)
+      c.report(
+        issue(
+          pointer(path, "environment"),
+          "environment_required",
+          `The profile ${profile} names no environment (this version was saved before profiles had one), so the step names one. Environments: ${listNames(names)}. Or save a new version of the profile with an "environment".`,
+          names,
+        ),
+      );
+    return;
+  }
+  const own = c.resolver.environments().find((e) => e.id === id);
+  if (own === undefined) {
+    c.report(
+      issue(
+        pointer(path, "profile"),
+        "environment_unknown",
+        `The profile ${profile} runs in an environment that is no longer in this workspace. Save a new version of the profile with one of: ${listNames(names)}.`,
+        names,
+      ),
+    );
+    return;
+  }
+  const written =
+    typeof node.environment === "string"
+      ? literalText(parseTemplate(node.environment))
+      : undefined;
+  if (written !== undefined && written.toLowerCase() !== own.name.toLowerCase())
+    c.report(
+      issue(
+        pointer(path, "environment"),
+        "environment_mismatch",
+        `The profile ${profile} runs in the environment ${shown(own.name)}, not ${shown(written)}. A profile says where it works: leave "environment" out of the step, or write ${shown(own.name)}.`,
+        [own.name],
+      ),
+    );
+}
+
+/**
  * #854: what a profile and an environment can only do together. A runner works with its owner's own key, so a profile with a managed
  * model has no place in a runner environment; and a harness the platform's catalog does not hold (any but OpenCode) exists only on a
- * runner. Both are reported where the environment is written. A name nobody knows is reported by the checks above and not again here.
+ * runner. Both are reported where the environment is written, or at the profile when the environment is the profile's (#919). A name
+ * nobody knows is reported by the checks above and not again here.
  */
 function checkRunnerRules(
   node: Record<string, unknown>,
   path: string,
   c: Checker,
 ): void {
-  const environment =
-    typeof node.environment === "string"
-      ? literalText(parseTemplate(node.environment))
-      : undefined;
-  if (environment === undefined) return;
-  const known = c.resolver
-    .environments()
-    .find((e) => e.name.toLowerCase() === environment.toLowerCase());
+  const found = environmentOf(node, c.resolver);
+  const known = found?.info;
   const facts = findProfile(node.profile, c.resolver)?.facts;
-  if (known === undefined || facts === undefined) return;
-  const where = pointer(path, "environment");
+  if (found === undefined || known === undefined || facts === undefined) return;
+  const where = pointer(path, found.fromProfile ? "profile" : "environment");
+  const profile = shown(parseProfileRef(node.profile as string)?.name ?? "");
   const onRunner = known.kind === "runner";
   if (onRunner && facts.managedModel === true)
     c.report(
       issue(
         where,
         "runner_needs_own_key",
-        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
+        `The environment ${shown(known.name)} runs on a runner, which works with the workspace's own key, but the profile ${profile} uses a managed model. Use a profile with a model of your own key, or a platform environment.`,
       ),
     );
   const harness = harnessOfProfile(facts);
@@ -455,7 +556,7 @@ function checkRunnerRules(
       issue(
         where,
         "harness_needs_runner",
-        `The profile ${shown(parseProfileRef(node.profile as string)?.name ?? "")} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
+        `The profile ${profile} runs with the harness ${shown(harness)}, which exists only on a runner. Use an environment that runs on a runner.`,
       ),
     );
 }
@@ -641,7 +742,7 @@ function checkSession(
     return;
   }
   // A session belongs to one profile in one environment: it holds the files and the conversation of that setup.
-  const mine = setupOf(node);
+  const mine = setupOf(node, c.resolver);
   const theirs = found.agent ?? {};
   for (const [what, a, b] of [
     ["profile", mine.profile, theirs.profile],
@@ -700,7 +801,7 @@ function checkStartBranch(
     );
   checkInput(value, STRING, where, c, reachOf(env, where, state), {
     input: "branch",
-    roots: ["input", "defaultBranch", "branch"],
+    roots: START_BRANCH_ROOTS,
   });
 }
 
@@ -720,6 +821,7 @@ function checkAgent(
     c,
     reachOf(env, pointer(path, "environment"), state),
   );
+  checkProfileEnvironment(node, path, c);
   checkRunnerRules(node, path, c);
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
@@ -823,7 +925,92 @@ function checkAction(
         spec.atLeastOneOf,
       ),
     );
-  if (spec.name === GITHUB_ISSUE_LABELS.name) checkNoRetrigger(node, path, c);
+  if (
+    spec.name === GITHUB_ISSUE_LABELS.name ||
+    spec.name === TICKET_LABELS.name
+  )
+    checkNoRetrigger(node, path, c);
+  if (spec.name === TICKET_SET_STATUS.name) checkBoardInputs(node, path, c);
+  if (spec.name === TICKET_REQUEST_REVIEW.name) checkReviewers(node, path, c);
+}
+
+/** The number of a GitHub Project (1 to 2147483647) or its node id: what `ticket.setStatus` takes as `board`. */
+const BOARD_REFERENCE = /^(?:[1-9]\d{0,9}|PVT_[A-Za-z0-9_-]{1,200})$/;
+/** A GitHub login: letters, digits and single hyphens, up to 39 characters. */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * `ticket.setStatus`: `board` and `status` are literals (a target with no reference allowed), so what is checked here is their form:
+ * the board is the number of a Project or its node id, the status is not blank. The option name itself is the board's and is looked up
+ * when the step runs (`board_status_unknown` lists the options).
+ */
+function checkBoardInputs(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const { board, status } = node;
+  if (
+    typeof board === "string" &&
+    !board.includes("{{") &&
+    !BOARD_REFERENCE.test(board)
+  )
+    c.report(
+      issue(
+        pointer(path, "board"),
+        "invalid_value",
+        '\'board\' is the number of a GitHub Project of the repository\'s owner (for example "7") or its node id ("PVT_…").',
+      ),
+    );
+  if (
+    typeof status === "string" &&
+    !status.includes("{{") &&
+    status.trim() === ""
+  )
+    c.report(
+      issue(
+        pointer(path, "status"),
+        "invalid_value",
+        "'status' is the name of an option of the board's Status field, not blank.",
+      ),
+    );
+}
+
+/** `ticket.requestReview`: `reviewers` is the text "project members" or a list of GitHub logins (a reference to a manual input is fine). */
+function checkReviewers(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const { reviewers } = node;
+  const refused = (at: string, what: string): void =>
+    c.report(
+      issue(
+        at,
+        "invalid_value",
+        `${what} 'reviewers' is "${PROJECT_MEMBERS}" or a list of GitHub logins.`,
+        [PROJECT_MEMBERS],
+      ),
+    );
+  if (typeof reviewers === "string") {
+    if (!reviewers.includes("{{") && reviewers !== PROJECT_MEMBERS)
+      refused(
+        pointer(path, "reviewers"),
+        `${shown(reviewers)} is no group of people.`,
+      );
+    return;
+  }
+  if (!Array.isArray(reviewers)) return;
+  if (reviewers.length === 0)
+    refused(pointer(path, "reviewers"), "The list is empty.");
+  reviewers.forEach((entry: unknown, position) => {
+    if (typeof entry !== "string" || entry.includes("{{")) return;
+    if (!GITHUB_LOGIN.test(entry))
+      refused(
+        pointer(path, "reviewers", position),
+        `${shown(entry)} is not a GitHub login.`,
+      );
+  });
 }
 
 /** Adding the label that starts the workflow would start it again, and again. */
@@ -832,12 +1019,13 @@ function checkNoRetrigger(
   path: string,
   c: Checker,
 ): void {
-  const label = c.triggerLabel?.trim().toLowerCase();
-  if (label === undefined || !Array.isArray(node.add)) return;
+  const labels = c.retriggerLabels;
+  if (labels === undefined || labels.length === 0 || !Array.isArray(node.add))
+    return;
   node.add.forEach((entry: unknown, position) => {
     if (typeof entry !== "string") return;
     const literal = literalText(parseTemplate(entry))?.trim().toLowerCase();
-    if (literal === label)
+    if (literal !== undefined && labels.includes(literal))
       c.report(
         issue(
           pointer(path, "add", position),
@@ -1000,6 +1188,7 @@ function checkLoop(
     });
   }
   const untilAt = pointer(path, "until");
+  if (bodyEnv !== undefined) c.probe?.(untilAt, bodyEnv, state);
   if (node.until === undefined)
     missing(
       path,
@@ -1057,6 +1246,7 @@ export function checkSteps(
       );
       continue;
     }
+    c.probe?.(at, env, state);
     const id = node.id;
     const validId = typeof id === "string" && isStepId(id, state.onFailure);
     if (id === undefined)

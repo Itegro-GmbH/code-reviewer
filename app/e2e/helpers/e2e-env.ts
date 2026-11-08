@@ -34,6 +34,9 @@ const catalogAdminAppPort =
 // The fake Stripe of the billing journey of a workspace (#505): the catalog admin app sends its Stripe API calls to it, so the port has to be
 // known when the app starts. The port after the catalog admin app unless E2E_STRIPE_PORT says otherwise.
 const stripeFakePort = Number(process.env.E2E_STRIPE_PORT) || appPort + 9;
+// The factory app of the browser journey of the factory pages (e2e/factory, #951): the product `factory` with the capability
+// `implementer`, single-tenant. The port after the fake Stripe's unless E2E_FACTORY_PORT says otherwise.
+const factoryAppPort = Number(process.env.E2E_FACTORY_PORT) || appPort + 10;
 // The fakes get ports of their own, picked once per run by the main Playwright process: random, so that two checkouts never
 // collide however their E2E_PORT values are chosen, below the ephemeral range of the kernel (the ports it gives to
 // outgoing connections: a fake inside it can find its port taken by a connection of the same run, `listen EADDRINUSE`,
@@ -166,6 +169,10 @@ export const e2eEnv = {
   /** The database of the catalog admin app (#554) (fresh for every run). */
   catalogAdminDatabaseUrl: appDatabase("catalog_admin").url,
   catalogAdminAppUrl: `http://127.0.0.1:${catalogAdminAppPort}`,
+  factoryAppPort,
+  /** The database of the factory app (#951) (fresh for every run). */
+  factoryDatabaseUrl: appDatabase("factory").url,
+  factoryAppUrl: `http://127.0.0.1:${factoryAppPort}`,
   stripeFakePort,
   /** The fake Stripe (`fakes/stripe`): the address of the catalog admin app's Stripe API calls (`STRIPE_API_BASE_URL`, test stack only). */
   stripeFakeUrl: `http://127.0.0.1:${stripeFakePort}`,
@@ -204,6 +211,7 @@ export const e2eEnv = {
     operator: "test-results/e2e-operator.log",
     catalog: "test-results/e2e-catalog.log",
     catalogAdmin: "test-results/e2e-catalog-admin.log",
+    factory: "test-results/e2e-factory.log",
   },
   /** The instance admin the journeys create when they set an app up. A dummy, as everything here. */
   adminEmail: "admin@e2e.test",

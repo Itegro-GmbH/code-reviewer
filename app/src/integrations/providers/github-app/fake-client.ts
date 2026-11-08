@@ -3,16 +3,18 @@
 // An in-memory GithubAppClient for unit tests of the provider: no HTTP, no GitHub. It answers from
 // plain data and records every call. (The real client is tested against the fake GitHub API.)
 import type {
+  BoardMove,
   CollaboratorPermission,
   GithubAppClient,
   IssueComment,
   PullRequestReview,
+  ReadIssue,
   ReadIssueComment,
   RemoteInstallation,
   RemoteRepository,
 } from "./client.ts";
 import { GithubAppError } from "./errors.ts";
-import type { PullRequestRef } from "../../types.ts";
+import type { PullRequestRef, TrackerItemFields } from "../../types.ts";
 
 /** An installation the way a test writes it: the permissions it holds (#749) are empty unless it says. */
 export type FakeRemoteInstallation = Omit<RemoteInstallation, "permissions"> &
@@ -36,6 +38,48 @@ export type FakeGithubAppClientData = {
   revokeFailure?: Error;
   /** Makes `listOpenPullRequests` reject with this error. */
   listPullRequestsFailure?: Error;
+  /** The pages `readTrackerIssues` answers, by "owner/name": page 1 is the first entry (#923). */
+  trackerIssuePages?: Record<string, TrackerItemFields[][]>;
+  /** The pages `readTrackerChecks` answers, by "owner/name" (#923): the pull requests in the order of their numbers, grouped as the walk reads them. */
+  trackerCheckPages?: Record<
+    string,
+    {
+      number: number;
+      checksState: string | null;
+      reviewRequestedFrom?: string[];
+      headSha?: string;
+      updatedAt?: string;
+    }[][]
+  >;
+  /** What `readChecksState` answers, by "owner/name@sha" (#923); a commit not listed has no checks. */
+  trackerChecks?: Record<string, string | null>;
+  /** The pages `readTrackerBoard` answers, by "owner/name"; `available: false` for none (#923). */
+  trackerBoardPages?: Record<
+    string,
+    { nodeId: string; status: string | null }[][]
+  >;
+  /** The pages `readTrackerBoard` answers for the board a project chose, by the board's id (#937); `available: false` for a board not listed. */
+  trackerChosenBoardPages?: Record<
+    string,
+    { nodeId: string; status: string | null }[][]
+  >;
+  /** What `readTrackerBoardStatus` answers, by node id (#932); a ticket not listed is on no board, `null`: boards cannot be read. */
+  trackerBoardStatuses?: Record<string, string | null> | null;
+  /** What `readTrackerBoardStatus` answers for a project's chosen board, by the board's id and the node id (#937); a ticket not listed is not on it. */
+  trackerChosenBoardStatuses?: Record<string, Record<string, string | null>>;
+  /** What `listRepositoryBoards` answers, by "owner/name"; `available: false` for a repository not listed (#922). */
+  repositoryBoards?: Record<
+    string,
+    {
+      projectV2Id: string;
+      number: number;
+      title: string;
+      statusFieldId: string | null;
+      statuses: string[];
+    }[]
+  >;
+  /** Makes the tracker reads reject with this error (#923). */
+  trackerFailure?: Error;
   /** Makes `createIssueComment` reject with this error. */
   commentFailure?: Error;
   /** Makes `openPullRequest` reject with this error (#844). */
@@ -46,6 +90,18 @@ export type FakeGithubAppClientData = {
   labelsFailure?: Error;
   /** The labels `changeIssueLabels` answers (#844). Default: the added ones. */
   labelsAfter?: string[];
+  /** Makes `requestPullRequestReviewers` reject with this error (#917). */
+  reviewersFailure?: Error;
+  /** The logins `requestPullRequestReviewers` answers (#917). Default: the ones asked for. */
+  reviewersAfter?: string[];
+  /** Makes `removePullRequestReviewers` reject with this error (#924). */
+  removeReviewersFailure?: Error;
+  /** The logins `removePullRequestReviewers` answers as still requested (#924). Default: none. */
+  removeReviewersAfter?: string[];
+  /** Makes `moveIssueOnBoard` reject with this error (#917). */
+  boardFailure?: Error;
+  /** What `moveIssueOnBoard` answers (#917). Default: moved to the status asked for. */
+  boardMove?: BoardMove;
   /** Makes `listIssueComments` reject with this error. */
   listCommentsFailure?: Error;
   /** What `listIssueComments` answers, by "owner/name#number". */
@@ -68,6 +124,10 @@ export type FakeGithubAppClientData = {
   defaultBranch?: string;
   /** The branches of every repository, by name, each with its head commit (#750). Default: the default branch only. */
   branches?: Record<string, string>;
+  /** What `getIssue` answers, by "owner/name#number" (#916); an issue not listed is not found. */
+  issues?: Record<string, ReadIssue>;
+  /** Makes `getIssue` reject with this error (#916). */
+  issueFailure?: Error;
   /** Makes `getRepositoryFacts`, `listBranches` and `getBranch` reject with this error (#750). */
   branchReadFailure?: Error;
 };
@@ -188,6 +248,19 @@ export function fakeGithubAppClient(
       if (data.branchReadFailure) throw data.branchReadFailure;
       return { defaultBranch: data.defaultBranch ?? "main" };
     },
+    async getIssue(installationId, scope, repoFullName, issueNumber, signal) {
+      record(
+        "getIssue",
+        installationId,
+        scope,
+        repoFullName,
+        issueNumber,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.issueFailure) throw data.issueFailure;
+      return data.issues?.[`${repoFullName}#${String(issueNumber)}`] ?? null;
+    },
     async listBranches(installationId, scope, repoFullName, signal) {
       record(
         "listBranches",
@@ -286,6 +359,26 @@ export function fakeGithubAppClient(
         url: `https://github.com/${repoFullName}/pull/${String(prNumber)}#issuecomment-5001`,
       };
     },
+    async updateIssueComment(
+      installationId,
+      scope,
+      repoFullName,
+      commentId,
+      body,
+      signal,
+    ) {
+      record(
+        "updateIssueComment",
+        installationId,
+        scope,
+        repoFullName,
+        commentId,
+        body,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.commentFailure) throw data.commentFailure;
+    },
     async openPullRequest(installationId, scope, repoFullName, input, signal) {
       record(
         "openPullRequest",
@@ -325,6 +418,71 @@ export function fakeGithubAppClient(
       throwIfAborted(signal);
       if (data.labelsFailure) throw data.labelsFailure;
       return data.labelsAfter ?? [...change.add];
+    },
+    async requestPullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      options,
+    ) {
+      record(
+        "requestPullRequestReviewers",
+        installationId,
+        scope,
+        repoFullName,
+        prNumber,
+        reviewers,
+        options?.skipRefused === true,
+        ...(options?.max === undefined ? [] : [options.max]),
+        ...(options?.signal === undefined ? [] : [options.signal]),
+      );
+      throwIfAborted(options?.signal);
+      if (data.reviewersFailure) throw data.reviewersFailure;
+      return data.reviewersAfter ?? [...reviewers];
+    },
+    async removePullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      signal,
+    ) {
+      record(
+        "removePullRequestReviewers",
+        installationId,
+        scope,
+        repoFullName,
+        prNumber,
+        reviewers,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.removeReviewersFailure) throw data.removeReviewersFailure;
+      return data.removeReviewersAfter ?? [];
+    },
+    async moveIssueOnBoard(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      move,
+      signal,
+    ) {
+      record(
+        "moveIssueOnBoard",
+        installationId,
+        scope,
+        repoFullName,
+        issueNumber,
+        move,
+        ...(signal === undefined ? [] : [signal]),
+      );
+      throwIfAborted(signal);
+      if (data.boardFailure) throw data.boardFailure;
+      return data.boardMove ?? { kind: "moved", status: move.status };
     },
     async createCheckRun(installationId, scope, repoFullName, input) {
       record("createCheckRun", installationId, scope, repoFullName, input);
@@ -405,6 +563,99 @@ export function fakeGithubAppClient(
         message,
       );
       if (data.reviewFailure) throw data.reviewFailure;
+    },
+    async readTrackerIssues(installationId, scope, repoFullName, page, since) {
+      record("readTrackerIssues", installationId, scope, repoFullName, page);
+      if (data.trackerFailure) throw data.trackerFailure;
+      // As GitHub answers: the least recently changed first, from `since` on, in pages as long as the longest page given.
+      const pages = data.trackerIssuePages?.[repoFullName] ?? [];
+      const size = Math.max(1, ...pages.map((entry) => entry.length));
+      const items = pages
+        .flat()
+        .filter((item) => since === undefined || item.updatedAt >= since)
+        .sort((a, b) =>
+          a.updatedAt < b.updatedAt ? -1 : a.updatedAt > b.updatedAt ? 1 : 0,
+        );
+      const slice = items.slice((page - 1) * size, page * size);
+      return { items: slice, last: slice.length < size, skipped: 0 };
+    },
+    async readTrackerChecks(installationId, scope, repoFullName, after) {
+      record("readTrackerChecks", installationId, scope, repoFullName, after);
+      if (data.trackerFailure) throw data.trackerFailure;
+      // The first page that still has a pull request after the number, cut to what comes after it.
+      const pages = (data.trackerCheckPages?.[repoFullName] ?? []).map((page) =>
+        page.filter((pullRequest) => pullRequest.number > after),
+      );
+      const index = pages.findIndex((page) => page.length > 0);
+      const pullRequests = index < 0 ? [] : (pages[index] ?? []);
+      return {
+        pullRequests: pullRequests.map((pullRequest) => ({
+          ...pullRequest,
+          headSha: pullRequest.headSha ?? "head-1",
+          updatedAt: pullRequest.updatedAt ?? new Date(0).toISOString(),
+        })),
+        last:
+          index < 0 ||
+          pages.slice(index + 1).every((page) => page.length === 0),
+        lastNumber: pullRequests.at(-1)?.number ?? null,
+      };
+    },
+    async readChecksState(installationId, scope, repoFullName, headSha) {
+      record("readChecksState", installationId, scope, repoFullName, headSha);
+      if (data.trackerFailure) throw data.trackerFailure;
+      return data.trackerChecks?.[`${repoFullName}@${headSha}`] ?? null;
+    },
+    async readTrackerBoard(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      boardId,
+    ) {
+      record(
+        "readTrackerBoard",
+        installationId,
+        scope,
+        repoFullName,
+        after,
+        boardId,
+      );
+      if (data.trackerFailure) throw data.trackerFailure;
+      const pages =
+        boardId === undefined
+          ? data.trackerBoardPages?.[repoFullName]
+          : data.trackerChosenBoardPages?.[boardId];
+      if (pages === undefined)
+        return { available: false, items: [], next: null };
+      const index = after === null ? 0 : Number(after);
+      return {
+        available: true,
+        items: pages[index] ?? [],
+        next: index + 1 < pages.length ? String(index + 1) : null,
+      };
+    },
+    async readTrackerBoardStatus(installationId, scope, nodeId, boardId) {
+      record("readTrackerBoardStatus", installationId, scope, nodeId, boardId);
+      if (data.trackerFailure) throw data.trackerFailure;
+      if (data.trackerBoardStatuses === null)
+        return { available: false, status: null };
+      if (boardId !== undefined)
+        return {
+          available: true,
+          status: data.trackerChosenBoardStatuses?.[boardId]?.[nodeId] ?? null,
+        };
+      return {
+        available: true,
+        status: data.trackerBoardStatuses?.[nodeId] ?? null,
+      };
+    },
+    async listRepositoryBoards(installationId, scope, repoFullName) {
+      record("listRepositoryBoards", installationId, scope, repoFullName);
+      if (data.trackerFailure) throw data.trackerFailure;
+      const boards = data.repositoryBoards?.[repoFullName];
+      return boards === undefined
+        ? { available: false, boards: [] }
+        : { available: true, boards };
     },
     async revokeInstallationToken(token) {
       record("revokeInstallationToken", token);

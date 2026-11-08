@@ -48,6 +48,7 @@ import {
 } from "./contract.ts";
 import { WORKER_CREDENTIAL_PATTERN } from "../jobs/worker-credential.ts";
 import { checkCallTrace } from "./call-trace.ts";
+import { boundAgentAsk } from "../db/agent-ask.ts";
 import { boundAgentResult, type AgentResultValue } from "../db/agent-result.ts";
 
 export type Parsed<T> =
@@ -1088,6 +1089,7 @@ function parseImplementerResult(
       "checkedOut",
       "resume",
       "agentResult",
+      "agentAsk",
     ],
     prefix,
   );
@@ -1167,6 +1169,9 @@ function parseImplementerResult(
     const bounded = boundAgentResult(value.agentResult);
     if (bounded.ok) agentResult = bounded.value;
   }
+  // #920: the question the agent ended the turn with, within its bounds, or none; one that is not is left out, like a result.
+  const agentAsk =
+    value.agentAsk === undefined ? undefined : boundAgentAsk(value.agentAsk);
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1207,6 +1212,7 @@ function parseImplementerResult(
     ...(value.checkedOut === undefined ? {} : { checkedOut }),
     ...(resume === undefined ? {} : { resume }),
     ...(agentResult === undefined ? {} : { agentResult }),
+    ...(agentAsk === undefined ? {} : { agentAsk }),
   };
 }
 

@@ -44,6 +44,34 @@ describe("requesting JSON from the app", () => {
     expect(seen[0]?.init.credentials).toBe("same-origin");
   });
 
+  it("reads the `path` the project and tracker routes name an issue by, as well as the `field` of the older routes", async () => {
+    const result = await requestJson(
+      answering(400, {
+        error: "PROJECT_REQUEST_INVALID",
+        issues: [
+          {
+            path: "board.projectV2Id",
+            code: "unknown_board",
+            message: "m",
+            available: ["PVT_1"],
+          },
+          { field: "maxTokens", code: "TOO_SMALL" },
+        ],
+      }),
+      "PUT",
+      "/api/x",
+      {},
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      issues: [
+        { field: "board.projectV2Id", code: "unknown_board" },
+        { field: "maxTokens", code: "TOO_SMALL" },
+      ],
+    });
+  });
+
   it("returns the error code and the field issues of a refusal", async () => {
     const result = await requestJson(
       answering(400, {
@@ -162,5 +190,23 @@ describe("requesting JSON from the app", () => {
       ok: false,
       issues: [{ field: "model", code: "EMPTY" }],
     });
+  });
+
+  it("hands an abort signal to fetch", async () => {
+    const seen: (AbortSignal | null | undefined)[] = [];
+    const controller = new AbortController();
+    await requestJson(
+      (_url, init) => {
+        seen.push(init?.signal);
+        return Promise.resolve(
+          new Response(JSON.stringify({}), { status: 200 }),
+        );
+      },
+      "POST",
+      "/api/x",
+      {},
+      controller.signal,
+    );
+    expect(seen).toEqual([controller.signal]);
   });
 });

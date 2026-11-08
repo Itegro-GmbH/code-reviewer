@@ -11,8 +11,17 @@ export const STEPS_MAX = 50;
 export const NESTING_DEPTH_MAX = 4;
 /** How deep `loop` may nest inside `loop`. */
 export const LOOP_NESTING_MAX = 2;
+/** Triggers one workflow may have (#916). */
+export const TRIGGERS_MAX = 10;
 /** Workflow budget in USD when the document names none. */
 export const BUDGET_DEFAULT_USD = 20;
+/**
+ * The time one agent turn of a workflow may run, in minutes (#918): the bounds of `turnTimeLimitMinutes` and what a document without it gets.
+ * The maximum is the 3600 seconds the Dispatcher gives the VM of an Implementer turn: more would be cut without the final push.
+ */
+export const TURN_TIME_LIMIT_MINUTES_MIN = 15;
+export const TURN_TIME_LIMIT_MINUTES_MAX = 60;
+export const TURN_TIME_LIMIT_MINUTES_DEFAULT = 60;
 /** What the operator allows a workflow to spend, until the operator can set it (the service takes it as a parameter). */
 export const BUDGET_OPERATOR_MAX_USD = 100;
 /** A serialized document may not be larger than this (UTF-8 bytes). */
@@ -53,8 +62,11 @@ export const LIST_MAX_ITEMS_LIMIT = 1000;
 /** A workflow id as the routes take it (`/workflows/<id>`); longer is "not found". Its own bound, not that of a step id. */
 export const WORKFLOW_ID_MAX_LENGTH = 64;
 
-/** Per workspace. */
-export const WORKFLOWS_PER_WORKSPACE_MAX = 100;
+/**
+ * Per project (#937; it was per workspace): the lanes that are not archived. A lane without a project counts with the other lanes without one.
+ * Per project so that copying the built-in lanes into every project cannot use up the room of the workspace.
+ */
+export const WORKFLOWS_PER_PROJECT_MAX = 100;
 /**
  * Per workspace: archived workflows stay (their versions are history), but not without bound. At the maximum an archive is refused
  * (`WORKFLOW_ARCHIVE_LIMIT_REACHED`), so archiving and creating again cannot grow the rows for ever; creating and saving go on.

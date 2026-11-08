@@ -15,6 +15,9 @@ import {
   NAME_MAX_LENGTH,
   RESULT_ENUM_VALUES_MAX,
   RESULT_PROPERTIES_MAX,
+  TURN_TIME_LIMIT_MINUTES_DEFAULT,
+  TURN_TIME_LIMIT_MINUTES_MAX,
+  TURN_TIME_LIMIT_MINUTES_MIN,
 } from "../../src/workflows/limits.ts";
 import { validateResultSchema } from "../../src/workflows/result-schema.ts";
 import { createResolver } from "../../src/workflows/resolver.ts";
@@ -74,10 +77,20 @@ describe("the workflow contract", () => {
       "PullRequestOpenAction",
       "IssueCommentAction",
       "IssueLabelsAction",
+      "TicketCommentAction",
+      "TicketLabelsAction",
+      "TicketSetStatusAction",
+      "TicketRequestReviewAction",
+      "PullRequestCommentAction",
     ]) {
       const def = defs[name] as Json;
       const properties = def.properties as Record<string, Json>;
-      byConnector.set((properties.connector as Json).const as string, def);
+      const connector = properties.connector as Json;
+      // A definition names its connector as a constant, or as a list when it is also known by another name (#917).
+      for (const connectorName of (connector.enum ?? [
+        connector.const,
+      ]) as string[])
+        byConnector.set(connectorName, def);
     }
 
     expect([...byConnector.keys()].sort()).toEqual(
@@ -108,12 +121,29 @@ describe("the workflow contract", () => {
       string,
       Json
     >;
-    const triggerKinds = (
-      ["ManualTrigger", "IssueLabeledTrigger"] as const
-    ).map(
-      (name) => (((defs[name] as Json).properties as Json).kind as Json).const,
-    );
-
+    // The kinds of the entries of `triggers` (each def states its `kind` as a constant or a list of names).
+    const kindOf = (name: string): string[] => {
+      const kind = (((defs[name] as Json).properties as Json).kind ??
+        {}) as Json;
+      return (kind.const !== undefined ? [kind.const] : kind.enum) as string[];
+    };
+    const triggerKinds = [
+      "ManualTriggerEntry",
+      "TicketLabeledTriggerEntry",
+      "PullRequestPushedTriggerEntry",
+      "ScheduleTriggerEntry",
+    ].flatMap(kindOf);
+    // `api` shares the definition of `manual`; the legacy `trigger` states the same kinds.
+    expect(
+      [
+        "ManualTrigger",
+        "TicketLabeledTrigger",
+        "PullRequestPushedTrigger",
+        "ScheduleTrigger",
+      ]
+        .flatMap(kindOf)
+        .sort(),
+    ).toEqual([...triggerKinds].sort());
     expect(triggerKinds.sort()).toEqual([...TRIGGER_KINDS].sort());
     const loopRounds = ((defs.LoopStep as Json).properties as Json)
       .maxRounds as Json;
@@ -123,6 +153,13 @@ describe("the workflow contract", () => {
     });
     const objectProps = ((resultDefs.ObjectSchema as Json).properties as Json)
       .properties as Json;
+    expect(
+      ((defs.Workflow as Json).properties as Json).turnTimeLimitMinutes,
+    ).toMatchObject({
+      minimum: TURN_TIME_LIMIT_MINUTES_MIN,
+      maximum: TURN_TIME_LIMIT_MINUTES_MAX,
+      default: TURN_TIME_LIMIT_MINUTES_DEFAULT,
+    });
     expect(objectProps.maxProperties).toBe(RESULT_PROPERTIES_MAX);
     const enumDef = ((resultDefs.StringSchema as Json).properties as Json)
       .enum as Json;
@@ -159,6 +196,21 @@ describe("the workflow contract", () => {
 
 type Case = [name: string, edit: (document: Json) => void];
 
+/** The workflow the way it was written before #916: the single `trigger`, `edit` applied to it. */
+const legacy =
+  (trigger: unknown): ((document: Json) => void) =>
+  (document) => {
+    delete document.triggers;
+    document.trigger = trigger;
+  };
+const TICKET_INPUT = {
+  type: "object",
+  required: ["ticket"],
+  properties: { ticket: { type: "ticket" } },
+};
+const entry = (document: Json, at: number): Json =>
+  (document.triggers as Json[])[at] as Json;
+const inputOf = (document: Json): Json => entry(document, 1).input as Json;
 const first = (document: Json): Json => steps(document)[0] as Json;
 const loop = (document: Json): Json => steps(document)[1] as Json;
 const implement = (document: Json): Json =>
@@ -177,7 +229,7 @@ const WORKFLOW_CASES: Case[] = [
   ["an empty name", (d) => (d.name = "")],
   ["a name of numbers", (d) => (d.name = 4)],
   ["a key it does not know", (d) => (d.extra = 1)],
-  ["no trigger", (d) => delete d.trigger],
+  ["no triggers", (d) => delete d.triggers],
   ["no steps", (d) => delete d.steps],
   ["an empty list of steps", (d) => (d.steps = [])],
   ["steps that are no list", (d) => (d.steps = {})],
@@ -200,32 +252,135 @@ const WORKFLOW_CASES: Case[] = [
   ],
   ["a budget of zero", (d) => (d.budgetUsd = 0)],
   ["a budget that is a text", (d) => (d.budgetUsd = "20")],
-  ["a description that is a number", (d) => (d.description = 5)],
-  ["a trigger of an unknown kind", (d) => (d.trigger = { kind: "cron" })],
-  ["a trigger without a kind", (d) => (d.trigger = {})],
+  ["a turn time limit under 15 minutes", (d) => (d.turnTimeLimitMinutes = 14)],
+  ["a turn time limit over 60 minutes", (d) => (d.turnTimeLimitMinutes = 61)],
   [
-    "an issue trigger without a label",
-    (d) => (d.trigger = { kind: "github.issueLabeled" }),
+    "a turn time limit that is not whole",
+    (d) => (d.turnTimeLimitMinutes = 30.5),
   ],
+  ["a turn time limit that is a text", (d) => (d.turnTimeLimitMinutes = "60")],
+  ["a description that is a number", (d) => (d.description = 5)],
+  // The single `trigger` of the format before #916 (#916): the same forms, without `id` and `steps`.
+  ["a trigger of an unknown kind", legacy({ kind: "cron" })],
+  ["a trigger without a kind", legacy({})],
+  ["an issue trigger without a label", legacy({ kind: "github.issueLabeled" })],
   [
     "an issue trigger with an empty label",
-    (d) => (d.trigger = { kind: "github.issueLabeled", label: "" }),
+    legacy({ kind: "github.issueLabeled", label: "" }),
   ],
-  [
-    "a manual trigger with a label",
-    (d) => (d.trigger = { kind: "manual", label: "x" }),
-  ],
+  ["a manual trigger with a label", legacy({ kind: "manual", label: "x" })],
   [
     "a manual trigger with an input schema",
-    (d) =>
-      (d.trigger = {
-        kind: "manual",
-        input: { type: "object", properties: { a: { type: "string" } } },
-      }),
+    legacy({
+      kind: "manual",
+      input: { type: "object", properties: { a: { type: "string" } } },
+    }),
   ],
   [
     "a manual trigger with a bad input schema",
-    (d) => (d.trigger = { kind: "manual", input: { type: "list" } }),
+    legacy({ kind: "manual", input: { type: "list" } }),
+  ],
+  ["a legacy trigger with an id", legacy({ kind: "manual", id: "m" })],
+  ["a legacy trigger with steps", legacy({ kind: "manual", steps: [] })],
+  [
+    "a legacy label trigger of the new name",
+    legacy({ kind: "ticket.labeled", label: "x" }),
+  ],
+  ["a legacy api trigger", legacy({ kind: "api", input: TICKET_INPUT })],
+  ["a legacy schedule", legacy({ kind: "schedule", cron: "0 6 * * 1" })],
+  ["a legacy schedule without a cron", legacy({ kind: "schedule" })],
+  // #916: several triggers, each with pre-steps
+  ["both trigger and triggers", (d) => (d.trigger = entry(d, 0))],
+  ["an empty list of triggers", (d) => (d.triggers = [])],
+  ["eleven triggers", (d) => (d.triggers = Array(11).fill(entry(d, 0)))],
+  ["triggers that are no list", (d) => (d.triggers = {})],
+  ["a trigger that is no object", (d) => ((d.triggers as unknown[])[0] = 3)],
+  ["a trigger without an id", (d) => delete entry(d, 0).id],
+  [
+    "a trigger with an id that starts with a digit",
+    (d) => (entry(d, 0).id = "1a"),
+  ],
+  ["a trigger with the id trigger", (d) => (entry(d, 0).id = "trigger")],
+  [
+    "a trigger of an unknown kind in the list",
+    (d) => (entry(d, 1).kind = "cron"),
+  ],
+  ["a trigger without a kind in the list", (d) => delete entry(d, 1).kind],
+  ["a label trigger without a label", (d) => delete entry(d, 0).label],
+  [
+    "a label trigger that is the old name",
+    (d) => (entry(d, 0).kind = "github.issueLabeled"),
+  ],
+  [
+    "a manual trigger with a label in the list",
+    (d) => (entry(d, 1).label = "x"),
+  ],
+  ["an api trigger", (d) => (entry(d, 1).kind = "api")],
+  ["pre-steps that are no list", (d) => (entry(d, 1).steps = {})],
+  ["pre-steps with a step that is no object", (d) => (entry(d, 1).steps = [3])],
+  ["an empty list of pre-steps", (d) => (entry(d, 1).steps = [])],
+  ["pre-steps on a trigger without an input", (d) => delete entry(d, 1).input],
+  ["a pull request trigger", (d) => (entry(d, 0).kind = "pullRequest.pushed")],
+  [
+    "a pull request trigger with a label",
+    (d) => {
+      entry(d, 0).kind = "pullRequest.pushed";
+    },
+  ],
+  [
+    "a schedule",
+    (d) => {
+      entry(d, 0).kind = "schedule";
+      delete entry(d, 0).label;
+      entry(d, 0).cron = "0 6 * * 1";
+    },
+  ],
+  [
+    "a schedule with a cron of six fields",
+    (d) => {
+      entry(d, 0).kind = "schedule";
+      delete entry(d, 0).label;
+      entry(d, 0).cron = "0 0 6 * * 1";
+    },
+  ],
+  ["a ticket that is not required", (d) => (inputOf(d).required = [])],
+  [
+    "a ticket under another name",
+    (d) => {
+      const properties = inputOf(d).properties as Json;
+      properties.task = properties.ticket;
+      delete properties.ticket;
+      inputOf(d).required = ["task"];
+    },
+  ],
+  [
+    "a ticket in a list",
+    (d) => {
+      (inputOf(d).properties as Json).many = {
+        type: "array",
+        items: { type: "ticket" },
+      };
+    },
+  ],
+  [
+    "a ticket inside an object",
+    (d) => {
+      (inputOf(d).properties as Json).nested = {
+        type: "object",
+        properties: { ticket: { type: "ticket" } },
+      };
+    },
+  ],
+  [
+    "a ticket with a keyword it does not have",
+    (d) => (((inputOf(d).properties as Json).ticket as Json).maxLength = 3),
+  ],
+  [
+    "a ticket in the result of an agent step",
+    (d) =>
+      (((implement(d).result as Json).properties as Json).t = {
+        type: "ticket",
+      }),
   ],
   ["a step that is no object", (d) => (steps(d)[0] = 3 as unknown as Json)],
   ["a step without an id", (d) => delete first(d).id],
@@ -300,16 +455,13 @@ const WORKFLOW_CASES: Case[] = [
   ],
   [
     "a label of only spaces",
-    (d) => (d.trigger = { kind: "github.issueLabeled", label: " " }),
+    legacy({ kind: "github.issueLabeled", label: " " }),
   ],
   [
     "a label of 101 emoji",
-    (d) =>
-      (d.trigger = {
-        kind: "github.issueLabeled",
-        label: "\u{1F600}".repeat(101),
-      }),
+    legacy({ kind: "github.issueLabeled", label: "\u{1F600}".repeat(101) }),
   ],
+  ["a label of only spaces in the list", (d) => (entry(d, 0).label = " ")],
   [
     "a text of 20001 emoji",
     (d) => (implement(d).instruction = "\u{1F600}".repeat(20001)),

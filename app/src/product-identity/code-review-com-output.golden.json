@@ -182,7 +182,13 @@
       "description": "Automatic pull request reviews by code-review.com.",
       "public": true,
       "request_oauth_on_install": false,
-      "default_events": ["pull_request", "issue_comment"],
+      "default_events": [
+        "pull_request",
+        "issue_comment",
+        "issues",
+        "sub_issues",
+        "check_suite"
+      ],
       "default_permissions": {
         "pull_requests": "write",
         "issues": "write",

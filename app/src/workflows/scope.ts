@@ -39,8 +39,15 @@ export type Binding = {
   unavailable: Readonly<Record<string, string>>;
   /** The result schema of the step failed its own check, which is reported where it is written: any other name is unknown, not an error. */
   open?: boolean;
+  /** Of an action: the connector it names, so a reference to its output can tell what produced the value (#917). */
+  connector?: string;
   /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
   agent?: { profile?: string; environment?: string };
+  /**
+   * Of `trigger` when the workflow has several triggers (#916): what each one yields. `type` is what ALL of them yield, the only part
+   * the steps after the triggers may read; a field that only some yield is `reference_not_in_scope`, naming a trigger that lacks it.
+   */
+  triggers?: readonly { id: string; type: ObjectType | { kind: "unknown" } }[];
 };
 
 export type LoopFrame = {
@@ -115,6 +122,8 @@ export type StepInfo = {
   kind: string;
   /** The `if` branches around it, outermost first. */
   branches: { ifId: string; branch: "then" | "else" }[];
+  /** Of a pre-step (#916): the trigger it belongs to and the pointer of its pre-steps. It runs for that trigger only. */
+  preStepOf?: { id: string; path: string };
 };
 
 export type Use = {
@@ -196,6 +205,14 @@ function whyNotReachable(
       code: "reference_to_later_step",
       message: `${shown(info.id)} is still running here: it contains this step, and its values exist only when it has ended. Use a step that ends before.`,
     };
+  if (
+    info.preStepOf !== undefined &&
+    !isPrefix(info.preStepOf.path, use.nodePath)
+  )
+    return {
+      code: "reference_not_in_scope",
+      message: `${shown(info.id)} is a pre-step of trigger ${clip(info.preStepOf.id)}, which does not run for this one. Only the pre-steps of the trigger that fired run, so a step outside them cannot rely on its values.`,
+    };
   const later =
     comparePaths(info.path, use.nodePath) > 0 &&
     !isPrefix(use.nodePath, info.path);
@@ -212,6 +229,18 @@ function whyNotReachable(
     code: "reference_to_later_step",
     message: `${shown(info.id)} (${info.path}) comes later than this text, or is this step itself. Steps run in order and can only use what ran before them.`,
   };
+}
+
+/** The id of a trigger that does not yield `name` while another one does, or undefined (nobody yields it, or all do). */
+function whoLacks(
+  triggers: NonNullable<Binding["triggers"]>,
+  name: string,
+): string | undefined {
+  const yields = (type: ObjectType | { kind: "unknown" }): boolean =>
+    type.kind !== "object" || Object.hasOwn(type.fields, name);
+  if (!triggers.some((t) => t.type.kind === "object" && yields(t.type)))
+    return undefined;
+  return triggers.find((t) => !yields(t.type))?.id;
 }
 
 function descend(
@@ -251,6 +280,18 @@ function descend(
         );
       if (position === 0 && binding.open === true) return { type: UNKNOWN };
       const known = Object.keys(current.fields);
+      const lacking =
+        position === 0 && binding.triggers !== undefined
+          ? whoLacks(binding.triggers, name)
+          : undefined;
+      if (lacking !== undefined)
+        return fail(
+          context,
+          use,
+          "reference_not_in_scope",
+          `${shown(`${binding.id}.${name}`)} is not yielded by every trigger: the trigger ${shown(lacking)} has no ${shown(name)}. The steps after the triggers run for each of them and read only what all of them yield: ${listNames(known)}. Give ${shown(lacking)} a pre-step or an input that yields it, or leave the reference out.`,
+          known,
+        );
       return fail(
         context,
         use,

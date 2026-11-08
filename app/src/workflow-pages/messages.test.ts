@@ -74,8 +74,20 @@ describe("the copy of the workflow pages", () => {
     ).toContain('"Issues: Read and write"');
   });
 
+  // #913-T05
+  it("names the permissions of the action that opens a pull request, which asks for the contents too", () => {
+    const text = describeStepFailure(
+      "github_permission_missing",
+      'The GitHub App of this workspace may not open pull requests: it needs the permission "Pull requests: Read and write and Contents: Read-only". The owner has to grant it.',
+    );
+    expect(text).toContain(
+      '"Pull requests: Read and write and Contents: Read-only"',
+    );
+    expect(text).not.toContain("lacks a permission this action needs");
+  });
+
   // #873-T25
-  it("names no permission that is not one of the two known ones, or when the message has none", () => {
+  it("names no permission that is not one of the known ones, or when the message has none", () => {
     for (const message of [
       'it needs the permission "Administration: Read and write".',
       "<script>alert(1)</script>",

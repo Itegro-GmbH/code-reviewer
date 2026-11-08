@@ -2,6 +2,7 @@
 
 // #909: what the engine hands the Implementer as the branches of an agent step. The base branch is the run's, whatever the step starts
 // from; a step with `branch` starts from that branch (`startBranch`), a step without one starts at the tip of the base.
+// #918: the engine also hands the Implementer the time limit of the document (`turnTimeLimitMinutes`) with the cap of the budget.
 import { describe, expect, it, vi } from "vitest";
 import type {
   StoredStepRun,
@@ -16,10 +17,14 @@ const NOW = new Date("2026-11-06T12:00:00.000Z");
 const RUN_ID = "7f0c1b3e-aaaa-4bbb-8ccc-0123456789ab";
 const IMPLEMENT_BRANCH = `workflow/${RUN_ID}/implement`;
 
-const documentOf = (branch: string | undefined) => ({
+const documentOf = (
+  branch: string | undefined,
+  turnTimeLimitMinutes?: number,
+) => ({
   version: 1,
   name: "Issue to PR",
   trigger: { kind: "github.issueLabeled", label: "agent" },
+  ...(turnTimeLimitMinutes === undefined ? {} : { turnTimeLimitMinutes }),
   steps: [
     {
       id: "implement",
@@ -58,6 +63,8 @@ function stepRow(overrides: Partial<StoredStepRun>): StoredStepRun {
     output: JSON.stringify({ branch: IMPLEMENT_BRANCH }),
     errorCode: null,
     errorMessage: null,
+    ask: null,
+    waitingOnCommentId: null,
     createdAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     startedAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
     finishedAt: null,
@@ -66,7 +73,7 @@ function stepRow(overrides: Partial<StoredStepRun>): StoredStepRun {
 }
 
 /** A run whose second step is claimed and has not started its turn yet: the engine starts it. */
-function harness(branch: string | undefined) {
+function harness(branch: string | undefined, turnTimeLimitMinutes?: number) {
   const run: StoredWorkflowRun = {
     id: RUN_ID,
     workspaceId: "w-1",
@@ -81,10 +88,14 @@ function harness(branch: string | undefined) {
     spentMicroUsd: 0,
     clientRequestId: "request-1",
     triggerKind: "github.issueLabeled",
+    triggerId: null,
     createdBy: null,
     actorLogin: "octocat",
     cancelRequestedAt: null,
+    discardedAt: null,
+    pauseRequestedAt: null,
     failure: null,
+    ticketRef: null,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
     finishedAt: null,
@@ -130,7 +141,7 @@ function harness(branch: string | undefined) {
     workflows: {
       getVersion: async () =>
         ({
-          document: JSON.stringify(documentOf(branch)),
+          document: JSON.stringify(documentOf(branch, turnTimeLimitMinutes)),
           createdBy: "owner-1",
         }) as never,
     },
@@ -182,5 +193,33 @@ describe("the branches an agent step starts its session with", () => {
     const task = app.startTask.mock.calls[0]?.[1];
     expect(task).toMatchObject({ baseBranch: "main" });
     expect(task).not.toHaveProperty("startBranch");
+  });
+});
+
+describe("the time limit of a turn", () => {
+  // #918-T04
+  it("hands the Implementer the turnTimeLimitMinutes of the document with the cap of the budget", async () => {
+    const app = harness(undefined, 15);
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.startTask).toHaveBeenCalledTimes(1);
+    expect(app.startTask.mock.calls[0]?.[2]).toEqual({
+      costCapCents: 500,
+      timeLimitMinutes: 15,
+      // The engine's own request ids (`wf-...`) are reserved for it and pass the parser under this trust.
+      workflowStep: true,
+    });
+  });
+
+  // #918-T05
+  it("gives a document without the field the default of 60 minutes", async () => {
+    const app = harness(undefined);
+
+    await app.engine.advance(RUN_ID);
+
+    expect(app.startTask.mock.calls[0]?.[2]).toMatchObject({
+      timeLimitMinutes: 60,
+    });
   });
 });

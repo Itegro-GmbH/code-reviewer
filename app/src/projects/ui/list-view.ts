@@ -31,6 +31,8 @@ export const noRunsYet: LastRunSource = async () => new Map();
 
 export type ProjectRowView = {
   repositoryId: string;
+  /** The id of the project the repository is; none while it is not one yet. */
+  projectId: string | null;
   fullName: string;
   /** The repository's address at the platform when it is a web address, otherwise null. */
   url: string | null;
@@ -50,6 +52,7 @@ function toRowView(
 ): ProjectRowView {
   return {
     repositoryId: repository.id,
+    projectId: project?.id ?? null,
     fullName: repository.fullName,
     url: webAddress(repository.url),
     installation: repository.integration.displayName,

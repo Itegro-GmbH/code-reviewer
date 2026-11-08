@@ -28,6 +28,7 @@ import {
 import type { GithubAppConfig } from "./config.ts";
 import { GithubAppError } from "./errors.ts";
 import { parseGithubEvent } from "./events.ts";
+import { parseTrackerChange } from "./tracker-events.ts";
 import {
   BRANCH_READ_TOKEN_PERMISSIONS,
   CHECK_TOKEN_PERMISSIONS,
@@ -35,9 +36,13 @@ import {
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   COMMENT_READ_TOKEN_PERMISSIONS,
+  BOARD_STATUS_TOKEN_PERMISSIONS,
   ISSUE_ACTION_TOKEN_PERMISSIONS,
   NOTICE_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
+  REVIEW_REQUEST_TOKEN_PERMISSIONS,
+  TRACKER_BOARD_TOKEN_PERMISSIONS,
+  TRACKER_READ_TOKEN_PERMISSIONS,
   VERDICT_TOKEN_PERMISSIONS,
   jobTokenRepositoryIds,
   toImplementerAccessError,
@@ -440,9 +445,10 @@ export function createGithubAppProvider(
             return {
               url: `${repo.url}/issues/${String(issueNumber)}#issuecomment-${found.id}`,
               existing: true,
+              id: found.id,
             };
         }
-        const { url } = await client.createIssueComment(
+        const { url, id } = await client.createIssueComment(
           integration.externalId,
           scope,
           repo.fullName,
@@ -450,9 +456,42 @@ export function createGithubAppProvider(
           body,
           signal,
         );
-        return { url, existing: false };
+        return { url, existing: false, id };
       } catch (error) {
         throw toActionError(error);
+      }
+    },
+
+    async updateIssueComment(integration, repo, commentId, body, signal) {
+      try {
+        await (
+          await getClient()
+        ).updateIssueComment(
+          integration.externalId,
+          actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
+          repo.fullName,
+          commentId,
+          body,
+          signal,
+        );
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async readIssue(integration, repo, issueNumber, signal) {
+      try {
+        return await (
+          await getClient()
+        ).getIssue(
+          integration.externalId,
+          actionScope(integration, repo, COMMENT_READ_TOKEN_PERMISSIONS),
+          repo.fullName,
+          issueNumber,
+          signal,
+        );
+      } catch (error) {
+        throw toReadError(error);
       }
     },
 
@@ -470,6 +509,61 @@ export function createGithubAppProvider(
             signal,
           ),
         };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async requestReviewers(integration, repo, prNumber, reviewers, options) {
+      try {
+        return {
+          requested: await (
+            await getClient()
+          ).requestPullRequestReviewers(
+            integration.externalId,
+            actionScope(integration, repo, REVIEW_REQUEST_TOKEN_PERMISSIONS),
+            repo.fullName,
+            prNumber,
+            reviewers,
+            options,
+          ),
+        };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async removeReviewers(integration, repo, prNumber, reviewers, signal) {
+      try {
+        return {
+          requested: await (
+            await getClient()
+          ).removePullRequestReviewers(
+            integration.externalId,
+            actionScope(integration, repo, REVIEW_REQUEST_TOKEN_PERMISSIONS),
+            repo.fullName,
+            prNumber,
+            reviewers,
+            signal,
+          ),
+        };
+      } catch (error) {
+        throw toActionError(error);
+      }
+    },
+
+    async setTicketStatus(integration, repo, issueNumber, move, signal) {
+      try {
+        return await (
+          await getClient()
+        ).moveIssueOnBoard(
+          integration.externalId,
+          actionScope(integration, repo, BOARD_STATUS_TOKEN_PERMISSIONS),
+          repo.fullName,
+          issueNumber,
+          move,
+          signal,
+        );
       } catch (error) {
         throw toActionError(error);
       }
@@ -760,6 +854,144 @@ export function createGithubAppProvider(
         return await (
           await getClient()
         ).listOpenPullRequests(integration.externalId, repo.fullName, signal);
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async parseTrackerChange(integration, request) {
+      const payload = await readJson(request);
+      if (payload === undefined)
+        return { kind: "ignored", reason: "the body is not valid JSON" };
+      return parseTrackerChange({
+        integrationId: integration.id,
+        eventName: request.headers.get("x-github-event") ?? "",
+        payload,
+      });
+    },
+
+    async readTrackerPage(integration, repo, step, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      const scope = (permissions: InstallationPermissions): JobTokenScope => ({
+        repositoryIds,
+        permissions,
+      });
+      try {
+        const client = await getClient();
+        if (step.phase === "issues") {
+          const page = await client.readTrackerIssues(
+            integration.externalId,
+            scope(TRACKER_READ_TOKEN_PERMISSIONS),
+            repo.fullName,
+            step.page,
+            step.since,
+            signal,
+          );
+          return {
+            phase: "issues",
+            items: page.items,
+            last: page.last,
+            skipped: page.skipped,
+          };
+        }
+        if (step.phase === "checks") {
+          const page = await client.readTrackerChecks(
+            integration.externalId,
+            scope(TRACKER_READ_TOKEN_PERMISSIONS),
+            repo.fullName,
+            step.after,
+            signal,
+          );
+          return {
+            phase: "checks",
+            pullRequests: page.pullRequests,
+            last: page.last,
+            lastNumber: page.lastNumber,
+          };
+        }
+        const page = await client.readTrackerBoard(
+          integration.externalId,
+          scope(TRACKER_BOARD_TOKEN_PERMISSIONS),
+          repo.fullName,
+          step.after,
+          step.boardId,
+          signal,
+        );
+        return { phase: "board", ...page };
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async readBoardStatus(integration, repo, nodeId, boardId, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      try {
+        return await (
+          await getClient()
+        ).readTrackerBoardStatus(
+          integration.externalId,
+          { repositoryIds, permissions: TRACKER_BOARD_TOKEN_PERMISSIONS },
+          nodeId,
+          boardId,
+          signal,
+        );
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async listBoards(integration, repo, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      try {
+        const answer = await (
+          await getClient()
+        ).listRepositoryBoards(
+          integration.externalId,
+          {
+            repositoryIds,
+            permissions: TRACKER_BOARD_TOKEN_PERMISSIONS,
+          },
+          repo.fullName,
+          signal,
+        );
+        return answer;
+      } catch (error) {
+        throw toReadError(error);
+      }
+    },
+
+    async readChecksState(integration, repo, headSha, signal) {
+      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
+      if (repo.integrationId !== integration.id || repositoryIds === null)
+        throw new IntegrationError(
+          "INTEGRATION_ACCESS_SCOPE_REFUSED",
+          "The repository does not belong to this integration or has no usable id.",
+        );
+      try {
+        return await (
+          await getClient()
+        ).readChecksState(
+          integration.externalId,
+          { repositoryIds, permissions: TRACKER_READ_TOKEN_PERMISSIONS },
+          repo.fullName,
+          headSha,
+          signal,
+        );
       } catch (error) {
         throw toReadError(error);
       }

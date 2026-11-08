@@ -21,10 +21,36 @@ export type WorkflowRunsApi = {
   /** Starts a run by hand. The same `clientRequestId` with the same input answers the run it made before. */
   start(
     workflowId: string,
-    body: { input: Record<string, unknown>; clientRequestId: string },
+    body: {
+      trigger?: string;
+      input: Record<string, unknown>;
+      clientRequestId: string;
+    },
   ): Promise<RequestResult<{ run: RunView }>>;
-  /** Stops a run (#891). `requested`: it is told to stop; a repeat and a run that is over answer with their own outcome. */
-  cancel(
+  /** Answers the question the run waits for (#920): the question the page showed, and an option by its number from 1 and/or a text. */
+  answer(
+    workflowId: string,
+    runId: string,
+    body: {
+      question: { stepRunId: string; n: number };
+      choice?: number;
+      text?: string;
+    },
+  ): Promise<RequestResult<{ run: RunView }>>;
+  /**
+   * Discards a run, whatever state it is in (#921): `discarded`, or `already_discarded` for a repeat. The run in the answer is the discarded
+   * one (the page of a run that is over does not poll any more, so this is how it shows).
+   */
+  discard(
+    workflowId: string,
+    runId: string,
+  ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
+  /** Asks a run to stop after its current step (#921), or lets it go on again. `changed`, or `unchanged` for a repeat. */
+  pause(
+    workflowId: string,
+    runId: string,
+  ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
+  resume(
     workflowId: string,
     runId: string,
   ): Promise<RequestResult<{ run: RunView; outcome: string }>>;
@@ -38,6 +64,12 @@ export function createWorkflowRunsApi(
     workspaceApiPath(
       workspaceSlug,
       `/workflows/${encodeURIComponent(workflowId)}/runs`,
+    );
+  const post = (workflowId: string, runId: string, action: string) =>
+    requestJson<{ run: RunView; outcome: string }>(
+      fetchImpl,
+      "POST",
+      `${runsPath(workflowId)}/${encodeURIComponent(runId)}/${action}`,
     );
   return {
     list: (workflowId) =>
@@ -59,12 +91,16 @@ export function createWorkflowRunsApi(
         runsPath(workflowId),
         body,
       ),
-    cancel: (workflowId, runId) =>
-      requestJson<{ run: RunView; outcome: string }>(
+    answer: (workflowId, runId, body) =>
+      requestJson<{ run: RunView }>(
         fetchImpl,
         "POST",
-        `${runsPath(workflowId)}/${encodeURIComponent(runId)}/cancel`,
+        `${runsPath(workflowId)}/${encodeURIComponent(runId)}/answer`,
+        body,
       ),
+    discard: (workflowId, runId) => post(workflowId, runId, "discard"),
+    pause: (workflowId, runId) => post(workflowId, runId, "pause"),
+    resume: (workflowId, runId) => post(workflowId, runId, "resume"),
   };
 }
 

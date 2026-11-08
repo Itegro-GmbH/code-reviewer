@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// POST /api/w/:workspace/workflows/:workflowId/runs/:runId/cancel (#891): stops a run. The right is the one to start an Implementer task
-// (`start_implementer_task`): whoever may start a run may stop one. Only in a deployment with the capability `implementer`. The logic is in
-// src/workflow-runs/.
+// POST /api/w/:workspace/workflows/:workflowId/runs/:runId/cancel (#891): the old route of a discard (#921); it forwards to the same call and
+// answers the same. The right is the one to start an Implementer task (`start_implementer_task`). Only in a deployment with the capability
+// `implementer`. The logic is in src/workflow-runs/.
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createWorkflowRunRouteHandlers } from "@/workflow-runs/http";

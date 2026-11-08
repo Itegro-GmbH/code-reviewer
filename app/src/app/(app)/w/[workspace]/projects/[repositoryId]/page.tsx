@@ -1,119 +1,79 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
-import { createInstanceSettingsRepository } from "@/db/repositories/instance-settings-repository";
-import { getDatabase } from "@/db/startup";
-import { isBillingOn } from "@/billing/enabled";
-import { nativeFormDataFor } from "@/native-providers/form-data";
-import { getNativeCatalog } from "@/native-providers/shared";
-import { ownKeyTokenCapOf } from "@/native-cost/token-cap";
-import { isDynamicReviewEnabled } from "@/jobs/dynamic-review-gate";
-import { getConfigStatusFor } from "@/config-status/shared";
-import { configAudienceOf } from "@/config-status/status";
-import { getWorkspaceLlm } from "@/llm/shared";
-import { llmAccessAttention } from "@/llm/ui/llm-access-notice";
-import { keyedProvidersFor } from "@/review-settings/ui/keyed-providers";
+import { getCapabilities } from "@/capabilities/shared";
+import { IssuesBoard } from "@/issues/issues-board";
+import { loadIssuesPage } from "@/issues/load";
 import { projectServiceFor } from "@/projects/shared";
-import {
-  loadProjectSettingsPage,
-  ProjectSettingsPageContent,
-} from "@/projects/ui/project-settings-page";
-import { reviewSettingsServiceFor } from "@/review-settings/shared";
+import { trackerServiceFor } from "@/tracker/shared";
+import { workflowServiceFor } from "@/workflows/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 import { can } from "@/workspaces/permissions";
-import { getProductIdentity } from "@/product-identity/current";
+import { CockpitFrame } from "./cockpit-frame";
+import ProjectSettingsPage from "./review/page";
 
-export const metadata: Metadata = { title: "Project settings" };
+// The title is the one of the page: the cockpit in the factory, the review settings elsewhere (a function, as the capability is read
+// from the environment).
+export function generateMetadata(): Metadata {
+  return {
+    title: getCapabilities().has("implementer")
+      ? "Project · Issues"
+      : "Project settings",
+  };
+}
 
-// The review settings of one project. The address names the workspace and the repository by its id in this
-// app. An id nobody has in this workspace (also one of another workspace) shows the not-found page; with
-// Cache Components the data sits behind the layout's <Suspense>, so the response is already streaming and
-// its HTTP status stays 200 (a status of 404 would need the lookup before the first byte, which only data
-// outside Suspense allows). A repository that was never activated has its settings page too (the settings
-// are saved first and apply once the project is switched on).
-export default async function ProjectSettingsPage({
+// One project. In the factory (#925) it is the cockpit, and this address is its Issues tab; the review settings are at `/review`. A
+// deployment without the factory has no cockpit: the address shows the review settings, as it always did.
+export default async function ProjectPage({
   params,
+  searchParams,
 }: PageProps<"/w/[workspace]/projects/[repositoryId]">) {
+  if (!getCapabilities().has("implementer"))
+    return ProjectSettingsPage({ params, searchParams });
   const { workspace: slug, repositoryId } = await params;
-  const { workspace, role, user } = await requireWorkspace(slug);
+  const { workspace, role } = await requireWorkspace(slug);
   return (
-    <ProjectSettingsContent
+    <CockpitFrame
       workspaceId={workspace.id}
       workspaceSlug={workspace.slug}
       repositoryId={repositoryId}
-      canManageLlmKey={can(role, "manage_llm_key")}
-      user={user}
-    />
+      tab=""
+    >
+      <IssuesContent
+        workspaceId={workspace.id}
+        workspaceSlug={workspace.slug}
+        repositoryId={repositoryId}
+        mayStart={can(role, "start_implementer_task")}
+      />
+    </CockpitFrame>
   );
 }
 
-async function ProjectSettingsContent({
+// The tickets of the project and the lanes a person can start from one (#925); the board polls from this first list.
+async function IssuesContent({
   workspaceId,
   workspaceSlug,
   repositoryId,
-  canManageLlmKey,
-  user,
+  mayStart,
 }: {
   workspaceId: string;
   workspaceSlug: string;
   repositoryId: string;
-  canManageLlmKey: boolean;
-  user: { isInstanceAdmin: boolean };
+  mayStart: boolean;
 }) {
-  const data = await loadProjectSettingsPage(repositoryId, {
+  const data = await loadIssuesPage(repositoryId, {
     projects: projectServiceFor(workspaceId),
-    settings: reviewSettingsServiceFor(workspaceId),
-    // Only the instance admin gets the names of the variables that are wrong.
-    config: () => getConfigStatusFor(user),
-    // Shown on the Review kind card: Dynamic Review runs only while the instance has turned it on.
-    dynamicReviewEnabled: () => isDynamicReviewEnabled(getDatabase()),
-  });
-  if (data.kind === "not_found") notFound();
-  // The workspace's LLM hint is a row of the page's one "Needs attention" strip, not its own region.
-  const llm = getWorkspaceLlm();
-  // The key statuses are read only for a workspace on its own key; a managed one is handed no provider id.
-  const [llmSummary, keyedProviders, nativeCatalog, billingOn] =
-    await Promise.all([
-      llm.summaryFor(workspaceId),
-      keyedProvidersFor(data.model, llm.keyServiceFor(workspaceId)),
-      // The catalog providers and models of Dynamic Review on the workspace's own key (#555); nothing for a managed one.
-      nativeFormDataFor(
-        {
-          managed: data.model.managed,
-          currentProvider: data.model.dynamic?.effective.dynamicProvider,
-        },
-        {
-          catalog: getNativeCatalog(),
-          keys: llm.keyServiceFor(workspaceId),
-          billingOn: () => isBillingOn(getDatabase()),
-          tokenCap: async () =>
-            ownKeyTokenCapOf(
-              await createInstanceSettingsRepository(getDatabase()).get(
-                "own_key_max_total_tokens",
-              ),
-            ),
-        },
-      ),
-      isBillingOn(getDatabase()),
-    ]);
-  const llmNotice = llmAccessAttention({
-    product: getProductIdentity(),
-    workspaceSlug,
-    summary: llmSummary,
-    canManage: canManageLlmKey,
+    tracker: trackerServiceFor(workspaceId),
+    workflows: workflowServiceFor(workspaceId),
   });
   return (
-    <ProjectSettingsPageContent
-      product={getProductIdentity()}
+    <IssuesBoard
       workspaceSlug={workspaceSlug}
-      audience={configAudienceOf(user)}
-      llmNotice={llmNotice}
-      {...(keyedProviders === undefined ? {} : { keyedProviders })}
-      {...(nativeCatalog === undefined ? {} : { nativeCatalog })}
-      billingOn={billingOn}
-      canConfirmProviderAddress={canManageLlmKey}
-      data={data}
+      repositoryId={repositoryId}
+      projectId={data.projectId}
+      initial={data.initial}
+      lanes={data.lanes}
+      mayStart={mayStart}
     />
   );
 }

@@ -11,7 +11,13 @@ import { GithubAppError, type GithubRefusalReason } from "./errors.ts";
 import { isRecord } from "./guards.ts";
 import { createAppJwt } from "./jwt.ts";
 import { toPullRequestRef } from "./mappers.ts";
-import type { PullRequestRef } from "../../types.ts";
+import type { PullRequestRef, TrackerItemFields } from "../../types.ts";
+import {
+  checksStateOf,
+  requestedReviewersOf,
+  toCheckSuites,
+  toTrackerItem,
+} from "./tracker-map.ts";
 
 export type RemoteInstallation = {
   /** The installation id as text. */
@@ -65,6 +71,20 @@ export type JobTokenScope = {
   permissions: InstallationPermissions;
 };
 
+/** An issue as a workflow reads it as a ticket (#916). The texts are untrusted: whoever opened the issue wrote them. */
+export type ReadIssue = {
+  number: number;
+  title: string;
+  /** An issue without a description has an empty body. */
+  body: string;
+  url: string;
+  labels: string[];
+  /** The logins of the people the issue is assigned to. */
+  assignees: string[];
+  /** GitHub's issue type (`Bug`, `Feature`), empty for an issue without one. */
+  type: string;
+};
+
 /** A comment below a pull request, as far as the app needs it. */
 export type IssueComment = {
   /** The comment id as text. */
@@ -114,6 +134,15 @@ export type OpenedPullRequest = {
   url: string;
   existing: boolean;
 };
+
+/** What moving an issue to a status of a GitHub Project board came to (#917). */
+export type BoardMove =
+  | { kind: "moved"; status: string }
+  /** The project of that number or id is not there for the App (it is not the owner's, or the App cannot see it). */
+  | { kind: "board_not_found" }
+  | { kind: "issue_not_found" }
+  /** The board has no option of that name on its `Status` field (or no `Status` field); `available` are the option names it has. */
+  | { kind: "status_unknown"; available: string[] };
 
 /** A review of a pull request (#405), as far as the app needs it. */
 export type PullRequestReview = {
@@ -195,6 +224,17 @@ export type GithubAppClient = {
     name: string,
     signal?: AbortSignal,
   ): Promise<{ sha: string } | null>;
+  /**
+   * One issue (#916), read as a ticket with a token of its own limited to `scope`, or null when there is none of that number or the number
+   * is a pull request (a ticket is an issue); same token and abort rules as `getRepositoryFacts`.
+   */
+  getIssue(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    issueNumber: number,
+    signal?: AbortSignal,
+  ): Promise<ReadIssue | null>;
   /** The repository permission of a user; "none" for a user GitHub does not know. */
   getCollaboratorPermission(
     installationId: string,
@@ -239,6 +279,19 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<{ id: string; url: string }>;
   /**
+   * Replaces the body of a comment below an issue or pull request (#920; `PATCH .../issues/comments/{id}`), as the app, with a token of its own
+   * limited to `scope`. Only a comment the app wrote can be edited by it; 404 `GITHUB_APP_NOT_FOUND` when there is none. The body is never part
+   * of a message.
+   */
+  updateIssueComment(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    commentId: string,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
+  /**
    * Opens a pull request as the app (#844), with a token of its own limited to `scope`, switched off after the call. An open pull
    * request from `head` into `base` is the result (`existing`) instead of a second one or an error: it is looked for first, and again
    * when GitHub answers 422 because one exists. Other failures reject with the stable code of the answer; a 422 says why in `refusal`
@@ -264,6 +317,52 @@ export type GithubAppClient = {
     change: { add: readonly string[]; remove: readonly string[] },
     signal?: AbortSignal,
   ): Promise<string[]>;
+  /**
+   * Takes the review requests of these GitHub users back (#924; `DELETE .../pulls/{n}/requested_reviewers`), with a token limited to
+   * `scope`. Answers the logins that are still requested afterwards, as GitHub spells them. A login that is not requested is no error
+   * for the caller to handle: GitHub's 422 for it rejects like any other. 404 when there is no such pull request. Aborts like
+   * `getPullRequest`.
+   */
+  removePullRequestReviewers(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    prNumber: number,
+    reviewers: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<string[]>;
+  /**
+   * Requests a review of a pull request from these GitHub users (#917; `POST .../pulls/{n}/requested_reviewers`), with a token limited
+   * to `scope`. Answers the logins that are requested afterwards, as GitHub spells them. A user who has already been asked stays
+   * asked, so it can be done twice. GitHub refuses the whole request when one of them cannot review (not a collaborator, the author of
+   * the pull request): that is a 422, `GITHUB_APP_REQUEST_FAILED`. With `skipRefused` the users are asked one by one, in the order
+   * given, and the ones GitHub refuses for that reason (its 422 says they are not collaborators or are the author) are left out
+   * instead; any other 422 (a closed pull request, say) still rejects. `max` stops asking once that many are requested. 404 when
+   * there is no such pull request. Aborts like `getPullRequest`.
+   */
+  requestPullRequestReviewers(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    prNumber: number,
+    reviewers: readonly string[],
+    options?: { skipRefused?: boolean; max?: number; signal?: AbortSignal },
+  ): Promise<string[]>;
+  /**
+   * Sets the `Status` field of an issue on a GitHub Project (projects_v2) board of the repository's owner to the option named `status`
+   * (#917), with a token limited to `scope`; GraphQL, because Projects have no REST API for this. `board` is the number of the project
+   * or its node id. The issue is added to the board when it is not on it. The status is a literal option name of the board's
+   * `Status` field, never created. Idempotent. Failures that the board or issue decide are an answer (`BoardMove`); a token without
+   * the Projects permission, a rate limit and the like reject like the other calls. Aborts like `getPullRequest`.
+   */
+  moveIssueOnBoard(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    issueNumber: number,
+    move: { board: string; status: string },
+    signal?: AbortSignal,
+  ): Promise<BoardMove>;
   /**
    * Creates the check run of a review on a commit (#405), as the app, with a token of its own limited to `scope`
    * (minted for this call and switched off after it, also when the call fails). Rejects with the stable code of
@@ -331,6 +430,100 @@ export type GithubAppClient = {
     signal?: AbortSignal,
   ): Promise<void>;
   /**
+   * One page (100) of the issues and pull requests of a repository, any state, the least recently changed first (#923), read with a
+   * token of its own limited to `scope`. A pull request comes back as such (`kind`). `since` (ISO 8601, UTC) leaves out what changed
+   * before it: a list longer than `MAX_PAGES` pages is walked by asking again from the time of the last item, so a repository of any
+   * size can be read (the one thing that still stops it is `MAX_PAGES` pages of items that all changed in the same second). `last` is
+   * true when the page is the last one; `skipped` counts the tickets of the page that could not be read and are not in `items`.
+   */
+  readTrackerIssues(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    page: number,
+    since?: string,
+    signal?: AbortSignal,
+  ): Promise<{ items: TrackerItemFields[]; last: boolean; skipped: number }>;
+  /**
+   * One page (30) of the open pull requests of a repository with the state of the checks of the head of each (#923): one more call per
+   * pull request, which is why the page is small. The pull requests come in the order of their numbers and the page is the first 30 whose
+   * number is greater than `after` (0 for the first page; #937): the next page continues after `lastNumber`, so a pull request that closes
+   * between two calls cannot move another one past the walk, as a page number would. Finding the place costs list calls of 100 pull
+   * requests, no more.
+   */
+  readTrackerChecks(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    after: number,
+    signal?: AbortSignal,
+  ): Promise<{
+    pullRequests: {
+      number: number;
+      checksState: string | null;
+      /** Absent when the entry carries no list of reviewers (#924): unknown, not nobody. */
+      reviewRequestedFrom?: string[];
+      /** The head commit of the pull request now (#924). */
+      headSha: string;
+      /** The provider's time of the last change of the pull request, as the list read it (#924). */
+      updatedAt: string;
+    }[];
+    last: boolean;
+    lastNumber: number | null;
+  }>;
+  /** The state of the checks of one commit (#923), or null when it has no check suite. */
+  readChecksState(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
+  /**
+   * One page of the items of the project boards of a repository, with the status of each (#923; GraphQL, the one place REST has nothing).
+   * `after` is the position `next` of the last page named, null for the first page. `boardId` (#937): the board the project chose; only its
+   * items are read, and the answer does not depend on the other boards of the repository (a saved position of another board starts that
+   * board from its first page). A board the token may not read (the permission "Projects" is missing, or the repository belongs to a user
+   * and has no organization board) is `available: false`, not a failure.
+   */
+  readTrackerBoard(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    after: string | null,
+    boardId?: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    available: boolean;
+    items: { nodeId: string; status: string | null }[];
+    next: string | null;
+  }>;
+  /**
+   * The status the project boards give one issue or pull request now, by its node id (#932): the status on the first board that has one,
+   * null for a ticket on no board or without a status. `boardId` (#937): the board the project chose; only the ticket's item on that board
+   * counts (null when it is not on it). A board the token may not read is `available: false`, not a failure; so is a ticket with more
+   * board items than one answer holds that does not show the chosen board among them.
+   */
+  readTrackerBoardStatus(
+    installationId: string,
+    scope: JobTokenScope,
+    nodeId: string,
+    boardId?: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; status: string | null }>;
+  /**
+   * The boards (GitHub Projects, projects_v2) of a repository (#922; GraphQL): id, number, title and the Status field with its option
+   * names, at most `BOARDS_MAX` of them, closed ones left out. A board the token may not read (the permission "Projects" is missing, or
+   * the repository belongs to a user and has no organization board) is `available: false`, not a failure; so is a list in which one board
+   * came back null (it may not be read and cannot be named): the list is never silently short.
+   */
+  listRepositoryBoards(
+    installationId: string,
+    scope: JobTokenScope,
+    repoFullName: string,
+    signal?: AbortSignal,
+  ): Promise<{ available: boolean; boards: RepositoryBoard[] }>;
+  /**
    * Mints a fresh installation access token, never from the cache, limited to the given repositories
    * and permissions. The one place a token for a job is created. Refuses (without a request) a scope
    * with no repository or no permission, and a token GitHub reports as broader than asked for.
@@ -367,6 +560,13 @@ export type GithubAppClientOptions = {
 };
 
 const PAGE_SIZE = 100;
+/** A time the issue list can start from (`since`): ISO 8601 in UTC, as the sync writes it. */
+const SINCE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+/** The pull requests of one page of the checks read: each costs a call. */
+const CHECKS_PAGE_SIZE = 30;
+/** The boards of one repository the mirror reads, and the items of one page of a board. */
+const BOARDS_MAX = 20;
+const BOARD_PAGE_SIZE = 100;
 /** How many branch names `listBranches` returns at most. */
 export const BRANCH_LIST_LIMIT = 100;
 /** A hard stop so a misbehaving server cannot loop us forever; reaching it is an error, not a cut. */
@@ -377,12 +577,183 @@ const JWT_REUSE_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_REVOKE_TIMEOUT_MS = 3_000;
 const GITHUB_API_VERSION = "2022-11-28";
+/** The longest text of GitHub's reason for a refused call that is kept (#913). */
+const REASON_MAX_CHARS = 300;
 
 function shapeError(call: string): GithubAppError {
   return new GithubAppError(
     "GITHUB_APP_REQUEST_FAILED",
     `GitHub answered ${call} in an unexpected format.`,
   );
+}
+
+/** The provider's time of the last change of a pull request of a list, as ISO text; the epoch for an entry that says none, so that no delivery counts as older. */
+function updatedAtOf(entry: unknown): string {
+  const text = isRecord(entry) ? entry.updated_at : undefined;
+  const at = typeof text === "string" ? Date.parse(text) : Number.NaN;
+  return new Date(Number.isNaN(at) ? 0 : at).toISOString();
+}
+
+function checkPage(page: number): void {
+  if (!Number.isInteger(page) || page < 1 || page > MAX_PAGES)
+    throw new GithubAppError(
+      "GITHUB_APP_REQUEST_FAILED",
+      `The page ${page} is outside the pages a list may have.`,
+    );
+}
+
+/** A board of a repository as `listRepositoryBoards` answers it. */
+export type RepositoryBoard = {
+  projectV2Id: string;
+  number: number;
+  title: string;
+  statusFieldId: string | null;
+  statuses: string[];
+};
+
+/** The `type` of the GraphQL errors that mean the app may not read the board; any other error is a failure to try again. */
+const BOARD_UNAVAILABLE_ERRORS: ReadonlySet<string> = new Set([
+  "FORBIDDEN",
+  "INSUFFICIENT_SCOPES",
+  "NOT_FOUND",
+]);
+
+const BOARDS_QUERY =
+  "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first){nodes{id}}}}";
+// `query: "is:open"` leaves the closed boards out at GitHub, so they cannot fill the page and hide the open ones.
+const REPOSITORY_BOARDS_QUERY =
+  'query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){projectsV2(first:$first,query:"is:open"){nodes{id number title closed field(name:"Status"){... on ProjectV2SingleSelectField{id options{name}}}}}}}';
+const BOARD_ITEMS_QUERY =
+  'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
+
+const BOARD_STATUS_FIELDS =
+  'projectItems(first:20,includeArchived:false){pageInfo{hasNextPage} nodes{project{id} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}';
+const BOARD_STATUS_QUERY = `query($id:ID!){node(id:$id){... on Issue{${BOARD_STATUS_FIELDS}} ... on PullRequest{${BOARD_STATUS_FIELDS}}}}`;
+
+/**
+ * The status of the first board item of a ticket that has one; null when it has none; undefined when the answer is not that of a ticket.
+ * With `boardId` only the item on that board counts: null when the ticket is not on it, undefined when the answer cannot say (a board item
+ * GitHub could not give, or more items than the answer holds).
+ */
+function boardStatusOf(
+  data: Record<string, unknown>,
+  boardId?: string,
+): string | null | undefined {
+  const { node } = data;
+  if (node === null) return null;
+  if (!isRecord(node)) return undefined;
+  if (!isRecord(node.projectItems)) return undefined;
+  const { nodes } = node.projectItems;
+  if (!Array.isArray(nodes)) return undefined;
+  // Board items GitHub could not give are null: when nothing but those came there is no answer, and "no status" would be a guess.
+  if (nodes.length > 0 && nodes.every((item: unknown) => item === null))
+    return undefined;
+  const statusOf = (item: unknown): string | null => {
+    if (!isRecord(item) || !isRecord(item.fieldValueByName)) return null;
+    const { name } = item.fieldValueByName;
+    return typeof name === "string" && name !== "" ? name : null;
+  };
+  if (boardId !== undefined) {
+    const onBoard = (nodes as unknown[]).find(
+      (item) =>
+        isRecord(item) && isRecord(item.project) && item.project.id === boardId,
+    );
+    if (onBoard !== undefined) return statusOf(onBoard);
+    // Not among the items of the answer: on the board only if the answer left items out.
+    const more =
+      isRecord(node.projectItems.pageInfo) &&
+      node.projectItems.pageInfo.hasNextPage === true;
+    return more || nodes.includes(null) ? undefined : null;
+  }
+  for (const item of nodes as unknown[]) {
+    const status = statusOf(item);
+    if (status !== null) return status;
+  }
+  return null;
+}
+
+/**
+ * The ids of the boards a `BOARDS_QUERY` answer lists, in the order GitHub gives them; null when the answer is not that. A board the token
+ * may not read keeps its place as `null`: the position of the boards after it must not shift, the cursor of a sync names them by it.
+ */
+function boardIdsOf(data: Record<string, unknown>): (string | null)[] | null {
+  const repository = data.repository;
+  if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
+  const nodes = repository.projectsV2.nodes;
+  if (!Array.isArray(nodes)) return null;
+  return nodes.map((node: unknown) =>
+    isRecord(node) && typeof node.id === "string" ? node.id : null,
+  );
+}
+
+/** The open boards a `REPOSITORY_BOARDS_QUERY` answer lists; null when the answer is not that. */
+function repositoryBoardsOf(
+  data: Record<string, unknown>,
+): RepositoryBoard[] | null {
+  const repository = data.repository;
+  if (!isRecord(repository) || !isRecord(repository.projectsV2)) return null;
+  const nodes = repository.projectsV2.nodes;
+  if (!Array.isArray(nodes)) return null;
+  // A board GitHub could not give (null: the token may not read it) is left out: it can be neither synced nor moved on, so it is no choice.
+  const boards: RepositoryBoard[] = [];
+  for (const node of nodes as unknown[]) {
+    if (
+      !isRecord(node) ||
+      typeof node.id !== "string" ||
+      typeof node.number !== "number" ||
+      typeof node.title !== "string" ||
+      node.closed === true
+    )
+      continue;
+    const field = isRecord(node.field) ? node.field : null;
+    boards.push({
+      projectV2Id: node.id,
+      number: node.number,
+      title: node.title,
+      statusFieldId:
+        field !== null && typeof field.id === "string" ? field.id : null,
+      statuses:
+        field !== null && Array.isArray(field.options)
+          ? (field.options as unknown[]).flatMap((option) =>
+              isRecord(option) && typeof option.name === "string"
+                ? [option.name]
+                : [],
+            )
+          : [],
+    });
+  }
+  return boards;
+}
+
+/** One page of a board: its items with their status (null for none), and where the next page is. */
+function boardPageOf(data: Record<string, unknown>): {
+  items: { nodeId: string; status: string | null }[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+} | null {
+  const { node } = data;
+  if (!isRecord(node) || !isRecord(node.items)) return null;
+  const { nodes, pageInfo } = node.items;
+  if (!Array.isArray(nodes) || !isRecord(pageInfo)) return null;
+  const result: { nodeId: string; status: string | null }[] = [];
+  for (const item of nodes as unknown[]) {
+    if (!isRecord(item) || !isRecord(item.content)) continue;
+    if (typeof item.content.id !== "string") continue;
+    const value = item.fieldValueByName;
+    result.push({
+      nodeId: item.content.id,
+      status:
+        isRecord(value) && typeof value.name === "string" && value.name !== ""
+          ? value.name
+          : null,
+    });
+  }
+  return {
+    items: result,
+    hasNextPage: pageInfo.hasNextPage === true,
+    endCursor:
+      typeof pageInfo.endCursor === "string" ? pageInfo.endCursor : null,
+  };
 }
 
 /**
@@ -560,6 +931,26 @@ function repoPath(repoFullName: string): string {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
 }
 
+/**
+ * GitHub's words for a refusal as one short line: control characters become spaces, the marks that make a link or an image in
+ * Markdown and HTML are dropped, a link (`scheme:…`, `//…`, `www.…`) and a token-looking word are replaced (the text is GitHub's,
+ * but it can quote what was sent), and only then is the rest cut at `REASON_MAX_CHARS`, so that the bound holds for the text as it is
+ * kept. Undefined for nothing.
+ */
+function cleanReason(text: string): string | undefined {
+  const line = text
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ")
+    .replace(/[[\]()<>`]/g, "")
+    .replace(/\b(?:gh[pousr]_|github_pat_)\w+/g, "[token]")
+    .replace(/\b[a-z][a-z0-9+.-]*:\S+|\/\/\S+|\bwww\.\S*/gi, "[link]")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  if (line === "") return undefined;
+  if (line.length <= REASON_MAX_CHARS) return line;
+  const cut = line.slice(0, REASON_MAX_CHARS - 1);
+  return `${/[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut}…`;
+}
+
 /** A name with a half of a surrogate pair cannot be percent encoded (`encodeURIComponent` throws a URIError). */
 const UNPAIRED_SURROGATE =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -625,6 +1016,75 @@ function checkPullRequestNumber(prNumber: number): void {
       "GITHUB_APP_REQUEST_FAILED",
       "The pull request number is not a positive whole number.",
     );
+}
+
+/** What GitHub's 422 says when the user cannot review the pull request: not a collaborator of the repository, or its author. */
+const REVIEWER_REFUSED = /\bcollaborators?\b|pull request author/i;
+
+/** A GitHub login: letters, digits and single hyphens, up to 39 characters. */
+function checkLogin(login: string): void {
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login))
+    throw new GithubAppError(
+      "GITHUB_APP_REQUEST_FAILED",
+      "The login is not a GitHub user name.",
+    );
+}
+
+/** The number of a project or its node id: digits, or GitHub's `PVT_…` id (letters, digits, `_` and `-`). */
+function boardReference(
+  board: string,
+): { number: number } | { nodeId: string } {
+  if (/^[1-9]\d{0,9}$/.test(board) && Number(board) <= 2147483647)
+    return { number: Number(board) };
+  if (/^PVT_[A-Za-z0-9_-]{1,200}$/.test(board)) return { nodeId: board };
+  throw new GithubAppError(
+    "GITHUB_APP_REQUEST_FAILED",
+    "The board is not the number of a GitHub Project or its node id.",
+  );
+}
+
+const BOARD_FIELDS = `id field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } }`;
+const BOARD_BY_NUMBER_QUERY = `query($owner: String!, $name: String!, $issue: Int!, $board: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $issue) { id }
+    owner { ... on ProjectV2Owner { projectV2(number: $board) { ${BOARD_FIELDS} } } }
+  }
+}`;
+const BOARD_BY_ID_QUERY = `query($owner: String!, $name: String!, $issue: Int!, $board: ID!) {
+  repository(owner: $owner, name: $name) { issue(number: $issue) { id } }
+  node(id: $board) { ... on ProjectV2 { ${BOARD_FIELDS} owner { ... on Organization { login } ... on User { login } } } }
+}`;
+const ADD_TO_BOARD_MUTATION = `mutation($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+}`;
+const SET_STATUS_MUTATION = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
+}`;
+
+/** A board as far as a status change needs it: its id and the options of its `Status` field. */
+type BoardFacts = {
+  id: string;
+  field: { id: string; options: { id: string; name: string }[] } | null;
+};
+
+function toBoardFacts(json: unknown): BoardFacts | null {
+  if (!isRecord(json) || typeof json.id !== "string") return null;
+  const field = json.field;
+  if (
+    !isRecord(field) ||
+    typeof field.id !== "string" ||
+    !Array.isArray(field.options)
+  )
+    return { id: json.id, field: null };
+  const options: { id: string; name: string }[] = [];
+  for (const option of field.options as unknown[])
+    if (
+      isRecord(option) &&
+      typeof option.id === "string" &&
+      typeof option.name === "string"
+    )
+      options.push({ id: option.id, name: option.name });
+  return { id: json.id, field: { id: field.id, options } };
 }
 
 const PERMISSION_LEVELS = ["read", "write", "admin"];
@@ -699,32 +1159,57 @@ export function createGithubAppClient(
   }
 
   /**
-   * Why GitHub refused, from the `message` of its answer (read at most a few kilobytes, never kept): the closed
-   * set of `GithubRefusalReason`. Only for the answers where the reason decides what the caller does.
+   * Why GitHub refused, from the `message` and `errors` of its answer (read at most a few kilobytes): the closed set of
+   * `GithubRefusalReason`, which only the answers where the reason decides what the caller does need, and `reason`, GitHub's own
+   * short words for it (#913). An entry of `errors` without a `message` is named by its `resource`, `field` and `code`
+   * (`PullRequest head invalid`: GitHub says that for a branch it cannot resolve, and nothing else).
    */
-  async function refusalOf(response: Response): Promise<GithubRefusalReason> {
-    let message = "";
+  async function refusalOf(
+    response: Response,
+  ): Promise<{ refusal: GithubRefusalReason; reason?: string }> {
+    // `messages` is what GitHub wrote as text and the only thing that is classified; `entries` adds the names of an entry that has
+    // no text (`Repository archived invalid` must not read as GitHub saying the repository is archived) and is for the reason only.
+    let messages = "";
+    let entries = "";
     try {
       const json: unknown = JSON.parse((await response.text()).slice(0, 4000));
       if (isRecord(json) && typeof json.message === "string")
-        message = json.message;
+        messages = json.message;
       // A 422 says what is wrong in `errors` (opening a pull request: the pull request exists, there is nothing to compare).
-      if (isRecord(json) && Array.isArray(json.errors))
-        message += ` ${json.errors
-          .map((entry: unknown) =>
-            isRecord(entry) && typeof entry.message === "string"
-              ? entry.message
-              : "",
-          )
-          .join(" ")}`;
+      if (isRecord(json) && Array.isArray(json.errors)) {
+        const texts: string[] = [];
+        const described: string[] = [];
+        for (const entry of json.errors as unknown[]) {
+          if (!isRecord(entry)) continue;
+          if (
+            typeof entry.message === "string" &&
+            entry.message.trim() !== ""
+          ) {
+            texts.push(entry.message);
+            described.push(entry.message);
+            continue;
+          }
+          const names = [entry.resource, entry.field, entry.code]
+            .filter((part): part is string => typeof part === "string")
+            .join(" ");
+          if (names !== "") described.push(names);
+        }
+        messages = `${messages} ${texts.join(" ")}`;
+        entries = described.join("; ");
+      }
     } catch {
       // An answer that is not JSON says nothing.
     }
+    const reason = cleanReason(entries.trim() === "" ? messages : entries);
+    return {
+      refusal: classify(response.status, messages),
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  function classify(status: number, message: string): GithubRefusalReason {
     // GitHub's secondary rate limit is a 403 with no header that says so, only its message.
-    if (
-      (response.status === 403 || response.status === 429) &&
-      /rate limit/i.test(message)
-    )
+    if ((status === 403 || status === 429) && /rate limit/i.test(message))
       return "rate_limited";
     if (/pull request already exists/i.test(message))
       return "pull_request_exists";
@@ -746,6 +1231,7 @@ export function createGithubAppClient(
     path: string,
     response: Response,
     refusal?: GithubRefusalReason,
+    reason?: string,
   ): GithubAppError {
     const status = response.status;
     const call = `${method} ${path}`;
@@ -774,6 +1260,8 @@ export function createGithubAppClient(
     return new GithubAppError(code, `GitHub answered ${status} for ${call}.`, {
       status,
       ...(refusal === undefined ? {} : { refusal }),
+      // GitHub's words are kept for a refused call (422) only: a refused token request or a 403 has a message of its own.
+      ...(reason === undefined || status !== 422 ? {} : { reason }),
       // A 5xx may say when to come back (Retry-After); everything else has nothing to wait for.
       retryAfterSeconds: status >= 500 ? retryAfter(response.headers) : null,
     });
@@ -819,17 +1307,18 @@ export function createGithubAppClient(
         response.headers.get("x-ratelimit-remaining") === "0";
       // The body is read only to tell why a 403 or a 422 was refused (#405) and never ends up in a message;
       // otherwise it is not needed: free the socket.
-      const refusal =
+      const refused =
         (response.status === 403 || response.status === 422) && !rateLimited
           ? await refusalOf(response)
           : undefined;
-      if (refusal === undefined)
+      if (refused === undefined)
         await response.body?.cancel().catch(() => undefined);
       throw errorForStatus(
         method,
         path.split("?")[0] as string,
         response,
-        refusal,
+        refused?.refusal,
+        refused?.reason,
       );
     }
     try {
@@ -897,6 +1386,75 @@ export function createGithubAppClient(
     } catch {
       return false;
     }
+  }
+
+  /** The state of the checks of one commit: its check suites in one state (`checksStateOf`). */
+  async function readCommitChecks(
+    token: string,
+    path: string,
+    headSha: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (!/^[0-9a-f]{7,64}$/i.test(headSha))
+      throw new GithubAppError(
+        "GITHUB_APP_REQUEST_FAILED",
+        "The commit is not a hexadecimal object name.",
+      );
+    const json = await request(
+      token,
+      "GET",
+      `${path}/commits/${headSha}/check-suites?per_page=${PAGE_SIZE}`,
+      undefined,
+      signal,
+    );
+    const suites = toCheckSuites(json);
+    if (suites === null)
+      throw shapeError("GET /repos/{owner}/{repo}/commits/{ref}/check-suites");
+    return checksStateOf(suites);
+  }
+
+  /**
+   * One GraphQL query. When every error of the answer is `FORBIDDEN`, `INSUFFICIENT_SCOPES` or `NOT_FOUND` (some board is not ours to
+   * read), the data that came with them is returned when there is any (the boards we may read, #932): the nodes GitHub could not give
+   * are null in it. Null when there is none; the caller treats the board as unavailable. Any other error (a rate limit, a server error,
+   * a query GitHub could not run) and anything else wrong (no answer, not JSON) fails as for REST, so the sync keeps its place and goes
+   * on from there.
+   */
+  async function graphql(
+    token: string,
+    query: string,
+    variables: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown> | null> {
+    const json = await request(
+      token,
+      "POST",
+      "/graphql",
+      { query, variables },
+      signal,
+    );
+    if (!isRecord(json)) throw shapeError("POST /graphql");
+    if (Array.isArray(json.errors) && json.errors.length > 0) {
+      const types = (json.errors as unknown[]).map((error) =>
+        isRecord(error) && typeof error.type === "string" ? error.type : "",
+      );
+      if (types.every((type) => BOARD_UNAVAILABLE_ERRORS.has(type)))
+        return isRecord(json.data) &&
+          Object.values(json.data).some((value) => value !== null)
+          ? json.data
+          : null;
+      if (types.includes("RATE_LIMITED"))
+        throw new GithubAppError(
+          "GITHUB_APP_RATE_LIMITED",
+          "GitHub rate limit reached for POST /graphql.",
+        );
+      throw new GithubAppError(
+        "GITHUB_APP_REQUEST_FAILED",
+        "GitHub answered POST /graphql with errors.",
+      );
+    }
+    if (!isRecord(json.data)) throw shapeError("POST /graphql");
+    return json.data;
   }
 
   /** `default_branch` of `GET /repos/{owner}/{repo}`. */
@@ -1257,6 +1815,66 @@ export function createGithubAppClient(
       );
     },
 
+    async getIssue(installationId, scope, repoFullName, issueNumber, signal) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(issueNumber);
+      const path = `${repoPath(repoFullName)}/issues/${issueNumber}`;
+      const where = "GET /repos/{owner}/{repo}/issues/{n}";
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          try {
+            const json = await request(token, "GET", path, undefined, signal);
+            if (
+              !isRecord(json) ||
+              typeof json.number !== "number" ||
+              typeof json.title !== "string" ||
+              typeof json.html_url !== "string" ||
+              !Array.isArray(json.labels)
+            )
+              throw shapeError(where);
+            // The issues API answers for a pull request too; a ticket is an issue.
+            if (isRecord(json.pull_request)) return null;
+            const labels = json.labels.flatMap((item: unknown) => {
+              const name =
+                typeof item === "string"
+                  ? item
+                  : isRecord(item)
+                    ? item.name
+                    : undefined;
+              return typeof name === "string" ? [name] : [];
+            });
+            const assignees = Array.isArray(json.assignees)
+              ? json.assignees.flatMap((item: unknown) =>
+                  isRecord(item) && typeof item.login === "string"
+                    ? [item.login]
+                    : [],
+                )
+              : [];
+            const kind = isRecord(json.type) ? json.type.name : undefined;
+            return {
+              number: json.number,
+              title: json.title,
+              body: typeof json.body === "string" ? json.body : "",
+              url: json.html_url,
+              labels,
+              assignees,
+              type: typeof kind === "string" ? kind : "",
+            };
+          } catch (error) {
+            if (
+              error instanceof GithubAppError &&
+              error.code === "GITHUB_APP_NOT_FOUND"
+            )
+              return null;
+            throw error;
+          }
+        },
+        signal,
+      );
+    },
+
     async getCollaboratorPermission(installationId, repoFullName, login) {
       checkInstallationId(installationId);
       if (!isPlainSegment(login))
@@ -1385,6 +2003,27 @@ export function createGithubAppClient(
           )
             throw shapeError("POST /repos/{owner}/{repo}/issues/{n}/comments");
           return { id: String(json.id), url: json.html_url };
+        },
+        signal,
+      );
+    },
+
+    async updateIssueComment(
+      installationId,
+      scope,
+      repoFullName,
+      commentId,
+      body,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkCheckRunId(commentId);
+      const path = `${repoPath(repoFullName)}/issues/comments/${commentId}`;
+      await withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          await request(token, "PATCH", path, { body }, signal);
         },
         signal,
       );
@@ -1526,6 +2165,262 @@ export function createGithubAppClient(
             change.remove.every((name) => !present.includes(name))
             ? present
             : labelsOf();
+        },
+        signal,
+      );
+    },
+
+    async removePullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(prNumber);
+      for (const login of reviewers) checkLogin(login);
+      const path = `${repoPath(repoFullName)}/pulls/${prNumber}/requested_reviewers`;
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(
+            token,
+            "DELETE",
+            path,
+            { reviewers },
+            signal,
+          );
+          const left = requestedReviewersOf(json);
+          if (left === undefined)
+            throw shapeError(
+              "DELETE /repos/{owner}/{repo}/pulls/{n}/requested_reviewers",
+            );
+          return left;
+        },
+        signal,
+      );
+    },
+
+    async requestPullRequestReviewers(
+      installationId,
+      scope,
+      repoFullName,
+      prNumber,
+      reviewers,
+      options = {},
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(prNumber);
+      for (const login of reviewers) checkLogin(login);
+      const { skipRefused = false, max = Infinity, signal } = options;
+      const path = `${repoPath(repoFullName)}/pulls/${prNumber}/requested_reviewers`;
+      const asked = new Set(reviewers.map((login) => login.toLowerCase()));
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const requested = new Map<string, string>();
+          const ask = async (logins: readonly string[]): Promise<void> => {
+            const json = await request(
+              token,
+              "POST",
+              path,
+              { reviewers: logins },
+              signal,
+            );
+            if (!isRecord(json) || !Array.isArray(json.requested_reviewers))
+              throw shapeError(
+                "POST /repos/{owner}/{repo}/pulls/{n}/requested_reviewers",
+              );
+            for (const entry of json.requested_reviewers as unknown[])
+              if (
+                isRecord(entry) &&
+                typeof entry.login === "string" &&
+                asked.has(entry.login.toLowerCase())
+              )
+                requested.set(entry.login.toLowerCase(), entry.login);
+          };
+          if (!skipRefused) {
+            if (reviewers.length > 0) await ask(reviewers);
+            return [...requested.values()];
+          }
+          for (const login of reviewers) {
+            if (requested.size >= max) break;
+            try {
+              await ask([login]);
+            } catch (error) {
+              // A user who cannot review this pull request (not a collaborator, its author) is left out; a 422 for another
+              // reason (the pull request is closed, say) is not about the user and stays a failure.
+              if (
+                !(error instanceof GithubAppError) ||
+                error.code !== "GITHUB_APP_REQUEST_FAILED" ||
+                error.status !== 422 ||
+                error.reason === undefined ||
+                !REVIEWER_REFUSED.test(error.reason)
+              )
+                throw error;
+            }
+          }
+          return [...requested.values()];
+        },
+        signal,
+      );
+    },
+
+    async moveIssueOnBoard(
+      installationId,
+      scope,
+      repoFullName,
+      issueNumber,
+      move,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPullRequestNumber(issueNumber);
+      const board = boardReference(move.board);
+      const [owner, name] = repoFullName.split("/") as [string, string];
+      repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token): Promise<BoardMove> => {
+          // GraphQL answers 200 with `errors`; a refusal of the token's rights is told apart from a thing that is not there. `operation` is
+          // the mutation whose object must come back: errors next to partial `data` are a failure when it is null (a card that was not
+          // added or a status that was not set must not read as moved). A query leaves "not found" to the caller, which sees the null.
+          const graphql = async (
+            query: string,
+            variables: Record<string, unknown>,
+            operation?: string,
+          ): Promise<Record<string, unknown>> => {
+            const json = await request(
+              token,
+              "POST",
+              "/graphql",
+              { query, variables },
+              signal,
+            );
+            if (!isRecord(json)) throw shapeError("POST /graphql");
+            const errors = Array.isArray(json.errors)
+              ? (json.errors as unknown[]).filter(isRecord)
+              : [];
+            const typeOf = (type: string): boolean =>
+              errors.some((entry) => entry.type === type);
+            if (typeOf("RATE_LIMITED"))
+              throw new GithubAppError(
+                "GITHUB_APP_RATE_LIMITED",
+                "GitHub rate limit reached for POST /graphql.",
+                { status: 200 },
+              );
+            if (typeOf("FORBIDDEN"))
+              throw new GithubAppError(
+                "GITHUB_APP_FORBIDDEN",
+                "GitHub answered FORBIDDEN for POST /graphql.",
+                { status: 403, refusal: "permission_missing" },
+              );
+            const data = isRecord(json.data) ? json.data : null;
+            const objectNull =
+              operation === undefined
+                ? data === null
+                : data === null || !isRecord(data[operation]);
+            if (errors.length > 0 && objectNull) {
+              if (typeOf("UNPROCESSABLE")) {
+                const message = errors.find(
+                  (entry) => entry.type === "UNPROCESSABLE",
+                )?.message;
+                const reason =
+                  typeof message === "string"
+                    ? cleanReason(message)
+                    : undefined;
+                throw new GithubAppError(
+                  "GITHUB_APP_REQUEST_FAILED",
+                  "GitHub answered UNPROCESSABLE for POST /graphql.",
+                  { status: 422, ...(reason === undefined ? {} : { reason }) },
+                );
+              }
+              if (typeOf("NOT_FOUND")) {
+                if (operation === undefined) return data ?? {};
+                throw new GithubAppError(
+                  "GITHUB_APP_NOT_FOUND",
+                  "GitHub answered NOT_FOUND for POST /graphql.",
+                  { status: 404 },
+                );
+              }
+            }
+            if (data === null || (operation !== undefined && objectNull))
+              throw shapeError("POST /graphql");
+            return data;
+          };
+          const found = await graphql(
+            "number" in board ? BOARD_BY_NUMBER_QUERY : BOARD_BY_ID_QUERY,
+            {
+              owner,
+              name,
+              issue: issueNumber,
+              board: "number" in board ? board.number : board.nodeId,
+            },
+          );
+          const repository = found.repository;
+          const issue = isRecord(repository) ? repository.issue : null;
+          if (!isRecord(issue) || typeof issue.id !== "string")
+            return { kind: "issue_not_found" };
+          const boardJson =
+            "number" in board
+              ? isRecord(repository) && isRecord(repository.owner)
+                ? repository.owner.projectV2
+                : null
+              : found.node;
+          const facts = toBoardFacts(boardJson);
+          if (facts === null) return { kind: "board_not_found" };
+          // A node id names any project the token can see; only a project of the repository's owner is a board of this run.
+          if (!("number" in board)) {
+            const projectOwner =
+              isRecord(boardJson) && isRecord(boardJson.owner)
+                ? boardJson.owner.login
+                : undefined;
+            if (
+              typeof projectOwner !== "string" ||
+              projectOwner.toLowerCase() !== owner.toLowerCase()
+            )
+              return { kind: "board_not_found" };
+          }
+          const option = facts.field?.options.find(
+            (candidate) => candidate.name === move.status,
+          );
+          if (facts.field === null || option === undefined)
+            return {
+              kind: "status_unknown",
+              available: facts.field?.options.map((entry) => entry.name) ?? [],
+            };
+          // Adding an issue that is on the board already answers its card, so the same call works for both.
+          const added = await graphql(
+            ADD_TO_BOARD_MUTATION,
+            { project: facts.id, content: issue.id },
+            "addProjectV2ItemById",
+          );
+          const item = isRecord(added.addProjectV2ItemById)
+            ? added.addProjectV2ItemById.item
+            : null;
+          if (!isRecord(item) || typeof item.id !== "string")
+            throw shapeError("POST /graphql");
+          const set = await graphql(
+            SET_STATUS_MUTATION,
+            {
+              project: facts.id,
+              item: item.id,
+              field: facts.field.id,
+              option: option.id,
+            },
+            "updateProjectV2ItemFieldValue",
+          );
+          const updated = isRecord(set.updateProjectV2ItemFieldValue)
+            ? set.updateProjectV2ItemFieldValue.projectV2Item
+            : null;
+          if (!isRecord(updated) || typeof updated.id !== "string")
+            throw shapeError("POST /graphql");
+          return { kind: "moved", status: option.name };
         },
         signal,
       );
@@ -1704,6 +2599,362 @@ export function createGithubAppClient(
     },
 
     revokeInstallationToken,
+
+    async readTrackerIssues(
+      installationId,
+      scope,
+      repoFullName,
+      page,
+      since,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      checkPage(page);
+      if (since !== undefined && !SINCE_PATTERN.test(since))
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The time to read the issues from is not an ISO 8601 time in UTC.",
+        );
+      // GitHub takes whole seconds: the time is cut down to the second (the item it names is read once more, which is harmless).
+      const from =
+        since === undefined
+          ? ""
+          : `&since=${encodeURIComponent(since.replace(/\.\d+Z$/, "Z"))}`;
+      const path = `${repoPath(repoFullName)}/issues?state=all&sort=updated&direction=asc&per_page=${PAGE_SIZE}&page=${page}${from}`;
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          const json = await request(token, "GET", path, undefined, signal);
+          if (!Array.isArray(json))
+            throw shapeError("GET /repos/{owner}/{repo}/issues");
+          const items: TrackerItemFields[] = [];
+          let skipped = 0;
+          for (const entry of json) {
+            const item = toTrackerItem(entry, repoFullName);
+            // One odd record cannot block the sync: it is left out and the rest is read. The sync is told, and removes nothing.
+            if (item === null) {
+              skipped += 1;
+              warn("A ticket of the list could not be read and was left out.");
+            } else items.push(item);
+          }
+          return { items, last: json.length < PAGE_SIZE, skipped };
+        },
+        signal,
+      );
+    },
+
+    async readTrackerChecks(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      if (!Number.isInteger(after) || after < 0)
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The number to read the pull requests after is not a whole number.",
+        );
+      const path = repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        async (token) => {
+          // The list is in the order of creation, which is the order of the numbers: skip what the walk has read, take the next page's worth.
+          // A pull request is told by its number alone here, so one that cannot be read otherwise still moves the walk on.
+          // The pages 1..n of this one call are read by page number, so a pull request that closes while the call runs can still shift one past
+          // the walk (#947): its checks are read by the next sync, the nightly one at the latest.
+          const taken: { number: number; entry: unknown }[] = [];
+          let more = false;
+          for (let page = 1; !more; page += 1) {
+            checkPage(page);
+            const json = await request(
+              token,
+              "GET",
+              `${path}/pulls?state=open&sort=created&direction=asc&per_page=${PAGE_SIZE}&page=${page}`,
+              undefined,
+              signal,
+            );
+            if (!Array.isArray(json))
+              throw shapeError("GET /repos/{owner}/{repo}/pulls");
+            for (const entry of json as unknown[]) {
+              const number =
+                isRecord(entry) && typeof entry.number === "number"
+                  ? entry.number
+                  : 0;
+              if (number <= after) continue;
+              if (taken.length === CHECKS_PAGE_SIZE) {
+                more = true;
+                break;
+              }
+              taken.push({ number, entry });
+            }
+            if (json.length < PAGE_SIZE) break;
+          }
+          const pullRequests: {
+            number: number;
+            checksState: string | null;
+            reviewRequestedFrom?: string[];
+            headSha: string;
+            updatedAt: string;
+          }[] = [];
+          for (const { entry } of taken) {
+            const pr = toPullRequestRef(entry);
+            if (pr === null) {
+              warn(
+                "A pull request of the list could not be read and was left out.",
+              );
+              continue;
+            }
+            const reviewers = requestedReviewersOf(entry);
+            pullRequests.push({
+              number: pr.number,
+              // Left out when the entry has no list: unknown is not nobody.
+              ...(reviewers === undefined
+                ? {}
+                : { reviewRequestedFrom: reviewers }),
+              headSha: pr.headSha,
+              updatedAt: updatedAtOf(entry),
+              checksState: await readCommitChecks(
+                token,
+                path,
+                pr.headSha,
+                signal,
+              ),
+            });
+          }
+          return {
+            pullRequests,
+            last: !more,
+            lastNumber: taken.at(-1)?.number ?? null,
+          };
+        },
+        signal,
+      );
+    },
+
+    async readChecksState(
+      installationId,
+      scope,
+      repoFullName,
+      headSha,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      const path = repoPath(repoFullName);
+      return withScopedToken(
+        installationId,
+        scope,
+        (token) => readCommitChecks(token, path, headSha, signal),
+        signal,
+      );
+    },
+
+    async readTrackerBoard(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      boardId,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      const slash = repoFullName.indexOf("/");
+      repoPath(repoFullName);
+      const unavailable: {
+        available: boolean;
+        items: { nodeId: string; status: string | null }[];
+        next: string | null;
+      } = { available: false, items: [], next: null };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            // `after` is "<index of the board>:<cursor within it>"; the first page starts at board 0.
+            const separator = after === null ? -1 : after.indexOf(":");
+            const index =
+              after === null || separator < 0
+                ? 0
+                : Number(after.slice(0, separator));
+            // "<index>:" is the start of that board: no cursor within it yet.
+            const within =
+              after === null || separator < 0 ? "" : after.slice(separator + 1);
+            const cursor = within === "" ? null : within;
+            if (boardId !== undefined) {
+              // The project's own board: no list of boards, and the position is the one within it (a position that names another board by
+              // its index starts this board again at its first page; the sync does not hand one over, see `SyncCursor.board`).
+              const chosen = await graphql(
+                token,
+                BOARD_ITEMS_QUERY,
+                {
+                  project: boardId,
+                  after: index === 0 ? cursor : null,
+                  first: BOARD_PAGE_SIZE,
+                },
+                signal,
+              );
+              if (chosen === null) return unavailable;
+              const chosenPage = boardPageOf(chosen);
+              if (chosenPage === null) return unavailable;
+              return {
+                available: true,
+                items: chosenPage.items,
+                next:
+                  chosenPage.endCursor !== null && chosenPage.hasNextPage
+                    ? `0:${chosenPage.endCursor}`
+                    : null,
+              };
+            }
+            if (!Number.isInteger(index) || index < 0 || index >= BOARDS_MAX)
+              return { available: true, items: [], next: null };
+
+            const projects = await graphql(
+              token,
+              BOARDS_QUERY,
+              {
+                owner: repoFullName.slice(0, slash),
+                name: repoFullName.slice(slash + 1),
+                first: BOARDS_MAX,
+              },
+              signal,
+            );
+            if (projects === null) return unavailable;
+            const boards = boardIdsOf(projects);
+            if (boards === null) return unavailable;
+            // A board the token may not read is skipped, the indexes of the others stay what they were.
+            let at = index;
+            while (at < boards.length && boards[at] === null) at += 1;
+            const board = boards[at];
+            if (board === undefined || board === null)
+              return { available: true, items: [], next: null };
+
+            const data = await graphql(
+              token,
+              BOARD_ITEMS_QUERY,
+              {
+                project: board,
+                // The cursor belongs to the board it was saved for: another board starts from its first page.
+                after: at === index ? cursor : null,
+                first: BOARD_PAGE_SIZE,
+              },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const page = boardPageOf(data);
+            if (page === null) return unavailable;
+            let following = at + 1;
+            while (following < boards.length && boards[following] === null)
+              following += 1;
+            const next =
+              page.endCursor !== null && page.hasNextPage
+                ? `${at}:${page.endCursor}`
+                : following < boards.length
+                  ? `${following}:`
+                  : null;
+            return { available: true, items: page.items, next };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
+
+    async readTrackerBoardStatus(
+      installationId,
+      scope,
+      nodeId,
+      boardId,
+      signal,
+    ) {
+      checkInstallationId(installationId);
+      if (nodeId === "" || nodeId.length > 200)
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The node id of the ticket is not usable.",
+        );
+      const unavailable = { available: false, status: null };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            const data = await graphql(
+              token,
+              BOARD_STATUS_QUERY,
+              { id: nodeId },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const status = boardStatusOf(data, boardId);
+            if (status === undefined) return unavailable;
+            return { available: true, status };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
+
+    async listRepositoryBoards(installationId, scope, repoFullName, signal) {
+      checkInstallationId(installationId);
+      const slash = repoFullName.indexOf("/");
+      repoPath(repoFullName);
+      const unavailable = { available: false, boards: [] };
+      try {
+        return await withScopedToken(
+          installationId,
+          scope,
+          async (token) => {
+            const data = await graphql(
+              token,
+              REPOSITORY_BOARDS_QUERY,
+              {
+                owner: repoFullName.slice(0, slash),
+                name: repoFullName.slice(slash + 1),
+                first: BOARDS_MAX,
+              },
+              signal,
+            );
+            if (data === null) return unavailable;
+            const boards = repositoryBoardsOf(data);
+            if (boards === null) return unavailable;
+            return { available: true, boards };
+          },
+          signal,
+        );
+      } catch (error) {
+        // The permission "Projects" may be missing from the App or not accepted by the installation: the token request is refused.
+        if (
+          error instanceof GithubAppError &&
+          (error.code === "GITHUB_APP_FORBIDDEN" ||
+            error.refusal !== undefined ||
+            (error.duringTokenRequest && error.status === 422))
+        )
+          return unavailable;
+        throw error;
+      }
+    },
 
     async mintInstallationToken(installationId, scope) {
       if (scope.repositoryIds.length === 0)

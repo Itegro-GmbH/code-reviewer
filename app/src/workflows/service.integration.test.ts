@@ -3,10 +3,14 @@
 // The workflow service with the real repositories on a real Postgres (#833): the validator runs with the workspace's own
 // environments, an invalid document is refused with the full list and nothing is stored, every save is a new version, an older
 // version stays readable, and a workspace never sees the workflows of another.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
+import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import { seedImplementerRepository } from "../test-support/implementer.ts";
 import { createTestDatabase } from "../test-support/test-database.ts";
 import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 import {
@@ -14,7 +18,7 @@ import {
   defaultWorkspaceId,
 } from "../test-support/workspaces.ts";
 import { WorkflowError } from "./errors.ts";
-import { createWorkflowService } from "./service.ts";
+import { createWorkflowService, type WorkflowService } from "./service.ts";
 import { tiny } from "./test-fixtures.ts";
 
 const USER = { id: "u-1" };
@@ -32,16 +36,43 @@ async function setup() {
   await addUser(db, USER.id);
   const idA = await defaultWorkspaceId(db);
   const idB = await addWorkspace(db, "other");
-  const serviceFor = (
+  // A project in each workspace (#922): a lane belongs to one.
+  const projectIds = new Map<string, string>();
+  for (const [id, tag] of [
+    [idA, "a"],
+    [idB, "b"],
+  ] as const) {
+    const seeded = await seedImplementerRepository(db, id, tag);
+    const project = await createProjectsRepository(db, id).get(
+      seeded.repositoryId,
+    );
+    projectIds.set(id, project!.id);
+  }
+  const rawServiceFor = (
     workspaceId: string,
     options: { maxBudgetUsd?: number; archivedMax?: number } = {},
-  ) =>
+  ): WorkflowService =>
     createWorkflowService({
       workflows: createWorkflowsRepository(db, workspaceId),
+      projects: createProjectsRepository(db, workspaceId),
       environments: createImplementerEnvironmentsRepository(db, workspaceId),
       profiles: createProfilesRepository(db, workspaceId),
       ...options,
     });
+  /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
+  const serviceFor = (
+    workspaceId: string,
+    options: { maxBudgetUsd?: number; archivedMax?: number } = {},
+  ) => {
+    const service = rawServiceFor(workspaceId, options);
+    const projectId = projectIds.get(workspaceId)!;
+    return {
+      ...service,
+      create: (user: { id: string }, body: unknown) =>
+        service.create(user, projectId, body),
+      list: () => service.list(projectId),
+    };
+  };
   for (const id of [idA, idB]) {
     await createImplementerEnvironmentsRepository(db, id).create(
       { name: "node", vcpus: 4, setupScript: "", createdBy: USER.id },
@@ -57,7 +88,16 @@ async function setup() {
       100,
     );
   }
-  return { db, a: serviceFor(idA), b: serviceFor(idB), serviceFor, idA, idB };
+  return {
+    db,
+    a: serviceFor(idA),
+    b: serviceFor(idB),
+    serviceFor,
+    rawServiceFor,
+    projectIds,
+    idA,
+    idB,
+  };
 }
 
 async function failureOf(promise: Promise<unknown>): Promise<WorkflowError> {
@@ -136,6 +176,50 @@ describe("the workflow service", () => {
     expect((await a.validate(document)).errors[0]?.code).toBe(
       "environment_unknown",
     );
+    expect((await b.validate(document)).valid).toBe(true);
+  });
+
+  // #919-T48
+  it("says the environment of a profile version that belongs to another workspace is not in this one", async () => {
+    const { a, b, db, idA, idB } = await setup();
+    const [foreign] = await createImplementerEnvironmentsRepository(
+      db,
+      idB,
+    ).listSummaries();
+    if (foreign === undefined) throw new Error("expected an environment");
+    // Seeded directly: the profile service would never save an id that is not one of the workspace.
+    const created = await createProfilesRepository(db, idA).create(
+      {
+        name: "crossed",
+        content: { ...PROFILE_CONTENT, environmentId: foreign.id },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    if (!created.ok) throw new Error("the profile was not created");
+    await createProfilesRepository(db, idB).create(
+      {
+        name: "crossed",
+        content: { ...PROFILE_CONTENT, environmentId: foreign.id },
+        createdBy: USER.id,
+      },
+      100,
+    );
+    const document = tiny();
+    const step = (document.steps as Array<Record<string, unknown>>)[0]!;
+    step.profile = "crossed";
+    delete step.environment;
+
+    const refused = await a.validate(document);
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/profile",
+        code: "environment_unknown",
+        available: ["node"],
+      }),
+    ]);
+    // In the workspace the environment belongs to, the same profile is fine.
     expect((await b.validate(document)).valid).toBe(true);
   });
 
@@ -377,5 +461,182 @@ describe("the workflow service", () => {
       .executeTakeFirstOrThrow();
     expect(JSON.parse(row.document)).toEqual(document);
     expect(created.document).toEqual(document);
+  });
+
+  // #922-T10
+  it("lists and creates lanes within a project, and refuses a missing or foreign project naming the ones there are", async () => {
+    const { rawServiceFor, projectIds, idA, idB } = await setup();
+    const service = rawServiceFor(idA);
+    const mine = projectIds.get(idA)!;
+
+    const missing = await failureOf(service.list(undefined));
+    const foreign = await failureOf(
+      service.create(USER, projectIds.get(idB), tiny()),
+    );
+
+    expect(missing.code).toBe("WORKFLOW_PROJECT_REQUIRED");
+    expect(missing.issues).toEqual([
+      expect.objectContaining({
+        path: "projectId",
+        code: "project_required",
+        available: [mine],
+      }),
+    ]);
+    expect(foreign.code).toBe("WORKFLOW_PROJECT_NOT_FOUND");
+    expect(foreign.issues).toEqual([
+      expect.objectContaining({ code: "project_unknown", available: [mine] }),
+    ]);
+    expect((await service.list(mine)).workflows).toEqual([]);
+    expect((await service.create(USER, mine, tiny())).projectId).toBe(mine);
+    expect(
+      (await service.list(mine)).workflows.map((w) => w.projectId),
+    ).toEqual([mine]);
+  });
+
+  // #922-T11
+  it("takes no lane in a project that is switched off", async () => {
+    const { rawServiceFor, projectIds, db, idA } = await setup();
+    const mine = projectIds.get(idA)!;
+    const projects = createProjectsRepository(db, idA);
+    const project = await db
+      .selectFrom("projects")
+      .select("repository_id")
+      .where("id", "=", mine)
+      .executeTakeFirstOrThrow();
+    await projects.deactivate(project.repository_id);
+
+    const failure = await failureOf(
+      rawServiceFor(idA).create(USER, mine, tiny()),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_PROJECT_INACTIVE");
+  });
+
+  // #922-T12
+  it("holds a name once per project, not once per workspace", async () => {
+    const { rawServiceFor, projectIds, db, idA } = await setup();
+    const service = rawServiceFor(idA);
+    const first = { id: projectIds.get(idA)! };
+    // A second repository of the workspace, with a project of its own.
+    const integration = await createIntegrationsRepository(db, idA).create({
+      type: "github_app",
+      displayName: "acme-second",
+      externalId: "installation-second",
+      config: {},
+    });
+    const repositories = createRepositoriesRepository(db, idA);
+    await repositories.reconcile(integration.id, [
+      {
+        integrationId: integration.id,
+        externalId: "repo-second",
+        fullName: "acme/second",
+        url: "https://github.test/acme/second",
+      },
+    ]);
+    const repository = (await repositories.list()).find(
+      (candidate) => candidate.fullName === "acme/second",
+    )!;
+    const activated = await createProjectsRepository(db, idA).activate(
+      repository.id,
+    );
+    if (activated.kind !== "activated") throw new Error("seeding failed");
+    const second = activated.project;
+
+    await service.create(USER, first.id, tiny());
+    const again = await failureOf(service.create(USER, first.id, tiny()));
+    const other = await service.create(USER, second.id, tiny());
+
+    expect(again.code).toBe("WORKFLOW_NAME_TAKEN");
+    expect(other.projectId).toBe(second.id);
+    expect((await service.list(second.id)).workflows).toHaveLength(1);
+  });
+
+  // #922-T13
+  it("copies built-in lanes into a project and reports the ones that do not pass", async () => {
+    const { rawServiceFor, projectIds, db, idA } = await setup();
+    const service = rawServiceFor(idA);
+    const mine = projectIds.get(idA)!;
+    // The profiles of the built-ins: `implementer` exists (setup), `reviewer` does not.
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    expect(results.map((r) => [r.key, r.ok])).toEqual([
+      ["issue-to-pr", false],
+      ["review-a-pull-request", false],
+    ]);
+    expect(
+      results.flatMap((r) => (r.ok ? [] : r.errors.map((e) => e.code))),
+    ).toContain("profile_unknown");
+
+    await createProfilesRepository(db, idA).create(
+      { name: "reviewer", content: PROFILE_CONTENT, createdBy: USER.id },
+      100,
+    );
+    const copied = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+    const twice = await service.copyBuiltIn(USER, mine, ["issue-to-pr"]);
+
+    expect(copied.map((r) => [r.key, r.ok])).toEqual([
+      ["issue-to-pr", true],
+      ["review-a-pull-request", true],
+    ]);
+    expect(
+      (await service.list(mine)).workflows.map((w) => w.name).sort(),
+    ).toEqual(["Issue to PR", "Review a pull request"]);
+    expect(twice[0]).toMatchObject({ ok: false, code: "WORKFLOW_NAME_TAKEN" });
+  });
+
+  // #937 (from the re-review of #936)
+  it("reports a database error on the second built-in lane as that lane's failure only, and the first stays saved", async () => {
+    const { db, idA, projectIds } = await setup();
+    await createProfilesRepository(db, idA).create(
+      { name: "reviewer", content: PROFILE_CONTENT, createdBy: USER.id },
+      100,
+    );
+    const real = createWorkflowsRepository(db, idA);
+    let creates = 0;
+    const service = createWorkflowService({
+      workflows: {
+        ...real,
+        create: (input, maximum) => {
+          creates += 1;
+          if (creates === 2)
+            return Promise.reject(
+              Object.assign(new Error("connection lost"), { code: "08006" }),
+            );
+          return real.create(input, maximum);
+        },
+      },
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+    });
+    const mine = projectIds.get(idA)!;
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const results = await service.copyBuiltIn(USER, mine, [
+      "issue-to-pr",
+      "review-a-pull-request",
+    ]);
+
+    expect(results[0]).toMatchObject({ key: "issue-to-pr", ok: true });
+    expect(results[1]).toMatchObject({
+      key: "review-a-pull-request",
+      ok: false,
+      code: "LANE_COPY_FAILED",
+    });
+    expect((await service.list(mine)).workflows.map((w) => w.name)).toEqual([
+      "Issue to PR",
+    ]);
+    // The lane and the code of the error are logged, never its text.
+    expect(quiet).toHaveBeenCalledWith(
+      "[workflows] copying the built-in lane review-a-pull-request failed (08006)",
+    );
+    expect(JSON.stringify(quiet.mock.calls)).not.toContain("connection lost");
+    quiet.mockRestore();
   });
 });

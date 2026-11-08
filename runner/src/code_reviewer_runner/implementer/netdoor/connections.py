@@ -27,6 +27,11 @@ REASON_PORT: Final = "port_not_allowed"
 REASON_BAD_REQUEST: Final = "bad_request"
 REASON_TOO_MANY: Final = "too_many_connections"
 REASON_UPSTREAM: Final = "upstream_failed"
+# A package registry the door reads for the agent and never writes to (#784, `registries.py`).
+REASON_METHOD: Final = "method_not_allowed"
+REASON_HOST_MISMATCH: Final = "host_mismatch"
+REASON_REGISTRY: Final = "registry_read_only"
+REASON_TLS: Final = "tls_failed"
 
 
 def clean_host(text: str) -> str:

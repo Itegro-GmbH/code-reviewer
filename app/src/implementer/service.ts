@@ -94,10 +94,18 @@ export type ImplementerService = FollowUps &
  */
 export type StartTaskOptions = {
   /**
-   * The most the task may cost, in whole US cents. It lowers the cost limit of the task (the profile version's, or none) and never
-   * raises it; it is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it instead of refused.
+   * The most the task may cost, in whole US cents. It is the cost limit of the task: the cost limit of the profile version is not read
+   * when it is given (#918). It is held to the operator's maximum like any limit, but a cap above that maximum is lowered to it
+   * instead of refused.
    */
   costCapCents?: number;
+  /**
+   * #918: how many minutes the turn may run, from the `turnTimeLimitMinutes` of the workflow. Copied into the turn; the claim hands it
+   * to the Worker as its time limit. Left out: the platform's 60 minutes.
+   */
+  timeLimitMinutes?: number;
+  /** #920: the request id may start with the prefix that is the engine's alone (`wf-`); a request body never gets this. */
+  workflowStep?: boolean;
 };
 
 export type ImplementerServiceDependencies = FollowUpDependencies & {
@@ -142,7 +150,7 @@ function repeatOf(
   task: StartInput,
 ): StartedTask {
   const { session, turn } = earlier;
-  // With a profile the model and the cost limit are the version's, not the body's: only the profile is compared.
+  // With a profile the model is the version's, not the body's, and the cost limit is the operator's maximum: only the profile is compared.
   const sameChoices =
     task.profile !== null ||
     (turn.costLimitCents === task.costLimitCents &&
@@ -251,7 +259,9 @@ export function createImplementerService(
     listModels: () => deps.models.options(),
 
     async startTask(user, input, options = {}) {
-      const checked = validateStartInput(input);
+      const checked = validateStartInput(input, {
+        workflowStep: options.workflowStep === true,
+      });
       if (!checked.ok)
         throw new ImplementerError(
           "IMPLEMENTER_REQUEST_INVALID",
@@ -324,7 +334,8 @@ export function createImplementerService(
       }
 
       // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
-      // whatever is done to it afterwards. Its model and cost limit take the place of the body's, and are checked like the body's.
+      // whatever is done to it afterwards. Its model takes the place of the body's and is checked like it. Its cost limit is not read (#918):
+      // the cap is the operator's maximum, as for a version that never had one (`claim.ts`: `costLimitCents ?? operatorCents`).
       let profile: TurnProfile | null = null;
       let profileResult: string | null = null;
       let model: ModelChoice;
@@ -337,7 +348,7 @@ export function createImplementerService(
         const copied = await copyProfile(deps.profiles, task.profile);
         profile = copied.profile;
         model = copied.model;
-        costLimitCents = copied.costLimitCents;
+        costLimitCents = null;
         profileResult = copied.defaultResult;
       }
 
@@ -396,6 +407,9 @@ export function createImplementerService(
           instruction: task.instruction,
           modelChoice: model,
           costLimitCents,
+          ...(options.timeLimitMinutes === undefined
+            ? {}
+            : { timeLimitMinutes: options.timeLimitMinutes }),
           environment,
           runnerEnvironment,
           profile,

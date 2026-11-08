@@ -5,15 +5,27 @@
 // authenticates the installation token and finds the repository; the answers are shaped like GitHub's.
 //
 // Issues and pull requests share the numbers of a repository. A label that is added and is not known is created. Not modelled on
-// purpose: label colors and descriptions, issue states other than open, assignees.
+// purpose: label colors and descriptions, issue states other than open.
 
 export type FakeIssue = {
   number: number;
   title: string;
   labels?: string[];
+  body?: string;
+  /** The logins the issue is assigned to (#916). */
+  assignees?: string[];
+  /** GitHub's issue type (`Bug`), left out for an issue without one (#916). */
+  type?: string;
 };
 
-type Stored = { number: number; title: string; labels: string[] };
+type Stored = {
+  number: number;
+  title: string;
+  labels: string[];
+  body?: string;
+  assignees?: string[];
+  type?: string;
+};
 
 type FakeIssueComment = {
   id: number;
@@ -157,6 +169,32 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
       };
     }
 
+    // One issue, as `GET /repos/{owner}/{repo}/issues/{n}` answers it (#916). A pull request number answers with `pull_request` set, as GitHub does.
+    const issueMatch = /^\/issues\/(\d+)$/.exec(rest);
+    if (issueMatch !== null && method === "GET") {
+      if (!mayDo(["issues", "pull_requests"], "read")) return forbidden;
+      const number = Number(issueMatch[1]);
+      const known = issuesOf(repository.fullName).find(
+        (issue) => issue.number === number,
+      );
+      const isPullRequest = request.pullRequestNumbers.includes(number);
+      if (known === undefined && !isPullRequest) return notFound;
+      return {
+        status: 200,
+        body: {
+          number,
+          title: known?.title ?? "",
+          body: known?.body ?? null,
+          state: "open",
+          html_url: `${options.webBase()}/${repository.fullName}/${isPullRequest ? "pull" : "issues"}/${String(number)}`,
+          labels: (known?.labels ?? []).map(labelJson),
+          assignees: (known?.assignees ?? []).map((login) => ({ login })),
+          ...(known?.type === undefined ? {} : { type: { name: known.type } }),
+          ...(isPullRequest ? { pull_request: {} } : {}),
+        },
+      };
+    }
+
     const labelsMatch = /^\/issues\/(\d+)\/labels(?:\/(.+))?$/.exec(rest);
     if (labelsMatch !== null) {
       const number = Number(labelsMatch[1]);
@@ -202,6 +240,33 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
         return { status: 200, body: issue.labels.map(labelJson) };
       }
       return undefined;
+    }
+
+    // #920: a comment of an issue is edited by its id alone (`PATCH /issues/comments/{id}`); one that is below a pull request is `review-api.ts`'s.
+    const editMatch = /^\/issues\/comments\/(\d+)$/.exec(rest);
+    if (editMatch !== null && method === "PATCH") {
+      const id = Number(editMatch[1]);
+      const found = [...comments.values()]
+        .flat()
+        .find((candidate) => candidate.id === id);
+      if (found === undefined) return undefined;
+      if (!mayDo(["issues"], "write")) return forbidden;
+      const input = JSON.parse((await request.body()) || "{}") as {
+        body?: unknown;
+      };
+      if (typeof input.body !== "string" || input.body === "")
+        return validation("body is missing", "body");
+      found.body = input.body;
+      return {
+        status: 200,
+        body: {
+          id: found.id,
+          body: found.body,
+          user: { login: found.login, id: 1, type: "Bot" },
+          html_url: `${options.webBase()}/${repository.fullName}/issues/${String(found.number)}#issuecomment-${String(found.id)}`,
+          issue_url: `${options.apiBase()}/repos/${repository.fullName}/issues/${String(found.number)}`,
+        },
+      };
     }
 
     // Comments below an issue that is no pull request (those of a pull request are `review-api.ts`'s).
@@ -265,6 +330,11 @@ export function createActionsApi(options: ActionsApiOptions): ActionsApi {
           number: issue.number,
           title: issue.title,
           labels: [...(issue.labels ?? [])],
+          ...(issue.body === undefined ? {} : { body: issue.body }),
+          ...(issue.assignees === undefined
+            ? {}
+            : { assignees: [...issue.assignees] }),
+          ...(issue.type === undefined ? {} : { type: issue.type }),
         },
       ]);
     },

@@ -109,6 +109,29 @@ export function addressesOf(
         route.pattern.startsWith("/api/w/:workspace/profiles") ||
         route.pattern.startsWith("/api/w/:workspace/runners") ||
         route.pattern === "/w/:workspace/runners" ||
+        // The shell of the factory (#925): the ToDos and the profiles, the tabs of a project's cockpit, the settings tabs that moved from
+        // `/connections` and `/members`, and the review settings below a project.
+        route.pattern === "/w/:workspace/settings/integrations" ||
+        route.pattern === "/w/:workspace/settings/members" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/review" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/runs" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/setup" ||
+        route.pattern === "/w/:workspace/todos" ||
+        route.pattern === "/api/w/:workspace/todos/count" ||
+        // The ToDos of a workspace and of a project and the review given from the list (#924): read and written by the factory only.
+        route.pattern === "/api/w/:workspace/todos" ||
+        route.pattern === "/api/w/:workspace/todos/reviews" ||
+        route.pattern === "/api/w/:workspace/projects/:projectId/todos" ||
+        route.pattern === "/w/:workspace/profiles" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/todos" ||
+        route.pattern === "/w/:workspace/projects/:repositoryId/lanes" ||
+        // The tickets of a project from the ticket mirror (#923): read by the factory's cockpit only.
+        route.pattern ===
+          "/api/w/:workspace/repositories/:repositoryId/issues" ||
+        // The boards of a repository and the tickets of a project by its id (#922): read by the factory's cockpit only.
+        route.pattern ===
+          "/api/w/:workspace/repositories/:repositoryId/boards" ||
+        route.pattern === "/api/w/:workspace/projects/:projectId/issues" ||
         route.pattern === "/w/:workspace/settings/billing",
     },
   ];
@@ -141,6 +164,7 @@ export function addressesOf(
             { value: "no-such-provider", refused: true },
           ];
         case "environmentId":
+        case "projectId":
         case "workflowId":
         case "profileId":
         case "runId":

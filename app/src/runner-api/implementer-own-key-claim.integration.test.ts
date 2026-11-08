@@ -249,6 +249,59 @@ describe("the claim of a turn of the Implementer with a start branch", () => {
       (job.input as { implementer: Record<string, unknown> }).implementer,
     ).not.toHaveProperty("startBranch");
   });
+
+  // #918-T08
+  it("hands the Worker the time limit of the turn, and 3600 seconds when the turn has none", async () => {
+    const h = await start();
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+      timeLimitMinutes: 15,
+    });
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+    });
+    const limited = await h.claimed(claimOptions());
+    const plain = await h.claimed(claimOptions());
+    const limitOf = (job: { input: unknown }) =>
+      (job.input as { implementer: { limits: { timeLimitSeconds: number } } })
+        .implementer.limits.timeLimitSeconds;
+
+    expect(limitOf(limited.job)).toBe(900);
+    expect(limitOf(plain.job)).toBe(3600);
+  });
+});
+
+describe("a turn that may ask a question (#920)", () => {
+  const ASK_FEATURES = [...FEATURES, "implementer_result", "implementer_ask"];
+  const SCHEMA = {
+    type: "object" as const,
+    required: ["summary"],
+    properties: { summary: { type: "string" } },
+  };
+
+  // #920-T185
+  it("does not tell a plain task that a crafted request id makes a workflow step: no run has such a step, so no canAsk", async () => {
+    const h = await start();
+    // The queue takes any id (the API's parser refuses the prefix, and this goes round it): the claim must not read the id alone.
+    await h.enqueueTurn({
+      modelChoice: { provider: "anthropic", model: SONNET },
+      costLimitCents: 500,
+      resultSchema: SCHEMA,
+      clientRequestId: "wf-00000000-0000-4000-8000-000000000000-0",
+    });
+
+    const { job } = await h.claimed({
+      engines: ["implementer", "opencode", "pr-agent"],
+      features: ASK_FEATURES,
+    });
+
+    expect(job.input).toMatchObject({ implementer: { resultSchema: SCHEMA } });
+    expect(
+      (job.input as { implementer: Record<string, unknown> }).implementer,
+    ).not.toHaveProperty("canAsk");
+  });
 });
 
 describe("a turn of the Implementer on the operator's key", () => {

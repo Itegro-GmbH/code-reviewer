@@ -1,0 +1,46 @@
+{
+  "action": "edited",
+  "projects_v2_item": {
+    "id": 3001,
+    "node_id": "PVTI_1",
+    "project_node_id": "PVT_1",
+    "content_node_id": "I_kwDOAAA12",
+    "content_type": "Issue",
+    "creator": {
+      "login": "bob",
+      "id": 1002,
+      "type": "User"
+    }
+  },
+  "organization": {
+    "login": "acme",
+    "id": 5001
+  },
+  "installation": {
+    "id": 4242,
+    "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+  },
+  "sender": {
+    "login": "bob",
+    "id": 1002,
+    "type": "User"
+  },
+  "changes": {
+    "field_value": {
+      "field_node_id": "PVTSSF_1",
+      "field_type": "single_select",
+      "field_name": "Status",
+      "project_number": 1,
+      "from": {
+        "id": "a1",
+        "name": "Todo",
+        "color": "GRAY"
+      },
+      "to": {
+        "id": "b2",
+        "name": "In Progress",
+        "color": "YELLOW"
+      }
+    }
+  }
+}

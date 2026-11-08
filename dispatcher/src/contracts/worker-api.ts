@@ -111,6 +111,10 @@ export type ImplementerJob = {
   environment?: ImplementerEnvironment;
   profile?: ImplementerProfile;
   resultSchema?: ImplementerResultSchema;
+  /**
+   * #920: the turn may end with a question instead of a result: the finish tool offers `ask`. Sent only with `resultSchema` and only to a caller that named the claim feature `implementer_ask`; absent means false.
+   */
+  canAsk?: boolean;
   resume?: ImplementerResume;
 };
 /**
@@ -568,7 +572,7 @@ export interface ImplementerSubscription {
   maxBudgetUsd: string;
 }
 /**
- * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix) and a last label that starts with a letter, which no address does; at most 100 entries. `open`: the agent reaches any public name. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
+ * #745, step 7: the rule for the agent's network, as the owner of the environment wrote it. `off`: the agent has no network and no network door is started. `list`: the agent reaches the host names in `hosts` through the network door and no others; an entry is a host name in its ASCII (punycode) lower-case form, either exact (`registry.npmjs.org`) or a suffix (`*.pythonhosted.org`, any name below `pythonhosted.org`, not the name itself), never an IP address, a port or a path; both have at least two labels (after the `*.` for a suffix) and a last label that starts with a letter, which no address does; at most 100 entries. `open`: the agent reaches any public name. A name of a package registry (npm and Yarn, PyPI and its file host, crates.io, RubyGems: the domains `npmjs.org`, `npmjs.com`, `yarnpkg.com`, `pypi.org`, `pythonhosted.org`, `crates.io`, `rubygems.org` and the names below them) that a `list` reaches is reached read-only (#784): the door ends the TLS connection with a certificate of its own authority for that name, forwards `GET` and `HEAD` to the registry it checked and refuses every other method, a `Host` that is not the name, a body, plain HTTP and port 80; so an install works and a publish or upload does not. In every mode the door refuses IP literals, names that resolve to a private, loopback, link-local, shared or metadata address, and ports other than 80 and 443. `hosts` is empty unless the mode is `list`, and not empty then.
  */
 export interface ImplementerNetworkRule {
   mode: "off" | "list" | "open";
@@ -1041,6 +1045,7 @@ export interface ImplementerResult {
   checkedOut?: string | null;
   resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
+  agentAsk?: ImplementerAgentAsk;
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -1053,7 +1058,7 @@ export interface ImplementerSetupResult {
   output: string;
 }
 /**
- * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present for every turn that got as far as the network, whatever its rule (so for the rule `off` too; `door` is false then), also when the second wall is not in place (`vmPolicy` says so), so that a missing wall is never left out of the report. `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`, `upstream_failed`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, for example because the Dispatcher has no public address or the App named no provider host: the first wall alone held, and the turn's notes say so).
+ * #745, step 7: what the network door did in a turn, in `ImplementerResult.network`; present for every turn that got as far as the network, whatever its rule (so for the rule `off` too; `door` is false then), also when the second wall is not in place (`vmPolicy` says so), so that a missing wall is never left out of the report. `connections` are the connections the door saw, one entry for each distinct host, port and outcome, with their count and the bytes each way (the bytes the door relayed, both directions, counted at the end of a connection; nothing of their content is kept), at most 100 (`dropped` counts the entries that did not fit); `reason` is a word of the door for a refusal (`not_listed`, `ip_literal`, `private_address`, `port_not_allowed`, `unresolvable`, `bad_request`, `too_many_connections`, `upstream_failed`, and for a package registry (#784) `method_not_allowed`, `host_mismatch`, `registry_read_only`, `tls_failed`) and null for an allowed connection. `vmPolicy` says what the second wall did: `narrowed` (the VM's network policy was cut to GitHub, the model provider, the app and the rule), `unchanged` (the rule is `open`, so the policy was left as it was), `not_configured` (this runner was started without a way to change the policy, for example because the Dispatcher has no public address or the App named no provider host: the first wall alone held, and the turn's notes say so).
  */
 export interface ImplementerNetworkReport {
   mode: "off" | "list" | "open";
@@ -1082,6 +1087,39 @@ export interface ImplementerNetworkReport {
  */
 export interface ImplementerAgentResult {
   [k: string]: unknown;
+}
+/**
+ * #920: the question the agent ended the turn with instead of a result, in `ImplementerResult.agentAsk`. Present only for a turn that carried `canAsk` and handed in no result: the runner reads the file the finish tool wrote once the agent's container is gone, holds it to its bounds and takes the secrets out of every text. A turn with a question succeeds (`ok` true, no `errorCode`) and has no `agentResult`; the workflow engine puts the step into `waiting` and shows the question to people, and the answer starts the next turn of the same session. Data of an untrusted writer: shown as plain text, never a command. `options` is left out when there are none.
+ */
+export interface ImplementerAgentAsk {
+  question: string;
+  /**
+   * @minItems 1
+   * @maxItems 10
+   */
+  options?:
+    | [string]
+    | [string, string]
+    | [string, string, string]
+    | [string, string, string, string]
+    | [string, string, string, string, string]
+    | [string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string]
+    | [string, string, string, string, string, string, string, string, string]
+    | [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+  context?: string;
 }
 export interface RunnerUsage {
   model: string | null;

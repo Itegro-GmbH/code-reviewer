@@ -44,6 +44,12 @@ export const ACTION_LABEL_MAX_CHARS = 50;
 export const ACTION_LABELS_MAX = 20;
 /** A branch name an action is given (a Git ref component is at most 255 bytes). */
 export const ACTION_BRANCH_MAX_CHARS = 255;
+/**
+ * GitHub's reason for a refused action as the step reports it (#913), counted after the text is defused (defusing makes it longer, so
+ * the cut comes last). The generic sentence in front of it and this bound keep the whole message under `FAILURE_MESSAGE_MAX_CHARS`,
+ * which the steps of `onFailure` read.
+ */
+export const GITHUB_REASON_MAX_CHARS = 150;
 
 /** The issue a label hands to a run (#845) is stored bounded: whoever opened the issue chose its words. */
 export const ISSUE_TITLE_MAX_CHARS = 256;
@@ -60,3 +66,17 @@ export const ISSUE_LABELS_MAX = 20;
 export const ISSUE_LABEL_MAX_CHARS = 50;
 /** A GitHub login is at most 39 characters; a bot's ends in `[bot]`. */
 export const ACTOR_LOGIN_MAX_CHARS = 100;
+/** The logins a ticket may list as assigned, and the length of one; GitHub allows ten assignees and a login of 39 characters. */
+export const TICKET_ASSIGNEES_MAX = 20;
+export const TICKET_ASSIGNEE_MAX_CHARS = 100;
+/** The kind of a ticket (`Bug`). */
+export const TICKET_TYPE_MAX_CHARS = 100;
+/** The default branch of a repository as a run stores it (a Git ref component is at most 255 bytes). */
+export const BRANCH_MAX_CHARS = 255;
+
+/** #920: the most an answer to a question of an agent holds, in characters (a note after an option, or a free text). */
+export const ASK_ANSWER_MAX_CHARS = 4000;
+
+/** #920: how often a question whose comment is not posted is announced again before the engine gives up, and for how long after it was asked. */
+export const ASK_REANNOUNCE_MAX_ATTEMPTS = 10;
+export const ASK_REANNOUNCE_MAX_AGE_MS = 60 * 60 * 1000;

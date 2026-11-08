@@ -23,7 +23,7 @@ Three places hold the parts, split so that none of them joins the import cycle o
 ## The rules
 
 - **A token** is made by an Owner or Admin (`manage_runners`), valid for one hour, usable once (one conditional `UPDATE ... WHERE used_at IS NULL AND expires_at > now`,
-  so two runners racing for it cannot both win), shown once in the answer. The database keeps the hash. A token that is unknown, used or expired is one
+  so two runners racing for it cannot both win), shown once in the answer (the Runners page, #925, shows it in the "Connect your own runner" dialog with the command to run on the machine). The database keeps the hash. A token that is unknown, used or expired is one
   answer (`401 RUNNER_REGISTRATION_TOKEN_INVALID`).
 - **A credential** is the runner's own. It is shown once (the answer of the exchange or of a renewal). A renewal keeps the previous credential valid until
   the new one is used once, so an answer lost on the way does not lock the runner out. **A revoked runner is refused at once**: the lookup joins on

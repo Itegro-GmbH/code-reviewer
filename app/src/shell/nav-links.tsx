@@ -23,10 +23,13 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import type { ProductIdentity } from "@/product-identity/identity";
+import { workspaceSlugOfPath } from "@/workspaces/paths";
+import { TodoCount } from "../todo-badges/badges.tsx";
 import {
   isCurrentPage,
   navGroupsFor,
   SIDEBAR_LINK_CLASS,
+  type NavItem,
 } from "./nav-items.ts";
 
 /**
@@ -69,11 +72,12 @@ function NavLink({
   item,
   pathname,
 }: {
-  item: { href: string; label: string };
+  item: NavItem;
   pathname: string | null;
 }) {
   const { setOpenMobile } = useSidebar();
   const current = isCurrentPage(pathname, item.href);
+  const slug = pathname === null ? undefined : workspaceSlugOfPath(pathname);
   return (
     <SidebarMenuItem>
       <SidebarMenuButton asChild isActive={current}>
@@ -84,6 +88,9 @@ function NavLink({
           onClick={() => setOpenMobile(false)}
         >
           {item.label}
+          {item.badge === "todos" && typeof slug === "string" ? (
+            <TodoCount workspaceSlug={slug} pathname={pathname} />
+          ) : null}
         </Link>
       </SidebarMenuButton>
     </SidebarMenuItem>

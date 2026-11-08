@@ -185,6 +185,9 @@ export function createWorkspaceErasureRepository(
         // The steps of a workflow run point at jobs and turns, the runs at the workflow versions (#844): steps first, runs next.
         "workflow_step_runs",
         "workflow_runs",
+        // The cache of the tickets points at the repositories (#923): it goes before them.
+        "tracker_items",
+        "tracker_sync_state",
         "implementer_turn_steps",
         "implementer_session_snapshot_parts",
         "implementer_session_snapshots",

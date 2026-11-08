@@ -4,9 +4,11 @@
 // a project and back. It validates its input, maps a refusal to a stable `ProjectError` code and lets
 // the jobs module hook into a deactivation. All SQL is in the projects repository.
 import type {
+  ActivateOptions,
   ProjectListEntry,
   ProjectsRepository,
   StoredProject,
+  TicketBoard,
 } from "../db/repositories/projects-repository.ts";
 import { ProjectError } from "./errors.ts";
 import { noopProjectHooks, type ProjectHooks } from "./hooks.ts";
@@ -17,10 +19,32 @@ export type ProjectService = {
    * second answer says `unchanged`. Throws `PROJECT_REPOSITORY_NOT_FOUND`,
    * `PROJECT_REPOSITORY_UNAVAILABLE`, `PROJECT_INTEGRATION_UNAVAILABLE` or `PROJECT_REQUEST_INVALID`.
    */
-  activateProject(repositoryId: string): Promise<{
+  activateProject(
+    repositoryId: string,
+    options?: ActivateOptions,
+  ): Promise<{
     project: StoredProject;
     outcome: "created" | "reactivated" | "unchanged";
   }>;
+  /**
+   * Creates the project of a repository in the factory (#922): switches it on and writes its ticket source (the GitHub issues of the
+   * repository and `board`, or none). Throws what `activateProject` throws and `PROJECT_ALREADY_EXISTS` for a repository whose project is
+   * on already: the board of an existing project is not changed by creating it again.
+   */
+  createProject(
+    repositoryId: string,
+    board: ActivateOptions["board"],
+  ): Promise<StoredProject>;
+  /** A project by its own id, or undefined when the workspace has none with it (#922). */
+  getProject(projectId: string): Promise<StoredProject | undefined>;
+  /**
+   * Sets, changes or clears (`null`) the board of the ticket source of a project (#937). The board is taken as it is: the caller has
+   * checked it against the boards of the repository. Throws `PROJECT_NOT_FOUND` for an id the workspace does not have.
+   */
+  setBoard(
+    projectId: string,
+    board: TicketBoard | null,
+  ): Promise<StoredProject>;
   /**
    * Switches the project of a repository off and keeps it (row and settings). A repository without a
    * project, or with a project that is off, is not an error: `changed` is false. Throws
@@ -71,11 +95,22 @@ export function createProjectService(deps: {
   const { projects } = deps;
   const hooks = deps.hooks ?? noopProjectHooks;
 
-  return {
-    async activateProject(repositoryId) {
-      const result = await projects.activate(checkRepositoryId(repositoryId));
+  const service: ProjectService = {
+    async activateProject(repositoryId, options) {
+      const result = await projects.activate(
+        checkRepositoryId(repositoryId),
+        options,
+      );
       switch (result.kind) {
         case "activated":
+          if (result.outcome !== "unchanged")
+            // What follows an activation never fails it (the hook's own contract); a throw is dropped.
+            await Promise.resolve(
+              hooks.onProjectActivated?.({
+                projectId: result.project.id,
+                repositoryId: result.project.repositoryId,
+              }),
+            ).catch(() => undefined);
           return { project: result.project, outcome: result.outcome };
         case "repository_not_found":
           throw new ProjectError(
@@ -93,6 +128,40 @@ export function createProjectService(deps: {
             "The installation of the repository is suspended or removed, so the repository cannot be activated.",
           );
       }
+    },
+
+    async createProject(repositoryId, board) {
+      const id = checkRepositoryId(repositoryId);
+      const existing = await projects.get(id);
+      if (existing?.active === true)
+        throw new ProjectError(
+          "PROJECT_ALREADY_EXISTS",
+          "The repository has a project that is switched on already.",
+        );
+      return (await service.activateProject(id, { board })).project;
+    },
+
+    async getProject(projectId) {
+      if (
+        typeof projectId !== "string" ||
+        projectId.trim() === "" ||
+        projectId.length > MAX_ID_LENGTH
+      )
+        return undefined;
+      return projects.getById(projectId);
+    },
+
+    async setBoard(projectId, board) {
+      const found =
+        (await service.getProject(projectId)) === undefined
+          ? undefined
+          : await projects.setTicketBoard(projectId, board);
+      if (found === undefined)
+        throw new ProjectError(
+          "PROJECT_NOT_FOUND",
+          "There is no project with this id.",
+        );
+      return found;
     },
 
     async deactivateProject(repositoryId) {
@@ -139,4 +208,5 @@ export function createProjectService(deps: {
       return projects.find(repositoryId);
     },
   };
+  return service;
 }

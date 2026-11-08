@@ -35,6 +35,11 @@ import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
+  canonicalTriggerKind,
+  legacyTriggerId,
+  type TriggerKind,
+} from "../workflows/triggers.ts";
+import {
   ActionInputError,
   ConnectorError,
   MAY_HAVE_HAPPENED,
@@ -42,8 +47,19 @@ import {
   specOf,
   type ConnectorRegistry,
 } from "./connectors.ts";
-import { conditionHolds } from "./conditions.ts";
 import {
+  answerInstruction,
+  parseStepAsk,
+  resolveAnswer,
+  serializeAsk,
+  type AnswerInput,
+  type StepAsk,
+} from "./ask.ts";
+import { placeOf, ticketNumberOf } from "./ask-place.ts";
+import { conditionHolds } from "./conditions.ts";
+import { readStoredInput } from "./ticket.ts";
+import {
+  forTrigger,
   machineNodes,
   nodesById,
   readRunDocument,
@@ -51,6 +67,8 @@ import {
 } from "./document.ts";
 import {
   ACTION_TIMEOUT_MS,
+  ASK_REANNOUNCE_MAX_AGE_MS,
+  ASK_REANNOUNCE_MAX_ATTEMPTS,
   ERROR_MESSAGE_MAX_CHARS,
   MICRO_USD_COLUMN_MAX,
   MICRO_USD_PER_CENT,
@@ -80,6 +98,9 @@ export type TurnRead = { turnId: string; ended: EndedTurn | undefined };
 /** A turn found by the request id it was started under. */
 export type RequestedTurn = TurnRead & { jobId: string };
 
+/** The most runs of a repository a discard looks at to see whether another one holds its ticket. */
+const ACTIVE_RUNS_LOOKED_AT = 200;
+
 export type EngineDependencies = {
   runs: WorkflowRunsRepository;
   workflows: Pick<WorkflowsRepository, "getVersion">;
@@ -103,6 +124,12 @@ export type EngineDependencies = {
     findByRequest(clientRequestId: string): Promise<RequestedTurn | undefined>;
   };
   connectors: ConnectorRegistry;
+  /**
+   * #920: where a question of an agent goes and how an answer is acknowledged (the ticket or the pull request of the run). Left out: the
+   * question is shown on the run page only. Every call is made after the run's lock is released and a failure of one is logged and
+   * nothing more: the question is stored with the step, whatever happens to its comment.
+   */
+  asks?: AskChannel;
   /** The full name of the repository of a run, for the call of an action. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   now?: () => Date;
@@ -110,6 +137,78 @@ export type EngineDependencies = {
   actionTimeoutMs?: number;
   /** One line per notable event; never a value, a token or the text of an error. */
   log?: (line: string) => void;
+};
+
+/** What the engine asks of the place a question is shown (#920); the implementation is the GitHub one (`ask-channel.ts`). */
+export type AskChannel = {
+  /**
+   * The step began to wait: puts the question where people can answer it. Returns the id of the comment that carries it, or undefined when
+   * the run has no ticket or pull request to put it on.
+   */
+  asked(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<{ commentId: string } | undefined>;
+  /**
+   * The question was answered: marks its comment as answered and puts the labels back. A question that was never posted (the answer came
+   * first, or the post failed) gets its answered state posted instead of an open question.
+   */
+  answered(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<void>;
+  /** The run was stopped while the question was open: marks its comment as cancelled and takes the `agent waiting` label off. */
+  cancelled(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<void>;
+  /**
+   * #921: the run was discarded: edits the comment of its open question (`open`, when a step waited for an answer) to say so. With
+   * `freeTicket` it also takes both `agent working` and `agent waiting` off the ticket or pull request the run is about: the engine says so
+   * for a run that was going on while no other run that goes on holds the ticket; without it the labels are not touched, they are
+   * another run's.
+   */
+  discarded(
+    run: StoredWorkflowRun,
+    open: { step: StoredStepRun; ask: StepAsk } | undefined,
+    options: { freeTicket: boolean },
+  ): Promise<void>;
+  /**
+   * A second comment for the same question was posted (two announcements at once) and the other one is the question's: edits the comment
+   * `commentId` to say so, so that only one comment asks.
+   */
+  superseded(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    ask: StepAsk,
+    commentId: string,
+  ): Promise<void>;
+};
+
+/** What `answer` came to. A refusal names why; the question stays open. */
+export type AnswerResult =
+  | { outcome: "answered"; step: StoredStepRun; ask: StepAsk }
+  /** The run does not wait for an answer (it never did, it was answered before, or it was asked to stop). */
+  | { outcome: "not_waiting" }
+  | {
+      outcome: "refused";
+      code:
+        | "answer_empty"
+        | "answer_too_long"
+        | "option_unknown"
+        /** The question that waits is not the one the answer was written for (it was answered and the step asked again). */
+        | "question_changed";
+    };
+
+/** The question an answer is for: the step run that asked it (its row, so the rounds of a loop differ) and which question of it this is (`StepAsk.n`). */
+export type AskedQuestion = { stepRunId: string; n: number };
+
+/** What `discard` came to: `not_found` for a run that is none of this workspace's; a repeat changes nothing. */
+export type DiscardResult = {
+  outcome: "discarded" | "already_discarded" | "not_found";
 };
 
 export type WorkflowEngine = {
@@ -120,6 +219,28 @@ export type WorkflowEngine = {
    * that ended the turn must not fail or slow down because of the engine.
    */
   jobEnded(jobId: string): Promise<void>;
+  /**
+   * #920: answers the question the run waits for. Under the lock of the run: of two answers one wins, the other finds the question
+   * answered. The step and the run are `running` again afterwards; the caller kicks `advance`, which starts the turn that goes on. The
+   * answer names the question it was written for and is refused (`question_changed`) when another one waits now, so a page that was open
+   * while the agent asked again never answers the new question with the old one's answer.
+   */
+  answer(
+    runId: string,
+    input: AnswerInput & {
+      question: AskedQuestion;
+      by: string | null;
+      via: "comment" | "ui";
+    },
+  ): Promise<AnswerResult>;
+  /**
+   * #921: discards a run, whatever state it is in (running, waiting, or over however it ended). Under the lock of the run the steps that
+   * are not over end (a step that was not started is skipped, one that ran or waited fails with `discarded`) and the run becomes
+   * `discarded`: over, and free of its ticket for a new run. `onFailure` does not run: nothing technical failed. After the lock is released
+   * the turn that runs is asked to stop, a turn that is being started is found and asked too, the comment of an open question says it was
+   * discarded, and the labels `agent working` and `agent waiting` come off the ticket. Repeating it changes nothing.
+   */
+  discard(runId: string): Promise<DiscardResult>;
 };
 
 type Resolved = { name: string; version: number } | undefined;
@@ -145,6 +266,12 @@ type Prefetched = {
 
 type Decision =
   | { kind: "done" }
+  /** #920: the turn of this step ended with a question; the step and the run wait, and the question is shown after the lock is released. */
+  | { kind: "asked"; stepRun: StoredStepRun }
+  /** #920: a question was answered; the turn that goes on is started after the lock is released. */
+  | { kind: "resume"; stepRun: StoredStepRun }
+  /** #920: the run was stopped while its step waited: the step ended cancelled, and the question is marked so after the lock is released. */
+  | { kind: "cancelled_ask"; stepRun: StoredStepRun }
   | { kind: "again" }
   | { kind: "execute"; stepRun: StoredStepRun; takeOver: boolean }
   /** #891: the run was asked to stop and the turn of this step still runs: its job is asked to stop, after the lock is released. */
@@ -187,21 +314,35 @@ function parseOutput(text: string | null): unknown {
 }
 
 /**
+ * What `{{trigger.*}}` holds for a run (#916): its `id` and `kind`, and what the trigger stored when it started the run. A run started
+ * by hand or through the API stored its input as handed in, or `{ input, ticket }` when it has a ticket (`readStoredInput`); a run a
+ * label started stored `{ ticket, issue, repo }` (`label-trigger.ts`).
+ *
+ * The ticket's reference (`workflow_runs.ticket_ref`, `github:owner/repo#128`, #923) is not read from here: the label trigger and the
+ * start service write it with the run, from the ticket they hold.
+ */
+function triggerValueOf(run: StoredWorkflowRun): Record<string, unknown> {
+  const stored = parseOutput(run.triggerInput);
+  const record = isRecord(stored) ? stored : {};
+  const kind = canonicalTriggerKind(run.triggerKind as TriggerKind);
+  const facts = { id: run.triggerId ?? legacyTriggerId(kind), kind };
+  if (kind === "manual" || kind === "api")
+    return { ...facts, ...readStoredInput(stored) };
+  return { ...facts, ...record };
+}
+
+/**
  * What a reference can reach: the trigger and the output of every step that succeeded (of a step that ran in several rounds, the
- * latest), and `previous.<step>`, what a direct step of the loop body had in the round before (`context`). A run started by hand has
- * `trigger.input`, what the caller handed in; a run a label started has `trigger.issue` and `trigger.repo`, stored as they are
- * (`label-trigger.ts`).
+ * latest), and `previous.<step>`, what a direct step of the loop body had in the round before (`context`).
  */
 function valuesOf(
   run: StoredWorkflowRun,
   steps: readonly StoredStepRun[],
   context?: RoundContext,
 ): RunValues {
-  const input = parseOutput(run.triggerInput);
-  const record = isRecord(input) ? input : {};
   const failure = failureOf(run);
   return {
-    trigger: run.triggerKind === "manual" ? { input: record } : record,
+    trigger: triggerValueOf(run),
     // The facts of the failure exist for the steps of `onFailure` only: once the run has begun them.
     ...(failure === undefined
       ? {}
@@ -287,6 +428,10 @@ function machineStepsOf(steps: readonly StoredStepRun[]): MachineStep[] {
       errorCode: step.errorCode,
       errorMessage: step.errorMessage,
       ...(taken === undefined ? {} : { taken }),
+      ...(step.status === "running" &&
+      parseStepAsk(step.ask)?.state === "answered"
+        ? { answerPending: true }
+        : {}),
     };
   });
 }
@@ -391,9 +536,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       run.workflowId,
       run.workflowVersion,
     );
-    return version === undefined
+    if (version === undefined) return undefined;
+    // The pre-steps of the trigger that started the run come before the shared steps; the machine walks one list (#916).
+    const document = readRunDocument(version.document);
+    return document === undefined
       ? undefined
-      : readRunDocument(version.document);
+      : forTrigger(document, { id: run.triggerId, kind: run.triggerKind });
   }
 
   /** The state the machine decides from: the rows, the nodes of the document, and how a condition is told from the values of the run. */
@@ -407,6 +555,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return {
       runStatus: run.status,
       cancelRequested: run.cancelRequestedAt !== null,
+      pauseRequested: run.pauseRequestedAt !== null,
       budgetMicroUsd: run.budgetMicroUsd,
       spentMicroUsd: run.spentMicroUsd,
       steps: machineStepsOf(steps),
@@ -474,17 +623,41 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       log(
         `[workflow-runs] cost not reported run=${step.runId} step=${step.stepId} charged=${outcome.costBasis}`,
       );
+    if (outcome.ok && "asked" in outcome) {
+      const previous = parseStepAsk(step.ask);
+      const ask: StepAsk = {
+        ...outcome.asked,
+        n: (previous?.n ?? 0) + 1,
+        state: "open",
+        askedAt: now().toISOString(),
+      };
+      const waiting = await lock.askStep(step.id, serializeAsk(ask), {
+        costMicroUsd: cost,
+        costBasis: outcome.costBasis,
+      });
+      if (waiting === undefined) return "waiting";
+      log(
+        `[workflow-runs] run waiting run=${step.runId} step=${step.stepId} question=${String(ask.n)}`,
+      );
+      return { kind: "asked", stepRun: waiting };
+    }
+    // A step that asked before was charged for its earlier turns when they ended (`askStep`): the step ends with the sum, and only the
+    // turn that just ended is added to the run (`finishStep`).
+    const total = Math.min(
+      (step.costMicroUsd ?? 0) + cost,
+      MICRO_USD_COLUMN_MAX,
+    );
     await lock.finishStep(
       step.id,
       outcome.ok
         ? {
             status: "succeeded",
             output: JSON.stringify(outcome.output),
-            costMicroUsd: cost,
+            costMicroUsd: total,
             costBasis: outcome.costBasis,
           }
         : failed(outcome.code, outcome.message, {
-            costMicroUsd: cost,
+            costMicroUsd: total,
             costBasis: outcome.costBasis,
           }),
     );
@@ -520,7 +693,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     };
     try {
       const run = await deps.runs.getRun(runId);
-      if (run === undefined || run.status !== "running") return pre;
+      if (
+        run === undefined ||
+        (run.status !== "running" && run.status !== "waiting")
+      )
+        return pre;
       const document = await documentOf(run);
       pre.document = { value: document };
       if (document === undefined) return pre;
@@ -557,9 +734,65 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return pre;
   }
 
+  /**
+   * #920: whether the question of a step that waits is announced once more. Not for a run that has no place for it (no ticket, no pull
+   * request: the page of the run shows the question), and not any more after `ASK_REANNOUNCE_MAX_ATTEMPTS` attempts or once
+   * `ASK_REANNOUNCE_MAX_AGE_MS` have passed since it was asked: that is written on the step (`announce.ended`), so the sweep stops
+   * looking and the page can say the question could not be posted. Each attempt is counted and marks the run as looked at.
+   */
+  async function announceAgain(
+    lock: RunLock,
+    waiting: StoredStepRun,
+    ask: StepAsk,
+  ): Promise<Decision> {
+    const announce = ask.announce ?? { attempts: 0 };
+    if (announce.ended !== undefined) return { kind: "done" };
+    const end = async (ended: "no_place" | "gave_up"): Promise<Decision> => {
+      await lock.setUnpostedAsk(
+        waiting.id,
+        serializeAsk({ ...ask, announce: { ...announce, ended } }),
+      );
+      return { kind: "done" };
+    };
+    if (deps.asks === undefined || placeOf(lock.run, lock.steps) === undefined)
+      return end("no_place");
+    const askedAt = ask.askedAt === undefined ? NaN : Date.parse(ask.askedAt);
+    if (
+      announce.attempts >= ASK_REANNOUNCE_MAX_ATTEMPTS ||
+      now().getTime() - askedAt >= ASK_REANNOUNCE_MAX_AGE_MS
+    ) {
+      log(
+        `[workflow-runs] ASK_GIVEN_UP run=${lock.run.id} step=${waiting.stepId}`,
+      );
+      return end("gave_up");
+    }
+    const counted = await lock.setUnpostedAsk(
+      waiting.id,
+      serializeAsk({
+        ...ask,
+        announce: { attempts: announce.attempts + 1 },
+      }),
+    );
+    await lock.touch();
+    return { kind: "asked", stepRun: counted ?? waiting };
+  }
+
   async function decide(lock: RunLock, pre: Prefetched): Promise<Decision> {
     const { run } = lock;
-    if (run.status !== "running") return { kind: "done" };
+    // #920: a run that waits for an answer does nothing, unless somebody asked it to stop, or its question is not shown anywhere yet (the
+    // post failed or was never made): that is made again, a bounded number of times, and the marker of the comment keeps it from being
+    // posted twice.
+    if (run.status === "waiting" && run.cancelRequestedAt === null) {
+      const waiting = lock.steps.findLast((step) => step.status === "waiting");
+      const ask = parseStepAsk(waiting?.ask ?? null);
+      return waiting !== undefined &&
+        waiting.waitingOnCommentId === null &&
+        ask?.state === "open"
+        ? announceAgain(lock, waiting, ask)
+        : { kind: "done" };
+    }
+    if (run.status !== "running" && run.status !== "waiting")
+      return { kind: "done" };
     if (pre.document === undefined)
       return {
         kind: "fetch",
@@ -717,6 +950,26 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         if (typeof ended === "object") return ended;
         return ended === "ended" ? { kind: "again" } : { kind: "done" };
       }
+      case "resume_turn": {
+        const stepRun = lock.steps[move.position];
+        return stepRun === undefined
+          ? { kind: "done" }
+          : { kind: "resume", stepRun };
+      }
+      case "cancel_waiting": {
+        const stepRun = lock.steps[move.position];
+        if (stepRun === undefined) return { kind: "done" };
+        // The run waits for nobody now: the step ends cancelled and the run is `running` again for the one move that ends it.
+        await lock.finishStep(
+          stepRun.id,
+          failed(
+            "cancelled",
+            "The run was cancelled while the step waited for an answer.",
+          ),
+        );
+        await lock.resumeRun();
+        return { kind: "cancelled_ask", stepRun };
+      }
       case "cancel_job": {
         const stepRun = lock.steps[move.position];
         if (stepRun?.jobId == null) return { kind: "done" };
@@ -866,18 +1119,40 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     values: RunValues,
     context: RoundContext,
     profile: { name: string; version: number },
+    timeLimitMinutes: number,
   ): Promise<Begun> {
+    // #919: a profile says where it works. The environment is the profile version's; only a version saved before profiles had one
+    // (and so every document written before) runs where its step says. A step that names another environment than its profile
+    // version's is not overridden: the lane was saved against an older version, and the version it runs now has moved.
+    const ownId = (
+      await deps.profiles.findByName(profile.name, profile.version)
+    )?.version.content.environmentId;
     const environmentName =
       typeof node.environment === "string" ? node.environment : "";
     const environment = (await deps.environments.listSummaries()).find(
       (candidate) =>
-        candidate.name.toLowerCase() === environmentName.toLowerCase(),
+        typeof ownId === "string"
+          ? candidate.id === ownId
+          : candidate.name.toLowerCase() === environmentName.toLowerCase(),
     );
     if (environment === undefined)
       return {
         outcome: failed(
           "environment_not_found",
-          "The environment of this step is not one of the workspace.",
+          typeof ownId === "string"
+            ? "The environment of the profile of this step is not one of the workspace."
+            : "The environment of this step is not one of the workspace.",
+        ),
+      };
+    if (
+      typeof ownId === "string" &&
+      environmentName !== "" &&
+      environment.name.toLowerCase() !== environmentName.toLowerCase()
+    )
+      return {
+        outcome: failed(
+          "environment_mismatch",
+          `The step names the environment "${environmentName}", but version ${String(profile.version)} of the profile ${profile.name} runs in "${environment.name}". Take the environment out of the step, or name the one of the profile.`,
         ),
       };
     // The instruction is built from the values of earlier steps. They are text in it and nothing else: the profile, the environment,
@@ -912,7 +1187,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
           ...(node.result === undefined ? {} : { result: node.result }),
           clientRequestId: requestIdOf(run, step),
         },
-        { costCapCents: capCents(step.capMicroUsd) },
+        {
+          costCapCents: capCents(step.capMicroUsd),
+          timeLimitMinutes,
+          workflowStep: true,
+        },
       );
       return { runId: started.runId };
     } catch (error) {
@@ -933,6 +1212,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     context: RoundContext,
     target: StoredStepRun,
     byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+    timeLimitMinutes: number,
   ): Promise<Begun> {
     // A session keeps the result schema of its last turn, so a step that goes on in another step's session must ask for the same result.
     if (
@@ -970,13 +1250,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         {
           instruction,
           clientRequestId: requestIdOf(run, step),
-          costLimitCents: Math.max(
-            1,
-            Math.min(
-              capCents(step.capMicroUsd),
-              read.ended.turn.costLimitCents ?? Number.MAX_SAFE_INTEGER,
-            ),
-          ),
+        },
+        // #918: the cost of a turn is what is left of the lane's budget, whatever the turn before was held to.
+        {
+          costCapCents: capCents(step.capMicroUsd),
+          timeLimitMinutes,
+          workflowStep: true,
         },
       );
       return continued.runId === null
@@ -1031,13 +1310,22 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     context: RoundContext,
     steps: readonly StoredStepRun[],
     byId: ReadonlyMap<string, RunDocument["steps"][number]>,
+    timeLimitMinutes: number,
   ): Promise<StepOutcome | undefined> {
     if (step.profile === null)
       return failed("profile_not_found", "The step has no profile version.");
     const target = continuedStep(node, steps, step.position);
     const begun =
       target === undefined
-        ? await beginSession(run, step, node, values, context, step.profile)
+        ? await beginSession(
+            run,
+            step,
+            node,
+            values,
+            context,
+            step.profile,
+            timeLimitMinutes,
+          )
         : await continueSessionOf(
             run,
             step,
@@ -1046,6 +1334,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             context,
             target,
             byId,
+            timeLimitMinutes,
           );
     if ("outcome" in begun) return begun.outcome;
     // An instruction behind a turn that still runs starts when that turn ends. The step stays as it is, claimed and without a job; a
@@ -1054,6 +1343,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       log(
         `[workflow-runs] STEP_CONTINUE_QUEUED run=${run.id} step=${step.stepId}`,
       );
+      // #921: a discard that came while the instruction was being queued found no turn to stop: the instruction is taken out of
+      // the session again, and a turn it started meanwhile is asked to stop, or the end of the turn before it would start it for no run.
+      const current = await deps.runs.getRun(run.id);
+      if (current === undefined || current.status !== "running")
+        await stopUnrecordedTurn(run, step, steps);
       return undefined;
     }
     const turn = await deps.turns.read(begun.runId);
@@ -1172,7 +1466,11 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     // #891: a stop that was asked for between the decision and the claim: the step does not start. Not a step of `onFailure` (#902): it
     // runs after the stop, or after a failure, and a stop asked for meanwhile changes neither.
     const current = await deps.runs.getRun(run.id);
-    if (current?.cancelRequestedAt != null && current.failure === null) {
+    if (
+      current === undefined ||
+      current.status !== "running" ||
+      (current.cancelRequestedAt !== null && current.failure === null)
+    ) {
       await deps.runs.settleOwnStep(claimed.id, { status: "skipped" });
       return;
     }
@@ -1236,6 +1534,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
                   context,
                   steps,
                   byId,
+                  document.turnTimeLimitMinutes,
                 )
               : await runAction(run, claimed, node, values);
         }
@@ -1279,6 +1578,252 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     return deps.turns.findByRequest(requestIdOf(run, step));
   }
 
+  /** The step as it is stored now, with its question; undefined when the step or its question cannot be read. */
+  async function storedAsk(
+    runId: string,
+    stepRunId: string,
+  ): Promise<{ step: StoredStepRun; ask: StepAsk } | undefined> {
+    const step = (await deps.runs.listSteps(runId)).find(
+      (row) => row.id === stepRunId,
+    );
+    const ask = step === undefined ? undefined : parseStepAsk(step.ask);
+    return step === undefined || ask === undefined ? undefined : { step, ask };
+  }
+
+  /**
+   * Shows the question of a step that began to wait where people can answer it. Looked at again for a step whose question is not shown (the
+   * sweep and every `advance` do), so it is idempotent: a step with a comment is left alone, and the marker keeps a second post from being
+   * made. What happened meanwhile decides what is shown: a question that was answered before it was posted is posted as answered, never as
+   * an open question, and one that was stopped is not posted at all. A failure is logged: the question is stored with the step.
+   */
+  async function announce(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    if (deps.asks === undefined) return;
+    try {
+      const stored = await storedAsk(run.id, step.id);
+      if (stored === undefined) return;
+      if (stored.ask.state !== "open") {
+        if (stored.ask.answer !== undefined)
+          await deps.asks.answered(run, stored.step, stored.ask);
+        return;
+      }
+      if (
+        stored.step.status !== "waiting" ||
+        stored.step.waitingOnCommentId !== null
+      )
+        return;
+      const posted = await deps.asks.asked(run, stored.step, stored.ask);
+      if (posted === undefined) return;
+      const recorded = await deps.runs.recordAskComment(
+        step.id,
+        posted.commentId,
+      );
+      // Answered or stopped while the question was being posted: the comment just posted says so now.
+      const after = await storedAsk(run.id, step.id);
+      if (after === undefined) return;
+      // Another announcement posted its own comment first (the marker is not seen by two posts that are made at once): that one is the
+      // question's, this one says so and is never shown as a second question.
+      if (
+        !recorded &&
+        after.step.waitingOnCommentId !== null &&
+        after.step.waitingOnCommentId !== posted.commentId
+      ) {
+        await deps.asks.superseded(
+          run,
+          after.step,
+          after.ask,
+          posted.commentId,
+        );
+        return;
+      }
+      // The id of the comment is in hand even where the row no longer takes it (a step that ended).
+      const shown = { ...after.step, waitingOnCommentId: posted.commentId };
+      if (after.ask.state !== "open") {
+        if (after.ask.answer !== undefined)
+          await deps.asks.answered(run, shown, after.ask);
+      } else if (after.step.status !== "waiting") {
+        // The step is over: a member discarded the run (#921), or a stop ended it (#891).
+        const current = await deps.runs.getRun(run.id);
+        if (current?.status === "discarded")
+          await deps.asks.discarded(
+            current,
+            { step: shown, ask: after.ask },
+            {
+              freeTicket: !(await ticketHeldByAnother(
+                current,
+                await deps.runs.listSteps(current.id),
+              )),
+            },
+          );
+        else await deps.asks.cancelled(run, shown, after.ask);
+      }
+    } catch {
+      log(`[workflow-runs] ASK_NOT_SHOWN run=${run.id} step=${step.stepId}`);
+    }
+  }
+
+  /** Marks the question of a step that was stopped while it waited as cancelled. A failure is logged: the step has ended either way. */
+  async function cancelAsk(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    const ask = parseStepAsk(step.ask);
+    if (deps.asks === undefined || ask === undefined) return;
+    try {
+      await deps.asks.cancelled(run, step, ask);
+    } catch {
+      log(
+        `[workflow-runs] ASK_NOT_CANCELLED run=${run.id} step=${step.stepId}`,
+      );
+    }
+  }
+
+  /** Ends a step that has a job (so `settleOwnStep` is not for it) under the lock of the run. */
+  async function failStep(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    outcome: StepOutcome,
+  ): Promise<void> {
+    await deps.runs.lockRun(run.id, (lock) =>
+      lock.finishStep(step.id, outcome),
+    );
+  }
+
+  /**
+   * #920: starts the turn that goes on after an answer: the next turn of the session the step's last turn ran in, with the question and the
+   * answer as its instruction, under a request id of its own (`wf-<run>-<position>-q<n>`), so that starting it twice makes one turn. The
+   * step takes its job; the earlier one is over.
+   */
+  async function resumeAgent(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+  ): Promise<void> {
+    const ask = parseStepAsk(step.ask);
+    if (
+      ask === undefined ||
+      ask.state !== "answered" ||
+      ask.answer === undefined ||
+      step.jobId === null
+    ) {
+      await failStep(
+        run,
+        step,
+        failed("turn_unreadable", "The question of this step cannot be read."),
+      );
+      return;
+    }
+    const previousJobId = step.jobId;
+    const read = await deps.turns.read(previousJobId);
+    if (read?.ended === undefined) {
+      await failStep(
+        run,
+        step,
+        failed(
+          "turn_unreadable",
+          "The session of the step to go on with cannot be read.",
+        ),
+      );
+      return;
+    }
+    const current = await deps.runs.getRun(run.id);
+    const left =
+      current === undefined
+        ? 0
+        : Math.max(0, current.budgetMicroUsd - current.spentMicroUsd);
+    if (left < MICRO_USD_PER_CENT) {
+      await failStep(
+        run,
+        step,
+        failed(
+          "budget_exhausted",
+          "The budget of the workflow cannot pay for the turn that goes on after the answer.",
+        ),
+      );
+      return;
+    }
+    const owner = await sessionOwner(run);
+    if ("missing" in owner) {
+      await failStep(
+        run,
+        step,
+        failed("agent_start_failed", ownerMissingText(owner)),
+      );
+      return;
+    }
+    const requestId = `${requestIdOf(run, step)}-q${String(ask.n)}`;
+    let jobId: string;
+    try {
+      const continued = await deps.implementer.continueSession(
+        owner,
+        read.ended.session.id,
+        {
+          instruction: answerInstruction(ask, ask.answer),
+          clientRequestId: requestId,
+        },
+        // #918: the cost of a turn is what is left of the lane's budget; the time limit is the one of the turn before (the default of a follow-up).
+        { costCapCents: capCents(left), workflowStep: true },
+      );
+      // Nobody else queues in this session while the run waits; if the Implementer says otherwise, the next look asks again.
+      if (continued.runId === null) return;
+      jobId = continued.runId;
+    } catch (error) {
+      if (!(error instanceof ImplementerError)) throw error;
+      if (error.code === "IMPLEMENTER_SESSION_BUSY") {
+        const existing = await deps.turns.findByRequest(requestId);
+        if (existing === undefined) return;
+        jobId = existing.jobId;
+      } else {
+        const existing = await deps.turns.findByRequest(requestId);
+        if (existing === undefined) {
+          log(
+            `[workflow-runs] STEP_RESUME_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
+          );
+          await failStep(
+            run,
+            step,
+            failed("agent_start_failed", "The agent could not be started."),
+          );
+          return;
+        }
+        jobId = existing.jobId;
+      }
+    }
+    const turn = await deps.turns.read(jobId);
+    const attached = await deps.runs.lockRun(run.id, (lock) =>
+      lock.attachAnswerTurn(
+        step.id,
+        previousJobId,
+        { jobId, turnId: turn?.turnId ?? null },
+        serializeAsk({ ...ask, state: "resumed" }),
+      ),
+    );
+    if (attached !== true) {
+      // Another look at the same run attached the very same turn first (the request id makes one turn): nothing is orphaned.
+      const current = (await deps.runs.listSteps(run.id)).find(
+        (row) => row.id === step.id,
+      );
+      if (current?.jobId === jobId) return;
+      log(
+        `[workflow-runs] STEP_TURN_ORPHANED run=${run.id} step=${step.stepId} job=${jobId}`,
+      );
+      await deps.jobs.requestCancel(jobId);
+      return;
+    }
+    const latest = await deps.runs.getRun(run.id);
+    if (
+      latest === undefined ||
+      latest.cancelRequestedAt !== null ||
+      latest.status !== "running"
+    ) {
+      await deps.jobs.requestCancel(jobId);
+      log(
+        `[workflow-runs] STEP_TURN_CANCELLED run=${run.id} step=${step.stepId} job=${jobId}`,
+      );
+    }
+  }
+
   async function advance(runId: string): Promise<void> {
     for (let moves = 0; moves < MOVES_PER_CALL_MAX; moves += 1) {
       let latest: StoredWorkflowRun | undefined;
@@ -1300,6 +1845,21 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         await decision.read(pre);
       }
       if (decision === undefined || decision.kind === "done") return;
+      if (decision.kind === "asked") {
+        // A stop was asked for meanwhile: nobody is asked, and the next move ends the step.
+        if (latest?.cancelRequestedAt != null) continue;
+        // The run waits for as long as it takes: nothing else to do until the answer comes.
+        if (latest !== undefined) await announce(latest, decision.stepRun);
+        return;
+      }
+      if (decision.kind === "resume") {
+        if (latest !== undefined) await resumeAgent(latest, decision.stepRun);
+        continue;
+      }
+      if (decision.kind === "cancelled_ask") {
+        if (latest !== undefined) await cancelAsk(latest, decision.stepRun);
+        continue;
+      }
       if (decision.kind === "cancel_job") {
         // Outside the lock: the queue takes its own. A turn that was waiting ends at once and the run goes on; one that runs is told by its
         // next heartbeat, and its end reaches the engine like any end of a turn.
@@ -1319,8 +1879,234 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     }
   }
 
+  /**
+   * The turn of an agent step that was claimed and has no job recorded: the turn may be starting this moment, or an instruction of the step
+   * waits behind the turn of its session. The turn is found by the request id and asked to stop; the instruction is taken out of the
+   * session first, as for a step that is given up. A turn that starts later is stopped by whoever starts it (`attachTurn` fails for an ended
+   * step, and the run is not `running`).
+   */
+  async function stopUnrecordedTurn(
+    run: StoredWorkflowRun,
+    step: StoredStepRun,
+    steps: readonly StoredStepRun[],
+  ): Promise<void> {
+    let found = await deps.turns.findByRequest(requestIdOf(run, step));
+    if (found === undefined) {
+      const document = await documentOf(run);
+      const node =
+        document === undefined
+          ? undefined
+          : nodesById(document).get(step.stepId);
+      const target =
+        node === undefined
+          ? undefined
+          : continuedStep(node, steps, step.position);
+      if (target === undefined) return;
+      await discardQueuedInstruction(run, step, target);
+      found = await deps.turns.findByRequest(requestIdOf(run, step));
+    }
+    if (found !== undefined) await deps.jobs.requestCancel(found.jobId);
+  }
+
+  /**
+   * Whether another run that goes on holds the ticket (or the pull request) `run` is about (#921): the labels on it are that run's then.
+   * A look that fails counts as yes: the labels stay, and a repeat of the discard repairs it.
+   */
+  async function ticketHeldByAnother(
+    run: StoredWorkflowRun,
+    steps: readonly StoredStepRun[],
+  ): Promise<boolean> {
+    try {
+      const place = placeOf(run, steps);
+      if (place === undefined) return false;
+      const active = await deps.runs.listActiveOnRepository(
+        run.repositoryId,
+        ACTIVE_RUNS_LOOKED_AT,
+      );
+      for (const other of active) {
+        if (other.id === run.id) continue;
+        const ticket = ticketNumberOf(other);
+        const otherPlace =
+          ticket !== undefined
+            ? { number: ticket }
+            : placeOf(other, await deps.runs.listSteps(other.id));
+        if (otherPlace?.number === place.number) return true;
+      }
+      return false;
+    } catch {
+      log(`[workflow-runs] DISCARD_TICKET_NOT_CHECKED run=${run.id}`);
+      return true;
+    }
+  }
+
+  /**
+   * Best effort, outside the lock: edits the comment of the question that was open and, when the discard freed the ticket, takes the labels
+   * off. `wasLive`: the run was going on when it was discarded (a run that was over has no label of its own on the ticket).
+   */
+  async function showDiscard(
+    run: StoredWorkflowRun,
+    steps: readonly StoredStepRun[],
+    open: { step: StoredStepRun; ask: StepAsk } | undefined,
+    wasLive: boolean,
+  ): Promise<void> {
+    if (deps.asks === undefined || (open === undefined && !wasLive)) return;
+    try {
+      const freeTicket = wasLive && !(await ticketHeldByAnother(run, steps));
+      await deps.asks.discarded(run, open, { freeTicket });
+    } catch {
+      log(`[workflow-runs] DISCARD_NOT_SHOWN run=${run.id}`);
+    }
+  }
+
+  async function discard(runId: string): Promise<DiscardResult> {
+    const done = await deps.runs.lockRun(runId, async (lock) => {
+      const wasLive =
+        lock.run.status === "running" || lock.run.status === "waiting";
+      if (lock.run.status === "discarded") {
+        // A repeat: the ticket may have been left as it was by a crash or a refusal of GitHub after the first discard committed. A run
+        // that was going on ends with the time of its discard (the discard wrote both); one that was over had ended before.
+        const interrupted = lock.steps.findLast(
+          (step) =>
+            step.errorCode === "discarded" &&
+            parseStepAsk(step.ask)?.state === "open",
+        );
+        const ask = parseStepAsk(interrupted?.ask ?? null);
+        return {
+          outcome: "already_discarded" as const,
+          run: lock.run,
+          steps: [...lock.steps],
+          wasLive: lock.run.finishedAt === lock.run.discardedAt,
+          open:
+            interrupted !== undefined && ask !== undefined
+              ? { step: interrupted, ask }
+              : undefined,
+        };
+      }
+      const steps = [...lock.steps];
+      for (const step of steps) {
+        if (step.status === "pending")
+          await lock.finishStep(step.id, { status: "skipped" });
+        else if (step.status === "running" || step.status === "waiting")
+          await lock.finishStep(
+            step.id,
+            failed(
+              "discarded",
+              step.status === "waiting"
+                ? "The run was discarded while the step waited for an answer."
+                : "The run was discarded while the step ran.",
+            ),
+          );
+      }
+      await lock.discardRun();
+      const waiting = steps.findLast((step) => step.status === "waiting");
+      const ask = parseStepAsk(waiting?.ask ?? null);
+      return {
+        outcome: "discarded" as const,
+        run: lock.run,
+        steps,
+        wasLive,
+        open:
+          waiting !== undefined && ask?.state === "open"
+            ? { step: waiting, ask }
+            : undefined,
+      };
+    });
+    if (done === undefined) return { outcome: "not_found" };
+    const { run, steps, open, wasLive } = done;
+    if (done.outcome === "already_discarded") {
+      await showDiscard(run, steps, open, wasLive);
+      return { outcome: "already_discarded" };
+    }
+    // Outside the lock: the queue takes its own. A turn that was waiting ends at once; one that runs is told by its next heartbeat, and
+    // what it reports reaches no run any more (a discarded run is over).
+    for (const step of steps) {
+      if (step.status !== "running") continue;
+      try {
+        if (step.jobId !== null) {
+          const asked = await deps.jobs.requestCancel(step.jobId);
+          log(
+            `[workflow-runs] discard asked run=${runId} job=${step.jobId} outcome=${asked.status}`,
+          );
+        } else if (step.kind === "agent") {
+          await stopUnrecordedTurn(run, step, steps);
+        }
+      } catch {
+        log(
+          `[workflow-runs] DISCARD_TURN_NOT_STOPPED run=${runId} step=${step.stepId}`,
+        );
+      }
+    }
+    await showDiscard(run, steps, open, wasLive);
+    log(`[workflow-runs] run discarded run=${runId}`);
+    return { outcome: "discarded" };
+  }
+
+  async function answer(
+    runId: string,
+    input: AnswerInput & {
+      question: AskedQuestion;
+      by: string | null;
+      via: "comment" | "ui";
+    },
+  ): Promise<AnswerResult> {
+    const done = await deps.runs.lockRun(
+      runId,
+      async (lock): Promise<AnswerResult & { run?: StoredWorkflowRun }> => {
+        if (
+          lock.run.status !== "waiting" ||
+          lock.run.cancelRequestedAt !== null
+        )
+          return { outcome: "not_waiting" };
+        const waiting = lock.steps.findLast(
+          (step) => step.status === "waiting",
+        );
+        const ask = parseStepAsk(waiting?.ask ?? null);
+        if (waiting === undefined || ask === undefined || ask.state !== "open")
+          return { outcome: "not_waiting" };
+        if (
+          waiting.id !== input.question.stepRunId ||
+          ask.n !== input.question.n
+        )
+          return { outcome: "refused", code: "question_changed" };
+        const resolved = resolveAnswer(ask, input);
+        if (!resolved.ok) return { outcome: "refused", code: resolved.code };
+        const answered: StepAsk = {
+          ...ask,
+          state: "answered",
+          answer: {
+            text: resolved.text,
+            ...(resolved.choice === undefined
+              ? {}
+              : { choice: resolved.choice }),
+            by: input.by,
+            via: input.via,
+            at: now().toISOString(),
+          },
+        };
+        const step = await lock.answerStep(waiting.id, serializeAsk(answered));
+        if (step === undefined) return { outcome: "not_waiting" };
+        return { outcome: "answered", step, ask: answered, run: lock.run };
+      },
+    );
+    if (done === undefined) return { outcome: "not_waiting" };
+    if (done.outcome === "answered" && done.run !== undefined && deps.asks) {
+      try {
+        await deps.asks.answered(done.run, done.step, done.ask);
+      } catch {
+        log(
+          `[workflow-runs] ASK_NOT_ACKNOWLEDGED run=${runId} step=${done.step.stepId}`,
+        );
+      }
+    }
+    return done.outcome === "answered"
+      ? { outcome: "answered", step: done.step, ask: done.ask }
+      : done;
+  }
+
   return {
     advance,
+    answer,
+    discard,
     async jobEnded(jobId) {
       try {
         const step = await deps.runs.findStepByJob(jobId);

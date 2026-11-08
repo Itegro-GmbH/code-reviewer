@@ -179,6 +179,11 @@ export interface ProjectsTable {
   active: number;
   /** JSON text: the project's setting overrides, '{}' until some are saved. */
   settings: string;
+  /**
+   * JSON text (#922): the ticket source, `{ provider, repositoryId, board }`; null for a row an older version wrote, which reads as the
+   * GitHub issues of `repository_id` without a board.
+   */
+  ticket_source: string | null;
   /** ISO 8601 text in UTC. */
   created_at: string;
   updated_at: string;
@@ -1217,6 +1222,15 @@ export interface ImplementerTurnsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * #918: the minutes the turn may run (15 to 60), copied from the `turnTimeLimitMinutes` of the workflow that started it. Null for a
+   * turn no workflow started and for every turn written before: those keep `IMPLEMENTER_TIME_LIMIT_SECONDS`.
+   */
+  time_limit_minutes: ColumnType<
+    number | null,
+    number | null | undefined,
+    number | null
+  >;
 }
 
 /**
@@ -1321,6 +1335,8 @@ export interface WorkflowsTable {
   updated_at: string;
   /** Set when the workflow was archived: hidden from the list, takes no new version, its name is free. */
   archived_at: string | null;
+  /** The project the lane belongs to (#922); null for an archived lane no project could take and for one an older version wrote. */
+  project_id: string | null;
 }
 
 /** One saved version of a workflow's document (#833). Immutable: the database refuses an update. */
@@ -1358,8 +1374,10 @@ export interface WorkflowRunsTable {
   client_request_id: string;
   /** The person who started the run by hand; null for a run that a trigger started (#845). */
   created_by: string | null;
-  /** What started the run: `manual` or `github.issueLabeled` (#845). */
+  /** What started the run: `manual`, `api`, `ticket.labeled` (`github.issueLabeled` before #916), or a reserved kind (#845, #916). */
   trigger_kind: ColumnType<string, string | undefined, string>;
+  /** #916: the id of the trigger of the document that started the run; null for a run that started before, which the engine finds by the kind. */
+  trigger_id: ColumnType<string | null, string | null | undefined, never>;
   /** What a trigger started the run for (`<repository id>#<issue number>` for a label); null for a run by hand. One running run for each (workflow, key). */
   trigger_key: ColumnType<string | null, string | null | undefined, never>;
   /** The login the agent steps are started as: the person who started the run, or who put the label on. Display only. */
@@ -1375,10 +1393,92 @@ export interface WorkflowRunsTable {
    * the facts those steps read. The run stays `running` until they are over. Null otherwise.
    */
   failure: ColumnType<string | null, string | null | undefined, string | null>;
+  /** #923: the ticket the run is about (`github:owner/repo#128`); null for a run that is about none. */
+  ticket_ref: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #921: when a member discarded the run (`status` is then `discarded`); null for every other run. */
+  discarded_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
+  /** #921: when a member asked the run to stop after its current step; the engine starts no new step until it is resumed (null again). */
+  pause_requested_at: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   created_at: string;
   updated_at: string;
   /** Set when the run ends. */
   finished_at: string | null;
+}
+
+/**
+ * #923: one issue or pull request of a repository, the read cache of the ticket mirror (`src/tracker/`). Rebuilt from the provider at
+ * any time and never the source of truth; the values are those of the provider, nothing is mapped.
+ */
+export interface TrackerItemsTable {
+  workspace_id: string;
+  repository_id: string;
+  /** Reserved for #922 (the project as the ticket source); null until then. */
+  project_id: string | null;
+  provider: string;
+  /** "owner/name". */
+  repo: string;
+  number: number;
+  /** The provider's global id; how a board item finds its row. */
+  node_id: string;
+  /** `issue` or `pull_request`. */
+  kind: string;
+  /** `open` or `closed`. */
+  state: string;
+  /** GitHub's reason (`completed`, `not_planned`, `reopened`); `merged` for a merged pull request. */
+  state_reason: string | null;
+  /** The issue type as the organization named it. */
+  type: string | null;
+  title: string;
+  body_excerpt: string;
+  /** JSON text: `[{ "name", "color" }]`. */
+  labels: string;
+  /** JSON text: `[{ "login" }]`. */
+  assignees: string;
+  /** The Status of the project board as the board names it. */
+  board_status: string | null;
+  parent_number: number | null;
+  /** JSON text: the numbers of the pull requests that close the issue. */
+  pull_requests: string;
+  /** JSON text: the numbers of the issues the pull request closes. */
+  closes: string;
+  checks_state: string | null;
+  /** The newest time of a change of the provider the row has taken. */
+  updated_at: string;
+  /** When the row was last written from the provider. */
+  synced_at: string;
+  /** Set when the provider deleted or moved the issue: the row is a tombstone, hidden from every read, so an older delivery cannot revive it. */
+  deleted_at: string | null;
+  /** When a board last said something about the item (a delivery or the board phase of a full sync). */
+  board_seen_at: string | null;
+  /** #924: JSON text, the logins a review of the pull request is asked from; null when the mirror was not told (read as nobody). */
+  review_requested_from: string | null;
+  /** #924: JSON text, the logins that acted on a review ToDo of the pull request while the provider still holds their request; null for none. */
+  review_acted_by: string | null;
+}
+
+/** #923: where the full sync of a repository's tickets stands. */
+export interface TrackerSyncStateTable {
+  repository_id: string;
+  workspace_id: string;
+  project_id: string | null;
+  /** JSON text: the phase and position of the sync under way; null when none is. */
+  cursor: string | null;
+  /** When the sync under way began. */
+  started_at: string | null;
+  last_full_sync_at: string | null;
+  updated_at: string;
 }
 
 /** One step of a run (#844), in the order the steps run. `status` is `pending`, `running`, `succeeded`, `failed` or `skipped` (#846). */
@@ -1390,7 +1490,10 @@ export interface WorkflowStepRunsTable {
   step_id: string;
   /** `agent`, `action`, or a control step the run decided: `if` or `loop` (#846). */
   kind: string;
-  /** `pending`, `running`, `succeeded`, `failed`, or `skipped` (a step in the branch of an `if` that was not taken, #846). */
+  /**
+   * `pending`, `running`, `waiting` (#920: the turn ended with a question and nobody answered yet), `succeeded`, `failed`, or `skipped` (a
+   * step in the branch of an `if` that was not taken, #846).
+   */
   status: string;
   /** How often the step has run in the run, from 1: the rounds of a loop (#846). */
   round: number;
@@ -1410,6 +1513,14 @@ export interface WorkflowStepRunsTable {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** #920: JSON text, the question the step's turn ended with and what became of it (`workflow-runs/ask.ts`); null for a step that never asked. */
+  ask: ColumnType<string | null, string | null | undefined, string | null>;
+  /** #920: the id of the comment that carries the question on the ticket or the pull request; null before it is posted and for a step that never asked. */
+  waiting_on_comment_id: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
 }
 
 /**
@@ -1488,6 +1599,8 @@ export interface ProfileVersionsTable {
   default_result: string | null;
   /** #856: `opencode` or `claude-code`; null reads as OpenCode (a version saved before harnesses were stored). */
   harness: string | null;
+  /** #919: the environment of the workspace the version runs in; null for a version saved before it (its step names the environment). No foreign key: an environment may be removed. */
+  environment_id: string | null;
   created_by: string;
   created_at: string;
 }
@@ -1530,6 +1643,8 @@ export interface Database {
   workflow_versions: WorkflowVersionsTable;
   workflow_runs: WorkflowRunsTable;
   workflow_step_runs: WorkflowStepRunsTable;
+  tracker_items: TrackerItemsTable;
+  tracker_sync_state: TrackerSyncStateTable;
   profiles: ProfilesTable;
   profile_versions: ProfileVersionsTable;
   runners: RunnersTable;
