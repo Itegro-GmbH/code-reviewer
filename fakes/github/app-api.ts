@@ -108,6 +108,36 @@ function parsePullRequestControl(
     : null;
 }
 
+/** The body of `POST /__fake/issues`, or null when it is not one. */
+function parseIssueControl(
+  text: string,
+): { repository: string; issue: FakeIssue } | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof body !== "object" || body === null) return null;
+  const { repository, issue } = body as {
+    repository?: unknown;
+    issue?: Partial<FakeIssue> | null;
+  };
+  if (typeof repository !== "string" || repository === "") return null;
+  if (typeof issue !== "object" || issue === null) return null;
+  const strings = (value: unknown) =>
+    value === undefined ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === "string"));
+  const valid =
+    Number.isInteger(issue.number) &&
+    typeof issue.title === "string" &&
+    strings(issue.labels) &&
+    strings(issue.assignees) &&
+    (issue.body === undefined || typeof issue.body === "string") &&
+    (issue.type === undefined || typeof issue.type === "string");
+  return valid ? { repository, issue: issue as FakeIssue } : null;
+}
+
 /** GitHub's permission names mapped to the level the app (or a token) holds. */
 export type FakePermissions = Record<string, "read" | "write" | "admin">;
 
@@ -609,6 +639,15 @@ export function createAppPart(
       const body = parsePullRequestControl(await readBody(request));
       if (body === null) return send(400, { message: "Invalid body" });
       controls.addPullRequest(body.repository, body.pullRequest);
+      return send(201, { ok: true });
+    }
+
+    // Control endpoint for a test that runs the fake as its own process (Playwright): adds an issue
+    // (`addIssue`), replacing one with the same number. The body is `{ repository: "owner/name", issue: FakeIssue }`.
+    if (path === "/__fake/issues" && method === "POST") {
+      const body = parseIssueControl(await readBody(request));
+      if (body === null) return send(400, { message: "Invalid body" });
+      controls.addIssue(body.repository, body.issue);
       return send(201, { ok: true });
     }
 

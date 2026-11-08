@@ -650,6 +650,27 @@ settings page listed the provider to the Owner of a managed workspace (it now li
 | #435-T05 | A person who is no admin (Owner, Member) gets, for the portal pages and the catalog, settings and key routes (also those of one entry), with every method, exactly the answer of a path that does not exist                                                                                                                                                                                                                                                          |
 | #435-T06 | The search above finds nothing in the surfaces of the managed workspace; the Advanced page names no provider; a provider error that names the model, the provider and the key (and one that quotes the key) reaches the workspace as neutral copy; a draft, a retired or an unknown entry and a model of their own are refused and change nothing; the usage feed holds name and id of the entry and no model or provider; the search proves itself on planted leaks |
 
+Factory pages journey (`app/e2e/factory/factory-pages.e2e.ts`, project `factory`, the normal Playwright lane, #951, a follow-up of #925 and #915).
+Every page of the factory opens once in a real browser and does its main action once, against a production build of the factory product (the
+capability `implementer`) and the fake GitHub. No model, no Dispatcher, no runner: the pages have component and integration tests, this proves
+they are wired together. No new fake process; the fake GitHub got the control endpoint `POST /__fake/issues` (README of the fake) because a lane
+that starts on an issue reads it there.
+
+- **App.** The tenth app of the lane, a `next start` of the same build on `E2E_FACTORY_PORT` (default `E2E_PORT` + 10), single-tenant, with
+  `PRODUCT_ID=factory` and `PRODUCT_CAPABILITIES=review,dynamic-review,implementer` (read when the server starts). Its set-up is a test of
+  `e2e/setup/prepare-apps.e2e.ts` (it also checks the health route names the product and the set). Nothing else uses it and no retry: a second
+  attempt would find the lane started and the question answered.
+- **Data.** The project and the lane are made through the routes of the app (`POST /projects`, `POST /workflows?projectId=`), as a person does.
+  The mirror of the tickets and the run that waits for an answer are written through the real repositories of the app by a child process
+  (`src/test-support/e2e-factory-child.ts`, `e2e/helpers/factory.ts`): the sync of the ticket source and a turn that asks need GitHub's GraphQL
+  and a model, which the journey does not have. The run is what `lock.askStep` leaves, the same rows the integration tests of the ToDos seed.
+- **Steps.** Issues tab (the mirror, the issue drawer, the start dialog: the lane is started and its run page opens) and the run page (discard);
+  the ToDos page (the question of the waiting run is answered from the panel and moves to Done); the lane builder (one value from the variable
+  picker, saved as the next version, read back from the route); the tabs ToDos, Runs, Lanes and Setup of the project; the sidebar with Profiles,
+  Runners and Settings (the Integrations and Members tabs that moved there). All of them are tagged `@smoke` (the journey takes about twenty seconds) and so run on the pull requests into `development`; they depend on each other, so no one is tagged alone.
+- **Not covered:** what the engine does after the answer or after the start (a turn on a runner: the harness of the engine and the privileged
+  lane), the sync of the ticket source (`Resync`), the review actions of the ToDos page and the creation of a project in the dialog.
+
 Image (`docker/smoke/runner.sh`, bash): the Worker image is the only image of the project, the `sandbox` target of
 `runner/Dockerfile`; the golden snapshot builds it and every review job runs it in a Vercel Sandbox VM. `runner.sh [<image>]` checks
 `--version` against `runner/pyproject.toml`, that the entry point runs under tini (killed helpers leave no zombie), that a missing or

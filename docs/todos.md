@@ -181,9 +181,23 @@ the App review its own pull request, so the decision stands as a comment; the pa
 (`TODOS_REVIEW_NOT_REQUESTED`, `TODOS_GITHUB_UNAVAILABLE`, `TODOS_REVIEW_FAILED`, …) are told in words and nothing is lost: both buttons work again. A review that was given is not on the list any more (and
 is not in **Done**, which holds only reviews that ended while still asked); asking for changes does not start the agent again ([above](#giving-a-review)).
 
-**The badges.** The sidebar's ToDos link and the **ToDos** tab of a project show the number of open ToDos (`GET …/todos/count`: `countOpen` of the service, which reads the waiting runs and the pull requests of the lanes like the list, but **no ticket of a question** and no done list; the answer is kept 10 s per workspace and person and reads that arrive at the same time share one pass). The two badges are one request in the browser; one read per page change, never one per ToDo, and a read that finishes after a newer one was started is thrown away. The page sends the browser event `factory:todos-changed` after an answer or a review and when its own poll finds other open ToDos than the read before; the badges then read again with `?fresh=1`. Nothing is shown for none, for a repository that is not a project yet, or when the read fails.
+**The badges.** The sidebar's ToDos link and the **ToDos** tab of a project show the number of open ToDos (`GET …/todos/count`: `countOpen` of the
+service, which reads the waiting runs and the pull requests of the lanes like the list, but **no ticket of a question** and no done list; the answer
+is kept 10 s per workspace and person, in the memory of the server instance that answered: another instance has its own cache and its own 10 s, so two
+instances can show numbers that differ for a moment; reads that arrive at the same time share one pass, and so do reads with `?fresh=1` that arrive
+while another fresh read is on its way: they share one more pass that starts when it is over, so no fresh read costs more than one pass of its own and
+none is answered with a pass that began before it). The two badges are one request in the browser; one read per page change, never one per ToDo, and a
+read that finishes after a newer one was started is thrown away. The page sends the browser event `factory:todos-changed` after an answer or a review
+and when its own poll finds other open ToDos than the read before; the badges then read again with `?fresh=1`. Nothing is shown for none, for a
+repository that is not a project yet, or when the read fails.
 
-**Rights and kept text.** Answer, Approve and Request changes are shown only to roles with `start_implementer_task`; others see the ToDo and one sentence ("Your role in this workspace does not allow that."), no form. A text typed in a panel is never lost with the form: when the ToDo is not open any more (`WORKFLOW_RUN_NOT_WAITING`, `WORKFLOW_RUN_QUESTION_CHANGED`, `TODOS_REVIEW_NOT_REQUESTED`, or the next read) the option and the note stay on screen as read-only "Your text" with **Copy**. A refused post moves the focus to its alert. The chosen option can be taken back (**Clear choice**); the note is capped so that option and note together stay within the 4000 characters the answer route takes. For an account without a GitHub login the footnotes say "a member of the workspace", not "@login". The **Answer** button of the Issues tab opens `/w/<slug>/projects/<repositoryId>/todos?run=<runId>`, which picks the open question of that run when the list arrives.
+**Rights and kept text.** Answer, Approve and Request changes are shown only to roles with `start_implementer_task`; others see the ToDo and one
+sentence ("Your role in this workspace does not allow that."), no form. A text typed in a panel is never lost with the form: when the ToDo is not open
+any more (`WORKFLOW_RUN_NOT_WAITING`, `WORKFLOW_RUN_QUESTION_CHANGED`, `TODOS_REVIEW_NOT_REQUESTED`, or the next read) the option and the note stay on
+screen as read-only "Your text" with **Copy**. A refused post moves the focus to its alert. The chosen option can be taken back (**Clear choice**);
+the note is capped so that option and note together stay within the 4000 characters the answer route takes. For an account without a GitHub login the
+footnotes say "a member of the workspace", not "@login". The **Answer** button of the Issues tab opens
+`/w/<slug>/projects/<repositoryId>/todos?run=<runId>`, which picks the open question of that run when the list arrives.
 
 **Accessible and safe.** The list is a list of buttons (`aria-pressed`), the panel a labelled region, the options a fieldset with a legend, the note and the filter have labels, results
 and errors are in live regions (`role="status"` / `role="alert"`), and the focus is moved on open, on close and to a result. Everything the agent or GitHub wrote

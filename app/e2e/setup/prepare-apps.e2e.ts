@@ -84,4 +84,21 @@ test.describe("the apps under test", () => {
     const page = await request.get(e2eEnv.pipelineAppUrl, { maxRedirects: 0 });
     expect(page.status()).toBe(307);
   });
+
+  // #951
+  test("the factory app of the factory pages journey is set up before it runs", async ({
+    request,
+  }) => {
+    await setUpApp(e2eEnv.factoryAppUrl, e2eEnv.factoryDatabaseUrl);
+    await enterGithubApp(e2eEnv.factoryAppUrl);
+
+    const page = await request.get(e2eEnv.factoryAppUrl, { maxRedirects: 0 });
+    expect(page.status()).toBe(307);
+    // The app is the factory with the Implementer: the health route names the product and the set.
+    const health = await request.get(`${e2eEnv.factoryAppUrl}/api/health`);
+    expect(await health.json()).toMatchObject({
+      product: "factory",
+      capabilities: ["dynamic-review", "implementer", "review"],
+    });
+  });
 });
