@@ -154,6 +154,11 @@ export type TodosService = {
    * The questions are the same for every member; the reviews depend on the viewer.
    */
   list(viewer: TodoViewer, scope?: { projectId: string }): Promise<TodoList>;
+  /**
+   * How many ToDos are open for the viewer in the workspace (questions and reviews: what the sidebar badge shows). The same reads as `list`
+   * without the done list, so a badge costs two bounded reads, never one per ToDo.
+   */
+  countOpen(viewer: TodoViewer): Promise<number>;
   /** The review ToDo of the viewer for one pull request, or undefined when it is none (what a review action checks first). */
   findReview(
     viewer: TodoViewer,
@@ -608,6 +613,16 @@ export function createTodosService(
           .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
           .slice(0, DONE_MAX),
       };
+    },
+
+    async countOpen(viewer) {
+      const facts = await known();
+      const everything = () => true;
+      const [asked, review] = await Promise.all([
+        questions(facts, everything, undefined),
+        reviews(facts, viewer, everything, undefined),
+      ]);
+      return asked.length + review.open.length;
     },
 
     async findReview(viewer, repositoryId, number) {

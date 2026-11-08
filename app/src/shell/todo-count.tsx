@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// The count on the sidebar's ToDos link (#925): the number of open ToDos, read from the app's own route when the page changes. Nothing
-// is shown for none, and nothing when the read fails: a badge that cannot be loaded is no badge, never an error in the navigation.
+// The count on the sidebar's ToDos link (#925): the number of open ToDos, read from the app's own route when the page changes and when the
+// ToDos page says it dealt with one (so the badge follows an answer without a navigation). Nothing is shown for none, and nothing when the
+// read fails: a badge that cannot be loaded is no badge, never an error in the navigation.
 import { useEffect, useState } from "react";
 import { workspaceApiPath } from "../workspaces/paths.ts";
+
+/** The browser event after a ToDo was dealt with (the ToDos page sends it): the badge reads its count again. */
+export const TODOS_CHANGED_EVENT = "factory:todos-changed";
 
 export function TodoCount({
   workspaceSlug,
@@ -32,8 +36,10 @@ export function TodoCount({
       }
     }
     void load();
+    window.addEventListener(TODOS_CHANGED_EVENT, load);
     return () => {
       current = false;
+      window.removeEventListener(TODOS_CHANGED_EVENT, load);
     };
   }, [workspaceSlug, pathname]);
   if (open === 0) return null;

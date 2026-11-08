@@ -22,6 +22,7 @@ function setup(
   const requireUser = vi.fn(async () => USER);
   const fullService: TodosService = {
     list: vi.fn(async () => LIST),
+    countOpen: vi.fn(async () => 0),
     findReview: vi.fn(async () => undefined),
     ...service,
   };

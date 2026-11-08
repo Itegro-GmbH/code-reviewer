@@ -2,8 +2,8 @@
 
 The ToDo list of the factory (#924, epic #915) is **a query over the runs and the [ticket mirror](ticket-mirror.md); nothing about a ToDo is
 stored**. A ToDo is there as long as the thing it is about is: a question while its run waits, a review while the review is asked for.
-Only a deployment with the capability `implementer` has the routes (code-review.com does not and behaves as before). The page and the
-answer panel are the rest of #925; this is the API behind them. The code is `app/src/todos/` (its `README.md` is the map).
+Only a deployment with the capability `implementer` has the routes and the page (code-review.com does not and behaves as before). This file
+describes the API ([below](#the-page) the page and the answer panel on it, #925). The code is `app/src/todos/` (its `README.md` is the map).
 
 The routes need a signed in member of the workspace (`view`; the review needs the right named below), answer `Cache-Control: no-store`, and are scoped to the workspace in the
 address: nothing of another workspace is ever read.
@@ -12,6 +12,7 @@ address: nothing of another workspace is ever read.
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /api/w/<slug>/todos`                      | `200 { projectId: null, questions, reviews, done }` for all projects of the workspace                                                                                                                          |
 | `GET /api/w/<slug>/projects/<projectId>/todos` | The same, narrowed to the lanes and the repository of the project (`projectId` is the project's id, as in `.../projects/<id>/issues`); `404 TODOS_PROJECT_NOT_FOUND` for a project the workspace does not have |
+| `GET /api/w/<slug>/todos/count`                | `200 { open }`: the number of open ToDos of the caller (questions and reviews, not the done list), what the badge on the sidebar's ToDos link shows; read by the badge when the page changes and when the ToDos page dealt with one |
 | `POST /api/w/<slug>/todos/reviews`             | Gives a review ([below](#reviews)); needs the right to start an Implementer task (`start_implementer_task`), as answering a question does                                                                      |
 
 An answer to a question is not a new route: the panel posts to the one that exists, `POST /api/w/<slug>/workflows/<workflowId>/runs/<runId>/answer`
@@ -149,3 +150,41 @@ output names a pull request) are served by partial indexes (migration `202611072
 The answer route, the comments and the labels of a question, the review settings and the code-review.com routes are unchanged. The mirror gains two
 columns (`review_requested_from` and `review_acted_by`, migration `20261107210000_tracker_review_requested_from`): null for every row that
 exists, read as nobody until a delivery or the next full sync says who is asked, and as nobody who acted.
+
+## The page
+
+`/w/<slug>/todos` (the sidebar entry "ToDos") and the tab **ToDos** of a project (`/w/<slug>/projects/<id>/todos`, the same list from
+`GET …/projects/<projectId>/todos`; a repository that is not a project yet says so and reads nothing). Both are the same component
+(`app/src/todos/ui/todos-page.tsx`); the prototype is the board "1 ToDos with answer panel".
+
+| Part                | What it does                                                                                                                                                                                                                                                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Open · n**        | The questions and the reviews in one list, the newest first: kind, since when, the question or the pull request title (text, never markup), repository, ticket and lane, and the pill **Answer** or **Review**. With ToDos of more than one project a **Project** filter appears. A ToDo the person dealt with leaves the list at once                |
+| **Done · n**        | The done list of the API (answered questions with who answered and from where, finished reviews)                                                                                                                                                                                                                  |
+| States              | *Loading* (skeleton, announced), *empty* (with the way to the projects, or a line for a project), *error* (alert: the first read failed, the page tries again by itself; a failure that asking does not fix, as a signed-out session or a project that is gone, stops the polling), *stale* (a later read failed: the last list stays and a status line says so) |
+| Polling             | One read when the page opens, then every 20 s while the page is shown (never while it is hidden), and at once after an answer or a review                                                                                                                                                                       |
+| **The panel**       | Opens next to the list (below it on a narrow screen) for the ToDo that is picked; the focus moves to its heading, **Close** gives it back to the row. A ToDo that is not on the list any more (answered elsewhere, or by this panel) says so and offers no form                                                  |
+
+**Answering a question.** The question is shown like a comment of the agent (its text and context as text), with lane, spend of the budget, since
+when and the ticket. The options are radio choices, a note is optional, and **Answer** posts to the route that exists:
+`POST /api/w/<slug>/workflows/<workflowId>/runs/<runId>/answer` with `{ question: { stepRunId, n }, choice?, text? }` (`choice` is the number of the
+option from 1, `text` the note, or the answer when the question has no options). The answer is written on the ticket in the name of the signed-in
+person (`Answer by @login: …`, [`workflows.md`](workflows.md#a-question-done-or-ask-920)). One answer goes at a time (a second click while one is on its way does
+nothing). The refusals are told in words and the note stays: `WORKFLOW_RUN_NOT_WAITING` and `WORKFLOW_RUN_QUESTION_CHANGED` ("already answered or replaced": the
+list is read again), `WORKFLOW_RUN_ANSWER_INVALID` (an option the question has not, an empty or too long answer). After success the panel says the answer went on, the focus
+moves to that message and the ToDo is in **Done** as soon as the list is read again.
+
+**Reviewing.** A review ToDo shows the pull request (a link to it on GitHub when its address is a web address), who is asked (you, or the
+project members: any member may answer) and the checks, with an optional note (4000 characters). **Approve** and **Request changes** post to
+`POST /api/w/<slug>/todos/reviews` and the result is told as the API names it: `submitted` ("Approved on GitHub" / "Changes requested on GitHub"), `commented` (GitHub does not let
+the App review its own pull request, so the decision stands as a comment; the panel links to it) and `already_there` (the same review was posted before). Errors
+(`TODOS_REVIEW_NOT_REQUESTED`, `TODOS_GITHUB_UNAVAILABLE`, `TODOS_REVIEW_FAILED`, …) are told in words and nothing is lost: both buttons work again. A review that was given is not on the list any more (and
+is not in **Done**, which holds only reviews that ended while still asked); asking for changes does not start the agent again ([above](#giving-a-review)).
+
+**The badge.** The sidebar's ToDos link shows the count of open ToDos (`GET …/todos/count`, `countOpen` of the service: the two reads of the questions
+and the reviews, bounded as the list is, without the done list; one call per page change, not one per ToDo). After an answer or a review the page sends the browser event
+`factory:todos-changed` and the badge reads again. Nothing is shown for none or when the read fails.
+
+**Accessible and safe.** The list is a list of buttons (`aria-pressed`), the panel a labelled region, the options a fieldset with a legend, the note and the filter have labels, results
+and errors are in live regions (`role="status"` / `role="alert"`), and the focus is moved on open, on close and to a result. Everything the agent or GitHub wrote
+(question, options, context, titles, logins) is rendered as text; an address is a link only when it is `http(s)`.

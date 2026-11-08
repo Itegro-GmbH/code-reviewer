@@ -74,4 +74,37 @@ describe("the count on the ToDos link", () => {
 
     expect(container.textContent).toBe("");
   });
+
+  // #925
+  it("reads the count again when the ToDos page says it dealt with one", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ open: 2 }) })
+      .mockResolvedValue({ ok: true, json: async () => ({ open: 1 }) });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<TodoCount workspaceSlug="acme" pathname="/w/acme/todos" />);
+    expect(await screen.findByText("2")).toBeTruthy();
+
+    await act(async () => {
+      window.dispatchEvent(new Event("factory:todos-changed"));
+    });
+
+    expect(await screen.findByText("1")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  // #925
+  it("stops listening when it goes away", async () => {
+    const fetchMock = answer({ open: 1 });
+    vi.stubGlobal("fetch", fetchMock);
+    const { unmount } = render(
+      <TodoCount workspaceSlug="acme" pathname="/w/acme/todos" />,
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    unmount();
+
+    window.dispatchEvent(new Event("factory:todos-changed"));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

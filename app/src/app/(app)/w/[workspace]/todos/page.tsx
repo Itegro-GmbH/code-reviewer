@@ -8,10 +8,10 @@ import { requireWorkspace } from "@/workspaces/access-runtime";
 
 export const metadata: Metadata = { title: "ToDos" };
 
-// What waits for the person across the projects of the workspace (#925): a question of an agent, a review that is asked for, red
-// checks. The page exists only in a deployment with the capability `implementer` (the access proxy answers it as a path that does
-// not exist everywhere else; `requireImplementerCapability()` is the second wall). The ToDos arrive with the ticket source and the
-// answer panel (#923, #924); until then the page says so.
+// What waits for the person across the projects of the workspace (#925): a question of an agent, a review that is asked for. The list
+// is read by the page itself from `GET /api/w/<slug>/todos` (what it shows depends on who looks), with the answer panel next to it. The
+// page exists only in a deployment with the capability `implementer` (the access proxy answers it as a path that does not exist
+// everywhere else; `requireImplementerCapability()` is the second wall).
 export default async function TodosPage({
   params,
 }: PageProps<"/w/[workspace]/todos">) {

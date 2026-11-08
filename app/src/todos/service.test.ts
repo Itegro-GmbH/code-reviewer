@@ -661,6 +661,24 @@ describe("the reviews that are asked for", () => {
       await todos.findReview({ githubLogin: "alice" }, "r-2", 7),
     ).toBeUndefined();
   });
+
+  // #925: the number on the sidebar's ToDos link
+  it("counts the open questions and the reviews of the viewer for the badge, and nothing of the done list", async () => {
+    const todos = service({
+      waiting: [run("run-1")],
+      steps: { "run-1": [step("run-1")] },
+      prSteps: [opened(7), opened(8)],
+      items: [
+        item(7, { kind: "pull_request", reviewRequestedFrom: ["alice"] }),
+        item(8, { kind: "pull_request", reviewRequestedFrom: ["bob"] }),
+      ],
+    });
+
+    expect(await todos.countOpen({ githubLogin: "alice" })).toBe(2);
+    expect(await todos.countOpen({ githubLogin: "bob" })).toBe(2);
+    expect(await todos.countOpen({ githubLogin: "carol" })).toBe(1);
+    expect(await todos.countOpen({ githubLogin: null })).toBe(1);
+  });
 });
 
 describe("the done list", () => {
