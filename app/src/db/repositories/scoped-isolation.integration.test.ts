@@ -2299,6 +2299,16 @@ const CASES: Case[] = [
     run: (a, b) => a.projects.getById(b.project.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
+  // #937: the board of another workspace's project is not A's to set, and nothing is written
+  {
+    name: "projects.setTicketBoard",
+    run: (a, b) =>
+      a.projects.setTicketBoard(b.project.id, {
+        projectV2Id: "PVT_foreign",
+        statusFieldId: "PVTSSF_foreign",
+      }),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
   // #922: a lane cannot be created in the project of another workspace
   {
     name: "workflows.create (foreign project)",

@@ -70,7 +70,13 @@ function setup(
   const requireUser = vi.fn(async () => USER);
   const handlers = createNewProjectHandlers({
     requireUser,
-    service: { createProject },
+    service: {
+      createProject,
+      getProject: async () => undefined,
+      setBoard: async () => {
+        throw new Error("not under test");
+      },
+    },
     boards,
     laneKeys: ["issue-to-pr", "review-a-pull-request"],
     copyLanes,

@@ -19,14 +19,16 @@ import { TrackerError } from "./errors.ts";
 import { TRACKER_PROVIDER } from "./mirror.ts";
 import type { SyncProgress, TrackerSync } from "./sync.ts";
 
-/** The run that is going on for a ticket. */
+/** The run that is going on for a ticket: running, or waiting for an answer (#925). */
 export type TicketLane = {
   runId: string;
+  /** The workflow (lane) of the run: the address of the run page. */
+  workflowId: string;
   /** The name of the workflow. */
   name: string;
-  /** The step that runs now (or the next one that waits); null before the first step is written. */
+  /** The step that runs now, or asks (or the next one that waits); null before the first step is written. */
   step: string | null;
-  status: "running";
+  status: "running" | "waiting";
 };
 
 /** One ticket of the list: the provider's fields as the cache holds them, plus what is read at the time of the question. */
@@ -79,7 +81,12 @@ export type TicketQuery = {
   offset: number;
 };
 
+/** Where the cache of a repository stands (`TicketList.sync`). */
+export type SyncState = TicketList["sync"];
+
 export type TrackerService = {
+  /** Where the cache of an active project's repository stands, without reading a ticket (the Setup tab's hint). Throws a `TrackerError`. */
+  syncState(repositoryId: string): Promise<SyncState>;
   /** The tickets of an active project's repository, the newest change first. Throws a `TrackerError`. */
   listIssues(repositoryId: string, query: TicketQuery): Promise<TicketList>;
   /**
@@ -146,7 +153,21 @@ export function createTrackerService(
     return repository;
   }
 
+  async function stateOf(repositoryId: string): Promise<SyncState> {
+    const state = await deps.tracker.getSyncState(repositoryId);
+    return {
+      lastFullSyncAt: state?.lastFullSyncAt ?? null,
+      inProgress: state?.cursor != null,
+      lastWriteAt: await deps.tracker.newestWriteAt(repositoryId),
+    };
+  }
+
   return {
+    async syncState(repositoryId) {
+      const repository = await resolve(repositoryId);
+      return stateOf(repository.id);
+    },
+
     async listIssues(repositoryId, query) {
       const repository = await resolve(repositoryId);
       const items = await deps.tracker.listItems(repository.id, {
@@ -161,7 +182,6 @@ export function createTrackerService(
           )
         ).map((summary) => [summary.ticketRef, summary]),
       );
-      const state = await deps.tracker.getSyncState(repository.id);
       return {
         repositoryId: repository.id,
         repo: repository.fullName,
@@ -190,18 +210,18 @@ export function createTrackerService(
                 ? null
                 : {
                     runId: summary.activeRun.runId,
+                    workflowId: summary.activeRun.workflowId,
                     name: summary.activeRun.workflowName,
                     step: summary.activeRun.stepId,
-                    status: "running",
+                    status:
+                      summary.activeRun.status === "waiting"
+                        ? "waiting"
+                        : "running",
                   },
             costUsd: (summary?.spentMicroUsd ?? 0) / MICRO,
           };
         }),
-        sync: {
-          lastFullSyncAt: state?.lastFullSyncAt ?? null,
-          inProgress: state?.cursor != null,
-          lastWriteAt: await deps.tracker.newestWriteAt(repository.id),
-        },
+        sync: await stateOf(repository.id),
       };
     },
 

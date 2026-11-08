@@ -67,16 +67,6 @@ export const COCKPIT_TABS = [
 ] as const;
 export type CockpitTab = (typeof COCKPIT_TABS)[number]["segment"];
 
-export const ISSUES_COPY = {
-  title: "Issues",
-  hint: "Exactly what GitHub says, plus whether a lane is on an issue. Click a row for details.",
-  emptyTitle: "No issues yet",
-  emptyDescription:
-    "The issues of this repository appear here as soon as the ticket source is read: state, type, labels and board status in GitHub's own words, and which lane is on an issue and at which step.",
-  footnote:
-    "Nothing is translated: state, type, labels and board status are GitHub's own words. The factory only adds which lane is on an issue and at which step.",
-} as const;
-
 export const PROJECT_TODOS_COPY = {
   title: "ToDos",
   hint: "Questions, reviews and red checks of this project. Answer here or in the ticket.",

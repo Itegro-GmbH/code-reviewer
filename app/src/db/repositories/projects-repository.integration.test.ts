@@ -896,4 +896,35 @@ describe("the ticket source of a project (#922)", () => {
       first.id,
     );
   });
+
+  // #937-T10
+  it("sets, changes and clears the board of a project, switched off or on, keeping the rest and moving the update time", async () => {
+    const { projects, first, second } = await setup();
+    const created = await projects.activate(first.id, { board: BOARD });
+    if (created.kind !== "activated") throw new Error("seeding failed");
+    const other = { projectV2Id: "PVT_board2", statusFieldId: "PVTSSF_2" };
+
+    const changed = await projects.setTicketBoard(created.project.id, other);
+    await projects.deactivate(first.id);
+    const cleared = await projects.setTicketBoard(created.project.id, null);
+
+    expect(changed?.ticketSource).toEqual({
+      provider: "github",
+      repositoryId: first.id,
+      board: other,
+    });
+    expect(cleared).toMatchObject({
+      id: created.project.id,
+      active: false,
+      settings: created.project.settings,
+      ticketSource: { provider: "github", repositoryId: first.id, board: null },
+    });
+    expect(cleared!.updatedAt > created.project.updatedAt).toBe(true);
+    expect(await projects.getById(created.project.id)).toEqual(cleared);
+    // A repository that is not a project is untouched, and an unknown id writes nothing.
+    expect(await projects.get(second.id)).toBeUndefined();
+    expect(
+      await projects.setTicketBoard("no-such-project", BOARD),
+    ).toBeUndefined();
+  });
 });

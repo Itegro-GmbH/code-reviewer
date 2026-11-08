@@ -141,14 +141,16 @@ export type NewWorkflowRun = {
   ticketRef?: string;
 };
 
-/** What the runs of one ticket add up to (#923): the money they spent and the run that is going on for it, if one is. */
+/** What the runs of one ticket add up to (#923): the money they spent and the run that is going on for it, if one is (running, or waiting for an answer, #925). */
 export type TicketRunSummary = {
   ticketRef: string;
   /** The sum of `spentMicroUsd` over every run of the ticket, whatever its status. */
   spentMicroUsd: number;
-  /** The newest `running` run of the ticket; null when none is running. */
+  /** The newest `running` or `waiting` run of the ticket; null when none is. */
   activeRun: {
     runId: string;
+    /** The workflow the run belongs to: the address of its page. */
+    workflowId: string;
     /** The name of the workflow: the lane. */
     workflowName: string;
     /** The step that runs now, or the next one that waits; null before the first step is written. */
@@ -681,7 +683,9 @@ export function createWorkflowRunsRepository(
             .execute()
         ).map((row) => [row.id, row.name]),
       );
-      const running = runs.filter((run) => run.status === "running");
+      const running = runs.filter(
+        (run) => run.status === "running" || run.status === "waiting",
+      );
       const steps =
         running.length === 0
           ? []
@@ -694,14 +698,18 @@ export function createWorkflowRunsRepository(
                 "in",
                 running.map((run) => run.id),
               )
-              .where("status", "in", ["running", "pending"])
+              .where("status", "in", ["running", "waiting", "pending"])
               .orderBy("position")
               .execute();
+      // The step that runs now, or the one that waits for the answer, before the ones that come next.
       const stepOf = (runId: string): string | null => {
         const own = steps.filter((step) => step.run_id === runId);
         return (
-          (own.find((step) => step.status === "running") ?? own[0])?.step_id ??
-          null
+          (
+            own.find((step) => step.status === "running") ??
+            own.find((step) => step.status === "waiting") ??
+            own[0]
+          )?.step_id ?? null
         );
       };
       const summaries = new Map<string, TicketRunSummary>();
@@ -715,7 +723,7 @@ export function createWorkflowRunsRepository(
         summary.spentMicroUsd += run.spent_micro_usd;
         summaries.set(ref, summary);
       }
-      // The newest running run of a ticket is its active one.
+      // The newest running or waiting run of a ticket is its active one.
       for (const run of [...running].sort((a, b) =>
         a.created_at < b.created_at ? 1 : -1,
       )) {
@@ -723,9 +731,10 @@ export function createWorkflowRunsRepository(
         if (summary === undefined || summary.activeRun !== null) continue;
         summary.activeRun = {
           runId: run.id,
+          workflowId: run.workflow_id,
           workflowName: names.get(run.workflow_id) ?? "",
           stepId: stepOf(run.id),
-          status: "running",
+          status: run.status === "waiting" ? "waiting" : "running",
         };
       }
       return [...summaries.values()];

@@ -8,7 +8,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ProjectRowView } from "./list-view.ts";
 import { ProjectCockpit } from "./project-cockpit.tsx";
 import {
-  IssuesTab,
   LanesTab,
   type LaneRow,
   ProjectTodosTab,
@@ -79,22 +78,6 @@ describe("the cockpit frame", () => {
 });
 
 describe("the tabs", () => {
-  // #925
-  it("shows the issues table of the prototype with its empty state until the ticket source exists", () => {
-    render(<IssuesTab />);
-
-    const table = screen.getByRole("table", { name: "Issues" });
-    expect(
-      within(table)
-        .getAllByRole("columnheader")
-        .map((header) => header.textContent),
-    ).toEqual(["Issue", "In GitHub", "Lane", "Waits for"]);
-    expect(within(table).getByText("No issues yet")).toBeTruthy();
-    expect(
-      screen.getByText(/Nothing is translated: state, type, labels/),
-    ).toBeTruthy();
-  });
-
   // #925
   it("says nothing waits on the ToDos tab", () => {
     render(<ProjectTodosTab />);

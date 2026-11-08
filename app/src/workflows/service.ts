@@ -12,7 +12,11 @@ import type {
   StoredWorkflowVersion,
   WorkflowsRepository,
 } from "../db/repositories/workflows-repository.ts";
-import { builtInLaneDocument, type BuiltInLaneKey } from "./built-in-lanes.ts";
+import {
+  builtInLaneDocument,
+  LANE_COPY_FAILED,
+  type BuiltInLaneKey,
+} from "./built-in-lanes.ts";
 import {
   WorkflowError,
   type WorkflowErrorCode,
@@ -25,7 +29,7 @@ import {
   DOCUMENT_MAX_BYTES,
   VERSIONS_PER_WORKFLOW_MAX,
   WORKFLOW_ID_MAX_LENGTH,
-  WORKFLOWS_PER_WORKSPACE_MAX,
+  WORKFLOWS_PER_PROJECT_MAX,
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
 import { isRecord } from "./json.ts";
@@ -65,7 +69,8 @@ export type BuiltInLaneResult =
   | {
       key: BuiltInLaneKey;
       ok: false;
-      code: WorkflowErrorCode;
+      /** A `WorkflowError`'s code, or `LANE_COPY_FAILED` for a failure no lane has a code for (the others are still copied). */
+      code: WorkflowErrorCode | typeof LANE_COPY_FAILED;
       errors: readonly Issue[];
     };
 
@@ -362,7 +367,7 @@ export function createWorkflowService({
     const { name, text } = await acceptable(body);
     const created = await workflows.create(
       { name, document: text, createdBy: user.id, projectId: project.id },
-      WORKFLOWS_PER_WORKSPACE_MAX,
+      WORKFLOWS_PER_PROJECT_MAX,
     );
     if (!created.ok) {
       // Cannot happen after `projectOf`, which read the project of this workspace; the repository says it anyway.
@@ -388,8 +393,8 @@ export function createWorkflowService({
         );
       throw new WorkflowError(
         "WORKFLOW_LIMIT_REACHED",
-        "The workspace holds the most workflows it may.",
-        { maximum: WORKFLOWS_PER_WORKSPACE_MAX },
+        "The project holds the most workflows it may.",
+        { maximum: WORKFLOWS_PER_PROJECT_MAX },
       );
     }
     return viewOf(created.workflow, created.saved);
@@ -406,7 +411,7 @@ export function createWorkflowService({
         workflows: (await workflows.list({ projectId: project.id })).map(
           summaryOf,
         ),
-        maximum: WORKFLOWS_PER_WORKSPACE_MAX,
+        maximum: WORKFLOWS_PER_PROJECT_MAX,
       };
     },
 
@@ -454,7 +459,26 @@ export function createWorkflowService({
             },
           });
         } catch (error) {
-          if (!(error instanceof WorkflowError)) throw error;
+          // One lane failing - a database error after the lane before was saved - is that lane's failure, never the failure of the others.
+          if (!(error instanceof WorkflowError)) {
+            // The lane and the code of the failure (a database error's own code, else its name), never its text.
+            const code =
+              isRecord(error) && typeof error.code === "string"
+                ? error.code
+                : error instanceof Error
+                  ? error.name
+                  : "unknown";
+            console.error(
+              `[workflows] copying the built-in lane ${key} failed (${code})`,
+            );
+            results.push({
+              key,
+              ok: false,
+              code: LANE_COPY_FAILED,
+              errors: [],
+            });
+            continue;
+          }
           results.push({
             key,
             ok: false,

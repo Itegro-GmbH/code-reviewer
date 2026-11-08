@@ -59,6 +59,7 @@ async function setup(
             spentMicroUsd: 1_234_567,
             activeRun: {
               runId: "run-1",
+              workflowId: "wf-1",
               workflowName: "Implement",
               stepId: "review",
               status: "running" as const,
@@ -144,6 +145,7 @@ describe("the list of the tickets of a project's repository", () => {
       url: "https://github.com/acme/widgets/issues/1",
       lane: {
         runId: "run-1",
+        workflowId: "wf-1",
         name: "Implement",
         step: "review",
         status: "running",
@@ -221,6 +223,28 @@ describe("the list of the tickets of a project's repository", () => {
 
     tracker.clear();
     expect(await tracker.newestWriteAt("r-1")).toBeNull();
+  });
+
+  // #937-T60
+  it("tells where the cache stands without reading a ticket, and refuses what the list refuses", async () => {
+    const { service, summarizeTickets, tracker } = await setup();
+
+    const sync = await service.syncState("r-1");
+
+    expect(sync).toEqual((await service.listIssues("r-1", OPEN)).sync);
+    expect(sync.lastFullSyncAt).toBe("2026-11-06T09:00:00.000Z");
+    summarizeTickets.mockClear();
+    await service.syncState("r-1");
+    expect(summarizeTickets).not.toHaveBeenCalled();
+    await tracker.saveSyncState("r-1", { cursor: '{"phase":"issues"}' });
+    expect((await service.syncState("r-1")).inProgress).toBe(true);
+    await expect(service.syncState("nope")).rejects.toMatchObject({
+      code: "TRACKER_REPOSITORY_NOT_FOUND",
+    });
+    const off = await setup({ project: false });
+    await expect(off.service.syncState("r-1")).rejects.toMatchObject({
+      code: "TRACKER_PROJECT_NOT_ACTIVE",
+    });
   });
 
   // #923-T59
