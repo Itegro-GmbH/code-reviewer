@@ -91,6 +91,7 @@ export type TrackerSyncDependencies = {
     TrackerRepository,
     | "upsertItem"
     | "setBoardStatusByNode"
+    | "findItemByNode"
     | "setChecksState"
     | "setReviewRequestedFrom"
     | "linkPullRequests"
@@ -102,6 +103,12 @@ export type TrackerSyncDependencies = {
     | "saveSyncState"
   >;
   provider: Pick<IntegrationProvider, "readTrackerPage">;
+  /**
+   * The board the active project of a repository chose (undefined: none). A board is the organization's, so its items can name a
+   * ticket of another repository: that ticket takes the status only when its repository has no chosen board or reads this one (#947).
+   * Absent: every ticket on the board takes the status.
+   */
+  boardOf?: (repositoryId: string) => Promise<string | undefined>;
   now?: () => Date;
   /** Receives the line about a sync that could not remove anything. Default: console.warn. */
   warn?: (line: string) => void;
@@ -206,7 +213,7 @@ export function readCursor(text: string | null): SyncCursor | undefined {
 }
 
 export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
-  const { tracker, provider } = deps;
+  const { tracker, provider, boardOf } = deps;
   const now = deps.now ?? (() => new Date());
   const warn = deps.warn ?? ((line: string) => console.warn(line));
 
@@ -380,8 +387,27 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
                 };
           } else if (page.phase === "board" && cursor.phase === "board") {
             boardAvailable = page.available;
-            for (const item of page.items)
+            const boards = new Map<string, string | undefined>();
+            for (const item of page.items) {
+              const held =
+                boardOf === undefined
+                  ? undefined
+                  : await tracker.findItemByNode(item.nodeId);
+              if (
+                boardOf !== undefined &&
+                held !== undefined &&
+                held.repositoryId !== repository.id
+              ) {
+                if (!boards.has(held.repositoryId))
+                  boards.set(
+                    held.repositoryId,
+                    await boardOf(held.repositoryId),
+                  );
+                const own = boards.get(held.repositoryId);
+                if (own !== undefined && own !== boardId) continue;
+              }
               await tracker.setBoardStatusByNode(item.nodeId, item.status);
+            }
             if (page.available && page.next !== null)
               next = {
                 phase: "board",

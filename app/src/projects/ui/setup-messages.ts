@@ -20,17 +20,36 @@ export const BOARD_COPY = {
   failed:
     "GitHub could not be asked for the boards right now. Reload the page to try again.",
   noBoards: "This repository has no board. A project works without one.",
-  picked:
-    "Its Status field gives the columns of the tickets, once they are read again (Resync).",
+  /** By whether the page offers a Resync button next to the picker (`ResyncOffer`). */
+  picked: {
+    offered:
+      "Its Status field gives the columns of the tickets, once they are read again (Resync).",
+    switched_off:
+      "Its Status field gives the columns of the tickets, once the project is switched on and they are read.",
+    not_allowed:
+      "Its Status field gives the columns of the tickets, once they are read again.",
+  },
   noneSet:
     "No board is set on this project, so its tickets get no status from a board.",
   currentUnread:
     "The board set on this project (its boards cannot be read now)",
   saving: "Saving the board",
-  saved:
-    "Board saved. The tickets still show the statuses of the old board: press Resync to read the new board.",
-  cleared:
-    "Board removed. The tickets still show the statuses of the old board: press Resync to drop them.",
+  saved: {
+    offered:
+      "Board saved. The tickets still show the statuses of the old board: press Resync to read the new board.",
+    switched_off:
+      "Board saved. The project is switched off, so its tickets are not read: switch it on, then press Resync to read the new board.",
+    not_allowed:
+      "Board saved. The tickets still show the statuses of the old board until they are read again: the nightly sync does it, or a person who may change the project settings presses Resync.",
+  },
+  cleared: {
+    offered:
+      "Board removed. The tickets still show the statuses of the old board: press Resync to drop them.",
+    switched_off:
+      "Board removed. The project is switched off, so its tickets are not read: switch it on, then press Resync to drop the old statuses.",
+    not_allowed:
+      "Board removed. The tickets still show the statuses of the old board until they are read again: the nightly sync does it, or a person who may change the project settings presses Resync.",
+  },
   /** What a refused save says, by the `code` of the issue the route named. */
   refused: {
     unknown_board:
@@ -54,8 +73,7 @@ export const RESYNC_COPY = {
     `${String(count)} ${count === 1 ? "ticket" : "tickets"} could not be read, so none was removed. Resync again later.`,
   noBoard:
     "GitHub did not let the App read the boards, so board statuses stay empty.",
-  gaveUp:
-    "Still reading after many calls. What was read is kept: press Resync to go on.",
+  gaveUp: "Still reading after many calls: press Resync to go on.",
   kept: (written: number) =>
     `${String(written)} ${written === 1 ? "ticket was" : "tickets were"} read and ${written === 1 ? "is" : "are"} kept.`,
   boardChanged:
@@ -77,7 +95,7 @@ const SETUP_FAILURE: Record<string, string> = {
   TRACKER_INTEGRATION_UNAVAILABLE:
     "The GitHub App installation of this repository is suspended or removed, so GitHub cannot be asked.",
   TRACKER_SYNC_FAILED:
-    "GitHub could not be read just now. What was read is kept: press Resync to go on.",
+    "GitHub could not be read just now: press Resync to go on.",
   TRACKER_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,
   TRACKER_REQUEST_INVALID: REQUEST_NOT_UNDERSTOOD,
 };
