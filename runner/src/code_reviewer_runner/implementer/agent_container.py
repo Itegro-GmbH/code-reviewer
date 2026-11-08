@@ -66,6 +66,7 @@ from .host_rules import (
     close_bridge_ipv6,
     inet_failure_note,
 )
+from .netdoor.registries import rule_has_registries
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .reader import REPO_SUBPATH, work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
@@ -159,12 +160,41 @@ NO_PROXY: Final = ",".join(
 )
 
 
+# The door's certificate authority in the agent's container (#784): when the rule names a package
+# registry the door reads it as HTTP (GET and HEAD only) and shows the tools its own certificate for
+# it. `Session` writes these two files, before the agent starts, from the public certificate the
+# door sent: the CA alone (Node adds it to the roots it has) and the system's roots with the CA (the
+# variables below replace the roots a tool has, so the bundle keeps every other host working).
+TRUST_CA_NAME: Final = "network-door-ca.pem"
+TRUST_BUNDLE_NAME: Final = "network-door-bundle.pem"
+TRUST_CA_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_CA_NAME}"
+TRUST_BUNDLE_PATH: Final = f"{AGENT_CONFIG_DIRECTORY}/{TRUST_BUNDLE_NAME}"
+SYSTEM_ROOTS_PATH: Final = "/etc/ssl/certs/ca-certificates.crt"
+
+
+def trust_environment(rule: NetworkRule) -> dict[str, str]:
+    """The variables that make npm, pnpm, Yarn, pip, uv, cargo, gem, curl and Python's `requests`
+    trust the door's certificate for the package registries; none unless the rule names one
+    (`rule_has_registries`), where the two files are not written either."""
+    if not rule_has_registries(rule):
+        return {}
+    return {
+        "NODE_EXTRA_CA_CERTS": TRUST_CA_PATH,
+        "SSL_CERT_FILE": TRUST_BUNDLE_PATH,
+        "REQUESTS_CA_BUNDLE": TRUST_BUNDLE_PATH,
+        "CURL_CA_BUNDLE": TRUST_BUNDLE_PATH,
+        "PIP_CERT": TRUST_BUNDLE_PATH,
+        "CARGO_HTTP_CAINFO": TRUST_BUNDLE_PATH,
+    }
+
+
 def proxy_environment(rule: NetworkRule) -> dict[str, str]:
     """The variables that point the agent's tools at the network door; none for `off`, where there
     is no door and the container has no variable of any kind."""
     if rule.mode == MODE_OFF:
         return {}
     return {
+        **trust_environment(rule),
         "HTTP_PROXY": NETWORK_DOOR_URL,
         "HTTPS_PROXY": NETWORK_DOOR_URL,
         "http_proxy": NETWORK_DOOR_URL,

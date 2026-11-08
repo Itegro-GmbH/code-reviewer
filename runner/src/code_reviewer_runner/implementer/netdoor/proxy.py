@@ -43,36 +43,23 @@ from .connections import (
     REASON_IP_LITERAL,
     REASON_NOT_LISTED,
     REASON_PORT,
+    REASON_REGISTRY,
     REASON_TOO_MANY,
     REASON_UPSTREAM,
     ConnectionLog,
 )
+from .intercept import RegistryGate
+from .registries import is_registry_name
+from .wire import HEAD_SECONDS, forwarded_head, read_head, respond
 
 _log = logging.getLogger(__name__)
 
-MAX_HEAD_BYTES: Final = 16 * 1024
-HEAD_SECONDS: Final = 15.0
 CONNECT_SECONDS: Final = 10.0
 # A tunnel that carries nothing for this long is closed (a package manager that waits on a slow
 # server still sends keep-alives; a stuck one is the agent's to retry).
 IDLE_SECONDS: Final = 600.0
 MAX_CONNECTIONS: Final = 128
 CHUNK: Final = 64 * 1024
-# The headers the door removes from a forwarded request: hop-by-hop ones and the proxy's own.
-_DROPPED = frozenset(
-    {
-        "connection",
-        "keep-alive",
-        "proxy-connection",
-        "proxy-authorization",
-        "proxy-authenticate",
-        "te",
-        "trailer",
-        "upgrade",
-        "host",
-    }
-)
-
 # A method is a token (RFC 7230, 3.2.6): one or more of these characters, no space, no control
 # character. The door forwards the method as it was sent, so a line that is not one is refused
 # rather than passed to an origin.
@@ -166,80 +153,6 @@ class Decider:
         return Decision(addresses=found.addresses)
 
 
-_REASON_TEXT: Final = {
-    REASON_NOT_LISTED: "the host is not in the environment's network list",
-    REASON_IP_LITERAL: "an IP address is never allowed, use a host name",
-    REASON_PORT: "this port is not allowed (the door dials 80 and 443, a rule may allow fewer)",
-    REASON_BAD_REQUEST: "the request is not one this proxy serves",
-    REASON_TOO_MANY: "too many connections at once",
-    REASON_UPSTREAM: "the host could not be reached",
-    "private_address": "the host resolves to a private or special address",
-    "unresolvable": "the host name could not be resolved",
-}
-
-
-def _status_line(code: int) -> str:
-    return {
-        200: "Connection Established",
-        400: "Bad Request",
-        403: "Forbidden",
-        502: "Bad Gateway",
-        503: "Service Unavailable",
-    }[code]
-
-
-def _respond(sock: socket.socket, code: int, reason: str | None = None) -> None:
-    """A complete answer; the refusal's body names the reason in plain words, for the person (or
-    the agent) reading a failed `npm install`."""
-    text = "" if reason is None else _REASON_TEXT.get(reason, reason)
-    body = b"" if code == 200 else f"network door: {text}\n".encode("ascii", "replace")
-    head = f"HTTP/1.1 {code} {_status_line(code)}\r\n"
-    if code != 200:
-        head += (
-            f"Content-Type: text/plain; charset=us-ascii\r\nContent-Length: {len(body)}\r\n"
-            f"X-Network-Door: {reason or 'refused'}\r\nConnection: close\r\n"
-        )
-    with contextlib.suppress(OSError):
-        sock.sendall(head.encode("ascii") + b"\r\n" + body)
-
-
-class _Head:
-    def __init__(self, request_line: str, headers: list[tuple[str, str]], rest: bytes) -> None:
-        self.request_line = request_line
-        self.headers = headers
-        self.rest = rest
-
-
-def _read_head(sock: socket.socket) -> _Head | None:
-    """The request line and headers (up to a blank line, `MAX_HEAD_BYTES`), and any bytes that came
-    after them. None for a head that is too long, not ASCII, or cut off."""
-    data = b""
-    while b"\r\n\r\n" not in data:
-        if len(data) > MAX_HEAD_BYTES:
-            return None
-        try:
-            chunk = sock.recv(4096)
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        data += chunk
-    head, _, rest = data.partition(b"\r\n\r\n")
-    if len(head) > MAX_HEAD_BYTES:
-        return None
-    try:
-        lines = head.decode("ascii").split("\r\n")
-    except UnicodeDecodeError:
-        return None
-    headers: list[tuple[str, str]] = []
-    for line in lines[1:]:
-        name, colon, value = line.partition(":")
-        if not colon or not name or name != name.strip() or not name.isprintable():
-            return None
-        headers.append((name, value.strip()))
-    return _Head(lines[0], headers, rest)
-
-
 def _origin_form(target: str) -> tuple[Authority, str] | None:
     """`http://authority/path?query` to (authority, path). Only `http`, port 80 unless the URL names
     one (the decision on the port is `Decider.decide`'s), no user name."""
@@ -304,7 +217,7 @@ class _Handler(socketserver.BaseRequestHandler):
         proxy = self.proxy
         if not proxy.slots.acquire(blocking=False):
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_TOO_MANY)
-            _respond(client, 503, REASON_TOO_MANY)
+            respond(client, 503, REASON_TOO_MANY)
             return
         try:
             self._serve(client)
@@ -319,20 +232,20 @@ class _Handler(socketserver.BaseRequestHandler):
     def _serve(self, client: socket.socket) -> None:
         proxy = self.proxy
         client.settimeout(HEAD_SECONDS)
-        head = _read_head(client)
+        head = read_head(client)
         if head is None:
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            _respond(client, 400, REASON_BAD_REQUEST)
+            respond(client, 400, REASON_BAD_REQUEST)
             return
         parts = head.request_line.split(" ")
         if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            _respond(client, 400, REASON_BAD_REQUEST)
+            respond(client, 400, REASON_BAD_REQUEST)
             return
         method, target, _version = parts
         if _METHOD_TOKEN.fullmatch(method) is None:
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            _respond(client, 400, REASON_BAD_REQUEST)
+            respond(client, 400, REASON_BAD_REQUEST)
             return
         if method.upper() == "CONNECT":
             authority = split_authority(target, None)
@@ -347,26 +260,30 @@ class _Handler(socketserver.BaseRequestHandler):
                 OUTCOME_REFUSED,
                 REASON_BAD_REQUEST,
             )
-            _respond(client, 400, REASON_BAD_REQUEST)
+            respond(client, 400, REASON_BAD_REQUEST)
             return
         decision = proxy.decider.decide(authority.host, authority.port)
         if not decision.allowed:
             proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, decision.reason)
-            _respond(client, 403, decision.reason)
+            respond(client, 403, decision.reason)
+            return
+        name = ascii_name(authority.host) or authority.host
+        gate = proxy.registry_gate
+        if gate is not None and is_registry_name(name):
+            self._registry(client, gate, name, authority, path, decision.addresses, head.rest)
             return
         upstream = self._connect(decision.addresses, authority.port)
         if upstream is None:
             proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, REASON_UPSTREAM)
-            _respond(client, 502, REASON_UPSTREAM)
+            respond(client, 502, REASON_UPSTREAM)
             return
         try:
             if path is None:
-                _respond(client, 200)
+                respond(client, 200)
                 pending = head.rest
             else:
-                name = ascii_name(authority.host) or authority.host
                 host_header = name if authority.port == 80 else f"{name}:{authority.port}"
-                upstream.sendall(_forwarded_head(method, path, host_header, head.headers))
+                upstream.sendall(forwarded_head(method, path, host_header, head.headers))
                 pending = head.rest
             if pending:
                 upstream.sendall(pending)
@@ -385,6 +302,32 @@ class _Handler(socketserver.BaseRequestHandler):
             bytes_out=pair.to_upstream,
         )
 
+    def _registry(
+        self,
+        client: socket.socket,
+        gate: RegistryGate,
+        name: str,
+        authority: Authority,
+        path: str | None,
+        addresses: tuple[str, ...],
+        pending: bytes,
+    ) -> None:
+        """A package registry (#784): a tunnel to it on port 443 is ended here and read as HTTP,
+        GET and HEAD only; plain HTTP and port 80 are refused (a registry is served over HTTPS).
+        A client that sent bytes after its `CONNECT` before the answer (a TLS hello in a hurry) is
+        refused: nothing is replayed into the handshake."""
+        proxy = self.proxy
+        if path is not None or authority.port != 443:
+            proxy.log.add(name, authority.port, OUTCOME_REFUSED, REASON_REGISTRY)
+            respond(client, 403, REASON_REGISTRY)
+            return
+        if pending:
+            proxy.log.add(name, authority.port, OUTCOME_REFUSED, REASON_BAD_REQUEST)
+            respond(client, 400, REASON_BAD_REQUEST)
+            return
+        respond(client, 200)
+        gate.serve(client, name, addresses, self._connect)
+
     def _connect(self, addresses: tuple[str, ...], port: int) -> socket.socket | None:
         """To one of the addresses that were checked, in order; never to the name."""
         for address in addresses:
@@ -393,16 +336,6 @@ class _Handler(socketserver.BaseRequestHandler):
             except OSError:
                 continue
         return None
-
-
-def _forwarded_head(method: str, path: str, host: str, headers: list[tuple[str, str]]) -> bytes:
-    lines = [f"{method} {path} HTTP/1.1", f"Host: {host}"]
-    for name, value in headers:
-        if name.lower() in _DROPPED or "\r" in value or "\n" in value:
-            continue
-        lines.append(f"{name}: {value}")
-    lines.append("Connection: close")
-    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii", "replace")
 
 
 class ProxyServer(socketserver.ThreadingTCPServer):
@@ -417,8 +350,10 @@ class ProxyServer(socketserver.ThreadingTCPServer):
         *,
         connector: Connector = tcp_connector,
         max_connections: int = MAX_CONNECTIONS,
+        registry_gate: RegistryGate | None = None,
     ) -> None:
         self.decider = decider
+        self.registry_gate = registry_gate
         self.log = decider.log
         self.connector = connector
         self.slots = threading.BoundedSemaphore(max_connections)
