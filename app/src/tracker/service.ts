@@ -162,7 +162,7 @@ export function createTrackerService(
 
   return {
     async syncState(repositoryId) {
-      const repository = await resolve(repositoryId);
+      const { repository } = await resolve(repositoryId);
       return stateOf(repository.id);
     },
 
