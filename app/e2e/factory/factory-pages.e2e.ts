@@ -45,6 +45,8 @@ test.describe("the pages of the factory", () => {
   }
 
   test.beforeAll(async ({ request }) => {
+    // One sync and three child processes that load the repositories: on a loaded CI runner that can take longer than a test's default.
+    test.setTimeout(180_000);
     await addGithubInstallation(
       request,
       { id: 9100051, account: GITHUB_APP_OWNER_ACCOUNT },

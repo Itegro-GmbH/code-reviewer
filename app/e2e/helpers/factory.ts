@@ -23,7 +23,8 @@ async function factoryCommand<T>(command: string, input: unknown): Promise<T> {
       e2eEnv.factoryDatabaseUrl,
       JSON.stringify(input),
     ],
-    { cwd: process.cwd() },
+    // A child that hangs fails the journey with its own message instead of the test's timeout.
+    { cwd: process.cwd(), timeout: 60_000 },
   );
   return JSON.parse(stdout.trim().split("\n").at(-1) ?? "null") as T;
 }
