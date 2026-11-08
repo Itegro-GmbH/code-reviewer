@@ -81,7 +81,12 @@ export type TicketQuery = {
   offset: number;
 };
 
+/** Where the cache of a repository stands (`TicketList.sync`). */
+export type SyncState = TicketList["sync"];
+
 export type TrackerService = {
+  /** Where the cache of an active project's repository stands, without reading a ticket (the Setup tab's hint). Throws a `TrackerError`. */
+  syncState(repositoryId: string): Promise<SyncState>;
   /** The tickets of an active project's repository, the newest change first. Throws a `TrackerError`. */
   listIssues(repositoryId: string, query: TicketQuery): Promise<TicketList>;
   /**
@@ -148,7 +153,21 @@ export function createTrackerService(
     return repository;
   }
 
+  async function stateOf(repositoryId: string): Promise<SyncState> {
+    const state = await deps.tracker.getSyncState(repositoryId);
+    return {
+      lastFullSyncAt: state?.lastFullSyncAt ?? null,
+      inProgress: state?.cursor != null,
+      lastWriteAt: await deps.tracker.newestWriteAt(repositoryId),
+    };
+  }
+
   return {
+    async syncState(repositoryId) {
+      const repository = await resolve(repositoryId);
+      return stateOf(repository.id);
+    },
+
     async listIssues(repositoryId, query) {
       const repository = await resolve(repositoryId);
       const items = await deps.tracker.listItems(repository.id, {
@@ -163,7 +182,6 @@ export function createTrackerService(
           )
         ).map((summary) => [summary.ticketRef, summary]),
       );
-      const state = await deps.tracker.getSyncState(repository.id);
       return {
         repositoryId: repository.id,
         repo: repository.fullName,
@@ -203,11 +221,7 @@ export function createTrackerService(
             costUsd: (summary?.spentMicroUsd ?? 0) / MICRO,
           };
         }),
-        sync: {
-          lastFullSyncAt: state?.lastFullSyncAt ?? null,
-          inProgress: state?.cursor != null,
-          lastWriteAt: await deps.tracker.newestWriteAt(repository.id),
-        },
+        sync: await stateOf(repository.id),
       };
     },
 

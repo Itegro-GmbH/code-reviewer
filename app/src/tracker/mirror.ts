@@ -45,6 +45,7 @@ export type TrackerMirrorDependencies = {
     | "setBoardStatusByNode"
     | "setParent"
     | "setChecksState"
+    | "clearReviewActed"
     | "linkPullRequests"
   >;
   /** The status the boards give a ticket now, by its provider id (`readBoardStatus`); `available: false` when boards cannot be read. */
@@ -138,8 +139,11 @@ export function createTrackerMirror(
           if (!written) return "not_mirrored";
           if (item.kind === "pull_request") {
             // The checks belong to a commit: a new commit, or a pull request that is over, has none.
-            if (change.resetChecks || item.state === "closed")
+            if (change.resetChecks || item.state === "closed") {
               await tracker.setChecksState(repositoryId, item.number, null);
+              // #924: a person who acted on a review ToDo did so for the commit that was the head; a request that stands is for the new one.
+              await tracker.clearReviewActed(repositoryId, item.number);
+            }
             // The issues the pull request closed before and the ones it closes now list it, or do not any more.
             const affected = new Set([
               ...(before?.closes ?? []),

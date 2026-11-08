@@ -251,6 +251,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #937: the board of a project; the project of the other workspace is not found, and nothing is written (null clears it, so no GitHub call).
+    name: "PUT projects/[projectId]",
+    route: "/api/w/[workspace]/projects/[projectId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/projects/${ids.projectId}`,
+    body: () => ({ board: null }),
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/route.ts",
+    implementer: true,
+  },
+  {
     // #922: the tickets of a project, by its own id; the project of the other workspace is not found.
     name: "GET projects/[projectId]/issues",
     route: "/api/w/[workspace]/projects/[projectId]/issues",
@@ -598,6 +610,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    name: "POST workflows/scope",
+    route: "/api/w/[workspace]/workflows/scope",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflows/scope",
+    body: () => ({}),
+    params: () => ({}),
+    file: "workflows/scope/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
     name: "GET workflows/[workflowId]",
     route: "/api/w/[workspace]/workflows/[workflowId]",
     method: "GET",
@@ -835,6 +859,45 @@ const ENTRIES: Entry[] = [
     path: (ids) => `/profiles/${ids.profileId}`,
     params: (ids) => ({ profileId: ids.profileId }),
     file: "profiles/[profileId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #924: every member reads the ToDos of their own workspace (the questions and the reviews of its lanes); nothing of another.
+    name: "GET todos",
+    route: "/api/w/[workspace]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/todos",
+    params: () => ({}),
+    file: "todos/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #924: the ToDos of one project, by its own id; the project of the other workspace is not found.
+    name: "GET projects/[projectId]/todos",
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/projects/${ids.projectId}/todos`,
+    params: (ids) => ({ projectId: ids.projectId }),
+    file: "projects/[projectId]/todos/route.ts",
+    implementer: true,
+  },
+  {
+    // #924: a review given from the list; a pull request of the other workspace's repository is no ToDo here, and nothing is posted.
+    name: "POST todos/reviews",
+    route: "/api/w/[workspace]/todos/reviews",
+    method: "POST",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/todos/reviews",
+    body: (ids) => ({
+      repositoryId: ids.repositoryId,
+      number: 7,
+      decision: "approve",
+    }),
+    params: () => ({}),
+    file: "todos/reviews/route.ts",
     implementer: true,
   },
   {

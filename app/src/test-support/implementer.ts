@@ -41,7 +41,10 @@ export async function seedImplementerRepository(
       url: `https://github.test/acme/${tag}`,
     },
   ]);
-  const [repository] = await repositories.list();
+  // The workspace can hold the repositories of several seeds: this one is the repository of this tag.
+  const repository = (await repositories.list()).find(
+    (candidate) => candidate.fullName === `acme/${tag}`,
+  );
   if (repository === undefined) throw new Error("seeding failed");
   await createProjectsRepository(db, workspaceId).activate(repository.id);
   return { userId, repositoryId: repository.id, repoUrl: repository.url };

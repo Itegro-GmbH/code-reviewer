@@ -118,6 +118,10 @@ export function addressesOf(
         route.pattern === "/w/:workspace/projects/:repositoryId/setup" ||
         route.pattern === "/w/:workspace/todos" ||
         route.pattern === "/api/w/:workspace/todos/count" ||
+        // The ToDos of a workspace and of a project and the review given from the list (#924): read and written by the factory only.
+        route.pattern === "/api/w/:workspace/todos" ||
+        route.pattern === "/api/w/:workspace/todos/reviews" ||
+        route.pattern === "/api/w/:workspace/projects/:projectId/todos" ||
         route.pattern === "/w/:workspace/profiles" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/todos" ||
         route.pattern === "/w/:workspace/projects/:repositoryId/lanes" ||
@@ -127,6 +131,7 @@ export function addressesOf(
         // The boards of a repository and the tickets of a project by its id (#922): read by the factory's cockpit only.
         route.pattern ===
           "/api/w/:workspace/repositories/:repositoryId/boards" ||
+        route.pattern === "/api/w/:workspace/projects/:projectId" ||
         route.pattern === "/api/w/:workspace/projects/:projectId/issues" ||
         route.pattern === "/w/:workspace/settings/billing",
     },

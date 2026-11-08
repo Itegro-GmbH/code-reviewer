@@ -118,6 +118,39 @@ describe("the ticket of a GitHub issue", () => {
     });
   });
 
+  // #924-T03
+  it("reads who a review is asked from for a pull request only, once each, and says nothing without the list", () => {
+    const reviewers = [
+      { login: "carol" },
+      { login: "carol" },
+      { id: 4 },
+      "text",
+      { login: "dave" },
+    ];
+    const webhook = toTrackerItem(
+      { ...ISSUE, requested_reviewers: reviewers },
+      "acme/widgets",
+      { pullRequest: true },
+    );
+    const issue = toTrackerItem(
+      { ...ISSUE, requested_reviewers: reviewers },
+      "acme/widgets",
+    );
+    const listed = toTrackerItem(
+      { ...ISSUE, pull_request: {}, requested_reviewers: undefined },
+      "acme/widgets",
+    );
+
+    expect(webhook?.reviewRequestedFrom).toEqual(["carol", "dave"]);
+    expect(issue).not.toHaveProperty("reviewRequestedFrom");
+    expect(listed).not.toHaveProperty("reviewRequestedFrom");
+    expect(
+      toTrackerItem({ ...ISSUE, requested_reviewers: [] }, "acme/widgets", {
+        pullRequest: true,
+      })?.reviewRequestedFrom,
+    ).toEqual([]);
+  });
+
   // #923-T05
   it.each([
     ["no number", { ...ISSUE, number: undefined }],

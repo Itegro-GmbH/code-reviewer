@@ -19,6 +19,13 @@
       }
     ],
     "assignees": [],
+    "requested_reviewers": [
+      {
+        "login": "carol",
+        "id": 1003,
+        "type": "User"
+      }
+    ],
     "updated_at": "2026-11-06T11:00:00Z",
     "user": {
       "login": "alice",

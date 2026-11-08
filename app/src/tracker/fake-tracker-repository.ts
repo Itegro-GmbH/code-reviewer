@@ -6,10 +6,12 @@
 // removed; one sync is claimed at a time), without a database. The SQL itself is proved against Postgres in
 // `tracker-repository.integration.test.ts`.
 import {
+  liveReviewMarks,
   TOMBSTONE_KEPT_MS,
   type TrackerItem,
   type TrackerRepository,
   type TrackerSyncState,
+  withReviewMark,
 } from "../db/repositories/tracker-repository.ts";
 
 export type FakeTrackerRepository = TrackerRepository & {
@@ -75,6 +77,14 @@ export function createFakeTrackerRepository(
         deletedAt: null,
         pullRequests: before?.pullRequests ?? [],
         checksState: before?.checksState ?? null,
+        reviewRequestedFrom:
+          item.reviewRequestedFrom ?? before?.reviewRequestedFrom ?? [],
+        // As the SQL: a list that lacks a login says nothing against its mark; nobody asked ends them all.
+        reviewActedBy: liveReviewMarks(
+          before?.reviewActedBy ?? [],
+          item.reviewRequestedFrom,
+          undefined,
+        ),
         parentNumber:
           item.parentNumber === undefined
             ? (before?.parentNumber ?? null)
@@ -181,6 +191,55 @@ export function createFakeTrackerRepository(
         syncedAt: stamp(),
       });
       return true;
+    },
+    async setReviewRequestedFrom(repositoryId, number, logins, at, headSha) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      if (item.updatedAt > at) return false;
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewRequestedFrom:
+          logins === undefined ? item.reviewRequestedFrom : [...logins],
+        reviewActedBy: liveReviewMarks(item.reviewActedBy, logins, headSha),
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async removeReviewRequested(repositoryId, number, login, sha) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewRequestedFrom: item.reviewRequestedFrom.filter(
+          (candidate) => candidate.toLowerCase() !== login.toLowerCase(),
+        ),
+        reviewActedBy: withReviewMark(item.reviewActedBy, login, sha),
+        // One millisecond on, as the SQL does: a delivery of the same second is older.
+        updatedAt: new Date(Date.parse(item.updatedAt) + 1).toISOString(),
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async markReviewActed(repositoryId, number, login, sha) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.kind !== "pull_request") return false;
+      items.set(key(repositoryId, number), {
+        ...item,
+        reviewActedBy: withReviewMark(item.reviewActedBy, login, sha),
+        syncedAt: stamp(),
+      });
+      return true;
+    },
+    async clearReviewActed(repositoryId, number) {
+      const item = visible(repositoryId, number);
+      if (item === undefined || item.reviewActedBy.length === 0) return false;
+      items.set(key(repositoryId, number), { ...item, reviewActedBy: [] });
+      return true;
+    },
+    async listItemsByNumbers(repositoryId, numbers) {
+      return rowsOf(repositoryId)
+        .filter((item) => numbers.includes(item.number))
+        .map(strip);
     },
     async linkPullRequests(repositoryId, issueNumbers) {
       for (const issue of rowsOf(repositoryId)) {

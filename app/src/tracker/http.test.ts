@@ -30,6 +30,7 @@ function setup(service: Partial<TrackerService> = {}) {
   const requireUser = vi.fn(async () => USER);
   const full: TrackerService = {
     listIssues: vi.fn(async () => LIST),
+    syncState: vi.fn(async () => LIST.sync),
     sync: vi.fn(async () => PROGRESS),
     ...service,
   };

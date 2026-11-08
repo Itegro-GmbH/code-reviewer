@@ -212,6 +212,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // A project is one ticket source (#922): the factory's new project (its board and its first lanes), the boards of a repository it can
   // take, and the tickets of a project by its own id (the same answer as the issues of its repository).
   { route: "/api/w/[workspace]/projects", class: "implementer" },
+  // The board of a project, set or changed on its Setup tab (#937).
+  { route: "/api/w/[workspace]/projects/[projectId]", class: "implementer" },
   {
     route: "/api/w/[workspace]/projects/[projectId]/issues",
     class: "implementer",
@@ -256,6 +258,13 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/w/[workspace]/todos/count", class: "implementer" },
+  // The ToDos of a workspace and of one project, read from the runs and the ticket mirror (#924), and a review given from the list.
+  { route: "/api/w/[workspace]/todos", class: "implementer", exact: true },
+  { route: "/api/w/[workspace]/todos/reviews", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/projects/[projectId]/todos",
+    class: "implementer",
+  },
   { route: "/w/[workspace]/todos", class: "implementer" },
   { route: "/w/[workspace]/profiles", class: "implementer" },
   {
@@ -293,6 +302,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // workflow with its versions. The lane builder and the pages below edit, show and start them.
   { route: "/api/w/[workspace]/workflows", class: "implementer" },
   { route: "/api/w/[workspace]/workflows/validate", class: "implementer" },
+  // The values a step can reach, for the picker of the lane builder (#927).
+  { route: "/api/w/[workspace]/workflows/scope", class: "implementer" },
   {
     route: "/api/w/[workspace]/workflows/[workflowId]",
     class: "implementer",

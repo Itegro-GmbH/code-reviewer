@@ -212,6 +212,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows",
   "/api/w/[workspace]/workflows/[workflowId]",
   "/api/w/[workspace]/workflows/validate",
+  // The values a step can reach, for the picker of the lane builder (#927).
+  "/api/w/[workspace]/workflows/scope",
   // The runs of a workflow (#844).
   "/api/w/[workspace]/workflows/[workflowId]/runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
@@ -226,7 +228,11 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/runners",
   "/api/w/[workspace]/runners/tokens",
   "/api/w/[workspace]/runners/[runnerId]/revoke",
+  "/api/w/[workspace]/todos",
   "/api/w/[workspace]/todos/count",
+  // The ToDos of a project and a review given from the list (#924).
+  "/api/w/[workspace]/projects/[projectId]/todos",
+  "/api/w/[workspace]/todos/reviews",
   // The profiles of the agents (#843).
   "/api/w/[workspace]/profiles",
   "/api/w/[workspace]/profiles/[profileId]",
@@ -254,6 +260,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/plan-handoff",
   "/api/w/[workspace]/members/[userId]",
   "/api/w/[workspace]/projects",
+  "/api/w/[workspace]/projects/[projectId]",
   "/api/w/[workspace]/projects/[projectId]/issues",
   "/api/w/[workspace]/repositories/[repositoryId]/boards",
   "/api/w/[workspace]/repositories/[repositoryId]/issues",

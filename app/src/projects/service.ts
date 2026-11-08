@@ -8,6 +8,7 @@ import type {
   ProjectListEntry,
   ProjectsRepository,
   StoredProject,
+  TicketBoard,
 } from "../db/repositories/projects-repository.ts";
 import { ProjectError } from "./errors.ts";
 import { noopProjectHooks, type ProjectHooks } from "./hooks.ts";
@@ -36,6 +37,14 @@ export type ProjectService = {
   ): Promise<StoredProject>;
   /** A project by its own id, or undefined when the workspace has none with it (#922). */
   getProject(projectId: string): Promise<StoredProject | undefined>;
+  /**
+   * Sets, changes or clears (`null`) the board of the ticket source of a project (#937). The board is taken as it is: the caller has
+   * checked it against the boards of the repository. Throws `PROJECT_NOT_FOUND` for an id the workspace does not have.
+   */
+  setBoard(
+    projectId: string,
+    board: TicketBoard | null,
+  ): Promise<StoredProject>;
   /**
    * Switches the project of a repository off and keeps it (row and settings). A repository without a
    * project, or with a project that is off, is not an error: `changed` is false. Throws
@@ -140,6 +149,19 @@ export function createProjectService(deps: {
       )
         return undefined;
       return projects.getById(projectId);
+    },
+
+    async setBoard(projectId, board) {
+      const found =
+        (await service.getProject(projectId)) === undefined
+          ? undefined
+          : await projects.setTicketBoard(projectId, board);
+      if (found === undefined)
+        throw new ProjectError(
+          "PROJECT_NOT_FOUND",
+          "There is no project with this id.",
+        );
+      return found;
     },
 
     async deactivateProject(repositoryId) {

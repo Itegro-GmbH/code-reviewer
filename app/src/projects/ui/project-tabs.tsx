@@ -3,6 +3,7 @@
 // The contents of the tabs of a project's cockpit (#925). ToDos, Lanes and Setup show what the prototype shows, with what has no data
 // yet empty: the ToDos come with the answer panel (#924). The Issues tab is `src/issues/` (the ticket mirror, #923); the Lanes tab lists the lanes of the project (#922).
 import Link from "next/link";
+import type { ReactNode } from "react";
 import {
   Empty,
   EmptyDescription,
@@ -131,8 +132,14 @@ const SOURCE_STATE = {
   unavailable: { label: SETUP_COPY.stateGone, variant: "warning" },
 } as const;
 
-/** The ticket source card of the Setup tab: exactly one per project, in its own words. */
-export function TicketSourceCard({ row }: { row: ProjectRowView }) {
+/** The ticket source card of the Setup tab: exactly one per project, in its own words. `children` are its controls (the board, the resync). */
+export function TicketSourceCard({
+  row,
+  children,
+}: {
+  row: ProjectRowView;
+  children?: ReactNode;
+}) {
   const state = SOURCE_STATE[row.status];
   return (
     <section
@@ -170,6 +177,7 @@ export function TicketSourceCard({ row }: { row: ProjectRowView }) {
             On GitHub
           </a>
         ) : null}
+        {children}
       </div>
       <p className="text-xs text-muted-foreground">{SETUP_COPY.footnote}</p>
     </section>

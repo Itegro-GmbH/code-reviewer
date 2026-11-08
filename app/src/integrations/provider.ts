@@ -209,6 +209,20 @@ export interface IntegrationProvider {
   ): Promise<{ requested: string[] }>;
 
   /**
+   * Only where the app can take a review request back (#924; GitHub: `DELETE .../pulls/{n}/requested_reviewers`): takes the requests of
+   * these users (logins) away, as the app, with a token limited to this repository and the pull request permission. Answers the users
+   * that are still asked afterwards. Rejects like `requestReviewers`. The ToDo list uses it after a review the app posted in a person's
+   * name: the app's review does not satisfy the request of the person, so the platform keeps it.
+   */
+  removeReviewers?(
+    integration: Integration,
+    repo: RepoRef,
+    prNumber: number,
+    reviewers: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<{ requested: string[] }>;
+
+  /**
    * Only where tickets sit on a board (#917, `ticket.setStatus`; GitHub: a Project, projects_v2): puts issue `issueNumber` into the
    * status column named `status` of the board `board` (its number or id) of the repository's owner, adding the issue to the board when
    * it is not on it. The token is limited to this repository and to the projects permission of the app, which the owner of the

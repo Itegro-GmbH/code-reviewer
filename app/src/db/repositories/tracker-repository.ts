@@ -6,7 +6,12 @@
 // nothing here decides what a value means, the values are stored as the provider delivers them.
 import "server-only";
 import { sql, type Kysely, type Selectable } from "kysely";
-import { decodeJson, encodeJson, formatTimestamp } from "../codecs.ts";
+import {
+  decodeJson,
+  encodeJson,
+  formatTimestamp,
+  tryDecodeJson,
+} from "../codecs.ts";
 import type {
   Database,
   TrackerItemsTable,
@@ -21,6 +26,36 @@ export type TrackerLabel = { name: string; color: string };
 export type TrackerAssignee = { login: string };
 
 /** A cached issue or pull request. */
+/** One person who acted on a review ToDo, and the head commit of the pull request at that time. */
+export type ReviewMark = { login: string; sha: string };
+
+/** How many marks a row keeps (the oldest go first): the column holds at most 4096 characters. */
+export const REVIEW_MARKS_MAX = 25;
+
+/** The marks with this login added (a mark of the same login, compared without regard to case, is replaced). */
+export function withReviewMark(
+  marks: readonly ReviewMark[],
+  login: string,
+  sha: string,
+): ReviewMark[] {
+  const others = marks.filter(
+    (mark) => mark.login.toLowerCase() !== login.toLowerCase(),
+  );
+  return [...others, { login, sha }].slice(-REVIEW_MARKS_MAX);
+}
+
+/** The marks that are still valid: when nobody is asked there are none, and a head commit says which ones were made for it. */
+export function liveReviewMarks(
+  marks: readonly ReviewMark[],
+  asked: readonly string[] | undefined,
+  headSha: string | undefined,
+): ReviewMark[] {
+  if (asked !== undefined && asked.length === 0) return [];
+  return headSha === undefined
+    ? [...marks]
+    : marks.filter((mark) => mark.sha === headSha);
+}
+
 export type TrackerItem = {
   repositoryId: string;
   /** Reserved for #922; null until a project is the ticket source. */
@@ -45,6 +80,15 @@ export type TrackerItem = {
   /** The numbers of the issues the pull request closes. */
   closes: number[];
   checksState: string | null;
+  /** #924: the logins a review of the pull request is asked from (the provider's `requested_reviewers`); empty for an issue and for none. */
+  reviewRequestedFrom: string[];
+  /**
+   * #924: who acted on the review ToDo of the pull request, and for which head commit, while the provider still holds a request that
+   * covers them (their own, or the fan-out's: a member that is not asked by name is marked all the same); the list hides the review from
+   * them. A mark goes with a new head commit, with the end of the pull request, and when nobody is asked any more, never because its login
+   * is not in a list of the people asked.
+   */
+  reviewActedBy: ReviewMark[];
   /** The provider's time of the last change. */
   updatedAt: string;
   /** When the row was last written from the provider. */
@@ -77,6 +121,11 @@ export type TrackerItemWrite = Pick<
    * it).
    */
   parentNumber?: number | null;
+  /**
+   * #924: who a review of the pull request is asked from; `undefined` leaves what the row has (an issue, a comment event and the list of
+   * the issues say nothing about it).
+   */
+  reviewRequestedFrom?: string[];
 };
 
 export type TrackerItemFilter = {
@@ -158,6 +207,43 @@ export type TrackerRepository = {
     state: string | null,
   ): Promise<boolean>;
   /**
+   * #924: who a review of the pull request is asked from (the full sync reads it from the list of the open pull requests), as of `at`,
+   * the provider's time of the pull request in that list: a pull request a delivery changed after `at` keeps what the delivery said,
+   * like `upsertItem`. Answers whether the row was written.
+   */
+  setReviewRequestedFrom(
+    repositoryId: string,
+    number: number,
+    logins: readonly string[] | undefined,
+    at: string,
+    headSha?: string,
+  ): Promise<boolean>;
+  /**
+   * #924: takes one login (compared without regard to case) out of who a review is asked from, right after its request was taken away,
+   * and marks that it acted for the commit `sha`, so that a delivery that still lists it does not bring the ToDo back. The row's time
+   * moves one millisecond on: GitHub tells seconds only, and a delivery of the same second that listed the login is older than this.
+   */
+  removeReviewRequested(
+    repositoryId: string,
+    number: number,
+    login: string,
+    sha: string,
+  ): Promise<boolean>;
+  /** #924: remembers that this login acted on the review ToDo of the pull request, which had the head commit `sha`. */
+  markReviewActed(
+    repositoryId: string,
+    number: number,
+    login: string,
+    sha: string,
+  ): Promise<boolean>;
+  /** #924: forgets who acted: the pull request has a new commit, so a request that stands is for that commit. */
+  clearReviewActed(repositoryId: string, number: number): Promise<boolean>;
+  /** #924: the items of the repository with these numbers (at most 200 are looked at), in no particular order. */
+  listItemsByNumbers(
+    repositoryId: string,
+    numbers: readonly number[],
+  ): Promise<TrackerItem[]>;
+  /**
    * Computes `pullRequests` again for these issues (all issues of the repository when none are named) from the `closes` of the cached
    * pull requests: an issue lists the pull requests that close it.
    */
@@ -228,9 +314,43 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     pullRequests: decodeJson<number[]>(row.pull_requests),
     closes: decodeJson<number[]>(row.closes),
     checksState: row.checks_state,
+    reviewRequestedFrom: loginsFrom(row.review_requested_from),
+    reviewActedBy: marksFrom(row.review_acted_by),
     updatedAt: row.updated_at,
     syncedAt: row.synced_at,
   };
+}
+
+/** The logins of the column: null and a text that is no list of texts read as nobody. */
+function loginsFrom(text: string | null): string[] {
+  if (text === null) return [];
+  const decoded = tryDecodeJson<unknown>(text);
+  return decoded.ok && Array.isArray(decoded.value)
+    ? decoded.value.filter(
+        (login): login is string => typeof login === "string",
+      )
+    : [];
+}
+
+/** The marks of the column: null and a text that is no list of `{login, sha}` read as none (a bare login has no commit, so no sha). */
+function marksFrom(text: string | null): ReviewMark[] {
+  if (text === null) return [];
+  const decoded = tryDecodeJson<unknown>(text);
+  if (!decoded.ok || !Array.isArray(decoded.value)) return [];
+  return decoded.value.flatMap((entry: unknown): ReviewMark[] => {
+    if (typeof entry === "string") return [{ login: entry, sha: "" }];
+    if (typeof entry !== "object" || entry === null) return [];
+    const { login, sha } = entry as { login?: unknown; sha?: unknown };
+    return typeof login === "string"
+      ? [{ login, sha: typeof sha === "string" ? sha : "" }]
+      : [];
+  });
+}
+
+/** The ISO time one millisecond after this one (the text itself when it is no time). */
+function afterInstant(text: string): string {
+  const time = Date.parse(text);
+  return Number.isNaN(time) ? text : new Date(time + 1).toISOString();
 }
 
 function syncStateFrom(
@@ -246,6 +366,13 @@ function syncStateFrom(
   };
 }
 
+/** The two lists of a pull request, and the time of the row, as `changeReviewLists` hands them over. `requested` null: never told. */
+type ReviewLists = {
+  requested: string[] | null;
+  acted: ReviewMark[];
+  updatedAt: string;
+};
+
 export function createTrackerRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -258,6 +385,55 @@ export function createTrackerRepository(
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
+
+  /**
+   * Changes the lists of a pull request in one transaction, with the row locked, so that two members acting at once, or an action and a
+   * delivery, do not lose each other's change. `change` answers the new lists, or undefined to leave the row as it is.
+   */
+  const changeReviewLists = async (
+    repositoryId: string,
+    number: number,
+    change: (lists: ReviewLists) => ReviewLists | undefined,
+  ): Promise<boolean> => {
+    const run = async (executor: Kysely<Database>): Promise<boolean> => {
+      const row = await executor
+        .selectFrom("tracker_items")
+        .select(["review_requested_from", "review_acted_by", "updated_at"])
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("number", "=", number)
+        .where("deleted_at", "is", null)
+        .where("kind", "=", "pull_request")
+        .forUpdate()
+        .executeTakeFirst();
+      if (row === undefined) return false;
+      const next = change({
+        requested:
+          row.review_requested_from === null
+            ? null
+            : loginsFrom(row.review_requested_from),
+        acted: marksFrom(row.review_acted_by),
+        updatedAt: row.updated_at,
+      });
+      if (next === undefined) return false;
+      await executor
+        .updateTable("tracker_items")
+        .set({
+          review_requested_from:
+            next.requested === null ? null : encodeJson(next.requested),
+          review_acted_by:
+            next.acted.length === 0 ? null : encodeJson(next.acted),
+          updated_at: next.updatedAt,
+          synced_at: formatTimestamp(now()),
+        })
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("number", "=", number)
+        .execute();
+      return true;
+    };
+    return db.isTransaction ? run(db) : db.transaction().execute(run);
+  };
 
   const getSyncState: TrackerRepository["getSyncState"] = async (
     repositoryId,
@@ -281,16 +457,27 @@ export function createTrackerRepository(
         item.parentNumber === undefined
           ? sql`tracker_items.parent_number`
           : sql`excluded.parent_number`;
+      const requested =
+        item.reviewRequestedFrom === undefined
+          ? sql`tracker_items.review_requested_from`
+          : sql`excluded.review_requested_from`;
+      // The marks stay with the row: a list of the people asked that lacks a login says nothing against its mark (a member of the fan-out
+      // is never asked by name). They go when nobody is asked (a later request is a new ToDo); a new commit clears them on its own.
+      // Decided in this statement, so no read comes before the write.
+      const acted =
+        item.reviewRequestedFrom?.length === 0
+          ? sql`null`
+          : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
           workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
-          deleted_at, board_seen_at
+          deleted_at, board_seen_at, review_requested_from
         )
         select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
           ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
-          null, null
+          null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
         on conflict (repository_id, number) do update set
@@ -308,6 +495,8 @@ export function createTrackerRepository(
           assignees = excluded.assignees,
           closes = excluded.closes,
           parent_number = ${parent},
+          review_requested_from = ${requested},
+          review_acted_by = ${acted},
           updated_at = excluded.updated_at,
           synced_at = excluded.synced_at,
           deleted_at = null
@@ -421,6 +610,59 @@ export function createTrackerRepository(
         .where("deleted_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
+    },
+
+    setReviewRequestedFrom(repositoryId, number, logins, at, headSha) {
+      return changeReviewLists(repositoryId, number, (lists) =>
+        // A pull request a delivery changed after the list was read keeps what the delivery said.
+        lists.updatedAt > at
+          ? undefined
+          : {
+              requested: logins === undefined ? lists.requested : [...logins],
+              acted: liveReviewMarks(lists.acted, logins, headSha),
+              updatedAt: lists.updatedAt,
+            },
+      );
+    },
+
+    removeReviewRequested(repositoryId, number, login, sha) {
+      return changeReviewLists(repositoryId, number, (lists) => ({
+        requested: (lists.requested ?? []).filter(
+          (other) => other.toLowerCase() !== login.toLowerCase(),
+        ),
+        acted: withReviewMark(lists.acted, login, sha),
+        updatedAt: afterInstant(lists.updatedAt),
+      }));
+    },
+
+    markReviewActed(repositoryId, number, login, sha) {
+      return changeReviewLists(repositoryId, number, (lists) => ({
+        requested: lists.requested,
+        acted: withReviewMark(lists.acted, login, sha),
+        updatedAt: lists.updatedAt,
+      }));
+    },
+
+    async clearReviewActed(repositoryId, number) {
+      const result = await own(repositoryId, number)
+        .set({ review_acted_by: null })
+        .where("deleted_at", "is", null)
+        .where("review_acted_by", "is not", null)
+        .executeTakeFirst();
+      return Number(result.numUpdatedRows) > 0;
+    },
+
+    async listItemsByNumbers(repositoryId, numbers) {
+      if (numbers.length === 0) return [];
+      const rows = await db
+        .selectFrom("tracker_items")
+        .selectAll()
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("deleted_at", "is", null)
+        .where("number", "in", numbers.slice(0, 200))
+        .execute();
+      return rows.map(itemFrom);
     },
 
     async linkPullRequests(repositoryId, issueNumbers) {
