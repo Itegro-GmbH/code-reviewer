@@ -5,6 +5,7 @@ wire: read the head of a request, and answer with a refusal that says why in pla
 
 import contextlib
 import socket
+import time
 from typing import Final
 
 from .connections import (
@@ -23,9 +24,14 @@ from .connections import (
 MAX_HEAD_BYTES: Final = 16 * 1024
 HEAD_SECONDS: Final = 15.0
 
-# The headers the door removes from a forwarded request: hop-by-hop ones and the proxy's own.
+# The headers the door removes from a forwarded request: hop-by-hop ones, the proxy's own and the
+# ones some servers read as a change of method (a registry that honoured them would turn the `GET`
+# the door allowed into a write).
 DROPPED = frozenset(
     {
+        "x-http-method-override",
+        "x-method-override",
+        "x-http-method",
         "connection",
         "keep-alive",
         "proxy-connection",
@@ -86,14 +92,20 @@ class Head:
         self.rest = rest
 
 
-def read_head(sock: socket.socket) -> Head | None:
+def read_head(sock: socket.socket, seconds: float = HEAD_SECONDS) -> Head | None:
     """The request line and headers (up to a blank line, `MAX_HEAD_BYTES`), and any bytes that came
-    after them. None for a head that is too long, not ASCII, or cut off."""
+    after them. None for a head that is too long, not ASCII, cut off, or not complete within
+    `seconds` in total (a client that sends a byte at a time does not keep the slot)."""
     data = b""
+    end = time.monotonic() + seconds
     while b"\r\n\r\n" not in data:
         if len(data) > MAX_HEAD_BYTES:
             return None
+        left = end - time.monotonic()
+        if left <= 0:
+            return None
         try:
+            sock.settimeout(left)
             chunk = sock.recv(4096)
         except OSError:
             return None

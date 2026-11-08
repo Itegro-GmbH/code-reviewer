@@ -3,10 +3,11 @@
 """The certificate authority of one network door (#784): the certificates the agent's tools see
 when they connect to a package registry through the door.
 
-The door makes the authority when it starts, in memory: the **private key never leaves the door's
-process** (it is not written to a file the agent could reach, not logged, not sent anywhere), and
-the door ends with the turn. Control gets the public certificate only (`ready.ca`) and puts it
-into the agent's container, where the tools are told to trust it
+The door makes the authority when it starts, in memory: the **CA's private key is never written**
+and never leaves the door's process (not logged, not sent anywhere), and the door ends with the
+turn. The key of the certificates it signs touches the door's own `/tmp` (a tmpfs the agent cannot
+reach) for the moment `ssl` takes to load it. Control gets the public certificate only (`ready.ca`)
+and puts it into the agent's container, where the tools are told to trust it
 (`agent_container.trust_environment`).
 
 Two things keep a copy of the certificate from being worth anything to the agent: the authority is
@@ -15,12 +16,15 @@ accepts a certificate of this authority for any other name), and it is **valid f
 only** (the key is gone when the door is).
 
 The certificate the door shows for a name has that name and no other, one key for all of them
-(`server_context`). The context refuses a client that sends no server name or another one than the
-name of its `CONNECT`: the name the door checked, the name in the certificate and the name the
-client asked for are one.
+(`server_context`; the contexts of the last `MAX_CONTEXTS` names are kept, so the door's memory
+does not grow with the names a client asks for). The context refuses a client that sends no server
+name or another one than the name of its `CONNECT`: the name the door checked, the name in the
+certificate and the name the client asked for are one.
 """
 
+import collections
 import datetime
+import ipaddress
 import os
 import ssl
 import tempfile
@@ -38,6 +42,13 @@ from .registries import REGISTRY_DOMAINS
 CA_COMMON_NAME: Final = "Network door (this turn only)"
 _BACKDATE: Final = datetime.timedelta(minutes=5)
 MIN_LIFETIME_SECONDS: Final = 3600
+# One `SSLContext` is about 120 KB; the door has 96 MB.
+MAX_CONTEXTS: Final = 64
+# No IP address is ever a name of this authority (the door refuses IP literals anyway).
+_NO_ADDRESSES: Final = (
+    x509.IPAddress(ipaddress.ip_network("0.0.0.0/0")),
+    x509.IPAddress(ipaddress.ip_network("::/0")),
+)
 
 
 def _name(common_name: str) -> x509.Name:
@@ -89,7 +100,7 @@ class Authority:
             .add_extension(
                 x509.NameConstraints(
                     permitted_subtrees=[x509.DNSName(domain) for domain in domains],
-                    excluded_subtrees=None,
+                    excluded_subtrees=list(_NO_ADDRESSES),
                 ),
                 critical=True,
             )
@@ -102,7 +113,7 @@ class Authority:
         self._ca = ca
         self.ca_pem: bytes = ca.public_bytes(serialization.Encoding.PEM)
         self._lock = threading.Lock()
-        self._contexts: dict[str, ssl.SSLContext] = {}
+        self._contexts: collections.OrderedDict[str, ssl.SSLContext] = collections.OrderedDict()
 
     def issue(self, name: str) -> bytes:
         """A PEM with the private key and the certificate of `name` (a server certificate for that
@@ -134,12 +145,18 @@ class Authority:
         )
         return key + certificate.public_bytes(serialization.Encoding.PEM)
 
+    @property
+    def context_count(self) -> int:
+        with self._lock:
+            return len(self._contexts)
+
     def server_context(self, name: str) -> ssl.SSLContext:
         """The TLS server context for connections that `CONNECT`ed to `name`: its certificate,
         HTTP/1.1 only, and a handshake that fails unless the client's server name is `name`."""
         with self._lock:
             known = self._contexts.get(name)
             if known is not None:
+                self._contexts.move_to_end(name)
                 return known
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -155,6 +172,8 @@ class Authority:
                 os.unlink(path)
             context.sni_callback = _require_name(name)
             self._contexts[name] = context
+            while len(self._contexts) > MAX_CONTEXTS:
+                self._contexts.popitem(last=False)
             return context
 
 

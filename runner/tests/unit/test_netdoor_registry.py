@@ -24,6 +24,7 @@ from netdoor_support import PUBLIC, Lookups, Running, start_proxy, status_of, ta
 from code_reviewer_runner.implementer.netdoor.authority import Authority
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
 from code_reviewer_runner.implementer.netdoor.intercept import RegistryGate
+from code_reviewer_runner.implementer.netdoor.wire import forwarded_head, read_head
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, MODE_OPEN, NetworkRule
 
 pytestmark = pytest.mark.integration
@@ -485,3 +486,206 @@ def test_the_door_sends_no_server_certificate_for_another_names_context(
     factory: Callable[[str], ssl.SSLContext] = door_authority.server_context
     assert factory(NPM) is factory(NPM), "one context for a name"
     assert factory(NPM) is not factory(PYPI)
+
+
+# #784-R01
+def test_the_contexts_of_the_authority_are_bounded_however_many_names_come(
+    door_authority: Authority,
+) -> None:
+    from code_reviewer_runner.implementer.netdoor.authority import MAX_CONTEXTS
+
+    authority = Authority(lifetime_seconds=3600)
+    first = authority.server_context("first.pypi.org")
+    for index in range(MAX_CONTEXTS * 2):
+        authority.server_context(f"pkg{index}.pythonhosted.org")
+
+    assert authority.context_count == MAX_CONTEXTS
+    assert authority.server_context("first.pypi.org") is not first, "the oldest was dropped"
+    assert authority.context_count == MAX_CONTEXTS
+
+
+# #784-R01
+def test_a_name_in_use_stays_in_the_cache_while_the_others_come_and_go() -> None:
+    from code_reviewer_runner.implementer.netdoor.authority import MAX_CONTEXTS
+
+    authority = Authority(lifetime_seconds=3600)
+    kept = authority.server_context(NPM)
+    for index in range(MAX_CONTEXTS * 2):
+        authority.server_context(f"pkg{index}.pythonhosted.org")
+        assert authority.server_context(NPM) is kept
+
+
+# #784-R02
+def test_the_authority_excludes_every_ip_address_by_name_constraint(
+    door_authority: Authority,
+) -> None:
+    ca = x509.load_pem_x509_certificate(door_authority.ca_pem)
+    constraints = ca.extensions.get_extension_for_class(x509.NameConstraints).value
+    excluded = {
+        str(network) for name in constraints.excluded_subtrees or [] for network in [name.value]
+    }
+    assert {"0.0.0.0/0", "::/0"} <= excluded
+
+
+# #784-R03
+@pytest.mark.parametrize("name", ["X-HTTP-Method-Override", "x-method-override", "X-Http-Method"])
+def test_method_override_headers_are_not_forwarded(name: str) -> None:
+    head = forwarded_head(
+        "GET", "/pkg", NPM, [("Accept", "*/*"), (name, "PUT"), ("User-Agent", "npm/10")]
+    )
+
+    assert b"override" not in head.lower() and b"x-http-method" not in head.lower()
+    assert b"Accept: */*" in head and b"User-Agent: npm/10" in head
+
+
+# #784-R03
+def test_a_method_override_never_reaches_the_registry(
+    door: Door, door_authority: Authority
+) -> None:
+    request = (
+        f"GET /pkg HTTP/1.1\r\nHost: {NPM}\r\nX-HTTP-Method-Override: PUT\r\n"
+        f"X-Method-Override: DELETE\r\nX-HTTP-Method: POST\r\n\r\n"
+    ).encode()
+
+    assert status_of(through_the_door(door, door_authority, request)) == 200
+
+    [received] = door.registry.received
+    assert b"override" not in received.lower() and b"x-http-method" not in received.lower()
+
+
+class Trickle:
+    """A client that sends `data` one byte at a time, `pause` seconds apart."""
+
+    def __init__(self, sock: socket.socket, data: bytes, pause: float) -> None:
+        self.sock = sock
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(data, pause), daemon=True)
+        self.thread.start()
+
+    def _run(self, data: bytes, pause: float) -> None:
+        for byte in data:
+            if self.stopped.wait(pause):
+                return
+            try:
+                self.sock.sendall(bytes([byte]))
+            except OSError:
+                return
+
+
+# #784-R04
+def test_the_head_has_one_deadline_in_total_not_one_per_read() -> None:
+    server, client = socket.socketpair()
+    trickle = Trickle(client, b"GET / HTTP/1.1\r\nHost: a\r\n" + b"X: y\r\n" * 100, 0.1)
+    try:
+        started = time.monotonic()
+        head = read_head(server, seconds=0.6)
+        elapsed = time.monotonic() - started
+    finally:
+        trickle.stopped.set()
+        server.close()
+        client.close()
+
+    assert head is None
+    assert elapsed < 2.0
+
+
+# #784-R04
+def test_a_client_that_trickles_its_request_through_tls_is_let_go_at_the_deadline(
+    door_authority: Authority, registry_authority: Authority
+) -> None:
+    registry = Registry(registry_authority, certificate_for=NPM)
+    lookups = Lookups(table={NPM: [PUBLIC]}, servers={PUBLIC: registry.port})
+    running = start_proxy(
+        LIST,
+        lookups,
+        gate=lambda log: RegistryGate(door_authority, log, head_seconds=1.0),
+    )
+    client = socket.create_connection(("127.0.0.1", running.port), timeout=10)
+    try:
+        client.sendall(f"CONNECT {NPM}:443 HTTP/1.1\r\nHost: {NPM}:443\r\n\r\n".encode())
+        answer = b""
+        while b"\r\n\r\n" not in answer:
+            answer += client.recv(4096)
+        context = ssl.create_default_context(cadata=door_authority.ca_pem.decode())
+        tls = context.wrap_socket(client, server_hostname=NPM)
+        trickle = Trickle(
+            tls, f"GET /x HTTP/1.1\r\nHost: {NPM}\r\n".encode() + b"X: y\r\n" * 400, 0.2
+        )
+        started = time.monotonic()
+        tls.settimeout(8)
+        read_all(tls)
+        elapsed = time.monotonic() - started
+        trickle.stopped.set()
+        assert elapsed < 4.0, "the door let the slot go long before the client was done"
+        assert registry.received == []
+        assert eventually(
+            lambda: (
+                ("registry.npmjs.org", "bad_request")
+                in [(c["host"], c["reason"]) for c in running.log.snapshot()["connections"]]
+            )
+        )
+    finally:
+        client.close()
+        running.stop()
+        registry.close()
+
+
+# #784-R04
+def test_a_client_that_trickles_the_handshake_is_let_go_at_the_deadline(
+    door_authority: Authority,
+) -> None:
+    lookups = Lookups(table={NPM: [PUBLIC]}, servers={})
+    running = start_proxy(
+        LIST,
+        lookups,
+        gate=lambda log: RegistryGate(door_authority, log, head_seconds=1.0),
+    )
+    client = socket.create_connection(("127.0.0.1", running.port), timeout=10)
+    try:
+        client.sendall(f"CONNECT {NPM}:443 HTTP/1.1\r\nHost: {NPM}:443\r\n\r\n".encode())
+        answer = b""
+        while b"\r\n\r\n" not in answer:
+            answer += client.recv(4096)
+        # The start of a TLS record that never ends.
+        trickle = Trickle(client, b"\x16\x03\x01\x05\x00" + b"\x01" * 1000, 0.2)
+        started = time.monotonic()
+        client.settimeout(8)
+        read_all(client)
+        elapsed = time.monotonic() - started
+        trickle.stopped.set()
+        assert elapsed < 4.0
+    finally:
+        client.close()
+        running.stop()
+
+
+# #784-R05
+def test_a_target_that_is_very_long_is_refused(door: Door, door_authority: Authority) -> None:
+    answer = through_the_door(door, door_authority, get("/" + "a" * 4000))
+
+    assert status_of(answer) == 400 and b"bad_request" in answer
+    assert door.registry.received == []
+
+
+# #784-R06
+def test_the_door_ends_the_tls_connection_with_a_close_notify(
+    door: Door, door_authority: Authority
+) -> None:
+    client = socket.create_connection(("127.0.0.1", door.port), timeout=10)
+    try:
+        client.sendall(f"CONNECT {NPM}:443 HTTP/1.1\r\nHost: {NPM}:443\r\n\r\n".encode())
+        answer = b""
+        while b"\r\n\r\n" not in answer:
+            answer += client.recv(4096)
+        context = ssl.create_default_context(cadata=door_authority.ca_pem.decode())
+        tls = context.wrap_socket(client, server_hostname=NPM, suppress_ragged_eofs=False)
+        tls.sendall(get())
+        chunks = b""
+        while True:
+            data = tls.recv(65536)  # an unclean end would raise SSLEOFError here
+            if not data:
+                break
+            chunks += data
+        assert status_of(chunks) == 200
+    finally:
+        client.close()

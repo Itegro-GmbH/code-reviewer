@@ -195,10 +195,6 @@ def deadline_seconds(time_limit: float, elapsed: float) -> float:
     return time_limit - min(GRACE_SECONDS, time_limit / 3) - elapsed
 
 
-def read_system_roots() -> bytes:
-    return Path(SYSTEM_ROOTS_PATH).read_bytes()
-
-
 @dataclass(frozen=True)
 class SessionSeams:
     """What the tests of the session replace; production leaves the defaults."""

@@ -29,6 +29,8 @@ import contextlib
 import re
 import socket
 import ssl
+import threading
+import time
 from collections.abc import Callable
 from typing import Final
 
@@ -52,6 +54,12 @@ CHUNK: Final = 64 * 1024
 # A registry that sends nothing for this long is given up on; a download that is slow still sends.
 IDLE_SECONDS: Final = 120.0
 CONNECT_SECONDS: Final = 10.0
+# The seconds a client has, in total, for the handshake and the request head, and for the closing
+# alert of the TLS connection.
+CLOSE_SECONDS: Final = 1.0
+# The longest request target the door forwards (npm, PyPI, crates.io and RubyGems use a few hundred
+# bytes): what the agent can put into one read is bounded.
+MAX_TARGET_CHARS: Final = 2048
 # Headers of a request that the door never forwards besides the hop-by-hop ones: the framing of a
 # body (a read has none) and the wait for a `100 Continue`.
 _NOT_FORWARDED = frozenset({"content-length", "transfer-encoding", "expect"})
@@ -78,6 +86,26 @@ def system_upstream_tls(sock: socket.socket, name: str) -> socket.socket:
     return _default_context.wrap_socket(sock, server_hostname=name)
 
 
+def _shut_down(sock: socket.socket) -> None:
+    with contextlib.suppress(OSError):
+        sock.shutdown(socket.SHUT_RDWR)
+
+
+def _close_notify(tls: socket.socket) -> None:
+    """End the TLS connection with the closing alert (a client that reads to the end of the TLS
+    stream sees a clean end, not a truncation), then close. The wait for the peer's alert is
+    short."""
+    try:
+        tls.settimeout(CLOSE_SECONDS)
+        if isinstance(tls, ssl.SSLSocket):
+            tls.unwrap()
+    except (OSError, ValueError):
+        pass
+    finally:
+        with contextlib.suppress(OSError):
+            tls.close()
+
+
 def _host_is(values: list[str], name: str) -> bool:
     """Whether the request has exactly one `Host` and it names `name` (port 443 allowed)."""
     if len(values) != 1:
@@ -92,6 +120,7 @@ def _target_is_origin_form(target: str) -> bool:
     return (
         target.startswith("/")
         and not target.startswith("//")
+        and len(target) <= MAX_TARGET_CHARS
         and target.isprintable()
         and " " not in target
         and "#" not in target
@@ -124,10 +153,12 @@ class RegistryGate:
         log: ConnectionLog,
         *,
         upstream_tls: UpstreamTls = system_upstream_tls,
+        head_seconds: float = HEAD_SECONDS,
     ) -> None:
         self._authority = authority
         self._log = log
         self._upstream_tls = upstream_tls
+        self._head_seconds = head_seconds
 
     @property
     def ca_pem(self) -> bytes:
@@ -138,19 +169,34 @@ class RegistryGate:
     ) -> None:
         """The request on a `CONNECT` to `name` that was allowed (the `200` is sent). Closes
         `client` (it is wrapped by TLS here)."""
+        end = time.monotonic() + self._head_seconds
         try:
-            client.settimeout(HEAD_SECONDS)
-            tls = self._authority.server_context(name).wrap_socket(client, server_side=True)
+            client.settimeout(self._head_seconds)
+            tls = self._authority.server_context(name).wrap_socket(
+                client, server_side=True, do_handshake_on_connect=False
+            )
         except (OSError, ValueError):
-            # `ssl.SSLError` is an `OSError`: the client does not trust the door's certificate, sent
-            # no or another server name, or spoke no TLS.
             self._refuse(name, REASON_TLS)
             return
         try:
-            self._request(tls, name, addresses, connect)
+            # The handshake and the head have `head_seconds` together: a client that sends a byte
+            # at a time is cut off at the end of the handshake's share (the socket is shut down
+            # under the blocked read) or of the head's (`read_head`).
+            watchdog = threading.Timer(self._head_seconds, _shut_down, args=(tls,))
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                tls.do_handshake()
+            except (OSError, ValueError):
+                # `ssl.SSLError` is an `OSError`: the client does not trust the door's
+                # certificate, sent no or another server name, or spoke no TLS.
+                self._refuse(name, REASON_TLS)
+                return
+            finally:
+                watchdog.cancel()
+            self._request(tls, name, addresses, connect, max(end - time.monotonic(), 0.0))
         finally:
-            with contextlib.suppress(OSError):
-                tls.close()
+            _close_notify(tls)
 
     def _refuse(
         self,
@@ -164,9 +210,14 @@ class RegistryGate:
             respond(answer, code, reason)
 
     def _request(
-        self, tls: socket.socket, name: str, addresses: tuple[str, ...], connect: Connect
+        self,
+        tls: socket.socket,
+        name: str,
+        addresses: tuple[str, ...],
+        connect: Connect,
+        head_seconds: float,
     ) -> None:
-        head = read_head(tls)
+        head = read_head(tls, head_seconds)
         if head is None:
             self._refuse(name, REASON_BAD_REQUEST, tls, 400)
             return

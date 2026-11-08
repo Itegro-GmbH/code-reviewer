@@ -50,7 +50,7 @@ from .connections import (
 )
 from .intercept import RegistryGate
 from .registries import is_registry_name
-from .wire import HEAD_SECONDS, forwarded_head, read_head, respond
+from .wire import forwarded_head, read_head, respond
 
 _log = logging.getLogger(__name__)
 
@@ -231,7 +231,6 @@ class _Handler(socketserver.BaseRequestHandler):
 
     def _serve(self, client: socket.socket) -> None:
         proxy = self.proxy
-        client.settimeout(HEAD_SECONDS)
         head = read_head(client)
         if head is None:
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
