@@ -30,7 +30,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-function renderControls(showResync: boolean) {
+function renderControls(showResync: boolean, switchedOn = true) {
   api.setup.boards.mockResolvedValue({
     ok: true,
     data: {
@@ -50,6 +50,16 @@ function renderControls(showResync: boolean) {
     ok: true,
     data: { project: { id: "p-1" } },
   });
+  api.setup.resync.mockResolvedValue({
+    ok: true,
+    data: {
+      status: "done",
+      written: 0,
+      removed: 0,
+      skipped: 0,
+      boardAvailable: true,
+    },
+  });
   render(
     <TicketSourceControls
       workspaceSlug="acme"
@@ -58,6 +68,7 @@ function renderControls(showResync: boolean) {
       board={null}
       canChange
       showResync={showResync}
+      switchedOn={switchedOn}
       staleness={null}
     />,
   );
@@ -95,5 +106,50 @@ describe("the ticket source controls", () => {
 
     expect(await screen.findByText(/Board saved/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Resync" })).toBeNull();
+    // no button to press, so the message does not say to press one
+    expect(screen.queryByText(/press Resync to read the new board/)).toBeNull();
+    expect(
+      screen.getByText(/a person who may change the project settings/),
+    ).toBeTruthy();
+  });
+
+  // #947-T05
+  it("says the project is switched off, not to press a Resync that is not there, when a board is saved on a switched-off project", async () => {
+    const user = userEvent.setup();
+    renderControls(false, false);
+    const select = (await screen.findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(false));
+
+    await user.selectOptions(select, "PVT_1");
+
+    expect(
+      await screen.findByText(
+        /The project is switched off, so its tickets are not read/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Resync" })).toBeNull();
+  });
+
+  // #947-T06
+  it("puts Resync forward again when the board is changed a second time after a Resync has finished", async () => {
+    const user = userEvent.setup();
+    renderControls(true);
+    const select = (await screen.findByLabelText(
+      "Board (optional)",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.disabled).toBe(false));
+    await user.selectOptions(select, "PVT_1");
+    await screen.findByRole("note");
+    await user.click(screen.getByRole("button", { name: "Resync" }));
+    await screen.findByText(/Done: 0 tickets read/);
+    expect(screen.queryByRole("note")).toBeNull();
+
+    await user.selectOptions(select, "");
+
+    expect((await screen.findByRole("note")).textContent).toContain(
+      "press Resync to read the new board",
+    );
   });
 });

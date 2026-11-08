@@ -175,7 +175,7 @@ switches the repository on with its ticket source and copies the built-in lanes 
 
 `PUT /api/w/:workspace/projects/:projectId` (#937; Admin or Owner, `manage_projects`, like creating a project and reading its boards; capability `implementer`; Resync stays with `change_project_settings`) takes `{ board: { projectV2Id } | null }` and nothing else: it sets, changes or clears the board of the ticket
 source after the same check against the repository's boards (`board-request.ts`, `create-http.ts` `setBoard`, `ProjectService.setBoard`, `ProjectsRepository.setTicketBoard`); `PROJECT_NOT_FOUND` (404) for an unknown project. The Setup tab (`ui/ticket-board-picker.tsx`, `ui/resync-tickets.tsx`,
-`ui/sync-staleness.ts`, calls in `ui/setup-api.ts`, words in `ui/setup-messages.ts`) offers the picker, "Resync" and the hint that the tickets may be out of date (last full sync older than `STALE_SYNC_DAYS` = 3 and no delivery since).
+`ui/sync-staleness.ts`, calls in `ui/setup-api.ts`, words in `ui/setup-messages.ts`) offers the picker, "Resync" and the hint that the tickets may be out of date (last full sync older than `STALE_SYNC_DAYS` = 3 and no delivery since). The page counts the changes of the board (`boardChanges`): every save brings the Resync prompt back until a Resync that began after it has finished, also a second one. Where no Resync is offered (project switched off, or a person without `change_project_settings`), the picker says so (`ResyncOffer`) instead of pointing at a missing button.
 
 How the lanes and the trigger use the project: [`docs/workflows.md`](../../../docs/workflows.md#lanes-belong-to-a-project).
 

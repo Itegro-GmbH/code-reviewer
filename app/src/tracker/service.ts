@@ -15,6 +15,7 @@ import type { WorkflowRunsRepository } from "../db/repositories/workflow-runs-re
 import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import type { ProjectService } from "../projects/service.ts";
+import type { SyncState } from "../projects/ui/sync-staleness.ts";
 import { TrackerError } from "./errors.ts";
 import { TRACKER_PROVIDER } from "./mirror.ts";
 import type { SyncProgress, TrackerSync } from "./sync.ts";
@@ -67,11 +68,7 @@ export type TicketList = {
    * sync). A `lastWriteAt` that is not after `lastFullSyncAt` says no delivery has arrived since the sync (#932): what the hint in Setup
    * reads ("nothing has been delivered since the last full sync").
    */
-  sync: {
-    lastFullSyncAt: string | null;
-    inProgress: boolean;
-    lastWriteAt: string | null;
-  };
+  sync: SyncState;
 };
 
 export type TicketQuery = {
@@ -80,9 +77,6 @@ export type TicketQuery = {
   limit: number;
   offset: number;
 };
-
-/** Where the cache of a repository stands (`TicketList.sync`). */
-export type SyncState = TicketList["sync"];
 
 export type TrackerService = {
   /** Where the cache of an active project's repository stands, without reading a ticket (the Setup tab's hint). Throws a `TrackerError`. */

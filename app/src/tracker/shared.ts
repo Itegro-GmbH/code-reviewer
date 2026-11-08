@@ -18,11 +18,20 @@ import { createTrackerSync, type TrackerSync } from "./sync.ts";
 
 const TYPE = "github_app";
 
+/** The board the active project of a repository chose, for the sync and the mirror (undefined: none). */
+const boardOfRepository =
+  (projects: ReturnType<typeof projectServiceFor>) =>
+  async (repositoryId: string): Promise<string | undefined> =>
+    (await projects.getActiveProjectForRepository(repositoryId))?.ticketSource
+      .board?.projectV2Id;
+
 /** The sync of the tickets of one workspace's repositories. */
 export function trackerSyncFor(workspaceId: string): TrackerSync {
+  const projects = projectServiceFor(workspaceId);
   return createTrackerSync({
     tracker: createTrackerRepository(getDatabase(), workspaceId),
     provider: integrationRegistry.resolve(TYPE),
+    boardOf: boardOfRepository(projects),
   });
 }
 
@@ -40,10 +49,7 @@ export function trackerMirrorFor(workspaceId: string): TrackerMirror {
         return { available: false, status: null };
       return provider.readBoardStatus(integration, repo, nodeId, boardId);
     },
-    async boardOf(repositoryId) {
-      return (await projects.getActiveProjectForRepository(repositoryId))
-        ?.ticketSource.board?.projectV2Id;
-    },
+    boardOf: boardOfRepository(projects),
     async checksStateOf(integration, repo, headSha) {
       if (provider.readChecksState === undefined) return null;
       return provider.readChecksState(integration, repo, headSha);

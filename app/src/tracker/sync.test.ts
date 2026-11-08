@@ -184,13 +184,17 @@ function provider(github: GitHub) {
 let clock = Date.parse("2026-11-06T12:00:00.000Z");
 const tick = () => new Date((clock += 1000));
 
-function setup(github: GitHub = GITHUB) {
+function setup(
+  github: GitHub = GITHUB,
+  boardOf?: (repositoryId: string) => Promise<string | undefined>,
+) {
   const tracker = createFakeTrackerRepository(tick);
   const remote = provider(github);
   const warn = vi.fn<(line: string) => void>();
   const sync = createTrackerSync({
     tracker,
     provider: remote.port,
+    ...(boardOf === undefined ? {} : { boardOf }),
     now: tick,
     warn,
   });
@@ -1001,6 +1005,66 @@ describe("the board a project chose (#937)", () => {
     expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe(
       "Done on another board",
     );
+  });
+
+  // #947-T01
+  it("applies a board item to a ticket of another repository only when that repository has no chosen board or this one", async () => {
+    const boards: Record<string, string | undefined> = {
+      "r-2": "PVT_9",
+      "r-3": undefined,
+      "r-4": "PVT_1",
+    };
+    const { tracker, run } = setup(
+      {
+        ...WITH_BOARDS,
+        chosenBoards: {
+          PVT_1: [
+            [
+              { nodeId: "N_12", status: "Todo" },
+              { nodeId: "N_202", status: "Todo" },
+              { nodeId: "N_203", status: "Todo" },
+              { nodeId: "N_204", status: "Todo" },
+            ],
+          ],
+        },
+      },
+      async (repositoryId) => boards[repositoryId],
+    );
+    for (const [repositoryId, number] of [
+      ["r-2", 202],
+      ["r-3", 203],
+      ["r-4", 204],
+    ] as const)
+      await tracker.upsertItem(repositoryId, {
+        provider: "github",
+        repo: `acme/${repositoryId}`,
+        ...item(number),
+      });
+
+    await run({ boardId: "PVT_1" });
+
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Todo");
+    // r-2 chose another board: this board says nothing about its ticket
+    expect((await tracker.getItem("r-2", 202))?.boardStatus).toBeNull();
+    expect((await tracker.getItem("r-3", 203))?.boardStatus).toBe("Todo");
+    expect((await tracker.getItem("r-4", 204))?.boardStatus).toBe("Todo");
+  });
+
+  // #947-T02
+  it("applies no board item to a ticket of a repository with a chosen board when the project reads every board", async () => {
+    const { tracker, run } = setup(
+      { ...WITH_BOARDS, board: [[{ nodeId: "N_202", status: "Todo" }]] },
+      async () => "PVT_9",
+    );
+    await tracker.upsertItem("r-2", {
+      provider: "github",
+      repo: "acme/r-2",
+      ...item(202),
+    });
+
+    await run();
+
+    expect((await tracker.getItem("r-2", 202))?.boardStatus).toBeNull();
   });
 
   // #937-T12

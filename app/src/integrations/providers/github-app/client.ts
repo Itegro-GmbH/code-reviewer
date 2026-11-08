@@ -2664,6 +2664,8 @@ export function createGithubAppClient(
         async (token) => {
           // The list is in the order of creation, which is the order of the numbers: skip what the walk has read, take the next page's worth.
           // A pull request is told by its number alone here, so one that cannot be read otherwise still moves the walk on.
+          // The pages 1..n of this one call are read by page number, so a pull request that closes while the call runs can still shift one past
+          // the walk (#947): its checks are read by the next sync, the nightly one at the latest.
           const taken: { number: number; entry: unknown }[] = [];
           let more = false;
           for (let page = 1; !more; page += 1) {
