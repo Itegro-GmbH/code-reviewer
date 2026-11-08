@@ -63,14 +63,24 @@ _HOLDERS: Final = {
 # A key whose value is a URL, or an object with a `url` (OpenAI Chat `image_url: {url}`, Responses
 # `input_image.image_url`, `input_file.file_url`, and the `*_url` parts of the compatible
 # providers). A `data:` URI is inline content and passes; so does nothing else.
+# Written as the providers name them and compared in their normal form (see `_normal` below).
+_URL_KEY_NAMES: Final = (
+    "image_url",
+    "video_url",
+    "audio_url",
+    "file_url",
+    "document_url",
+    "input_audio_url",
+)
 _URL_KEYS: Final = frozenset(
-    {"imageurl", "videourl", "audiourl", "fileurl", "documenturl", "inputaudiourl"}
+    name.lower().replace("_", "").replace("-", "") for name in _URL_KEY_NAMES
 )
 # Google's `fileData.fileUri` (and the snake case the REST API reads as well): a Files API URI, a
 # `gs://` object, a YouTube or any other URL. None of them is inline.
 _FILE_URI_KEYS: Final = frozenset({"fileuri"})
 # Inline content by contract (base64 or a `data:` URI); a provider that fetches it when it names a
-# URL (OpenRouter) is a way out. Google's `file_data` is an object and is walked into.
+# URL (OpenRouter) is a way out. Google's `file_data` is an object and is walked into. A `file_id`
+# names an upload the provider already holds, not something to fetch, and passes like any key.
 _FILE_DATA_KEYS: Final = frozenset({"filedata"})
 # What a provider said and the engine sends back; not a request to fetch anything.
 _ECHO_KEYS: Final = frozenset({"citations", "annotations", "urlcitation"})
