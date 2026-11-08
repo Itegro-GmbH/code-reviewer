@@ -5,7 +5,8 @@
 // entry of the index.
 //
 // Expand only, safe for the version that is still running (it never reads the index, and no column changes): `tracker_items` is a table
-// of a day-old feature, so the index is built in the migration's transaction, and the wait for the lock is bounded like the other
+// of a day-old feature, so the index build is short only because the table is small and new: it holds the lock while it builds, so a
+// table of millions of rows would need `create index concurrently` outside a transaction. The wait for the lock is bounded like the other
 // migrations of the batch: after `LOCK_TIMEOUT` the migration gives up, the batch is rolled back (`MIGRATION_FAILED`) and the deployment
 // can be run again.
 //

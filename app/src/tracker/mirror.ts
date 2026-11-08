@@ -96,6 +96,8 @@ export function createTrackerMirror(
       // workspace holds the ticket.
       if (change.kind === "board_status_changed") {
         // A project with its own board shows that board's status: another board's edit of a ticket that is on both changes nothing.
+        // A delivery without `projectId` (the payload names no board) is applied on purpose: it is rare, and a status it sets is corrected by
+        // the next delivery of the project's board or by the next full sync, which reads only that board (#947).
         if (change.projectId !== undefined) {
           const held = await tracker.findItemByNode(change.nodeId);
           const board =

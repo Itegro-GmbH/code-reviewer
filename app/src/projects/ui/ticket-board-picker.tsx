@@ -7,7 +7,7 @@
 // (`PUT .../projects/:id`): the server checks it against the boards GitHub has and takes the Status field from them. A board without a
 // Status field cannot be chosen. A failed save leaves the choice where it was and says why. A saved board changes nothing in the tickets that
 // are mirrored already: they keep the statuses of the old board until a full sync, so the message says to press Resync and `onSaved` lets
-// the page put that button forward.
+// the page put that button forward. Where the page offers no Resync (`resync`), the message says what is true instead.
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useMemo, useState } from "react";
 import { NativeSelect } from "../../components/native-select.tsx";
@@ -24,12 +24,16 @@ type BoardsState =
   | { kind: "unreadable" }
   | { kind: "failed" };
 
+/** Whether the page offers a Resync button next to the picker: `switched_off` (the project reads no tickets) or `not_allowed` (the person may not resync) say why not. */
+export type ResyncOffer = "offered" | "switched_off" | "not_allowed";
+
 export function TicketBoardPicker({
   workspaceSlug,
   projectId,
   repositoryId,
   board,
   canChange,
+  resync = "offered",
   onSaved,
   api: apiProp,
 }: {
@@ -40,6 +44,8 @@ export function TicketBoardPicker({
   board: string | null;
   /** Whether the person may read the boards and change the choice (`manage_projects`). */
   canChange: boolean;
+  /** Whether a Resync button is next to the picker; default: it is. */
+  resync?: ResyncOffer;
   /** Called after a board was saved or removed: the tickets still carry the old board's statuses. */
   onSaved?: () => void;
   /** Only tests pass this. */
@@ -99,7 +105,7 @@ export function TicketBoardPicker({
     setCurrent(next);
     setOutcome({
       kind: "saved",
-      text: next === "" ? BOARD_COPY.cleared : BOARD_COPY.saved,
+      text: (next === "" ? BOARD_COPY.cleared : BOARD_COPY.saved)[resync],
     });
     onSaved?.();
     router.refresh();
@@ -124,7 +130,7 @@ export function TicketBoardPicker({
           ? BOARD_COPY.failed
           : choices.length === 0
             ? BOARD_COPY.noBoards
-            : BOARD_COPY.picked;
+            : BOARD_COPY.picked[resync];
   return (
     <div className="flex flex-col gap-1">
       <Label htmlFor={selectId}>{BOARD_COPY.label}</Label>

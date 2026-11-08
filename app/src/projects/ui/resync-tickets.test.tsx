@@ -35,17 +35,23 @@ const progress = (overrides: Partial<ResyncProgress> = {}) => ({
 function renderResync(
   resync: SetupApi["resync"],
   staleness: Parameters<typeof ResyncTickets>[0]["staleness"] = null,
-  prompted = false,
+  boardChanges = 0,
 ) {
-  return render(
+  const element = (changes: number) => (
     <ResyncTickets
       workspaceSlug="acme"
       repositoryId="repo-1"
       staleness={staleness}
-      prompted={prompted}
+      boardChanges={changes}
       api={{ boards: vi.fn(), setBoard: vi.fn(), resync }}
-    />,
+    />
   );
+  const view = render(element(boardChanges));
+  return {
+    ...view,
+    /** The page after another save of the board. */
+    changeBoard: (changes: number) => view.rerender(element(changes)),
+  };
 }
 
 describe("Resync", () => {
@@ -238,7 +244,7 @@ describe("Resync after the board changed", () => {
     renderResync(
       vi.fn<SetupApi["resync"]>().mockResolvedValue(progress()),
       null,
-      true,
+      1,
     );
 
     expect(screen.getByRole("note").textContent).toContain(
@@ -248,5 +254,49 @@ describe("Resync after the board changed", () => {
 
     await screen.findByText(/Done: 0 tickets read/);
     expect(screen.queryByRole("note")).toBeNull();
+  });
+
+  // #947-T03
+  it("brings the prompt back when the board is changed again after a Resync has finished, and answers a change made while it reads only once it finished again", async () => {
+    const user = userEvent.setup();
+    const resync = vi.fn<SetupApi["resync"]>().mockResolvedValue(progress());
+    const view = renderResync(resync, null, 1);
+    await user.click(screen.getByRole("button", { name: "Resync" }));
+    await screen.findByText(/Done: 0 tickets read/);
+    expect(screen.queryByRole("note")).toBeNull();
+
+    view.changeBoard(2);
+
+    expect((await screen.findByRole("note")).textContent).toContain(
+      "press Resync to read the new board",
+    );
+    // the outcome of the Resync before says nothing about the new board
+    expect(screen.queryByText(/Done: 0 tickets read/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Resync" }));
+    await screen.findByText(/Done: 0 tickets read/);
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
+  // #947-T04
+  it("keeps the prompt when the board changed while the Resync was reading", async () => {
+    const user = userEvent.setup();
+    let release: (
+      value: Awaited<ReturnType<SetupApi["resync"]>>,
+    ) => void = () => {};
+    const resync = vi.fn<SetupApi["resync"]>(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    const view = renderResync(resync, null, 1);
+    await user.click(screen.getByRole("button", { name: "Resync" }));
+    await screen.findByRole("button", { name: /call 1/ });
+
+    view.changeBoard(2);
+    release(progress());
+    await screen.findByText(/Done: 0 tickets read/);
+
+    // that Resync began before the second change, so it may have read the old board
+    expect(screen.getByRole("note").textContent).toContain(
+      "press Resync to read the new board",
+    );
   });
 });

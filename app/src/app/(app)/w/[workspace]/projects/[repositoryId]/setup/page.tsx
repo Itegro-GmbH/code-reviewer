@@ -131,6 +131,7 @@ async function SetupContent({
               board={project.ticketSource.board?.projectV2Id ?? null}
               canChange={canManage}
               showResync={canChangeSettings && row.switchedOn}
+              switchedOn={row.switchedOn}
               staleness={syncStaleness(sync, new Date())}
             />
           </>

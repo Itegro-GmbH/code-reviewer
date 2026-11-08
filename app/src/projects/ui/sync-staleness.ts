@@ -11,7 +11,7 @@ export const STALE_SYNC_DAYS = 3;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** What the issue list's `sync` says (src/tracker/service.ts). */
+/** Where the cache of a repository stands: what `TicketList.sync` says (src/tracker/service.ts, which takes the type from here). */
 export type SyncState = {
   lastFullSyncAt: string | null;
   inProgress: boolean;

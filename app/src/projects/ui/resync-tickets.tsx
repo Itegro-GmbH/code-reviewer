@@ -4,7 +4,9 @@
 // "Resync" on the Setup tab (#937): the full sync of the ticket mirror of the project's repository. One call reads for about twenty seconds
 // and answers 202 while more is left, so the button asks again until the answer is 200 and shows how far it is; what was read stays
 // whatever happens, so an error or the limit of calls ends with "press Resync to go on". The hint above it tells when the tickets may be
-// out of date (`sync-staleness.ts`), or, right after the board was changed, that the tickets still show the old board's statuses (`prompted`).
+// out of date (`sync-staleness.ts`), or, right after the board was changed, that the tickets still show the old board's statuses: the page
+// counts the changes of the board (`boardChanges`) and a Resync answers the changes that were made before it began, so a second change after
+// a finished Resync brings the prompt back.
 // The page refreshes afterwards so the hint follows the new state. Leaving the page aborts the call under way and ends the loop; a second
 // click while the loop runs does nothing (a ref, not the rendered state, which a double click can beat).
 import { useRouter } from "next/navigation";
@@ -30,15 +32,18 @@ export function ResyncTickets({
   workspaceSlug,
   repositoryId,
   staleness,
-  prompted = false,
+  boardChanges = 0,
   api: apiProp,
 }: {
   workspaceSlug: string;
   repositoryId: string;
   /** The hint the page worked out from the sync state of the tickets, or null for none. */
   staleness: SyncStaleness | null;
-  /** The board was just changed: the tickets still carry the old board's statuses until this has run. Takes the place of the staleness hint. */
-  prompted?: boolean;
+  /**
+   * How many times the board was changed since the page opened: the tickets still carry the old board's statuses until a Resync that began
+   * after the last change has finished. Takes the place of the staleness hint.
+   */
+  boardChanges?: number;
   /** Only tests pass this. */
   api?: SetupApi;
 }) {
@@ -51,6 +56,19 @@ export function ResyncTickets({
   const api = apiProp ?? defaultApi;
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const running = outcome?.kind === "running";
+  // The changes of the board a finished Resync has answered, and what the last render said (the loop reads it when it begins).
+  const [answered, setAnswered] = useState(0);
+  const changes = useRef(boardChanges);
+  useEffect(() => {
+    changes.current = boardChanges;
+  }, [boardChanges]);
+  const prompted = boardChanges > answered;
+  // The outcome of a Resync says nothing about a board that was changed after it.
+  const [seenChanges, setSeenChanges] = useState(boardChanges);
+  if (seenChanges !== boardChanges) {
+    setSeenChanges(boardChanges);
+    if (!running) setOutcome(null);
+  }
   const busy = useRef(false);
   const controller = useRef<AbortController | null>(null);
 
@@ -76,6 +94,7 @@ export function ResyncTickets({
 
   async function loop(signal: AbortSignal) {
     let written = 0;
+    const began = changes.current;
     for (let call = 1; call <= RESYNC_MAX_CALLS; call += 1) {
       if (signal.aborted) return;
       setOutcome({ kind: "running", call });
@@ -103,6 +122,7 @@ export function ResyncTickets({
             ...(result.data.boardAvailable ? [] : [RESYNC_COPY.noBoard]),
           ],
         });
+        setAnswered(began);
         router.refresh();
         return;
       }
@@ -113,7 +133,7 @@ export function ResyncTickets({
 
   return (
     <div className="flex flex-col gap-2">
-      {prompted && outcome?.kind !== "done" ? (
+      {prompted ? (
         <Alert variant="warning" role="note">
           {RESYNC_COPY.boardChanged}
         </Alert>
@@ -126,9 +146,7 @@ export function ResyncTickets({
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Button
-          variant={
-            prompted && outcome?.kind !== "done" ? "primary" : "secondary"
-          }
+          variant={prompted ? "primary" : "secondary"}
           disabled={running}
           onClick={() => void run()}
         >
