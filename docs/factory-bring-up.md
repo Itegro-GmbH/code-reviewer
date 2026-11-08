@@ -94,7 +94,7 @@ a secret. The order matters; each step has a check and a way back.
 - Take the baseline of [`implementer-smoke-test.md`](implementer-smoke-test.md) (one Diff and one Dynamic review on the first
   App) before step 2.
 - Open points, none of them a blocker for the rollout: the usage of a stopped turn is not recorded (#799), and the
-  exfiltration through a package registry (#784) must be closed before external users. It exists only for an environment whose
+  exfiltration through a package registry (#784): publishing is closed for the registries of a `list` (the door reads them read-only), but a slow covert channel through the URLs the agent GETs (for example the per-version download counters of a package published beforehand) remains and is accepted; before external users the rule `open`, other upload-capable hosts and the model proxy's image URLs are open as well (`implementer.md`, "What is accepted, and until when"). It exists only for an environment whose
   network rule is `list` or `open`; the rule `off`, the default, has none (`implementer.md`, "The network door (step 7)").
 
 | # | Step | Who | Check | Rollback |

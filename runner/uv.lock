@@ -537,12 +537,12 @@ name = "code-reviewer-runner"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "pr-agent" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "cryptography" },
     { name = "jsonschema" },
     { name = "pyjwt" },
     { name = "pyright" },
@@ -554,11 +554,13 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pr-agent", specifier = "==0.47.0" }]
+requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
+    { name = "pr-agent", specifier = "==0.47.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "jsonschema" },
     { name = "pyjwt", specifier = ">=2.15.1" },
     { name = "pyright" },

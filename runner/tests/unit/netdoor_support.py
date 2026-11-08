@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
+from code_reviewer_runner.implementer.netdoor.intercept import RegistryGate
 from code_reviewer_runner.implementer.netdoor.proxy import Decider, ProxyServer
 from code_reviewer_runner.implementer.network_rule import NetworkRule
 
@@ -105,11 +106,20 @@ class Running:
         self.server.stop()
 
 
-def start_proxy(rule: NetworkRule, lookups: Lookups, max_connections: int = 128) -> Running:
+def start_proxy(
+    rule: NetworkRule,
+    lookups: Lookups,
+    max_connections: int = 128,
+    gate: Callable[[ConnectionLog], RegistryGate] | None = None,
+) -> Running:
     log = ConnectionLog()
     decider = Decider(rule, log, resolver=lookups.resolve)
     server = ProxyServer(
-        ("127.0.0.1", 0), decider, connector=lookups.connect, max_connections=max_connections
+        ("127.0.0.1", 0),
+        decider,
+        connector=lookups.connect,
+        max_connections=max_connections,
+        registry_gate=None if gate is None else gate(log),
     ).start()
     return Running(server, log, lookups)
 

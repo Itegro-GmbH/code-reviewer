@@ -363,9 +363,10 @@ def test_a_door_that_refuses_the_rule_ends_the_turn_free_and_is_removed(rig: Rig
 
 # #745-T20
 def test_the_log_control_reads_is_the_doors_and_a_stop_returns_the_last_word(rig: Rig) -> None:
-    door = rig.start()
-    assert tunnel(rig.port, "registry.npmjs.org:443").startswith(b"HTTP/1.1 200")
-    assert b" 403 " in tunnel(rig.port, "example.com:443").split(b"\r\n")[0] + b" "
+    # A host that is no package registry: those are read through the door's own TLS (#784).
+    door = rig.start(NetworkRule(MODE_LIST, ("example.com",)))
+    assert tunnel(rig.port, "example.com:443").startswith(b"HTTP/1.1 200")
+    assert b" 403 " in tunnel(rig.port, "example.net:443").split(b"\r\n")[0] + b" "
 
     log = door.stop()
 
@@ -373,8 +374,8 @@ def test_the_log_control_reads_is_the_doors_and_a_stop_returns_the_last_word(rig
     assert (log["allowed"], log["refused"]) == (1, 1)
     hosts = {(c["host"], c["outcome"], c["reason"]) for c in log["connections"]}
     assert hosts == {
-        ("registry.npmjs.org", "allowed", None),
-        ("example.com", "refused", "not_listed"),
+        ("example.com", "allowed", None),
+        ("example.net", "refused", "not_listed"),
     }
     assert rig.engine.container(NETDOOR_CONTAINER_NAME).removed
     assert door.stop() == log, "twice is the same"
@@ -435,3 +436,32 @@ def test_a_door_beside_a_model_door_uses_its_network_and_leaves_it_to_it(rig: Ri
     assert not [call for call in rig.engine.calls if call[0] == "DELETE" and "/networks" in call[1]]
     created = [call for call in rig.engine.calls if call[1].endswith("/networks/create")]
     assert len(created) == 1, "only the one the test's model door made"
+
+
+# -- the certificate of the door for the package registries (#784) ---
+
+
+# #784-T08
+def test_a_rule_that_names_a_registry_has_the_door_send_its_public_certificate(rig: Rig) -> None:
+    door = rig.start()
+
+    ca = door.registry_ca
+    assert ca is not None and ca.startswith(b"-----BEGIN CERTIFICATE-----")
+    assert b"PRIVATE KEY" not in ca
+    door.stop()
+
+
+# #784-T08
+def test_a_rule_without_a_registry_has_no_certificate(rig: Rig) -> None:
+    door = rig.start(NetworkRule(MODE_LIST, ("example.com", "github.com")))
+
+    assert door.registry_ca is None
+    door.stop()
+
+
+# #784-T08
+def test_a_ready_with_something_that_is_not_a_certificate_is_ignored(rig: Rig) -> None:
+    door = rig.start(NetworkRule(MODE_LIST, ("example.com",)))
+    door._take(b'{"t":"ready","ca":"not a certificate"}')  # pyright: ignore[reportPrivateUsage]
+    assert door.registry_ca is None
+    door.stop()
