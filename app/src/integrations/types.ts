@@ -354,14 +354,27 @@ export type TrackerChange =
       parent: number | null;
       at: string;
     }
-  /** An item of a project board got another status (`null`: it has none now, or left the board). */
-  | { kind: "board_status_changed"; nodeId: string; status: string | null }
+  /**
+   * An item of a project board got another status (`null`: it has none now, or left the board). `projectId`: the platform's id of the
+   * board the item is on, when the delivery names it (a project that has its own board does not take the status of another one).
+   */
+  | {
+      kind: "board_status_changed";
+      nodeId: string;
+      status: string | null;
+      projectId?: string;
+    }
   /**
    * An item was added to a board, restored on it, archived or deleted: the delivery names no status, and the ticket may be on other boards,
    * so the cache asks the platform where the ticket stands now. `removed`: the item left this board; it is what the cache falls back to
-   * (an empty status) when the boards cannot be read.
+   * (an empty status) when the boards cannot be read. `projectId`: the board of the item, as for `board_status_changed`.
    */
-  | { kind: "board_item_reread"; nodeId: string; removed: boolean }
+  | {
+      kind: "board_item_reread";
+      nodeId: string;
+      removed: boolean;
+      projectId?: string;
+    }
   /** The checks of a commit changed: the cache asks the platform for the state of these pull requests. */
   | {
       kind: "checks_changed";
@@ -384,10 +397,17 @@ export type TrackerPageStep =
    * counting from there.
    */
   | { phase: "issues"; page: number; since?: string }
-  /** The open pull requests, and the state of the checks of each. */
-  | { phase: "checks"; page: number }
-  /** The status of the items of the project boards of the repository. `after` is the opaque position the last page returned. */
-  | { phase: "board"; after: string | null };
+  /**
+   * The open pull requests, and the state of the checks of each, in the order of their numbers. `after` is the number of the last pull
+   * request the page before read (0 for the first page): the walk continues after a number, not at a page, so a pull request that closes
+   * between two calls cannot move another one past the walk.
+   */
+  | { phase: "checks"; after: number }
+  /**
+   * The status of the items of the project boards of the repository. `after` is the opaque position the last page returned. `boardId`:
+   * the platform's id of the board the project chose (#922); only that board is read. Left out: every board of the repository.
+   */
+  | { phase: "board"; after: string | null; boardId?: string };
 
 /** One page of a phase, and where the next one is. */
 export type TrackerPage =
@@ -411,6 +431,8 @@ export type TrackerPage =
         updatedAt: string;
       }[];
       last: boolean;
+      /** The number of the last pull request of the page (read or not), what the next page continues after; null for an empty page. */
+      lastNumber: number | null;
     }
   | {
       phase: "board";

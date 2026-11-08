@@ -455,6 +455,42 @@ describe("the budget clock (#932)", () => {
 });
 
 describe("the page in flight at the end of the budget (#932)", () => {
+  // #937-T60
+  it("counts a project whose page the end of its slice aborted as partial, not failed", async () => {
+    const logFailure = vi.fn();
+    const log = vi.fn();
+    // The clock is past the hard limit of the run, so the signal aborts at once.
+    const now = () => RESYNC_HARD_LIMIT_MS + 5000;
+    const resync = vi.fn(
+      (_target: ResyncTarget, _deadline: number, signal: AbortSignal) =>
+        new Promise<{ status: "done" | "partial" }>((_resolve, reject) => {
+          signal.addEventListener("abort", () =>
+            reject(new Error("The operation was aborted")),
+          );
+        }),
+    );
+
+    const counts = await resyncProjects([target("r-1"), target("r-2")], {
+      resync,
+      now,
+      startedAt: 0,
+      budgetMs: 400_000,
+      logFailure,
+      log,
+    });
+
+    expect(counts).toMatchObject({
+      projects: 2,
+      done: 0,
+      partial: 2,
+      failed: 0,
+    });
+    expect(logFailure).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("2 partial, 0 failed"),
+    );
+  });
+
   // #932-R40
   it("hands every sync an abort signal that is still open", async () => {
     const calls: { target: ResyncTarget; signal: AbortSignal | undefined }[] =

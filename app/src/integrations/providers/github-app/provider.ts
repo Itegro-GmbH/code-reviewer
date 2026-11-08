@@ -904,13 +904,14 @@ export function createGithubAppProvider(
             integration.externalId,
             scope(TRACKER_READ_TOKEN_PERMISSIONS),
             repo.fullName,
-            step.page,
+            step.after,
             signal,
           );
           return {
             phase: "checks",
             pullRequests: page.pullRequests,
             last: page.last,
+            lastNumber: page.lastNumber,
           };
         }
         const page = await client.readTrackerBoard(
@@ -918,6 +919,7 @@ export function createGithubAppProvider(
           scope(TRACKER_BOARD_TOKEN_PERMISSIONS),
           repo.fullName,
           step.after,
+          step.boardId,
           signal,
         );
         return { phase: "board", ...page };
@@ -926,7 +928,7 @@ export function createGithubAppProvider(
       }
     },
 
-    async readBoardStatus(integration, repo, nodeId, signal) {
+    async readBoardStatus(integration, repo, nodeId, boardId, signal) {
       const repositoryIds = jobTokenRepositoryIds(repo.externalId);
       if (repo.integrationId !== integration.id || repositoryIds === null)
         throw new IntegrationError(
@@ -940,6 +942,7 @@ export function createGithubAppProvider(
           integration.externalId,
           { repositoryIds, permissions: TRACKER_BOARD_TOKEN_PERMISSIONS },
           nodeId,
+          boardId,
           signal,
         );
       } catch (error) {

@@ -236,6 +236,7 @@ describe("what a delivery says about the ticket mirror", () => {
         kind: "board_status_changed",
         nodeId: "I_kwDOAAA12",
         status: "In Progress",
+        projectId: "PVT_1",
       },
     });
     expect(
@@ -265,10 +266,38 @@ describe("what a delivery says about the ticket mirror", () => {
         }),
       ).toEqual({
         kind: "change",
-        change: { kind: "board_item_reread", nodeId: "I_kwDOAAA12", removed },
+        change: {
+          kind: "board_item_reread",
+          nodeId: "I_kwDOAAA12",
+          removed,
+          projectId: "PVT_1",
+        },
       });
     },
   );
+
+  // #937-T01
+  it("names no board when the delivery carries none", () => {
+    const payload = webhookFixture("projects_v2_item.deleted") as {
+      projects_v2_item: Record<string, unknown>;
+    };
+    const item = { ...payload.projects_v2_item };
+    delete item.project_node_id;
+    expect(
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "projects_v2_item",
+        payload: { ...payload, action: "created", projects_v2_item: item },
+      }),
+    ).toEqual({
+      kind: "change",
+      change: {
+        kind: "board_item_reread",
+        nodeId: "I_kwDOAAA12",
+        removed: false,
+      },
+    });
+  });
 
   // #932-T07
   it("ignores the board item actions that carry no status and move no ticket", () => {

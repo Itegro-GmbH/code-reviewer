@@ -68,9 +68,13 @@ async function setup() {
     repositories,
     projects,
     tracker,
-    async boardStatusOf(i, repo, nodeId) {
+    async boardOf(repositoryId) {
+      return (await projects.getActiveProjectForRepository(repositoryId))
+        ?.ticketSource.board?.projectV2Id;
+    },
+    async boardStatusOf(i, repo, nodeId, boardId) {
       return (
-        (await provider.readBoardStatus?.(i, repo, nodeId)) ?? {
+        (await provider.readBoardStatus?.(i, repo, nodeId, boardId)) ?? {
           available: false,
           status: null,
         }

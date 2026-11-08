@@ -446,13 +446,16 @@ export type GithubAppClient = {
   ): Promise<{ items: TrackerItemFields[]; last: boolean; skipped: number }>;
   /**
    * One page (30) of the open pull requests of a repository with the state of the checks of the head of each (#923): one more call per
-   * pull request, which is why the page is small.
+   * pull request, which is why the page is small. The pull requests come in the order of their numbers and the page is the first 30 whose
+   * number is greater than `after` (0 for the first page; #937): the next page continues after `lastNumber`, so a pull request that closes
+   * between two calls cannot move another one past the walk, as a page number would. Finding the place costs list calls of 100 pull
+   * requests, no more.
    */
   readTrackerChecks(
     installationId: string,
     scope: JobTokenScope,
     repoFullName: string,
-    page: number,
+    after: number,
     signal?: AbortSignal,
   ): Promise<{
     pullRequests: {
@@ -466,6 +469,7 @@ export type GithubAppClient = {
       updatedAt: string;
     }[];
     last: boolean;
+    lastNumber: number | null;
   }>;
   /** The state of the checks of one commit (#923), or null when it has no check suite. */
   readChecksState(
@@ -477,14 +481,17 @@ export type GithubAppClient = {
   ): Promise<string | null>;
   /**
    * One page of the items of the project boards of a repository, with the status of each (#923; GraphQL, the one place REST has nothing).
-   * `after` is the position `next` of the last page named, null for the first page. A board the token may not read (the permission
-   * "Projects" is missing, or the repository belongs to a user and has no organization board) is `available: false`, not a failure.
+   * `after` is the position `next` of the last page named, null for the first page. `boardId` (#937): the board the project chose; only its
+   * items are read, and the answer does not depend on the other boards of the repository (a saved position of another board starts that
+   * board from its first page). A board the token may not read (the permission "Projects" is missing, or the repository belongs to a user
+   * and has no organization board) is `available: false`, not a failure.
    */
   readTrackerBoard(
     installationId: string,
     scope: JobTokenScope,
     repoFullName: string,
     after: string | null,
+    boardId?: string,
     signal?: AbortSignal,
   ): Promise<{
     available: boolean;
@@ -493,12 +500,15 @@ export type GithubAppClient = {
   }>;
   /**
    * The status the project boards give one issue or pull request now, by its node id (#932): the status on the first board that has one,
-   * null for a ticket on no board or without a status. A board the token may not read is `available: false`, not a failure.
+   * null for a ticket on no board or without a status. `boardId` (#937): the board the project chose; only the ticket's item on that board
+   * counts (null when it is not on it). A board the token may not read is `available: false`, not a failure; so is a ticket with more
+   * board items than one answer holds that does not show the chosen board among them.
    */
   readTrackerBoardStatus(
     installationId: string,
     scope: JobTokenScope,
     nodeId: string,
+    boardId?: string,
     signal?: AbortSignal,
   ): Promise<{ available: boolean; status: string | null }>;
   /**
@@ -617,12 +627,17 @@ const BOARD_ITEMS_QUERY =
   'query($project:ID!,$after:String,$first:Int!){node(id:$project){... on ProjectV2{items(first:$first,after:$after){pageInfo{hasNextPage endCursor}nodes{content{... on Issue{id} ... on PullRequest{id}} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}';
 
 const BOARD_STATUS_FIELDS =
-  'projectItems(first:20,includeArchived:false){nodes{fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}';
+  'projectItems(first:20,includeArchived:false){pageInfo{hasNextPage} nodes{project{id} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}';
 const BOARD_STATUS_QUERY = `query($id:ID!){node(id:$id){... on Issue{${BOARD_STATUS_FIELDS}} ... on PullRequest{${BOARD_STATUS_FIELDS}}}}`;
 
-/** The status of the first board item of a ticket that has one; null when it has none; undefined when the answer is not that of a ticket. */
+/**
+ * The status of the first board item of a ticket that has one; null when it has none; undefined when the answer is not that of a ticket.
+ * With `boardId` only the item on that board counts: null when the ticket is not on it, undefined when the answer cannot say (a board item
+ * GitHub could not give, or more items than the answer holds).
+ */
 function boardStatusOf(
   data: Record<string, unknown>,
+  boardId?: string,
 ): string | null | undefined {
   const { node } = data;
   if (node === null) return null;
@@ -633,10 +648,26 @@ function boardStatusOf(
   // Board items GitHub could not give are null: when nothing but those came there is no answer, and "no status" would be a guess.
   if (nodes.length > 0 && nodes.every((item: unknown) => item === null))
     return undefined;
-  for (const item of nodes as unknown[]) {
-    if (!isRecord(item) || !isRecord(item.fieldValueByName)) continue;
+  const statusOf = (item: unknown): string | null => {
+    if (!isRecord(item) || !isRecord(item.fieldValueByName)) return null;
     const { name } = item.fieldValueByName;
-    if (typeof name === "string" && name !== "") return name;
+    return typeof name === "string" && name !== "" ? name : null;
+  };
+  if (boardId !== undefined) {
+    const onBoard = (nodes as unknown[]).find(
+      (item) =>
+        isRecord(item) && isRecord(item.project) && item.project.id === boardId,
+    );
+    if (onBoard !== undefined) return statusOf(onBoard);
+    // Not among the items of the answer: on the board only if the answer left items out.
+    const more =
+      isRecord(node.projectItems.pageInfo) &&
+      node.projectItems.pageInfo.hasNextPage === true;
+    return more || nodes.includes(null) ? undefined : null;
+  }
+  for (const item of nodes as unknown[]) {
+    const status = statusOf(item);
+    if (status !== null) return status;
   }
   return null;
 }
@@ -2613,23 +2644,53 @@ export function createGithubAppClient(
       );
     },
 
-    async readTrackerChecks(installationId, scope, repoFullName, page, signal) {
+    async readTrackerChecks(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      signal,
+    ) {
       checkInstallationId(installationId);
-      checkPage(page);
+      if (!Number.isInteger(after) || after < 0)
+        throw new GithubAppError(
+          "GITHUB_APP_REQUEST_FAILED",
+          "The number to read the pull requests after is not a whole number.",
+        );
       const path = repoPath(repoFullName);
       return withScopedToken(
         installationId,
         scope,
         async (token) => {
-          const json = await request(
-            token,
-            "GET",
-            `${path}/pulls?state=open&sort=created&direction=asc&per_page=${CHECKS_PAGE_SIZE}&page=${page}`,
-            undefined,
-            signal,
-          );
-          if (!Array.isArray(json))
-            throw shapeError("GET /repos/{owner}/{repo}/pulls");
+          // The list is in the order of creation, which is the order of the numbers: skip what the walk has read, take the next page's worth.
+          // A pull request is told by its number alone here, so one that cannot be read otherwise still moves the walk on.
+          const taken: { number: number; entry: unknown }[] = [];
+          let more = false;
+          for (let page = 1; !more; page += 1) {
+            checkPage(page);
+            const json = await request(
+              token,
+              "GET",
+              `${path}/pulls?state=open&sort=created&direction=asc&per_page=${PAGE_SIZE}&page=${page}`,
+              undefined,
+              signal,
+            );
+            if (!Array.isArray(json))
+              throw shapeError("GET /repos/{owner}/{repo}/pulls");
+            for (const entry of json as unknown[]) {
+              const number =
+                isRecord(entry) && typeof entry.number === "number"
+                  ? entry.number
+                  : 0;
+              if (number <= after) continue;
+              if (taken.length === CHECKS_PAGE_SIZE) {
+                more = true;
+                break;
+              }
+              taken.push({ number, entry });
+            }
+            if (json.length < PAGE_SIZE) break;
+          }
           const pullRequests: {
             number: number;
             checksState: string | null;
@@ -2637,7 +2698,7 @@ export function createGithubAppClient(
             headSha: string;
             updatedAt: string;
           }[] = [];
-          for (const entry of json) {
+          for (const { entry } of taken) {
             const pr = toPullRequestRef(entry);
             if (pr === null) {
               warn(
@@ -2662,7 +2723,11 @@ export function createGithubAppClient(
               ),
             });
           }
-          return { pullRequests, last: json.length < CHECKS_PAGE_SIZE };
+          return {
+            pullRequests,
+            last: !more,
+            lastNumber: taken.at(-1)?.number ?? null,
+          };
         },
         signal,
       );
@@ -2685,7 +2750,14 @@ export function createGithubAppClient(
       );
     },
 
-    async readTrackerBoard(installationId, scope, repoFullName, after, signal) {
+    async readTrackerBoard(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      boardId,
+      signal,
+    ) {
       checkInstallationId(installationId);
       const slash = repoFullName.indexOf("/");
       repoPath(repoFullName);
@@ -2709,6 +2781,31 @@ export function createGithubAppClient(
             const within =
               after === null || separator < 0 ? "" : after.slice(separator + 1);
             const cursor = within === "" ? null : within;
+            if (boardId !== undefined) {
+              // The project's own board: no list of boards, and the position is the one within it (a position that names another board by
+              // its index starts this board again at its first page; the sync does not hand one over, see `SyncCursor.board`).
+              const chosen = await graphql(
+                token,
+                BOARD_ITEMS_QUERY,
+                {
+                  project: boardId,
+                  after: index === 0 ? cursor : null,
+                  first: BOARD_PAGE_SIZE,
+                },
+                signal,
+              );
+              if (chosen === null) return unavailable;
+              const chosenPage = boardPageOf(chosen);
+              if (chosenPage === null) return unavailable;
+              return {
+                available: true,
+                items: chosenPage.items,
+                next:
+                  chosenPage.endCursor !== null && chosenPage.hasNextPage
+                    ? `0:${chosenPage.endCursor}`
+                    : null,
+              };
+            }
             if (!Number.isInteger(index) || index < 0 || index >= BOARDS_MAX)
               return { available: true, items: [], next: null };
 
@@ -2772,7 +2869,13 @@ export function createGithubAppClient(
       }
     },
 
-    async readTrackerBoardStatus(installationId, scope, nodeId, signal) {
+    async readTrackerBoardStatus(
+      installationId,
+      scope,
+      nodeId,
+      boardId,
+      signal,
+    ) {
       checkInstallationId(installationId);
       if (nodeId === "" || nodeId.length > 200)
         throw new GithubAppError(
@@ -2792,7 +2895,7 @@ export function createGithubAppClient(
               signal,
             );
             if (data === null) return unavailable;
-            const status = boardStatusOf(data);
+            const status = boardStatusOf(data, boardId);
             if (status === undefined) return unavailable;
             return { available: true, status };
           },

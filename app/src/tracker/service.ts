@@ -150,7 +150,7 @@ export function createTrackerService(
         "TRACKER_PROJECT_NOT_ACTIVE",
         "The repository has no active project, so its tickets are not mirrored.",
       );
-    return repository;
+    return { repository, project };
   }
 
   async function stateOf(repositoryId: string): Promise<SyncState> {
@@ -164,12 +164,12 @@ export function createTrackerService(
 
   return {
     async syncState(repositoryId) {
-      const repository = await resolve(repositoryId);
+      const { repository } = await resolve(repositoryId);
       return stateOf(repository.id);
     },
 
     async listIssues(repositoryId, query) {
-      const repository = await resolve(repositoryId);
+      const { repository } = await resolve(repositoryId);
       const items = await deps.tracker.listItems(repository.id, {
         ...(query.state === "all" ? {} : { state: query.state }),
         limit: query.limit,
@@ -226,7 +226,7 @@ export function createTrackerService(
     },
 
     async sync(repositoryId, options = {}) {
-      const repository = await resolve(repositoryId);
+      const { repository, project } = await resolve(repositoryId);
       const integration: Integration | undefined = await deps.integrations.get(
         repository.integrationId,
       );
@@ -236,7 +236,12 @@ export function createTrackerService(
           "The installation of the repository is suspended, removed or disconnected.",
         );
       try {
-        return await deps.sync.run(integration, repository, options);
+        // The project's own board, when it chose one (#922), is the only one that gives the board status.
+        const boardId = project.ticketSource.board?.projectV2Id;
+        return await deps.sync.run(integration, repository, {
+          ...options,
+          ...(boardId === undefined ? {} : { boardId }),
+        });
       } catch (error) {
         // The code of the failure is for the log; the body of a failure of the platform is never repeated.
         const providerCode =

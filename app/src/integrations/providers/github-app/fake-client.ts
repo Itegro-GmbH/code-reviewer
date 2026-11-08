@@ -40,7 +40,7 @@ export type FakeGithubAppClientData = {
   listPullRequestsFailure?: Error;
   /** The pages `readTrackerIssues` answers, by "owner/name": page 1 is the first entry (#923). */
   trackerIssuePages?: Record<string, TrackerItemFields[][]>;
-  /** The pages `readTrackerChecks` answers, by "owner/name" (#923). */
+  /** The pages `readTrackerChecks` answers, by "owner/name" (#923): the pull requests in the order of their numbers, grouped as the walk reads them. */
   trackerCheckPages?: Record<
     string,
     {
@@ -58,8 +58,15 @@ export type FakeGithubAppClientData = {
     string,
     { nodeId: string; status: string | null }[][]
   >;
+  /** The pages `readTrackerBoard` answers for the board a project chose, by the board's id (#937); `available: false` for a board not listed. */
+  trackerChosenBoardPages?: Record<
+    string,
+    { nodeId: string; status: string | null }[][]
+  >;
   /** What `readTrackerBoardStatus` answers, by node id (#932); a ticket not listed is on no board, `null`: boards cannot be read. */
   trackerBoardStatuses?: Record<string, string | null> | null;
+  /** What `readTrackerBoardStatus` answers for a project's chosen board, by the board's id and the node id (#937); a ticket not listed is not on it. */
+  trackerChosenBoardStatuses?: Record<string, Record<string, string | null>>;
   /** What `listRepositoryBoards` answers, by "owner/name"; `available: false` for a repository not listed (#922). */
   repositoryBoards?: Record<
     string,
@@ -572,17 +579,25 @@ export function fakeGithubAppClient(
       const slice = items.slice((page - 1) * size, page * size);
       return { items: slice, last: slice.length < size, skipped: 0 };
     },
-    async readTrackerChecks(installationId, scope, repoFullName, page) {
-      record("readTrackerChecks", installationId, scope, repoFullName, page);
+    async readTrackerChecks(installationId, scope, repoFullName, after) {
+      record("readTrackerChecks", installationId, scope, repoFullName, after);
       if (data.trackerFailure) throw data.trackerFailure;
-      const pages = data.trackerCheckPages?.[repoFullName] ?? [];
+      // The first page that still has a pull request after the number, cut to what comes after it.
+      const pages = (data.trackerCheckPages?.[repoFullName] ?? []).map((page) =>
+        page.filter((pullRequest) => pullRequest.number > after),
+      );
+      const index = pages.findIndex((page) => page.length > 0);
+      const pullRequests = index < 0 ? [] : (pages[index] ?? []);
       return {
-        pullRequests: (pages[page - 1] ?? []).map((pullRequest) => ({
+        pullRequests: pullRequests.map((pullRequest) => ({
           ...pullRequest,
           headSha: pullRequest.headSha ?? "head-1",
           updatedAt: pullRequest.updatedAt ?? new Date(0).toISOString(),
         })),
-        last: page >= pages.length,
+        last:
+          index < 0 ||
+          pages.slice(index + 1).every((page) => page.length === 0),
+        lastNumber: pullRequests.at(-1)?.number ?? null,
       };
     },
     async readChecksState(installationId, scope, repoFullName, headSha) {
@@ -590,10 +605,26 @@ export function fakeGithubAppClient(
       if (data.trackerFailure) throw data.trackerFailure;
       return data.trackerChecks?.[`${repoFullName}@${headSha}`] ?? null;
     },
-    async readTrackerBoard(installationId, scope, repoFullName, after) {
-      record("readTrackerBoard", installationId, scope, repoFullName, after);
+    async readTrackerBoard(
+      installationId,
+      scope,
+      repoFullName,
+      after,
+      boardId,
+    ) {
+      record(
+        "readTrackerBoard",
+        installationId,
+        scope,
+        repoFullName,
+        after,
+        boardId,
+      );
       if (data.trackerFailure) throw data.trackerFailure;
-      const pages = data.trackerBoardPages?.[repoFullName];
+      const pages =
+        boardId === undefined
+          ? data.trackerBoardPages?.[repoFullName]
+          : data.trackerChosenBoardPages?.[boardId];
       if (pages === undefined)
         return { available: false, items: [], next: null };
       const index = after === null ? 0 : Number(after);
@@ -603,11 +634,16 @@ export function fakeGithubAppClient(
         next: index + 1 < pages.length ? String(index + 1) : null,
       };
     },
-    async readTrackerBoardStatus(installationId, scope, nodeId) {
-      record("readTrackerBoardStatus", installationId, scope, nodeId);
+    async readTrackerBoardStatus(installationId, scope, nodeId, boardId) {
+      record("readTrackerBoardStatus", installationId, scope, nodeId, boardId);
       if (data.trackerFailure) throw data.trackerFailure;
       if (data.trackerBoardStatuses === null)
         return { available: false, status: null };
+      if (boardId !== undefined)
+        return {
+          available: true,
+          status: data.trackerChosenBoardStatuses?.[boardId]?.[nodeId] ?? null,
+        };
       return {
         available: true,
         status: data.trackerBoardStatuses?.[nodeId] ?? null,

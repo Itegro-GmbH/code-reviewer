@@ -30,14 +30,19 @@ export function trackerSyncFor(workspaceId: string): TrackerSync {
 export function trackerMirrorFor(workspaceId: string): TrackerMirror {
   const db = getDatabase();
   const provider = integrationRegistry.resolve(TYPE);
+  const projects = projectServiceFor(workspaceId);
   return createTrackerMirror({
     repositories: createRepositoriesRepository(db, workspaceId),
-    projects: projectServiceFor(workspaceId),
+    projects,
     tracker: createTrackerRepository(db, workspaceId),
-    async boardStatusOf(integration, repo, nodeId) {
+    async boardStatusOf(integration, repo, nodeId, boardId) {
       if (provider.readBoardStatus === undefined)
         return { available: false, status: null };
-      return provider.readBoardStatus(integration, repo, nodeId);
+      return provider.readBoardStatus(integration, repo, nodeId, boardId);
+    },
+    async boardOf(repositoryId) {
+      return (await projects.getActiveProjectForRepository(repositoryId))
+        ?.ticketSource.board?.projectV2Id;
     },
     async checksStateOf(integration, repo, headSha) {
       if (provider.readChecksState === undefined) return null;

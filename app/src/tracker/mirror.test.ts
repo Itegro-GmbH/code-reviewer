@@ -47,14 +47,24 @@ const pullRequest = (
 type BoardRead = { available: boolean; status: string | null };
 
 function setup(
-  options: { project?: boolean; active?: boolean; board?: BoardRead } = {},
+  options: {
+    project?: boolean;
+    active?: boolean;
+    board?: BoardRead;
+    /** The board the project chose (#937). */
+    chosenBoard?: string;
+  } = {},
 ) {
   const tracker = createFakeTrackerRepository();
   const checksStateOf = vi.fn(async () => "failure" as string | null);
-  const boardStatusOf = vi.fn(
-    async (): Promise<BoardRead> =>
-      options.board ?? { available: true, status: null },
-  );
+  const boardStatusOf = vi.fn<
+    (
+      integration: Integration,
+      repo: unknown,
+      nodeId: string,
+      boardId: string | undefined,
+    ) => Promise<BoardRead>
+  >(async () => options.board ?? { available: true, status: null });
   const mirror = createTrackerMirror({
     repositories: {
       async findByExternalId(integrationId, externalId) {
@@ -77,6 +87,7 @@ function setup(
     },
     projects: { hasActiveProject: async () => options.project ?? true },
     tracker,
+    boardOf: async () => options.chosenBoard,
     boardStatusOf,
     checksStateOf,
   });
@@ -382,10 +393,103 @@ describe("applying a change of a ticket to the mirror", () => {
         INTEGRATION,
         REPO,
         "I_12",
+        undefined,
       );
       expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Review");
     },
   );
+
+  // #937-T02
+  it("asks for the status on the board the project chose, so that a ticket on two boards shows the project's board", async () => {
+    const { tracker, mirror, boardStatusOf, changed } = setup({
+      chosenBoard: "PVT_1",
+      board: { available: true, status: "In Review" },
+    });
+    await changed(issue(12));
+    await tracker.setBoardStatusByNode("I_12", "Todo");
+
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: false,
+        projectId: "PVT_1",
+      }),
+    ).toBe("updated");
+
+    expect(boardStatusOf).toHaveBeenCalledExactlyOnceWith(
+      INTEGRATION,
+      REPO,
+      "I_12",
+      "PVT_1",
+    );
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("In Review");
+  });
+
+  // #937-T03
+  it("ignores a delivery about another board than the one the project chose, and still takes one that names none", async () => {
+    const { tracker, mirror, boardStatusOf, changed } = setup({
+      chosenBoard: "PVT_1",
+      board: { available: true, status: "In Review" },
+    });
+    await changed(issue(12));
+    await tracker.setBoardStatusByNode("I_12", "Todo");
+
+    for (const removed of [false, true])
+      expect(
+        await mirror.apply(INTEGRATION, {
+          kind: "board_item_reread",
+          nodeId: "I_12",
+          removed,
+          projectId: "PVT_2",
+        }),
+      ).toBe("not_mirrored");
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: "Done",
+        projectId: "PVT_2",
+      }),
+    ).toBe("not_mirrored");
+    expect(boardStatusOf).not.toHaveBeenCalled();
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Todo");
+
+    // The chosen board's own edit is written.
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: "Done",
+        projectId: "PVT_1",
+      }),
+    ).toBe("updated");
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Done");
+    // A delivery that names no board is read as before.
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: "Todo",
+      }),
+    ).toBe("updated");
+  });
+
+  // #937-T04
+  it("takes the status of any board when the project chose none", async () => {
+    const { tracker, mirror, changed } = setup();
+    await changed(issue(12));
+
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_status_changed",
+        nodeId: "I_12",
+        status: "Done",
+        projectId: "PVT_2",
+      }),
+    ).toBe("updated");
+    expect((await tracker.getItem("r-1", 12))?.boardStatus).toBe("Done");
+  });
 
   // #932-T02
   it("empties the status of an item that left its only board, and keeps the status another board gives", async () => {

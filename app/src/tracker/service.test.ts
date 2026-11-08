@@ -19,6 +19,8 @@ const REPOSITORY = {
 async function setup(
   options: {
     project?: boolean;
+    /** The board the project chose (#937). */
+    board?: { projectV2Id: string; statusFieldId: string };
     repositoryActive?: boolean;
     integration?: Partial<Integration> | undefined;
     sync?: () => Promise<never>;
@@ -98,7 +100,16 @@ async function setup(
     },
     projects: {
       getActiveProjectForRepository: async () =>
-        options.project === false ? undefined : ({ id: "p-1" } as never),
+        options.project === false
+          ? undefined
+          : ({
+              id: "p-1",
+              ticketSource: {
+                provider: "github",
+                repositoryId: "r-1",
+                board: options.board ?? null,
+              },
+            } as never),
     },
     tracker,
     runs: { summarizeTickets },
@@ -283,6 +294,27 @@ describe("the full sync of a repository", () => {
       expect.objectContaining({ id: "i-1" }),
       expect.objectContaining({ id: "r-1", fullName: "acme/widgets" }),
       { maxPages: 2, deadline: 5 },
+    );
+  });
+
+  // #937-T40
+  it("hands the sync the board the project chose, and none when it chose none", async () => {
+    const chosen = await setup({
+      board: { projectV2Id: "PVT_1", statusFieldId: "PVTSSF_1" },
+    });
+    await chosen.service.sync("r-1", { maxPages: 2 });
+    expect(chosen.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      { maxPages: 2, boardId: "PVT_1" },
+    );
+
+    const none = await setup();
+    await none.service.sync("r-1");
+    expect(none.run).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      {},
     );
   });
 

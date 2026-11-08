@@ -48,12 +48,18 @@ export type TrackerMirrorDependencies = {
     | "clearReviewActed"
     | "linkPullRequests"
   >;
-  /** The status the boards give a ticket now, by its provider id (`readBoardStatus`); `available: false` when boards cannot be read. */
+  /**
+   * The status the boards give a ticket now, by its provider id (`readBoardStatus`); `available: false` when boards cannot be read.
+   * `boardId`: the board the project chose, the only one that counts (undefined: every board, the first status wins).
+   */
   boardStatusOf(
     integration: Integration,
     repo: RepoRef,
     nodeId: string,
+    boardId: string | undefined,
   ): Promise<{ available: boolean; status: string | null }>;
+  /** The provider's id of the board the active project of the repository chose (#922, `ticket_source.board`); undefined for none. */
+  boardOf(repositoryId: string): Promise<string | undefined>;
   /** The state of the checks of a commit, as the provider names it (`readChecksState`). */
   checksStateOf(
     integration: Integration,
@@ -88,13 +94,24 @@ export function createTrackerMirror(
     async apply(integration, change) {
       // A board belongs to the organization: its item is found by the node id of its content, in whichever repository of the
       // workspace holds the ticket.
-      if (change.kind === "board_status_changed")
+      if (change.kind === "board_status_changed") {
+        // A project with its own board shows that board's status: another board's edit of a ticket that is on both changes nothing.
+        if (change.projectId !== undefined) {
+          const held = await tracker.findItemByNode(change.nodeId);
+          const board =
+            held === undefined
+              ? undefined
+              : await deps.boardOf(held.repositoryId);
+          if (board !== undefined && board !== change.projectId)
+            return "not_mirrored";
+        }
         return (await tracker.setBoardStatusByNode(
           change.nodeId,
           change.status,
         )) > 0
           ? "updated"
           : "not_mirrored";
+      }
 
       // The delivery names no status and the ticket may be on other boards: ask where it stands now, so that leaving one board empties the
       // status only when no other board gives one, and a ticket added or restored shows its status at once.
@@ -112,7 +129,20 @@ export function createTrackerMirror(
         };
         if ((await mirroredRepository(integration, repo)) === undefined)
           return "not_mirrored";
-        const read = await deps.boardStatusOf(integration, repo, change.nodeId);
+        // The project's board decides the status; a delivery about another board says nothing about it.
+        const board = await deps.boardOf(item.repositoryId);
+        if (
+          board !== undefined &&
+          change.projectId !== undefined &&
+          change.projectId !== board
+        )
+          return "not_mirrored";
+        const read = await deps.boardStatusOf(
+          integration,
+          repo,
+          change.nodeId,
+          board,
+        );
         // Boards that cannot be read: a ticket that left its board has no status, any other change says nothing.
         if (!read.available && !change.removed) return "not_mirrored";
         return (await tracker.setBoardStatusByNode(
