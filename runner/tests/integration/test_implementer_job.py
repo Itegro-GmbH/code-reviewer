@@ -2670,6 +2670,41 @@ def test_a_question_has_the_secrets_of_the_job_taken_out(play: Any) -> None:
     assert "agentAsk" in block
 
 
+# #961-T01: asking before changing anything is what a question is for, so no commit is no giving up
+def test_a_turn_that_asks_before_any_commit_succeeds_and_pushes_nothing(play: Any) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        results.write_ask(QUESTION)
+        return "I asked first."
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results, can_ask=True)
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    assert result["errorCode"] is None
+    assert valid_result(result)
+    block = result["implementer"]
+    assert block["agentAsk"] == json.loads(QUESTION)
+    assert block["headCommit"] is None and block["pushed"] is False
+    assert turn.git.pushes == []
+
+
+# #961-T02: without a question, no commit is still giving up
+def test_a_turn_that_may_ask_and_neither_asks_nor_commits_still_gave_up(play: Any) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        results.write(RIGHT_RESULT)
+        return "Nothing to do."
+
+    turn = play(script, result_schema=RESULT_SCHEMA, results=results, can_ask=True)
+
+    assert turn.result["ok"] is False and turn.result["errorCode"] == "agent_gave_up"
+
+
 def test_can_ask_needs_a_result_schema_and_a_boolean() -> None:
     from code_reviewer_runner.job import parse_implementer_input
 
