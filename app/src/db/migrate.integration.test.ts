@@ -156,6 +156,7 @@ describe("the migrations of both epics", () => {
       "20261107220000_todo_list_indexes",
       "20261107230000_add_tracker_items_write_index",
       "20261110090000_add_job_required_labels",
+      "20261110120000_add_runner_delivery",
     ]);
   });
 
@@ -232,6 +233,7 @@ describe("starting the database", () => {
       "rate_limits",
       "refusal_notices",
       "repositories",
+      "runner_job_dispatches",
       "runner_registration_tokens",
       "runners",
       "secrets",

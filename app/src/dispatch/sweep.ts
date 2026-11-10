@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // One run of the cron sweep of a hosted deployment (#328). In a serverless deployment nothing polls and no
-// process lives long enough to hold a timer, so the clock is this run, called once a minute by the platform's
-// cron (src/cron/dispatch-sweep.ts, which also makes sure two runs never overlap). Per run, in this order:
+// process lives long enough to hold a timer, so the clock is this run, called by the platform's cron every 2 hours
+// (`app/vercel.json`; since #395 it is the safety net, the normal flow is the events of src/dispatch/job-ended.ts and the
+// hook of the enqueue; src/cron/dispatch-sweep.ts also makes sure two runs never overlap). Per run, in this order:
 //
 //  1. `expire`: lapsed leases put back in the queue (or failed on the last attempt), jobs past the hard limit
 //     failed with `timeout`: what a claim does first, for a deployment in which nobody claims often.

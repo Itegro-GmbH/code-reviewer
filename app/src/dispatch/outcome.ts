@@ -13,6 +13,12 @@ export const BACKOFF_SCHEDULE_MS = [10_000, 30_000, 120_000, 300_000] as const;
 const BACKOFF_FINAL_MS = 15 * 60_000;
 /** After an answer the contract does not describe (400, 401, 404, a redirect, ...): wait, and alert. */
 export const REJECTED_BACKOFF_MS = 30 * 60_000;
+/**
+ * #972: how long a dispatcher that answered `busy` (it is full and forgets the bell) is left alone. It claims by itself when a slot
+ * frees; the app rings it again when a job of its label group ends (an event) and, at the latest, in the sweep, which runs every
+ * two hours (`app/vercel.json`). No timer and no request rings it sooner.
+ */
+export const BUSY_REST_MS = 2 * 60 * 60_000;
 /** A `Retry-After` beyond this is cut: a typo in the header must not park a job for a day. */
 export const MAX_RETRY_AFTER_SECONDS = 3600;
 
@@ -25,6 +31,8 @@ export const DISPATCH_RESULT_CODES = [
   "accepted",
   "ignored_not_claimable",
   "ignored_not_capable",
+  /** #972: the dispatcher is full (reason `busy`). */
+  "ignored_busy",
   "rate_limited",
   "unavailable",
   "server_error",
@@ -91,7 +99,18 @@ export function decideOutcome(
         alert: false,
       };
     case "ignored":
-      // Any reason but `not_capable` is read as `not_claimable` (a reader accepts any reason of the right form).
+      // #972: a full dispatcher forgets the bell and claims by itself when a slot frees: no timer rings it again.
+      if (result.reason === "busy")
+        return {
+          state: "pending",
+          nextDispatchAt: at(BUSY_REST_MS),
+          consecutiveFailures: 0,
+          acknowledged: false,
+          lastStatus: 200,
+          lastCode: "ignored_busy",
+          alert: false,
+        };
+      // Any other reason but `not_capable` is read as `not_claimable` (a reader accepts any reason of the right form).
       return result.reason === "not_capable"
         ? {
             state: "stopped",
