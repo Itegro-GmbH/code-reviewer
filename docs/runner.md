@@ -10,6 +10,7 @@ the runner is built and used, and what was **measured** before it was built; it 
   developer and operation in a VM (R1b).
 - [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
+- [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
 
 ## Registration and routing (R1a, #854)
 
@@ -1276,3 +1277,399 @@ the image layer, and the selftest runs a canned turn of the adapter against the 
 Not measured here: a host with systemd and AppArmor (Ubuntu 22.04/24.04 as a customer has them), Debian, a kernel older than
 6.18, Sysbox's own install on a host with running containers, the cost of the daemons Sysbox keeps running (idle memory of
 `sysbox-mgr` and `sysbox-fs`), and any real model, real subscription or real key.
+
+## Spike: Firecracker sandbox (#970)
+
+Runner v2 (epic #969) runs the **same VM content as hosted** on a customer's Linux machine: a Firecracker microVM with our kernel
+and root file system, and inside it dockerd, Sysbox 0.7.1 and the unchanged Worker image. This spike proves that it works and
+measures it, before #975 to #979 build it. **All seven questions of the issue are answered below with numbers; none is blocked.**
+The decisions that follow from it are at the end ("What the build issues must do differently").
+
+**Where it was measured.** A throwaway workflow on the branch `spike-970-firecracker` (never merged; this server has no
+`/dev/kvm`): GitHub-hosted `ubuntu-24.04` runners, 4 vCPU (AMD EPYC 9V45) and 16 GB RAM, which expose `/dev/kvm` through nested
+virtualization on Azure (host kernel 7.0.0-azure, systemd 255, cgroup v2). Every number comes from there: **nested
+virtualization is slower than bare metal and the runner VMs differ from run to run**, so times are given as median (min to max) of
+five boots in one run, plus the spread over the six runs of this work where it matters. The final run, with the logs of every
+test case: [run 42876336293](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293) (job
+[Experiments on a KVM runner](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714), steps named after the test
+cases); its artifacts hold the console log of every VM, the JSON of every check and the nft counters. Scripts, workflow and the
+kernel fragment: [`spike/firecracker/`](https://github.com/Itegro-GmbH/code-reviewer/tree/spike-970-firecracker/spike/firecracker)
+on the branch, commit `a9e0964f1fd06f04df3e14c28f1e7a62a4d76e14`; the pins are in `versions.env`.
+
+### What was built
+
+| Part | Content |
+|---|---|
+| Firecracker | **1.17.0**, release tarball, no `jailer`, started as the user `fcuser` (group `kvm`) |
+| Guest kernel | **Linux 6.18.62** (the hosted VMs run 6.18.56), Firecracker's recommended `microvm-kernel-ci-x86_64-6.18.config` of the same tag plus our fragment (below); everything built in, no modules; `vmlinux` 26.5 MiB, **566 s** to build on 4 cores |
+| Root file system | read-only ext4 (632 MiB, 170 MB as zstd) of **Ubuntu Base 26.04.1** (the golden snapshot's base) with Docker **29.1.3** (static bundle), Sysbox **0.7.1** (the golden snapshot's package and checksum), and `docker/sandbox/vm-prepare.sh` and `sysbox-prepare.sh` **unchanged** |
+| Job disk | ext4 with Docker's data root and the images (busybox, hello-world, `docker:29.1.3-dind`: 752 MiB file system, 463 MiB allocated), made per job by a copy of the base |
+| Guest init | PID 1 is `docker-init` (tini, from the Docker bundle) running a 40 line shell script; the vsock agent is a Python script (the real `vm-init` is #977) |
+| Pins | every download is pinned by version **and** sha256 in `versions.env` (Firecracker, its guest config, the kernel source, Ubuntu Base, Docker, Sysbox, moby's `check-config.sh`, the three images by digest); the scripts refuse a file with another checksum |
+
+### Test cases
+
+| Case | What | Result | Log |
+|---|---|---|---|
+| T01 | Sysbox container with an inner `docker run hello-world` inside a Firecracker VM, a plain `runc` container next to it | passes (11 of 11 checks); inner dockerd ready 1.5 s after `docker run` | [step 10 "T01"](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714#step:10:1) |
+| T02 | the guest cannot reach the host's own address, an RFC1918 address or `169.254.169.254`, and can reach the proxy port | passes: 16 probes blocked that the control reached, the proxy reachable | [step 12 "T02 control"](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714#step:12:1), [step 13 "T02 wall"](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714#step:13:1), the table in [step 18 "Report"](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714#step:18:1) |
+| T03 | a vsock round trip host → guest → host | passes (7 of 7 checks); 0.6 ms median per request | [step 11 "T03"](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42876336293/job/130041033714#step:11:1) |
+
+### Q1: the guest kernel
+
+Firecracker's recommended 6.18 config already has most of what Docker and Sysbox need: user namespaces, overlayfs, cgroup v2 with
+BPF device control, veth, bridge, nf_tables with `nft_compat`, vsock, FUSE, TUN, seccomp. The build **merges the fragment below
+and fails when an option did not end up with the requested value** (a dropped option, an unmet dependency, is the usual way a
+hand-written fragment fails: `BRIDGE_VLAN_FILTERING` was caught like that on its first try). 23 options differ from Firecracker's
+base, and the first one is the one that mattered:
+
+| Option | Why |
+|---|---|
+| `RT_GROUP_SCHED=n` (**Firecracker's config has `y`**) | with it, the `cpu` controller **cannot be enabled for child cgroups** (EINVAL) while a real-time kernel thread (`migration/N`, `ksoftirqd`) sits in the root cgroup. `vm-prepare.sh` then fails (`cgroup_root_busy ... Invalid argument`), no Docker, no Sysbox. Found by the first boot with Docker; the hosted kernel presumably has it off, as the hosted VM runs the same script |
+| `IKCONFIG`, `IKCONFIG_PROC` | `/proc/config.gz`: moby's `check-config.sh` and Sysbox read it |
+| `NF_TABLES_INET`, `NF_TABLES_NETDEV`, `NFT_MASQ`, `NFT_REDIR`, `NFT_REJECT`, `NFT_LOG`, `NFT_LIMIT`, `NFT_FIB`, `NFT_FIB_INET`, `NFT_FIB_IPV4`, `NFT_FIB_IPV6` | an nftables that can express what iptables-nft (Docker's firewall in the guest) and the host-style `inet` rules need. The inner Docker in the Sysbox container ran on `iptables-nft` (`iptables v1.8.11 (nf_tables)`). **Docker 29's own nftables backend was not switched on**: the options are there, the backend is unproven |
+| `NETFILTER_XT_MATCH_COMMENT`, `_MULTIPORT`, `_MARK`, `_STATE` | matches the iptables rules of Docker and the inner Docker use |
+| `IP_NF_RAW`, `IP6_NF_RAW` | listed as "generally necessary" by `check-config.sh` for Docker 29 (the `raw` table) |
+| `DUMMY`, `MACVLAN`, `CGROUP_MISC` | Docker's macvlan driver, the `misc` cgroup controller; added as cheap precautions, **nothing measured depends on them** |
+
+The rest of the fragment lists what the base already had (namespaces, `USER_NS`, cgroups and their controllers, `CGROUP_BPF`, seccomp
+filter, overlayfs, ext4, FUSE, veth, bridge, conntrack, NAT, masquerade, vsock, virtio): the verification keeps it from silently
+dropping out when the base config or the kernel version changes.
+
+After that, `check-config.sh` (moby, pinned) in the guest reports every "generally necessary" option enabled except `NETFILTER_XT_MATCH_IPVS` (it belongs to IPVS, Docker's
+Swarm load balancing, not built), and as missing only optional ones: IPVS, SCTP, AppArmor, the encrypted overlay network's crypto, `ipvlan`, FTP/TFTP connection
+tracking, btrfs, zfs.
+**Idmapped mounts** (what Sysbox 0.7.1 uses on a kernel ≥ 5.12; shiftfs is the alternative) work: sysbox-mgr logs `ID-mapped
+mounts supported by kernel: yes`, `Overlayfs on ID-mapped mounts supported by kernel: yes`, `Shiftfs module found in kernel: no`.
+The kernel needs no option for it; 6.18 has it. Nothing needs modules: there is no `/lib/modules` in the guest, and Sysbox only warns that it has no kernel headers and no modules to mount into containers.
+
+The fragment, verbatim (`spike/firecracker/kernel/config.fragment`):
+
+```
+## Spike #970: what the Firecracker guest kernel (6.18 LTS) needs on top of Firecracker's recommended
+## microvm config (microvm-kernel-ci-x86_64-6.18.config, tag v1.17.0) for Docker, Sysbox 0.7.1 and the VM's job.
+## Lines starting with "##" are explanations. kernel/build.sh merges this file with `merge_config.sh`, runs
+## `make olddefconfig` and FAILS when one option below did not end up with the value given here (a silently
+## dropped option is the usual failure of a hand-written fragment: an unmet dependency).
+
+## --- introspection: Sysbox and Docker's check-config.sh read /proc/config.gz
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
+## --- namespaces and cgroup v2 (runc, Docker, Sysbox's nested containers)
+CONFIG_NAMESPACES=y
+CONFIG_TIME_NS=y
+CONFIG_PROC_CHILDREN=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_USER_NS=y
+CONFIG_CGROUPS=y
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CGROUP_SCHED=y
+CONFIG_FAIR_GROUP_SCHED=y
+## MUST be off: Firecracker's recommended config has RT_GROUP_SCHED=y, and with it enabling the `cpu` controller for child cgroups
+## fails with EINVAL as long as a real-time kernel thread (migration/N, ksoftirqd) sits in the root cgroup. vm-prepare.sh (the
+## hosted VM's cgroup script) then fails: "cgroup_root_busy ... Invalid argument", Docker never starts, Sysbox cannot start.
+CONFIG_RT_GROUP_SCHED=n
+CONFIG_CFS_BANDWIDTH=y
+CONFIG_CGROUP_CPUACCT=y
+CONFIG_CPUSETS=y
+CONFIG_CGROUP_DEVICE=y
+CONFIG_CGROUP_FREEZER=y
+CONFIG_CGROUP_BPF=y
+CONFIG_BPF_SYSCALL=y
+CONFIG_BLK_CGROUP=y
+CONFIG_CGROUP_MISC=y
+## runc on cgroup v2 limits devices with a BPF program; sysbox-runc and runc need these
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+## Sysbox intercepts mount, umount, chown, ... with the seccomp "user notification" (SECCOMP_FILTER, 5.0+)
+CONFIG_CHECKPOINT_RESTORE=y
+CONFIG_KEYS=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_BINFMT_MISC=y
+CONFIG_PROC_FS=y
+CONFIG_PROC_SYSCTL=y
+CONFIG_SYSFS=y
+CONFIG_INOTIFY_USER=y
+CONFIG_FHANDLE=y
+CONFIG_EVENTFD=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+
+## --- file systems: overlayfs (Docker's overlay2, also inside a Sysbox container), ext4 for the disks, FUSE for sysbox-fs
+CONFIG_OVERLAY_FS=y
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
+CONFIG_EXT4_FS_SECURITY=y
+CONFIG_FS_POSIX_ACL=y
+CONFIG_FUSE_FS=y
+## sysbox-fs is a FUSE file system that emulates /proc and /sys inside the container: /dev/fuse is a must
+CONFIG_BLK_DEV_LOOP=y
+CONFIG_SQUASHFS=y
+CONFIG_XFS_FS=y
+
+## --- network: veth, bridge, tun, netfilter (Docker's bridge network with NAT, Docker 29's nftables backend, iptables-nft)
+CONFIG_VETH=y
+CONFIG_BRIDGE=y
+CONFIG_BRIDGE_NETFILTER=y
+CONFIG_TUN=y
+CONFIG_DUMMY=y
+CONFIG_VXLAN=y
+CONFIG_MACVLAN=y
+CONFIG_INET=y
+CONFIG_IPV6=y
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_NAT=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_INET=y
+CONFIG_NF_TABLES_NETDEV=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_NAT=y
+CONFIG_NFT_MASQ=y
+CONFIG_NFT_REDIR=y
+CONFIG_NFT_REJECT=y
+CONFIG_NFT_COMPAT=y
+CONFIG_NFT_LOG=y
+CONFIG_NFT_LIMIT=y
+CONFIG_NFT_FIB=y
+CONFIG_NFT_FIB_INET=y
+CONFIG_NFT_FIB_IPV4=y
+CONFIG_NFT_FIB_IPV6=y
+CONFIG_NETFILTER_XTABLES=y
+CONFIG_NETFILTER_XT_MARK=y
+CONFIG_NETFILTER_XT_NAT=y
+CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+CONFIG_NETFILTER_XT_TARGET_REDIRECT=y
+CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+CONFIG_NETFILTER_XT_MATCH_COMMENT=y
+CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
+CONFIG_NETFILTER_XT_MATCH_MARK=y
+CONFIG_NETFILTER_XT_MATCH_STATE=y
+CONFIG_IP_NF_RAW=y
+CONFIG_IP6_NF_RAW=y
+CONFIG_IP_NF_IPTABLES=y
+CONFIG_IP_NF_FILTER=y
+CONFIG_IP_NF_NAT=y
+CONFIG_IP_NF_TARGET_MASQUERADE=y
+CONFIG_IP_NF_TARGET_REJECT=y
+CONFIG_IP6_NF_IPTABLES=y
+CONFIG_IP6_NF_FILTER=y
+CONFIG_IP6_NF_NAT=y
+CONFIG_IP6_NF_TARGET_MASQUERADE=y
+
+## --- host <-> guest: vsock (the start payload and the exit report), virtio devices (Firecracker has no PCI)
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_VIRTIO_BALLOON=y
+CONFIG_HW_RANDOM_VIRTIO=y
+```
+
+### Q2: Sysbox inside the guest
+
+T01 runs the agent's case and Control's case in one VM, started the way the hosted VM is: `vm-prepare.sh` (cgroup layout, dockerd), then
+`sysbox-prepare.sh` (the Sysbox daemons), both **unchanged**.
+
+- **Agent's case:** `docker run --runtime=sysbox-runc` of `docker:29.1.3-dind`, with the image's `dockerd` as the container's init, becomes
+  an inner Docker 29.1.3 (overlayfs, cgroup v2) that loads an image from a file and prints `Hello from Docker!` for `docker run
+  hello-world`. The container is not privileged (`privileged=false`), its root maps to host uid 100000 (`uid_map 0 100000 65536`),
+  and a second one starts next to it (0.8 s). Inner dockerd ready **1.5 s** (median of five, 1.44 to 1.73 s) after `docker run`.
+- **Control's case:** `docker run --runtime=runc` of busybox with the payload on stdin: 309 ms; a runc container also runs **next to**
+  the running Sysbox container.
+- **Through the proxy:** in the wall phase (Q6) a Sysbox container with `HTTPS_PROXY` set pulls `hello-world` from a registry and runs it:
+  2 s, and the proxy log shows only `CONNECT public.ecr.aws:443` and the CDN. A plain container without the variable gets nowhere.
+
+What it took, each a line of the plan:
+
+1. **`vm-prepare.sh` assumes the layout of the platform's init.** It starts by disabling `cpuset cpu pids` in the root's
+   `subtree_control`, which is EINVAL on a kernel that enabled none. The guest init enables `cpuset cpu io memory pids` first; the script is untouched.
+2. **A read-only root needs three writable places for Sysbox:** `/var/lib/sysbox` (on the job disk), and `/var/lib/sysboxfs` (a tmpfs). Without
+   the second the container fails with `failed to pre-register with sysbox-fs ... FuseServer with invalid mountpoint`.
+3. **Docker 29's containerd image store ignores `data-root`.** Its images live under `/var/lib/containerd` (a second Docker on the build machine
+   quietly used the machine's own containerd and wrote 180 KiB under the data root for 508 MiB of images). The spike uses the classic overlay2
+   store (`"features": {"containerd-snapshotter": false}`) for the guest and the base-disk builder; the alternative is a bind mount of
+   `/var/lib/containerd` from the job disk, which the init also does. **#976 must decide which store the golden recipe uses**, the hosted one is the default (containerd store).
+4. **The Sysbox package's `config` script runs `docker ps -a` and refuses to continue unless it sees the header line**, and calls
+   `systemctl`: the build puts two stubs on the PATH for that one install, as the golden snapshot does for `systemctl`.
+5. **The `dind` image's own entrypoint costs 15 s**: it binds `tcp://0.0.0.0:2375` and dockerd 29 delays such a start by 15 s on purpose
+   (`Startup is intentionally delayed`, in the container log). 17 s ready time with the entrypoint, 1.2 s with `--entrypoint dockerd --host=unix://...`.
+   Not a Sysbox cost, but the agent image's init (#981) must not bind TCP.
+
+### Q3: the disk
+
+The base is a file system image; a job gets its own copy, so the unprivileged service needs **no mount, no loop device and no root** at
+runtime: Firecracker takes the file as a block device. The root file system is shared by all VMs as a read-only drive; a write
+to it fails (`touch: Read-only file system`), everything writable is a tmpfs or the job disk. Copies were made by `fcuser`
+on a volume it owns.
+
+| Copy of | File system | `cp --reflink` | plain copy `cp` | plain copy + sync | File system space used |
+|---|---|---|---|---|---|
+| 752 MiB base (463 MiB allocated) | XFS (`reflink=1`) | **34 ms** | 1.27 s | 2.3 s | 0 against 520 MiB |
+| 752 MiB base | btrfs | **33 ms** | 942 ms | 2.1 s | 0 against 464 MiB |
+| 4 GiB (random data) | XFS | **33 ms** | 15.2 s | 21.2 s | 0 against 4096 MiB |
+| 4 GiB (random data) | btrfs | **1.1 s** (0.4 to 1.2 s over the runs) | 16.8 s | 20.6 s | 16 MiB against 4096 MiB |
+
+Median of five copies each (page cache dropped before every copy). A reflink copy is constant time on XFS and shares the
+extents; its price comes later: **overwriting 256 MiB inside a reflinked copy took 0.56 s and used 256 MiB of new space** (the copy
+diverges as the job writes; 0.65 s and 28 MiB in a plain copy, which paid for it before the start). XFS and btrfs are equal for a base of this size; XFS is
+flat for the big file, btrfs took 0.4 to 1.2 s (not investigated why). Recommendation: **XFS with reflink** on the host
+(the installer checks `reflink=1`), with a plain-copy fallback on other file systems and the numbers above as its cost.
+
+**The quota is the size of the job's file.** A 3 GiB job disk was made from the 752 MiB base by `truncate` and then `resize2fs` **on the file, by the
+unprivileged service, before the VM starts: 20 ms, no root, no mount** (the file system then shows 2936 MiB). The guest sees `No space left on device` at the quota (the check
+writes 4 GiB of zeros into the 3 GiB disk), and the file occupied 3030 MiB of its 3072 MiB on the host at that point. **The online resize in the guest did not work as
+I called it** (`resize2fs /dev/vdb` at boot: `open: Device or resource busy while opening /dev/vdb`, the file system stayed at its old size); not pursued, because the host-side
+resize is simpler and needs nothing in the guest. The host then needs `e2fsprogs` (`resize2fs`), as any Linux machine has.
+
+### Q4: the unprivileged host side
+
+Everything the runtime does ran as the normal user `fcuser` (uid 1002, groups `fcuser` and `kvm`) in a transient systemd service with
+`Delegate=yes`, the unit the plan's installer would write. Firecracker **without the jailer** starts, boots a guest and has no capability
+(`CapEff` 0000000000000000), `NoNewPrivs` 1 and Firecracker's own **seccomp filter** (mode 2).
+
+| Needed once, as root, at install | Why |
+|---|---|
+| the group `kvm` and the udev rule `KERNEL=="kvm", GROUP="kvm", MODE="0660"` | `/dev/kvm` is opened through the group; `nobody` cannot read it (control) |
+| the user and its membership in `kvm` | |
+| TAP devices, `ip tuntap add dev fctapN mode tap user fcuser group fcuser` (with their addresses) | Firecracker may attach to a TAP **its user owns**: attaching to a TAP owned by root fails (`TapOpen ... Operation not permitted`), creating a TAP as `fcuser` fails (`TUNSETIFF: Operation not permitted`) |
+| the static nft table (Q6) | `fcuser` cannot change nftables (control) |
+| the systemd unit with `Delegate=yes` | the cgroup subtree belongs to the user |
+| the reflink volume, owned by the user | mounts are root's (control: `fcuser` cannot mount) |
+
+**At runtime nothing needed root**: reflink copy, cgroup per VM, Firecracker, the vsock sockets, the proxy, `resize2fs` on a file, stopping
+a VM (the guest reboots itself, `reboot=k` ends the process). A pool of pre-created TAPs is therefore **a set number of concurrent jobs**; more
+slots means a root step (a helper or a bigger pool at install).
+
+**Limits through the delegated cgroup hold.** The service made a leaf for itself (a cgroup with processes cannot enable controllers for
+children), enabled `cpu memory pids io` and made one cgroup per VM (the Firecracker process only; the host page cache of the disk files is
+charged to it too: `memory.current` was 123, 825 and 1599 MiB at the three stages of Q7 against 123, 344 and 573 MiB of resident memory, so a `memory.max` must leave room for the cache). `cpu.max` at 50 % with a guest running two
+busy loops on two vCPUs: the VM used **3.06 CPU-seconds in 6.5 s (0.47 CPU)**, 61 periods throttled. `memory.max` of 700 MiB for a guest with 2 GiB that touches
+1.4 GiB: **the cgroup OOM-killed the Firecracker process** (`oom_kill 1`), the host and the service were untouched. `io.max` was not tried.
+
+**Without the jailer the VMM is not in a chroot, a PID or mount namespace**; it runs as the service's own user. A VMM escape lands in
+the user that also holds the other jobs' state. The seccomp filter and zero capabilities are measured; the rest (a unit per VM with
+`PrivateTmp`, `ProtectSystem`, a user per slot, or the jailer's setup) is **not tried**.
+
+### Q5: vsock
+
+Firecracker's vsock device exposes the guest as a Unix socket on the host: the host connects to `v.sock`, sends `CONNECT 5000` and
+gets `OK`; the guest connects to the host's CID 2, which Firecracker forwards to `v.sock_<port>` (the host listens on it before the VM starts).
+T03: the start payload (`{appUrl, jobId, crj_..., unicode, nested}`) goes host → guest and is acknowledged with its sha256 in **2.4 ms** (the first request,
+which includes the guest's first Python import); the guest process writes it to a file (identical), then reports `{"type":"exit","code":0}`
+guest → host, carrying the same digest. A 1 MiB payload takes 22 ms. 200 new connections with a request and a reply each: **p50 0.63 ms, p95 0.72
+ms, max 0.98 ms** (p50 0.3 to 0.6 ms over the runs). The same channel carried every command of the other tests (`exec`), so it is the channel vm-init (#977) needs; what the spike's
+agent does not have is a framing beyond one JSON line per connection, no authentication (vsock is point to point), and no reconnect.
+
+### Q6: the network
+
+The VM has one NIC on a TAP; the host side of the TAP is `172.31.0.1/30` (and `fd00:fc:0::1/64`), and a proxy listens on `:3128` as the service's
+user. The **static nft table** (`spike/firecracker/host/wall.nft`, loaded once as root, matching the TAPs by name `fctap*`): input from a TAP accepts
+established traffic and TCP to port 3128 of a **local** address (`fib daddr type local`), drops everything else addressed to the host
+(including ICMP and UDP) and any source address outside `172.31.0.0/16`; forward drops everything from and to a TAP; output to a TAP
+drops everything but answers. It hooks at priority -150, before Docker's iptables. The host **forwards on purpose** (`ip_forward=1`, as
+the runner does for its own Docker), so the table, not the absence of routing, is what stops traffic.
+
+**Every probe has a control**, because "blocked" proves nothing from a probe that could never say "reachable": the same 19 probes ran first with the
+table removed and NAT on (all but one reach their target), then with the table loaded. Targets sit on the host (TAP address, eth0 address:
+TCP, UDP, ping), behind it in a network namespace reached **through the forward path** (10.77.0.2, 172.16.77.2, 192.168.77.2, a link-local
+169.254.169.253, IPv6 fd00:77::2), the real Azure metadata endpoint `169.254.169.254:80`, the internet (1.1.1.1:443, 8.8.8.8 DNS over UDP) and a second VM.
+
+| Probe | Control (no table) | Table loaded |
+|---|---|---|
+| proxy, TAP address `:3128` and eth0 address `:3128` | connected | **connected** |
+| host TAP address `:9999`, UDP `:9999`, ping; host eth0 address `:9999` | connected / answered | blocked |
+| RFC1918 10.77.0.2, 172.16.77.2, 192.168.77.2 (TCP), 10.77.0.2 (UDP) | connected / answered | blocked |
+| link-local 169.254.169.253 (fixture), **169.254.169.254:80 (Azure)** | connected | blocked |
+| internet 1.1.1.1:443, 8.8.8.8:53/udp | connected / answered | blocked |
+| IPv6: host TAP address (TCP, ping), forwarded fd00:77::2 | connected / answered | blocked |
+| the other VM (172.31.0.6:9999) | connected | blocked |
+| ping 1.1.1.1 | blocked (Azure drops ICMP) | the control proves nothing, reported as such |
+
+The nft counters after the run (`wall-counters.txt`) show the table doing it: 2 packets accepted to the proxy port, 24 forwarded packets dropped,
+11 packets to other host ports dropped, 8 host-initiated packets to a TAP dropped. Not blocked and worth knowing: **the guest can also reach the
+proxy through the host's other addresses** (eth0 address :3128, in the table above), because the rule says "a local address"; one proxy listening on the TAP
+addresses only makes that moot, and a proxy per TAP is how the dispatcher tells jobs apart by source address anyway. The proxy sees the VM's address, so it
+can apply a per-job rule. By its rule (not tested) the wall lets a guest send from **another slot's address** inside `172.31.0.0/16`, so the per-job proxy must not trust the source address as an identity
+without a per-TAP rule (`iifname fctapN ip saddr != <its /30>`, generated at install).
+
+### Q7: timing and memory
+
+Boot to a state, measured on the host from the start of the Firecracker process (median of five boots, min to max; the final run), with the guest's serial console
+on (Firecracker's recommended boot arguments):
+
+| Milestone | Time |
+|---|---|
+| process start to the guest's init up (kernel boot included) | 944 ms (922 to 967) |
+| job disk mounted | 999 ms (981 to 1025) |
+| `docker_ready` (`vm-prepare.sh`: cgroup layout, dockerd answers) | **1.90 s** (1.87 to 2.23) |
+| `sysbox_ready` (`sysbox-prepare.sh`: the two daemons) | 2.25 s (2.23 to 2.60) |
+| init finished (`boot_done`) | 2.29 s (2.26 to 2.63) |
+| **"Control could start"**: first `docker run --runtime=runc busybox true` has returned | **2.61 s** (2.61 to 2.97), the container itself 0.31 to 0.35 s |
+| agent container with its own dockerd ready (Q2), after `docker run` | +1.51 s (1.44 to 1.73) |
+
+The six runs of this work, on six runner VMs, gave `boot_done` medians of **1.70 to 2.33 s** (1.70, 1.70, 1.86, 1.88, 2.29, 2.33) and `docker_ready` of 1.37 to 1.91 s: the
+runner hosts differ by a third. **A VM without Docker** (the kernel, the init and the agent) is up in 0.77 to 1.05 s with the serial console on and in **0.45 to 0.65 s**
+with `quiet loglevel=0` (final run: 1.05 s and 0.63 s, guest uptime 0.71 s and 0.54 s): **the serial console costs 0.3 to 0.4 s of every boot**, so the launcher should
+not give the guest a console it does not read.
+
+**Memory.** Firecracker takes the guest's RAM lazily; resident memory of the process (guest 2 GiB, final run):
+
+| State | Firecracker RSS | Guest "used" (MemTotal - MemAvailable) | Guest touched (MemTotal - MemFree) |
+|---|---|---|---|
+| kernel, init and agent only | 123 MiB | 126 MiB | 67 MiB |
+| dockerd, Sysbox daemons, one runc container run | 344 MiB | 211 MiB | 293 MiB |
+| plus a Sysbox container with its own running dockerd | 573 MiB | 242 MiB | 519 MiB |
+
+The fixed cost of a VM, resident memory minus what the guest touched, is **about 50 to 56 MiB** at every stage (the VMM, the kernel image's pages, the device buffers); the rest is
+the guest's own memory, which stays resident after the guest frees it (no balloon was tried). The host page cache for the disk files is charged to the VM's cgroup
+as well: 482 MiB of `file` after the first container, 1025 MiB with the Sysbox container (the cgroup's `memory.current` is 1599 MiB then). dockerd and the two Sysbox daemons idle within the 211 MiB above.
+
+### Rerun
+
+On a repository checkout of the branch, the workflow `spike-970-firecracker.yml` runs on every push of `spike-970-firecracker` (a `workflow_dispatch` trigger exists but
+GitHub only offers it for workflow files on the default branch). It builds the kernel (a cache keyed by the fragment and the pins), the root file system, then installs as
+root (`host/setup.sh`) and runs the tests as `fcuser` through `host/as-fcuser.sh`; `host/report.py` writes the summary and fails when the table of T02 is not as required.
+
+### What was not proven
+
+- **Anything on real hardware, or on a customer's distribution:** one nested-virtualization environment (Azure, AMD). No Debian, no Ubuntu 22.04, no
+  AppArmor on the host, no kernel older than 6.18 on the host, no ARM.
+- **The jailer's isolation without the jailer:** only seccomp and zero capabilities are measured (Q4); a unit with systemd sandboxing per VM is not tried.
+- **The online resize2fs in the guest** (failed with EBUSY, not pursued; the host-side one is measured), **Docker 29's nftables firewall backend,** `io.max` on the job disk, a balloon, memory returned to the host, snapshot/restore, several VMs at the same time under load (two ran at once for
+  the cross-VM probe only).
+- **Update and rollback of kernel and root file system,** signing (#976): the artifacts are pinned, not signed.
+- **The hosted VM's `/etc/subuid` range:** Sysbox mapped container root to host uid 100000 here; the golden snapshot's doc says 165536. Not compared.
+- **A job's real Worker image:** busybox and `docker:dind` stood in for Control and the agent. Sizes and times of the Worker image (1.5 GB+) are #976's to measure, the copy
+  times above scale with allocated size (reflink does not).
+
+### What the build issues must do differently
+
+- **#976 (VM artifacts).** The kernel is Firecracker's recommended 6.18 config plus the fragment above, verified at build time; `RT_GROUP_SCHED=n` is not optional. The root file
+  system is built from the golden recipe's two scripts as they are, plus: the cgroup controllers enabled by the init before `vm-prepare.sh`, `/var/lib/sysbox` on the job disk and a
+  tmpfs on `/var/lib/sysboxfs`, stubs for `systemctl` **and** `docker ps` during the Sysbox package install, and **one decision on the image store** (containerd store with
+  `/var/lib/containerd` on the job disk, or overlay2; the spike ran overlay2). Image init must not start a `dockerd` that binds TCP (15 s). Size and time to plan for: `vmlinux` 26.5 MiB,
+  566 s to build on 4 cores (cache it by fragment and pins), root file system 632 MiB (170 MB compressed) without the Worker image.
+- **#977 (vm-init).** PID 1 can be `docker-init`; the channel is vsock with Firecracker's host side (a Unix socket, `CONNECT <port>` for host → guest, `<uds>_<port>` listeners for
+  guest → host, opened **before** the VM starts). Requests take 0.3 to 0.6 ms, so a call per step is cheap. Report milestones as events (the spike's `init_up`, `docker_ready`,
+  `sysbox_ready`). End the VM from the guest with a reboot (`reboot=k`); give it no serial console it does not read (0.3 to 0.4 s of boot).
+- **#978 (launcher).** Per job: reflink copy of the base disk, `resize2fs` on the file (20 ms) to the quota, a cgroup under the unit's delegated subtree (own leaf first, then one per VM; `memory.max`
+  must leave room for the page cache of the disk files), Firecracker as the service's user on a pre-created TAP, `--no-api --config-file`. The number of pre-created TAPs is the number of concurrent
+  jobs. A unit hardening per VM (instead of the jailer) is **to be decided**; only seccomp and zero capabilities are proven.
+- **#979 (outer wall).** `host/wall.nft` and `host/open.nft` plus `rootfs/probe.py` are the acceptance test as built: every blocked probe needs a control that reached the same target with the
+  table removed; the proxy listens on the TAP addresses only and tells jobs apart by TAP; the install generates the per-TAP source-address rule.
+- **#982 (install).** The root steps are exactly the table in Q4. The installer checks `/dev/kvm`, `reflink=1` on the work volume (XFS), `e2fsprogs` and a delegating systemd. No Docker is needed on the
+  customer's host: nothing of the runtime used one (the spike's base-disk builder ran a second dockerd on the **build** machine, which is the release pipeline's job).
+
