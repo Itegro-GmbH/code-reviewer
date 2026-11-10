@@ -83,27 +83,25 @@ function world(
             (dispatcher.labels ?? ["linux"]).includes(label),
           ),
         )
-        .map(
-          (dispatcher): RingPair => ({
-            jobId: job.id,
-            reviewKind: "implementer",
-            jobAttempts: 0,
-            harness: job.harness ?? "opencode",
-            runnerId: dispatcher.runnerId,
-            baseVersion: dispatcher.baseVersion ?? "1.0.0",
-            manifest: {
-              harnesses: dispatcher.harnesses ?? {
-                opencode: { version: "1", ready: true },
-              },
-              capabilities: [],
+        .map((dispatcher): RingPair => ({
+          jobId: job.id,
+          reviewKind: "implementer",
+          jobAttempts: 0,
+          harness: job.harness ?? "opencode",
+          runnerId: dispatcher.runnerId,
+          baseVersion: dispatcher.baseVersion ?? "1.0.0",
+          manifest: {
+            harnesses: dispatcher.harnesses ?? {
+              opencode: { version: "1", ready: true },
             },
-            delivery: {
-              url: dispatcher.url,
-              keyId: dispatcher.keyId,
-              sealedSecret: dispatcher.secret,
-            },
-          }),
-        ),
+            capabilities: [],
+          },
+          delivery: {
+            url: dispatcher.url,
+            keyId: dispatcher.keyId,
+            sealedSecret: dispatcher.secret,
+          },
+        })),
     );
   }
 

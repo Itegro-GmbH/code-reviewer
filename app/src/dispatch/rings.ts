@@ -31,7 +31,10 @@ import {
 import { errorCode } from "../db/errors.ts";
 import type { Database } from "../db/schema.ts";
 import type { EnqueueResult } from "../jobs/job-types.ts";
-import { OPENCODE_HARNESS, readyHarnesses } from "../runner-identity/harness.ts";
+import {
+  OPENCODE_HARNESS,
+  readyHarnesses,
+} from "../runner-identity/harness.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 import {
   decideOutcome,
@@ -39,7 +42,11 @@ import {
   type DispatchUpdate,
 } from "./outcome.ts";
 import { buildDispatchRequest } from "./request.ts";
-import { DISPATCH_TIMEOUT_MS, sendDispatch, type DispatchFetch } from "./send.ts";
+import {
+  DISPATCH_TIMEOUT_MS,
+  sendDispatch,
+  type DispatchFetch,
+} from "./send.ts";
 
 /** How long a claimed ring holds its row: the request limit plus time to store the answer. */
 export const RING_LEASE_MS = 30_000;
