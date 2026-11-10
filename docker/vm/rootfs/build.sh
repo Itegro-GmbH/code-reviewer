@@ -51,9 +51,14 @@ log "install Sysbox (step install_sysbox)"
 mv "$root/usr/bin/docker" "$root/usr/bin/docker.real"
 printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/usr/bin/docker"
 chmod 0755 "$root/usr/bin/docker"
+# The package's postinst also calls `systemctl` (the guest has no systemd). The pipeline's script puts a stand-in first on the PATH of its own
+# command; a maintainer script that does not go through that PATH finds none in a chroot, so one is there for this step too.
+printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/systemctl"
+chmod 0755 "$root/usr/bin/systemctl"
 stage "$recipe/20-install-sysbox.sh" /tmp/recipe-install-sysbox.sh 0755
 runscript /tmp/recipe-install-sysbox.sh
 mv -f "$root/usr/bin/docker.real" "$root/usr/bin/docker"
+rm -f "$root/usr/bin/systemctl"
 
 log "write the daemon configuration (step write_daemon_config)"
 stage "$recipe/30-daemon.json" "$(paths daemonJson)" 0644
