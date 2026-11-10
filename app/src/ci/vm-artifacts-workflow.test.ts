@@ -101,6 +101,71 @@ describe("the build workflow", () => {
     expect(names[built + 1]).toContain("Save the kernel to the cache");
   });
 
+  // #976-T04
+  it("never takes the kernel of a release from the cache: the cache steps run for pull requests only, and the build runs when nothing was restored", () => {
+    const steps = stepsOf(job(build, "kernel"));
+    const restore = steps.find((step) =>
+      step.uses?.startsWith("actions/cache/restore"),
+    );
+    const save = steps.find((step) =>
+      step.uses?.startsWith("actions/cache/save"),
+    );
+    const built = steps.find((step) =>
+      step.name?.startsWith("Build the kernel"),
+    );
+
+    expect(build.on.workflow_call).toMatchObject({
+      inputs: { for_release: { type: "boolean", default: false } },
+    });
+    expect(String(restore?.if)).toContain("!inputs.for_release");
+    expect(String(save?.if)).toContain("!inputs.for_release");
+    // A skipped restore leaves `cache-hit` empty, which is not 'true': the kernel is built.
+    expect(String(built?.if)).toContain("cache-hit != 'true'");
+    expect(String(built?.if)).not.toContain("for_release");
+  });
+
+  // #976-T03
+  it("keeps the data disk out of every workflow artifact and every artifact short-lived", () => {
+    const uploads = Object.keys(build.jobs).flatMap((id) =>
+      stepsOf(job(build, id))
+        .filter((step) => step.uses?.startsWith("actions/upload-artifact"))
+        .map((step) => ({ id, step })),
+    );
+
+    expect(uploads.length).toBeGreaterThan(0);
+    for (const { id, step } of uploads) {
+      const path = String(step.with?.path);
+      expect(path, `${id}: ${step.name ?? step.with?.name}`).not.toMatch(
+        /data-out|dockerdata|\/release(\s|$)|rootfs-out/,
+      );
+      expect(step.with?.name).not.toBe("vm-artifacts");
+      expect(
+        Number(step.with?.["retention-days"]),
+        String(step.with?.name),
+      ).toBeLessThanOrEqual(3);
+    }
+    // Nothing downloads an artifact of the release's files either.
+    expect(releaseText).not.toContain("download-artifact");
+    expect(buildText).not.toMatch(/name: vm-artifacts\s*$/m);
+  });
+
+  // #976-T01
+  it("hands the release's files to the signing job through the cache, for a release only, under a key of this run", () => {
+    const save = stepsOf(job(build, "build")).find((step) =>
+      step.uses?.startsWith("actions/cache/save"),
+    );
+    const restore = stepsOf(job(release, "release")).find((step) =>
+      step.uses?.startsWith("actions/cache/restore"),
+    );
+
+    expect(String(save?.if)).toContain("inputs.for_release");
+    expect(save?.with?.path).toBe("${{ env.VM_WORK }}/release");
+    expect(String(save?.with?.key)).toContain("github.run_id");
+    expect(restore?.with?.path).toBe(save?.with?.path);
+    expect(restore?.with?.key).toBe(save?.with?.key);
+    expect(restore?.with?.["fail-on-cache-miss"]).toBe(true);
+  });
+
   // #976-T03
   it("pins every third-party action of the build to a commit", () => {
     for (const id of Object.keys(build.jobs))
@@ -143,7 +208,8 @@ describe("the release workflow", () => {
     );
     expect(holdersOfTheSecret).toHaveLength(1);
     expect(holdersOfTheSecret[0]?.name).toBe("Sign the manifest");
-    // The other jobs, the ones that run third-party code (apt, docker build), have neither the key nor the environment.
+    // The jobs that run third-party code at build time (`build`: apt, docker build, the kernel's tools) have neither the key nor the environment;
+    // the job that has them installs with --ignore-scripts and builds nothing (the test below).
     expect(job(release, "build").environment).toBeUndefined();
     expect(job(release, "number").environment).toBeUndefined();
   });
@@ -184,17 +250,96 @@ describe("the release workflow", () => {
   });
 
   // #976-T02
-  it("compares the recipe with the hosted golden snapshot's record before it signs", () => {
-    const names = stepsOf(job(release, "release")).map(
-      (step) => step.name ?? "",
+  it("compares this commit's recipe with the hosted golden snapshot's record before it signs, and says what the step does", () => {
+    const steps = stepsOf(job(release, "release"));
+    const names = steps.map((step) => step.name ?? "");
+    const compare = names.findIndex((name) =>
+      name.startsWith("Compare this commit's recipe"),
     );
 
+    expect(compare).toBeGreaterThan(-1);
+    expect(compare).toBeLessThan(names.indexOf("Sign the manifest"));
+    expect(names[compare]).toContain("image ids reported, not enforced");
+    expect(steps[compare]?.run).toContain("compare-main.ts");
+    // The image ids are the owner's decision: the flag that enforces them is not passed.
+    expect(steps[compare]?.run).not.toContain("--require-images");
+    expect(releaseText).not.toContain(
+      "The hosted golden snapshot has the same recipe",
+    );
+  });
+
+  // #976-T01
+  it("runs no lifecycle script of a dependency in the job that holds the key", () => {
+    const steps = stepsOf(job(release, "release"));
+    const installs = steps.filter((step) => step.run?.includes("pnpm install"));
+
+    expect(installs).toHaveLength(1);
+    expect(installs[0]?.run).toContain("--frozen-lockfile");
+    expect(installs[0]?.run).toContain("--ignore-scripts");
+    // No cache of dependencies a pull request could have written, and no other way to run a package's script.
+    for (const step of steps) {
+      expect(step.with?.cache, step.name).toBeUndefined();
+      expect(step.run ?? "", step.name).not.toMatch(
+        /\bpnpm (run|exec|dlx)|(^|[\s;&|])(npx|yarn) |(^|[\s;&|])npm (install|ci|run)/,
+      );
+    }
+    // And it builds nothing: the third-party code of the build (apt, docker) is the job `build`.
+    expect(releaseText).not.toMatch(/apt-get|docker build|build-push-action/);
+  });
+
+  // #976-T01
+  it("starts only for a commit that is on main, before the build is paid for and before the key is asked for", () => {
+    const guard = job(release, "guard");
+    const run = stepsOf(guard)
+      .map((step) => step.run ?? "")
+      .join("\n");
+
+    expect(guard.needs).toBe("number");
+    expect(guard.environment).toBeUndefined();
+    expect(run).toContain("compare/main...$GITHUB_SHA");
+    expect(run).toMatch(/identical \| behind/);
+    // By the API: no checkout, so no code of the tag runs for it.
     expect(
-      names.indexOf("The hosted golden snapshot has the same recipe"),
-    ).toBeGreaterThan(-1);
-    expect(
-      names.indexOf("The hosted golden snapshot has the same recipe"),
-    ).toBeLessThan(names.indexOf("Sign the manifest"));
+      stepsOf(guard).some((step) => step.uses?.startsWith("actions/checkout")),
+    ).toBe(false);
+    expect(job(release, "build").needs).toEqual(["number", "guard"]);
+    expect(job(release, "release").needs).toEqual(["number", "guard", "build"]);
+    expect(job(release, "build").with?.for_release).toBe(true);
+  });
+
+  // #976-T01
+  it("takes a release number higher than every other release and a channel file of this repository", () => {
+    const steps = stepsOf(job(release, "release"));
+    const names = steps.map((step) => step.name ?? "");
+    const channel = steps.find((step) =>
+      step.name?.startsWith("The channel is this repository's"),
+    );
+    const published = steps.find((step) => step.id === "published");
+    const verify = steps.find((step) =>
+      step.name?.startsWith("Verify what is about to be published"),
+    );
+
+    expect(channel?.run).toContain("$GITHUB_REPOSITORY");
+    expect(channel?.run).toContain(".repository");
+    expect(channel?.run).toContain(".manifestAsset");
+    expect(channel?.run).toContain(".signatureAsset");
+    expect(published?.run).toContain("gh release list");
+    expect(published?.run).toMatch(/test "\$RELEASE" -gt "\$last"/);
+    expect(names.indexOf(published?.name ?? "")).toBeLessThan(
+      names.indexOf("Sign the manifest"),
+    );
+    // The verifier is held to it too: strictly higher than the last release, and nothing in the directory that was not signed.
+    expect(verify?.run).toContain('--min-release "$LAST"');
+    expect(verify?.run).toContain("--exact-dir");
+    expect(verify?.env?.LAST).toBe("${{ steps.published.outputs.last }}");
+  });
+
+  // #976-T01
+  it("points the GPL source offer at a stable address, not at 'the archive'", () => {
+    expect(releaseText).toContain("https://snapshot.ubuntu.com/ubuntu/");
+    expect(releaseText).toContain("build date");
+    expect(releaseText).not.toMatch(/Ubuntu's archive/);
+    expect(releaseText).toContain(".builtAt");
   });
 
   // #976-T01

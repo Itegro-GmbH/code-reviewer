@@ -7,6 +7,12 @@ name: VM artifacts
 # else) and vm-artifacts-release.yml (a tag, which signs and publishes). This workflow never signs for real and never publishes: it holds no
 # secret, and the one key lives only in the release job, in the environment `vm-artifacts-release` (docs/runner.md, "VM artifacts").
 # A throwaway key signs and verifies the build's own manifest, and a changed byte must be refused (docker/vm/selftest-signing.sh).
+#
+# The files are NOT workflow artifacts. A workflow artifact of a public repository can be downloaded by anybody who is signed in to GitHub, and
+# the data disk holds the Worker image (proprietary code, copyleft packages): it must not be downloadable before the owner has decided to publish
+# it. A pull request run keeps only what its own jobs need, for a day (the kernel), and its logs, for three. A run for a release (`for_release`)
+# hands the release's files to the signing job through the Actions cache (nobody can download a cache's content, only a workflow of this
+# repository restores it, and the key names this run) and builds the kernel again: it never takes one from the cache.
 on:
   workflow_call:
     inputs:
@@ -14,8 +20,8 @@ on:
         description: The release number of the manifest; it only grows (the tag's number, or the run number for a build that is not published)
         required: true
         type: number
-      upload:
-        description: Keep the release's files as the artifact `vm-artifacts` (about 2 GB) for the job that publishes them
+      for_release:
+        description: The run feeds a release (vm-artifacts-release.yml). The kernel is built, never taken from the cache, and the release's files go to the job that signs them through the Actions cache, not as an artifact
         required: false
         default: false
         type: boolean
@@ -54,18 +60,21 @@ jobs:
         run: |
           docker/vm/kernel/configure.sh "$VM_WORK/kwork"
           cat "$VM_WORK/kwork/added-options.txt"
+      # Pull requests only: what is signed is built from the source, never restored from a cache that an earlier run wrote.
       - name: Cache of the built kernel
         id: kcache
+        if: ${{ !inputs.for_release }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VM_WORK }}/vmlinux-cache
           key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
+      # A skipped restore is no hit: a release always builds.
       - name: Build the kernel (about 10 minutes on 4 cores)
         if: steps.kcache.outputs.cache-hit != 'true'
         run: docker/vm/kernel/build.sh "$VM_WORK/kwork" "$VM_WORK/vmlinux-cache"
       # Right away: a later failure must not lose a 10 minute build.
       - name: Save the kernel to the cache
-        if: steps.kcache.outputs.cache-hit != 'true'
+        if: ${{ !inputs.for_release && steps.kcache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ env.VM_WORK }}/vmlinux-cache
@@ -90,7 +99,7 @@ jobs:
           name: vm-kernel
           path: ${{ env.VM_WORK }}/kernel-out
           compression-level: 0
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
   build:
@@ -218,14 +227,13 @@ jobs:
             ${{ env.VM_WORK }}/dwork/seed-boot
             ${{ env.VM_WORK }}/smoke
             ${{ env.VM_WORK }}/release/manifest.json
-          retention-days: 14
+          retention-days: 3
           if-no-files-found: ignore
-      - name: The release's files, for the job that signs and publishes them
-        if: ${{ inputs.upload }}
-        uses: actions/upload-artifact@v7
+      # For a release only. Not an artifact (see the top): the cache is restored by the one job that signs, which verifies every file against the
+      # manifest before it publishes anything, so a cache that held other bytes would fail there.
+      - name: The release's files, for the job that signs and publishes them (the Actions cache, not an artifact)
+        if: ${{ inputs.for_release }}
+        uses: actions/cache/save@v4
         with:
-          name: vm-artifacts
           path: ${{ env.VM_WORK }}/release
-          compression-level: 0
-          retention-days: 7
-          if-no-files-found: error
+          key: vm-release-files-${{ github.run_id }}
