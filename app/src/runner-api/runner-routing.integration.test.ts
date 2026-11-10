@@ -625,6 +625,15 @@ describe("revoking a runner that is running a turn (#854)", () => {
   // #854-T240
   it("refuses it every report about the job it was running, and ends the job at once as failed", async () => {
     const { h, runner, turn, job, fleet } = await runningTurn();
+    // The Worker fetches the turn: this is where the GitHub token is made (the claim made none).
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      FEATURES_OF_A_RUNNER.join(","),
+      undefined,
+      "openrouter,anthropic",
+    );
+    expect(fetched.status).toBe(200);
     const issued = h.issuedJobTokens();
     expect((await h.worker.heartbeat(job.id, job.credential)).status).toBe(200);
 
