@@ -1279,7 +1279,7 @@
       "enum": ["launch_failed", "worker_exited"]
     },
     "ReleaseRequest": {
-      "description": "#318: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).",
+      "description": "#318, #974: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN, or the credential of a customer's runner for a job of its own workspace) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).",
       "type": "object",
       "required": ["credential", "reason"],
       "properties": {
@@ -1346,7 +1346,7 @@
       }
     },
     "JobStateResponse": {
-      "description": "#364: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential only; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.",
+      "description": "#364, #974: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential, or the credential of a customer's runner for a job of its own workspace: 404 for any other; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.",
       "type": "object",
       "required": ["version", "job"],
       "properties": {

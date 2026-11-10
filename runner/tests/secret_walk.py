@@ -11,7 +11,7 @@ a leaf: the log is checked from its text.
 
 import functools
 import types
-from typing import Any, cast
+from typing import Any
 
 _MAX_DEPTH = 14
 _OURS = "code_reviewer_runner"
@@ -38,7 +38,8 @@ def _walk(obj: Any, needles: tuple[str, ...], path: str, depth: int, seen: set[i
     seen.add(id(obj))
     children: list[tuple[str, Any]] = []
     if isinstance(obj, dict):
-        for key, value in obj.items():  # pyright: ignore[reportUnknownVariableType]
+        entries: list[tuple[Any, Any]] = list(obj.items())  # pyright: ignore[reportUnknownArgumentType,reportUnknownMemberType]
+        for key, value in entries:
             children.append((f"{path}[{key!r}]", key))
             children.append((f"{path}[{key!r}]", value))
     elif isinstance(obj, (list, tuple, set, frozenset)):
