@@ -384,20 +384,17 @@ describe("the pairs of a job that went back to the queue, and the dispatchers th
     const busy = await webhookRunner(h, "busy");
     const stopped = await webhookRunner(h, "stopped");
     const turn = await h.enqueueTurn({ runnerEnvironment: ENV });
-    const r = rings(h, [acked, busy]);
+    const r = rings(h, [acked, fresh, busy, stopped]);
+    r.reply(acked, { status: 202 });
     r.reply(busy, ignored("busy"));
-    // Only these two were rung; `fresh` has no row yet. The row of `stopped` was told to stop.
     const pairs = createRunnerDispatchesRepository(h.db, h.clock.now);
     await r.service.onEnqueued(created(turn));
-    expect(
-      await pairs.create(turn.job.id, stopped.runnerId, h.clock.now()),
-    ).toBe(true);
+    // `stopped` was told to stop; `fresh` has no row yet.
     await h.db
       .updateTable("job_rings")
       .set({ state: "stopped" })
       .where("runner_id", "=", stopped.runnerId)
       .execute();
-    // `fresh` was not rung because its endpoint is not in the rings of this test, so it has a row only if a ring reached it.
     await h.db
       .deleteFrom("job_rings")
       .where("runner_id", "=", fresh.runnerId)
