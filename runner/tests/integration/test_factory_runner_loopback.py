@@ -1,20 +1,26 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Factory-Runner as a whole, on the loopback (#854, R1b): the CLI registers against a fake App,
-`run` announces, claims a turn, runs it through the real job host and a stand-in job process, keeps
-the heartbeat and delivers the result with the lease token; a revoked runner stops.
+"""The Factory-Runner as a whole, on the loopback (#854, R1b; #974): the CLI registers against a
+fake App, `run` announces and claims a turn (the split answer: the job's credential and nothing
+secret), starts a real Worker (`local_worker`) that fetches the job over the Worker API, runs it
+through the real job host and a stand-in job process, keeps the heartbeat and delivers the result;
+a revoked runner stops.
 
 What is a double: the App (`runner_app.py`, which holds every body to the contracts), the machine
 (`prepare` is replaced, since this level has no Docker: the self-test has its own tests and lane),
-and the job process (a script that prints the result a finished turn prints). The turn itself, the
-containers and the model, are the lane's (`tests/lane`).
+and the job process (a script that prints the result a finished turn prints). The Worker is not a
+double: it is the process the dispatcher starts on a real machine. The turn itself, the containers
+and the model, are the lane's (`tests/lane`).
 """
 
 import json
+import shlex
 import sys
 import textwrap
+import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,7 +38,7 @@ from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.job_loop.settings import WorkerSettings
-from runner_app import EXAMPLE_JOB, FakeRunnerApp
+from runner_app import EXAMPLE_JOB, GIT_TOKEN, MODEL_KEY, FakeRunnerApp
 
 pytestmark = pytest.mark.integration
 
@@ -80,20 +86,28 @@ def report() -> dict[str, object]:
 STAND_IN = textwrap.dedent(
     """
     import json, os, sys, time
-    job = json.loads(sys.stdin.read())
+    raw = sys.stdin.read()
+    job = json.loads(raw)
     sleep, seen = float(sys.argv[1]), sys.argv[2]
+    report = json.load(open(sys.argv[3]))
     # What a turn makes in the work volume: it refuses folders an earlier turn left (os.mkdir).
     work = os.environ["RUNNER_IMPLEMENTER_WORK_DIR"]
     os.makedirs(work, exist_ok=True)
     for name in ("reserve", "repo", "result"):
         os.mkdir(os.path.join(work, name))
     with open(seen, "w") as handle:
-        json.dump({"env": sorted(os.environ), "has_token": "crc_" in json.dumps(job)}, handle)
+        json.dump({
+            "env": sorted(os.environ),
+            "git_token": job["git"]["token"],
+            "llm_key": job["llm"]["apiKey"],
+            "crj_in_job": "crj_" in raw,
+            "crc_in_job": "crc_" in raw,
+        }, handle)
     time.sleep(sleep)
     print(json.dumps({
         "ok": True, "durationMs": 5, "commentUrl": None, "errorCode": None,
         "logTail": "pushed", "logTruncated": False, "usage": None,
-        "implementer": json.loads(sys.argv[3]),
+        "implementer": report,
     }))
     """
 )
@@ -106,7 +120,7 @@ SNAPSHOT_STAND_IN = textwrap.dedent(
     """
     import hashlib, json, os, socket, sys
     job = json.loads(sys.stdin.read())
-    seen, finished = sys.argv[2], sys.argv[3]
+    seen, finished = sys.argv[2], json.load(open(sys.argv[3]))
     work = os.environ["RUNNER_IMPLEMENTER_WORK_DIR"]
     os.makedirs(work, exist_ok=True)
     for name in ("reserve", "repo", "result"):
@@ -133,7 +147,7 @@ SNAPSHOT_STAND_IN = textwrap.dedent(
     print(json.dumps({
         "ok": True, "durationMs": 5, "commentUrl": None, "errorCode": None,
         "logTail": "pushed", "logTruncated": False, "usage": None,
-        "implementer": json.loads(finished),
+        "implementer": finished,
     }))
     """
 )
@@ -151,6 +165,7 @@ class Machine:
 
     def __init__(self, app: FakeRunnerApp, tmp_path: Path, *, sleep: float = 0.0) -> None:
         self.app = app
+        tmp_path.mkdir(parents=True, exist_ok=True)
         self.seen = tmp_path / "seen.json"
         self.environment = {
             "FACTORY_RUNNER_HOME": str(tmp_path / "home"),
@@ -160,17 +175,22 @@ class Machine:
         self.sleep = sleep
         self.work = tmp_path / "work"
         self.stand_in = STAND_IN
+        self.script = tmp_path / "stand_in.py"
+        self.report_file = tmp_path / "report.json"
+        self.report_file.write_text(json.dumps(report()))
 
     def prepare(self, config: RunnerConfig, _env: object) -> Prepared:
-        settings = WorkerSettings(
-            engines=("implementer",),
-            job_command=(
-                *(sys.executable, "-c", self.stand_in),
-                *(str(self.sleep), str(self.seen), json.dumps(report())),
-            ),
-            job_timeout=60.0,
-            terminate_grace=2.0,
-        )  # fmt: skip
+        self.script.write_text(self.stand_in)
+        command = shlex.join(
+            (
+                sys.executable,
+                str(self.script),
+                str(self.sleep),
+                str(self.seen),
+                str(self.report_file),
+            )
+        )
+        settings = WorkerSettings(engines=("implementer",), job_timeout=60.0, terminate_grace=2.0)
         result = SelfTestResult(
             (Check("docker", True), Check("canned-turn", True)), "runc", "1.19.0"
         )
@@ -180,6 +200,8 @@ class Machine:
                 "PATH": "/usr/bin:/bin",
                 "HOME": str(self.seen.parent),
                 "RUNNER_IMPLEMENTER_WORK_DIR": str(self.work),
+                "RUNNER_JOB_TIMEOUT_SECONDS": "60",
+                "PR_AGENT_COMMAND": command,
             },
             Announcement(
                 config.labels,
@@ -202,7 +224,7 @@ class Machine:
         assert code == EXIT_OK
 
 
-def test_a_registered_runner_announces_claims_runs_a_turn_and_reports_its_result(
+def test_a_registered_runner_announces_claims_and_its_worker_fetches_runs_and_delivers_the_turn(
     app: FakeRunnerApp, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     machine = Machine(app, tmp_path, sleep=2.5)
@@ -221,22 +243,43 @@ def test_a_registered_runner_announces_claims_runs_a_turn_and_reports_its_result
     )
     assert app.announcements[-1]["manifest"]["harnesses"][0]["harness"] == "opencode"
     assert app.announcements[-1]["labels"] == ["linux", "itegro-claude"]
-    # The turn: heartbeats while it ran, one result with the lease token, nothing after it.
+    # #974-T02: the Worker fetched the job over the Worker API with the credential of the claim,
+    # kept the heartbeat while the turn ran and delivered one result; the result is the last call.
+    credential = app.job(JOB).credential
+    assert credential.startswith("crj_")
+    worker_calls = [r for r in app.requests if r.path.startswith("/api/workers/")]
+    assert worker_calls[0].method == "GET" and worker_calls[0].path == f"/api/workers/v1/jobs/{JOB}"
+    assert all(r.authorization == f"Bearer {credential}" for r in worker_calls)
     assert len(app.heartbeats) >= 1
     assert len(app.completions) == 1
     assert app.completions[0]["ok"] is True
     assert app.completions[0]["implementer"]["headCommit"] == report()["headCommit"]
-    assert paths[-1] == ("POST", f"/api/runners/v1/jobs/{JOB}/complete")
-    # Every call after the registration carried the runner's credential.
-    assert all(
-        r.authorization and r.authorization.startswith("Bearer crc_") for r in app.requests[1:]
+    assert paths[-1] == ("POST", f"/api/workers/v1/jobs/{JOB}/result")
+    # The Worker said what it reads of a job (the features of the hosted Worker).
+    assert "implementer_environment" in app.job(JOB).fetches[0]["features"].split(",")
+    # The dispatcher's own calls carried the runner's credential, and none of them was a call about
+    # the running job but the claim and the state; it never touched the Worker API.
+    dispatcher_calls = [
+        r for r in app.requests[1:] if r.authorization and r.authorization.startswith("Bearer crc_")
+    ]
+    assert dispatcher_calls and all(
+        not r.path.startswith("/api/workers/") for r in dispatcher_calls
     )
-    # The job process had the job and none of the runner's secrets; the log has none either.
+    assert all(
+        r.path in ("/api/runners/v1/self", "/api/runners/v1/claim")
+        or r.path == f"/api/runners/v1/jobs/{JOB}"
+        for r in dispatcher_calls
+    )
+    # The job process had the job (fetched by the Worker) and none of the runner's secrets, and not
+    # the Worker's credential either; the dispatcher's log has none of them.
     seen = json.loads(machine.seen.read_text())
     assert not any(name.startswith("FACTORY_RUNNER") for name in seen["env"])
-    credential = json.loads((tmp_path / "home" / "config.json").read_text())["credential"]
+    assert seen["git_token"] == GIT_TOKEN and seen["llm_key"] == MODEL_KEY
+    assert seen["crj_in_job"] is False and seen["crc_in_job"] is False
+    runner_credential = json.loads((tmp_path / "home" / "config.json").read_text())["credential"]
     captured = capsys.readouterr()
-    assert credential not in captured.err + captured.out
+    for secret in (runner_credential, credential, GIT_TOKEN, MODEL_KEY):
+        assert secret not in captured.err + captured.out
 
 
 # #854-B1
@@ -301,7 +344,6 @@ def test_a_runner_a_vm_starts_with_only_the_environment_takes_a_job_and_ends(
         "FACTORY_RUNNER_LABELS": "itegro-claude",
         "PATH": "/usr/bin:/bin",
     }
-    (tmp_path / "vm").mkdir()
     app.queue_job(JOB)
 
     code = vm.cli("run", "--once", "--wait", "30")
@@ -310,6 +352,9 @@ def test_a_runner_a_vm_starts_with_only_the_environment_takes_a_job_and_ends(
     assert len(app.completions) == 1
     assert not (tmp_path / "vm-home").exists()  # a VM writes no configuration
     assert app.announcements[-1]["labels"] == ["itegro-claude"]
+    # The runner credential from the environment never reached the Worker or the job.
+    seen = json.loads(vm.seen.read_text())
+    assert not any(name.startswith("FACTORY_RUNNER") for name in seen["env"])
 
 
 def test_a_revoked_runner_stops_with_its_own_exit_code(app: FakeRunnerApp, tmp_path: Path) -> None:
@@ -322,26 +367,25 @@ def test_a_revoked_runner_stops_with_its_own_exit_code(app: FakeRunnerApp, tmp_p
 
 
 def test_a_runner_revoked_while_a_turn_runs_loses_it_and_then_stops(
-    app: FakeRunnerApp, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    app: FakeRunnerApp, tmp_path: Path
 ) -> None:
     machine = Machine(app, tmp_path, sleep=20.0)  # longer than the test lets it run
     machine.register()
     app.queue_job(JOB).heartbeat_seconds = 1
-    original = app._job_call  # pyright: ignore[reportPrivateUsage]
+    original = app._worker_call  # pyright: ignore[reportPrivateUsage]
 
-    def revoke_at_the_first_heartbeat(job_id: str, call: str, body: object) -> tuple[int, object]:
-        answer = original(job_id, call, body)  # type: ignore[arg-type]
-        if call == "heartbeat":
-            app.revoke_all()
+    def revoke_at_the_first_heartbeat(*args: Any) -> tuple[int, object]:
+        answer = original(*args)
+        if args[2] == "heartbeat":
+            threading.Thread(target=app.revoke_all).start()
         return answer
 
-    app._job_call = revoke_at_the_first_heartbeat  # type: ignore[method-assign,assignment]  # pyright: ignore[reportPrivateUsage]
+    app._worker_call = revoke_at_the_first_heartbeat  # type: ignore[method-assign,assignment]  # pyright: ignore[reportPrivateUsage]
 
     code = machine.cli("run", "--once", "--wait", "30")
 
-    assert code == EXIT_FAILED  # the turn was lost
-    assert app.completions == []  # and it did not report: it can no longer
-    assert "lease is lost" in capsys.readouterr().err
+    assert code == EXIT_FAILED  # the turn was lost: the app ended it with the runner
+    assert app.completions == []  # and the Worker did not report: it can no longer
     assert machine.cli("run") == EXIT_REVOKED  # the next start is told at once
 
 
@@ -394,35 +438,36 @@ def test_a_follow_up_turn_continues_from_the_snapshot_the_first_turn_stored(
         {"turn": 1, "channel": True, "resumed": None, "state": None},
         {"turn": 2, "channel": True, "resumed": "the conversation of turn 1", "state": "file"},
     ]
-    # Through the runner routes only, with the runner's credential, before each turn's result.
+    # #974: through the Worker API only, with the credential of each claim, before each result.
     session_paths = [
         r.path for r in app.requests if r.path.endswith(("/session", "/resume-session"))
     ]
     assert session_paths == [
-        f"/api/runners/v1/jobs/{JOB}/session",
-        f"/api/runners/v1/jobs/{JOB.replace('aa', 'ab')}/resume-session",
-        f"/api/runners/v1/jobs/{JOB.replace('aa', 'ab')}/session",
+        f"/api/workers/v1/jobs/{JOB}/session",
+        f"/api/workers/v1/jobs/{JOB.replace('aa', 'ab')}/resume-session",
+        f"/api/workers/v1/jobs/{JOB.replace('aa', 'ab')}/session",
     ]
-    assert all("/api/workers/" not in r.path for r in app.requests)
+    assert not any(
+        r.path.startswith("/api/runners/v1/jobs/") and "/session" in r.path for r in app.requests
+    )
     # For every job, all of its snapshot parts are in before its result is.
     for job in (JOB, JOB.replace("aa", "ab")):
         calls = [
             (r.method, r.path.rsplit("/", 1)[1])
             for r in app.requests
-            if r.path.startswith(f"/api/runners/v1/jobs/{job}/")
+            if r.path.startswith(f"/api/workers/v1/jobs/{job}/")
         ]
         puts = [index for index, call in enumerate(calls) if call == ("PUT", "session")]
-        assert puts and ("POST", "complete") in calls
-        assert max(puts) < calls.index(("POST", "complete"))
+        assert puts and ("POST", "result") in calls
+        assert max(puts) < calls.index(("POST", "result"))
 
 
 # #879-T11
-def test_an_app_without_the_runner_routes_gets_a_turn_without_snapshot_and_with_the_old_fallback(
+def test_an_app_that_does_not_list_the_snapshot_gets_a_turn_without_it_and_with_the_old_fallback(
     app: FakeRunnerApp, tmp_path: Path
 ) -> None:
-    # The Worker's feature is listed (production did so before the runner routes): the host opens no
-    # channel and downloads nothing, and the turns run as before.
-    app.features = ["worker_api", "implementer_steps", "implementer_snapshot"]
+    # The Worker's feature is not listed: the host opens no channel, and the turns run as before.
+    app.features = ["worker_api", "implementer_steps"]
     machine = Machine(app, tmp_path)
     machine.stand_in = SNAPSHOT_STAND_IN
     machine.register()
@@ -433,7 +478,10 @@ def test_an_app_without_the_runner_routes_gets_a_turn_without_snapshot_and_with_
     second = machine.cli("run", "--once", "--wait", "30")
 
     assert (first, second) == (EXIT_OK, EXIT_OK)
-    assert app.session_calls == [] and app.violations == []
+    # Nothing is uploaded (no channel); the follow-up turn may ask for a stored session and is told
+    # there is none (204), as the hosted Worker does.
+    assert [c.method for c in app.session_calls] == ["GET"]
+    assert app.session_calls[0].status == 204 and app.violations == []
     assert [t["channel"] for t in turns_seen(machine)] == [False, False]
     assert [t["resumed"] for t in turns_seen(machine)] == [None, None]
     assert [c["ok"] for c in app.completions] == [True, True]
