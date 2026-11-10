@@ -56,6 +56,35 @@ App** (the Worker API, `crj_`, everywhere).
 - `SplitClaimResponse.sizeLabel` is optional on the wire so a Dispatcher can read an app of the release before; `vcpus` keeps its value and still decides the VM size. A label that names
   a size the Dispatcher does not offer gives the job back unlaunched.
 
+## 3b. Details of #972
+
+- **Delivery is announced** (`delivery` in `POST /register` and `PUT /self`): `poll` (default) or `webhook` with an https URL the app checks (no private, link-local or internal
+  host, no credentials, no redirect). The platform's dispatcher has no announcement: `RUNNER_WEBHOOK_URL` and its signing secret are its delivery, so a hosted deployment keeps
+  working with only those. `PUT /self` replaces what the app holds, so a dispatcher announces its delivery every time.
+- **A signing secret for each dispatcher**, made by the app (never chosen by the dispatcher, so none is weak or shared), shown once in the answer that made it and kept sealed with
+  the app's secret, bound to the runner's row. Rotation is `rotateSecret: true`, with no grace period: the dispatcher takes the new secret from the answer. The signing rule and
+  the receiver are those of the platform's dispatcher (`contracts/dispatch-webhook.v1.json`); `contracts/dispatch-signing-vectors.json` gains the vectors of another dispatcher's key.
+- **The doorbell is only a doorbell** (the body of #316, no job data) and goes to every webhook dispatcher that matches (workspace, every label, a ready harness, the minimum
+  base). The claim decides: first wins, the others get `204`. The state of each (job, dispatcher) pair is a row of its own (`job_rings`, the columns of `job_dispatches`): one row
+  per job could not say that one dispatcher is full and another failed. The platform's `job_dispatches` is untouched.
+- **`busy` is a known reason of `200 ignored`.** The row rests for the period of the cron (`BUSY_REST_MS`, 2 hours); it is rung again by an event and by the sweep. It counts as "waiting"
+  (`WAITING_DISPATCH_CODES`), so the platform's `sendWaiting` asks a hosted Dispatcher that said it too. The hosted Dispatcher still answers a full pool with `429` and `Retry-After`.
+- **Events, bounded:** an enqueue, a job that a lapsed lease (or a revoked runner, or a holder giving a turn back before it started) put back in the queue (`onRequeued`: the job itself
+  on every dispatcher that can take it, then its group), and the end of any claim (`onClaimsEnded`: a result, a failure, a cancel, a lapsed lease that fails the job, a timeout) ring the
+  waiting jobs of the group (the labels the ended job required and the labels of the runner that held it). At most 20 pairs, no pair twice within 9 seconds, a dispatcher that is full or
+  unreachable once per reaction, and a dispatcher whose last call ended in a network error or a timeout is not asked again for a minute, for any job (remembered in `job_rings`, so it
+  holds across runs and instances). **With more than 20 matching dispatchers, the first 20 in the order of the query (oldest job, then runner id) are rung first; this is by design:**
+  the bell is a nudge, the others hear of the job by their own claim, a later event or the sweep, and the claim decides who gets it.
+  The sweep (every 2 hours; the comments that said once a minute are fixed) stays the safety net.
+- **The address is checked twice, and loopback is for the fakes only.** The announced address must be https to a public host (no private, loopback, link-local, reserved or non-global IPv6
+  address, in any spelling; no `.internal` or dotless name; a trailing dot is no way round). A name that looks public can still resolve to the app's own network, so every connection to
+  a customer's dispatcher (the doorbell and the stop call) resolves the name once and refuses it when any address is internal, and connects to an address that was checked (an undici agent with
+  its own `lookup`): no gap for a DNS rebinding. Loopback and plain http are accepted only where `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` is set (the fakes and the E2E), never by default and never in
+  production. The platform's own `RUNNER_WEBHOOK_URL` is the operator's setting and is called as before.
+- **Stop** goes to the webhook dispatcher that holds the job (`jobs.runner_id`), signed with its own secret; a polling dispatcher learns from its worker ending.
+- **Only with the dispatch webhook on** (`RUNNER_DISPATCH=webhook`, hosted): in poll mode the app makes no outgoing call.
+- **Not done here:** the hosted Dispatcher still claims by the `jobId` of the doorbell and still answers a full pool with `429`; a UI to show the secret once and to rotate it.
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.
@@ -76,4 +105,4 @@ subscription login through a door.
 
 ## 7. Out of scope
 
-The delivery, the harness manifest, the local Dispatcher without job secrets and everything of M2 and M3: each is its own issue of epic #969.
+The harness manifest, the local Dispatcher without job secrets and everything of M2 and M3: each is its own issue of epic #969.

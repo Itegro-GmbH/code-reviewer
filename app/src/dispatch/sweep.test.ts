@@ -811,3 +811,67 @@ describe("the queued instructions of the Implementer in a run of the sweep (#841
     expect(t.cleanup).toHaveBeenCalledOnce();
   });
 });
+
+describe("the doorbell to the webhook dispatchers of customers in a run of the sweep (#972)", () => {
+  function sweepWith(
+    options: { capabilities?: CapabilitySet; withPlatform?: boolean } = {},
+  ) {
+    const reviveStopped = vi.fn(async () => 2);
+    const ringDue = vi.fn(async () => ({ rung: 3 }));
+    const ringsRevive = vi.fn(async () => 1);
+    const sendDue = vi.fn(async () => ({ sent: 4 }));
+    const error = vi.fn();
+    const sweep = createDispatchSweep({
+      now: () => new Date("2026-11-10T12:30:00.000Z"),
+      queue: {
+        expireStaleJobs: async () => expiry,
+        failUndispatched: async () => 0,
+        countRunning: async () => 0,
+      },
+      dispatches: { reviveStopped },
+      ...(options.withPlatform === false ? {} : { dispatch: { sendDue } }),
+      rings: { ringDue, reviveStopped: ringsRevive },
+      meta: { get: async () => "999999999", set: async () => undefined },
+      cleanup: async () => cleaned,
+      settings: { giveUpMs: null, maxRunning: null },
+      ...(options.capabilities === undefined
+        ? {}
+        : { capabilities: options.capabilities }),
+      log: { info: vi.fn(), error },
+    });
+    return { sweep, reviveStopped, ringDue, ringsRevive, sendDue, error };
+  }
+
+  // #972-T03
+  it("rings the pairs that are due and looks again at the pairs a dispatcher stopped, with the steps of the platform's dispatcher", async () => {
+    const t = sweepWith();
+
+    const report = await t.sweep.run();
+
+    expect(t.ringsRevive).toHaveBeenCalledOnce();
+    expect(t.ringDue).toHaveBeenCalledOnce();
+    expect(report).toMatchObject({ revived: 3, sent: 7, failedSteps: [] });
+  });
+
+  it("rings when the platform's dispatcher is off: the customers' delivery does not depend on it", async () => {
+    const t = sweepWith({ withPlatform: false });
+
+    const report = await t.sweep.run();
+
+    expect(t.sendDue).not.toHaveBeenCalled();
+    expect(t.reviveStopped).not.toHaveBeenCalled();
+    expect(report).toMatchObject({ revived: 1, sent: 3 });
+  });
+
+  it("rings nothing in a deployment without the Implementer: only a runner environment's turn goes to a customer's dispatcher", async () => {
+    const t = sweepWith({
+      capabilities: createCapabilitySet(["review", "billing"]),
+    });
+
+    await t.sweep.run();
+
+    expect(t.ringDue).not.toHaveBeenCalled();
+    expect(t.ringsRevive).not.toHaveBeenCalled();
+    expect(t.sendDue).toHaveBeenCalledOnce();
+  });
+});

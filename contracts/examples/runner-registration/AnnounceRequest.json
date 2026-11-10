@@ -2,8 +2,19 @@
   "labels": ["linux", "gpu"],
   "baseVersion": "1.0.1",
   "manifest": {
-    "harnesses": { "opencode": { "version": "1.19.0", "ready": true } },
+    "harnesses": {
+      "opencode": {
+        "version": "1.19.0",
+        "ready": true
+      }
+    },
     "capabilities": []
   },
-  "limits": { "parallelRuns": 1 }
+  "limits": {
+    "parallelRuns": 1
+  },
+  "delivery": {
+    "mode": "webhook",
+    "url": "https://dispatcher.example.com/dispatch"
+  }
 }

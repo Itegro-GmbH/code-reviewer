@@ -26,6 +26,7 @@ import { CREDENTIAL_PROVIDER_ID } from "../auth/session-user.ts";
 import { formatTimestamp } from "../db/codecs.ts";
 import { createJobClaimedKeysRepository } from "../db/repositories/job-claimed-keys-repository.ts";
 import { createJobDispatchesRepository } from "../db/repositories/job-dispatches-repository.ts";
+import { createRunnerDispatchesRepository } from "../db/repositories/runner-dispatches-repository.ts";
 import { createPlanHandoffRedeemRepository } from "../db/repositories/plan-handoff-redeem-repository.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import type { Database } from "../db/schema.ts";
@@ -199,10 +200,15 @@ export async function cleanUpExpiredRows(
     db,
     now,
   ).deleteFinishedBefore(new Date(now().getTime() - JOB_CLAIMED_KEY_KEEP_MS));
-  const jobDispatches = await createJobDispatchesRepository(
-    db,
-    now,
-  ).deleteFinishedBefore(new Date(now().getTime() - JOB_DISPATCH_KEEP_MS));
+  const dispatchCutoff = new Date(now().getTime() - JOB_DISPATCH_KEEP_MS);
+  const jobDispatches =
+    (await createJobDispatchesRepository(db, now).deleteFinishedBefore(
+      dispatchCutoff,
+    )) +
+    // #972: the rows of the doorbells to customers' webhook dispatchers are kept as long.
+    (await createRunnerDispatchesRepository(db, now).deleteFinishedBefore(
+      dispatchCutoff,
+    ));
   return {
     rateLimits,
     unverifiedAccounts,

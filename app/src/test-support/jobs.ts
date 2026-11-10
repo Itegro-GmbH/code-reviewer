@@ -75,6 +75,8 @@ export function createTestQueue(
     onUnknownCostSettled?: RunnerJobsRepositoryOptions["onUnknownCostSettled"];
     /** #487: called with the jobs whose running claim a call ended, after the transaction committed. */
     onClaimsEnded?: RunnerJobsRepositoryOptions["onClaimsEnded"];
+    /** #972: called with the jobs a lapsed lease put back in the queue, after the transaction committed. */
+    onRequeued?: RunnerJobsRepositoryOptions["onRequeued"];
   } = {},
 ): TestQueue {
   return {
@@ -145,6 +147,8 @@ export async function createJobQueueFixture(
     onUnknownCostSettled?: RunnerJobsRepositoryOptions["onUnknownCostSettled"];
     /** #487: called with the jobs whose running claim a call ended, after the transaction committed. */
     onClaimsEnded?: RunnerJobsRepositoryOptions["onClaimsEnded"];
+    /** #972: called with the jobs a lapsed lease put back in the queue, after the transaction committed. */
+    onRequeued?: RunnerJobsRepositoryOptions["onRequeued"];
   } = {},
 ): Promise<JobQueueFixture> {
   const created = options.database
@@ -206,6 +210,9 @@ export async function createJobQueueFixture(
     ...(options.onClaimsEnded === undefined
       ? {}
       : { onClaimsEnded: options.onClaimsEnded }),
+    ...(options.onRequeued === undefined
+      ? {}
+      : { onRequeued: options.onRequeued }),
     dynamicReviewEnabled:
       options.dynamicReview === true ? allowDynamicReview : undefined,
   });

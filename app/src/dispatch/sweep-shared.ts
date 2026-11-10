@@ -18,7 +18,11 @@ import { getMailSender } from "../mail/shared.ts";
 import { getModelsDevService } from "../models-dev/shared.ts";
 import { getRefusalNoticeService } from "../refusal-notices/shared.ts";
 import { reconcileWorkflowRuns } from "../workflow-runs/shared.ts";
-import { DispatchConfigError, getDispatchService } from "./shared.ts";
+import {
+  DispatchConfigError,
+  getDispatchService,
+  getRingService,
+} from "./shared.ts";
 import { createDispatchSweep, type DispatchSweep } from "./sweep.ts";
 import { loadSweepSettings } from "./sweep-settings.ts";
 
@@ -42,10 +46,18 @@ export function getDispatchSweep(
       `[dispatch] ${error.code}: the sweep sends nothing until the dispatch settings are fixed.`,
     );
   }
+  // #972: the customers' webhook dispatchers; absent in poll mode and for a bad setting (reported above).
+  let rings: ReturnType<typeof getRingService>;
+  try {
+    rings = getRingService(env);
+  } catch (error) {
+    if (!(error instanceof DispatchConfigError)) throw error;
+  }
   return createDispatchSweep({
     queue: getRunnerQueue(),
     dispatches: createJobDispatchesRepository(db),
     ...(dispatch === undefined ? {} : { dispatch }),
+    ...(rings === undefined ? {} : { rings }),
     meta: createAppMetaRepository(db),
     // #281: the notices of refused reviews whose post failed.
     notices: getRefusalNoticeService(),

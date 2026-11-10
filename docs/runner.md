@@ -103,8 +103,8 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
   credential too, for a job of its own workspace only (`404 RUNNER_JOB_NOT_FOUND` for any other); the Dispatcher's calls (`vm`, the job state) take the
   shared token alone.
 - **Why hosted and runner never meet.** A hosted job requires `cr:managed`, which no customer's runner has; a runner turn requires labels of a customer,
-  which the platform identity does not have. The dispatch (the signed wake-up call, its rows, its listings and its sweep) skips runner turns, so the
-  Dispatcher is not woken for a job it cannot take.
+  which the platform identity does not have. The platform's dispatch (the signed wake-up call, its rows, its listings and its sweep) skips runner turns, so the
+  Dispatcher is not woken for a job it cannot take; a customer's dispatcher that announced a webhook is rung for them (next section).
 - **Waiting.** A turn that waits for a runner shows **"Waiting for a runner with labels gpu, linux"** on the run page. After `RUNNER_WAIT_DEADLINE_MINUTES`
   (default 30) without a claim it ends **cancelled with `no_runner_available`**, free: no attempt, no credential, no charge, and it is not run again by
   itself. This pass runs wherever the queue expires jobs (every claim, the sweep), so it works in poll mode too. A busy pool of other runners does not
@@ -113,6 +113,56 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
   (a catalog entry) in a runner environment is refused with `IMPLEMENTER_RUNNER_NEEDS_OWN_KEY` (422) before a session, a turn or a job exists; a workspace
   without its own key for the model's provider is refused by the rule every task meets. The claim holds the same line: a runner turn whose selection would
   be managed ends `runner_needs_own_key` before a key or a credential exists.
+
+### Delivery: poll or webhook (#972)
+
+A dispatcher chooses how it learns of a job and **announces** it (`delivery` of `contracts/runner-registration.v1.json`, in `POST /register` and in `PUT /self`).
+The claim stays the only way to a job; the delivery only says what makes a dispatcher claim.
+
+| Delivery | What makes it claim | What the app does |
+|---|---|---|
+| `poll` (the default, also when `delivery` is left out) | its own timer (`POST /claim`, every 30 s for the Factory-Runner) | nothing: it is never rung |
+| `webhook` with its own **https URL** | the **doorbell**, and a slot that frees on its side | rings it |
+
+- **The doorbell is the signed wake-up call of `contracts/dispatch-webhook.v1.json`** (`POST <url>`, body `job.ready`, no job data, no key, no repository data).
+  It goes to **every** webhook dispatcher that matches the job: the same workspace, every label the job requires, a ready harness, not below the minimum base.
+  Whoever claims first wins; the claim of the others finds the job running and answers `204`. A dispatcher claims the **next matching job**, it does not need the
+  `jobId` the doorbell names (the hosted Dispatcher still claims by it for now).
+- **A signing secret for each dispatcher.** The app makes it (`crw_` and 43 characters), **shows it once**, in the answer of the call that made it (`delivery.secret`), and
+  keeps it **encrypted** (the key derives from `APP_SECRET`, bound to the runner row, so it opens nowhere else). The first announcement of `webhook` makes it; announcing
+  the same mode again keeps it and shows nothing; a new address keeps it; `rotateSecret: true` makes a new one (the old one stops working at once); announcing `poll`
+  drops it. `delivery.keyId` names it in `X-Dispatch-Key-Id`. A doorbell signed with another dispatcher's secret is refused by the receiver (`bad_signature`, or
+  `unknown_key` under another key id): `contracts/dispatch-signing-vectors.json` has a vector for each (`otherDispatcher`).
+- **The address is the dispatcher's, so it is checked.** https without credentials to a public host. An address that names a private, loopback, link-local (the metadata
+  service), shared or reserved IP address (in any spelling: decimal, octal, hexadecimal, a trailing dot), an IPv6 address that is no global unicast one (6to4 `2002::/16`,
+  Teredo `2001::/32`, documentation `2001:db8::/32`, the IPv4-mapped and -compatible forms are refused), or a name that only means something inside a network (`.local`,
+  `.internal`, a name with no dot) is refused with `400 RUNNER_REQUEST_INVALID`, field `delivery.url`. That check is of the text; a name that looks public can still
+  resolve to the app's own network, so **every connection to a customer's dispatcher resolves the name once and refuses it when any of its addresses is internal**, and
+  connects to an address that was checked (`src/dispatch/guarded-fetch.ts`, an undici agent with its own `lookup`: no gap for a DNS rebinding). That holds for the doorbell and for
+  `POST /stop`; the platform's own `RUNNER_WEBHOOK_URL` is the operator's setting and is called as before. **Loopback and plain http are for the fakes only**: an app that runs with
+  `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the E2E, local development; **never in production**, where it is unset) also takes an address on this machine, with http. No redirect is ever
+  followed, the body of the answer is read only for the small `ignored` body, and nothing of an answer or of an error is stored or logged.
+- **`RUNNER_WEBHOOK_URL` is the delivery of the platform's own dispatcher.** The hosted Dispatcher has no row of its own: its address and its signing key are the settings the app
+  already had (`RUNNER_WEBHOOK_URL`, `RUNNER_WEBHOOK_SECRET`), so a deployment keeps working with nothing more than those. Its rows are `job_dispatches` as before.
+- **A dispatcher that is full answers `200 ignored` with `reason: "busy"`** and forgets the bell. It claims by itself when a slot frees (a serverless one learns that
+  from `POST /stop`). The app does not ring it again for that job on a timer: **not until an event or the sweep**.
+- **The app rings again on events**, bounded and idempotent in the row of each (job, dispatcher) pair (`job_rings`; the same compare-and-set, back-off and acknowledgement
+  timeout as the platform's `job_dispatches`):
+  - a **job is enqueued** (the hook of the queue, after the response);
+  - a **lapsed lease puts a job back in the queue** (also a revoked runner, or a holder that gives a turn back before it started: `onRequeued`): the job is rung at once on every
+    dispatcher that can take it, the one that held it included, and the group it was in is rung as below. The claim did not end for good, so `onClaimsEnded` does not name it;
+  - the **claim of a job ends** (a result, a failure, a cancel, a lapsed lease that fails the job, a timeout: `onClaimsEnded`): the waiting jobs that the group of that job can take (the labels it
+    required and the labels of the runner that held it) are rung again, those whose last ring was answered "not now" (a busy dispatcher among them). At most 20 pairs a
+    reaction, a pair no sooner than 9 seconds after its last call, and a dispatcher that answers busy or cannot be reached is asked once in a reaction, not once for each of its jobs;
+  - the **sweep**, the rare safety net (the cron runs **every 2 hours**, `app/vercel.json`), and the repair work of the requests that touch the database: the pairs with no row yet or whose row is due.
+- **A dispatcher whose endpoint is down is left alone for a minute.** When the last call to a dispatcher ended in a network error or a timeout (the last attempt of its pairs in
+  `job_rings`, so every instance and every run sees it), none of its pairs is rung for the next minute: a dead endpoint with many jobs is rung once, not once for each. After the
+  minute it is asked again (an answer of any kind, a `503` included, says the endpoint is up).
+- **With more than 20 matching dispatchers, the first 20 are rung first.** A reaction rings at most 20 pairs, oldest job first and, for one job, the dispatchers in the order of their
+  ids; the others hear of it by their own claim, by a later event or by the sweep. This is by design: the bell is a nudge, the claim decides.
+- **`POST /stop` goes to the webhook dispatcher that holds the job** (the runner of its claim), signed with its own secret, when the claim ends. A polling dispatcher learns it
+  from its worker ending and from the job state call.
+- **Only while the deployment runs the dispatch webhook** (`RUNNER_DISPATCH=webhook`, the hosted one). In poll mode the app makes no outgoing call, so a webhook delivery is stored but never rung.
 
 ### Resume on customer runners (#879)
 

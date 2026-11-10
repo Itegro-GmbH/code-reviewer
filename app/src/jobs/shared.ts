@@ -14,6 +14,8 @@ import {
 import {
   dispatchHook,
   runAfterResponse,
+  ringEndedClaims,
+  ringRequeuedJobs,
   stopEndedClaims,
 } from "../dispatch/shared.ts";
 import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
@@ -114,11 +116,18 @@ function createRunnerQueueOfTheServer(): RunnerQueue {
     // #493: and, where billing is on, the wall clock of a job that ran on a runner is recorded (no VM to measure).
     onClaimsEnded: (jobIds) => {
       stopEndedClaims(jobIds);
+      // #972: a slot freed in the label groups of these jobs: the waiting jobs those groups can take are rung again.
+      ringEndedClaims(jobIds);
       // #790: the write tokens of an ended turn of the Implementer, however it ended (a result, the reaper, a stop, the timeout).
       revokeTokensOfEndedClaims(jobIds);
       recordWallClocks(jobIds);
       // #506: the settlement of these jobs may have taken a balance below the threshold; the mail goes out after the response.
       deliverBalanceMails();
+    },
+    // #972: a lapsed lease put jobs back in the queue; their claim did not end for good (`onClaimsEnded` does not name them), but a webhook
+    // dispatcher is told that they wait again: the doorbell rings them and their label groups.
+    onRequeued: (jobIds) => {
+      ringRequeuedJobs(jobIds);
     },
     // #277: a managed cost limit next to the own key is read by nothing; say so once, with the id of the workspace only.
     onIgnoredCostLimit: (workspaceId) => {

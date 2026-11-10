@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // One run of the cron sweep of a hosted deployment (#328). In a serverless deployment nothing polls and no
-// process lives long enough to hold a timer, so the clock is this run, called once a minute by the platform's
-// cron (src/cron/dispatch-sweep.ts, which also makes sure two runs never overlap). Per run, in this order:
+// process lives long enough to hold a timer, so the clock is this run, called by the platform's cron every 2 hours
+// (`app/vercel.json`; since #395 it is the safety net, the normal flow is the events of src/dispatch/job-ended.ts and the
+// hook of the enqueue; src/cron/dispatch-sweep.ts also makes sure two runs never overlap). Per run, in this order:
 //
 //  1. `expire`: lapsed leases put back in the queue (or failed on the last attempt), jobs past the hard limit
 //     failed with `timeout`: what a claim does first, for a deployment in which nobody claims often.
@@ -47,6 +48,7 @@ import type { ExpiryReport } from "../db/repositories/runner-jobs-repository.ts"
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import type { CleanupResult } from "../maintenance/cleanup.ts";
 import type { RefreshOutcome } from "../models-dev/service.ts";
+import type { RingService } from "./rings.ts";
 import { DEFAULT_SEND_LIMIT, type DispatchService } from "./service.ts";
 
 /** How long a stopped dispatch rests before the Dispatcher is asked about it again. */
@@ -126,6 +128,12 @@ export type SweepDependencies = {
   dispatches: Pick<JobDispatchesRepository, "reviveStopped">;
   /** Absent in poll mode: nothing is sent and no row is revived. */
   dispatch?: Pick<DispatchService, "sendDue">;
+  /**
+   * #972: the doorbell to the webhook dispatchers of customers, for the turns of runner environments (the Implementer). Absent in poll mode.
+   * It shares the steps `revive` and `send` with the platform's dispatcher: a pair that a dispatcher stopped is looked at again after the
+   * same time, and the pairs that are due are rung. Not subject to the pool cap: that is the platform's own VMs.
+   */
+  rings?: Pick<RingService, "ringDue" | "reviveStopped">;
   meta: Pick<AppMetaRepository, "get" | "set">;
   cleanup: () => Promise<CleanupResult>;
   /** #281: tries the notices of refused reviews that are due again. Left out, none is tried. */
@@ -206,23 +214,31 @@ export function createDispatchSweep(deps: SweepDependencies): DispatchSweep {
         report.givenUp = await deps.queue.failUndispatched(giveUpMs);
       });
     const dispatch = review ? deps.dispatch : undefined;
-    if (dispatch !== undefined) {
+    const rings = has("implementer") ? deps.rings : undefined;
+    if (dispatch !== undefined || rings !== undefined) {
       await step("revive", async () => {
         const at = now();
-        report.revived = await deps.dispatches.reviveStopped(
-          new Date(at.getTime() - STOPPED_REVIVE_MS),
-          at,
-        );
+        const stoppedBefore = new Date(at.getTime() - STOPPED_REVIVE_MS);
+        if (dispatch !== undefined)
+          report.revived = await deps.dispatches.reviveStopped(
+            stoppedBefore,
+            at,
+          );
+        if (rings !== undefined)
+          report.revived += await rings.reviveStopped(stoppedBefore, at);
       });
       await step("send", async () => {
-        const free =
-          maxRunning === null
-            ? DEFAULT_SEND_LIMIT
-            : Math.min(
-                DEFAULT_SEND_LIMIT,
-                maxRunning - (await deps.queue.countRunning()),
-              );
-        if (free > 0) report.sent = (await dispatch.sendDue(free)).sent;
+        if (dispatch !== undefined) {
+          const free =
+            maxRunning === null
+              ? DEFAULT_SEND_LIMIT
+              : Math.min(
+                  DEFAULT_SEND_LIMIT,
+                  maxRunning - (await deps.queue.countRunning()),
+                );
+          if (free > 0) report.sent = (await dispatch.sendDue(free)).sent;
+        }
+        if (rings !== undefined) report.sent += (await rings.ringDue()).rung;
       });
     }
     const notices = review ? deps.notices : undefined;

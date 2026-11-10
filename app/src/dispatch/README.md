@@ -7,7 +7,7 @@ starts a Worker. This folder is the sending side (#326). The receiving side is t
 `contracts/dispatch-signing-vectors.json`, which both ends are tested against.
 
 **Off by default.** `RUNNER_DISPATCH` is `poll` unless set to `webhook`. In poll mode there is no hook, no row
-in `job_dispatches` and no HTTP: the app behaves as it did before this folder existed (runners poll).
+in `job_dispatches` or `job_rings` and no HTTP: the app behaves as it did before this folder existed (runners poll).
 
 ## Settings
 
@@ -76,14 +76,15 @@ written, the job is still queued, and `sendDue` finds queued, due jobs **without
 
 ## What an answer means (`outcome.ts`)
 
-| Answer                                                                         | Stored                  | Next                                                                                                                                                                       |
-| ------------------------------------------------------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `202`                                                                          | `acked`, `acked_at`     | Looked at again after the **acknowledgement timeout** (2 minutes); sent again only if the job is still queued then (the claim failed, or the Worker launch was given back) |
-| `200 ignored`, `not_claimable` (or any other reason of the right form)         | `pending`               | Again after the acknowledgement timeout (not due, running, pool cap reached, ...)                                                                                          |
-| `200 ignored`, `not_capable`                                                   | `stopped`               | Not by the send itself: the Dispatcher cannot run that review kind. The sweep asks again, at its next run ("The cron sweep", step 3)                                       |
-| `429`, `503`                                                                   | `pending`, failures + 1 | The longer of the schedule and `Retry-After` (seconds or HTTP date, at most 1 hour). Only the status and `Retry-After` are read; the body is dropped                       |
-| other `5xx`, timeout, no connection                                            | `pending`, failures + 1 | 10 s, 30 s, 2 min, 5 min, then 15 min                                                                                                                                      |
-| any other status (`4xx`, a redirect, an unexpected `2xx`, an unreadable `200`) | `pending`, failures + 1 | **30 minutes**, and an error log line `DISPATCH_REJECTED` (a wrong URL or a wrong secret looks like this)                                                                  |
+| Answer                                                                         | Stored                  | Next                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------ | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `202`                                                                          | `acked`, `acked_at`     | Looked at again after the **acknowledgement timeout** (2 minutes); sent again only if the job is still queued then (the claim failed, or the Worker launch was given back)                                                                                                                                                               |
+| `200 ignored`, `not_claimable` (or any other reason of the right form)         | `pending`               | Again after the acknowledgement timeout (not due, running, pool cap reached, ...)                                                                                                                                                                                                                                                        |
+| `200 ignored`, `busy` (#972)                                                   | `pending`               | **Not by a timer**: the Dispatcher is full, forgets the bell and claims by itself when a slot frees. Rested for `BUSY_REST_MS` (2 hours, the period of the cron); a job that ends in its group rings it again at once (`WAITING_DISPATCH_CODES`), and the sweep is the safety net. Nothing is logged: a full Dispatcher is not a failure |
+| `200 ignored`, `not_capable`                                                   | `stopped`               | Not by the send itself: the Dispatcher cannot run that review kind. The sweep asks again, at its next run ("The cron sweep", step 3)                                                                                                                                                                                                     |
+| `429`, `503`                                                                   | `pending`, failures + 1 | The longer of the schedule and `Retry-After` (seconds or HTTP date, at most 1 hour). Only the status and `Retry-After` are read; the body is dropped                                                                                                                                                                                     |
+| other `5xx`, timeout, no connection                                            | `pending`, failures + 1 | 10 s, 30 s, 2 min, 5 min, then 15 min                                                                                                                                                                                                                                                                                                    |
+| any other status (`4xx`, a redirect, an unexpected `2xx`, an unreadable `200`) | `pending`, failures + 1 | **30 minutes**, and an error log line `DISPATCH_REJECTED` (a wrong URL or a wrong secret looks like this)                                                                                                                                                                                                                                |
 
 `last_status` and `last_code` (`DISPATCH_RESULT_CODES`) keep the last answer for support. The failures count resets
 on any answer that is not a failure.
@@ -246,6 +247,42 @@ awaits it, throws from it or is changed by it. A failure is best effort:
 
 One line per job and call, `[dispatch] <CODE> job=<id> [status=<n>]`, never the URL, a key, a header or the text of an answer or
 an error. At most about 25 seconds a job (two pauses of up to 5 seconds and three calls of 5 seconds), five jobs at a time.
+
+## The doorbell to customers' dispatchers (#972)
+
+A customer's dispatcher that announced `delivery: webhook` (`src/runner-identity/delivery.ts`, `contracts/runner-registration.v1.json`) is rung with the same signed
+wake-up call as the platform's own, but with **its own** signing secret (minted by the app, shown once, kept encrypted in `runners.delivery_secret`) and to its own address.
+The platform's dispatcher keeps `job_dispatches` and its settings (`RUNNER_WEBHOOK_URL`, `RUNNER_WEBHOOK_SECRET`: the seed of its delivery); the customers' pairs
+(job, dispatcher) are in `job_rings`, with the same columns, compare-and-set, back-off and acknowledgement timeout.
+
+| File                                              | Role                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rings.ts`                                        | `createRingService`: `onEnqueued` (the hook of the queue), `ringRequeued` (a lapsed lease put these jobs back in the queue), `ringGroupsOf` (the claims of these jobs ended), `ringDue` (the sweep and the repair work), `reviveStopped`                                |
+| `guarded-fetch.ts`                                | `customerDeliveryFetch()`: the `fetch` of every call to a customer's dispatcher (doorbell and stop): an undici agent whose `lookup` refuses a name when any address it resolves to is internal (`RUNNER_DELIVERY_ALLOW_LOOPBACK=1` lets loopback through, nothing else) |
+| `db/repositories/runner-dispatches-repository.ts` | the rows of `job_rings` and the join that finds the pairs: a queued, due turn of a runner environment, a runner of the job's workspace that announced a webhook and has every label the job requires, not revoked, and no row yet or a due one that is not stopped      |
+| `shared.ts`                                       | `getRingService()` (none in poll mode), `ringEndedClaims(jobIds)` (after the response, never throws) and the customer's stop target                                                                                                                                     |
+| `stop.ts`                                         | `customerTarget`: `POST /stop` to the dispatcher that holds the job, with its own key                                                                                                                                                                                   |
+
+- **Who is rung.** Every dispatcher that matches: the same workspace, every label of the job, OpenCode ready and the job's harness ready, not below the minimum base. One that
+  cannot run the job is not asked: its pair is stored `stopped` and looked at again by the sweep after `STOPPED_REVIVE_MS`. A dispatcher that polls is never rung and has no row.
+- **The first claim wins.** The doorbell names the job and carries no data; the dispatcher claims the next matching job and the claim of every other dispatcher answers `204`.
+- **The connection is checked, not only the text.** The announced address is checked when it is announced (`delivery.ts`: https, a public host, no internal name or address, a trailing dot is
+  no way round), but a name that looks public can resolve to the app's own network. So the doorbell and the stop call go through `guarded-fetch.ts`: the name is resolved once, every
+  address goes through the same rule, and the socket connects to a checked address (no rebinding gap). An address literal stored earlier is judged before any connection. The platform's
+  own `RUNNER_WEBHOOK_URL` does not go through it. Loopback and plain http are accepted only with `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the fakes, the E2E; never in production).
+- **A dead endpoint is rung once.** A dispatcher whose last call ended in `network_error` or `timeout` is not rung for `ENDPOINT_DOWN_MS` (one minute), for any job, in any run: the memory is the
+  most recent attempt of its pairs in `job_rings` (`endpointFailedSince`). With more than 20 matching dispatchers, the first 20 in the order of the query are rung first (by design).
+- **When.** On enqueue; when a lapsed lease (or a revoked runner, or a holder giving a turn back before it started) put a job back in the queue (`onRequeued`: the job on every dispatcher that
+  can take it, the pair that held it included, then its group; the same bound of 20 pairs); when the claim of a job ends (`onClaimsEnded`, the group is the labels the job required and the labels of the runner that held it: the pairs of waiting
+  jobs whose last answer was "not now" are rung again, at most 20, no pair sooner than 9 seconds after its last call, a dispatcher that answers busy or cannot be reached once
+  per reaction); in the sweep and the repair work (`minAgeMs` leaves a job the request that queued it is still sending). Customers' pairs are not counted against the pool cap:
+  that is the platform's own VMs.
+- **No inline retry.** A pair that failed (a `5xx`, a timeout, `429`, `503`) is not retried inside the request: the schedule of the row (10 s, 30 s, 2 min, 5 min, 15 min, or
+  `Retry-After`) and the next sender (the repair work of a later request, the sweep, an event) do it.
+- **Logs.** `[dispatch] RING_SEND_FAILED job=<id> runner=<id> code=<code> status=<n> failures=<n> retry_at=<time>`, `RING_REJECTED` (an answer the contract does not describe, or a
+  secret that cannot be read: the dispatcher has to announce its delivery again) and `RING_FAILED`. Never the address, the key id, the secret or what an answer said.
+- **Stop.** The same stop call as for the platform (`POST <url with its last path segment dispatch replaced by stop>`), to the webhook dispatcher whose runner holds the job
+  (`jobs.runner_id`), when the claim ends. It needs no acknowledged wake-up: a dispatcher that claimed by itself is stopped as well. The VMs it names are its own and not billed here.
 
 ## Rotating the key
 
