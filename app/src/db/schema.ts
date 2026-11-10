@@ -267,6 +267,16 @@ export interface JobsTable {
     string | null | undefined,
     string | null
   >;
+  /**
+   * #971: the labels a dispatcher must all have to take the job, one on each line (`labelsToText`): `cr:managed` and a size label for a
+   * hosted job, the labels of the environment for a turn of a runner environment. Null for a job written before the labels: the claim
+   * derives them (`required_labels` of `jobs-claim.ts`).
+   */
+  required_labels: ColumnType<
+    string | null,
+    string | null | undefined,
+    string | null
+  >;
   claimed_at: string | null;
   heartbeat_at: string | null;
   lease_expires_at: string | null;

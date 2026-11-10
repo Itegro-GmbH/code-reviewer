@@ -74,7 +74,7 @@
       }
     },
     "RunnerAnnouncement": {
-      "description": "What a runner says about itself. The labels are all the routing reads (together with the ready harnesses and the version): a job runs on a runner that has every label its environment asks for.",
+      "description": "What a runner says about itself. The labels are all the routing reads (together with the ready harnesses and the version): a job runs on a runner that has every label it requires, which is every label its environment asks for. #971: the namespace `cr:` is reserved for the platform identity (`cr:managed`, `cr:size-<vCPUs>`). A runner on a customer's machine that announces such a label, in `POST /register` or in `PUT /self`, is refused with 422 `RUNNER_LABEL_RESERVED` of `contracts/runner-api.v1.json` (`fields` names each label by position, field code `reserved`) and nothing is stored; a body that is malformed in another way keeps its 400 `RUNNER_REQUEST_INVALID`. The check is by identity, not by spelling: no runner credential is the platform.",
       "type": "object",
       "required": ["labels", "baseVersion"],
       "properties": {

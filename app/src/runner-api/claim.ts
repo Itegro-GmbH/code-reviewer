@@ -112,6 +112,12 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
+import {
+  DEFAULT_IMPLEMENTER_VCPUS,
+  REVIEW_VCPUS,
+  sizeLabel,
+  sizeLabelOf,
+} from "../runner-identity/labels.ts";
 
 /**
  * The codes a job gets when it ends at claim time. Branch on these, not on messages. The queue's
@@ -1805,6 +1811,17 @@ async function prepare(
           reviewKind: job.reviewKind,
           leaseExpiresAt: job.leaseExpiresAt,
           heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+          // #971: the size label the job requires (`cr:size-<vCPUs>`), the one the Dispatcher checks; the VM size stays `vcpus`. Every job this answer
+          // is for is a hosted one (a customer's runner never takes the split), so it always has one: the stored label, or for a job written
+          // before the labels the size its kind runs on.
+          sizeLabel:
+            sizeLabelOf(job.requiredLabels) ??
+            sizeLabel(
+              checked.implementer === null
+                ? REVIEW_VCPUS
+                : (checked.implementer.environment?.vcpus ??
+                    DEFAULT_IMPLEMENTER_VCPUS),
+            ),
           // #818: the size the turn's environment asks for, for the Dispatcher that launches the VM before any Worker exists. Only a
           // turn that has an environment names one, and nothing else of the environment is in this answer.
           ...(checked.implementer?.environment == null

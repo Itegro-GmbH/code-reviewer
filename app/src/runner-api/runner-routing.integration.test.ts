@@ -17,8 +17,11 @@ import {
   type NativeCostService,
 } from "../native-cost/service.ts";
 import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
-import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
-import type { ClaimResponse } from "./contract.ts";
+import {
+  startRunnerApiHarness,
+  TEST_LLM_API_KEY,
+} from "../test-support/runner-api-harness.ts";
+import type { ClaimResponse, SplitClaimResponse } from "./contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerFleetService } from "../runner-fleet/service.ts";
@@ -763,5 +766,336 @@ describe("what a customer's runner never gets (#854)", () => {
     expect(await h.queue.get(operatorTurn.job.id)).toMatchObject({
       status: "queued",
     });
+  });
+});
+
+// #971: one rule for every Dispatcher. A job requires labels (`jobs.required_labels`) and a caller takes it only when it has all of them: the
+// platform identity (the shared token) has the reserved labels `cr:managed` and `cr:size-<vCPUs>`, a customer's runner its own. The two
+// special rules of #854 above are this rule: their tests are unchanged and still hold.
+describe("the labels a job requires (#971)", () => {
+  /** The harness of the tests above, with the key of the default provider as well, so a hosted review can be claimed. */
+  async function startWithReviews() {
+    const h = await start();
+    await h.setLlmKey(TEST_LLM_API_KEY);
+    return h;
+  }
+
+  const requiredOf = async (
+    h: Awaited<ReturnType<typeof start>>,
+    jobId: string,
+  ) =>
+    (
+      await h.db
+        .selectFrom("jobs")
+        .select("required_labels")
+        .where("id", "=", jobId)
+        .executeTakeFirstOrThrow()
+    ).required_labels;
+
+  // #971-T02
+  it("enqueues a hosted review with cr:managed and its size, and a turn with the size of its environment, or the labels of a runner environment", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const standard = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const sized = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      environment: {
+        id: "env-big",
+        name: "Big",
+        vcpus: 4,
+        setupScript: "",
+      },
+    });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    expect(await requiredOf(h, review.job.id)).toBe("cr:managed\ncr:size-1");
+    expect(await requiredOf(h, standard.job.id)).toBe("cr:managed\ncr:size-2");
+    expect(await requiredOf(h, sized.job.id)).toBe("cr:managed\ncr:size-4");
+    expect(await requiredOf(h, runnerTurn.job.id)).toBe("gpu\nlinux");
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      requiredLabels: ["cr:managed", "cr:size-1"],
+    });
+  });
+
+  // #971-T03
+  it("hands the platform identity a hosted job without a job id, and a customer's runner never gets it, even with every label that is not cr:", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({
+      labels: ["gpu", "linux", "extra"],
+    });
+    const review = await h.enqueue({ prNumber: 7 });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+
+    for (const jobId of [undefined, review.job.id, hostedTurn.job.id])
+      expect(
+        (
+          await h.claim({
+            ...claimOf(runner.credential),
+            engines: ["pr-agent", "opencode", "implementer"],
+            ...(jobId === undefined ? {} : { jobId }),
+          })
+        ).status,
+      ).toBe(204);
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      status: "queued",
+    });
+
+    const byPlatform = await h.claim({ engines: ["pr-agent"] });
+    expect(byPlatform.status).toBe(200);
+    expect(((await byPlatform.json()) as ClaimResponse).job.id).toBe(
+      review.job.id,
+    );
+    const turnByPlatform = await h.claim(claimOptions());
+    expect(((await turnByPlatform.json()) as ClaimResponse).job.id).toBe(
+      hostedTurn.job.id,
+    );
+  });
+
+  // #971-T03
+  it("keeps the reserved labels out of a customer's runner that stored one before the namespace was reserved", async () => {
+    const h = await startWithReviews();
+    // Registered through the repository, as a runner of the release before was: the door of today would refuse these labels.
+    const old = await h.registerRunner({
+      labels: ["cr:managed", "cr:size-2", "gpu", "linux"],
+    });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+
+    expect((await h.claim(claimOf(old.credential))).status).toBe(204);
+
+    expect(await h.queue.get(hostedTurn.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  // #971-T04
+  it("hands a runner with gpu and linux a turn that requires linux, and a runner with linux only no turn that requires linux and gpu", async () => {
+    const h = await startWithReviews();
+    const both = await h.registerRunner({ labels: ["linux", "gpu"] });
+    const linuxOnly = await h.registerRunner({ labels: ["linux"] });
+    const needsLinux = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-l", name: "Linux", labels: ["linux"] },
+    });
+    const needsBoth = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    // The one with linux only gets the first turn, not the second.
+    const first = await h.claim(claimOf(linuxOnly.credential));
+    expect(((await first.json()) as ClaimResponse).job.id).toBe(
+      needsLinux.job.id,
+    );
+    expect((await h.claim(claimOf(linuxOnly.credential))).status).toBe(204);
+    expect(await h.queue.get(needsBoth.job.id)).toMatchObject({
+      status: "queued",
+    });
+    // The one with both takes the second, without naming it.
+    const second = await h.claim(claimOf(both.credential));
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(
+      needsBoth.job.id,
+    );
+  });
+
+  // #971-T03, #971-T04
+  it("routes a job written before the labels as it was: a runner turn by its environment's labels, any other job to the platform", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "in", [hostedTurn.job.id, runnerTurn.job.id])
+      .execute();
+
+    expect((await h.claim(claimOptions())).status).toBe(200);
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    const taken = await h.claim(claimOf(runner.credential));
+    expect(((await taken.json()) as ClaimResponse).job.id).toBe(
+      runnerTurn.job.id,
+    );
+    expect(await h.queue.get(hostedTurn.job.id)).toMatchObject({
+      status: "running",
+      runnerId: "runner-a",
+    });
+  });
+
+  // #971-T05
+  it("claims by job id as before: the platform gets the hosted job it names, and one that is not its to take stays", async () => {
+    const h = await startWithReviews();
+    const older = await h.enqueue({ prNumber: 7 });
+    const wanted = await h.enqueue({ prNumber: 8 });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    const byId = await h.claimSplit({ jobId: wanted.job.id });
+    expect(byId.status).toBe(200);
+    expect(((await byId.json()) as SplitClaimResponse).job.id).toBe(
+      wanted.job.id,
+    );
+    expect(await h.queue.get(older.job.id)).toMatchObject({ status: "queued" });
+    expect(
+      (
+        await h.claimSplit({
+          engines: ["implementer"],
+          jobId: runnerTurn.job.id,
+        })
+      ).status,
+    ).toBe(204);
+    // Without an id the next claim takes the oldest hosted job.
+    const next = await h.claimSplit();
+    expect(((await next.json()) as SplitClaimResponse).job.id).toBe(
+      older.job.id,
+    );
+  });
+
+  // #971-T06
+  it("names the size label of the job in the claim answer, and the vcpus of an environment as before", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const standard = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const sized = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      environment: { id: "env-big", name: "Big", vcpus: 6, setupScript: "" },
+    });
+    const split = async (jobId: string, engines: string[]) =>
+      (await (
+        await h.claimSplit({
+          engines,
+          features: FEATURES_OF_A_RUNNER,
+          jobId,
+        })
+      ).json()) as SplitClaimResponse;
+
+    const reviewAnswer = await split(review.job.id, ["pr-agent"]);
+    const standardAnswer = await split(standard.job.id, ["implementer"]);
+    const sizedAnswer = await split(sized.job.id, ["implementer"]);
+
+    expect(reviewAnswer.job.sizeLabel).toBe("cr:size-1");
+    expect(reviewAnswer.job).not.toHaveProperty("vcpus");
+    expect(standardAnswer.job.sizeLabel).toBe("cr:size-2");
+    expect(standardAnswer.job).not.toHaveProperty("vcpus");
+    expect(sizedAnswer.job).toMatchObject({
+      sizeLabel: "cr:size-6",
+      vcpus: 6,
+    });
+  });
+
+  // #971-T07
+  it("never hands the platform a runner turn stored with a cr: label, and still hands it to the customer's runner", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    // An environment written before the namespace was reserved: its labels hold `cr:` ones.
+    const stored = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: {
+        id: "env-old",
+        name: "Old",
+        labels: ["cr:managed", "cr:size-8", "gpu", "linux"],
+      },
+    });
+    // The same turn as a row of the release before: no required labels, the environment's labels as stored.
+    const legacy = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "=", legacy.job.id)
+      .execute();
+    await h.db
+      .updateTable("implementer_turns")
+      .set({ environment_labels: "cr:managed\ncr:size-8\ngpu\nlinux" })
+      .where("job_id", "=", legacy.job.id)
+      .execute();
+    // Defence in depth: even a required list that is only the platform's labels never reaches the platform for a runner turn.
+    const reserved = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-r", name: "R", labels: ["linux"] },
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "cr:managed\ncr:size-8" })
+      .where("id", "=", reserved.job.id)
+      .execute();
+
+    expect(await requiredOf(h, stored.job.id)).toBe("gpu\nlinux");
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: legacy.job.id }))
+        .status,
+    ).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: reserved.job.id }))
+        .status,
+    ).toBe(204);
+    for (const turn of [stored, legacy, reserved])
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "queued",
+      });
+
+    const first = await h.claim(claimOf(runner.credential));
+    expect(((await first.json()) as ClaimResponse).job.id).toBe(stored.job.id);
+    const second = await h.claim(claimOf(runner.credential));
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(legacy.job.id);
+  });
+
+  // #971-T08
+  it("hands a job that requires no label to nobody", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const review = await h.enqueue({ prNumber: 7 });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "" })
+      .where("id", "=", review.job.id)
+      .execute();
+
+    expect((await h.claim({ engines: ["pr-agent"] })).status).toBe(204);
+    expect((await h.claimSplit({ jobId: review.job.id })).status).toBe(204);
+    expect(
+      (
+        await h.claim({
+          ...claimOf(runner.credential),
+          engines: ["pr-agent", "opencode", "implementer"],
+        })
+      ).status,
+    ).toBe(204);
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  // #971-T06
+  it("names the size label of a job written before the labels from its kind: 1 for a review, 2 for a turn without an environment", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const turn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "in", [review.job.id, turn.job.id])
+      .execute();
+    const split = async (jobId: string, engines: string[]) =>
+      (await (
+        await h.claimSplit({ engines, features: FEATURES_OF_A_RUNNER, jobId })
+      ).json()) as SplitClaimResponse;
+
+    expect((await split(review.job.id, ["pr-agent"])).job.sizeLabel).toBe(
+      "cr:size-1",
+    );
+    expect((await split(turn.job.id, ["implementer"])).job.sizeLabel).toBe(
+      "cr:size-2",
+    );
   });
 });

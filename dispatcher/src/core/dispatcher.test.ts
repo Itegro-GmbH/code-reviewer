@@ -1120,3 +1120,89 @@ describe("the size of a job (#818)", () => {
     },
   );
 });
+
+describe("the size label of a job (#971)", () => {
+  const buildAll = () =>
+    build(
+      {
+        engines: ["pr-agent", "opencode", "implementer"],
+        kinds: ["diff", "dynamic", "implementer"],
+      },
+      { engines: ["pr-agent", "opencode", "implementer"] },
+    );
+
+  // #971-T06
+  it("leaves the size of a turn that names none of its own to the Launcher's configured one, whatever its label names", async () => {
+    const jobId = app.enqueue({
+      reviewKind: "implementer",
+      sizeLabel: "cr:size-2",
+    });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+    );
+
+    expect(launcher.launches).toHaveLength(1);
+    expect(launcher.launches[0]?.vcpus).toBeUndefined();
+  });
+
+  // #971-T06
+  it("lets the size an environment names win over the label, and starts a review on its own size whatever its label", async () => {
+    const turn = app.enqueue({
+      reviewKind: "implementer",
+      vcpus: 6,
+      sizeLabel: "cr:size-6",
+    });
+    const review = app.enqueue({ reviewKind: "diff", sizeLabel: "cr:size-1" });
+    const { core, launcher } = buildAll();
+
+    await handled(
+      core.handle({
+        appId: "reviewer",
+        jobId: turn,
+        reviewKind: "implementer",
+      }),
+    );
+    await handled(
+      core.handle({ appId: "reviewer", jobId: review, reviewKind: "diff" }),
+    );
+
+    expect(launcher.launches[0]?.vcpus).toBe(6);
+    expect(launcher.launches[1]?.vcpus).toBeUndefined();
+  });
+
+  // #971-T06
+  it("gives a job back unlaunched when its label names a size it does not offer, and starts nothing for it", async () => {
+    const jobId = app.enqueue({
+      reviewKind: "implementer",
+      sizeLabel: "cr:size-3",
+    });
+    const { core, launcher, logger } = buildAll();
+
+    const result = await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "implementer" }),
+    );
+
+    expect(result).toStrictEqual({ outcome: "not_capable" });
+    expect(launcher.launches).toHaveLength(0);
+    expect(logger.text()).toContain("size_not_offered");
+    // It was claimed and given back at once (the App counts the attempt), so no other Dispatcher is kept from the job.
+    expect(
+      app.requests().filter((request) => request.route === "release"),
+    ).toStrictEqual([{ method: "POST", route: "release", jobId, status: 200 }]);
+  });
+
+  // #971-T06
+  it("treats a label that is no size label as an answer it cannot read: nothing is launched", async () => {
+    const jobId = app.enqueue({ reviewKind: "diff", sizeLabel: "gpu" });
+    const { core, launcher } = buildAll();
+
+    const result = await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+    );
+
+    expect(result.outcome).not.toBe("started");
+    expect(launcher.launches).toHaveLength(0);
+  });
+});

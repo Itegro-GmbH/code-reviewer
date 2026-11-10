@@ -36,7 +36,7 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
   carries the token once, in `token`, with `expiresAt`; the page shows it as the command `factory-runner register --token ...` to copy. The app keeps a
   SHA-256 of it. It is valid for one hour and works once: the exchange is a single conditional update, so two runners racing for one token cannot both win.
   An unknown, a used and an expired token are the same answer, `401 RUNNER_REGISTRATION_TOKEN_INVALID`.
-- **Exchange.** The runner says its name (1 to 80 characters, one line), its **labels** (at most 20, lower case, `[a-z0-9][a-z0-9._:-]{0,39}`), the **version of
+- **Exchange.** The runner says its name (1 to 80 characters, one line), its **labels** (at most 20, lower case, `[a-z0-9][a-z0-9._:-]{0,39}`; **not** in the namespace `cr:`, which is the platform's, see "Routing"), the **version of
   its base** (`1.4.0`), its **manifest** and its **limits**. The manifest names the harnesses it announces (`opencode`, or `custom/name`), each with its
   version and whether it is `ready` (installed, logged in, proven by the runner's selftest), and its capabilities such as `agent-docker` (announced only
   when the selftest ran a container in a Docker inside Sysbox, see S2 below). The limits (`cpus`, `memoryMb`, `diskGb`, `parallelRuns`) are informational:
@@ -62,11 +62,38 @@ three**. A runner environment names at least one and at most twenty labels (lowe
 rule in its body is refused with the field's name, not silently dropped. Size, script and network are the runner's own business (decision 8). Hosted
 environments change in no way; a body without a `kind` is hosted, as every body was before.
 
+A label in the namespace `cr:` is refused in an environment (field `labels`, code `invalid`): a turn that required `cr:managed` would be the platform
+Dispatcher's to take.
+
 The turn copies the kind and the labels with the rest of the environment (`implementer_turns.environment_kind`, `environment_labels`), so editing or
 deleting the environment touches no turn, and the claim routes by the turn's own row.
 
 ### Routing
 
+One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
+and a dispatcher takes it only when it has all of them.** There is no special case for hosted jobs or for runner turns; the two that existed
+(a hosted job never goes to a customer's runner, a runner turn never goes to the Dispatcher) are this rule.
+
+| Who claims | Its labels | Takes |
+|---|---|---|
+| The **platform identity**: the shared `RUNNER_TOKEN` (the hosted Dispatcher, the poll mode) | `cr:managed` and one `cr:size-<vCPUs>` for each size of `contracts/environment-sizes.v1.json` (1, 2, 4, 6, 8) | The jobs whose labels are all of those: every hosted review and every hosted turn |
+| A **customer's runner** (`crc_` credential) | the labels it announced, never one in `cr:` | The turns of its own workspace whose environment labels it has all of |
+
+- **What a job requires** (`jobs.required_labels`, written when the job is enqueued). A hosted review: `cr:managed` and `cr:size-1`. A hosted turn of the
+  Implementer: `cr:managed` and the size of its environment (`cr:size-2` for a task without one). A turn of a runner environment: the labels of the
+  environment, copied with it. A job written before the column (null) is read as a runner turn requiring the labels of its environment, and any other
+  job as requiring `cr:managed`, so a queued job is routed exactly as before the migration.
+- **The reserved namespace `cr:`.** Only the platform identity carries a `cr:` label, and the identity decides, never the text. A customer's runner that
+  announces one in `POST /register` or `PUT /self` is refused with **`422 RUNNER_LABEL_RESERVED`** (`fields`: each label by position, code `reserved`) and
+  nothing is stored; a malformed body keeps its `400`. A runner that stored such a label before this release is claimed without it: the claim drops the
+  reserved labels of a customer's runner. An environment cannot name one either (see above).
+- **The claim without a job id** returns the oldest due job the caller matches: its labels, its workspace (a customer's runner), the kind its engines run
+  and the harness it announces. With a `jobId` it works as before (the hosted Dispatcher is still woken by id and claims that job), under the same rule:
+  a job the caller does not match is `204`. Business limits stay in the app (the pool cap, `maxRunning`, answers `204`); technical capacity stays with the
+  dispatcher, which claims only with room for the job.
+- **The size in the claim answer.** The answer to a Dispatcher (`SplitClaimResponse`) names the size label the job requires in `sizeLabel`; `vcpus` keeps
+  its value (only for a turn with an environment). The label does not choose the VM size (a turn without an environment starts with the operator's configured size), and the Dispatcher gives a
+  job back unlaunched (`launch_failed`, log code `size_not_offered`) when the label names a size the platform does not offer.
 - **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, announces the harness of the profile
   **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets
   nothing; one below the minimum gets `426 RUNNER_UPDATE_NEEDED`. The runner claims with its credential and takes the engine `implementer` only: not a
@@ -74,9 +101,9 @@ deleting the environment touches no turn, and the claim routes by the turn's own
   Worker gets them), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`, `steps`, and the two snapshot calls below) take the
   credential too, for a job of its own workspace only (`404 RUNNER_JOB_NOT_FOUND` for any other); the Dispatcher's calls (`vm`, the job state) take the
   shared token alone.
-- **Who never does.** A **hosted job never goes to a customer's runner**, and a **runner turn never goes to the Dispatcher or to the shared token**: the
-  claim statement itself excludes the turns of runner environments from every claim that is not a runner's, and the dispatch (the signed wake-up call, its
-  rows, its listings and its sweep) skips them, so the Dispatcher is not woken for a job it cannot take.
+- **Why hosted and runner never meet.** A hosted job requires `cr:managed`, which no customer's runner has; a runner turn requires labels of a customer,
+  which the platform identity does not have. The dispatch (the signed wake-up call, its rows, its listings and its sweep) skips runner turns, so the
+  Dispatcher is not woken for a job it cannot take.
 - **Waiting.** A turn that waits for a runner shows **"Waiting for a runner with labels gpu, linux"** on the run page. After `RUNNER_WAIT_DEADLINE_MINUTES`
   (default 30) without a claim it ends **cancelled with `no_runner_available`**, free: no attempt, no credential, no charge, and it is not run again by
   itself. This pass runs wherever the queue expires jobs (every claim, the sweep), so it works in poll mode too. A busy pool of other runners does not
@@ -157,6 +184,8 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
 
 A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
+
+The environment of a profile or of a step is also refused when a label of its `labels` is in the reserved namespace `cr:` (`invalid`, #971).
 
 ### Known limits and follow-ups
 

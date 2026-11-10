@@ -16,6 +16,7 @@ import {
   LABELS_MAX,
   normalizeLabels,
 } from "../../runner-identity/announcement.ts";
+import { isReservedLabel } from "../../runner-identity/labels.ts";
 
 export type EnvironmentInput =
   | {
@@ -69,7 +70,8 @@ function checkRunnerLabels(
   const labels: string[] = [];
   for (const label of value) {
     const text = typeof label === "string" ? label.trim().toLowerCase() : "";
-    if (!LABEL_PATTERN.test(text)) {
+    // #971: the namespace `cr:` is the platform's. A turn that required `cr:managed` would be the platform Dispatcher's to take.
+    if (!LABEL_PATTERN.test(text) || isReservedLabel(text)) {
       refuse("labels", "invalid");
       return undefined;
     }

@@ -14,6 +14,7 @@ import {
   PLAIN_HOST,
   type NetworkRule,
 } from "../network/rule.ts";
+import { isSizeLabel } from "./size-labels.ts";
 import { CONTRACT_REVIEW_KINDS, type WireReviewKind } from "./types.ts";
 
 /** The features of the App the split needs (`VersionResponse.features`). */
@@ -46,6 +47,12 @@ export type ClaimedJob = {
    * for the kind `implementer` and for no other, and the Launcher accepts only the sizes of the platform.
    */
   vcpus?: number;
+  /**
+   * #971: the size label the job requires (`cr:size-<vCPUs>`). Read from the App's authenticated answer only; absent from the release
+   * before. It is checked, not launched from: the VM size stays `vcpus`, else the Launcher's configuration; a label that names a size the
+   * platform does not offer gives the job back unlaunched.
+   */
+  sizeLabel?: string;
   /**
    * #745, step 7: the environment's rule for the agent's network, for a job of the kind `implementer` (a task without an
    * environment is `off`). Read from the App's authenticated answer only; absent from the release before.
@@ -123,6 +130,8 @@ const splitClaim = z.object({
     heartbeatIntervalSeconds: z.number().int().min(1).max(3600),
     // The contract's range; which sizes are launched is the Launcher's decision (`SANDBOX_VCPUS`).
     vcpus: z.number().int().min(1).max(64).optional(),
+    // #971: spelled `cr:size-<n>`; whether the platform offers that size is the core's decision, which gives the job back.
+    sizeLabel: z.string().refine(isSizeLabel).optional(),
     network: NetworkRuleSchema.optional(),
     modelHost: z.string().max(253).regex(PLAIN_HOST).optional(),
   }),
@@ -138,6 +147,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     reviewKind,
     heartbeatIntervalSeconds,
     vcpus,
+    sizeLabel,
     network,
     modelHost,
   } = parsed.data.job;
@@ -147,6 +157,7 @@ export function parseSplitClaim(body: unknown): ClaimedJob | null {
     reviewKind,
     heartbeatIntervalSeconds,
     ...(vcpus === undefined ? {} : { vcpus }),
+    ...(sizeLabel === undefined ? {} : { sizeLabel }),
     ...(network === undefined ? {} : { network }),
     ...(modelHost === undefined ? {} : { modelHost }),
   };

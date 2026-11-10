@@ -280,6 +280,22 @@ describe("the body of a runner environment (#854)", () => {
     ).toEqual([]);
   });
 
+  // #971-T01
+  it("cannot ask for a label of the platform: a turn that required cr:managed would be the Dispatcher's to take", () => {
+    for (const label of ["cr:managed", "CR:size-2", " cr:anything"]) {
+      const checked = validateEnvironmentInput({
+        kind: "runner",
+        name: "x",
+        labels: ["linux", label],
+      });
+
+      expect(checked).toEqual({
+        ok: false,
+        issues: [{ field: "labels", code: "invalid" }],
+      });
+    }
+  });
+
   // #854-T192
   it("has no size, script or network rule: a body that names one is refused instead of silently dropping it", () => {
     const checked = validateEnvironmentInput({

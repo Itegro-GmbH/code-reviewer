@@ -177,6 +177,16 @@ engine `implementer` and takes the turns of runner environments of its workspace
 for any other); `session` and `resume-session` (#879, below) take it for a job its own runner holds; the Dispatcher's calls (`vm`, the job state) and every other claim take the shared token alone; `version` takes the shared token, the credential of a running claim and (#879) the credential of a live runner. A claim without a runner
 credential never takes a turn of a runner environment (`db/repositories/jobs-claim.ts`).
 
+### Labels: one rule for every caller (#971)
+
+A job requires labels (`jobs.required_labels`, written at enqueue: `cr:managed` and `cr:size-<vCPUs>` for a hosted job, the environment's labels for a turn of a
+runner environment) and a claim takes a job only when its caller has **all** of them: the platform identity (`RUNNER_TOKEN`) has the reserved labels
+(`runner-identity/labels.ts`, `PLATFORM_LABELS`), a customer's runner its own announced labels, never one in the namespace `cr:`. One `where` of `jobs-claim.ts`
+holds this for both, so "a hosted job never goes to a customer's runner" and "a runner turn never goes to the Dispatcher" are not separate rules any more
+(their tests in `runner-routing.integration.test.ts` are unchanged). A customer's runner that announces a `cr:` label is refused at the door with
+`422 RUNNER_LABEL_RESERVED` (`registration.ts`, `register` and `announce`). A claim without `jobId` takes the oldest due job the caller matches; with one it works
+as before, under the same rule. The split answer names the size the job requires in `sizeLabel`. `docs/runner.md`, "Routing"; ADR 0005.
+
 ## The lease token
 
 Every claim response carries a new `leaseToken`; heartbeat and complete must send it in the body.
@@ -578,7 +588,7 @@ A Dispatcher (#316) is woken by the dispatch webhook for one job, claims exactly
 Worker. It cannot count what runs, so the app counts for it. Three additions, all optional on the wire:
 
 - **Claim by id.** `jobId` in the claim body adds `id = :jobId` to the claim SQL (Postgres) and
-  nothing else: the job must be `queued`, due, of a kind the advertised `engines` can run, and its pull
+  nothing else (the label rule of #971 applies to it like to every claim): the job must be `queued`, due, of a kind the advertised `engines` can run, and its pull
   request must have no running job. Anything else (unknown, running, finished, cancelled, superseded, not
   due yet, another kind) is `204`, with no attempt counted and no other job handed out, also when the named
   job ends at claim time (closed pull request, project switched off). Two claims for one id: one wins, the

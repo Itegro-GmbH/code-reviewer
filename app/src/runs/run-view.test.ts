@@ -47,6 +47,7 @@ function job(overrides: Partial<Job> = {}): Job {
     errorCode: null,
     supersededBy: null,
     cancelRequestedAt: null,
+    requiredLabels: null,
     createdAt: "2026-10-10T12:00:00.000Z",
     updatedAt: "2026-10-10T12:01:00.000Z",
     finishedAt: "2026-10-10T12:01:00.000Z",

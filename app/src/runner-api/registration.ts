@@ -32,6 +32,7 @@ import {
   REGISTRATION_TOKEN_PATTERN,
   RUNNER_CREDENTIAL_PATTERN,
 } from "../runner-identity/tokens.ts";
+import { reservedLabelIssues } from "../runner-identity/labels.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 
 /**
@@ -71,6 +72,22 @@ export type RunnerRegistrationApi = {
 
 function fieldErrors(issues: readonly FieldIssue[]): FieldError[] {
   return issues.map((issue) => ({ field: issue.field, code: issue.code }));
+}
+
+/**
+ * #971: the labels of a body that are in the platform's reserved namespace `cr:`, as the 422 answer of the door. Only the platform
+ * identity (the shared token) carries those labels, and nothing in this API is that identity: a customer's runner is refused whatever
+ * the spelling. Asked only for a body that passed the form check, so a malformed body keeps its 400.
+ */
+function reservedLabelsOf(body: unknown): Response | null {
+  const labels =
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>).labels
+      : undefined;
+  const issues = Array.isArray(labels) ? reservedLabelIssues(labels) : [];
+  return issues.length === 0
+    ? null
+    : errorResponse(422, "RUNNER_LABEL_RESERVED", { fields: issues });
 }
 
 export function updateNeededFor(
@@ -139,6 +156,8 @@ export function createRunnerRegistrationApi(
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(issues),
           });
+        const reserved = reservedLabelsOf(fields);
+        if (reserved !== null) return reserved;
 
         const credential = newRunnerCredential();
         const outcome = await deps.credentials.redeem(
@@ -176,6 +195,8 @@ export function createRunnerRegistrationApi(
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(checked.fields),
           });
+        const reserved = reservedLabelsOf(body.value);
+        if (reserved !== null) return reserved;
         const announcement: Announcement = checked.value;
         // A runner revoked between the two statements is the same 401.
         if (!(await deps.credentials.announce(who.runner.id, announcement)))
