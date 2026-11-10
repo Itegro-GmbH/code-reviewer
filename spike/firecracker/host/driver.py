@@ -355,7 +355,7 @@ def cmd_t01(a) -> int:
 
     # The agent's case: sysbox-runc container with its own dockerd (docker:dind image), image seeded from a file, run hello-world
     t0 = time.monotonic()
-    r = vm.sh("docker run -d --runtime=sysbox-runc --name agent -e DOCKER_TLS_CERTDIR= -v /jobdisk/seed:/seed:ro docker:dind-spike", 90)
+    r = vm.sh("docker run -d --runtime=sysbox-runc --name agent -v /jobdisk/seed:/seed:ro --entrypoint dockerd docker:dind-spike --host=unix:///var/run/docker.sock", 90)
     check("sysbox-runc container starts", r["rc"] == 0, r["stderr"][-300:])
     ready_ms = None
     for _ in range(120):
@@ -374,7 +374,7 @@ def cmd_t01(a) -> int:
             "echo '--- uid_map in the container:'; docker exec agent cat /proc/self/uid_map; "
             "echo '--- inner docker:'; docker exec agent docker info --format 'server={{.ServerVersion}} storage={{.Driver}} runtimes={{range $k,$v := .Runtimes}}{{$k}} {{end}}cgroup=v{{.CgroupVersion}}'; "
             "echo '--- container root fs / host uid of its init:'; docker exec agent sh -c 'mount | grep \" / \"'; ps -o user:20,pid,comm -p $(docker inspect -f '{{.State.Pid}}' agent); "
-            "echo '--- idmapped mounts / shiftfs in the sysbox logs:'; grep -hiE 'idmap|shiftfs' /var/log/sysbox-mgr.log /var/log/sysbox-fs.log | sort | uniq -c | sort -rn | head -n 8; "
+            "echo '--- idmapped mounts / shiftfs in the sysbox logs:'; grep -hiE 'id-mapped|idmap|shiftfs' /var/log/sysbox-mgr.log /var/log/sysbox-fs.log | sort | uniq -c | sort -rn | head -n 8; "
             "echo '--- sysbox versions:'; sysbox-runc --version | head -n 3; "
             "echo '--- container privileges:'; docker inspect -f 'privileged={{.HostConfig.Privileged}} runtime={{.HostConfig.Runtime}}' agent", 60)
         print(ev["stdout"], ev["stderr"][-300:])
@@ -385,9 +385,11 @@ def cmd_t01(a) -> int:
         print("--- inner dockerd start, with the container's own timestamps:\n" + tl["stdout"])
         save("t01-agent-logs", tl)
         mem["agent_sysbox_container_up"] = {**vm.host_stats(), **vm.guest_mem()}
+        nxt = vm.sh("docker run --rm --runtime=runc busybox:spike echo runc-next-to-sysbox; docker ps --format '{{.Names}} {{.Image}}'", 60)
+        check("a runc container runs next to the running Sysbox container", "runc-next-to-sysbox" in nxt["stdout"], nxt["stdout"].replace("\n", " | "))
         # the same on a SECOND sysbox container: ready time when the Sysbox daemons are warm and the image is in the cache
         t0 = time.monotonic()
-        vm.sh("docker run -d --runtime=sysbox-runc --name agent2 -e DOCKER_TLS_CERTDIR= -v /jobdisk/seed:/seed:ro docker:dind-spike", 90)
+        vm.sh("docker run -d --runtime=sysbox-runc --name agent2 -v /jobdisk/seed:/seed:ro --entrypoint dockerd docker:dind-spike --host=unix:///var/run/docker.sock", 90)
         ready2 = None
         for _ in range(60):
             if vm.sh("docker exec agent2 docker info >/dev/null 2>&1", 15)["rc"] == 0:
@@ -469,7 +471,7 @@ def cmd_t02_pull(a) -> int:
     if not check("VM boots", vm.boot()):
         return finish("t02-pull")
     proxy = f"http://{SLOTS[0]['gw']}:3128"
-    r = vm.sh(f"docker run -d --runtime=sysbox-runc --name agent -e DOCKER_TLS_CERTDIR= -e HTTPS_PROXY={proxy} -e NO_PROXY=localhost,127.0.0.1 docker:dind-spike", 90)
+    r = vm.sh(f"docker run -d --runtime=sysbox-runc --name agent -e HTTPS_PROXY={proxy} -e NO_PROXY=localhost,127.0.0.1 --entrypoint dockerd docker:dind-spike --host=unix:///var/run/docker.sock", 90)
     check("sysbox container starts", r["rc"] == 0, r["stderr"][-200:])
     for _ in range(90):
         if vm.sh("docker exec agent docker info >/dev/null 2>&1", 15)["rc"] == 0:
@@ -555,7 +557,7 @@ def cmd_timing(a) -> int:
         tl["control_rc"] = r["rc"]
         mem = {"after_control": {**vm.host_stats(), **vm.guest_mem()}}
         t0 = time.monotonic()
-        vm.sh("docker run -d --runtime=sysbox-runc --name agent -e DOCKER_TLS_CERTDIR= docker:dind-spike", 90)
+        vm.sh("docker run -d --runtime=sysbox-runc --name agent --entrypoint dockerd docker:dind-spike --host=unix:///var/run/docker.sock", 90)
         for _ in range(200):
             if vm.sh("docker exec agent docker info >/dev/null 2>&1", 15)["rc"] == 0:
                 break

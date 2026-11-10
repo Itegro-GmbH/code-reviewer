@@ -179,7 +179,7 @@ jobs:
           { echo "--- /dev/kvm and the udev rule"; ls -l /dev/kvm /dev/net/tun; cat /etc/udev/rules.d/99-kvm-spike.rules
             echo "--- negative control: another user cannot open /dev/kvm"; sudo -u nobody sh -c 'test -r /dev/kvm && echo "nobody CAN read /dev/kvm" || echo "nobody cannot read /dev/kvm"'
             echo "--- TAP devices"; ip -d tuntap show 2>/dev/null || ip tuntap show
-            echo "--- the file system the job disks live on"; xfs_info /srv/fc | head -n 3; } | tee /srv/fc/results/q4-root-side.txt
+            echo "--- the file system the job disks live on"; xfs_info /srv/fc | head -n 3; } | sudo tee /srv/fc/results/q4-root-side.txt
 
       - name: Q7 - timing and memory (5 boots each)
         if: ${{ !cancelled() }}
