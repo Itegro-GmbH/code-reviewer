@@ -53,7 +53,10 @@ mount --bind /jobdisk/containerd /var/lib/containerd
 if [ "$mode" != bare ]; then
   # vm-prepare.sh (the hosted VM's script) starts by DISabling cpuset/cpu/pids in the root's subtree_control: it expects the
   # layout the platform's init made. A kernel that starts with no controller enabled makes that write fail (EINVAL), so enable them first.
-  echo "+cpuset +cpu +io +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
+  for c in cpuset cpu io memory pids; do
+    echo "+$c" > /sys/fs/cgroup/cgroup.subtree_control || echo "init: cgroup controller $c cannot be enabled" >&2
+  done
+  echo "init: cgroup.controllers=$(cat /sys/fs/cgroup/cgroup.controllers) subtree_control=$(cat /sys/fs/cgroup/cgroup.subtree_control)" >&2
   /usr/local/sbin/vm-prepare.sh && /spike/agent.py event docker_ready || /spike/agent.py event docker_failed
   /usr/local/sbin/sysbox-prepare.sh && /spike/agent.py event sysbox_ready || /spike/agent.py event sysbox_failed
 fi

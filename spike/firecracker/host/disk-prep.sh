@@ -20,7 +20,7 @@ mkfs.ext4 -q -m 0 -L jobdisk "$img"
 mount -o loop "$img" "$mnt"
 mkdir -p "$mnt/docker" "$mnt/seed" "$mnt/sysbox" "$mnt/containerd" /var/lib/containerd
 cat > "$run/daemon.json" <<'JSON'
-{ "ipv6": false, "ip6tables": false, "live-restore": false, "log-opts": { "max-size": "10m", "max-file": "2" } }
+{ "ipv6": false, "ip6tables": false, "live-restore": false, "features": { "containerd-snapshotter": false }, "log-opts": { "max-size": "10m", "max-file": "2" } }
 JSON
 # Docker 29's containerd snapshotter keeps images under containerd's root (/var/lib/containerd), not under the data root: in a private
 # mount namespace that path is the base disk's /containerd, so the runner's own Docker is not touched. The guest does the same bind mount.
@@ -40,6 +40,9 @@ for pair in "$IMG_BUSYBOX busybox:spike" "$IMG_HELLO hello-world:spike" "$IMG_DI
 done
 $D save hello-world:spike -o "$mnt/seed/hello-world.tar"
 $D images
+# where did the data go? (Docker 29 with the containerd image store did not write it under the data root: 180 KiB there, 508 MiB pulled)
+echo "--- diag: dockerd/containerd lines"; grep -iE 'containerd|snapshotter|storage' "$run/dockerd.log" | head -n 8 || true
+echo "--- diag: processes"; ps -eo pid,args | grep -E '[c]ontainerd' | cut -c1-200 || true
 kill -TERM "$dpid"; wait "$dpid" || true
 for _ in $(seq 1 50); do pgrep -f "$run/docker.sock" >/dev/null || break; sleep 0.2; done
 sync

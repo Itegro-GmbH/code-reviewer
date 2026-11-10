@@ -61,11 +61,14 @@ cfg = {
     "ip6tables": False,
     "live-restore": False,
     "data-root": "/jobdisk/docker",
+    "features": {"containerd-snapshotter": False},
     "runtimes": {"sysbox-runc": {"path": "/usr/bin/sysbox-runc"}},
     "log-opts": {"max-size": "10m", "max-file": "2"},
 }
 json.dump(cfg, open(path, "w"), indent=2)
 PY
+fetch_pinned "$CHECK_CONFIG_URL" "$CHECK_CONFIG_SHA256" "$dl/check-config.sh"
+install -D -m 0755 "$dl/check-config.sh" "$root/spike/check-config.sh"
 install -D -m 0755 "$SPIKE_DIR/rootfs/init" "$root/spike/init"
 install -D -m 0755 "$SPIKE_DIR/rootfs/agent.py" "$root/spike/agent.py"
 install -D -m 0755 "$SPIKE_DIR/rootfs/probe.py" "$root/spike/probe.py"
@@ -79,7 +82,7 @@ rm -f "$root/etc/resolv.conf"; ln -s /run/resolv.conf "$root/etc/resolv.conf"
 ln -sf /proc/self/mounts "$root/etc/mtab"
 echo "spike-vm" > "$root/etc/hostname"
 printf '127.0.0.1 localhost spike-vm\n::1 localhost\n' > "$root/etc/hosts"
-mkdir -p "$root/jobdisk" "$root/var/lib/sysbox" "$root/run" "$root/tmp" "$root/var/log" "$root/var/tmp" "$root/root" "$root/sys/fs/cgroup"
+mkdir -p "$root/jobdisk" "$root/var/lib/sysbox" "$root/var/lib/containerd" "$root/run" "$root/tmp" "$root/var/log" "$root/var/tmp" "$root/root" "$root/sys/fs/cgroup"
 chroot "$root" apt-get clean
 rm -rf "$root/var/lib/apt/lists"/* "$root/var/cache/apt"/* "$root/usr/share/doc"/* "$root/usr/share/man"/*
 cleanup

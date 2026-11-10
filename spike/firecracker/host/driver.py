@@ -316,6 +316,15 @@ def cmd_smoke(a) -> int:
         print(r["stdout"], r["stderr"])
         check("rootfs is read-only", "Read-only file system" in r["stdout"] or "Read-only file system" in r["stderr"])
         check("dockerd answers", r["rc"] == 0)
+        cc = vm.sh("/spike/check-config.sh /proc/config.gz 2>&1 | sed 's/\\x1b\\[[0-9;]*m//g'", 60)
+        save("smoke-check-config", cc)
+        print(cc["stdout"][-6000:])
+        diag = vm.sh("cd /sys/fs/cgroup; echo controllers=$(cat cgroup.controllers); echo subtree=$(cat cgroup.subtree_control); "
+                     "zcat /proc/config.gz | grep -E 'RT_GROUP_SCHED|CGROUP_SCHED' ; "
+                     "for op in '-cpuset -cpu -pids' '+memory +io +cpu +cpuset +pids'; do echo \"$op\" > cgroup.subtree_control && echo \"ok [$op]\" || echo \"FAIL [$op]\"; done; "
+                     "for c in cpuset cpu io memory pids; do echo \"+$c\" > cgroup.subtree_control 2>&1 && echo \"ok +$c\" || echo \"FAIL +$c\"; done; cat cgroup.subtree_control; "
+                     "echo '--- vm-prepare.sh, traced:'; bash -x /usr/local/sbin/vm-prepare.sh 2>&1 | grep -v left_in_root | head -n 40")
+        print("diag:\n" + diag["stdout"], diag["stderr"])
         cfg = vm.sh("zcat /proc/config.gz | grep -cE '^CONFIG_(USER_NS|OVERLAY_FS|VSOCKETS|NF_TABLES|FUSE_FS)=y'")
         check("config.gz readable in the guest", cfg["stdout"].strip() == "5", cfg["stdout"].strip())
     keep_logs(vm)
