@@ -193,6 +193,9 @@ export const errorCopy = (
   // #818: the setup script of the task's environment failed or ran out of time. The page shows the end of its output.
   environment_setup_failed:
     "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
+  // #975: the machine that runs the task did not confirm the network rule in time (or refused it) before the agent started.
+  environment_control_failed:
+    "The machine that runs this task did not confirm the network rule of its environment, so the task was stopped before the AI model was called and nothing was charged. Start the task again; if it keeps failing, check that the machine's runner is up to date and running.",
   agent_gave_up:
     "The agent stopped without a result it could stand behind. Read its summary, then try again with a clearer or smaller task.",
   // #843

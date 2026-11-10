@@ -289,6 +289,8 @@ export const RUNNER_ERROR_CODES = [
   "sandbox_size_unsupported",
   // #818: the setup script of the environment failed (a non-zero exit or its time limit) before the model was called.
   "environment_setup_failed",
+  // #975: the sandbox's environment control did not narrow the outer network wall (no answer in time, a refusal, no host) before the agent started.
+  "environment_control_failed",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 

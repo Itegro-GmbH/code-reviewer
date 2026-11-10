@@ -335,6 +335,7 @@ describe("the sentences for the codes of a task", () => {
     "clone_failed",
     "setup_failed",
     "environment_setup_failed",
+    "environment_control_failed",
     "agent_gave_up",
     "push_rejected",
     "branch_violation",
