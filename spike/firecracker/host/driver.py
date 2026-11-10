@@ -367,7 +367,7 @@ def cmd_t01(a) -> int:
     if ready_ms is None:
         print(vm.sh("docker logs agent 2>&1 | tail -n 40; tail -n 30 /var/log/sysbox-mgr.log /var/log/sysbox-fs.log; dmesg | tail -n 20")["stdout"])
     else:
-        r = vm.sh("docker exec agent docker load -i /seed/hello-world.tar && docker exec agent docker run --rm hello-world", 120)
+        r = vm.sh("docker exec agent docker load -i /seed/hello-world.tar && docker exec agent docker run --rm hello-world:spike", 120)
         print(r["stdout"][-600:], r["stderr"][-300:])
         check("inner `docker run hello-world` prints Hello from Docker!", "Hello from Docker!" in r["stdout"])
         ev = vm.sh(
@@ -379,7 +379,11 @@ def cmd_t01(a) -> int:
             "echo '--- container privileges:'; docker inspect -f 'privileged={{.HostConfig.Privileged}} runtime={{.HostConfig.Runtime}}' agent", 60)
         print(ev["stdout"], ev["stderr"][-300:])
         save("t01-evidence", ev)
-        check("container root is an unprivileged host uid (user namespace)", "165536" in ev["stdout"] or "sysbox" in ev["stdout"])
+        uid_line = next((l.split() for l in ev["stdout"].splitlines() if len(l.split()) == 3 and l.split()[0] == "0"), [])
+        check("container root is an unprivileged host uid (user namespace)", len(uid_line) == 3 and int(uid_line[1]) > 0 and int(uid_line[2]) >= 65536, " ".join(uid_line))
+        tl = vm.sh("docker logs --timestamps agent 2>&1 | cut -c1-160 | head -n 60", 30)
+        print("--- inner dockerd start, with the container's own timestamps:\n" + tl["stdout"])
+        save("t01-agent-logs", tl)
         mem["agent_sysbox_container_up"] = {**vm.host_stats(), **vm.guest_mem()}
         # the same on a SECOND sysbox container: ready time when the Sysbox daemons are warm and the image is in the cache
         t0 = time.monotonic()
@@ -475,8 +479,8 @@ def cmd_t02_pull(a) -> int:
     r = vm.sh("docker exec agent docker pull public.ecr.aws/docker/library/hello-world:linux 2>&1 | tail -n 5 && docker exec agent docker run --rm public.ecr.aws/docker/library/hello-world:linux", 180)
     print(r["stdout"][-700:])
     check("inner docker pulls and runs hello-world through the proxy", "Hello from Docker!" in r["stdout"], f"{round(time.monotonic() - t0)} s")
-    direct = vm.sh("docker run --rm --runtime=runc busybox:spike wget -q -T 4 -O- http://1.1.1.1/ 2>&1 | head -n 2", 30)
-    check("a container on the VM that does not use the proxy gets nowhere", direct["rc"] != 0, direct["stdout"][:150])
+    direct = vm.sh("docker run --rm --runtime=runc busybox:spike sh -c 'wget -q -T 4 -O /dev/null http://1.1.1.1/ 2>&1; echo wget_rc=$?'", 30)
+    check("a container on the VM that does not use the proxy gets nowhere", "wget_rc=0" not in direct["stdout"] and "wget_rc=" in direct["stdout"], direct["stdout"].strip()[:150])
     keep_logs(vm)
     vm.stop()
     return finish("t02-pull")
