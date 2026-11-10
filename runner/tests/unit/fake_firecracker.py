@@ -123,8 +123,10 @@ def main() -> int:
         )
         save()
     if behavior.get("narrow", True):
-        rule = behavior.get("rule", {"mode": "list", "hosts": ["registry.npmjs.org"]})
-        narrow = {
+        rule: dict[str, Any] = behavior.get(
+            "rule", {"mode": "list", "hosts": ["registry.npmjs.org"]}
+        )
+        narrow: dict[str, Any] = {
             "version": 1,
             "type": "narrow",
             "network": rule,
@@ -142,7 +144,7 @@ def main() -> int:
     )
     save()
     time.sleep(behavior.get("run", 0))
-    report = {
+    report: dict[str, Any] = {
         "version": 1,
         "type": "exit",
         "exitCode": behavior.get("exit", 0),

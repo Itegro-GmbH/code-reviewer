@@ -9,8 +9,6 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,13 +68,15 @@ def copying_disk(base: Path, destination: Path, quota: int) -> bool:
     return False
 
 
-@contextmanager
-def short_directory() -> Iterator[Path]:
-    path = Path(tempfile.mkdtemp(prefix="fc"))
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
+class short_directory:
+    """A short temporary directory, removed on exit."""
+
+    def __enter__(self) -> Path:
+        self._path = Path(tempfile.mkdtemp(prefix="fc"))
+        return self._path
+
+    def __exit__(self, *_: object) -> None:
+        shutil.rmtree(self._path, ignore_errors=True)
 
 
 class Rig:

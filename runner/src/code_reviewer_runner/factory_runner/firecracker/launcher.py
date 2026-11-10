@@ -120,6 +120,8 @@ class FirecrackerSandbox:
     _pool: SlotPool = field(init=False)
     _lost: list[Slot] = field(init=False, default_factory=list[Slot])
     _vms: dict[str, _Vm] = field(init=False, default_factory=dict[str, _Vm])
+    # What the last `setup` removed.
+    reaped: Reaped = field(init=False, default_factory=Reaped)
 
     def __post_init__(self) -> None:
         self.settings = self.settings.validated()
@@ -135,19 +137,24 @@ class FirecrackerSandbox:
         return self.settings.slots
 
     @property
+    def uses_host_docker(self) -> bool:
+        """The Worker's Docker is inside its VM: the host's is never touched."""
+        return False
+
+    @property
     def free(self) -> int:
         return self._pool.free
 
-    async def setup(self) -> Reaped:
+    async def setup(self) -> None:
         """Before the first claim: make the cgroup tree usable and remove what an earlier service
-        left. Raises `CgroupError` when the delegated cgroup cannot be used."""
+        left (`reaped`). Raises `CgroupError` when the delegated cgroup cannot be used."""
         if self.cgroups is None:
             tree = CgroupTree(self.settings.cgroup_root or delegated_root())
             self.cgroups = tree
         self.cgroups.prepare()
         self.settings.vms_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         tree = self.cgroups if isinstance(self.cgroups, CgroupTree) else None
-        return await asyncio.to_thread(reap_leftovers, self.settings.vms_dir, tree)
+        self.reaped = await asyncio.to_thread(reap_leftovers, self.settings.vms_dir, tree)
 
     async def start(self, start: WorkerStart) -> "FirecrackerWorker":
         slot = self._pool.acquire()

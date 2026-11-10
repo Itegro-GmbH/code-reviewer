@@ -142,8 +142,11 @@ def test_a_file_system_without_reflinks_gets_a_plain_sparse_copy() -> None:
                 Path(argv[-1]).write_bytes(Path(argv[-2]).read_bytes())
             return 0
 
+        def no_clone(source: Path, destination: Path) -> bool:
+            return False
+
         reflinked = disks.make_job_disk(
-            base_disk(root), root / "disk.ext4", 4096, run=copy, clone=lambda *_: False
+            base_disk(root), root / "disk.ext4", 4096, run=copy, clone=no_clone
         )
 
         assert reflinked is False
@@ -265,7 +268,7 @@ def test_the_delegated_cgroup_is_the_one_this_process_runs_in() -> None:
 def test_prepare_moves_the_service_into_a_leaf_and_enables_the_controllers_below() -> None:
     with short_directory() as root:
         tree = cgroup_tree(root / "unit")
-        (root / "unit" / "cgroup.procs").write_text("4242\n")
+        (root / "unit" / "cgroup.procs").write_text(f"{os.getpid()}\n4242\n")
         (root / "unit" / "service").mkdir()
         (root / "unit" / "service" / "cgroup.procs").write_text("")
 
@@ -273,7 +276,8 @@ def test_prepare_moves_the_service_into_a_leaf_and_enables_the_controllers_below
         tree.prepare()  # again is the same
 
         assert (root / "unit" / "cgroup.subtree_control").read_text() == "+cpu +memory +pids"
-        assert (root / "unit" / "service" / "cgroup.procs").read_text() == "4242"
+        # Only this process moves: the other one in the cgroup is not the service's.
+        assert (root / "unit" / "service" / "cgroup.procs").read_text() == str(os.getpid())
 
 
 # #978-T12
@@ -667,6 +671,3 @@ def test_a_setting_that_cannot_work_is_an_error_that_names_it(
 ) -> None:
     with pytest.raises(SettingsError, match=message):
         settings_from_environment(environment, **kwargs)
-
-
-_ = os

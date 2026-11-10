@@ -61,6 +61,8 @@ from code_reviewer_runner.factory_runner.base import (
 )
 from code_reviewer_runner.factory_runner.claude_code_selftest import device_checks
 from code_reviewer_runner.factory_runner.config import (
+    SANDBOX_FIRECRACKER,
+    SANDBOX_VARIABLE,
     ConfigError,
     Limits,
     RunnerConfig,
@@ -75,6 +77,8 @@ from code_reviewer_runner.factory_runner.config import (
     load_config,
     save_config,
 )
+from code_reviewer_runner.factory_runner.firecracker.factory import firecracker_sandbox_factory
+from code_reviewer_runner.factory_runner.firecracker.prepare import prepare_firecracker
 from code_reviewer_runner.factory_runner.prepare import Prepared, prepare
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult, summary
 from code_reviewer_runner.factory_runner.service import (
@@ -105,6 +109,9 @@ class CliSeams:
         url, credential=credential
     )
     prepare: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = prepare
+    # What `run` prepares with `FACTORY_RUNNER_SANDBOX=firecracker` (#978): the host's checks, no
+    # Docker self-test.
+    prepare_vm: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = prepare_firecracker
     # What `selftest` runs: the same checks, but nothing is pulled or named in the daemon.
     check: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = lambda config, env: _look(
         config, env
@@ -428,14 +435,18 @@ def _run(
         err.write(f"{PROGRAM}: --wait must not be negative\n")
         return EXIT_USAGE
     configure_logging()
-    prepared = seams.prepare(config, env)
+    vm = env.get(SANDBOX_VARIABLE, "").strip() == SANDBOX_FIRECRACKER
+    prepared = (seams.prepare_vm if vm else seams.prepare)(config, env)
     service = RunnerService(
         config,
         env,
         prepared,
         seams.client(config.url, config.credential),
         logger=logging.getLogger(LOGGER_NAME),
-        seams=Seams(docker=seams.docker),
+        seams=Seams(
+            docker=seams.docker,
+            sandbox=firecracker_sandbox_factory(config, env) if vm else None,
+        ),
     )
     return asyncio.run(service.run(once=arguments.once, wait_seconds=arguments.wait))
 

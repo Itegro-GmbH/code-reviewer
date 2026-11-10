@@ -524,10 +524,10 @@ def test_setup_prepares_the_cgroup_tree_and_removes_what_an_earlier_service_left
         (leftover / "disk.ext4").write_bytes(b"x" * 1000)
         sandbox = rig.sandbox()
 
-        reaped = go(sandbox.setup)
+        go(sandbox.setup)
 
         assert rig.cgroups.prepared == 1
-        assert reaped.directories == ("vm-0-deadbeef",)
+        assert sandbox.reaped.directories == ("vm-0-deadbeef",)
         assert rig.vm_directories() == []
 
 

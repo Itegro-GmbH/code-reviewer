@@ -10,11 +10,11 @@ environment of the dispatcher. The Worker fetches the job itself over the Worker
 (`/api/workers/v1`), so the git token and the key of the workspace are only ever in the Worker and
 the containers it starts.
 
-`WorkerSandbox` is the seam the Firecracker launcher (#978) will implement: start a Worker where it
-runs, wait for its exit, stop it. Until then `ProcessSandbox` starts the Worker as a process of the
-runner's own container (the image is the Worker image) on the host's Docker, with an environment
-made for it: the plain variables and the ones that say how its containers are made, never the
-runner's credential.
+`WorkerSandbox` is the seam: start a Worker where it runs, wait for its exit, stop it. The
+Firecracker launcher (#978, `firecracker/launcher.py`) runs it in a microVM, one per slot.
+`ProcessSandbox`, the fallback until #982, starts the Worker as a process of the runner's own
+container (the image is the Worker image) on the host's Docker, with an environment made for it: the
+plain variables and the ones that say how its containers are made, never the runner's credential.
 """
 
 import json
@@ -78,6 +78,22 @@ class RunningWorker(Protocol):
 
 
 class WorkerSandbox(Protocol):
+    @property
+    def capacity(self) -> int:
+        """The Workers that may run at once (the dispatcher claims only with a free one)."""
+        ...
+
+    @property
+    def uses_host_docker(self) -> bool:
+        """Whether the Worker's containers run on this machine's Docker (the dispatcher then
+        takes the lock on the daemon and tidies it). A VM sandbox has its own Docker inside."""
+        ...
+
+    async def setup(self) -> None:
+        """Before the first claim: whatever the sandbox must find or make clean (a VM sandbox
+        removes the leftovers of an earlier service). Raises when the sandbox cannot be used."""
+        ...
+
     async def start(self, start: WorkerStart) -> RunningWorker: ...
 
 
@@ -112,6 +128,12 @@ class ProcessSandbox:
         self._launcher = launcher
         self._environment = dict(environment)
         self._grace = grace_seconds
+
+    capacity = 1
+    uses_host_docker = True
+
+    async def setup(self) -> None:
+        """A process of this container needs nothing made."""
 
     async def start(self, start: WorkerStart) -> RunningWorker:
         spec = ProcessSpec(

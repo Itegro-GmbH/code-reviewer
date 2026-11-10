@@ -6,7 +6,8 @@ The limits hold without root (spike #970, Q4): `cpu.max` throttled a guest with 
 0.47 CPU at 50 %, and `memory.max` below what the guest touches made the cgroup OOM-kill the
 Firecracker process while the host and the service were untouched. The service first moves itself
 into a leaf of its own (a cgroup that has processes cannot enable controllers for its children, the
-"no internal process" rule), enables `cpu memory pids` in the delegated cgroup, and makes one cgroup
+"no internal process" rule; only the service's own process moves), enables `cpu memory pids` in the
+delegated cgroup, and makes one cgroup
 `vm-<n>-<random>` per VM that holds the Firecracker process and nothing else.
 
 `memory.max` is the guest's memory plus room for the VMM (about 56 MiB fixed) and what the guest's
@@ -85,7 +86,9 @@ class CgroupTree:
         leaf = self.root / SERVICE_LEAF
         try:
             leaf.mkdir(exist_ok=True)
-            self._move_processes(self.root, leaf)
+            # Only this process: whatever else lives in the delegated cgroup is not ours to move
+            # (enabling the controllers below then fails, EBUSY, and says so).
+            (leaf / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
             enabled = (self.root / "cgroup.controllers").read_text(encoding="utf-8").split()
             missing = [name for name in CONTROLLERS if name not in enabled]
             if missing:
@@ -94,15 +97,10 @@ class CgroupTree:
                 " ".join(f"+{name}" for name in CONTROLLERS), encoding="utf-8"
             )
         except OSError as error:
-            raise CgroupError(f"the delegated cgroup cannot be set up ({error.strerror})") from None
-
-    @staticmethod
-    def _move_processes(source: Path, target: Path) -> None:
-        for line in (source / "cgroup.procs").read_text(encoding="utf-8").split():
-            try:
-                (target / "cgroup.procs").write_text(line, encoding="utf-8")
-            except OSError:
-                continue  # it ended meanwhile
+            raise CgroupError(
+                f"the delegated cgroup cannot be set up ({error.strerror}): is it the service's "
+                "own, with no other process in it (Delegate=yes)?"
+            ) from None
 
     def create(self, name: str, limits: VmLimits) -> Path:
         """The cgroup of one VM with its limits. Swap is off: a VM that outgrows its memory is

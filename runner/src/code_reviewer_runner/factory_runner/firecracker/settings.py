@@ -154,6 +154,11 @@ def settings_from_environment(
         job_timeout_seconds=_whole(job_environment or {}, "RUNNER_JOB_TIMEOUT_SECONDS")
         or DEFAULT_JOB_TIMEOUT_SECONDS,
         outer_wall=mode,
+        cgroup_root=(
+            Path(environment["FACTORY_RUNNER_VM_CGROUP_ROOT"])
+            if environment.get("FACTORY_RUNNER_VM_CGROUP_ROOT", "").strip()
+            else None
+        ),
     )
     return settings.validated()
 
