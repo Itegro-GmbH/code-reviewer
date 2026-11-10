@@ -106,6 +106,10 @@ import {
   readEffectiveEntitlements,
   readEntitlements,
 } from "../workspaces/effective-entitlements.ts";
+import {
+  mintDeliverySecret,
+  sealDeliverySecret,
+} from "../runner-identity/delivery.ts";
 import { TEST_APP_SLUG } from "./github-app.ts";
 import { createJobQueueFixture, sha, type TestQueue } from "./jobs.ts";
 import type { NativeSelectionSource } from "../native-providers/catalog.ts";
@@ -635,6 +639,14 @@ export async function startRunnerApiHarness(
         }),
         settings: () => ({ minBaseVersion: fleetSettings.minBaseVersion }),
         logger,
+        // #972: the secret of a webhook delivery, sealed with the harness's own app secret (`TEST_APP_SECRET`).
+        mintDeliveryKey: (runnerId) => {
+          const key = mintDeliverySecret();
+          return {
+            ...key,
+            sealed: sealDeliverySecret(TEST_APP_SECRET, runnerId, key.secret),
+          };
+        },
       }),
       appVersion: TEST_APP_VERSION,
       noteClaimFeatures: (features) =>

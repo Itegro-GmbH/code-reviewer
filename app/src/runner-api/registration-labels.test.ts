@@ -30,12 +30,16 @@ function start() {
     redeem: vi.fn(async () => ({ ok: true as const, runner: RUNNER })),
     authenticate: vi.fn(async () => RUNNER),
     announce: vi.fn(async () => true),
+    setDelivery: vi.fn(async () => ({ mode: "poll" as const })),
     renew: vi.fn(async () => true),
   } satisfies RunnerCredentialsRepository;
   const api = createRunnerRegistrationApi({
     credentials,
     settings: () => ({ minBaseVersion: null }),
     logger: { info: () => {}, error: () => {} },
+    mintDeliveryKey: () => {
+      throw new Error("no delivery in this test");
+    },
   });
   return { api, credentials };
 }

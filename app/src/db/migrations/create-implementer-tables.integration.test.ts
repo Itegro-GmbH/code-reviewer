@@ -67,7 +67,8 @@ async function rowsOfEveryOldTable(
       table.name === "profiles" ||
       table.name === "profile_versions" ||
       table.name === "runners" ||
-      table.name === "runner_registration_tokens"
+      table.name === "runner_registration_tokens" ||
+      table.name === "job_rings"
     )
       continue;
     const { rows } =

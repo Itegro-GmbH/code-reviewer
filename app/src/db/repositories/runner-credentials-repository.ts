@@ -16,9 +16,37 @@ import {
 } from "../../runner-identity/announcement.ts";
 import { runnerFrom, type StoredRunner } from "./runners-repository.ts";
 
+/** #972: a key the app made for the delivery of one runner: the secret is shown once, the database keeps only `sealed`. */
+export type MintedDeliveryKey = {
+  keyId: string;
+  secret: string;
+  /** The secret as the database keeps it (`sealDeliverySecret`). */
+  sealed: string;
+};
+
+/** What the app holds of a runner's delivery. The secret is present only in the answer of the call that made it. */
+export type StoredDelivery =
+  | { mode: "poll" }
+  | { mode: "webhook"; url: string; keyId: string; secret?: string };
+
+export type DeliveryChange =
+  | { mode: "poll" }
+  | {
+      mode: "webhook";
+      url: string;
+      /** A new secret even when one exists. */
+      rotateSecret: boolean;
+      /** Makes the key, asked for only when there is none or a new one is wanted. */
+      mintKey: () => MintedDeliveryKey;
+    };
+
 export type NewRunner = Announcement & {
   name: string;
   credentialHash: string;
+  /** #972: the id of the runner when its sealed secret has to be bound to it before the row exists. */
+  id?: string;
+  /** #972: the webhook delivery announced with the registration; the runner polls without it. */
+  delivery?: { url: string; key: MintedDeliveryKey };
 };
 
 export type RedeemOutcome =
@@ -34,6 +62,15 @@ export type RunnerCredentialsRepository = {
   authenticate(credentialHash: string): Promise<StoredRunner | undefined>;
   /** What the runner says about itself now (its configuration lives on its machine). False when it was revoked meanwhile. */
   announce(runnerId: string, announcement: Announcement): Promise<boolean>;
+  /**
+   * #972: how the runner learns of a job now. `poll` drops the address, the key id and the sealed secret. `webhook` keeps the secret that
+   * exists, unless a new one is asked for or there is none, in which case it makes one: the secret is in the answer of that call and in
+   * no other. Undefined when the runner was revoked meanwhile.
+   */
+  setDelivery(
+    runnerId: string,
+    change: DeliveryChange,
+  ): Promise<StoredDelivery | undefined>;
   /** A credential for the runner that presented `presentedHash`; the previous one stays valid until the new one is used. */
   renew(
     runnerId: string,
@@ -53,7 +90,7 @@ export function createRunnerCredentialsRepository(
     redeem(tokenHash, runner) {
       return db.transaction().execute(async (trx): Promise<RedeemOutcome> => {
         const timestamp = formatTimestamp(now());
-        const id = newId();
+        const id = runner.id ?? newId();
         const used = await trx
           .updateTable("runner_registration_tokens")
           .set({ used_at: timestamp, runner_id: id })
@@ -79,6 +116,14 @@ export function createRunnerCredentialsRepository(
             created_at: timestamp,
             last_seen_at: timestamp,
             revoked_at: null,
+            ...(runner.delivery === undefined
+              ? {}
+              : {
+                  delivery_mode: "webhook",
+                  delivery_url: runner.delivery.url,
+                  delivery_key_id: runner.delivery.key.keyId,
+                  delivery_secret: runner.delivery.key.sealed,
+                }),
           })
           .returningAll()
           .executeTakeFirstOrThrow();
@@ -121,6 +166,55 @@ export function createRunnerCredentialsRepository(
         .where("revoked_at", "is", null)
         .executeTakeFirst();
       return Number(result.numUpdatedRows) > 0;
+    },
+
+    async setDelivery(runnerId, change) {
+      return db.transaction().execute(async (trx) => {
+        // Two announcements of one runner at the same moment take turns: the second sees the secret the first made.
+        const current = await trx
+          .selectFrom("runners")
+          .select(["delivery_secret", "delivery_key_id"])
+          .where("id", "=", runnerId)
+          .where("revoked_at", "is", null)
+          .forUpdate()
+          .executeTakeFirst();
+        if (current === undefined) return undefined;
+        if (change.mode === "poll") {
+          await trx
+            .updateTable("runners")
+            .set({
+              delivery_mode: "poll",
+              delivery_url: null,
+              delivery_key_id: null,
+              delivery_secret: null,
+            })
+            .where("id", "=", runnerId)
+            .execute();
+          return { mode: "poll" };
+        }
+        const keep =
+          !change.rotateSecret &&
+          current.delivery_secret !== null &&
+          current.delivery_key_id !== null;
+        const minted = keep ? undefined : change.mintKey();
+        const keyId = minted?.keyId ?? (current.delivery_key_id as string);
+        await trx
+          .updateTable("runners")
+          .set({
+            delivery_mode: "webhook",
+            delivery_url: change.url,
+            delivery_key_id: keyId,
+            ...(minted === undefined ? {} : { delivery_secret: minted.sealed }),
+          })
+          .where("id", "=", runnerId)
+          .execute();
+        return {
+          mode: "webhook",
+          url: change.url,
+          keyId,
+          ...(minted === undefined ? {} : { secret: minted.secret }),
+        };
+      });
     },
 
     // The previous credential may renew too, so that a renewal whose answer was lost locks nobody out. The price, accepted: until the

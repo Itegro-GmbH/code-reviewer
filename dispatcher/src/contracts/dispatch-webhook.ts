@@ -4,9 +4,10 @@
 // `make verify` fails while this file differs from what the schema generates.
 
 /**
- * Why a receiver answered 200 ignored. `not_claimable`: the claim of that job answered 204 (not due, running, finished, cancelled, superseded, or the pool cap is reached); the app resends after its acknowledgement timeout. `not_capable`: the receiver cannot run that review kind; the app stops resending that kind. A reader accepts any reason of the right form.
+ * Why a receiver answered 200 ignored. `not_claimable`: the claim of that job answered 204 (not due, running, finished, cancelled, superseded, or the pool cap is reached); the app resends after its acknowledgement timeout. `not_capable`: the receiver cannot run that review kind; the app stops resending that kind. `busy` (#972): the receiver has no free slot; it forgets the bell and claims by itself when a slot frees, so the app does not ring it again for that job until an event (a job of its label group ended) or its sweep. A reader accepts any reason of the right form.
  */
-export type KnownDispatchIgnoredReason = "not_claimable" | "not_capable";
+export type KnownDispatchIgnoredReason =
+  "not_claimable" | "not_capable" | "busy";
 
 /**
  * The body of the wake-up call. Closed: an unknown field, such as a secret, a token, a credential, a signature or repository data, is refused. A sender never adds one and a receiver refuses a body that has one.
@@ -215,9 +216,10 @@ export interface DispatchStopIgnored {
 export interface DispatchSigningVectors {
   version: 1;
   toleranceSeconds: number;
+  otherDispatcher?: DispatchSigningKey;
   keys: {
-    current: DispatchSigningKey;
-    previous: DispatchSigningKey;
+    current: DispatchSigningKey1;
+    previous: DispatchSigningKey1;
   };
   /**
    * @minItems 1
@@ -259,9 +261,16 @@ export interface DispatchSigningVectors {
   [k: string]: unknown;
 }
 /**
- * A signing key of the example. The secret is a dummy; a real one is at least 32 characters and unique to this purpose.
+ * #972: the key of ANOTHER dispatcher (dummy values). Every dispatcher has a signing secret of its own, so a request signed with this key is never valid for the receiver the `keys` belong to: under the receiver's key id it is `bad_signature`, under its own key id `unknown_key`.
  */
 export interface DispatchSigningKey {
+  kid: string;
+  secret: string;
+}
+/**
+ * A signing key of the example. The secret is a dummy; a real one is at least 32 characters and unique to this purpose.
+ */
+export interface DispatchSigningKey1 {
   kid: string;
   secret: string;
 }

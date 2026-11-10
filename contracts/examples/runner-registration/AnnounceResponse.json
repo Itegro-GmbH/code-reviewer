@@ -2,5 +2,11 @@
   "version": 1,
   "runnerId": "5f2a0c1e-7c0b-4d89-9a43-6d3f1a2b4c5d",
   "minBaseVersion": null,
-  "updateNeeded": false
+  "updateNeeded": false,
+  "delivery": {
+    "mode": "webhook",
+    "url": "https://dispatcher.example.com/dispatch",
+    "keyId": "d-3f9a1c7e",
+    "secret": "crw_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
 }

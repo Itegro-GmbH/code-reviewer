@@ -150,6 +150,8 @@ export default defineConfig({
         DATABASE_URL_MIGRATE: database.app,
         BETTER_AUTH_URL: hostedEnv.appUrl,
         RUNNER_DISPATCH: "webhook",
+        // A dispatcher of the E2E announces an address on this machine (the fakes); never set outside tests.
+        RUNNER_DELIVERY_ALLOW_LOOPBACK: "1",
         RUNNER_WEBHOOK_URL: `${hostedEnv.dispatcherUrl}/dispatch`,
         RUNNER_WEBHOOK_KEY_ID: hostedEnv.webhookKeyId,
         RUNNER_WEBHOOK_SECRET: hostedEnv.webhookSecret,
@@ -187,6 +189,8 @@ export default defineConfig({
         DATABASE_URL_MIGRATE: factoryDatabase.app,
         BETTER_AUTH_URL: factoryEnv.appUrl,
         RUNNER_DISPATCH: "webhook",
+        // A dispatcher of the E2E announces an address on this machine (the fakes); never set outside tests.
+        RUNNER_DELIVERY_ALLOW_LOOPBACK: "1",
         RUNNER_WEBHOOK_URL: `${hostedEnv.dispatcherUrl}/dispatch`,
         RUNNER_WEBHOOK_KEY_ID: factoryEnv.webhookKeyId,
         RUNNER_WEBHOOK_SECRET: factoryEnv.webhookSecret,

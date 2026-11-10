@@ -22,10 +22,12 @@ describe("the claims a call ended", () => {
   ) {
     const database = await open();
     const ended: string[][] = [];
+    const requeued: string[][] = [];
     const fixture = await createJobQueueFixture({
       ...(database === undefined ? {} : { database }),
       ...options,
       onClaimsEnded: (jobIds) => ended.push([...jobIds]),
+      onRequeued: (jobIds) => requeued.push([...jobIds]),
     });
     async function running(
       overrides: Parameters<typeof fixture.enqueue>[0] = {},
@@ -39,7 +41,7 @@ describe("the claims a call ended", () => {
       if (claimed === null) throw new Error("the job was not claimed");
       return claimed.job;
     }
-    return { fixture, ended, running };
+    return { fixture, ended, requeued, running };
   }
 
   // #487-T06
@@ -106,7 +108,7 @@ describe("the claims a call ended", () => {
 
   // #487-T06
   it("names a job given back on its last attempt, and not one that went back to the queue", async () => {
-    const { fixture, ended, running } = await start({
+    const { fixture, ended, requeued, running } = await start({
       limits: { maxAttempts: 2 },
     });
     const job = await running();
@@ -122,6 +124,8 @@ describe("the claims a call ended", () => {
     ).toBe("requeued");
     // The next attempt may have its VM already when the Dispatcher is told: a requeued job is not stopped.
     expect(ended).toEqual([]);
+    // It waits again, and a webhook dispatcher is told so (#972).
+    expect(requeued).toEqual([[job.id]]);
 
     const again = await fixture.queue.claimNext("pool", undefined, {
       jobId: job.id,
@@ -164,6 +168,70 @@ describe("the claims a call ended", () => {
     expect(report).toMatchObject({ requeued: 1, leaseExpired: 1 });
     expect(ended).toEqual([[lastTry.id]]);
     expect((await fixture.queue.get(fresh.id))?.status).toBe("queued");
+  });
+
+  // #972-T03
+  it("names the jobs a lapsed lease put back in the queue as requeued, and not the one it failed", async () => {
+    const { fixture, ended, requeued, running } = await start({
+      limits: { maxAttempts: 2 },
+    });
+    const lastTry = await running({
+      prNumber: 1,
+      prUrl: "https://github.test/acme/widgets/pull/1",
+    });
+    fixture.clock.advance(3 * MINUTE);
+    await fixture.queue.expireStaleJobs();
+    expect(requeued).toEqual([[lastTry.id]]);
+    await fixture.queue.claimNext("pool", undefined, { jobId: lastTry.id });
+    requeued.length = 0;
+    const fresh = await running({
+      prNumber: 2,
+      prUrl: "https://github.test/acme/widgets/pull/2",
+    });
+    fixture.clock.advance(3 * MINUTE);
+
+    await fixture.queue.expireStaleJobs();
+
+    // The first job failed on its last attempt (ended, not requeued); the second is waiting again.
+    expect(ended).toEqual([[lastTry.id]]);
+    expect(requeued).toEqual([[fresh.id]]);
+  });
+
+  // #972-T03
+  it("names nothing as requeued for a lapsed lease whose job the same claim handed to a new holder, and nothing when no lease lapsed", async () => {
+    const { fixture, requeued, running } = await start();
+    await fixture.queue.expireStaleJobs();
+    expect(requeued).toEqual([]);
+    const job = await running();
+    fixture.clock.advance(3 * MINUTE);
+
+    const claimed = await fixture.queue.claimNext("other-pool");
+
+    expect(claimed?.job.id).toBe(job.id);
+    expect(requeued).toEqual([]);
+  });
+
+  // #972-T03
+  it("names the job a claim found with a lapsed lease and left in the queue", async () => {
+    const { fixture, requeued, running } = await start();
+    const lapsed = await running({
+      prNumber: 1,
+      prUrl: "https://github.test/acme/widgets/pull/1",
+    });
+    const other = await fixture.enqueueNew({
+      prNumber: 2,
+      prUrl: "https://github.test/acme/widgets/pull/2",
+    });
+    fixture.clock.advance(3 * MINUTE);
+
+    // The claim is for the other job; the one whose lease lapsed goes back to the queue and stays there.
+    const claimed = await fixture.queue.claimNext("other-pool", undefined, {
+      jobId: other.id,
+    });
+
+    expect(claimed?.job.id).toBe(other.id);
+    expect((await fixture.queue.get(lapsed.id))?.status).toBe("queued");
+    expect(requeued).toEqual([[lapsed.id]]);
   });
 
   // #487-T06
@@ -281,5 +349,32 @@ describe("the claims a call ended", () => {
     expect((await fixture.queue.get(job.id))?.status).toBe("succeeded");
     // Logged once by its own stable code, not by the code of another callback, and without the error's text.
     expect(errors).toEqual(["[queue] claims_ended_callback_failed"]);
+  });
+
+  // #972-T03
+  it("logs a requeue callback that throws by its own code and still answers", async () => {
+    const database = await open();
+    const fixture = await createJobQueueFixture({
+      ...(database === undefined ? {} : { database }),
+      onRequeued: () => {
+        throw new Error("the doorbell is down");
+      },
+    });
+    const job = await fixture.enqueueNew();
+    await fixture.queue.claimNext("pool", undefined, { jobId: job.id });
+    fixture.clock.advance(3 * MINUTE);
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line) => {
+      errors.push(String(line));
+    });
+
+    try {
+      expect(await fixture.queue.expireStaleJobs()).toMatchObject({
+        requeued: 1,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors).toEqual(["[queue] requeued_callback_failed"]);
   });
 });

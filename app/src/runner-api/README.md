@@ -187,6 +187,17 @@ holds this for both, so "a hosted job never goes to a customer's runner" and "a 
 `422 RUNNER_LABEL_RESERVED` (`registration.ts`, `register` and `announce`). A claim without `jobId` takes the oldest due job the caller matches; with one it works
 as before, under the same rule. The split answer names the size the job requires in `sizeLabel`. `docs/runner.md`, "Routing"; ADR 0005.
 
+### Delivery of a runner (#972)
+
+A customer's dispatcher says how it learns of a job in `delivery` of `POST /register` and `PUT /self` (`contracts/runner-registration.v1.json`): `poll` (the
+default, also when it is left out) or `webhook` with its own https `url`. For a webhook the app makes the signing secret of that dispatcher (`runner-identity/delivery.ts`,
+`crw_` and 43 characters), shows it **once** in the answer that made it (`delivery.secret`, with `delivery.keyId`) and keeps it encrypted in `runners.delivery_secret`
+(`runner-credentials-repository.ts`, `setDelivery`: one transaction that keeps, makes or drops the secret). `rotateSecret: true` makes a new one; announcing `poll` drops it.
+A body that does not fit, or an address the app will not call (private, link-local, internal), is `400 RUNNER_REQUEST_INVALID` with the field `delivery`,
+`delivery.mode`, `delivery.url` or `delivery.rotateSecret`, and nothing is stored. The app rings such a dispatcher with the doorbell of
+`contracts/dispatch-webhook.v1.json` (`src/dispatch/rings.ts`, `src/dispatch/README.md`, "The doorbell to customers' dispatchers"); a dispatcher that polls is never rung.
+`docs/runner.md`, "Delivery: poll or webhook".
+
 ## The lease token
 
 Every claim response carries a new `leaseToken`; heartbeat and complete must send it in the body.
