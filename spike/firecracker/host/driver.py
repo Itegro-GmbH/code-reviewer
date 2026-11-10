@@ -89,10 +89,10 @@ class Cgroups:
 
 class Vm:
     def __init__(self, name: str, slot: int = 0, mode: str = "full", mem_mib: int = 2048, vcpus: int = 2,
-                 quota_gib: int | None = None, cg: Cgroups | None = None, limits: dict[str, str] | None = None,
+                 quota_gib: int | None = None, resize: str = "guest", cg: Cgroups | None = None, limits: dict[str, str] | None = None,
                  tap: str | None = None, extra_args: str = "") -> None:
         self.name, self.slot, self.mode = name, slot, mode
-        self.mem_mib, self.vcpus, self.quota_gib = mem_mib, vcpus, quota_gib
+        self.mem_mib, self.vcpus, self.quota_gib, self.resize = mem_mib, vcpus, quota_gib, resize
         self.net = SLOTS[slot]
         self.tap = tap or self.net["tap"]
         self.dir = VMS / name
@@ -112,13 +112,22 @@ class Vm:
         self.timings["reflink_copy_ms"] = (time.monotonic() - t0) * 1000
         if self.quota_gib:
             os.truncate(self.dir / "job.ext4", self.quota_gib << 30)
+            if self.resize == "host":  # the unprivileged service grows the file system offline, before the VM starts
+                t1 = time.monotonic()
+                p = subprocess.run(["resize2fs", str(self.dir / "job.ext4")], capture_output=True, text=True)
+                if p.returncode != 0 and "e2fsck" in p.stdout + p.stderr:  # resize2fs wants a checked file system first
+                    subprocess.run(["e2fsck", "-fy", str(self.dir / "job.ext4")], capture_output=True)
+                    p = subprocess.run(["resize2fs", str(self.dir / "job.ext4")], capture_output=True, text=True)
+                self.timings["host_resize_ms"] = (time.monotonic() - t1) * 1000
+                self.timings["host_resize_rc"] = p.returncode
+                self.timings["host_resize_msg"] = (p.stdout + p.stderr).strip().replace("\n", " | ")[:300]
         (self.dir / "fc.log").touch()
         cmdline = (
             "console=ttyS0 reboot=k panic=1 pci=off 8250.nr_uarts=1 i8042.noaux i8042.nokbd cgroup_no_v1=all "
             "root=/dev/vda ro rootfstype=ext4 init=/usr/bin/docker-init "
             f"spike.mode={self.mode} spike.ip={self.net['ip']} spike.gw={self.net['gw']} "
             f"spike.ip6={self.net['ip6']} spike.gw6={self.net['gw6']} "
-            f"{'spike.resize=1 ' if self.quota_gib else ''}{self.extra_args} -- /spike/init"
+            f"{'spike.resize=1 ' if self.quota_gib and self.resize == 'guest' else ''}{self.extra_args} -- /spike/init"
         )
         cfg = {
             "boot-source": {"kernel_image_path": str(ART / "vmlinux"), "boot_args": cmdline},
@@ -657,30 +666,44 @@ def cmd_q4(a) -> int:
 
 
 def cmd_disk(a) -> int:
-    """Q3 (in the VM): read-only shared rootfs + writable job disk; quota = size of the job disk file; growing it."""
+    """Q3 (in the VM): read-only shared rootfs + writable job disk; quota = size of the job disk file; growing it two ways."""
     cg = Cgroups()
     base_size = BASE.stat().st_size
     quota = 3
-    vm = Vm("disk", mode="full", quota_gib=quota, cg=cg, mem_mib=2048)
-    ok = vm.boot()
-    check("VM boots with the job disk grown to the quota", ok)
-    if not ok:
-        return finish("disk")
-    rs = vm.event("resize_done")
-    check("online resize2fs after the copy", rs is not None, f"{rs and rs.get('ms')} ms (base fs {base_size >> 20} MiB -> {quota} GiB)")
-    r = vm.sh("df -BM --output=size,used,avail /jobdisk | tail -n 1; findmnt -no FSTYPE,OPTIONS / | cut -d, -f1; touch /spike/x 2>&1 | head -n 1")
-    print(r["stdout"], r["stderr"])
-    check("root file system is read-only", "Read-only file system" in r["stdout"] + r["stderr"], r["stdout"].replace("\n", " | "))
-    alloc0 = (vm.dir / "job.ext4").stat().st_blocks * 512
-    w = vm.sh("dd if=/dev/zero of=/jobdisk/fill bs=1M count=4096 conv=fsync 2>&1 | tail -n 2; df -BM --output=size,used,avail /jobdisk | tail -n 1", 120)
-    print(w["stdout"])
-    check("writing past the quota fails with ENOSPC (the quota is the size of the file)", "No space left" in w["stdout"] + w["stderr"], w["stdout"].replace("\n", " | ")[-200:])
-    alloc1 = (vm.dir / "job.ext4").stat().st_blocks * 512
-    check("the job disk file stays within its quota on the host", (vm.dir / "job.ext4").stat().st_size <= quota << 30)
-    save("disk-vm", {"base_bytes": base_size, "job_alloc_before": alloc0, "job_alloc_after": alloc1, "resize_ms": rs and rs.get("ms")})
-    keep_logs(vm)
-    vm.stop()
-    return finish("disk")
+    out = {"base_bytes": base_size, "variants": {}}
+    for mode in ("guest", "host"):
+        vm = Vm(f"disk-{mode}", mode="full", quota_gib=quota, resize=mode, cg=cg, mem_mib=2048)
+        ok = vm.boot()
+        check(f"[{mode}] VM boots with the job disk grown to the quota", ok)
+        if not ok:
+            keep_logs(vm)
+            continue
+        if mode == "guest":
+            rs = vm.event("resize_done") or {}
+            say(f"[guest] resize2fs in the VM: rc={rs.get('rc')} {rs.get('ms')} ms: {rs.get('msg')}")
+            out["variants"][mode] = {"ms": rs.get("ms"), "rc": rs.get("rc"), "msg": rs.get("msg")}
+        else:
+            say(f"[host] resize2fs on the file: rc={vm.timings.get('host_resize_rc')} {vm.timings.get('host_resize_ms'):.0f} ms: {vm.timings.get('host_resize_msg')}")
+            out["variants"][mode] = {"ms": round(vm.timings.get("host_resize_ms", 0)), "rc": vm.timings.get("host_resize_rc"), "msg": vm.timings.get("host_resize_msg")}
+        r = vm.sh("blockdev --getsize64 /dev/vdb; df -BM --output=size,used,avail /jobdisk | tail -n 1; findmnt -no FSTYPE,OPTIONS / | cut -d, -f1; touch /spike/x 2>&1 | head -n 1")
+        print(r["stdout"], r["stderr"])
+        lines = r["stdout"].splitlines()
+        dev_bytes = int(lines[0]) if lines and lines[0].isdigit() else 0
+        fs_mib = int(lines[1].split()[0].rstrip("M")) if len(lines) > 1 else 0
+        check(f"[{mode}] the block device is the quota", dev_bytes == quota << 30, f"{dev_bytes >> 20} MiB")
+        check(f"[{mode}] the file system grew to the quota", fs_mib > (quota << 10) * 0.9, f"df says {fs_mib} MiB of {quota << 10} MiB")
+        check(f"[{mode}] root file system is read-only", "Read-only file system" in r["stdout"] + r["stderr"], "touch: Read-only file system")
+        w = vm.sh("dd if=/dev/zero of=/jobdisk/fill bs=1M count=4096 conv=fsync 2>&1 | tail -n 2; df -BM --output=size,used,avail /jobdisk | tail -n 1", 180)
+        print(w["stdout"])
+        check(f"[{mode}] writing past the quota fails with ENOSPC", "No space left" in w["stdout"] + w["stderr"], w["stdout"].replace("\n", " | ")[-160:])
+        st = (vm.dir / "job.ext4").stat()
+        check(f"[{mode}] the job disk file stays within its quota on the host", st.st_size <= quota << 30 and st.st_blocks * 512 <= quota << 30, f"allocated {st.st_blocks * 512 >> 20} MiB of {quota << 10} MiB")
+        out["variants"][mode]["fs_mib"] = fs_mib
+        out["variants"][mode]["allocated_mib_after_fill"] = st.st_blocks * 512 >> 20
+        keep_logs(vm)
+        vm.stop()
+    save("disk-vm", out)
+    return finish("disk", out)
 
 
 def main() -> int:

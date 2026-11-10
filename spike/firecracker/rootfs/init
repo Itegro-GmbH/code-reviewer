@@ -40,8 +40,8 @@ fi
 mkdir -p /jobdisk
 mount -t ext4 -o noatime /dev/vdb /jobdisk
 if [ "$(getarg spike.resize)" = 1 ]; then
-  t0=$(date +%s%N); resize2fs /dev/vdb > /run/resize2fs.log 2>&1
-  /spike/agent.py event resize_done "ms=$(( ($(date +%s%N) - t0) / 1000000 ))"
+  t0=$(date +%s%N); resize2fs /dev/vdb > /run/resize2fs.log 2>&1; rc=$?
+  /spike/agent.py event resize_done "ms=$(( ($(date +%s%N) - t0) / 1000000 ))" "rc=$rc" "msg=$(tr '\n' '|' < /run/resize2fs.log | cut -c1-300)"
 fi
 # Everything Docker and Sysbox keep lives on the job disk: the data root (daemon.json), containerd's root (the image store of
 # Docker 29's containerd snapshotter is NOT under the data root) and Sysbox's.
