@@ -39,7 +39,9 @@ describe("the build workflow", () => {
     for (const id of Object.keys(build.jobs))
       expect(job(build, id).permissions, id).toBeUndefined();
     expect(buildText).not.toMatch(/secrets\./);
-    expect(buildText).not.toMatch(/docker\/login-action|packages: write|contents: write/);
+    expect(buildText).not.toMatch(
+      /docker\/login-action|packages: write|contents: write/,
+    );
     expect(buildText).not.toMatch(/push: true/);
     // The key of the release is not here: the self-test signs with a throwaway one.
     expect(buildText).not.toMatch(/SIGNING_KEY/);
@@ -93,7 +95,9 @@ describe("the build workflow", () => {
     expect(key).toContain("docker/vm/pins.env");
     expect(key).toContain("docker/vm/kernel/**");
     const names = steps.map((step) => step.name ?? step.uses ?? "");
-    const built = names.findIndex((name) => name.startsWith("Build the kernel"));
+    const built = names.findIndex((name) =>
+      name.startsWith("Build the kernel"),
+    );
     expect(names[built + 1]).toContain("Save the kernel to the cache");
   });
 
@@ -102,7 +106,9 @@ describe("the build workflow", () => {
     for (const id of Object.keys(build.jobs))
       for (const step of stepsOf(job(build, id))) {
         if (!step.uses || step.uses.startsWith("actions/")) continue;
-        expect(step.uses, `${id}: ${step.uses}`).toMatch(/@[0-9a-f]{40}( #.*)?$/);
+        expect(step.uses, `${id}: ${step.uses}`).toMatch(
+          /@[0-9a-f]{40}( #.*)?$/,
+        );
       }
   });
 });
@@ -121,7 +127,10 @@ describe("the release workflow", () => {
       [".github/workflows/vm-artifacts-release.yml", releaseText],
     ];
     for (const [path, text] of holders)
-      expect(text.match(/secrets\.VM_ARTIFACTS_SIGNING_KEY/g), path).toHaveLength(1);
+      expect(
+        text.match(/secrets\.VM_ARTIFACTS_SIGNING_KEY/g),
+        path,
+      ).toHaveLength(1);
     expect(buildText).not.toContain("VM_ARTIFACTS_SIGNING_KEY");
     expect(readText(".github/workflows/ci.yml")).not.toContain(
       "VM_ARTIFACTS_SIGNING_KEY",
@@ -158,13 +167,17 @@ describe("the release workflow", () => {
     const steps = stepsOf(job(release, "release"));
     const names = steps.map((step) => step.name ?? "");
     const sign = steps.find((step) => step.name === "Sign the manifest");
-    const verifyAt = names.findIndex((name) => name.startsWith("Verify what is about to be published"));
+    const verifyAt = names.findIndex((name) =>
+      name.startsWith("Verify what is about to be published"),
+    );
 
     expect(sign?.run).toContain("release-channel.json");
     expect(sign?.run).toContain("openssl dgst -sha256 -sign");
     expect(verifyAt).toBeGreaterThan(names.indexOf("Sign the manifest"));
     expect(steps[verifyAt]?.run).toContain("verify-main.ts");
-    expect(steps[verifyAt]?.run).toContain("--channel docker/vm/release-channel.json");
+    expect(steps[verifyAt]?.run).toContain(
+      "--channel docker/vm/release-channel.json",
+    );
     // The key file is removed after the signature and once more at the end, whatever happened.
     expect(sign?.run).toContain("rm -f");
     expect(steps.at(-1)?.if).toContain("always()");
@@ -172,12 +185,16 @@ describe("the release workflow", () => {
 
   // #976-T02
   it("compares the recipe with the hosted golden snapshot's record before it signs", () => {
-    const names = stepsOf(job(release, "release")).map((step) => step.name ?? "");
-
-    expect(names.indexOf("The hosted golden snapshot has the same recipe")).toBeGreaterThan(-1);
-    expect(names.indexOf("The hosted golden snapshot has the same recipe")).toBeLessThan(
-      names.indexOf("Sign the manifest"),
+    const names = stepsOf(job(release, "release")).map(
+      (step) => step.name ?? "",
     );
+
+    expect(
+      names.indexOf("The hosted golden snapshot has the same recipe"),
+    ).toBeGreaterThan(-1);
+    expect(
+      names.indexOf("The hosted golden snapshot has the same recipe"),
+    ).toBeLessThan(names.indexOf("Sign the manifest"));
   });
 
   // #976-T01

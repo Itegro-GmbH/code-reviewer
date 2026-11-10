@@ -962,18 +962,24 @@ describe("CI workflow installation and runtimes", () => {
   });
 
   // CR-16-T07
-  it("calls a reusable workflow only from the engine job, the one job exempt from its own time limit", () => {
+  it("calls a reusable workflow only from the engine job and the VM artifacts job, the jobs exempt from their own time limit", () => {
     expect(
       jobs.filter(([, job]) => job.uses).map(([id, job]) => [id, job.uses]),
-    ).toEqual([["engine", "./.github/workflows/engine.yml"]]);
+    ).toEqual([
+      ["engine", "./.github/workflows/engine.yml"],
+      // The VM artifacts (#976): a KVM build of about half an hour, which runs only for a pull request that changes what they are made from.
+      ["vm-artifacts", "./.github/workflows/vm-artifacts.yml"],
+    ]);
   });
 
   // CR-16-T07
   it("limits the run time of every job", () => {
-    // Only the job that calls the engine workflow is exempt: a job that calls a reusable workflow
+    // Only the jobs that call the engine workflow and the VM artifacts workflow (whose jobs have limits of their own) are exempt: a job that calls a reusable workflow
     // cannot have its own limit, and the called workflow has one (engine-workflow.test.ts). Any
     // other job still needs a limit of its own.
-    const exempt = (job: Job) => job.uses === "./.github/workflows/engine.yml";
+    const exempt = (job: Job) =>
+      job.uses === "./.github/workflows/engine.yml" ||
+      job.uses === "./.github/workflows/vm-artifacts.yml";
     for (const [id, job] of jobs.filter(([, job]) => !exempt(job))) {
       expect(job["timeout-minutes"], `${id} timeout`).toBeGreaterThan(0);
       expect(job["timeout-minutes"], `${id} timeout`).toBeLessThanOrEqual(30);

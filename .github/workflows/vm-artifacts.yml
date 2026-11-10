@@ -191,9 +191,11 @@ jobs:
       - name: Sign with a throwaway key, verify, and see a changed byte refused
         run: docker/vm/selftest-signing.sh "$VM_WORK/release"
       - name: Summary
+        env:
+          RELEASE: ${{ inputs.release }}
         run: |
           {
-            echo "### VM artifacts (release ${{ inputs.release }})"
+            echo "### VM artifacts (release $RELEASE)"
             echo
             echo "| File | Size (MiB) |"
             echo "|---|---|"
