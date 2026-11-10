@@ -11,7 +11,16 @@ from typing import Any
 import pytest
 
 from code_reviewer_runner.vm_init import wire
-from vm_init_support import BAD_STARTS, CREDENTIAL, LOCAL_CREDENTIAL, start_document
+from vm_init_support import (
+    BAD_STARTS,
+    CONTROL_TOKEN,
+    CREDENTIAL,
+    IMAGE_ID,
+    IMAGE_REFERENCE,
+    LOCAL_CREDENTIAL,
+    VOLUME_NAME,
+    start_document,
+)
 
 
 def _pair() -> tuple[socket.socket, socket.socket]:
@@ -95,6 +104,7 @@ def test_the_local_credential_is_optional() -> None:
         "appUrl": "https://app.example",
         "jobId": "job-1",
         "credential": CREDENTIAL,
+        "controlToken": CONTROL_TOKEN,
     }
 
 
@@ -109,6 +119,7 @@ def test_the_stdin_document_is_one_json_line_with_the_local_credential_under_its
         "appUrl": "https://app.example",
         "jobId": "job-1",
         "credential": CREDENTIAL,
+        "controlToken": CONTROL_TOKEN,
         "localCredential": {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": LOCAL_CREDENTIAL},
     }
 
@@ -119,6 +130,7 @@ def test_no_credential_is_part_of_a_repr_or_an_error() -> None:
     shown = repr(request) + repr(request.job) + repr(request.local_credential)
 
     assert CREDENTIAL not in shown and LOCAL_CREDENTIAL not in shown
+    assert CONTROL_TOKEN not in shown
 
 
 # #977-T02
@@ -136,16 +148,17 @@ def test_a_start_that_is_not_an_object_is_refused(document: Any) -> None:
 
 
 # #977-T04
-@pytest.mark.parametrize("secret", [CREDENTIAL, LOCAL_CREDENTIAL])
+@pytest.mark.parametrize("secret", [CREDENTIAL, LOCAL_CREDENTIAL, CONTROL_TOKEN])
 def test_a_start_whose_arguments_hold_a_credential_is_refused_without_naming_it(
     secret: str,
 ) -> None:
-    document = start_document(control={"args": ["run", f"--env=X={secret}"]})
+    document = start_document(control={"args": ["run", f"--env=X={secret}", IMAGE_ID]})
 
     with pytest.raises(wire.InvalidStart) as refusal:
         wire.parse_start(document)
 
-    assert CREDENTIAL not in str(refusal.value) and LOCAL_CREDENTIAL not in str(refusal.value)
+    shown = str(refusal.value)
+    assert CREDENTIAL not in shown and LOCAL_CREDENTIAL not in shown and CONTROL_TOKEN not in shown
 
 
 def test_the_replies_and_the_report_are_the_contracts() -> None:
@@ -181,3 +194,148 @@ def test_a_reply_that_is_not_the_ack_of_the_exit_report_is_refused(document: Any
 
 def test_the_ack_of_the_exit_report_is_read() -> None:
     wire.read_ack({"version": 1, "type": "ack", "for": "exit"}, "exit")
+
+
+# -- the image that runs is the image that was checked (#977 fix round) ---
+
+
+def _args_with_image(image: str) -> dict[str, Any]:
+    return start_document(
+        control={"args": ["run", "--interactive", "--rm", "--name", "n", image, "worker-once"]}
+    )
+
+
+# #977-T05
+def test_the_image_operand_that_is_the_checked_id_is_run_as_it_is() -> None:
+    request = wire.parse_start(_args_with_image(IMAGE_ID))
+
+    assert request.args == ("run", "--interactive", "--rm", "--name", "n", IMAGE_ID, "worker-once")
+
+
+# #977-T05
+def test_the_image_operand_that_is_the_checked_reference_is_run_by_the_checked_id() -> None:
+    request = wire.parse_start(_args_with_image(IMAGE_REFERENCE))
+
+    assert request.args == ("run", "--interactive", "--rm", "--name", "n", IMAGE_ID, "worker-once")
+
+
+# #977-T05
+@pytest.mark.parametrize(
+    "image",
+    ["other:tag", "sha256:" + "cd" * 32, IMAGE_REFERENCE + "x", "registry.invalid/w@" + IMAGE_ID],
+)
+def test_an_image_operand_that_is_not_the_checked_image_is_refused(image: str) -> None:
+    with pytest.raises(wire.InvalidStart):
+        wire.parse_start(_args_with_image(image))
+
+
+# #977-T05
+def test_an_image_that_hides_behind_an_option_value_is_not_the_operand() -> None:
+    # `--name <checked id>` is a value; the operand after it is another image.
+    document = start_document(
+        control={"args": ["run", "--name", IMAGE_ID, "other:tag", "worker-once"]}
+    )
+
+    with pytest.raises(wire.InvalidStart):
+        wire.parse_start(document)
+
+
+# #977-T05
+def test_the_option_forms_with_an_equals_sign_and_the_flags_without_a_value_are_read() -> None:
+    document = start_document(
+        control={"args": ["run", "-i", "--rm", "--name=n", "--read-only", IMAGE_ID, "worker-once"]}
+    )
+
+    assert wire.parse_start(document).args[-2] == IMAGE_ID
+
+
+# -- what the arguments may not take away (#977 fix round) ---
+
+_WORK = f"type=volume,source={VOLUME_NAME},target=/work"
+_SOCKET = "type=bind,source=/var/run/docker.sock,target=/run/docker.sock,readonly"
+
+REFUSED_OPTIONS: dict[str, list[str]] = {
+    "--privileged": ["--privileged"],
+    "--privileged=true": ["--privileged=true"],
+    "seccomp=unconfined": ["--security-opt", "seccomp=unconfined"],
+    "seccomp:unconfined": ["--security-opt", "seccomp:unconfined"],
+    "--security-opt=seccomp=unconfined": ["--security-opt=seccomp=unconfined"],
+    "apparmor=unconfined": ["--security-opt", "apparmor=unconfined"],
+    "--pid host": ["--pid", "host"],
+    "--pid=host": ["--pid=host"],
+    "--net host": ["--net", "host"],
+    "--network host": ["--network", "host"],
+    "--network=host": ["--network=host"],
+    "--ipc host": ["--ipc", "host"],
+    "--userns host": ["--userns", "host"],
+    "--device": ["--device", "/dev/kvm"],
+    "--device=": ["--device=/dev/sda"],
+    "--cap-add ALL": ["--cap-add", "ALL"],
+    "--cap-add all": ["--cap-add", "all"],
+    "--cap-add=ALL": ["--cap-add=ALL"],
+    "a bind of the host": ["--mount", "type=bind,source=/,target=/host"],
+    "a bind of the socket that is writable": [
+        "--mount",
+        "type=bind,source=/var/run/docker.sock,target=/run/docker.sock",
+    ],
+    "another volume": ["--mount", "type=volume,source=other,target=/work"],
+    "the work volume elsewhere": ["--mount", f"type=volume,source={VOLUME_NAME},target=/etc"],
+    "--mount=": ["--mount=type=bind,source=/etc,target=/etc"],
+    "--volume": ["--volume", "/:/host"],
+    "-v": ["-v", "/:/host"],
+}
+
+
+def _with_options(options: list[str]) -> dict[str, Any]:
+    return start_document(control={"args": ["run", *options, IMAGE_ID, "worker-once"]})
+
+
+# #977-T06
+@pytest.mark.parametrize("options", list(REFUSED_OPTIONS.values()), ids=list(REFUSED_OPTIONS))
+def test_an_option_that_takes_the_walls_of_the_container_away_is_refused(
+    options: list[str],
+) -> None:
+    with pytest.raises(wire.InvalidStart):
+        wire.parse_start(_with_options(options))
+
+
+# #977-T06
+def test_the_work_volume_and_the_docker_socket_are_the_mounts_that_pass() -> None:
+    request = wire.parse_start(_with_options(["--mount", _WORK, "--mount", _SOCKET]))
+
+    assert "--mount" in request.args
+
+
+# #977-T06
+def test_the_hardened_options_of_the_hosted_container_pass() -> None:
+    options = [
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "NET_ADMIN",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--security-opt",
+        "seccomp=/etc/code-reviewer/control-seccomp.json",
+        "--network",
+        "bridge",
+        "--tmpfs",
+        "/tmp:rw,noexec",
+    ]
+
+    wire.parse_start(_with_options(options))
+
+
+# #977-T06
+def test_the_deny_list_looks_at_options_and_not_at_the_command_after_the_image() -> None:
+    document = start_document(control={"args": ["run", IMAGE_ID, "worker-once", "--privileged"]})
+
+    wire.parse_start(document)
+
+
+# #977-T06
+def test_the_refusal_of_an_option_names_the_field_and_not_the_value() -> None:
+    with pytest.raises(wire.InvalidStart) as refusal:
+        wire.parse_start(_with_options(["--mount", "type=bind,source=/secret-path,target=/x"]))
+
+    assert "/secret-path" not in str(refusal.value)

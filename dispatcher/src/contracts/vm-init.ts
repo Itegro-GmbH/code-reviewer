@@ -36,6 +36,10 @@ export type ReportSeconds = 10;
  */
 export type ReportRetrySeconds = 0.5;
 /**
+ * The per-VM token of the host (`ControlToken` of `environment-control.v1.json`, the same value and the same rules): 32 to 96 random bytes in base64url without padding, made by the host for one VM. vm-init writes it to Control's stdin as the `controlToken` key of the job document (with the credential and nowhere else: not an argument, not the environment, not a file, not a log) and puts it in every exit report it sends after it read a start. Control puts it in every message of the environment control. It is a secret of the host's own: the host compares it in constant time and never logs it.
+ */
+export type ControlToken = string;
+/**
  * Why the VM ends: `worker_exited` (Control's container ran and ended; `exitCode` is its status: 0 ok, 1 the job failed, 2 setup error, 137 killed, anything else it was given), `docker_failed` (`docker run` itself failed: the status was 125, 126 or 127, so the container was not started or its command was not found), `prepare_failed` (a step of the VM's preparation or of the work volume failed, `exitCode` 2), `image_missing` and `image_mismatch` (the image check of `ImageCheck` failed, `exitCode` 2), `start_invalid` (the start was refused, `exitCode` 2), `start_timeout` (no start in time, `exitCode` 2).
  */
 export type ExitReason =
@@ -67,7 +71,7 @@ export interface JobDocument {
   credential: string;
 }
 /**
- * The arguments of `docker run` for the Control container, without the word `docker`, as `renderDockerRunArguments` of the Dispatcher (dispatcher/src/launchers/container.ts) renders them from the local Implementer spec (dispatcher/src/launchers/local-control.ts): the same hardened flags as the hosted container plus what the local one needs (RUNNER_ENVIRONMENT_CONTROL, a seccomp profile that allows AF_VSOCK). The first one is `run`. No argument may hold the job's credential.
+ * The arguments of `docker run` for the Control container, without the word `docker`, as `renderDockerRunArguments` of the Dispatcher (dispatcher/src/launchers/container.ts) renders them from the local Implementer spec (dispatcher/src/launchers/local-control.ts): the same hardened flags as the hosted container plus what the local one needs (RUNNER_ENVIRONMENT_CONTROL, a seccomp profile that allows AF_VSOCK). The first one is `run`. No argument may hold the job's credential. The image operand (the first argument after the options) must be the start's `image.id`, or `image.reference`, which vm-init then replaces with the id, so that what runs is the image whose id was checked; any other image is refused. A cheap deny-list refuses `--privileged`, `seccomp=unconfined`, `apparmor=unconfined`, `--pid`, `--net`, `--network`, `--ipc`, `--userns` and `--uts` with `host`, `--device`, `--cap-add ALL`, `--volume` and every `--mount` but the job's work volume (`workVolume.name` at `/work`) and the Docker socket (read only): it catches a bug of the Dispatcher that renders such an option. The host owns the VMM, the kernel and the root file system and is trusted (`runner/vm-init/README.md`, "Trust, the token and the wall clock"); the list is no defence against a host that is hostile.
  */
 export interface ControlInvocation {
   /**
@@ -90,6 +94,7 @@ export interface StartRequest {
   version: 1;
   type: "start";
   job: JobDocument;
+  controlToken: ControlToken;
   localCredential?: LocalCredential;
   image: ImageCheck;
   control: ControlInvocation;
@@ -116,13 +121,14 @@ export interface ImageCheck {
   id: string;
 }
 /**
- * Guest to host: the VM ends with this.
+ * Guest to host: the VM ends with this. `token` is the start's `controlToken`: every report of a VM that read a start carries it (`image_missing`, `image_mismatch`, `prepare_failed` after the start, `worker_exited`, `docker_failed`). The reports of a VM that never read one (`start_timeout`, `start_invalid`, `prepare_failed` of the daemon before the start, a VM that could not listen) cannot: no job and no agent exists then, and the host knows it has no `ack` for a start from that VM, so it accepts a report without a token only until then. A host that has an `ack` for the start refuses a report without the token or with another one (`verify` in `dispatcher/src/launchers/control-token.ts`). THE HOST TAKES THE FIRST REPORT of a VM that passes this check and answers every later one with the same `ack`: vm-init sends the report again when the `ack` did not come, so the report is idempotent.
  */
 export interface ExitReport {
   version: 1;
   type: "exit";
   exitCode: number;
   reason: ExitReason;
+  token?: ControlToken;
 }
 /**
  * The request named in `for` is taken: for `start`, vm-init accepted the job and will run it; for `exit`, the host has the report.
@@ -133,7 +139,7 @@ export interface AckReply {
   for: RequestType;
 }
 /**
- * vm-init refuses a start and ends the VM (`start_invalid`): the document is not a `StartRequest`, or its arguments hold the credential. `reason` is a stable code and never a text.
+ * vm-init refuses a start and ends the VM (`start_invalid`): the document is not a `StartRequest` (a frame that is not whole, too large or not one object, a byte after the frame, a field that does not match, a `controlToken` that is missing), its arguments hold a credential, name another image than the checked one or hold an option of the deny-list. `reason` is a stable code and never a text.
  */
 export interface RefusedReply {
   version: 1;

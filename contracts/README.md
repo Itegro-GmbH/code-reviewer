@@ -119,6 +119,10 @@ AF_VSOCK socket; the real path is proven by the Firecracker lane of #977 and #97
 to host, port 5101). The framing is the one of the environment control. The runner holds its constants, the documents it writes and what it refuses to the file
 (`runner/tests/contract/test_vm_init_contract.py`); the Dispatcher holds the start it builds to the file (`dispatcher/src/launchers/local-control.test.ts`); the TypeScript types are generated
 (`app/src/contracts/vm-init.ts`, `dispatcher/src/contracts/vm-init.ts`). The Worker's own `narrow` and `end` do not pass through vm-init: Control connects to the host itself.
+The host makes a per-VM **token** (`ControlToken`) and sends it in the start (`controlToken`, required: the file is new); vm-init puts it in every exit report after it read a start, Control gets it on its stdin and puts
+it in every `narrow` and `end` (`token`, an **optional** field of `environment-control.v1.json`, so that file stays version 1: a field that readers may ignore is additive, and the only host that answers, #978, requires it).
+The host trusts the token and not the claim that the agent cannot open a vsock socket (seccomp is defence in depth); the helpers it checks with are in `dispatcher/src/launchers/control-token.ts`. The host takes the first exit report of a VM
+that passes the check and answers a repeated one with the same `ack` (the report is sent again when an `ack` is lost); a protocol error of the start is answered `refused` (`invalid_start`).
 
 ## The job model entry contract
 

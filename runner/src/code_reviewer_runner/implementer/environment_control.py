@@ -28,11 +28,12 @@ it is ending anyway.
 
 import json
 import logging
+import re
 import socket
 import struct
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final, Protocol, cast
 
@@ -60,6 +61,8 @@ MAX_FRAME_BYTES: Final = 65536
 NARROW_SECONDS: Final = 30.0
 END_SECONDS: Final = 5.0
 HEADER_BYTES: Final = 4
+# `ControlToken` of the contract: the host's per-VM token, which every request carries (#977).
+CONTROL_TOKEN: Final = re.compile(r"[A-Za-z0-9_-]{43,128}")
 
 REQUEST_NARROW: Final = "narrow"
 REQUEST_END: Final = "end"
@@ -111,19 +114,30 @@ def vsock_connect(timeout: float) -> StreamSocket:
 # -- the messages and the framing ---
 
 
-def narrow_request(rule: NetworkRule, model_host: str) -> dict[str, Any]:
-    """`NarrowRequest` of the contract."""
-    return {
+def narrow_request(rule: NetworkRule, model_host: str, token: str | None = None) -> dict[str, Any]:
+    """`NarrowRequest` of the contract. `token` is the host's per-VM token: a host that serves a VM
+    of vm-init refuses a request without it."""
+    request: dict[str, Any] = {
         "version": PROTOCOL_VERSION,
         "type": REQUEST_NARROW,
         "network": rule.to_json(),
         "modelHost": model_host,
     }
+    if token is not None:
+        request["token"] = token
+    return request
 
 
-def end_request(exit_code: int) -> dict[str, Any]:
-    """`EndRequest` of the contract."""
-    return {"version": PROTOCOL_VERSION, "type": REQUEST_END, "exitCode": exit_code}
+def end_request(exit_code: int, token: str | None = None) -> dict[str, Any]:
+    """`EndRequest` of the contract, with the host's token when the Worker has one."""
+    request: dict[str, Any] = {
+        "version": PROTOCOL_VERSION,
+        "type": REQUEST_END,
+        "exitCode": exit_code,
+    }
+    if token is not None:
+        request["token"] = token
+    return request
 
 
 def encode_frame(document: object) -> bytes:
@@ -240,9 +254,12 @@ class VsockControl:
     connect: Connect = vsock_connect
     narrow_seconds: float = NARROW_SECONDS
     end_seconds: float = END_SECONDS
+    # The host's per-VM token (vm-init hands it to Control on its stdin, #977). It is in every
+    # request, never in a log, an error or a `repr`.
+    token: str | None = field(default=None, repr=False)
 
     def narrow(self, rule: NetworkRule, model_host: str) -> None:
-        request = narrow_request(rule, model_host)
+        request = narrow_request(rule, model_host, self.token)
         try:
             reply = self._exchange(request, REQUEST_NARROW, self.narrow_seconds)
         except TimeoutError:
@@ -269,7 +286,9 @@ class VsockControl:
 
     def report_end(self, exit_code: int) -> None:
         try:
-            reply = self._exchange(end_request(exit_code), REQUEST_END, self.end_seconds)
+            reply = self._exchange(
+                end_request(exit_code, self.token), REQUEST_END, self.end_seconds
+            )
         except (TimeoutError, ProtocolError, OSError) as error:
             _log.warning("environment control: the end was not reported (%s)", type(error).__name__)
             return
@@ -300,11 +319,13 @@ def control_from_environment(
     pause_seconds: float = 2.0,
     connect: Connect = vsock_connect,
     narrow_seconds: float = NARROW_SECONDS,
+    token: str | None = None,
 ) -> EnvironmentControl | None:
     """The transport the Worker was started for, or None when it was started for none. Raises
     `JobError` (`implementer_config_invalid`) for a configuration that says something and cannot be
     read, and for one that says two things: a deployment that says it can narrow the wall and
-    cannot is not the same as one that does not say so."""
+    cannot is not the same as one that does not say so. `token` is the host's per-VM token, which
+    only the vsock transport sends; the https transport is unchanged."""
     chosen = environment.get(ENVIRONMENT_CONTROL_VARIABLE)
     switch_text = environment.get(IMPLEMENTER_NETWORK_SWITCH_VARIABLE)
     has_switch = switch_text is not None and bool(switch_text.strip())
@@ -319,7 +340,7 @@ def control_from_environment(
                 ErrorCode.IMPLEMENTER_CONFIG_INVALID,
                 "this container names two environment controls, the network switch and vsock",
             )
-        return VsockControl(connect=connect, narrow_seconds=narrow_seconds)
+        return VsockControl(connect=connect, narrow_seconds=narrow_seconds, token=token)
     switch = parse_switch(switch_text)
     if switch is None:
         return None
@@ -327,14 +348,18 @@ def control_from_environment(
 
 
 def report_worker_end(
-    environment: Mapping[str, str], exit_code: int, *, connect: Connect = vsock_connect
+    environment: Mapping[str, str],
+    exit_code: int,
+    *,
+    token: str | None = None,
+    connect: Connect = vsock_connect,
 ) -> None:
     """The Worker's last act: tell the host over vsock that it ended. Over https and with no control
     there is nothing to tell. Never raises: a Worker that cannot say goodbye still ends."""
     if environment.get(ENVIRONMENT_CONTROL_VARIABLE) is None:
         return
     try:
-        transport = control_from_environment(environment, connect=connect)
+        transport = control_from_environment(environment, connect=connect, token=token)
     except JobError:
         _log.warning("environment control: not configured, so the end was not reported")
         return

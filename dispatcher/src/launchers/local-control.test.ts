@@ -26,12 +26,14 @@ import {
   renderLocalControl,
 } from "./local-control.ts";
 import { environmentOf, planForKind } from "./sandbox.ts";
+import { generateControlToken } from "./control-token.ts";
 
 const IMAGE =
   "registry.invalid/code-reviewer-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 const IMAGE_ID = `sha256:${"ab".repeat(32)}`;
 const CREDENTIAL = "crj_dummy-credential-0123456789";
 const LOCAL_CREDENTIAL = "dummy-local-credential-0123456789";
+const CONTROL_TOKEN = generateControlToken();
 
 function golden(name: string): string[] {
   return JSON.parse(
@@ -202,6 +204,7 @@ describe("the start request of vm-init", () => {
       ...options,
       image: IMAGE_ID,
       reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
     });
 
     expect(valid("StartRequest", start)).toBe(true);
@@ -212,6 +215,9 @@ describe("the start request of vm-init", () => {
       reference: LOCAL_IMAGE_REFERENCE,
       id: IMAGE_ID,
     });
+    expect(start.controlToken).toBe(CONTROL_TOKEN);
+    expect(start.control.args).toContain(IMAGE_ID);
+    expect(JSON.stringify(start.control)).not.toContain(CONTROL_TOKEN);
     expect(start.workVolume).toEqual({
       name: "code-reviewer-work-job-1",
       reserveGib: 8,
@@ -229,6 +235,7 @@ describe("the start request of vm-init", () => {
       ...options,
       image: IMAGE_ID,
       reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
       localCredential: {
         name: "CLAUDE_CODE_OAUTH_TOKEN",
         value: LOCAL_CREDENTIAL,
@@ -248,9 +255,39 @@ describe("the start request of vm-init", () => {
         ...options,
         image: IMAGE_ID,
         reserveGib: 8,
+        controlToken: CONTROL_TOKEN,
         spec: { ...spec(), credential: "worker-once" },
       }),
     ).rejects.toThrow();
+  });
+
+  // #977-T07
+  it("refuses a token that would be an argument", async () => {
+    await expect(
+      buildStartRequest({
+        ...options,
+        image: IMAGE_ID,
+        reserveGib: 8,
+        controlToken: "ab".repeat(32),
+      }),
+    ).rejects.toThrow();
+  });
+
+  // #977-T07
+  it("is refused by the contract without the token or with one of the wrong shape", async () => {
+    const start = await buildStartRequest({
+      ...options,
+      image: IMAGE_ID,
+      reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
+    });
+    const withoutToken: Partial<typeof start> = { ...start };
+    delete withoutToken.controlToken;
+
+    expect(valid("StartRequest", withoutToken)).toBe(false);
+    expect(valid("StartRequest", { ...start, controlToken: "short" })).toBe(
+      false,
+    );
   });
 
   // #977-T02
@@ -259,6 +296,7 @@ describe("the start request of vm-init", () => {
       ...options,
       image: IMAGE_ID,
       reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
     });
     const withoutImage: Partial<typeof start> = { ...start };
     delete withoutImage.image;

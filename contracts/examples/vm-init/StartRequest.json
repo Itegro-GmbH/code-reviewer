@@ -6,6 +6,7 @@
     "jobId": "job-1",
     "credential": "crj_example-credential-for-the-contract-test-only"
   },
+  "controlToken": "Hq3-n0example_control_token_for_the_contract_test_only_7Kd",
   "localCredential": {
     "name": "CLAUDE_CODE_OAUTH_TOKEN",
     "value": "example-local-credential-for-the-contract-test-only"
@@ -21,7 +22,7 @@
       "--rm",
       "--name",
       "code-reviewer-worker-job-1",
-      "registry.invalid/code-reviewer-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "worker-once"
     ]
   },

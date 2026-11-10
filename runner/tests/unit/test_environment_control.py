@@ -166,8 +166,22 @@ ACK = {"version": 1, "type": "ack", "for": "narrow"}
 ACK_END = {"version": 1, "type": "ack", "for": "end"}
 
 
-def vsock_control(host: FakeHost, **limits: float) -> VsockControl:
-    return VsockControl(connect=host.connect, **limits)
+TOKEN = "control-token-of-the-host-0123456789-abcdefghij"
+
+
+def vsock_control(
+    host: FakeHost, *, narrow_seconds: float | None = None, end_seconds: float | None = None
+) -> VsockControl:
+    limits: dict[str, float] = {}
+    if narrow_seconds is not None:
+        limits["narrow_seconds"] = narrow_seconds
+    if end_seconds is not None:
+        limits["end_seconds"] = end_seconds
+    return VsockControl(
+        connect=host.connect,
+        narrow_seconds=limits.get("narrow_seconds", control.NARROW_SECONDS),
+        end_seconds=limits.get("end_seconds", control.END_SECONDS),
+    )
 
 
 # -- the framing ---
@@ -644,14 +658,14 @@ def test_with_no_transport_the_turn_goes_on_and_one_line_says_the_wall_is_not_na
 
 # #975-T02
 def test_the_worker_reports_its_exit_code_when_it_ends(monkeypatch: pytest.MonkeyPatch) -> None:
-    reported: list[tuple[dict[str, str], int]] = []
+    reported: list[tuple[dict[str, str], int, str | None]] = []
 
-    def run(env: dict[str, str], source: TextIO) -> int:
+    def run(env: dict[str, str], source: TextIO) -> worker_cli.Ended:
         _ = (env, source)
-        return 1
+        return worker_cli.Ended(1, TOKEN)
 
-    def report(env: Mapping[str, str], code: int) -> None:
-        reported.append((dict(env), code))
+    def report(env: Mapping[str, str], code: int, *, token: str | None = None) -> None:
+        reported.append((dict(env), code, token))
 
     monkeypatch.setattr(worker_cli, "_run", run)
     monkeypatch.setattr(worker_cli, "report_worker_end", report)
@@ -661,4 +675,122 @@ def test_the_worker_reports_its_exit_code_when_it_ends(monkeypatch: pytest.Monke
     )
 
     assert code == 1
-    assert reported == [({ENVIRONMENT_CONTROL_VARIABLE: "vsock"}, 1)]
+    assert reported == [({ENVIRONMENT_CONTROL_VARIABLE: "vsock"}, 1, TOKEN)]
+
+
+# -- the host's token in every request (#977 fix round) ---
+
+
+# #977-T07
+def test_narrow_carries_the_hosts_token(host_factory: Any) -> None:
+    host = host_factory(ACK)
+
+    VsockControl(connect=host.connect, token=TOKEN).narrow(LIST, MODEL_HOST)
+
+    [request] = host.requests
+    assert request["token"] == TOKEN and request["type"] == "narrow"
+
+
+# #977-T07
+def test_end_carries_the_hosts_token(host_factory: Any) -> None:
+    host = host_factory(ACK_END)
+
+    VsockControl(connect=host.connect, token=TOKEN).report_end(1)
+
+    assert host.requests == [{"version": 1, "type": "end", "exitCode": 1, "token": TOKEN}]
+
+
+# #977-T07
+def test_a_worker_with_no_token_sends_none_and_the_host_decides(host_factory: Any) -> None:
+    host = host_factory(ACK, ACK_END)
+    control_without = VsockControl(connect=host.connect)
+
+    control_without.narrow(LIST, MODEL_HOST)
+    control_without.report_end(0)
+
+    assert all("token" not in request for request in host.requests)
+
+
+# #977-T07
+def test_a_host_that_refuses_the_token_ends_the_job_with_the_stable_code(
+    host_factory: Any,
+) -> None:
+    host = host_factory(
+        {"version": 1, "type": "refused", "for": "narrow", "reason": "invalid_request"}
+    )
+
+    with pytest.raises(JobError) as failure:
+        VsockControl(connect=host.connect, token=TOKEN).narrow(LIST, MODEL_HOST)
+
+    assert failure.value.code is ErrorCode.ENVIRONMENT_CONTROL_FAILED
+    assert TOKEN not in failure.value.detail
+
+
+# #977-T07
+def test_the_token_is_not_part_of_a_repr_or_a_log(
+    host_factory: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    host = host_factory(None)
+    transport = VsockControl(connect=host.connect, token=TOKEN, end_seconds=0.05)
+
+    transport.report_end(0)
+
+    assert TOKEN not in repr(transport) and TOKEN not in caplog.text
+
+
+# #977-T07
+def test_the_vsock_choice_carries_the_token_and_https_does_not_know_it() -> None:
+    chosen = control_from_environment({ENVIRONMENT_CONTROL_VARIABLE: "vsock"}, token=TOKEN)
+    https = control_from_environment(
+        {IMPLEMENTER_NETWORK_SWITCH_VARIABLE: SWITCH_TEXT}, token=TOKEN
+    )
+
+    assert isinstance(chosen, VsockControl) and chosen.token == TOKEN
+    assert isinstance(https, HttpsControl)
+
+
+# #977-T07
+def test_the_worker_reports_its_end_with_the_token(host_factory: Any) -> None:
+    host = host_factory(ACK_END)
+
+    report_worker_end({ENVIRONMENT_CONTROL_VARIABLE: "vsock"}, 0, token=TOKEN, connect=host.connect)
+
+    assert host.requests[0]["token"] == TOKEN
+
+
+# #977-T07
+def test_the_session_narrows_with_the_token_the_job_carries(host_factory: Any) -> None:
+    host = host_factory(ACK)
+    document = json.loads(implementer_job_text())
+    document["environmentControlToken"] = TOKEN
+    job = parse_implementer_input(json.dumps(document))
+    session = ImplementerSession(
+        job,
+        workspace=cast("Any", None),
+        command=["opencode"],
+        place=lambda: cast("Any", None),
+        environment={ENVIRONMENT_CONTROL_VARIABLE: "vsock"},
+        seams=SessionSeams(control_connect=host.connect),
+    )
+
+    start_network(session)
+
+    assert host.requests[0]["token"] == TOKEN
+
+
+# #977-T07
+def test_a_job_carries_the_token_as_a_secret_and_only_in_the_shape_of_the_contract() -> None:
+    document = json.loads(implementer_job_text())
+    document["environmentControlToken"] = TOKEN
+
+    job = parse_implementer_input(json.dumps(document))
+
+    assert job.control_token == TOKEN
+    assert TOKEN in job.secrets
+    assert TOKEN not in repr(job)
+    for bad in ("short", 7, TOKEN + " ", TOKEN + "\n"):
+        document["environmentControlToken"] = bad
+        with pytest.raises(JobError):
+            parse_implementer_input(json.dumps(document))
+    assert parse_implementer_input(implementer_job_text()).control_token is None

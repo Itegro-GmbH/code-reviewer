@@ -322,6 +322,16 @@ def _end_of(result: Result, delivery: Delivery, superseded: bool = False) -> Job
     return JobEnd.OK if result["ok"] else JobEnd.FAILED
 
 
+def process_stdin(raw_input: Mapping[str, Any], kind: ReviewKind, control_token: str | None) -> str:
+    """The text a job process reads on its stdin: the job as the app sent it and, for an Implementer
+    turn of a Worker that vm-init started, the host's token for the environment control
+    (`environmentControlToken`, #977). ASCII escapes: a lone surrogate in a text cannot break the
+    encoding, and the job process reads the same JSON."""
+    if kind is ReviewKind.IMPLEMENTER and control_token is not None:
+        return json.dumps({**raw_input, "environmentControlToken": control_token})
+    return json.dumps(raw_input)
+
+
 def _secrets_in(raw_input: Mapping[str, Any]) -> list[str]:
     """The credentials of a job input, found defensively (the input may not be valid)."""
     values: list[str] = []
@@ -347,6 +357,7 @@ class JobHost:
         sweeper: Callable[[int, int], bool] = sweep_user,
         refuse_unadvertised_engine: bool = False,
         guard: Callable[[], Awaitable[str]] | None = None,
+        control_token: str | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
@@ -368,6 +379,9 @@ class JobHost:
         # guard's coroutine returns the text of the failure when it must end, and is otherwise
         # cancelled with the job. None: no budget (the hosted Worker).
         self._guard = guard
+        # The host's per-VM token for the environment control (#977): only an Implementer's job
+        # process gets it, on its stdin like the job's other secrets, never in its environment.
+        self._control_token = control_token
 
     def request_hard_stop(self) -> None:
         """End the running process now and report `runner_shutdown` (the grace period is over)."""
@@ -551,7 +565,7 @@ class JobHost:
                     **self._child_environment(job),
                     **({} if resumed.state is None else {RESUME_STATE_VARIABLE: resumed.state}),
                 },
-                stdin=json.dumps(claimed.input).encode("ascii"),
+                stdin=process_stdin(claimed.input, kind, self._control_token).encode("ascii"),
                 files=resumed.files,
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.

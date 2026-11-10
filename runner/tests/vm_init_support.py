@@ -16,7 +16,10 @@ from code_reviewer_runner.vm_init.wire import StreamSocket, encode_frame
 
 CREDENTIAL = "crj_credential-that-must-never-leak-0123456789"
 LOCAL_CREDENTIAL = "local-credential-that-must-never-leak-0123456789"
+CONTROL_TOKEN = "control-token-that-must-never-leak-0123456789"
 IMAGE_ID = "sha256:" + "ab" * 32
+IMAGE_REFERENCE = "code-reviewer-worker:golden"
+VOLUME_NAME = "code-reviewer-work-job-1"
 
 
 def start_document(**changes: Any) -> dict[str, Any]:
@@ -26,7 +29,8 @@ def start_document(**changes: Any) -> dict[str, Any]:
         "type": "start",
         "job": {"appUrl": "https://app.example", "jobId": "job-1", "credential": CREDENTIAL},
         "localCredential": {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": LOCAL_CREDENTIAL},
-        "image": {"reference": "code-reviewer-worker:golden", "id": IMAGE_ID},
+        "controlToken": CONTROL_TOKEN,
+        "image": {"reference": IMAGE_REFERENCE, "id": IMAGE_ID},
         "control": {
             "args": [
                 "run",
@@ -34,11 +38,11 @@ def start_document(**changes: Any) -> dict[str, Any]:
                 "--rm",
                 "--name",
                 "code-reviewer-worker-job-1",
-                "registry.invalid/worker@sha256:" + "0" * 64,
+                IMAGE_ID,
                 "worker-once",
             ]
         },
-        "workVolume": {"name": "code-reviewer-work-job-1", "reserveGib": 8},
+        "workVolume": {"name": VOLUME_NAME, "reserveGib": 8},
     }
     for key, value in changes.items():
         if value is None:
@@ -101,10 +105,40 @@ BAD_STARTS: dict[str, dict[str, Any]] = {
     "workVolume.reserveGib 65": _bad(workVolume={"name": "v", "reserveGib": 65}),
     "workVolume.reserveGib true": _bad(workVolume={"name": "v", "reserveGib": True}),
     "workVolume.name starts with a dash": _bad(workVolume={"name": "-v", "reserveGib": 8}),
+    "no controlToken": _bad(controlToken=None),
+    "controlToken too short": _bad(controlToken="t" * 42),
+    "controlToken with a space": _bad(controlToken="t" * 43 + " "),
+    "controlToken a number": _bad(controlToken=1),
+    # A trailing newline passes a pattern that ends in `$` (Python's `re`, `match`): the parser
+    # uses `fullmatch`. The schema (ECMA 262 `$`) refuses these; Python's `jsonschema` does not.
+    "job.appUrl trailing newline": _with_job(appUrl="https://app.example\n"),
+    "job.jobId trailing newline": _with_job(jobId="job-1\n"),
+    "job.credential trailing newline": _with_job(credential=CREDENTIAL + "\n"),
+    "localCredential.name trailing newline": _bad(
+        localCredential={"name": "TOKEN\n", "value": "x"}
+    ),
+    "localCredential.value trailing newline": _bad(
+        localCredential={"name": "TOKEN", "value": "x\n"}
+    ),
+    "image.reference trailing newline": _bad(
+        image={"reference": IMAGE_REFERENCE + "\n", "id": IMAGE_ID}
+    ),
+    "image.id trailing newline": _bad(image={"reference": IMAGE_REFERENCE, "id": IMAGE_ID + "\n"}),
+    "workVolume.name trailing newline": _bad(workVolume={"name": "v\n", "reserveGib": 8}),
+    "controlToken trailing newline": _bad(controlToken=CONTROL_TOKEN + "\n"),
+    # What the schema cannot say: the image that runs is the image that was checked, and the
+    # arguments hold no option that takes the VM's walls away (`wire.check_control_args`).
+    "args image is not the checked one": _with_args([*_ARGS[:-2], "other:tag", _ARGS[-1]]),
+    "args no image": _with_args(["run", "--rm"]),
 }
 
 
-SCHEMA_ALLOWS = frozenset({"args a NUL"})
+# The pattern is the same, but Python's `$` matches before a final newline, so the schema's reader
+# here lets these through; the parser does not (an ECMA 262 reader refuses them too).
+SCHEMA_ALLOWS = frozenset(
+    {"args a NUL", "args image is not the checked one", "args no image"}
+    | {name for name in BAD_STARTS if name.endswith("trailing newline")}
+)
 
 
 def read_frame_from(sock: socket.socket) -> dict[str, Any]:

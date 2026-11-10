@@ -32,6 +32,10 @@ export type ControlNarrowSeconds = 30;
  */
 export type ControlEndSeconds = 5;
 /**
+ * The per-VM token of the host (#977 fix round): 32 to 96 random bytes in base64url without padding, made by the host for one VM and sent to vm-init in the start (`controlToken` of `vm-init.v1.json`), to Control on its stdin and from there in every request of this file. It is the one thing that tells the host a message is the Worker's and not a forged one: `AF_VSOCK` is closed to the agent by the container's seccomp profile, which is defence in depth, and the token is what the host trusts. The host compares it in constant time, refuses a request without it or with another one (`refused`, `invalid_request`, or the connection closed) and never logs it.
+ */
+export type ControlToken = string;
+/**
  * A frame from the Worker to the host.
  */
 export type ControlRequest = NarrowRequest | EndRequest;
@@ -72,6 +76,7 @@ export interface NarrowRequest {
   type: "narrow";
   network: ControlNetworkRule;
   modelHost: string;
+  token?: ControlToken;
 }
 /**
  * Worker to host: the Worker ends with this exit code (0 ok, 1 the job failed, 2 setup error); the host may power the sandbox off once it answered. Best effort: the Worker does not wait for more than `ControlEndSeconds` and ignores a refusal.
@@ -80,6 +85,7 @@ export interface EndRequest {
   version: 1;
   type: "end";
   exitCode: number;
+  token?: ControlToken;
 }
 /**
  * Host to Worker: the request named in `for` is done (for `narrow`, the outer wall holds the rule).

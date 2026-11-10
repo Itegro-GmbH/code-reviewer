@@ -117,13 +117,16 @@ def read_frame(sock: StreamSocket, *, deadline_seconds: float) -> object:
 
 # -- the start request ---
 
-_APP_URL = re.compile(r"^https?://[!-~]+$")
-_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_PRINTABLE = re.compile(r"^[!-~]+$")
-_VARIABLE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_IMAGE_REFERENCE = re.compile(r"^[a-z0-9][A-Za-z0-9._/:@-]{0,255}$")
-_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
-_VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$")
+# Matched with `fullmatch`: `$` would let a trailing newline through.
+_APP_URL = re.compile(r"https?://[!-~]+")
+_JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_PRINTABLE = re.compile(r"[!-~]+")
+_VARIABLE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_IMAGE_REFERENCE = re.compile(r"[a-z0-9][A-Za-z0-9._/:@-]{0,255}")
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+_VOLUME_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
+# 32 to 96 random bytes in base64url, without padding.
+_CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 _MAX_ARGUMENTS = 256
 _MAX_ARGUMENT_CHARACTERS = 4096
 
@@ -159,16 +162,20 @@ class StartRequest:
     args: tuple[str, ...]
     volume_name: str
     reserve_gib: int
+    # The host's per-VM token: in every message the VM's processes send to the host, so that the
+    # host can tell them from a forged one (`contracts/vm-init.v1.json`, "THE TOKEN").
+    control_token: str = field(repr=False)
 
     def stdin_document(self) -> bytes:
-        """The bytes written to Control's stdin: the job document as one JSON line, plus the local
-        credential under `localCredential` when there is one. Other keys are ignored by the
-        Worker, so
-        an older Worker does not mind it."""
+        """The bytes written to Control's stdin: the job document as one JSON line, plus the token
+        of the environment control under `controlToken` and the local credential under
+        `localCredential` when there is one. Other keys are ignored by a Worker that does not know
+        them."""
         document: dict[str, Any] = {
             "appUrl": self.job.app_url,
             "jobId": self.job.job_id,
             "credential": self.job.credential,
+            "controlToken": self.control_token,
         }
         if self.local_credential is not None:
             document["localCredential"] = {
@@ -181,7 +188,7 @@ class StartRequest:
 
     def secrets(self) -> tuple[str, ...]:
         """Every value that must not appear anywhere but in the stdin document."""
-        values = [self.job.credential]
+        values = [self.job.credential, self.control_token]
         if self.local_credential is not None:
             values.append(self.local_credential.value)
         return tuple(values)
@@ -203,7 +210,7 @@ def _record(value: object, keys: set[str], optional: set[str], what: str) -> dic
 
 
 def _text(value: object, pattern: re.Pattern[str], what: str, *, longest: int) -> str:
-    if not isinstance(value, str) or not 1 <= len(value) <= longest or not pattern.match(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= longest or not pattern.fullmatch(value):
         raise _invalid(what)
     return value
 
@@ -213,7 +220,7 @@ def parse_start(document: object) -> StartRequest:
     a start that would put a credential in an argument of `docker run`."""
     top = _record(
         document,
-        {"version", "type", "job", "image", "control", "workVolume"},
+        {"version", "type", "job", "controlToken", "image", "control", "workVolume"},
         {"localCredential"},
         "the document",
     )
@@ -239,6 +246,8 @@ def parse_start(document: object) -> StartRequest:
             name=_text(given["name"], _VARIABLE, "localCredential.name", longest=64),
             value=_text(given["value"], _PRINTABLE, "localCredential.value", longest=4096),
         )
+
+    token = _text(top["controlToken"], _CONTROL_TOKEN, "controlToken", longest=128)
 
     image = _record(top["image"], {"reference", "id"}, set(), "image")
     check = ImageCheck(
@@ -269,18 +278,131 @@ def parse_start(document: object) -> StartRequest:
     reserve = volume["reserveGib"]
     if type(reserve) is not int or not 1 <= reserve <= 64:
         raise _invalid("workVolume.reserveGib")
+    volume_name = _text(volume["name"], _VOLUME_NAME, "workVolume.name", longest=160)
     request = StartRequest(
         job=job_document,
         local_credential=local,
         image=check,
-        args=tuple(args),
-        volume_name=_text(volume["name"], _VOLUME_NAME, "workVolume.name", longest=160),
+        args=check_control_args(tuple(args), check, volume_name),
+        volume_name=volume_name,
         reserve_gib=reserve,
+        control_token=token,
     )
     for secret in request.secrets():
         if any(secret in argument for argument in request.args):
             raise _invalid("control.args holds a credential")
     return request
+
+
+# -- what `control.args` may be ---
+
+# The options of `docker run` that stand alone; every other option takes a value (the next argument,
+# or after an equals sign). A flag this list does not know takes the next argument as its value, so
+# a mistake reads the image operand wrongly and the start is refused: it fails closed.
+_FLAGS_WITHOUT_VALUE: Final = frozenset(
+    {
+        "--interactive",
+        "--rm",
+        "--read-only",
+        "--privileged",
+        "--init",
+        "--tty",
+        "--detach",
+        "--oom-kill-disable",
+        "--no-healthcheck",
+        "--sig-proxy",
+        "--publish-all",
+        "-i",
+        "-t",
+        "-d",
+        "-P",
+        "-it",
+        "-ti",
+    }
+)
+_HOST_NAMESPACES: Final = frozenset({"--pid", "--net", "--network", "--ipc", "--userns", "--uts"})
+_DOCKER_SOCKET_MOUNT: Final = frozenset(
+    {
+        "type=bind",
+        "source=/var/run/docker.sock",
+        "target=/run/docker.sock",
+        "readonly",
+    }
+)
+
+
+def _split_options(args: tuple[str, ...]) -> tuple[list[tuple[str, str | None]], int]:
+    """The options of `docker run` as (name, value) and the index of the first argument that is not
+    one: the image operand. -1 when there is none."""
+    options: list[tuple[str, str | None]] = []
+    index = 1
+    while index < len(args):
+        argument = args[index]
+        if not argument.startswith("-"):
+            return options, index
+        name, equals, value = argument.partition("=")
+        if equals:
+            options.append((name, value))
+            index += 1
+        elif argument in _FLAGS_WITHOUT_VALUE:
+            options.append((argument, None))
+            index += 1
+        elif index + 1 < len(args):
+            options.append((argument, args[index + 1]))
+            index += 2
+        else:
+            options.append((argument, None))
+            index += 1
+    return options, -1
+
+
+def _refused_option(name: str, value: str | None, volume_name: str) -> bool:
+    given = (value or "").lower()
+    if name == "--privileged":
+        return given not in ("false",)
+    if name == "--security-opt":
+        return given.replace(":", "=") in ("seccomp=unconfined", "apparmor=unconfined")
+    if name in _HOST_NAMESPACES:
+        return given == "host"
+    if name == "--device":
+        return True
+    if name == "--cap-add":
+        return given == "all"
+    if name in ("--volume", "-v"):
+        return True
+    if name == "--mount":
+        fields = set((value or "").split(","))
+        work_volume = {"type=volume", f"source={volume_name}", "target=/work"}
+        return fields not in (work_volume, _DOCKER_SOCKET_MOUNT)
+    return False
+
+
+def check_control_args(
+    args: tuple[str, ...], image: ImageCheck, volume_name: str
+) -> tuple[str, ...]:
+    """`args` as vm-init runs them, or `InvalidStart`.
+
+    * The image operand (the first argument after the options) is the image that was checked: the
+      checked id, or the checked reference, which is then replaced by the id so that what runs is
+      what `docker image inspect` printed the id of. Any other image is refused.
+    * A cheap deny-list: no `--privileged`, `seccomp=unconfined`, `apparmor=unconfined`, a host
+      namespace (`--pid`, `--net`, `--network`, `--ipc`, `--userns`, `--uts` with `host`),
+      `--device`, `--cap-add ALL`, `--volume`, and no `--mount` but the job's work volume and the
+      Docker socket (read only). It catches a bug of the Dispatcher that renders such an option;
+      the host owns the VMM, the kernel and the root file system and is trusted
+      (`runner/vm-init/README.md`, "Trust, the token and the wall clock"), so it is no defence
+      against a host that is hostile.
+
+    The messages name the field, never a value."""
+    options, operand = _split_options(args)
+    if operand < 0:
+        raise _invalid("control.args names no image")
+    for name, value in options:
+        if _refused_option(name, value, volume_name):
+            raise _invalid("control.args holds an option that is not allowed")
+    if args[operand] not in (image.image_id, image.reference):
+        raise _invalid("control.args runs an image that is not the checked one")
+    return (*args[:operand], image.image_id, *args[operand + 1 :])
 
 
 # -- the replies and the report ---
@@ -301,14 +423,18 @@ def refused_start_reply() -> dict[str, Any]:
     }
 
 
-def exit_report(exit_code: int, reason: ExitReason) -> dict[str, Any]:
-    """`ExitReport` of the contract."""
-    return {
+def exit_report(exit_code: int, reason: ExitReason, token: str | None = None) -> dict[str, Any]:
+    """`ExitReport` of the contract. `token` is the start's `controlToken`: every report of a VM
+    that took a start carries it; the few that end the VM before one was read cannot."""
+    report: dict[str, Any] = {
         "version": PROTOCOL_VERSION,
         "type": REQUEST_EXIT,
         "exitCode": exit_code,
         "reason": reason.value,
     }
+    if token is not None:
+        report["token"] = token
+    return report
 
 
 def read_ack(document: object, request: str) -> None:

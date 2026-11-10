@@ -10,7 +10,8 @@
 //   - a seccomp profile that allows AF_VSOCK (`LOCAL_CONTROL_SECCOMP_PATH`, the file runner/vm-init/control-seccomp.json that
 //     vm-init's install hook puts into the root file system): the Worker connects to the host's CID 2 on port 5100 from inside the
 //     container itself, and Docker's default profile refuses that socket family. Only this container gets it. The agent's
-//     container, the model door, the network door and the readers keep Docker's default profile and cannot open a vsock socket.
+//     container, the model door, the network door and the readers keep Docker's default profile, which refuses AF_VSOCK (defence in depth:
+//     what the host trusts is the per-VM token, `control-token.ts`).
 //
 // Everything else is the hosted rendering: `renderDockerRunArguments` of container.ts through `ContainerLauncher`, the hosted
 // environment (`environmentOf`), the Sandbox variant's IPv6 switches. The hosted spec (`IMPLEMENTER_CONTAINER_SPEC`) and its
@@ -111,13 +112,17 @@ export interface StartRequestOptions extends LocalControlOptions {
   imageReference?: string;
   /** The reserve disk of the work volume in GiB (hosted: 8, an eighth of the VM's 64 GB disk). */
   reserveGib: number;
+  /** The VM's own token (`generateControlToken`): in every message of the VM, which the host refuses without it. */
+  controlToken: string;
   /** The one credential that exists only on the dispatcher's device, if the job needs one (#980). */
   localCredential?: { name: string; value: string };
 }
 
 /**
- * The start of `contracts/vm-init.v1.json` for a job: the rendered arguments, the job document, the image check against the
- * manifest's id and the work volume. Throws when the credential (or the local one) would be in an argument.
+ * The start of `contracts/vm-init.v1.json` for a job: the rendered arguments, the job document, the VM's token, the image check
+ * against the manifest's id and the work volume. Throws when the credential (or the local one, or the token) would be in an
+ * argument. The image that runs is the image that is checked: vm-init refuses arguments that name another one, so `options.image`
+ * (the id, which is the operand `renderLocalControl` renders) is the start's `image.id`.
  */
 export async function buildStartRequest(
   options: StartRequestOptions,
@@ -130,6 +135,7 @@ export async function buildStartRequest(
   const args: [string, string, ...string[]] = [verb, first, ...rest];
   const secrets = [
     options.spec.credential,
+    options.controlToken,
     ...(options.localCredential === undefined
       ? []
       : [options.localCredential.value]),
@@ -144,6 +150,7 @@ export async function buildStartRequest(
       jobId: options.spec.jobId,
       credential: options.spec.credential,
     },
+    controlToken: options.controlToken,
     ...(options.localCredential === undefined
       ? {}
       : { localCredential: options.localCredential }),

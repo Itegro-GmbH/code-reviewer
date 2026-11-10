@@ -16,7 +16,7 @@ import pytest
 from code_reviewer_runner.vm_init import wire
 from code_reviewer_runner.vm_init.control import spawn_docker
 from code_reviewer_runner.vm_init.steps import SubprocessRunner
-from vm_init_support import CREDENTIAL, LOCAL_CREDENTIAL, start_document
+from vm_init_support import CONTROL_TOKEN, CREDENTIAL, LOCAL_CREDENTIAL, start_document
 
 
 def _fake_docker(directory: Path, body: str) -> None:
@@ -45,7 +45,9 @@ def test_the_job_reaches_the_container_on_stdin_and_the_arguments_are_passed_as_
     document = json.loads((out / "stdin").read_text(encoding="utf-8"))
     assert document["credential"] == CREDENTIAL
     assert document["localCredential"]["value"] == LOCAL_CREDENTIAL
-    assert CREDENTIAL not in (out / "args").read_text(encoding="utf-8")
+    assert document["controlToken"] == CONTROL_TOKEN
+    arguments = (out / "args").read_text(encoding="utf-8")
+    assert CREDENTIAL not in arguments and CONTROL_TOKEN not in arguments
 
 
 # #977-T03

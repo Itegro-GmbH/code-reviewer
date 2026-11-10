@@ -18,42 +18,72 @@ container with the hosted container's flags, and reports how it ended.
 
 ```
 host (local Dispatcher, #978)                               guest (vm-init, root)
-                                                            listen on vsock port 5000
-                                                            [prepare, as the hosted launcher does]
+                                                            oom_score_adj -1000, listen on vsock port 5000
+                                                            [start the daemon, as the hosted launcher does]
 connect to <vsock uds>, "CONNECT 5000"  ──────────────────▶ accept
-frame: StartRequest ────────────────────────────────────▶ read, validate
+frame: StartRequest (with the VM's token) ───────────────▶ read, validate
                        ◀──────────────────────────────── frame: ack (or refused, and the VM ends)
-                                                            image id check, work volume
-                                                            docker run <control.args>  (job document on stdin)
-   Control ──(AF_VSOCK, CID 2, port 5100, #975)──▶ host: narrow, end   (Control talks to the host itself)
+                                                            image id check, Sysbox, work volume
+                                                            docker run <control.args>  (job document and token on stdin)
+   Control ──(AF_VSOCK, CID 2, port 5100, #975)──▶ host: narrow, end, each with the token   (Control talks to the host itself)
                                                             docker run ends
-listener on <vsock uds>_5101  ◀──── connect, frame: ExitReport
+listener on <vsock uds>_5101  ◀──── connect, frame: ExitReport (with the token)
                        ack ──────────────────────────────▶ power off
 ```
 
 1. **Listens first, prepares meanwhile.** vm-init listens on vsock port 5000 before anything else, so a host that connects the moment the VM is up
    finds it; the connection waits in the listen queue while the VM is prepared (about 2 s of the measured 2.6 s until Control can start, spike
    #970), and the host's answer therefore comes after the preparation, not after the connect. The host must wait for the `ack` at least as long as
-   the preparation may take (the limits of the steps before the answer add up to 112 s) and no longer than `StartWaitSeconds` (300 s) after the boot.
-2. **Prepares as the hosted launcher does** (`sandbox.ts`, `sandbox-host.ts`): the Docker runtime directories on memory, IPv6 off for new
-   interfaces, `vm-prepare.sh` with `TMPDIR` there (cgroup root, `dockerd`), `sysbox-prepare.sh`. The steps are data (`steps.py`), held equal to what the
-   Dispatcher's code renders by a golden file both suites read. A daemon that already answers (the guest's init started one) makes it skip the steps
-   before the daemon, because the runtime directories of a running daemon cannot be moved under it; Sysbox's script is idempotent and always runs.
+   the daemon's start may take (the limits of the steps before the answer add up to 72 s) and no longer than `StartWaitSeconds` (300 s) after the boot.
+2. **Starts the daemon as the hosted launcher does** (`sandbox.ts`, `sandbox-host.ts`): the Docker runtime directories on memory, IPv6 off for new
+   interfaces, `vm-prepare.sh` with `TMPDIR` there (cgroup root, `dockerd`; 60 s, as the hosted `prepare()` bounds it, pinned in the golden). The steps are
+   data (`steps.py`), held equal to what the Dispatcher's code renders by a golden file both suites read. A daemon that already answers (the guest's init
+   started one) makes it skip these steps, because the runtime directories of a running daemon cannot be moved under it.
 3. **Reads the start** (one frame, at most 256 KiB, within 10 s), answers `ack` or `refused` with the stable reason `invalid_start`, and from then on
    accepts nothing else. A start the contract refuses, one whose arguments hold the credential, a byte after the frame, a frame that does not come in
    time and a length outside the contract all end the VM with the exit report `start_invalid` and no job.
-4. **Checks the image** against the manifest's id (`docker image inspect --format {{.Id}} <reference>`, the hosted `prepare()`'s check):
-   `image_missing`, `image_mismatch`.
-5. **Makes the work volume** with the hosted steps (`workVolumeCommands`: a mount of its own below the VM's disk, a reserve disk the agent cannot
-   fill, a Docker named volume), and reads the mount options back from the kernel before it goes on. Only the size of the reserve is the host's
+4. **Goes on in the order of the hosted launcher** (`prepare()`, then the Implementer's steps): it **checks the image** against the manifest's id right after the
+   daemon (`docker image inspect --format {{.Id}} <reference>`; `image_missing`, `image_mismatch`), then runs `sysbox-prepare.sh` (idempotent), then
+   **makes the work volume** with the hosted steps (`workVolumeCommands`: a mount of its own below the VM's disk, a reserve disk the agent cannot fill, a Docker
+   named volume), reading the mount options back from the kernel before it goes on. The image check needs the start's `image`, so Sysbox and the volume come after
+   the start was read; the hosted order is kept otherwise (`test_the_steps_run_in_the_order_of_the_hosted_launcher`). Only the size of the reserve is the host's
    (`reserveGib`: hosted 8, an eighth of the 64 GB disk; local, an eighth of the job disk's quota).
+5. **Binds the image that runs to the image that was checked.** The image operand of `control.args` (the first argument after the options) must be the start's
+   `image.id` or `image.reference`; a reference is replaced by the id before `docker run`, so what runs is what the check printed the id of, and any other image
+   is refused (`start_invalid`).
 6. **Runs Control**: `docker` with the start's `control.args` (rendered by the Dispatcher's `renderDockerRunArguments` from the local spec), the job
-   document `{appUrl, jobId, credential}` (plus `localCredential` when there is one) as one JSON line on stdin, then the pipe is closed. Nothing else
-   carries a credential.
+   document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one) as one JSON line on stdin, then the pipe is closed. Nothing
+   else carries a credential or the token.
 7. **Reports and powers off.** The exit report (`ExitReport`: the container's status and a stable reason) goes to the host's port 5101, tried again every
-   0.5 s for at most 10 s in all, then the VM is ended whatever came back. The report is the authority on how the job ended (Control may be killed and
-   never send `end`); the host may kill the VMM after it, and must, as the backstop. Statuses 125 to 127 of `docker run` are `docker_failed`, every other
+   0.5 s for at most 10 s in all, then the VM is ended whatever came back (the power off is in a `finally`: a failure of the report, of a close or a bug of ours
+   cannot leave the VM running). The report carries the token once a start was read. The host takes **the first report of a VM** and answers a repeated one
+   with the same `ack`: vm-init sends the report again when the `ack` did not come, so the report is idempotent for the host. It is the authority on how the job ended
+   (Control may be killed and never send `end`); the host may kill the VMM after it, and must, as the backstop. Statuses 125 to 127 of `docker run` are `docker_failed`, every other
    status is `worker_exited`; a VM that ended before Control ran has status 2 (the Worker's "setup error") and its own reason.
+
+## Trust, the token and the wall clock
+
+**The trust boundary.** The host (the local Dispatcher, #978) owns the VMM, the root file system and the kernel of the VM: it is **trusted**. What vm-init accepts
+from it is checked (the contract, the image binding, the credential not in an argument), but the deny-list on `control.args` (`--privileged`, `seccomp=unconfined`,
+`apparmor=unconfined`, `--pid`, `--net`, `--network`, `--ipc`, `--userns`, `--uts` with `host`, `--device`, `--cap-add ALL`, `--volume`, and every `--mount` but the
+job's work volume and the Docker socket) only catches a **bug of the Dispatcher** that renders such an option; it is no defence against a host that is hostile, which
+could as well send a different VM. What is **not** trusted is everything inside the VM that runs the job: the agent, its container, its tools.
+
+**The token.** Something in the VM must not be able to talk to the host as Control or as vm-init. The agent's container has Docker's default seccomp profile, which
+refuses `socket(AF_VSOCK)`, and the kernel of the root file system is built without the 32-bit system-call interfaces (IA32 and X32 emulation, #976) through which a
+call that profile does not cover could be made; but that denial is a **defence in depth, an assumption, and not what the host trusts**. The host trusts a per-VM token:
+
+- the host makes a random `controlToken` for each VM (`generateControlToken`, `dispatcher/src/launchers/control-token.ts`) and sends it in the start;
+- vm-init puts it in **every exit report** it sends after it read a start; Control gets it on its **stdin** with the credential (the Worker reads it from the start
+  document, hands it to its job process on that process's stdin, and the environment control puts it in every `narrow` and `end`). It is never in an argument,
+  the environment, a file or a log (tests look for it everywhere the guest writes);
+- the host checks it with the same file's helpers (`verifyControlMessage`, `verifyExitReport`, constant time) and refuses a message without it or with another one.
+  A VM that never took a start (`start_timeout`, `start_invalid`, a daemon that did not start) cannot know it: the host accepts a report without a token only while it has
+  no `ack` for the start of that VM, when no job and no agent exists.
+
+**The wall clock is the host's.** vm-init has no timer for the job: Control's own job timeout (`RUNNER_JOB_TIMEOUT_SECONDS`) ends a job that runs too long, and a VM that
+is still there when the host's limit passes is killed by the host, which holds the VMM's process (#978). vm-init's only timers are the contract's start and report times.
+vm-init sets its own `oom_score_adj` to -1000, so that the guest's OOM killer picks anything but the process that tells the host how the VM ended.
 
 ## Decisions
 
@@ -100,9 +130,11 @@ port 5100) or whether Control should connect itself. **Control connects itself**
 - a relay is a second hop with its own failure modes (a listener that is not up yet when Control starts, a hop that dies, two timeouts instead of
   one) in front of a call whose failure ends the job (`environment_control_failed`) and whose answer must be an `ack` only after the outer wall holds the
   rule: the host's answer should reach the Worker directly;
-- what a relay would buy is a Control container without AF_VSOCK. Only Control gets it: the agent's container, the model door, the network door and the readers keep Docker's default profile (which refuses AF_VSOCK), so the agent
-  cannot reach the host's vsock ports. The host must treat every vsock connection from the VM as coming from the guest as a whole (it already
-  does: the VM is untrusted), which includes Control.
+- what a relay would buy is a Control container without AF_VSOCK. Only Control gets the seccomp profile that allows it: the agent's container, the model door, the
+  network door and the readers keep Docker's default profile, which refuses AF_VSOCK. That is **defence in depth**: the claim that the agent cannot open a vsock socket
+  is an assumption (Docker's default profile allows `socketcall`, and with 32-bit emulation in the kernel a 32-bit call could open one; the kernel of #976 has none).
+  What the host trusts is the per-VM token (above), which every message from the VM carries; the host treats every vsock connection from the VM as coming from the guest as
+  a whole, which includes Control, and refuses one without the token.
 
 vm-init's part in the environment control is therefore the enabling: `RUNNER_ENVIRONMENT_CONTROL=vsock` in Control's environment and the seccomp
 profile. The exit report is vm-init's own, on its own port (5101): it is sent when `docker run` ends, whether or not Control said `end`.
@@ -139,9 +171,12 @@ is: copy the new default, run the derivation, replace the file, and the test say
 
 - Listen on `<vsock uds path>_5100` (environment control) and `<vsock uds path>_5101` (exit report) **before** the VM starts; connect to
   `<vsock uds path>` with `CONNECT 5000` once the VM is up and send the `StartRequest`; read the `ack`.
-- Build the start with `buildStartRequest` (`local-control.ts`): the arguments, the job document, the image id from the verified manifest, the work volume.
+- Make a token for the VM (`generateControlToken`) and build the start with `buildStartRequest` (`local-control.ts`): the arguments, the job document, the token,
+  the image id from the verified manifest (the image operand of the arguments is that id), the work volume.
+- Check the token of every message with `verifyControlMessage` (`narrow`, `end`) and `verifyExitReport` (`startAcked`: whether the host has an `ack` for the start),
+  and refuse (or close) what fails. Take the **first** exit report that passes; answer a repeated one with the same `ack`.
 - Treat the exit report as the end of the job and the VMM as to be killed after it (and after `ReportSeconds` without one). A VM that ends with no report
-  ended with an unknown outcome.
+  ended with an unknown outcome. **The wall clock is the host's**: kill the VMM when the job's limit passes; vm-init does not keep time for the job.
 
 ## Tests, and what they do not prove
 
@@ -151,6 +186,7 @@ without the runner). **No test opens an AF_VSOCK socket, boots a VM or runs the 
 GitHub Actions, #970), which also measures the time to "Control could start" with vm-init in the path. Not measured here: the interpreter's start and memory in the
 real guest (above: only on this server).
 
-The secrets: the credential and the local credential live in the memory of the process and in the pipe to Control's stdin. A test starts a job with both
+The secrets: the credential, the local credential and the token live in the memory of the process and in the pipe to Control's stdin (the token also in the report, which is
+where the host reads it). A test starts a job with all three
 and looks for them in every command, argument, log record, standard output and error, reply, report and file the guest wrote; another starts one that
 is refused and one that fails unexpectedly.

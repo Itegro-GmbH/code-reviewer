@@ -14,7 +14,14 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from code_reviewer_runner.vm_init import wire
-from vm_init_support import BAD_STARTS, CREDENTIAL, SCHEMA_ALLOWS, start_document
+from vm_init_support import (
+    BAD_STARTS,
+    CONTROL_TOKEN,
+    CREDENTIAL,
+    IMAGE_ID,
+    SCHEMA_ALLOWS,
+    start_document,
+)
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
 Document = dict[str, Any]
@@ -117,8 +124,39 @@ def test_vm_init_refuses_what_the_file_refuses(name: str) -> None:
 def test_a_start_with_the_credential_in_its_arguments_is_valid_only_under_the_file() -> None:
     # The schema cannot compare two fields; the parser does, and the Dispatcher refuses to build
     # one.
-    document = start_document(control={"args": ["run", f"--env=X={CREDENTIAL}"]})
+    document = start_document(control={"args": ["run", f"--env=X={CREDENTIAL}", IMAGE_ID]})
 
     assert _accepts("StartRequest", document)
     with pytest.raises(wire.InvalidStart):
         wire.parse_start(document)
+
+
+# #977-T07
+def test_the_token_of_the_start_is_the_token_of_both_contracts() -> None:
+    environment_control = _load(CONTRACTS / "environment-control.v1.json")["$defs"]
+
+    assert _DEFS["ControlToken"]["pattern"] == environment_control["ControlToken"]["pattern"]
+    assert _accepts("ControlToken", CONTROL_TOKEN)
+    assert not _accepts("ControlToken", "short")
+
+
+# #977-T07
+@pytest.mark.parametrize("reason", list(wire.ExitReason))
+def test_every_report_with_the_token_is_valid(reason: wire.ExitReason) -> None:
+    report = wire.exit_report(2, reason, CONTROL_TOKEN)
+
+    assert _accepts("ExitReport", report)
+    assert report["token"] == CONTROL_TOKEN
+
+
+# #977-T07
+def test_a_report_with_a_token_that_is_not_the_contracts_is_refused() -> None:
+    report = {**wire.exit_report(0, wire.ExitReason.WORKER_EXITED), "token": "short"}
+
+    assert not _accepts("ExitReport", report)
+
+
+# #977-T07
+def test_the_start_requires_the_token_and_the_report_may_carry_it() -> None:
+    assert "controlToken" in _DEFS["StartRequest"]["required"]
+    assert "token" not in _DEFS["ExitReport"]["required"]

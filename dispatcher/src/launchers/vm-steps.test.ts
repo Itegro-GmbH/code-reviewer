@@ -11,6 +11,7 @@ import {
   SYSBOX_PREPARE_PATH,
   SYSBOX_PREPARE_TIMEOUT_MS,
   VM_PREPARE_PATH,
+  VM_PREPARE_TIMEOUT_MS,
   WORK_VOLUME_STEP_TIMEOUT_MS,
 } from "./sandbox-host.ts";
 import { workVolumeCommands, workVolumeName } from "./container.ts";
@@ -52,6 +53,7 @@ function rendered(): {
       {
         label: "vm-prepare",
         argv: ["env", `TMPDIR=${DOCKER_TMPDIR}`, VM_PREPARE_PATH],
+        timeoutSeconds: seconds(VM_PREPARE_TIMEOUT_MS),
       },
     ],
     sysbox: {
@@ -80,7 +82,9 @@ describe("the steps vm-init makes after the hosted launcher", () => {
   });
 
   // #977-T01
-  it("are the hosted order: directories on memory, IPv6 off, the daemon, Sysbox, the work volume", () => {
+  // The image check of `prepare()` sits between the daemon and Sysbox: it needs the start's `image`, so vm-init makes it after
+  // the start was read (runner/tests/unit/test_vm_init_agent.py pins that order).
+  it("are the hosted order: directories on memory, IPv6 off, the daemon, [the image check], Sysbox, the work volume", () => {
     const { preDaemon, sysbox, workVolume } = rendered();
 
     expect(preDaemon.map((s) => s.label)).toEqual([

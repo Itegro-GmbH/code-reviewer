@@ -16,7 +16,9 @@ from loop_support import FakeLauncher, FakeProcess, outcome, result_line
 from support import API_KEY, TOKEN, make_job_dict
 
 from code_reviewer_runner import worker_cli
+from code_reviewer_runner.job import ReviewKind
 from code_reviewer_runner.job_loop.api import CompleteReply, HeartbeatReply
+from code_reviewer_runner.job_loop.host import process_stdin
 from code_reviewer_runner.job_loop.process import ProcessSpec, RunningProcess
 from code_reviewer_runner.job_loop.settings import (
     SettingsError,
@@ -125,6 +127,42 @@ def run(
 
 
 # -- the start document ----------------------------------------------------------------------
+
+
+CONTROL_TOKEN = "control-token-of-the-host-0123456789-abcdefghij"
+
+
+# #977-T07
+def test_the_start_document_may_carry_the_token_of_the_environment_control() -> None:
+    request = parse_request(start_document(controlToken=CONTROL_TOKEN))
+
+    assert request.control_token == CONTROL_TOKEN
+    assert CONTROL_TOKEN not in repr(request)
+    assert parse_request(start_document()).control_token is None
+
+
+# #977-T07
+@pytest.mark.parametrize("bad", ["short", 7, None, CONTROL_TOKEN + " ", CONTROL_TOKEN + "\n", ""])
+def test_a_token_that_is_not_the_contracts_is_refused_without_naming_it(bad: Any) -> None:
+    with pytest.raises(WorkerSetupError) as refusal:
+        parse_request(start_document(controlToken=bad))
+
+    assert refusal.value.code is WorkerFailure.INPUT_INVALID
+    assert CONTROL_TOKEN not in str(refusal.value)
+
+
+# #977-T07
+def test_the_job_process_of_an_implementer_gets_the_token_on_its_stdin_and_no_other_does() -> None:
+    raw: dict[str, Any] = {"reviewKind": "implementer", "git": {}, "env": {}}
+
+    implementer = json.loads(process_stdin(raw, ReviewKind.IMPLEMENTER, CONTROL_TOKEN))
+    review = json.loads(process_stdin({"reviewKind": "diff"}, ReviewKind.DIFF, CONTROL_TOKEN))
+    without = json.loads(process_stdin(raw, ReviewKind.IMPLEMENTER, None))
+
+    assert implementer == {**raw, "environmentControlToken": CONTROL_TOKEN}
+    assert "environmentControlToken" not in review
+    assert without == raw
+    assert raw == {"reviewKind": "implementer", "git": {}, "env": {}}  # the input is not changed
 
 
 def test_the_start_document_names_the_app_the_job_and_the_credential() -> None:

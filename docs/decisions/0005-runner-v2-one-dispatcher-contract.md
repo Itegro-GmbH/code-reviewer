@@ -93,7 +93,14 @@ App** (the Worker API, `crj_`, everywhere).
 - **The `docker run` arguments are rendered once, by the Dispatcher**, from the hosted Implementer spec plus `RUNNER_ENVIRONMENT_CONTROL` and a seccomp profile that allows AF_VSOCK, and sent in the start; vm-init executes them. A
   golden file (`docker-run.local-control.golden.json`) pins them and the runner's tests feed it to the guest unchanged. The hosted spec and its golden file are untouched.
 - **No relay: Control connects to the host itself** (CID 2, port 5100, `environment-control.v1.json` unchanged). Only the Control container gets the seccomp profile; the agent's container, the doors and the readers keep Docker's
-  default profile and cannot open a vsock socket. vm-init's own exit report goes to its own port (5101) and is the authority on how the job ended.
+  default profile, which refuses AF_VSOCK. That denial is **defence in depth**, not what the host trusts (Docker's default profile allows `socketcall`, and a kernel with 32-bit emulation could let a 32-bit call open the socket; the kernel of #976 has none).
+  vm-init's own exit report goes to its own port (5101) and is the authority on how the job ended.
+- **The host trusts a per-VM token, not the denial.** The host makes a random token for each VM and sends it in the start; vm-init puts it in every exit report after a start, Control receives it on its stdin with its credential and puts
+  it in every `narrow` and `end` (`controlToken` of `vm-init.v1.json`, an optional `token` of `environment-control.v1.json`: additive, still version 1). The host refuses a message without it or with another
+  (`dispatcher/src/launchers/control-token.ts`, which #978 reuses). A report without a token counts only while the host has no `ack` for the start (a VM that never took one).
+- **Trust boundary.** The host owns the VMM, the root file system and the kernel and is trusted; vm-init binds the image of `control.args` to the checked image id and refuses a cheap deny-list of options (`--privileged`, `seccomp=unconfined`,
+  host namespaces, `--device`, `--cap-add ALL`, mounts but the work volume and the Docker socket): that catches a bug of the Dispatcher and is no defence against a hostile host. The host owns the job's wall clock (vm-init has none);
+  vm-init sets its own `oom_score_adj` to -1000 and always powers the VM off.
 
 ## 4. Alternatives considered
 

@@ -7,6 +7,7 @@ The vsock here is a socket pair per connection (`vm_init_support.FakeVsock`); no
 opened. The real boot path (a Firecracker VM, the real vsock, Docker and Sysbox in the guest) is
 proven by the KVM lane of #978."""
 
+import dataclasses
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from code_reviewer_runner.vm_init import wire
 from code_reviewer_runner.vm_init.agent import Environment, Timing, VmInit
 from code_reviewer_runner.vm_init.steps import CommandResult
 from vm_init_support import (
+    CONTROL_TOKEN,
     CREDENTIAL,
     IMAGE_ID,
     LOCAL_CREDENTIAL,
@@ -59,11 +61,16 @@ class Guest:
             spawn=self._spawn,
             power_off=self.end_vm,
             timing=timing,
+            protect_self=self.protect,
         )
 
     def _spawn(self, args: tuple[str, ...], stdin: bytes) -> int:
         self.events.append("control")
         return self.control(args, stdin)
+
+    def protect(self) -> bool:
+        self.events.append("protect")
+        return True
 
     def end_vm(self) -> bool:
         self.events.append("power-off")
@@ -102,15 +109,18 @@ def test_a_start_over_the_vsock_runs_control_with_the_arguments_and_the_job_on_s
 
 
 # #977-T01
-def test_the_arguments_of_the_hosted_golden_run_unchanged() -> None:
+def test_the_hosted_golden_runs_unchanged_but_for_the_image_that_now_runs_by_its_id() -> None:
     golden = json.loads(GOLDEN_ARGS.read_text(encoding="utf-8"))
+    (operand,) = [a for a in golden if a.startswith("registry.invalid/")]
     guest = Guest()
-    guest.start(start_document(control={"args": golden}))
+    guest.start(
+        start_document(control={"args": golden}, image={"reference": operand, "id": IMAGE_ID})
+    )
 
     guest.run()
 
     ((args, _),) = guest.control.calls
-    assert list(args) == golden
+    assert list(args) == [IMAGE_ID if a == operand else a for a in golden]
 
 
 # #977-T01
@@ -128,8 +138,8 @@ def test_the_steps_run_in_the_order_of_the_hosted_launcher() -> None:
         "mount",
         "sh",
         "/usr/local/sbin/vm-prepare.sh",
+        "docker",  # the image id, right after the daemon as the hosted `prepare()` does
         "/usr/local/sbin/sysbox-prepare.sh",
-        "docker",  # the image id
         "mkdir",
         "fallocate",
         "mkfs.ext4",
@@ -174,7 +184,8 @@ def test_a_daemon_that_already_answers_keeps_the_steps_before_it_from_running() 
 
     commands = [c[0] for c in guest.runner.commands]
     assert "mount" in commands  # the work volume's
-    assert guest.runner.commands[1] == ("/usr/local/sbin/sysbox-prepare.sh",)
+    assert guest.runner.commands[1][:3] == ("docker", "image", "inspect")
+    assert guest.runner.commands[2] == ("/usr/local/sbin/sysbox-prepare.sh",)
     assert ("mkdir", "-p", "--", "/run/docker", "/run/containerd") not in guest.runner.commands
 
 
@@ -212,9 +223,15 @@ def test_controls_exit_status_reaches_the_host_and_the_vm_powers_off(
 
     guest.run()
 
-    assert guest.report() == {"version": 1, "type": "exit", "exitCode": status, "reason": reason}
+    assert guest.report() == {
+        "version": 1,
+        "type": "exit",
+        "exitCode": status,
+        "reason": reason,
+        "token": CONTROL_TOKEN,
+    }
     assert guest.power.calls == 1
-    assert guest.events == ["control", "power-off"]
+    assert guest.events == ["protect", "control", "power-off"]
 
 
 # #977-T03
@@ -246,7 +263,7 @@ def test_a_host_that_never_answers_the_report_does_not_keep_the_vm_alive() -> No
     guest.run()
 
     assert guest.power.calls == 1
-    assert guest.events == ["control", "power-off"]
+    assert guest.events == ["protect", "control", "power-off"]
     assert len(guest.vsock.report_host_ends) == 1  # the time it had went on waiting for the answer
 
 
@@ -295,10 +312,22 @@ def test_a_report_the_host_answers_wrongly_is_sent_again() -> None:
         {"version": 1, "type": "start"},
         start_document(version=2),
         start_document(job={"appUrl": "https://a.example", "jobId": "j"}),
-        start_document(control={"args": ["run", f"--env=X={CREDENTIAL}"]}),
+        start_document(control={"args": ["run", f"--env=X={CREDENTIAL}", IMAGE_ID]}),
+        start_document(control={"args": ["run", "--privileged", IMAGE_ID]}),
+        start_document(control={"args": ["run", "other:tag"]}),
+        start_document(controlToken=None),
         [1, 2],
     ],
-    ids=["missing keys", "version", "job without credential", "credential in arguments", "array"],
+    ids=[
+        "missing keys",
+        "version",
+        "job without credential",
+        "credential in arguments",
+        "a refused option",
+        "another image",
+        "no token",
+        "array",
+    ],
 )
 def test_a_malformed_start_is_refused_and_the_vm_powers_off_with_a_stable_code(
     document: Any,
@@ -419,11 +448,10 @@ def test_a_vm_that_cannot_listen_reports_a_failed_preparation_and_powers_off() -
     ("failing", "label"),
     [
         (("env", "TMPDIR=/run/containerd"), "vm-prepare"),
-        (("/usr/local/sbin/sysbox-prepare.sh",), "sysbox-prepare"),
         (("mount", "-t", "tmpfs"), "run-directory"),
     ],
 )
-def test_a_preparation_that_fails_ends_the_vm_before_a_start_is_taken(
+def test_a_daemon_that_cannot_be_started_ends_the_vm_before_a_start_is_taken(
     failing: tuple[str, ...], label: str
 ) -> None:
     _ = label
@@ -470,6 +498,7 @@ def test_an_image_with_another_id_than_the_manifests_ends_the_vm() -> None:
         "type": "exit",
         "exitCode": 2,
         "reason": "image_mismatch",
+        "token": CONTROL_TOKEN,
     }
     assert guest.control.calls == []
     assert IMAGE_ID.encode() not in b"".join(
@@ -522,21 +551,25 @@ def test_the_local_credential_reaches_controls_stdin_and_nowhere_else(
     ((args, stdin),) = guest.control.calls
     document = json.loads(stdin)
     assert document["credential"] == CREDENTIAL
+    assert document["controlToken"] == CONTROL_TOKEN
     assert document["localCredential"] == {
         "name": "CLAUDE_CODE_OAUTH_TOKEN",
         "value": LOCAL_CREDENTIAL,
     }
+    report = guest.vsock.report_host_ends[-1].read()
     everything_else = [
         *[" ".join(a) for a in guest.runner.commands],
         " ".join(args),
-        json.dumps(guest.vsock.report_host_ends[-1].read()),
         json.dumps(host.read()),
         caplog.text,
         capfd.readouterr().out,
         capfd.readouterr().err,
     ]
-    for secret in (CREDENTIAL, LOCAL_CREDENTIAL):
+    for secret in (CREDENTIAL, LOCAL_CREDENTIAL, CONTROL_TOKEN):
         assert not [text for text in everything_else if secret in text]
+    # The token is in the report, which is where the host reads it, and the credentials are not.
+    assert report["token"] == CONTROL_TOKEN
+    assert CREDENTIAL not in json.dumps(report) and LOCAL_CREDENTIAL not in json.dumps(report)
     # No file was written anywhere the guest works.
     assert [p for p in tmp_path.rglob("*")] == []
 
@@ -547,11 +580,12 @@ def test_a_refused_start_leaves_no_trace_of_the_credential_in_the_log(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     guest = Guest()
-    guest.start(start_document(control={"args": ["run", f"--env=X={LOCAL_CREDENTIAL}"]}))
+    guest.start(start_document(control={"args": ["run", f"--env=X={LOCAL_CREDENTIAL}", IMAGE_ID]}))
 
     guest.run()
 
     assert CREDENTIAL not in caplog.text and LOCAL_CREDENTIAL not in caplog.text
+    assert CONTROL_TOKEN not in caplog.text
     assert caplog.text  # something was logged: the refusal
 
 
@@ -563,7 +597,7 @@ def test_the_credential_is_in_no_command_the_guest_runs(tmp_path: Path) -> None:
     guest.run()
 
     flat = "\n".join(" ".join(c) for c in guest.runner.commands)
-    assert CREDENTIAL not in flat and LOCAL_CREDENTIAL not in flat
+    assert CREDENTIAL not in flat and LOCAL_CREDENTIAL not in flat and CONTROL_TOKEN not in flat
     assert os.listdir(tmp_path) == []
 
 
@@ -583,13 +617,7 @@ def test_an_unexpected_error_still_ends_the_vm_with_a_report_and_never_logs_its_
     def explode(args: tuple[str, ...], stdin: bytes) -> int:
         raise RuntimeError(stdin.decode())
 
-    guest.environment = Environment(
-        vsock=guest.vsock,
-        runner=guest.runner,
-        spawn=explode,
-        power_off=guest.end_vm,
-        timing=FAST,
-    )
+    guest.environment = dataclasses.replace(guest.environment, spawn=explode)
 
     guest.run()
 
@@ -598,7 +626,168 @@ def test_an_unexpected_error_still_ends_the_vm_with_a_report_and_never_logs_its_
         "type": "exit",
         "exitCode": 2,
         "reason": "prepare_failed",
+        "token": CONTROL_TOKEN,
     }
     assert guest.power.calls == 1
     assert "RuntimeError" in caplog.text
     assert CREDENTIAL not in caplog.text
+
+
+# -- the token (#977 fix round) ---
+
+
+# #977-T07
+def test_every_report_after_a_start_was_read_carries_the_hosts_token() -> None:
+    cases: list[tuple[Guest, str]] = []
+    mismatch = Guest()
+    mismatch.runner.rules.append((("docker", "image"), CommandResult(0, "sha256:" + "cd" * 32)))
+    cases.append((mismatch, "image_mismatch"))
+    missing = Guest()
+    missing.runner.rules.append((("docker", "image"), CommandResult(1)))
+    cases.append((missing, "image_missing"))
+    volume = Guest()
+    volume.runner.rules.append((("mkfs.ext4",), CommandResult(1)))
+    cases.append((volume, "prepare_failed"))
+    sysbox = Guest()
+    sysbox.runner.rules.append((("/usr/local/sbin/sysbox-prepare.sh",), CommandResult(1)))
+    cases.append((sysbox, "prepare_failed"))
+    ran = Guest(status=1)
+    cases.append((ran, "worker_exited"))
+    for guest, reason in cases:
+        guest.start()
+
+        guest.run()
+
+        report = guest.report()
+        assert report["reason"] == reason
+        assert report["token"] == CONTROL_TOKEN
+
+
+# #977-T07
+@pytest.mark.parametrize("what", ["no start", "refused start", "no vsock", "no daemon"])
+def test_a_report_of_a_vm_that_never_took_a_start_has_no_token(what: str) -> None:
+    guest = Guest()
+    if what == "refused start":
+        guest.start(start_document(version=2))
+    if what == "no vsock":
+        guest.vsock.refuse_listen = True
+    if what == "no daemon":
+        guest.runner.rules.append((("env", "TMPDIR=/run/containerd"), CommandResult(1)))
+        guest.start()
+
+    guest.run()
+
+    assert "token" not in guest.report()
+
+
+# #977-T07
+def test_the_token_is_in_the_report_that_is_sent_again_after_a_lost_ack() -> None:
+    guest = Guest()
+    guest.vsock.ack_reports = False
+    guest.start()
+    original = guest.vsock.connect_host
+    calls: list[int] = []
+
+    def connect(port: int, timeout: float) -> Any:
+        calls.append(port)
+        stream = original(port, timeout)
+        guest.vsock.report_host_ends[-1].send(
+            {"version": 1, "type": "ack", "for": "start" if len(calls) == 1 else "exit"}
+        )
+        return stream
+
+    guest.vsock.connect_host = connect  # type: ignore[method-assign]
+
+    guest.run()
+
+    reports = [end.read() for end in guest.vsock.report_host_ends]
+    assert len(reports) == 2
+    assert reports[0] == reports[1]
+    assert reports[0]["token"] == CONTROL_TOKEN
+
+
+# -- vm-init protects itself and ends the VM whatever happens (#977 fix round) ---
+
+
+# #977-T08
+def test_vm_init_protects_itself_from_the_oom_killer_before_it_does_anything_else() -> None:
+    guest = Guest()
+    guest.start()
+
+    guest.run()
+
+    assert guest.events[0] == "protect"
+
+
+# #977-T08
+def test_a_vm_init_that_cannot_protect_itself_goes_on() -> None:
+    guest = Guest()
+
+    def refuse() -> bool:
+        raise OSError("no")
+
+    guest.environment = dataclasses.replace(guest.environment, protect_self=refuse)
+    guest.start()
+
+    guest.run()
+
+    assert guest.report()["reason"] == "worker_exited"
+    assert guest.power.calls == 1
+
+
+# #977-T09
+def test_the_vm_powers_off_even_when_the_report_itself_blows_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guest = Guest()
+    guest.start()
+
+    def explode(self: VmInit, outcome: object) -> None:
+        raise RuntimeError("a bug in the report")
+
+    monkeypatch.setattr(VmInit, "_report", explode)
+
+    guest.run()
+
+    assert guest.power.calls == 1
+    assert guest.events[-1] == "power-off"
+
+
+# #977-T09
+def test_the_vm_reports_and_powers_off_when_a_listener_cannot_be_closed() -> None:
+    guest = Guest()
+    guest.start()
+    listen = guest.vsock.listen
+
+    def listen_and_break(port: int) -> Any:
+        listener = listen(port)
+
+        def close() -> None:
+            listener.closed = True
+            raise OSError("cannot close")
+
+        listener.close = close  # type: ignore[method-assign]
+        return listener
+
+    guest.vsock.listen = listen_and_break  # type: ignore[method-assign]
+
+    guest.run()
+
+    assert guest.report()["reason"] == "worker_exited"
+    assert guest.power.calls == 1
+
+
+# #977-T09
+def test_a_power_off_that_raises_is_not_hidden_by_a_return() -> None:
+    guest = Guest()
+    guest.start()
+
+    def refuse() -> bool:
+        raise OSError("the kernel said no")
+
+    guest.environment = dataclasses.replace(guest.environment, power_off=refuse)
+
+    with pytest.raises(OSError):
+        guest.run()
+
+    assert guest.report()["reason"] == "worker_exited"

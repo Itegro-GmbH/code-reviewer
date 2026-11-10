@@ -42,7 +42,12 @@
     },
     {
       "label": "vm-prepare",
-      "argv": ["env", "TMPDIR=/run/containerd", "/usr/local/sbin/vm-prepare.sh"]
+      "argv": [
+        "env",
+        "TMPDIR=/run/containerd",
+        "/usr/local/sbin/vm-prepare.sh"
+      ],
+      "timeoutSeconds": 60
     }
   ],
   "sysbox": {
