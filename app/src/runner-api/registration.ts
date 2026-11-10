@@ -36,7 +36,10 @@ import {
   REGISTRATION_TOKEN_PATTERN,
   RUNNER_CREDENTIAL_PATTERN,
 } from "../runner-identity/tokens.ts";
-import { checkDelivery } from "../runner-identity/delivery.ts";
+import {
+  checkDelivery,
+  type DeliveryPolicy,
+} from "../runner-identity/delivery.ts";
 import { reservedLabelIssues } from "../runner-identity/labels.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 
@@ -67,6 +70,8 @@ export type RunnerRegistrationApiDeps = {
   logger: RunnerApiLogger;
   /** #972: makes the signing secret of a webhook delivery for a runner: the secret, its id and the sealed text the database keeps. */
   mintDeliveryKey: (runnerId: string) => MintedDeliveryKey;
+  /** #972: which addresses a webhook delivery may name (`RUNNER_DELIVERY_ALLOW_LOOPBACK`); read on every call. Default: public https only. */
+  deliveryPolicy?: () => DeliveryPolicy;
 };
 
 export type RunnerRegistrationApi = {
@@ -170,7 +175,10 @@ export function createRunnerRegistrationApi(
         else if (name === null) issues.push({ field: "name", code: "invalid" });
         const announcement = checkAnnouncement(fields);
         if (!announcement.ok) issues.push(...announcement.fields);
-        const delivery = checkDelivery(fields.delivery);
+        const delivery = checkDelivery(
+          fields.delivery,
+          deps.deliveryPolicy?.(),
+        );
         if (!delivery.ok) issues.push(...delivery.fields);
         if (
           issues.length > 0 ||
@@ -242,6 +250,7 @@ export function createRunnerRegistrationApi(
           });
         const delivery = checkDelivery(
           isRecordBody(body.value) ? body.value.delivery : undefined,
+          deps.deliveryPolicy?.(),
         );
         if (!delivery.ok)
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {

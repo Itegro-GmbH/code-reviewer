@@ -48,7 +48,10 @@ import {
   mintDeliverySecret,
   sealDeliverySecret,
 } from "../runner-identity/delivery.ts";
-import { minimumBaseVersion } from "../runner-identity/config.ts";
+import {
+  deliveryAllowsLoopback,
+  minimumBaseVersion,
+} from "../runner-identity/config.ts";
 import { createProviderPins } from "./provider-pins.ts";
 import { knownContextWindowFrom } from "./known-context-window.ts";
 import { APP_VERSION } from "./app-version.ts";
@@ -284,6 +287,10 @@ export function getRunnerRegistrationApi(): RunnerRegistrationApi {
     credentials: createRunnerCredentialsRepository(getDatabase()),
     settings: () => ({ minBaseVersion: minimumBaseVersion(process.env) }),
     logger: consoleRunnerApiLogger,
+    // #972: an address on this machine is a delivery only where `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the fakes, the E2E, local development).
+    deliveryPolicy: () => ({
+      allowLoopback: deliveryAllowsLoopback(process.env),
+    }),
     // #972: the secret of a webhook delivery is made here, shown once and kept sealed with the app's secret.
     mintDeliveryKey: (runnerId) => {
       const resolved = resolveAppSecret(process.env);

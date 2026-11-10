@@ -15,8 +15,15 @@
 //   so the waiting jobs that group can take are rung again: the pairs whose last ring was answered "not now" (a dispatcher that said `busy`
 //   forgets the bell, so this is how it hears of work again if it does not claim by itself). Bounded: at most `RING_LIMIT` pairs, a dispatcher that
 //   says it is busy or cannot be reached is asked no more in this reaction, and a pair is rung again only `WAITING_MIN_GAP_MS` after its last call.
+// - `ringRequeued`: a lapsed lease (or a revoked runner) put running jobs back in the queue. Their claim did not end for good, but the job is
+//   waiting again: it is rung at once on every dispatcher that can take it (also the pair that held it: its dispatcher lost the claim), and
+//   the group those jobs were in is rung like for an ended claim. Same bounds as the others, `RING_LIMIT` pairs in all.
 // - `ringDue`: the sweep and the repair work of the requests that touch the database: the pairs with no row yet or whose row is due. The
 //   rare safety net.
+//
+// A dispatcher whose endpoint could not be reached (a network error or a timeout) is not rung again for `ENDPOINT_DOWN_MS`, by any of these
+// and for any job: the memory is the last attempt of the dispatcher in `job_rings`, so every instance and every run shares it, and a dead
+// endpoint with many jobs is rung once, not once for each.
 //
 // Nothing here schedules itself and nothing here can lose a job: the job is durable before any of this runs.
 import "server-only";
@@ -42,6 +49,7 @@ import {
   type DispatchUpdate,
 } from "./outcome.ts";
 import { buildDispatchRequest } from "./request.ts";
+import { customerDeliveryFetch } from "./guarded-fetch.ts";
 import {
   DISPATCH_TIMEOUT_MS,
   sendDispatch,
@@ -52,6 +60,8 @@ import {
 export const RING_LEASE_MS = 30_000;
 /** The most pairs one reaction or one sweep rings. */
 export const RING_LIMIT = 20;
+/** How long a dispatcher whose endpoint was not reachable (a network error, a timeout) is left alone, for every job. */
+export const ENDPOINT_DOWN_MS = 60_000;
 const RING_CONCURRENCY = 5;
 /** The answers that say something about the dispatcher, not about the job: the other jobs would get the same. */
 const DISPATCHER_WIDE_CODES: readonly DispatchResultCode[] = [
@@ -80,6 +90,11 @@ export type RingService = {
   ): Promise<{ rung: number }>;
   /** The claims of these jobs ended: rings the waiting jobs of the groups they freed a slot in; how many were rung. Never rejects. */
   ringGroupsOf(jobIds: readonly string[]): Promise<{ rung: number }>;
+  /**
+   * A lapsed lease put these jobs back in the queue: rings them on every dispatcher that can take them, and the label groups they were in;
+   * how many were rung. Bounded by `RING_LIMIT`. Never rejects.
+   */
+  ringRequeued(jobIds: readonly string[]): Promise<{ rung: number }>;
   /** Makes the pairs a dispatcher stopped long enough ago pending again. */
   reviveStopped(stoppedBefore: Date, at: Date): Promise<number>;
 };
@@ -100,7 +115,9 @@ export function createRingService(options: {
 }): RingService {
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? randomUUID;
-  const send = options.fetch ?? ((url, init) => fetch(url, init));
+  // The address is the customer's: it is called through the connection that refuses the app's own network (guarded-fetch.ts).
+  const send =
+    options.fetch ?? ((url, init) => customerDeliveryFetch()(url, init));
   const timeoutMs = options.timeoutMs ?? DISPATCH_TIMEOUT_MS;
   const minBaseVersion = options.minBaseVersion ?? (() => null);
   const log: RingLog = options.log ?? {
@@ -231,6 +248,21 @@ export function createRingService(options: {
     }
   }
 
+  /** Whether the last call to the dispatcher found its endpoint unreachable less than `ENDPOINT_DOWN_MS` ago. A database that cannot say counts as no. */
+  async function endpointIsDown(
+    runnerId: string | undefined,
+  ): Promise<boolean> {
+    if (runnerId === undefined) return false;
+    try {
+      return await dispatches.endpointFailedSince(
+        runnerId,
+        new Date(now().getTime() - ENDPOINT_DOWN_MS),
+      );
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Rings the pairs: the dispatchers a few at a time, the pairs of one dispatcher one after the other. A dispatcher whose answer says
    * something about itself (it is full, not reachable, it asks to wait) is not asked again in this run: its other jobs would get the same
@@ -252,13 +284,19 @@ export function createRingService(options: {
       Array.from(
         { length: Math.min(RING_CONCURRENCY, queue.length) },
         async () => {
-          for (let own = queue.shift(); own !== undefined; own = queue.shift())
+          for (
+            let own = queue.shift();
+            own !== undefined;
+            own = queue.shift()
+          ) {
+            if (await endpointIsDown(own[0]?.runnerId)) continue;
             for (const pair of own) {
               const update = await ringPair(pair, { waiting });
               if (update === false) continue;
               rung += 1;
               if (DISPATCHER_WIDE_CODES.includes(update.lastCode)) break;
             }
+          }
         },
       ),
     );
@@ -278,6 +316,31 @@ export function createRingService(options: {
       );
       return fallback;
     }
+  }
+
+  /** Rings the waiting jobs of the label groups these jobs belong to, at most `budget` pairs; how many were rung. */
+  async function ringGroups(
+    jobIds: readonly string[],
+    budget: number,
+  ): Promise<number> {
+    const ended = await dispatches.endedGroups(jobIds);
+    // One group for each workspace: the labels of the jobs that ended and of the runners that held them. A freed slot can serve a
+    // waiting job whose labels all are among them.
+    const groups = new Map<string, Set<string>>();
+    for (const job of ended) {
+      const labels = groups.get(job.workspaceId) ?? new Set<string>();
+      for (const label of [...job.requiredLabels, ...job.holderLabels])
+        labels.add(label);
+      groups.set(job.workspaceId, labels);
+    }
+    let rung = 0;
+    for (const [workspaceId, labels] of groups) {
+      if (rung >= budget) break;
+      const group: LabelGroup = { workspaceId, labels: [...labels] };
+      const waiting = await dispatches.listWaiting(now(), budget - rung, group);
+      rung += await ringAll(waiting, { waiting: true });
+    }
+    return rung;
   }
 
   return {
@@ -304,29 +367,25 @@ export function createRingService(options: {
       });
     },
 
-    async ringGroupsOf(jobIds) {
+    ringGroupsOf: (jobIds) =>
+      guarded("job=none", { rung: 0 }, async () => ({
+        rung: await ringGroups(jobIds, RING_LIMIT),
+      })),
+
+    async ringRequeued(jobIds) {
       return guarded("job=none", { rung: 0 }, async () => {
-        const ended = await dispatches.endedGroups(jobIds);
-        // One group for each workspace: the labels of the jobs that ended and of the runners that held them. A freed slot can serve a
-        // waiting job whose labels all are among them.
-        const groups = new Map<string, Set<string>>();
-        for (const job of ended) {
-          const labels = groups.get(job.workspaceId) ?? new Set<string>();
-          for (const label of [...job.requiredLabels, ...job.holderLabels])
-            labels.add(label);
-          groups.set(job.workspaceId, labels);
-        }
         let rung = 0;
-        for (const [workspaceId, labels] of groups) {
+        for (const jobId of new Set(jobIds)) {
           if (rung >= RING_LIMIT) break;
-          const group: LabelGroup = { workspaceId, labels: [...labels] };
-          const waiting = await dispatches.listWaiting(
+          const pairs = await dispatches.listRequeued(
             now(),
             RING_LIMIT - rung,
-            group,
+            jobId,
           );
-          rung += await ringAll(waiting, { waiting: true });
+          rung += await ringAll(pairs, { waiting: true });
         }
+        if (rung < RING_LIMIT)
+          rung += await ringGroups(jobIds, RING_LIMIT - rung);
         return { rung };
       });
     },

@@ -169,4 +169,24 @@ export function ringEndedClaims(
   }
 }
 
+/**
+ * #972: a lapsed lease (or a revoked runner) put these jobs back in the queue: the webhook dispatchers that can take them are rung at once,
+ * and the label groups they were in (after the response, best effort, bounded). Never throws and never delays the call that requeued them.
+ */
+export function ringRequeuedJobs(
+  jobIds: readonly string[],
+  env: Env = process.env,
+): void {
+  if (jobIds.length === 0) return;
+  try {
+    const rings = getRingService(env);
+    if (rings !== undefined)
+      runAfterResponse(async () => void (await rings.ringRequeued(jobIds)));
+  } catch (error) {
+    // A bad setting turns the ring off like the wake-up (the start check refuses it loudly); anything else is a code.
+    if (!(error instanceof DispatchConfigError))
+      console.error("[dispatch] RING_FAILED job=none");
+  }
+}
+
 export { DispatchConfigError };

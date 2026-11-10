@@ -107,6 +107,17 @@ export type RunnerDispatchesRepository = {
    * was answered "not now" (`WAITING_DISPATCH_CODES`, `busy` among them) at least `WAITING_MIN_GAP_MS` ago, whatever time their row says.
    */
   listWaiting(now: Date, limit: number, group: LabelGroup): Promise<RingPair[]>;
+  /**
+   * The pairs of one job that a lapsed lease put back in the queue: queued and due, and whose pair has no row yet, was acknowledged (its
+   * dispatcher took the job and lost the claim) or is pending and due. A pair that is stopped, or waits for a back-off or a slot, is left
+   * to the event or the sweep that its answer named.
+   */
+  listRequeued(now: Date, limit: number, jobId: string): Promise<RingPair[]>;
+  /**
+   * Whether the last call to the dispatcher (the most recent attempt of any of its pairs) found its endpoint unreachable (a network error or
+   * a timeout) at or after `since`. A call that was answered, however it was answered, says the endpoint is up.
+   */
+  endpointFailedSince(runnerId: string, since: Date): Promise<boolean>;
   /** The labels and the holder of jobs whose claim ended, for the groups they free a slot in. Jobs that are none of a runner environment's are left out. */
   endedGroups(jobIds: readonly string[]): Promise<EndedJobGroup[]>;
   /** The webhook delivery of the customer's runner that holds the job, or undefined when none does (a polling runner, a hosted job). */
@@ -318,6 +329,36 @@ export function createRunnerDispatchesRepository(
           )})
           and d.last_attempt_at <= ${formatTimestamp(new Date(at.getTime() - WAITING_MIN_GAP_MS))}`,
         limit,
+      );
+    },
+
+    async listRequeued(at, limit, jobId) {
+      const timestamp = formatTimestamp(at);
+      return pairs(
+        sql`j.run_after <= ${timestamp}
+          and j.id = ${jobId}
+          and (d.job_id is null
+            or d.state = 'acked'
+            or (d.state = 'pending' and d.next_dispatch_at <= ${timestamp}))`,
+        limit,
+      );
+    },
+
+    async endpointFailedSince(runnerId, since) {
+      const latest = await db
+        .selectFrom("job_rings")
+        .select(["last_code", "last_attempt_at"])
+        .where("runner_id", "=", runnerId)
+        .where("last_attempt_at", "is not", null)
+        .orderBy("last_attempt_at", "desc")
+        .limit(1)
+        .executeTakeFirst();
+      return (
+        latest !== undefined &&
+        (latest.last_code === "network_error" ||
+          latest.last_code === "timeout") &&
+        latest.last_attempt_at !== null &&
+        latest.last_attempt_at >= formatTimestamp(since)
       );
     },
 

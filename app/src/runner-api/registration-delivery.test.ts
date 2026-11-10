@@ -30,7 +30,10 @@ const RUNNER: StoredRunner = {
 const SECRET = `crw_${"A".repeat(43)}`;
 const URL = "https://dispatcher.example.com/dispatch";
 
-function start(stored: StoredDelivery | undefined = undefined) {
+function start(
+  stored: StoredDelivery | undefined = undefined,
+  options: { allowLoopback?: boolean } = {},
+) {
   const credentials = {
     redeem: vi.fn(async () => ({ ok: true as const, runner: RUNNER })),
     authenticate: vi.fn(async () => RUNNER),
@@ -59,6 +62,9 @@ function start(stored: StoredDelivery | undefined = undefined) {
     settings: () => ({ minBaseVersion: null }),
     logger: { info: () => {}, error: () => {} },
     mintDeliveryKey,
+    ...(options.allowLoopback === undefined
+      ? {}
+      : { deliveryPolicy: () => ({ allowLoopback: options.allowLoopback }) }),
   });
   return { api, credentials, mintDeliveryKey };
 }
@@ -179,6 +185,15 @@ describe("the delivery in PUT /self", () => {
         "delivery.url",
       ],
       [
+        { mode: "webhook", url: "http://localhost:4010/dispatch" },
+        "delivery.url",
+      ],
+      [{ mode: "webhook", url: "https://localhost./dispatch" }, "delivery.url"],
+      [
+        { mode: "webhook", url: "https://metadata.google.internal./dispatch" },
+        "delivery.url",
+      ],
+      [
         { mode: "webhook", url: URL, rotateSecret: "yes" },
         "delivery.rotateSecret",
       ],
@@ -195,6 +210,19 @@ describe("the delivery in PUT /self", () => {
     }
     expect(credentials.announce).not.toHaveBeenCalled();
     expect(credentials.setDelivery).not.toHaveBeenCalled();
+  });
+
+  // #972: loopback is for the fakes and local development; a production instance never takes it, with any scheme and port.
+  it("takes an address on this machine only where RUNNER_DELIVERY_ALLOW_LOOPBACK is set", async () => {
+    const local = { mode: "webhook", url: "http://127.0.0.1:4010/dispatch" };
+    const refusing = start();
+    expect((await refusing.api.announce(announce(local))).status).toBe(400);
+    expect(refusing.credentials.setDelivery).not.toHaveBeenCalled();
+
+    const allowing = start(undefined, { allowLoopback: true });
+    expect((await allowing.api.announce(announce(local))).status).toBe(200);
+    expect(allowing.credentials.setDelivery).toHaveBeenCalledTimes(1);
+    expect((await allowing.api.register(register(local))).status).toBe(201);
   });
 
   it("is a 401, like every call, for a runner revoked between the two statements", async () => {

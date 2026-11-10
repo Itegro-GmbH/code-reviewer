@@ -374,3 +374,105 @@ describe("the stop call of a job that a customer's dispatcher holds", () => {
     expect(toB).toHaveLength(0);
   });
 });
+
+describe("the pairs of a job that went back to the queue, and the dispatchers that are down", () => {
+  // #972-T03
+  it("lists the pairs of a requeued job: the acknowledged ones and those not rung yet, not the stopped ones nor the ones waiting for a back-off", async () => {
+    const h = await start();
+    const acked = await webhookRunner(h, "acked");
+    const fresh = await webhookRunner(h, "fresh");
+    const busy = await webhookRunner(h, "busy");
+    const stopped = await webhookRunner(h, "stopped");
+    const turn = await h.enqueueTurn({ runnerEnvironment: ENV });
+    const r = rings(h, [acked, busy]);
+    r.reply(busy, ignored("busy"));
+    // Only these two were rung; `fresh` has no row yet. The row of `stopped` was told to stop.
+    const pairs = createRunnerDispatchesRepository(h.db, h.clock.now);
+    await r.service.onEnqueued(created(turn));
+    expect(
+      await pairs.create(turn.job.id, stopped.runnerId, h.clock.now()),
+    ).toBe(true);
+    await h.db
+      .updateTable("job_rings")
+      .set({ state: "stopped" })
+      .where("runner_id", "=", stopped.runnerId)
+      .execute();
+    // `fresh` was not rung because its endpoint is not in the rings of this test, so it has a row only if a ring reached it.
+    await h.db
+      .deleteFrom("job_rings")
+      .where("runner_id", "=", fresh.runnerId)
+      .execute();
+
+    const listed = await pairs.listRequeued(h.clock.now(), 20, turn.job.id);
+
+    expect(listed.map((pair) => pair.runnerId).sort()).toEqual(
+      [acked.runnerId, fresh.runnerId].sort(),
+    );
+    expect(await pairs.listRequeued(h.clock.now(), 20, "no-such-job")).toEqual(
+      [],
+    );
+  });
+
+  // #972-T03
+  it("rings a requeued turn again on the dispatcher that held it and on the others", async () => {
+    const h = await start();
+    const a = await webhookRunner(h, "a");
+    const b = await webhookRunner(h, "b");
+    const turn = await h.enqueueTurn({ runnerEnvironment: ENV });
+    const r = rings(h, [a, b]);
+    await r.service.onEnqueued(created(turn));
+    const claimed = await h.queue.claimNext(
+      customerRunnerId(a.runnerId),
+      ["implementer"],
+      { customerRunner: { workspaceId: h.workspaceId, labels: ["linux"] } },
+    );
+    expect(claimed?.job.id).toBe(turn.job.id);
+    // The holder gave the turn back before it started: the job waits again.
+    const released = await h.queue.release(
+      turn.job.id,
+      claimed!.leaseToken,
+      "git_access_unavailable",
+      { beforeStart: true },
+    );
+    expect(released.status).toBe("requeued");
+
+    const { rung } = await r.service.ringRequeued([turn.job.id]);
+
+    expect(rung).toBe(2);
+    expect(r.received(a)).toHaveLength(2);
+    expect(r.received(b)).toHaveLength(2);
+  });
+
+  // #972-T05
+  it("remembers a dead endpoint for a minute across runs, and forgets it after", async () => {
+    const h = await start();
+    const a = await webhookRunner(h, "a");
+    const b = await webhookRunner(h, "b");
+    const first = await h.enqueueTurn({ runnerEnvironment: ENV });
+    const second = await h.enqueueTurn({ runnerEnvironment: ENV });
+    const r = rings(h, [a, b]);
+    r.reply(a, { fails: "connect ECONNREFUSED" });
+    const pairs = createRunnerDispatchesRepository(h.db, h.clock.now);
+
+    await r.service.onEnqueued(created(first));
+    const since = new Date(h.clock.now().getTime() - 60_000);
+    expect(await pairs.endpointFailedSince(a.runnerId, since)).toBe(true);
+    // A dispatcher that answered is not down.
+    expect(await pairs.endpointFailedSince(b.runnerId, since)).toBe(false);
+
+    h.clock.advance(5_000);
+    await r.service.onEnqueued(created(second));
+    expect(r.received(a)).toHaveLength(1);
+    expect(r.received(b)).toHaveLength(2);
+
+    h.clock.advance(60_000);
+    expect(
+      await pairs.endpointFailedSince(
+        a.runnerId,
+        new Date(h.clock.now().getTime() - 60_000),
+      ),
+    ).toBe(false);
+    await r.service.ringDue();
+    expect(r.received(a).length).toBeGreaterThan(1);
+  });
+});

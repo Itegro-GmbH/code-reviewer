@@ -27,6 +27,7 @@ import type { Database } from "../db/schema.ts";
 import { correctLateMinutes } from "../billing/late-minutes.ts";
 import { VM_NAME_PATTERN } from "../runner-api/contract.ts";
 import type { DispatchKey, WebhookDispatchConfig } from "./config.ts";
+import { customerDeliveryFetch } from "./guarded-fetch.ts";
 import { buildStopRequest } from "./request.ts";
 import { parseRetryAfter, type DispatchFetch } from "./send.ts";
 
@@ -126,6 +127,8 @@ export type StopTarget = {
   url: string | null;
   key: DispatchKey;
   bypassToken?: string;
+  /** How the call is made, when not the service's own `fetch` (a customer's dispatcher: the guarded one). */
+  send?: DispatchFetch;
 };
 
 export type StopService = {
@@ -201,7 +204,7 @@ export function createStopService(options: {
     });
     const signal = AbortSignal.timeout(timeoutMs);
     try {
-      const response = await send(target.url as string, {
+      const response = await (target.send ?? send)(target.url as string, {
         method: "POST",
         headers: request.headers,
         body: request.body,
@@ -314,7 +317,17 @@ export function createStopService(options: {
     if (holder === undefined) return;
     const url = stopUrlOf(holder.url);
     if (url === null) return fail(jobId, "DISPATCH_STOP_URL_INVALID");
-    const answer = await callWithRetries({ url, key: holder.key }, jobId);
+    // The address is the customer's: it is called through the connection that refuses the app's own network (guarded-fetch.ts).
+    const answer = await callWithRetries(
+      {
+        url,
+        key: holder.key,
+        send:
+          options.fetch ??
+          ((address, init) => customerDeliveryFetch()(address, init)),
+      },
+      jobId,
+    );
     switch (answer.kind) {
       case "done":
         return;

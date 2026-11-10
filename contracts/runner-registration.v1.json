@@ -21,7 +21,7 @@
       "pattern": "^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}(-[0-9A-Za-z.-]{1,32})?$"
     },
     "DeliveryUrl": {
-      "description": "Where the app sends the doorbell (`POST <url>`; the stop call goes to the same address with its last path segment `dispatch` replaced by `stop`, as in contracts/dispatch-webhook.v1.json). https without credentials; plain http only to `localhost`, `127.0.0.1` or `[::1]` (the fakes and local development). An address that names a private, loopback, link-local or otherwise internal host is refused, and no redirect is followed.",
+      "description": "Where the app sends the doorbell (`POST <url>`; the stop call goes to the same address with its last path segment `dispatch` replaced by `stop`, as in contracts/dispatch-webhook.v1.json). https without credentials to a public host. An address that names a private, loopback, link-local, reserved or otherwise internal host is refused (a trailing dot on the host is no way round), and so is a name that resolves to such an address when the app connects (checked on every connection, on the address it connects to). No redirect is followed. Only an app that runs with `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the fakes, the E2E, local development, never production) also accepts an address on this machine, with plain http.",
       "type": "string",
       "minLength": 1,
       "maxLength": 2048

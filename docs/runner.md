@@ -132,10 +132,15 @@ The claim stays the only way to a job; the delivery only says what makes a dispa
   the same mode again keeps it and shows nothing; a new address keeps it; `rotateSecret: true` makes a new one (the old one stops working at once); announcing `poll`
   drops it. `delivery.keyId` names it in `X-Dispatch-Key-Id`. A doorbell signed with another dispatcher's secret is refused by the receiver (`bad_signature`, or
   `unknown_key` under another key id): `contracts/dispatch-signing-vectors.json` has a vector for each (`otherDispatcher`).
-- **The address is the dispatcher's, so it is checked.** https without credentials (plain http only to `localhost`, `127.0.0.1` or `[::1]`); an address that names a
-  private, link-local (the metadata service), shared or reserved IP address, or a name that only means something inside a network (`.local`, `.internal`, a name with
-  no dot) is refused with `400 RUNNER_REQUEST_INVALID`, field `delivery.url`. No redirect is ever followed, the body of the answer is read only for the small
-  `ignored` body, and nothing of an answer or of an error is stored or logged.
+- **The address is the dispatcher's, so it is checked.** https without credentials to a public host. An address that names a private, loopback, link-local (the metadata
+  service), shared or reserved IP address (in any spelling: decimal, octal, hexadecimal, a trailing dot), an IPv6 address that is no global unicast one (6to4 `2002::/16`,
+  Teredo `2001::/32`, documentation `2001:db8::/32`, the IPv4-mapped and -compatible forms are refused), or a name that only means something inside a network (`.local`,
+  `.internal`, a name with no dot) is refused with `400 RUNNER_REQUEST_INVALID`, field `delivery.url`. That check is of the text; a name that looks public can still
+  resolve to the app's own network, so **every connection to a customer's dispatcher resolves the name once and refuses it when any of its addresses is internal**, and
+  connects to an address that was checked (`src/dispatch/guarded-fetch.ts`, an undici agent with its own `lookup`: no gap for a DNS rebinding). That holds for the doorbell and for
+  `POST /stop`; the platform's own `RUNNER_WEBHOOK_URL` is the operator's setting and is called as before. **Loopback and plain http are for the fakes only**: an app that runs with
+  `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the E2E, local development; **never in production**, where it is unset) also takes an address on this machine, with http. No redirect is ever
+  followed, the body of the answer is read only for the small `ignored` body, and nothing of an answer or of an error is stored or logged.
 - **`RUNNER_WEBHOOK_URL` is the delivery of the platform's own dispatcher.** The hosted Dispatcher has no row of its own: its address and its signing key are the settings the app
   already had (`RUNNER_WEBHOOK_URL`, `RUNNER_WEBHOOK_SECRET`), so a deployment keeps working with nothing more than those. Its rows are `job_dispatches` as before.
 - **A dispatcher that is full answers `200 ignored` with `reason: "busy"`** and forgets the bell. It claims by itself when a slot frees (a serverless one learns that
@@ -143,10 +148,17 @@ The claim stays the only way to a job; the delivery only says what makes a dispa
 - **The app rings again on events**, bounded and idempotent in the row of each (job, dispatcher) pair (`job_rings`; the same compare-and-set, back-off and acknowledgement
   timeout as the platform's `job_dispatches`):
   - a **job is enqueued** (the hook of the queue, after the response);
-  - the **claim of a job ends** (a result, a failure, a cancel, a lapsed lease, a timeout: `onClaimsEnded`): the waiting jobs that the group of that job can take (the labels it
+  - a **lapsed lease puts a job back in the queue** (also a revoked runner, or a holder that gives a turn back before it started: `onRequeued`): the job is rung at once on every
+    dispatcher that can take it, the one that held it included, and the group it was in is rung as below. The claim did not end for good, so `onClaimsEnded` does not name it;
+  - the **claim of a job ends** (a result, a failure, a cancel, a lapsed lease that fails the job, a timeout: `onClaimsEnded`): the waiting jobs that the group of that job can take (the labels it
     required and the labels of the runner that held it) are rung again, those whose last ring was answered "not now" (a busy dispatcher among them). At most 20 pairs a
     reaction, a pair no sooner than 9 seconds after its last call, and a dispatcher that answers busy or cannot be reached is asked once in a reaction, not once for each of its jobs;
   - the **sweep**, the rare safety net (the cron runs **every 2 hours**, `app/vercel.json`), and the repair work of the requests that touch the database: the pairs with no row yet or whose row is due.
+- **A dispatcher whose endpoint is down is left alone for a minute.** When the last call to a dispatcher ended in a network error or a timeout (the last attempt of its pairs in
+  `job_rings`, so every instance and every run sees it), none of its pairs is rung for the next minute: a dead endpoint with many jobs is rung once, not once for each. After the
+  minute it is asked again (an answer of any kind, a `503` included, says the endpoint is up).
+- **With more than 20 matching dispatchers, the first 20 are rung first.** A reaction rings at most 20 pairs, oldest job first and, for one job, the dispatchers in the order of their
+  ids; the others hear of it by their own claim, by a later event or by the sweep. This is by design: the bell is a nudge, the claim decides.
 - **`POST /stop` goes to the webhook dispatcher that holds the job** (the runner of its claim), signed with its own secret, when the claim ends. A polling dispatcher learns it
   from its worker ending and from the job state call.
 - **Only while the deployment runs the dispatch webhook** (`RUNNER_DISPATCH=webhook`, the hosted one). In poll mode the app makes no outgoing call, so a webhook delivery is stored but never rung.
