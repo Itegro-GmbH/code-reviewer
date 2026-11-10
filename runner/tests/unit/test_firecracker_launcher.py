@@ -5,10 +5,12 @@ Unix sockets, real processes, the real framing, the real session and token check
 boots a VM: that is the KVM lane (`.github/workflows/vm-artifacts.yml`)."""
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
 import os
+import signal
 import sys
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -542,3 +544,39 @@ def test_the_environment_of_the_vmm_never_holds_the_environment_of_the_service()
             del os.environ["FACTORY_RUNNER_TEST_SECRET"]
 
         assert "must-not-reach-the-vmm" not in json.dumps(rig.seen()["environ"])
+
+
+# #978-T09
+def test_a_vmm_that_will_not_die_keeps_its_slot_out_of_use_and_the_log_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from code_reviewer_runner.factory_runner.firecracker import launcher as launcher_module
+
+    with short_directory() as root:
+        rig = Rig(root)
+        rig.behavior(mode="hang")
+        sandbox = rig.sandbox()
+        survivors: list[int] = []
+        monkeypatch.setattr(launcher_module, "GONE_SECONDS", 0.2)
+
+        def never_kills(self: Any) -> None:
+            """A process in uninterruptible sleep does not die of SIGKILL: none is sent."""
+
+        async def scenario() -> None:
+            worker = await sandbox.start(start_for())
+            vm = sandbox._vms[worker.vm_id]  # pyright: ignore[reportPrivateUsage]
+            assert vm.process is not None
+            survivors.append(vm.process.pid)
+            monkeypatch.setattr(type(vm.process), "kill", never_kills)
+            await sandbox._destroy(vm)  # pyright: ignore[reportPrivateUsage]
+
+        with caplog.at_level(logging.ERROR):
+            try:
+                go(scenario)
+            finally:
+                for pid in survivors:
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGKILL)
+
+        assert sandbox.free == 0 and "is out of use" in caplog.text
+        assert rig.vm_directories() == []  # the files are gone all the same

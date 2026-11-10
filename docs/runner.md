@@ -12,6 +12,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
 - [VM artifacts](#vm-artifacts-976): the kernel, root file system and Docker data disk of that microVM, built from the golden snapshot recipe, signed and verified (#976).
+- [The Firecracker launcher](#the-firecracker-launcher-978): how the local Dispatcher starts a job in such a microVM: slots, disks, limits, the host side of the vsock protocol, ending and clean-up (#978).
 
 ## Registration and routing (R1a, #854)
 
@@ -275,7 +276,7 @@ machine (Linux, Docker)
 ├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work): the local dispatcher
 │    ├─ announce (PUT /self): labels, base version, manifest {harness entries, capabilities}, limits
 │    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner): the job id and the credential of its Worker (crj_), nothing secret
-│    ├─ start the Worker (today: a process of this container; later the Firecracker launcher, #978) with {appUrl, jobId, credential} on its stdin
+│    ├─ start the Worker (a process of this container; or, with FACTORY_RUNNER_SANDBOX=firecracker, in a microVM: see "The Firecracker launcher") with {appUrl, jobId, credential} on its stdin
 │    │    and, if the job asks for it, the one credential of this device (a Claude Code subscription), read from the token file of R3: never through the app
 │    ├─ watch it: the local reaper (GET /jobs/{id} with the runner's credential), the claim given back when the Worker could not start or ended without a result (POST /jobs/{id}/release)
 │    └─ the Worker (`code-reviewer-runner`'s `local_worker`): fetch the job over /api/workers/v1 with crj_, job host (job process with the job on stdin, heartbeats, steps, result), delivery
@@ -612,7 +613,7 @@ Enforced through the host's Docker (`limits.py`, `disk_budget.py`):
 | -------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Memory               | `memoryMb`               | `Memory` = `MemorySwap` of the **agent's container and of the setup container** (#855; below 1024 MB the runner is not ready). The default is 60% of the machine up to 16 GiB.                                                              |
 | CPUs                 | `cpus`                   | `NanoCpus` of the **agent's container and of the setup container** (#855: the container that runs the environment's script is as free as the agent, so it had no business being the one that ran without a limit).                            |
-| Jobs at a time       | `parallelRuns`           | One. A second would collide on the fixed names and the fixed model network (R3 or later).                                                                                                                                                |
+| Jobs at a time       | `parallelRuns`           | One. A second would collide on the fixed names and the fixed model network. With the Firecracker sandbox (`FACTORY_RUNNER_SANDBOX=firecracker`, #978) every job has a VM of its own and `parallelRuns` is the number of slots (up to 64).                                                                                                                                                |
 | **Disk**             | `diskGb`                 | A **budget per job**, below.                                                                                                                                                                                                             |
 
 **The disk budget** (#855). `diskGb` is what one job may hold on the machine's disk. While a job runs (every 20 seconds) the runner measures
@@ -866,7 +867,10 @@ parts are in "Claude Code, R3" below.
   login.
 - **Your login** is a token you make with `claude setup-token` and keep on the device: in a file `claude-code-token` in the runner's home
   (`$FACTORY_RUNNER_HOME`), or the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, or in `CLAUDE_CODE_OAUTH_TOKEN` of the runner's
-  environment. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
+  environment. **Only the dispatcher reads these places**, once per job that asks for the login; the Worker and the job process never get
+  `FACTORY_RUNNER_HOME` or the file's name (their environment is made by `prepare.job_environment`, a test holds it), so there is no
+  second token file to take precedence: the one credential travels on the Worker's standard input (`localEnvironment`; with a VM,
+  `localCredential` of the start), and the Worker takes **only** `CLAUDE_CODE_OAUTH_TOKEN` from it. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
   database, never sent to the app and never written to a log** (the runner's log masks it). It is handed to Claude Code's process in the job's
   container for the length of the job, and to nothing else.
 - Set it up, then look: `factory-runner selftest` shows the login, the layer and the version without calling a model;
@@ -1894,3 +1898,139 @@ On GitHub's `ubuntu-24.04` runners (4 vCPU, nested virtualization; the same kind
 - Image ids equal to the hosted ones (above). Bare metal, other distributions, arm64. The online file system growth is the host's (`resize2fs` on the file); nothing was changed about that.
 - A release asset can hold 2 GiB: the build fails when a file is larger. A data disk that grows past it needs splitting (a manifest entry per part).
 - The Debian packages of the Worker image are not version pinned (the Dockerfile says so); only its bases are digest pinned.
+
+## The Firecracker launcher (#978)
+
+The local Dispatcher's `WorkerSandbox` for a machine with KVM (Runner v2, epic #969, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)):
+every job runs in a Firecracker microVM of the release ([VM artifacts](#vm-artifacts-976)), started by the dispatcher as a normal user.
+Code: [`runner/src/code_reviewer_runner/factory_runner/firecracker/`](../runner/src/code_reviewer_runner/factory_runner/firecracker). The Worker
+in the VM is the hosted one, started by [vm-init](../runner/vm-init/README.md); this section is the **host** side. The old mode (the Worker as
+a process of the runner's container, on the host's Docker) stays as the fallback until #982 removes it. Choose the launcher with
+`FACTORY_RUNNER_SANDBOX=firecracker`; `run` then prepares with the host's checks (`prepare_firecracker`: kernel, root file system, base
+disk, `firecracker`, `/dev/kvm`, the delegated cgroup, one TAP device per slot) instead of the Docker self-test, and touches the host's
+Docker never (no lock, no tidying). **Until #982 nothing installs the machine**: the root steps below are by hand.
+
+### What a job does
+
+```
+claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _5100 and _5101 ─▶ cgroup ─▶ firecracker ─▶ CONNECT 5000, start, ack
+                                                                                                               │
+ end: first exit report (token) | VMM gone without one | wall clock ──▶ kill VMM and cgroup ─▶ delete disk ─▶ free the slot
+```
+
+1. **Slot.** The number of slots is `parallelRuns` (`FACTORY_RUNNER_PARALLEL_RUNS` or `limits.parallelRuns`; 1 to 64). The dispatcher claims
+   only with a free slot and runs jobs beside each other (`run --once` is still one job). A TAP device per slot was made at install (root);
+   slot *N* is `fctapN` with the /30 network `172.31.<N*4 div 256>.<N*4 mod 256>`: the host's side is its first address, the guest's the
+   second (given to the guest on the kernel command line, `vm.ip` and `vm.gw`).
+2. **Job disk.** The base disk (`dockerdata.ext4`, the Worker and agent images in the guest's own Docker) is copied to `disk.ext4`: a
+   reflink (`FICLONE`, XFS with `reflink=1` or btrfs, 34 ms for 752 MiB in the spike) or a plain sparse `cp` where the file system has none,
+   then `truncate` and `resize2fs` on the file (20 ms, no root, no mount; `e2fsck -fy` first only if `resize2fs` asks for it). **The
+   quota is the size of the file** (`diskGb`, default 16, at least 8): the guest sees `No space left on device` at it. The work volume's
+   reserve disk is an eighth of it. The disk is deleted with the VM.
+3. **Token and listeners.** A random per-VM token (`tokens.py`) and **both vsock listeners before the VM exists**: Firecracker maps the
+   VM's connections to the host (CID 2) port 5100 to the Unix socket `vsock.sock_5100` and port 5101 to `_5101`; the host connects the
+   other way to `vsock.sock` with `CONNECT 5000`.
+4. **Cgroup and Firecracker.** One cgroup `vm-<slot>-<random>` under the subtree systemd delegated (`Delegate=yes`): `cpu.max` = vCPUs,
+   `memory.max` = the guest's memory + 384 MiB (the VMM and what the disk files cost in the page cache), `memory.swap.max` 0,
+   `memory.oom.group` 1, `pids.max` 256. The service moves only itself into a leaf (`service`) and enables `cpu memory pids` below its own
+   cgroup (the "no internal process" rule). Firecracker (**no jailer**, `--no-api --config-file`) starts **inside** the cgroup (the child
+   writes itself into `cgroup.procs` before `exec`), as the service's user, with an **empty environment**, in the VM's directory, with
+   stderr to `firecracker.log`. VM size: `FACTORY_RUNNER_VM_VCPUS` (2, 4, 6 or 8; 2 GB per vCPU as hosted; the agent's memory is the
+   hosted table's, `agentMemoryMb` of the template).
+5. **Start.** The start of `contracts/vm-init.v1.json`: `{appUrl, jobId, credential}`, the token, the image check (`code-reviewer-worker:golden`
+   and the id from the verified manifest, `FACTORY_RUNNER_VM_IMAGE_ID`), Control's `docker run` and the work volume, and for a job that
+   asks for it the one local credential (`localCredential`: **only `CLAUDE_CODE_OAUTH_TOKEN`**). The host waits for vm-init's `ack`
+   (up to 120 s: the daemon's start comes before it). A refused or unanswered start, a VMM that ends first or a report before the `ack`
+   fails the start: the claim is given back (`launch_failed`) and nothing is left.
+
+**Control's `docker run`** comes from one renderer: `dispatcher/src/launchers/local-control.ts` (`renderLocalControl`, the hosted
+rendering plus `RUNNER_ENVIRONMENT_CONTROL=vsock` and the seccomp profile that allows AF_VSOCK for Control alone). The Python launcher does
+not render it again: it fills `control-run.template.json`, **generated by that renderer** (`node dispatcher/src/launchers/local-control-template-main.ts`)
+with four markers (job id, image id, timeout, the agent's memory). A test of the Dispatcher holds the file equal to what the renderer
+generates and proves that filling it gives what the renderer renders for real values; a test of the runner fills it for the golden job
+and compares to `docker-run.local-control.golden.json`, the file vm-init's tests feed to the guest unchanged.
+
+### The host side of the vsock protocol
+
+Every connection is one request and one reply (a frame: four bytes of length, one JSON object, at most 64 KiB; any byte after the frame,
+a field the contract does not have, a version other than 1 is a protocol error and the connection is closed).
+
+| Port | Message | The host |
+|---|---|---|
+| 5100 | `narrow`, `end` (Control) | **requires the VM's token** (`verify_control_message`; missing or wrong are answered alike, `refused` `invalid_request`) and a start that has an `ack`. `end` is acknowledged and noted (the exit report is the authority). `narrow` is answered only after the **outer wall** holds the rule (below); the same request again gets the same answer, another one after the first is `invalid_request` |
+| 5101 | exit report (vm-init) | **takes the first** report that passes `verify_exit_report` and answers every later one with the same `ack` (vm-init repeats a report whose `ack` did not come); a report **without a token is accepted only while the start has no `ack`** (`start_timeout`, `start_invalid`: no job and no agent exists yet), otherwise it is closed without an answer |
+
+The token's check has a twin in TypeScript (`dispatcher/src/launchers/control-token.ts`); both read `contracts/control-token-vectors.json`.
+The token is in the start, in Control's stdin and in the messages; never in an argument, the environment, a file or a log.
+
+**`narrow` and the outer wall.** #979 builds the proxy and the nft table; the hook is `OuterWall` (`outer_wall.py`: `narrow(vm, message)`
+and `forget(vm)`, the VM identified by its slot and TAP). Until it exists there is no wall to switch, and the answer is the operator's
+**explicit** choice (`FACTORY_RUNNER_OUTER_WALL`), never a silent `ack`: `refuse` (the default) answers `refused` `unavailable`, so the
+Worker ends the job `environment_control_failed` before an agent exists; `inner-only` answers `ack` and logs a warning for every VM that
+nothing was narrowed (the agent's network is then the inner wall, the network door, only). So **a local VM job needs
+`FACTORY_RUNNER_OUTER_WALL=inner-only` until #979**.
+
+### Ending a VM
+
+A VM's worker ends with the **first** of: an exit report (`worker_exited`, `docker_failed`, `prepare_failed`, `image_missing`,
+`image_mismatch`, `start_invalid`, `start_timeout`; the status is the Worker's), the end of the VMM **without** a report (an unknown
+outcome: exit code 1, the dispatcher gives the claim back as `worker_exited`) or the **wall clock** of the VM (exit code -9). The wall
+clock is the host's, from the start of the VMM: **the job's timeout + Control's stop timeout (150 s) + the preparation (300 s)**, 4,050 s
+for the default 3,600 s. A VM that reported is given 5 s to power itself off (the guest's `reboot=k` ends Firecracker), then it is killed.
+Whatever ends it, before the worker returns: the VMM and its cgroup are killed (`cgroup.kill`), the listeners closed, the outer wall told
+(`forget`), the **job disk and the VM's directory deleted** and the slot free. A VMM that will not die keeps its slot out of use (its TAP
+may be busy) and the log says so; the next start of the service removes it.
+
+The dispatcher's **stop** (a signal) kills the VM at once: the Worker inside cannot be asked to give its job back from outside, so the
+dispatcher gives the claim back itself (`worker_exited`). The **local reaper** (`GET /jobs/{id}` every 60 s, 45 s of grace) stops the VM
+of a job the app ended, as it did the process: it is the same code, per worker, so every slot is watched.
+
+**At every start of the service**, before the first claim (`setup`): the cgroup tree is made usable and **what an earlier service left is
+removed**: each `vms/vm-*` directory (their processes are found by their command line, `--config-file <directory>/...`, never by a
+remembered pid, killed with their cgroups, the directory and its disk deleted) and every cgroup named like a VM's.
+
+### Files under `/var/lib/code-reviewer/`
+
+| Path | Content |
+|---|---|
+| `artifacts/vmlinux`, `rootfs.ext4`, `dockerdata.ext4` | the release's kernel, read-only root file system and base disk (the installer, #982; `FACTORY_RUNNER_VM_KERNEL`, `_ROOTFS`, `_BASE_DISK` move them) |
+| `vms/vm-<slot>-<random>/` | one directory per running VM (0700), made before it starts and deleted when it is gone: `disk.ext4` (the job disk), `vsock.sock`, `vsock.sock_5100`, `vsock.sock_5101`, `firecracker.json`, `firecracker.log`, `vm.json` (VM, slot, job id: no secret) |
+
+`FACTORY_RUNNER_VM_STATE_DIR` moves the state directory; keep it on XFS with `reflink=1` (the installer checks) for the 34 ms copy.
+
+### What the machine needs (the installer's, #982)
+
+Root, once: the group `kvm` and `/dev/kvm` for it; the service user in it; **one TAP device per slot** owned by that user
+(`ip tuntap add dev fctapN mode tap user <user>`, with the /30 address above); the static nft table of #979; a systemd unit with
+`Delegate=yes` and `User=`; `e2fsprogs` (`resize2fs`), `cp`. At runtime nothing needs root (spike #970). `FACTORY_RUNNER_VM_CGROUP_ROOT` names a
+delegated cgroup that is not the service's own (tests).
+
+**Hardening without the jailer** (the open point of the spike): what is done is Firecracker's own seccomp filter and no capability
+(measured in #970), a directory per VM made 0700, an empty environment, one cgroup per VM that kills the whole tree, and no Docker or
+other service on the host. What is **not** done and is an open decision: systemd's sandboxing for the unit (`ProtectSystem=strict`,
+`PrivateTmp`, `NoNewPrivileges`, `CapabilityBoundingSet=`, `ReadWritePaths=/var/lib/code-reviewer`) belongs to the installer's unit (#982),
+which holds every VM; **one unit per VM** (so that an escaped VMM does not see the other jobs' files) is not tried and costs a root-owned
+helper that starts transient units, which the "nothing needs root at runtime" decision rules out; a user per slot would need root at
+install and a TAP owner per user. Until decided, a VMM escape lands in the service user, which also owns the other VMs' disks: run the
+service as a user that owns nothing else.
+
+### Tests
+
+Unit (`runner/tests/unit/test_firecracker_*.py`): the launcher against a **fake Firecracker** (a process that is a VM with vm-init in
+it over the real Unix sockets, framing, session and token checks), slots, disks, cgroups on plain directories, the leftovers, the
+template against the golden file, the settings, the service with a sandbox that has slots. The **KVM lane** (`runner/tests/kvm`,
+the `Launcher lane` step of `.github/workflows/vm-artifacts.yml`, only for a change to its paths): T05 a real job (the Worker image
+fetches a job from the fake App through the TAP, delivers its result) with the VM's cgroup limits read while it runs, nothing left
+after it, and the wall clock killing a real VM. The smoke boot of the same workflow proves that a container of the agent **cannot open a
+vsock socket**: `vsock_denied_agent` (Docker's default profile, under Sysbox), its control `vsock_allowed_control` (Control's profile
+allows it: the probe can see a socket), and `ia32_unavailable` (a 32-bit `int 0x80` / `socketcall`, which would bypass the profile's
+argument filter, does not work on the guest kernel; on a kernel with IA32 emulation the same probe sees `EINVAL`).
+
+### Not done here, follow-ups
+
+- The outer wall (#979); the install, the update and the rollback (#982); the `config set --parallel` command still refuses more than one
+  (the installer writes `parallelRuns`); the no-Docker `selftest` (a VM boot as the self-test).
+- A stop that asks the Worker in the VM to give its job back (`runner_shutdown`) before the VM is killed needs a channel to Control that
+  vm-init does not have (a `stop` message over the start connection).
+- The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
+  the time to vm-init's `ack`).

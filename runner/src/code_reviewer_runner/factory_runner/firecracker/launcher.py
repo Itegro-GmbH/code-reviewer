@@ -83,10 +83,6 @@ class VmCgroups(Protocol):
     def vm_cgroups(self) -> list[Path]: ...
 
 
-# Seams the tests replace; production leaves the defaults.
-SpawnVmm = Callable[..., "asyncio.Future[asyncio.subprocess.Process]"]
-
-
 @dataclass
 class _Vm:
     vm_id: str
@@ -167,7 +163,8 @@ class FirecrackerSandbox:
         except BaseException:
             if vm is not None:
                 await self._destroy(vm)
-            else:
+            elif slot not in self._lost:
+                # Nothing was made yet; a slot whose VMM would not die stays out of use.
                 self._pool.release(slot)
             raise
         return FirecrackerWorker(self, vm)

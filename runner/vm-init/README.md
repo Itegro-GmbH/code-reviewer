@@ -167,7 +167,7 @@ is: copy the new default, run the derivation, replace the file, and the test say
 - The Worker image loaded into Docker under the tag `code-reviewer-worker:golden` (the manifest's image id is what the host sends; the id must match).
 - A kernel with `CONFIG_VSOCKETS`, `CONFIG_VIRTIO_VSOCKETS` and `CONFIG_BLK_DEV_LOOP` (all in the spike's fragment).
 
-## What the local Dispatcher must do (for #978)
+## What the local Dispatcher must do (for #978; built, see `docs/runner.md`, "The Firecracker launcher")
 
 - Listen on `<vsock uds path>_5100` (environment control) and `<vsock uds path>_5101` (exit report) **before** the VM starts; connect to
   `<vsock uds path>` with `CONNECT 5000` once the VM is up and send the `StartRequest`; read the `ack`.
