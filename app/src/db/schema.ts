@@ -484,6 +484,28 @@ export interface JobDispatchesTable {
 }
 
 /**
+ * #972: where the doorbell of one job stands for one webhook dispatcher of a customer (src/dispatch/README.md). The columns are those of
+ * `job_dispatches`, which keeps the platform's own dispatcher; a pair is made when a job that dispatcher could take is rung for.
+ */
+export interface JobRingsTable {
+  job_id: string;
+  runner_id: string;
+  /** `pending`, `acked` or `stopped` (`DISPATCH_STATES`). */
+  state: string;
+  attempts: number;
+  consecutive_failures: number;
+  /** ISO 8601 text in UTC: when the job is to be rung again; while a send is in flight: when its claim ends. */
+  next_dispatch_at: string;
+  acked_at: string | null;
+  last_attempt_at: string | null;
+  last_status: number | null;
+  /** A name of `DISPATCH_RESULT_CODES`. */
+  last_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
  * The notice of a refused review that one pull request got in one period (#281). Unique by workspace, repository,
  * pull request and period start: that is what keeps a second push from posting again.
  */
@@ -1575,6 +1597,14 @@ export interface RunnersTable {
   last_seen_at: string;
   /** Set when a member revoked the runner. */
   revoked_at: string | null;
+  /** #972: how the runner learns of a job: `poll` (it claims by itself) or `webhook` (the app rings `delivery_url`). */
+  delivery_mode: ColumnType<string, string | undefined, string>;
+  /** The address of the doorbell of a webhook delivery; null for `poll`. */
+  delivery_url: string | null;
+  /** Names the signing secret in `X-Dispatch-Key-Id`; null for `poll`. */
+  delivery_key_id: string | null;
+  /** The signing secret, sealed (JSON of `SealedSecret`, `src/crypto/secret-box.ts`); never the secret. Null for `poll`. */
+  delivery_secret: string | null;
 }
 
 /** A registration token of a workspace (#854): short lived, used once, kept as a hash. */
@@ -1640,6 +1670,7 @@ export interface Database {
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;
   job_dispatches: JobDispatchesTable;
+  job_rings: JobRingsTable;
   refusal_notices: RefusalNoticesTable;
   job_check_runs: JobCheckRunsTable;
   job_vm_runs: JobVmRunsTable;

@@ -11,6 +11,7 @@ import {
   readExamples,
 } from "../test-support/runner-contract.ts";
 import { checkAnnouncement } from "./announcement.ts";
+import { checkDelivery } from "./delivery.ts";
 import { RUNNER_API_ERROR_CODES } from "../runner-api/contract.ts";
 import { readContract } from "../test-support/runner-contract.ts";
 
@@ -85,6 +86,42 @@ describe("the runner registration contract", () => {
         app: file,
       });
     }
+  });
+
+  // #972-T04
+  it("gives the verdict the app's reading of a delivery gives, and holds its example", () => {
+    const url = "https://dispatcher.example.com/dispatch";
+    const bodies: unknown[] = [
+      { mode: "poll" },
+      { mode: "webhook", url },
+      { mode: "webhook", url, rotateSecret: true },
+      { mode: "webhook", url, rotateSecret: "yes" },
+      { mode: "webhook" },
+      { mode: "webhook", url: 5 },
+      { mode: "push", url },
+      {},
+    ];
+
+    for (const body of bodies) {
+      const file = contract.check("DeliveryAnnouncement", body).valid;
+      expect({ body, app: checkDelivery(body).ok }).toEqual({
+        body,
+        app: file,
+      });
+    }
+    expect(
+      contract.check("RunnerAnnouncement", {
+        labels: ["linux"],
+        baseVersion: "1.0.0",
+        delivery: { mode: "webhook", url },
+      }).valid,
+    ).toBe(true);
+    const response = examples.find(
+      (example) => example.definition === "AnnounceResponse",
+    );
+    expect(response?.document).toMatchObject({
+      delivery: { mode: "webhook", secret: expect.stringMatching(/^crw_/) },
+    });
   });
 
   // #854-T63

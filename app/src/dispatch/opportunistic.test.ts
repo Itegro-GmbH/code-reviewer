@@ -241,3 +241,31 @@ describe("the write tokens of the Implementer in the repair work (#790)", () => 
     expect(JSON.stringify(error.mock.calls)).not.toContain("secret");
   });
 });
+
+describe("the repair work and the customers' webhook dispatchers (#972)", () => {
+  it("rings the pairs that are due too, leaving a job the request that queued it still sends alone", async () => {
+    const ringDue = vi.fn(() => Promise.resolve({ rung: 1 }));
+    const maintenance = createOpportunisticMaintenance({
+      withLock: async (work) => ({ acquired: true, value: await work() }),
+      queue: {
+        expireStaleJobs: () =>
+          Promise.resolve({
+            requeued: 0,
+            leaseExpired: 0,
+            timedOut: 0,
+            noCapableRunner: 0,
+            noRunnerAvailable: 0,
+          }),
+      },
+      rings: { ringDue },
+      now: () => 1_000_000,
+      log: { error: vi.fn() },
+    });
+
+    expect(await maintenance.run()).toBe("ran");
+
+    expect(ringDue).toHaveBeenCalledExactlyOnceWith(expect.any(Number), {
+      minAgeMs: OPPORTUNISTIC_MIN_JOB_AGE_MS,
+    });
+  });
+});

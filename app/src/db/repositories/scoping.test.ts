@@ -180,6 +180,7 @@ const INSTANCE_LEVEL = [
   "rate-limits-repository.ts",
   "refusal-notices-sweep.ts",
   "runner-credentials-repository.ts",
+  "runner-dispatches-repository.ts",
   "runner-jobs-repository.ts",
   "secrets-repository.ts",
   "setup-codes-repository.ts",

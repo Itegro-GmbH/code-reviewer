@@ -79,6 +79,13 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   profile_versions: ["environment_id"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
   usage_records: ["cost_basis"],
+  // #972: how a runner learns of a job; every runner that exists polls (`DEFAULTS_OF_COLUMNS`) and holds no address, key or secret.
+  runners: [
+    "delivery_mode",
+    "delivery_url",
+    "delivery_key_id",
+    "delivery_secret",
+  ],
 };
 
 /** What a column added later holds on an existing row when it is not null: a constant default. */
@@ -90,6 +97,7 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
     labels: "",
   },
   workflow_runs: { trigger_kind: "manual" },
+  runners: { delivery_mode: "poll" },
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */

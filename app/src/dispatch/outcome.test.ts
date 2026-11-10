@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACK_TIMEOUT_MS,
   BACKOFF_SCHEDULE_MS,
+  BUSY_REST_MS,
   MAX_RETRY_AFTER_SECONDS,
   REJECTED_BACKOFF_MS,
   decideOutcome,
@@ -49,6 +50,21 @@ describe("deciding what an answer means for the dispatch", () => {
         lastCode: "ignored_not_claimable",
         alert: false,
       });
+  });
+
+  // #972-T02
+  it("waits for an event or the sweep when the receiver is full (reason busy)", () => {
+    expect(decideOutcome({ kind: "ignored", reason: "busy" }, 2, NOW)).toEqual({
+      state: "pending",
+      nextDispatchAt: after(BUSY_REST_MS),
+      consecutiveFailures: 0,
+      acknowledged: false,
+      lastStatus: 200,
+      lastCode: "ignored_busy",
+      alert: false,
+    });
+    // Longer than the acknowledgement timeout: no timer or request rings a full dispatcher again.
+    expect(BUSY_REST_MS).toBeGreaterThan(ACK_TIMEOUT_MS);
   });
 
   // #326-T03

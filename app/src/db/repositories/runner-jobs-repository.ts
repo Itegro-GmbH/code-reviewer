@@ -199,6 +199,13 @@ export type RunnerJobsRepositoryOptions = {
    * it never (it cannot see the commit).
    */
   onClaimsEnded?: (jobIds: readonly string[]) => void;
+  /**
+   * #972: called once per call that put running jobs back in the queue because their lease lapsed (in `expireStaleJobs`, in the expiry step
+   * of a claim and when a runner is revoked), with the ids of the jobs, after the transaction that queued them committed. The claim of such a
+   * job did not end for good (`onClaimsEnded` does not name it), but it is waiting again and a webhook dispatcher is to be told: the doorbell
+   * rings the job and its label group. Same rules as `onRefused`.
+   */
+  onRequeued?: (jobIds: readonly string[]) => void;
 };
 
 /**
@@ -508,13 +515,26 @@ export function createRunnerJobsRepository(
       executor: Kysely<Database>,
       unknownCost: UnknownCostSettlement[],
       endedClaims: string[],
+      requeued: string[],
     ) => Promise<T>,
   ): Promise<T> {
     const unknownCost: UnknownCostSettlement[] = [];
     const endedClaims: string[] = [];
-    const result = await inTransaction((trx) =>
-      run(trx, unknownCost, endedClaims),
-    );
+    const requeued: string[] = [];
+    const result = await inTransaction(async (trx) => {
+      const value = await run(trx, unknownCost, endedClaims, requeued);
+      // A job a lapsed lease put back that the same call handed to a new holder is not waiting: only the ones still queued are named.
+      if (requeued.length > 0) {
+        const waiting = await trx
+          .selectFrom("jobs")
+          .select("id")
+          .where("id", "in", requeued)
+          .where("status", "=", "queued")
+          .execute();
+        requeued.splice(0, requeued.length, ...waiting.map((row) => row.id));
+      }
+      return value;
+    });
     if (db.isTransaction) return result;
     for (const settlement of unknownCost)
       notify("unknown_cost_callback_failed", () =>
@@ -524,6 +544,8 @@ export function createRunnerJobsRepository(
       notify("claims_ended_callback_failed", () =>
         options.onClaimsEnded?.(endedClaims),
       );
+    if (requeued.length > 0)
+      notify("requeued_callback_failed", () => options.onRequeued?.(requeued));
     return result;
   }
 
@@ -541,7 +563,7 @@ export function createRunnerJobsRepository(
     runAfter?: string,
     /** #753: the input of the job never reached a Worker; the rule that a turn is never run twice does not apply. */
     beforeStart = false,
-  ): Promise<{ failed: number; requeued: number }> {
+  ): Promise<{ failed: number; requeued: number; requeuedIds: string[] }> {
     // #891: a job a member asked to stop is over with its claim, whatever else the claim lost: it is not tried again. A failure of the
     // platform (the Worker could not be started, or never got the input) keeps its own code: the job ends `cancelled` but free, because
     // `cancelled` is charged and no turn ran.
@@ -611,14 +633,16 @@ export function createRunnerJobsRepository(
         updated_at: timestamp,
       }))
       .where(runningWhere(scope))
-      .executeTakeFirst();
+      .returning("id")
+      .execute();
 
     // #752: a turn that failed here has no report to come; its session is idle again.
     if (disabled + Number(failed.numUpdatedRows) > 0)
       await idleSessionsOfEndedTurns(executor, timestamp);
     return {
       failed: disabled + Number(failed.numUpdatedRows),
-      requeued: Number(requeued.numUpdatedRows),
+      requeued: requeued.length,
+      requeuedIds: requeued.map((row) => row.id),
     };
   }
 
@@ -899,6 +923,8 @@ export function createRunnerJobsRepository(
     current: Date,
     unknownCost: UnknownCostSettlement[],
     endedClaims: string[],
+    /** #972: the jobs a lapsed lease put back in the queue; a webhook dispatcher is told of them (`onRequeued`). */
+    requeuedJobs: string[],
     /** #854: the runner a member revoked; its claims end with `runner_revoked` instead of `lease_expired`. */
     revokedRunnerId?: string,
   ): Promise<ExpiryReport> {
@@ -935,7 +961,7 @@ export function createRunnerJobsRepository(
     await endCancelRequested(executor, {}, current, true);
     const revoked =
       revokedRunnerId === undefined
-        ? { failed: 0, requeued: 0 }
+        ? { failed: 0, requeued: 0, requeuedIds: [] }
         : await loseAttempt(
             executor,
             { leaseExpiredBefore: timestamp, runnerId: revokedRunnerId },
@@ -952,6 +978,7 @@ export function createRunnerJobsRepository(
       failed: revoked.failed + lostOthers.failed,
       requeued: revoked.requeued + lostOthers.requeued,
     };
+    requeuedJobs.push(...revoked.requeuedIds, ...lostOthers.requeuedIds);
     // A job whose runner keeps the lease alive but never finishes. Lost leases come first: a job
     // whose runner vanished long ago is retried, not failed for taking long.
     const timedOut = await failTimedOut(executor, {}, current);
@@ -1117,9 +1144,9 @@ export function createRunnerJobsRepository(
       const ignoredCostLimits = new Set<string>();
       const grantedCredits: GrantedStartCredit[] = []; // #507: logged after the commit
       const claimed = await inAlertingTransaction(
-        async (trx, unknownCost, endedClaims) => {
+        async (trx, unknownCost, endedClaims, requeuedJobs) => {
           const current = now();
-          await expire(trx, current, unknownCost, endedClaims);
+          await expire(trx, current, unknownCost, endedClaims, requeuedJobs);
           // The credential is only ever returned; the database gets its hash as the lease token.
           const credential =
             claimOptions.workerCredential === true
@@ -1656,7 +1683,7 @@ export function createRunnerJobsRepository(
 
     release(jobId, leaseToken, reason, releaseOptions = {}) {
       return inAlertingTransaction<ReleaseResult>(
-        async (trx, unknownCost, endedClaims) => {
+        async (trx, unknownCost, endedClaims, requeuedJobs) => {
           const timestamp = formatTimestamp(now());
           // A removed command (#203) that is given back is cancelled, never requeued: no attempt of it
           // may ever run again. Only the current holder (the lease token) may cancel it this way.
@@ -1719,6 +1746,8 @@ export function createRunnerJobsRepository(
           if (lost.failed === 0 && lost.requeued === 0)
             return { status: "not_holder" };
           if (lost.failed > 0) endedClaims.push(jobId);
+          // #972: a job given back goes back to the queue: a webhook dispatcher is told it waits again.
+          requeuedJobs.push(...lost.requeuedIds);
           unknownCost.push(...(await closeRecordsOfEndedJobs(trx, timestamp)));
           const row = await trx
             .selectFrom("jobs")
@@ -1750,22 +1779,32 @@ export function createRunnerJobsRepository(
     },
 
     expireStaleJobs() {
-      return inAlertingTransaction((trx, unknownCost, endedClaims) =>
-        expire(trx, now(), unknownCost, endedClaims),
+      return inAlertingTransaction(
+        (trx, unknownCost, endedClaims, requeuedJobs) =>
+          expire(trx, now(), unknownCost, endedClaims, requeuedJobs),
       );
     },
 
     expireClaimsOf(runnerId) {
-      return inAlertingTransaction(async (trx, unknownCost, endedClaims) => {
-        const current = now();
-        await trx
-          .updateTable("jobs")
-          .set({ lease_expires_at: formatTimestamp(current) })
-          .where("status", "=", "running")
-          .where("runner_id", "=", runnerId)
-          .execute();
-        return expire(trx, current, unknownCost, endedClaims, runnerId);
-      });
+      return inAlertingTransaction(
+        async (trx, unknownCost, endedClaims, requeuedJobs) => {
+          const current = now();
+          await trx
+            .updateTable("jobs")
+            .set({ lease_expires_at: formatTimestamp(current) })
+            .where("status", "=", "running")
+            .where("runner_id", "=", runnerId)
+            .execute();
+          return expire(
+            trx,
+            current,
+            unknownCost,
+            endedClaims,
+            requeuedJobs,
+            runnerId,
+          );
+        },
+      );
     },
 
     failUndispatched(waitedMs) {

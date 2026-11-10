@@ -129,6 +129,8 @@ export default defineConfig({
         RUNNER_TOKEN: hostedEnv.dispatcherToken,
         // The hosted deployment: a queued job wakes the Dispatcher with a signed call, and the sweep is the clock.
         RUNNER_DISPATCH: "webhook",
+        // A dispatcher of the E2E announces an address on this machine (the fakes); never set outside tests.
+        RUNNER_DELIVERY_ALLOW_LOOPBACK: "1",
         RUNNER_WEBHOOK_URL: `${hostedEnv.dispatcherUrl}/dispatch`,
         RUNNER_WEBHOOK_KEY_ID: hostedEnv.webhookKeyId,
         RUNNER_WEBHOOK_SECRET: hostedEnv.webhookSecret,

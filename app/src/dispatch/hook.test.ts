@@ -5,6 +5,7 @@ import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.ts";
 import type { EnqueueResult, Job } from "../jobs/job-types.ts";
 import { createDispatchHook } from "./hook.ts";
+import type { RingService } from "./rings.ts";
 import type { DispatchService } from "./service.ts";
 
 const db = {} as Kysely<Database>;
@@ -114,5 +115,74 @@ describe("the dispatch hook", () => {
     expect(lines[0]).toContain("RUNNER_WEBHOOK_SECRET");
     expect(lines[0]).not.toContain("too-short");
     expect(lines[0]).not.toContain("dispatcher.example.test");
+  });
+
+  // #972-T05
+  it("keeps working for the platform's dispatcher with only RUNNER_WEBHOOK_URL and the signing secret: they are its delivery", async () => {
+    const seen: { url: string; kid: string; secret: string }[] = [];
+    const onEnqueued = vi.fn(() => Promise.resolve());
+    const scheduled: (() => Promise<void>)[] = [];
+    const hook = createDispatchHook({
+      env: webhookEnv,
+      db,
+      schedule: (work) => scheduled.push(work),
+      service: (config) => {
+        seen.push({
+          url: config.url,
+          kid: config.currentKey.kid,
+          secret: config.currentKey.secret,
+        });
+        return { onEnqueued } as unknown as DispatchService;
+      },
+    });
+
+    hook?.(result);
+    await scheduled[0]?.();
+
+    expect(seen).toEqual([
+      {
+        url: webhookEnv.RUNNER_WEBHOOK_URL,
+        kid: "k1",
+        secret: webhookEnv.RUNNER_WEBHOOK_SECRET,
+      },
+    ]);
+    expect(onEnqueued).toHaveBeenCalledOnce();
+  });
+
+  // #972-T01
+  it("rings the customers' webhook dispatchers beside the platform's wake-up, not behind its retries", async () => {
+    let release: () => void = () => undefined;
+    const platform = vi.fn(
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    const customers = vi.fn(() => Promise.resolve());
+    const scheduled: (() => Promise<void>)[] = [];
+    const hook = createDispatchHook({
+      env: webhookEnv,
+      db,
+      schedule: (work) => scheduled.push(work),
+      service: () => ({ onEnqueued: platform }) as unknown as DispatchService,
+      rings: { onEnqueued: customers } as unknown as RingService,
+    });
+
+    hook?.(result);
+    const running = scheduled[0]?.();
+    await Promise.resolve();
+
+    // The platform's call is still waiting (its inline retries), and the customers have been rung already.
+    expect(platform).toHaveBeenCalledOnce();
+    expect(customers).toHaveBeenCalledExactlyOnceWith(result);
+    release();
+    await running;
+  });
+
+  // #972-T04
+  it("rings no customer in poll mode: there is no hook at all", () => {
+    const rings = { onEnqueued: vi.fn() } as unknown as RingService;
+
+    expect(
+      createDispatchHook({ env: {}, db, schedule: vi.fn(), rings }),
+    ).toBeUndefined();
+    expect(rings.onEnqueued).not.toHaveBeenCalled();
   });
 });

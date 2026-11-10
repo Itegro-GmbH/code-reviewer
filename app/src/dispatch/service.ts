@@ -397,7 +397,9 @@ export function createDispatchService(options: {
         if (
           updates.some(
             (update) =>
-              update !== false && TRANSIENT_CODES.includes(update.lastCode),
+              update !== false &&
+              (TRANSIENT_CODES.includes(update.lastCode) ||
+                update.lastCode === "ignored_busy"),
           )
         )
           break;
