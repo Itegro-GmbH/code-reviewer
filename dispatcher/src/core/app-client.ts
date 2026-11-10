@@ -49,8 +49,8 @@ export type ClaimedJob = {
   vcpus?: number;
   /**
    * #971: the size label the job requires (`cr:size-<vCPUs>`). Read from the App's authenticated answer only; absent from the release
-   * before. For a turn of the Implementer that names no size of its own it is the size to start (`vcpusOfSizeLabel`); a label that names
-   * a size the platform does not offer gives the job back unlaunched.
+   * before. It is checked, not launched from: the VM size stays `vcpus`, else the Launcher's configuration; a label that names a size the
+   * platform does not offer gives the job back unlaunched.
    */
   sizeLabel?: string;
   /**

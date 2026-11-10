@@ -12,6 +12,7 @@ import {
   isReservedLabel,
   MANAGED_LABEL,
   PLATFORM_LABELS,
+  requiredLabelsOfTurn,
   RESERVED_LABEL_PREFIX,
   reservedLabelIssues,
   sizeLabel,
@@ -101,5 +102,26 @@ describe("the labels of the platform", () => {
     expect(hasAllLabels(["linux"], ["linux", "gpu"])).toBe(false);
     expect(hasAllLabels([], [])).toBe(true);
     expect(hasAllLabels([], ["linux"])).toBe(false);
+  });
+});
+
+describe("the labels a turn requires", () => {
+  // #971-T07
+  it("are the labels of a runner environment without any `cr:` label, which an environment stored before the namespace was reserved may hold", () => {
+    expect(
+      requiredLabelsOfTurn({
+        runnerEnvironment: {
+          labels: ["cr:managed", "gpu", "CR:size-8", "linux", " cr:size-2"],
+        },
+      }),
+    ).toEqual(["gpu", "linux"]);
+  });
+
+  it("are `cr:managed` and the size of a hosted environment, or the size of the kind without one", () => {
+    expect(requiredLabelsOfTurn({ environment: { vcpus: 4 } })).toEqual([
+      "cr:managed",
+      "cr:size-4",
+    ]);
+    expect(requiredLabelsOfTurn({})).toEqual(["cr:managed", "cr:size-2"]);
   });
 });

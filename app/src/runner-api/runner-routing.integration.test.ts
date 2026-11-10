@@ -989,4 +989,113 @@ describe("the labels a job requires (#971)", () => {
       vcpus: 6,
     });
   });
+
+  // #971-T07
+  it("never hands the platform a runner turn stored with a cr: label, and still hands it to the customer's runner", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    // An environment written before the namespace was reserved: its labels hold `cr:` ones.
+    const stored = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: {
+        id: "env-old",
+        name: "Old",
+        labels: ["cr:managed", "cr:size-8", "gpu", "linux"],
+      },
+    });
+    // The same turn as a row of the release before: no required labels, the environment's labels as stored.
+    const legacy = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "=", legacy.job.id)
+      .execute();
+    await h.db
+      .updateTable("implementer_turns")
+      .set({ environment_labels: "cr:managed\ncr:size-8\ngpu\nlinux" })
+      .where("job_id", "=", legacy.job.id)
+      .execute();
+    // Defence in depth: even a required list that is only the platform's labels never reaches the platform for a runner turn.
+    const reserved = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-r", name: "R", labels: ["linux"] },
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "cr:managed\ncr:size-8" })
+      .where("id", "=", reserved.job.id)
+      .execute();
+
+    expect(await requiredOf(h, stored.job.id)).toBe("gpu\nlinux");
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: legacy.job.id }))
+        .status,
+    ).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: reserved.job.id }))
+        .status,
+    ).toBe(204);
+    for (const turn of [stored, legacy, reserved])
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "queued",
+      });
+
+    const first = await h.claim(claimOf(runner.credential));
+    expect(((await first.json()) as ClaimResponse).job.id).toBe(stored.job.id);
+    const second = await h.claim(claimOf(runner.credential));
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(legacy.job.id);
+  });
+
+  // #971-T08
+  it("hands a job that requires no label to nobody", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const review = await h.enqueue({ prNumber: 7 });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "" })
+      .where("id", "=", review.job.id)
+      .execute();
+
+    expect((await h.claim({ engines: ["pr-agent"] })).status).toBe(204);
+    expect((await h.claimSplit({ jobId: review.job.id })).status).toBe(204);
+    expect(
+      (
+        await h.claim({
+          ...claimOf(runner.credential),
+          engines: ["pr-agent", "opencode", "implementer"],
+        })
+      ).status,
+    ).toBe(204);
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  // #971-T06
+  it("names the size label of a job written before the labels from its kind: 1 for a review, 2 for a turn without an environment", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const turn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "in", [review.job.id, turn.job.id])
+      .execute();
+    const split = async (jobId: string, engines: string[]) =>
+      (await (
+        await h.claimSplit({ engines, features: FEATURES_OF_A_RUNNER, jobId })
+      ).json()) as SplitClaimResponse;
+
+    expect((await split(review.job.id, ["pr-agent"])).job.sizeLabel).toBe(
+      "cr:size-1",
+    );
+    expect((await split(turn.job.id, ["implementer"])).job.sizeLabel).toBe(
+      "cr:size-2",
+    );
+  });
 });

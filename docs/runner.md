@@ -92,7 +92,7 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
   a job the caller does not match is `204`. Business limits stay in the app (the pool cap, `maxRunning`, answers `204`); technical capacity stays with the
   dispatcher, which claims only with room for the job.
 - **The size in the claim answer.** The answer to a Dispatcher (`SplitClaimResponse`) names the size label the job requires in `sizeLabel`; `vcpus` keeps
-  its value (only for a turn with an environment). For a turn without an environment `vcpus` the Dispatcher starts the size the label names, and it gives a
+  its value (only for a turn with an environment). The label does not choose the VM size (a turn without an environment starts with the operator's configured size), and the Dispatcher gives a
   job back unlaunched (`launch_failed`, log code `size_not_offered`) when the label names a size the platform does not offer.
 - **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, announces the harness of the profile
   **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets

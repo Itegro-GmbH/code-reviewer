@@ -1132,10 +1132,10 @@ describe("the size label of a job (#971)", () => {
     );
 
   // #971-T06
-  it("starts the VM size the label names for a turn of the Implementer that names no size of its own", async () => {
+  it("leaves the size of a turn that names none of its own to the Launcher's configured one, whatever its label names", async () => {
     const jobId = app.enqueue({
       reviewKind: "implementer",
-      sizeLabel: "cr:size-4",
+      sizeLabel: "cr:size-2",
     });
     const { core, launcher } = buildAll();
 
@@ -1144,7 +1144,7 @@ describe("the size label of a job (#971)", () => {
     );
 
     expect(launcher.launches).toHaveLength(1);
-    expect(launcher.launches[0]?.vcpus).toBe(4);
+    expect(launcher.launches[0]?.vcpus).toBeUndefined();
   });
 
   // #971-T06

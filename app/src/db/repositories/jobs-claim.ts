@@ -124,15 +124,21 @@ function claimQuery(
           sql`, `,
         )}]::text[]`;
   // The labels a job requires. A job written before the labels (null) is a turn of a runner environment that requires the labels of its
-  // environment, or any other job, which is the platform's: `cr:managed`.
+  // environment, or any other job, which is the platform's: `cr:managed`. An environment stored before the namespace was reserved may
+  // hold `cr:` labels; they are dropped here as they are when a turn is enqueued, or the turn would be one the platform could take.
   const required = sql`coalesce(
     string_to_array(due.required_labels, E'\n'),
-    (select string_to_array(legacy.environment_labels, E'\n')
+    (select array(
+        select environment_label
+          from unnest(string_to_array(legacy.environment_labels, E'\n')) as environment_label
+         where lower(btrim(environment_label)) not like 'cr:%')
        from implementer_turns as legacy
       where legacy.job_id = due.id and legacy.environment_kind = 'runner'
       limit 1),
     array[${MANAGED_LABEL}]::text[]
   )`;
+  // A job that requires no label is nobody's: the empty list is contained in every caller's labels.
+  const labelRule = sql`and cardinality(${required}) > 0 and ${required} <@ ${labels}`;
   const harnesses = sql`array[${sql.join(
     (scope?.customerRunner.harnesses ?? ["opencode"]).map(
       (harness) => sql`${harness}`,
@@ -141,12 +147,16 @@ function claimQuery(
   )}]::text[]`;
   const routing =
     scope === undefined
-      ? sql`and ${required} <@ ${labels}
+      ? sql`${labelRule}
         and not exists (
           select 1 from implementer_turns as routed
           where routed.job_id = due.id and routed.profile_harness = 'claude-code'
+        )
+        and not exists (
+          select 1 from implementer_turns as on_runner
+          where on_runner.job_id = due.id and on_runner.environment_kind = 'runner'
         )`
-      : sql`and ${required} <@ ${labels}
+      : sql`${labelRule}
         and due.workspace_id = ${scope.customerRunner.workspaceId}
         and exists (
           select 1 from implementer_turns as routed

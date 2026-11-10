@@ -84,14 +84,17 @@ export function hasAllLabels(
 
 /**
  * The labels a turn of the Implementer requires, from the environment it was started with: a runner environment's own labels, or
- * `cr:managed` and the size of a hosted environment (the Dispatcher's size for the kind when the task has none).
+ * `cr:managed` and the size of a hosted environment (the Dispatcher's size for the kind when the task has none). A runner environment
+ * stored before the namespace was reserved may hold `cr:` labels; they are dropped, or the turn would be one the platform could take.
  */
 export function requiredLabelsOfTurn(environments: {
   environment?: { vcpus: number } | null;
   runnerEnvironment?: { labels: readonly string[] } | null;
 }): string[] {
   if (environments.runnerEnvironment)
-    return [...environments.runnerEnvironment.labels];
+    return environments.runnerEnvironment.labels.filter(
+      (label) => !isReservedLabel(label),
+    );
   return hostedLabels(
     environments.environment?.vcpus ?? DEFAULT_IMPLEMENTER_VCPUS,
   );

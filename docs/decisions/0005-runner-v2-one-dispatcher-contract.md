@@ -27,7 +27,7 @@ App** (the Worker API, `crj_`, everywhere).
    customer's runner that announces one is refused (`422 RUNNER_LABEL_RESERVED`), and the check is by identity, never by spelling. A hosted job gets
    `cr:managed` and its size label when it is enqueued, a runner turn the labels of its environment. The two special rules are this one rule. The
    claim without a `jobId` returns the oldest due job the caller matches (labels, workspace, harness); with a `jobId` it works as before while the hosted
-   Dispatcher is still woken by id. The claim answer names the size label (`sizeLabel`) and the Dispatcher starts the VM size it names.
+   Dispatcher is still woken by id. The claim answer names the size label (`sizeLabel`), which the Dispatcher checks; the VM size stays the environment's `vcpus` or the operator's configuration.
 2. **Delivery** (#972). The claim is the only way to a job. A poll, the doorbell (a webhook without data) or a freed slot triggers it. The doorbell goes
    to every matching webhook dispatcher and the first claim wins. A full dispatcher declines and forgets; the app rings again on events (a job is
    enqueued, a job of its group ended) and the sweep stays the rare safety net.
@@ -50,8 +50,10 @@ App** (the Worker API, `crj_`, everywhere).
   runner environment, or as `cr:managed` for any other job, so queued jobs are routed as before and the migration rewrites no row.
 - The claim statement has one label condition for both callers (`required <@ labels`); the platform identity's labels are `PLATFORM_LABELS`, a customer's
   runner's are those it announced without any label of `cr:`. The harness rule (#856) stays beside it; #973 moves it into the labels' company.
-- A runner environment cannot name a `cr:` label either, or a turn would require `cr:managed`.
-- `SplitClaimResponse.sizeLabel` is optional on the wire so a Dispatcher can read an app of the release before; `vcpus` keeps its value. A label that names
+- A runner environment cannot name a `cr:` label either, or a turn would require `cr:managed`. One stored before the namespace was reserved may hold such
+  a label: the claim and the enqueue drop every `cr:` label from an environment's labels, and the platform branch of the claim excludes runner turns outright
+  (`environment_kind = 'runner'`), so a customer's turn is never the platform's. A job whose required list is empty is nobody's.
+- `SplitClaimResponse.sizeLabel` is optional on the wire so a Dispatcher can read an app of the release before; `vcpus` keeps its value and still decides the VM size. A label that names
   a size the Dispatcher does not offer gives the job back unlaunched.
 
 ## 4. Alternatives considered

@@ -361,7 +361,7 @@ The classification of the platform's errors goes by the HTTP status first (429 r
 platform does not document its error bodies, so the mapping is **not verified against the live API** (a follow-up of the
 first real run). Only the code is logged, never the platform's text.
 
-**Size label (#971).** The claim answer names the size the job requires as a label, `sizeLabel` (`cr:size-<vCPUs>`; `docs/decisions/0005-runner-v2-one-dispatcher-contract.md`). For a turn of the Implementer without a size of its own in `vcpus` the Dispatcher starts the size the label names; reviews keep the size of their kind. A label that names a size the platform does not offer gives the job back unlaunched (`launch_failed`, log code `size_not_offered`).
+**Size label (#971).** The claim answer names the size the job requires as a label, `sizeLabel` (`cr:size-<vCPUs>`; `docs/decisions/0005-runner-v2-one-dispatcher-contract.md`). It does not choose the VM size: a turn of the Implementer starts with `vcpus` when its environment names one and else with the `launcher.vcpus` of `DISPATCHER_WORKER_CONFIG`, as before; reviews keep the size of their kind. A label that names a size the platform does not offer gives the job back unlaunched (`launch_failed`, log code `size_not_offered`).
 
 **Sizes.** The platform's VMs have 1 vCPU or an even number up to 8, and 2 GiB of memory per vCPU. Per Worker kind,
 `DISPATCHER_WORKER_CONFIG` sets the VM (`launcher.vcpus`) and the container memory (`container.memory`), for example

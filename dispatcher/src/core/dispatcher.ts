@@ -76,14 +76,6 @@ const LIVE_VMS_STALE_MS = 60 * 1000;
  */
 const OWN_VM_MEMORY_MS = 10 * 60 * 1000;
 
-/** #971: the size a job's VM starts with: what its environment names, else what its size label names; undefined for the kind's own. */
-function launchedVcpus(job: ClaimedJob): number | undefined {
-  if (job.vcpus !== undefined) return job.vcpus;
-  return job.sizeLabel === undefined
-    ? undefined
-    : vcpusOfSizeLabel(job.sizeLabel);
-}
-
 /**
  * How far above its cap an app may be by the Dispatcher's count before a call is refused: twice the cap plus two VMs in all.
  * The App enforces the exact cap at the claim; this is a backstop against an app that ignores it (a runaway, not a fair
@@ -635,9 +627,9 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         timeoutSeconds: jobTimeoutFor(settings, job.reviewKind),
         config: launchConfigFor(settings, job.reviewKind),
         // #818: the size is believed for a turn of the Implementer and for no other kind: a review can never name one. #971: the size
-        // of its environment when it names one, else the one its size label names.
-        ...(job.reviewKind === "implementer" && launchedVcpus(job) !== undefined
-          ? { vcpus: launchedVcpus(job) }
+        // label of the job is for matching and checking above; the size of the VM stays the environment's, or the Launcher's configured one.
+        ...(job.reviewKind === "implementer" && job.vcpus !== undefined
+          ? { vcpus: job.vcpus }
           : {}),
         // #745, step 7: the same for the rule of the agent's network; a review never carries one.
         ...(job.reviewKind === "implementer" && job.network !== undefined

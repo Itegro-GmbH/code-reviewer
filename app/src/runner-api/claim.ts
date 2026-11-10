@@ -1811,7 +1811,7 @@ async function prepare(
           reviewKind: job.reviewKind,
           leaseExpiresAt: job.leaseExpiresAt,
           heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
-          // #971: the size label the job requires (`cr:size-<vCPUs>`), the one the Dispatcher starts the VM size from. Every job this answer
+          // #971: the size label the job requires (`cr:size-<vCPUs>`), the one the Dispatcher checks; the VM size stays `vcpus`. Every job this answer
           // is for is a hosted one (a customer's runner never takes the split), so it always has one: the stored label, or for a job written
           // before the labels the size its kind runs on.
           sizeLabel:

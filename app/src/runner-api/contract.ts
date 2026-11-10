@@ -590,7 +590,7 @@ export type SplitClaimResponse = {
     reviewKind: ReviewKind;
     leaseExpiresAt: string;
     heartbeatIntervalSeconds: number;
-    /** #971: the size label the job requires (`cr:size-<vCPUs>`); the Dispatcher starts the VM size it names. */
+    /** #971: the size label the job requires (`cr:size-<vCPUs>`); the Dispatcher checks it; the size of the VM stays `vcpus`, or its own configuration. */
     sizeLabel?: string;
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
