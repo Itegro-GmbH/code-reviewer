@@ -102,6 +102,7 @@ STAND_IN = textwrap.dedent(
             "llm_key": job["llm"]["apiKey"],
             "crj_in_job": "crj_" in raw,
             "crc_in_job": "crc_" in raw,
+            "login": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"),
         }, handle)
     time.sleep(sleep)
     print(json.dumps({
@@ -485,3 +486,38 @@ def test_an_app_that_does_not_list_the_snapshot_gets_a_turn_without_it_and_with_
     assert [t["channel"] for t in turns_seen(machine)] == [False, False]
     assert [t["resumed"] for t in turns_seen(machine)] == [None, None]
     assert [c["ok"] for c in app.completions] == [True, True]
+
+
+LOGIN = "sk-" + "ant-" + "oat01-made-up-token-not-real-0000000000000000"
+
+
+# #974-T05
+def test_a_subscription_turn_gets_the_login_of_the_device_from_the_dispatcher_and_no_other_does(
+    app: FakeRunnerApp, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    machine = Machine(app, tmp_path)
+    token = tmp_path / "claude-code-token"
+    token.write_text(LOGIN + "\n")
+    token.chmod(0o600)
+    machine.environment["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] = str(token)
+    machine.register()
+    app.queue_job(
+        JOB,
+        access={"harness": "claude-code", "auth": "subscription", "model": "claude-sonnet-5-5"},
+    )
+    app.queue_job(JOB.replace("aa", "ab"), access={"harness": "opencode", "auth": "app-key"})
+
+    first = machine.cli("run", "--once", "--wait", "30")
+    with_login = json.loads(machine.seen.read_text())
+    second = machine.cli("run", "--once", "--wait", "30")
+    without = json.loads(machine.seen.read_text())
+
+    assert (first, second) == (EXIT_OK, EXIT_OK)
+    # The job process of the subscription turn read the login the dispatcher handed the Worker; the
+    # turn that asks for none had none, although the device has one.
+    assert with_login["login"] == LOGIN and without["login"] is None
+    # It came on stdin: the app never saw it, and the dispatcher's own output has none of it.
+    assert LOGIN not in json.dumps([r.body for r in app.requests])
+    assert LOGIN not in "".join(capsys.readouterr())
+    # The names of the device's variables are not in the Worker's environment (it came by stdin).
+    assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in with_login["env"]

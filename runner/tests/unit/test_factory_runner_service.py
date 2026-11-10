@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The loop of the Factory-Runner (#854, R1b) with doubles: what it announces, what a claim's
-failure means, the once mode a VM runs, the renewal of the credential and the stop."""
+"""The local dispatcher of the Factory-Runner (#854, R1b; #974) with doubles: what it announces,
+what a claim's failure means, the Worker it starts for a claim and gives the claim back for, the
+once mode a VM runs, the renewal of the credential and the stop. The job itself (fetch, heartbeat,
+result) is the Worker's and has its own tests."""
 
 import asyncio
 import json
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +17,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from loop_support import (
-    FakeApi,
     FakeLauncher,
     FakeProcess,
     ManualClock,
@@ -23,12 +25,13 @@ from loop_support import (
     run,
 )
 from release_support import DIGEST, MANIFEST_URL, REPOSITORY, SIGNATURE_URL, Release, fetcher
-from test_implementer_job_host import implementer_claim, line
 
 from code_reviewer_runner.factory_runner import service as service_module
 from code_reviewer_runner.factory_runner.app_client import (
     Announced,
     Announcement,
+    ClaimedWorker,
+    JobAccess,
     Revoked,
     UpdateNeeded,
 )
@@ -49,6 +52,7 @@ from code_reviewer_runner.factory_runner.config import (
     save_config,
 )
 from code_reviewer_runner.factory_runner.prepare import Prepared
+from code_reviewer_runner.factory_runner.sandbox import WORKER_MODULE
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import (
     POLL_SECONDS,
@@ -68,13 +72,24 @@ from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
-from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
-from code_reviewer_runner.job_loop.http import ApiRejected
+from code_reviewer_runner.job_loop.api import ApiUnavailable
 
 pytestmark = pytest.mark.unit
 
 CREDENTIAL = "crc_" + "A" * 43
 RENEWED = "crc_" + "R" * 43
+# What only the Worker may hold: the dispatcher must never meet either.
+GIT_TOKEN = "ghs_" + "G" * 36
+MODEL_KEY = "sk-or-" + "M" * 40
+
+
+def claim(number: int = 1, *, access: JobAccess | None = None) -> ClaimedWorker:
+    """What a claim hands the dispatcher: the job and the credential of its Worker, nothing else."""
+    return ClaimedWorker(
+        job_id=f"00000000-0000-4000-8000-{number:012d}",
+        credential="crj_" + str(number) * 43,
+        access=access,
+    )
 
 
 class FastClock:
@@ -98,15 +113,21 @@ class FastClock:
 
 class FakeClient:
     def __init__(self) -> None:
-        self.claims: list[ClaimedJob | Exception | None] = []
+        self.claims: list[ClaimedWorker | Exception | None] = []
         self.claim_calls = 0
         self.announced: list[Announcement] = []
         self.announce_error: Exception | None = None
         self.answer = Announced(None, False)
         self.renewals = 0
         self.credentials: list[str] = []
+        # The claims given back: (job id, credential, reason); what the app answers to a release.
+        self.releases: list[tuple[str, str, str]] = []
+        self.release_answer: str | Exception = "released"
+        # What the app says about a job (`GET /jobs/{id}`); a list is the sequence of answers.
+        self.states: list[str | Exception | None] = []
+        self.state_calls: list[str] = []
 
-    def claim(self) -> ClaimedJob | None:
+    def claim(self) -> ClaimedWorker | None:
         self.claim_calls += 1
         item = self.claims.pop(0) if self.claims else None
         if isinstance(item, Exception):
@@ -126,34 +147,26 @@ class FakeClient:
     def use_credential(self, credential: str) -> None:
         self.credentials.append(credential)
 
+    def release(self, job_id: str, credential: str, reason: str) -> str:
+        self.releases.append((job_id, credential, reason))
+        if isinstance(self.release_answer, Exception):
+            raise self.release_answer
+        return self.release_answer
 
-class FakeJobApi(FakeApi):
-    def __init__(self) -> None:
-        super().__init__()
-        self.held: list[tuple[str, str]] = []
-        self.forgotten: list[str] = []
-        self.credentials: list[str] = []
-        self.checked: list[str] = []
-        self.check_error: BaseException | None = None
-        self.features_listed = True
-
-    def hold(self, job_id: str, lease_token: str) -> None:
-        self.held.append((job_id, lease_token))
-
-    async def check_app(self, job_id: str) -> None:
-        self.checked.append(job_id)
-        if self.check_error is not None:
-            raise self.check_error
-
-    def forget(self, job_id: str) -> None:
-        self.forgotten.append(job_id)
-
-    def use_credential(self, credential: str) -> None:
-        self.credentials.append(credential)
+    def job_state(self, job_id: str) -> str | None:
+        self.state_calls.append(job_id)
+        item = (
+            self.states.pop(0)
+            if len(self.states) > 1
+            else (self.states[0] if self.states else "running")
+        )
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 class AutoLauncher(FakeLauncher):
-    """Every job process ends at once with `result`."""
+    """Every Worker process ends at once with `result` (exit code 0 without one)."""
 
     def __init__(self, result: Any = None) -> None:
         super().__init__()
@@ -161,7 +174,7 @@ class AutoLauncher(FakeLauncher):
 
     async def start(self, spec: Any) -> FakeProcess:
         process: FakeProcess = await super().start(spec)  # type: ignore[assignment]
-        process.finish(self.result if self.result is not None else outcome(stdout=line()))
+        process.finish(self.result if self.result is not None else outcome(stdout=b""))
         return process
 
 
@@ -285,7 +298,6 @@ class Rig:
         fetch: Any = None,
     ) -> None:
         self.client = FakeClient()
-        self.api = FakeJobApi()
         self.clock = clock or FastClock()
         self.daemon = FakeDaemon()
         self.work = tmp_path / "work"
@@ -303,7 +315,6 @@ class Rig:
             self.environment,
             prepared(ready=ready, work=self.work),
             self.client,  # type: ignore[arg-type]
-            self.api,  # type: ignore[arg-type]
             seams=Seams(
                 clock=self.clock,
                 wall=self.clock.wall,
@@ -313,6 +324,11 @@ class Rig:
                 **({} if channel is None else {"channel": channel, "fetch": fetch}),
             ),
         )
+
+    @property
+    def started(self) -> list[str]:
+        """The jobs a Worker was started for, in order (from the start documents it was given)."""
+        return [json.loads(process.spec.stdin)["jobId"] for process in self.launcher.processes]
 
     def go(self, *, once: bool, wait: float = 0.0) -> int:
         codes: list[int] = []
@@ -350,82 +366,95 @@ def test_once_waits_for_a_job_up_to_the_deadline_and_then_ends_with_zero(tmp_pat
     assert all(0.7 * POLL_SECONDS <= pause <= 1.3 * POLL_SECONDS for pause in rig.clock.slept)
 
 
-def test_once_takes_one_job_runs_it_and_ends(tmp_path: Path) -> None:
+def test_once_takes_one_job_starts_its_worker_and_ends(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
-    claimed = implementer_claim()
-    rig.client.claims = [claimed, implementer_claim(2)]
+    claimed = claim()
+    rig.client.claims = [claimed, claim(2)]
 
     code = rig.go(once=True, wait=0)
 
     assert code == EXIT_OK
     assert rig.client.claim_calls == 1  # the second job stays in the queue for someone else
-    assert rig.api.held == [(claimed.id, claimed.lease_token)]
-    # #879: the features the app lists are read for the job, after the claim is held.
-    assert rig.api.checked == [claimed.id]
-    assert rig.api.forgotten == [claimed.id]
-    assert [(job, token) for job, token, _ in rig.api.completions] == [
-        (claimed.id, claimed.lease_token)
-    ]
-    assert rig.api.completions[0][2]["ok"] is True
+    # One Worker, started the way a Worker is: the module, and the start document on its stdin.
+    assert rig.started == [claimed.job_id]
+    spec = rig.launcher.processes[0].spec
+    assert spec.argv == (sys.executable, "-m", WORKER_MODULE)
+    assert json.loads(spec.stdin) == {
+        "appUrl": "https://app.example",
+        "jobId": claimed.job_id,
+        "credential": claimed.credential,
+    }
+    assert rig.client.releases == []  # the Worker ended well: nothing to give back
 
 
-# #879-T07
-@pytest.mark.parametrize(
-    "error",
-    [ApiRejected("secret-in-text", 400, None), RecursionError("secret-in-text"), OSError("x")],
-    ids=lambda error: type(error).__name__,
-)
-def test_a_version_call_that_raises_does_not_stop_the_job_and_is_logged_by_class(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+def test_a_job_that_asks_for_nothing_of_the_device_gets_no_local_credential(
+    tmp_path: Path,
 ) -> None:
     rig = Rig(tmp_path)
-    claimed = implementer_claim()
-    rig.client.claims = [claimed]
-    rig.api.check_error = error
+    rig.client.claims = [claim(access=JobAccess("opencode", "app-key"))]
 
-    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
-        code = rig.go(once=True, wait=0)
+    assert rig.go(once=True) == EXIT_OK
 
-    assert code == EXIT_OK
-    assert [(job, token) for job, token, _ in rig.api.completions] == [
-        (claimed.id, claimed.lease_token)
-    ]
-    assert rig.api.completions[0][2]["ok"] is True
-    assert rig.api.forgotten == [claimed.id]
-    assert f"({type(error).__name__})" in caplog.text
-    assert "secret-in-text" not in caplog.text
+    assert "localEnvironment" not in json.loads(rig.launcher.processes[0].spec.stdin)
 
 
-# #879-T07
-def test_an_app_that_lists_no_features_is_said_once_per_job_and_the_job_runs(
+def test_a_worker_that_ends_with_an_error_is_exit_code_one_and_the_claim_is_given_back(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    rig = Rig(tmp_path)
-    rig.client.claims = [implementer_claim()]
-    rig.api.features_listed = False
+    rig = Rig(tmp_path, launcher=AutoLauncher(outcome(exit_code=1, stdout=b"", stderr=b"boom\n")))
+    claimed = claim()
+    rig.client.claims = [claimed]
+
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_FAILED
+
+    # The app answers "ended" to a claim whose result was delivered, and counts an attempt if not.
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "worker_exited")]
+    assert "the Worker ended with exit code 1" in caplog.text
+    assert "worker: boom" in caplog.text  # the Worker's own words, in the dispatcher's log
+
+
+def test_a_worker_that_cannot_be_started_gives_the_claim_back_as_launch_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    launcher = FakeLauncher()
+    launcher.fail_with = OSError("no such file: " + CREDENTIAL)
+    rig = Rig(tmp_path, launcher=launcher)
+    claimed = claim()
+    rig.client.claims = [claimed]
+
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_FAILED
+
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "launch_failed")]
+    assert "could not be started (OSError)" in caplog.text
+    assert CREDENTIAL not in caplog.text  # the class of the error, never its text
+
+
+def test_a_claim_that_cannot_be_given_back_is_said_and_does_not_stop_the_runner(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path, launcher=AutoLauncher(outcome(exit_code=2, stdout=b"")))
+    rig.client.release_answer = ApiUnavailable("down")
+    rig.client.claims = [claim()]
 
     with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
-        code = rig.go(once=True, wait=0)
+        assert rig.go(once=True) == EXIT_FAILED
 
-    assert code == EXIT_OK
-    assert caplog.text.count("listed no features") == 1
-    assert rig.api.completions[0][2]["ok"] is True
+    assert "could not be given back now (ApiUnavailable)" in caplog.text
 
 
-def test_a_failed_job_is_exit_code_one_in_the_once_mode(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, launcher=AutoLauncher(outcome(exit_code=1, stdout=b"")))
-    rig.client.claims = [implementer_claim()]
-
-    assert rig.go(once=True) == EXIT_FAILED
-
-
-def test_the_job_process_never_sees_the_credential(tmp_path: Path) -> None:
-    rig = Rig(tmp_path)
-    rig.client.claims = [implementer_claim()]
+def test_the_worker_never_sees_the_runners_credential(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        environment={"FACTORY_RUNNER_CREDENTIAL": CREDENTIAL, "FACTORY_RUNNER_URL": "https://x"},
+    )
+    rig.client.claims = [claim()]
     rig.go(once=True)
 
     spec = rig.launcher.processes[0].spec
     assert CREDENTIAL not in "".join(spec.env.values())
+    assert not any(name.startswith("FACTORY_RUNNER") for name in spec.env)
     assert CREDENTIAL.encode() not in spec.stdin
 
 
@@ -463,12 +492,12 @@ def test_an_update_the_app_requires_ends_the_once_mode_with_its_exit_code(
 
 def test_an_app_that_cannot_be_reached_is_tried_again_with_a_growing_pause(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
-    rig.client.claims = [ApiUnavailable("down"), ApiUnavailable("down"), implementer_claim()]
+    rig.client.claims = [ApiUnavailable("down"), ApiUnavailable("down"), claim()]
 
     assert rig.go(once=True, wait=600) == EXIT_OK
 
     assert rig.clock.slept[:2] == [5.0, 10.0]
-    assert rig.api.completions  # and then it took the job
+    assert len(rig.started) == 1  # and then it took the job
 
 
 # #854-N3
@@ -485,10 +514,10 @@ def test_the_once_mode_tells_an_unreachable_app_from_no_job_by_its_exit_code(
 def test_a_failed_announcement_does_not_stop_the_runner(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.client.announce_error = ApiUnavailable("down")
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     assert rig.go(once=True) == EXIT_OK
-    assert rig.api.completions
+    assert len(rig.started) == 1
 
 
 # -- ready or not ------------------------------------------------------------------------------
@@ -498,7 +527,7 @@ def test_a_runner_whose_base_is_not_proven_announces_and_takes_no_job(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = Rig(tmp_path, ready=False)
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
         assert rig.go(once=True) == EXIT_NOT_READY
@@ -529,7 +558,7 @@ def test_an_old_credential_in_the_file_is_renewed_between_jobs_and_saved_first(
     rig.go(once=True)
 
     assert rig.client.renewals == 1
-    assert rig.client.credentials == [RENEWED] == rig.api.credentials
+    assert rig.client.credentials == [RENEWED]
     assert load_config(rig.environment).credential == RENEWED
 
 
@@ -639,7 +668,7 @@ def test_a_renewal_that_cannot_be_saved_keeps_the_old_credential_in_use(
     with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
         assert rig.go(once=True) == EXIT_OK
 
-    assert rig.client.credentials == [] and rig.api.credentials == []  # the new one was not used
+    assert rig.client.credentials == []  # the new one was not used
     assert "cannot be written" in caplog.text
     assert RENEWED not in caplog.text
 
@@ -650,40 +679,91 @@ def test_the_credential_is_masked_in_the_log(tmp_path: Path) -> None:
     assert CREDENTIAL not in rig.service._masker.redact(f"x {CREDENTIAL} y")  # pyright: ignore[reportPrivateUsage]
 
 
-# #856-L02
-def test_a_login_that_only_the_environment_holds_is_masked_in_the_log(tmp_path: Path) -> None:
-    login = "sk-" + "ant-" + "oat01-made-up-token-not-real-0000000000000000"
+LOGIN = "sk-" + "ant-" + "oat01-made-up-token-not-real-0000000000000000"
+SUBSCRIPTION = JobAccess("claude-code", "subscription", "claude-sonnet-5-5")
+
+
+def with_token_file(rig: Rig, tmp_path: Path, *, mode: int = 0o600) -> Path:
+    path = tmp_path / "claude-code-token"
+    path.write_text(LOGIN + "\n")
+    path.chmod(mode)
+    rig.environment["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] = str(path)
+    return path
+
+
+# #856-L02, #974-T05
+def test_a_job_that_asks_for_a_subscription_gets_the_login_of_the_device_on_the_workers_stdin(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     rig = Rig(tmp_path)
-    handed = prepared(work=rig.work)
-    service = RunnerService(
-        rig.config,
-        rig.environment,
-        replace(handed, environment={**handed.environment, "CLAUDE_CODE_OAUTH_TOKEN": login}),
-        rig.client,  # type: ignore[arg-type]
-        rig.api,  # type: ignore[arg-type]
-    )
+    with_token_file(rig, tmp_path)
+    claimed = claim(access=SUBSCRIPTION)
+    rig.client.claims = [claimed]
 
-    masked = service._masker.redact(f"x {login} y")  # pyright: ignore[reportPrivateUsage]
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_OK
 
-    assert login not in masked and CREDENTIAL not in masked
+    spec = rig.launcher.processes[0].spec
+    # The dispatcher read the token file and handed that one credential over, on stdin.
+    assert json.loads(spec.stdin)["localEnvironment"] == {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}
+    # Not in the Worker's environment, not in an argument, not in the log; masked if it ever were.
+    assert LOGIN not in "".join(spec.env.values()) + " ".join(spec.argv)
+    assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in spec.env
+    assert LOGIN not in caplog.text
+    assert LOGIN not in rig.service._masker.redact(f"x {LOGIN} y")  # pyright: ignore[reportPrivateUsage]
+
+
+# #974-T05
+def test_a_job_that_does_not_ask_for_the_subscription_never_gets_the_login(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    with_token_file(rig, tmp_path)
+    rig.client.claims = [claim(access=JobAccess("opencode", "app-key")), claim(2)]
+
+    rig.go(once=True)
+    rig.go(once=True)
+
+    for process in rig.launcher.processes:
+        assert LOGIN.encode() not in process.spec.stdin
+
+
+# #974-T05
+def test_a_login_that_cannot_be_used_is_said_in_words_and_no_credential_is_handed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = Rig(tmp_path)
+    with_token_file(rig, tmp_path, mode=0o644)  # readable by others: refused, root or not
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
+
+    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
+        rig.go(once=True)
+
+    assert "localEnvironment" not in json.loads(rig.launcher.processes[0].spec.stdin)
+    assert "no usable login" in caplog.text and "can be read by others" in caplog.text
+    assert LOGIN not in caplog.text
 
 
 # -- the stop ----------------------------------------------------------------------------------
 
 
-def test_a_stop_gives_the_running_job_back_and_ends_the_loop(tmp_path: Path) -> None:
+def test_a_stop_ends_the_running_worker_and_the_loop(tmp_path: Path) -> None:
     rig = Rig(tmp_path, launcher=FakeLauncher(), clock=ManualClock())  # time stands still
-    rig.client.claims = [implementer_claim()]
+    claimed = claim()
+    rig.client.claims = [claimed]
 
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
-        await until(lambda: bool(rig.launcher.running))  # the job is running
+        await until(lambda: bool(rig.launcher.running))  # the Worker is running
         rig.service.stop()
+        # The Worker is asked to stop (a real one gives the job back itself); the loop ends too.
         assert await asyncio.wait_for(task, 5) == EXIT_OK
 
     run(scenario)
-    assert rig.api.completions
-    assert rig.api.completions[0][2]["errorCode"] == "runner_shutdown"
+    assert rig.launcher.processes[0].terminated
+    # This double dies of the signal before it can report anything: the claim goes back, as it does
+    # for a Worker that was killed after its grace.
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "worker_exited")]
 
 
 def test_a_stop_ends_the_wait_between_claims(tmp_path: Path) -> None:
@@ -719,12 +799,12 @@ def test_two_jobs_in_a_row_each_find_the_work_volume_empty(tmp_path: Path) -> No
     rig = Rig(tmp_path, clock=ManualClock())  # time stands still: the wait after job 2 never ends
     launcher = TurnLauncher(rig.work, rig.daemon, outside=outside)
     rig.launcher = launcher
-    rig.client.claims = [implementer_claim(), implementer_claim(2)]
+    rig.client.claims = [claim(), claim(2)]
     (rig.work / "other-volume-file").write_text("not a folder of a turn")
 
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
-        await until(lambda: len(rig.api.completions) == 2)
+        await until(lambda: launcher.turns == 2 and not launcher.running)
         rig.service.stop()
         assert await asyncio.wait_for(task, 5) == EXIT_OK
 
@@ -733,7 +813,7 @@ def test_two_jobs_in_a_row_each_find_the_work_volume_empty(tmp_path: Path) -> No
     # `make_result_directory` and the mkdirs of the turn refuse leftovers: the second turn only
     # started because the first one's work was gone.
     assert launcher.turns == 2
-    assert [result["ok"] for _, _, result in rig.api.completions] == [True, True]
+    assert rig.started == [claim(1).job_id, claim(2).job_id]
     assert sorted(path.name for path in rig.work.iterdir()) == ["other-volume-file"]
     assert (outside / "keep.txt").read_text() == "not the volume's"  # a link is not followed
 
@@ -746,11 +826,11 @@ def test_what_a_killed_run_left_in_the_daemon_is_removed_before_the_first_claim(
     rig.daemon.containers = [container_id("a"), container_id("b")]
     rig.daemon.networks = [container_id("c")]
     seen: list[tuple[list[str], list[str]]] = []
-    claim = rig.client.claim
+    real_claim = rig.client.claim
 
-    def watching() -> ClaimedJob | None:
+    def watching() -> ClaimedWorker | None:
         seen.append((list(rig.daemon.containers), list(rig.daemon.networks)))
-        return claim()
+        return real_claim()
 
     rig.client.claim = watching  # type: ignore[method-assign]
 
@@ -767,7 +847,7 @@ def test_the_containers_a_job_leaves_are_removed_right_after_it(tmp_path: Path) 
     outside.mkdir()
     rig = Rig(tmp_path)
     rig.launcher = TurnLauncher(rig.work, rig.daemon, outside=outside)
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     rig.go(once=True)
 
@@ -781,7 +861,7 @@ def test_a_runner_that_cannot_be_tidied_claims_nothing_and_says_why(
 ) -> None:
     rig = Rig(tmp_path)
     rig.daemon.listing_fails = True
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
         assert rig.go(once=True) == EXIT_FAILED
@@ -796,7 +876,7 @@ def test_a_runner_that_cannot_be_tidied_tries_again_and_then_takes_the_job(
 ) -> None:
     rig = Rig(tmp_path)
     rig.daemon.listing_fails = True
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
     waited: list[float] = []
     sleep = rig.clock.sleep
 
@@ -809,14 +889,14 @@ def test_a_runner_that_cannot_be_tidied_tries_again_and_then_takes_the_job(
 
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
-        await until(lambda: bool(rig.api.completions))
+        await until(lambda: bool(rig.started))
         rig.service.stop()
         assert await asyncio.wait_for(task, 5) == EXIT_OK
 
     run(scenario)
 
     assert waited[0] == TIDY_RETRY_SECONDS
-    assert rig.api.completions  # and then it took the job
+    assert len(rig.started) == 1  # and then it took the job
 
 
 # -- one runner per daemon (R1) -------------------------------------------------------------------
@@ -864,7 +944,7 @@ def test_a_container_of_another_runner_ends_the_start_before_any_claim(
 ) -> None:
     rig = Rig(tmp_path)
     rig.daemon.foreign = [foreign_container()]
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     with caplog.at_level(logging.ERROR, logger="code_reviewer_runner.loop"):
         assert rig.go(once=True) == EXIT_SHARED_DAEMON
@@ -1001,7 +1081,7 @@ def test_the_work_volume_stays_as_it_is_when_a_container_could_not_be_removed(
     rig = Rig(tmp_path)
     (rig.work / "repo").mkdir()
     rig.daemon.listing_fails = True
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     assert rig.go(once=True) == EXIT_FAILED
 
@@ -1102,7 +1182,7 @@ def test_a_staged_image_is_switched_to_between_jobs_and_nothing_is_claimed_first
 ) -> None:
     rig = UpdateRig(tmp_path)
     rig.daemon.images[CURRENT_REFERENCE] = {"Id": "sha256:new"}  # `factory-runner update` did it
-    rig.client.claims = [implementer_claim()]
+    rig.client.claims = [claim()]
 
     assert rig.go(once=False) == EXIT_UPDATED
     assert rig.client.claim_calls == 0
@@ -1118,11 +1198,11 @@ def test_a_job_that_is_running_is_never_interrupted_by_an_update(tmp_path: Path)
             return await super().start(spec)
 
     rig.launcher = Staging()
-    rig.client.claims = [implementer_claim(), implementer_claim(2)]
+    rig.client.claims = [claim(), claim(2)]
 
     assert rig.go(once=False) == EXIT_UPDATED
     assert rig.client.claim_calls == 1
-    assert rig.api.completions[0][2]["ok"] is True  # the job ended and was reported first
+    assert rig.client.releases == []  # the Worker ended well and its job was not given back
 
 
 def test_the_once_mode_and_a_runner_without_a_supervisor_never_switch(tmp_path: Path) -> None:

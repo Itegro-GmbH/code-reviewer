@@ -59,6 +59,7 @@ from code_reviewer_runner.capabilities import (
 )
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
 from code_reviewer_runner.dynamic_review.netguard import EGRESS_MODE_VARIABLE, EgressMode
+from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
 from code_reviewer_runner.implementer.environment_control import ENVIRONMENT_CONTROL_VARIABLE
 from code_reviewer_runner.implementer.runner_profile import RUNNER_PROFILE_NAMES
 from code_reviewer_runner.job import (
@@ -153,6 +154,10 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
     # #975: the session narrows the sandbox's outer wall through this transport; without it a
     # configured one would read as none and the agent would start under the setup's wide rule.
     ENVIRONMENT_CONTROL_VARIABLE,
+    # #974: the login of a customer's device that its dispatcher handed the Worker on its standard
+    # input for a job on a subscription (`factory_runner/local_worker.py`). A hosted Worker's
+    # environment never holds it.
+    OAUTH_VARIABLE,
 )
 # The newest bytes of its stdout the host keeps of an Implementer job process: its result line
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).

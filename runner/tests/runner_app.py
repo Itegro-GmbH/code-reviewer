@@ -431,6 +431,7 @@ class FakeRunnerApp:
                 return self._error(409, "RUNNER_JOB_ENDED")
             job.status = "queued"
             job.claimed = False
+            job.credential = ""  # the claim is over: the credential proves nothing any more
             job.releases.append((body["reason"], 200))
             return 200, {"version": 1, "job": {"id": job_id, "status": "queued"}}
         return self._error(404, "RUNNER_JOB_NOT_FOUND")
