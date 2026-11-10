@@ -60,8 +60,6 @@ export const PAGE_COPY = {
   lastSeen: "Last seen",
   minimum: (version: string) =>
     `Runners older than base ${version} get no jobs until they are updated.`,
-  ready: "ready",
-  notReady: "not ready",
 } as const;
 
 export const STATUS_COPY: Record<RunnerStatus, string> = {

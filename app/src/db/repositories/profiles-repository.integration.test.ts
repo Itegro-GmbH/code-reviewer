@@ -374,6 +374,7 @@ describe("the profiles repository", () => {
         canPush: false,
         defaultResult: SCHEMA,
         managedModel: true,
+        model: null,
         harness: "opencode",
         environmentId: null,
       },
@@ -383,6 +384,7 @@ describe("the profiles repository", () => {
         canPush: true,
         defaultResult: null,
         managedModel: true,
+        model: null,
         harness: "opencode",
         environmentId: null,
       },
@@ -437,6 +439,45 @@ describe("the profiles repository", () => {
     expect(facts.map((fact) => [fact.profileId, fact.managedModel])).toEqual([
       ["pr-1", true],
       ["pr-2", false],
+    ]);
+  });
+
+  // #973-T01
+  it("reads the model name of a version on a login, and none for any other model", async () => {
+    const { a } = await setup();
+    await a.create(
+      {
+        ...NEW,
+        content: {
+          ...CONTENT,
+          harness: "claude-code",
+          model: { provider: "claude-code", model: "opus" },
+        },
+      },
+      100,
+    );
+    await a.create(
+      {
+        ...NEW,
+        name: "own",
+        content: {
+          ...CONTENT,
+          model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+        },
+      },
+      100,
+    );
+
+    const facts = await a.versionFacts([
+      { profileId: "pr-1", version: 1 },
+      { profileId: "pr-2", version: 1 },
+    ]);
+
+    expect(
+      facts.map((fact) => [fact.profileId, fact.harness, fact.model]),
+    ).toEqual([
+      ["pr-1", "claude-code", "opus"],
+      ["pr-2", "opencode", null],
     ]);
   });
 

@@ -15,6 +15,13 @@ import { formatTimestamp } from "../codecs.ts";
 import { errorCode, UNIQUE_VIOLATION } from "../errors.ts";
 import type { Database, JobsTable } from "../schema.ts";
 import {
+  accessRule,
+  customerAccess,
+  entriesParam,
+  PLATFORM_ACCESS,
+  type HarnessAccess,
+} from "../../runner-identity/access.ts";
+import {
   isReservedLabel,
   MANAGED_LABEL,
   PLATFORM_LABELS,
@@ -36,14 +43,16 @@ export type JobClaim = {
  * (`PLATFORM_LABELS`), so it takes the hosted jobs (`cr:managed` and a size) and never a job that asks for a label of a customer.
  * A customer's runner takes only the jobs of its own workspace that require labels it has; it has no reserved label, whatever it once
  * announced, so it never takes a hosted job. Both follow from the one rule: neither has a special case. What stays outside the labels
- * is the harness (#856): a customer's runner takes only a turn whose profile's harness it announces as ready (OpenCode alone when it
- * names none), and nobody else takes a turn that runs on the harness `claude-code`: it needs the login of a customer's device.
+ * is the access (#856, #973): both take a turn only when an entry of their manifest has the harness, the auth and the model the turn asks for
+ * (`accessRule`, the one rule the pairing of the rings uses too). The platform identity's manifest is `PLATFORM_ACCESS`, so a turn on a harness
+ * that needs the login of a customer's device (`claude-code`, a subscription) is never its own: the rule needs no special case for it.
  */
 export type ClaimScope = {
   customerRunner: {
     workspaceId: string;
     labels: readonly string[];
-    harnesses?: readonly string[];
+    /** The entries of its manifest: what it can run. */
+    access: readonly HarnessAccess[];
   };
 };
 
@@ -139,18 +148,21 @@ function claimQuery(
   )`;
   // A job that requires no label is nobody's: the empty list is contained in every caller's labels.
   const labelRule = sql`and cardinality(${required}) > 0 and ${required} <@ ${labels}`;
-  const harnesses = sql`array[${sql.join(
-    (scope?.customerRunner.harnesses ?? ["opencode"]).map(
-      (harness) => sql`${harness}`,
-    ),
-    sql`, `,
-  )}]::text[]`;
+  // #973: what the caller can run. A job with a turn is taken by a caller one entry of whose manifest has the harness, the auth and the model of
+  // the turn; a job with no turn (a review) asks for no harness here, as before.
+  // The platform's keys are the platform identity's alone: a `managed` entry in the manifest a customer's runner holds (a row written by hand or by an
+  // older release) is dropped before it is matched, so it is never handed a managed turn, and so never a key.
+  const entries = entriesParam(
+    scope === undefined
+      ? PLATFORM_ACCESS
+      : customerAccess(scope.customerRunner.access),
+  );
   const routing =
     scope === undefined
       ? sql`${labelRule}
         and not exists (
           select 1 from implementer_turns as routed
-          where routed.job_id = due.id and routed.profile_harness = 'claude-code'
+          where routed.job_id = due.id and not ${accessRule(entries, "routed")}
         )
         and not exists (
           select 1 from implementer_turns as on_runner
@@ -160,8 +172,7 @@ function claimQuery(
         and due.workspace_id = ${scope.customerRunner.workspaceId}
         and exists (
           select 1 from implementer_turns as routed
-          where routed.job_id = due.id
-            and coalesce(routed.profile_harness, 'opencode') = any(${harnesses})
+          where routed.job_id = due.id and ${accessRule(entries, "routed")}
         )`;
   return sql<Selectable<JobsTable>>`
     update jobs

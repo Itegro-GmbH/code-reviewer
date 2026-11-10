@@ -184,7 +184,7 @@ class Machine:
             Announcement(
                 config.labels,
                 BASE_VERSION,
-                {"harnesses": {"opencode": {"version": "1.19.0", "ready": True}}},
+                {"harnesses": [{"harness": "opencode", "version": "1.19.0", "auth": "app-key"}]},
                 {"cpus": 1, "parallelRuns": 1},
             ),
             result,
@@ -219,7 +219,7 @@ def test_a_registered_runner_announces_claims_runs_a_turn_and_reports_its_result
     assert paths.index(("PUT", "/api/runners/v1/self")) < paths.index(
         ("POST", "/api/runners/v1/claim")
     )
-    assert app.announcements[-1]["manifest"]["harnesses"]["opencode"]["ready"] is True
+    assert app.announcements[-1]["manifest"]["harnesses"][0]["harness"] == "opencode"
     assert app.announcements[-1]["labels"] == ["linux", "itegro-claude"]
     # The turn: heartbeats while it ran, one result with the lease token, nothing after it.
     assert len(app.heartbeats) >= 1

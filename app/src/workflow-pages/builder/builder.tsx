@@ -183,6 +183,8 @@ export function LaneBuilder({
   const valid = current && answer?.valid === true;
   const dirty = canonicalJson(doc) !== canonicalJson(saved.doc);
   const sorted = sortProblems(answer?.errors ?? []);
+  const warned = sortProblems(answer?.warnings ?? []);
+  const warningCount = answer?.warnings?.length ?? 0;
   const effective =
     nodeAt(doc, selected) === undefined ? firstPointer(doc) : selected;
   const budget =
@@ -273,6 +275,7 @@ export function LaneBuilder({
     <Badge variant="success">
       Valid · {answer.steps} {answer.steps === 1 ? "step" : "steps"} ·{" "}
       {money(budget)}
+      {warningCount === 0 ? "" : ` · ${BUILDER_COPY.warnings(warningCount)}`}
     </Badge>
   ) : (
     <Badge variant="danger">
@@ -346,6 +349,15 @@ export function LaneBuilder({
           heading={BUILDER_COPY.documentErrors}
         />
       )}
+      {warned.document.length === 0 ? null : (
+        <ProblemList
+          doc={doc}
+          problems={warned.document}
+          onChange={edit}
+          heading={BUILDER_COPY.documentWarnings}
+          severity="warning"
+        />
+      )}
       {showJson ? (
         <pre
           aria-label={BUILDER_COPY.jsonLabel}
@@ -376,6 +388,15 @@ export function LaneBuilder({
             onRemove={remove}
             onMove={move}
           />
+          {(warned.byNode.get(effective) ?? []).length === 0 ? null : (
+            <ProblemList
+              doc={doc}
+              problems={warned.byNode.get(effective) ?? []}
+              onChange={edit}
+              heading={BUILDER_COPY.warningsHeading}
+              severity="warning"
+            />
+          )}
           <LaneCard
             doc={doc}
             version={saved.version}

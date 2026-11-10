@@ -4,6 +4,10 @@
 // the job it gets has no model, no key, no price and no catalog entry (the login is the device's and never known to the app), it
 // carries the budget and the model name Claude Code reads, and every other claim, hosted or not, leaves it queued. Against a real
 // Postgres with the harness of the runner API.
+import {
+  CLAUDE_CODE_ACCESS,
+  OPENCODE_ACCESS,
+} from "../test-support/runner-access.ts";
 import { describe, expect, it } from "vitest";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import type { ClaimResponse } from "./contract.ts";
@@ -29,24 +33,10 @@ const PROFILE = {
   harness: "claude-code" as const,
 };
 
-const BOTH = {
-  harnesses: {
-    opencode: { version: "1.19.0", ready: true },
-    "claude-code": { version: "2.1.311", ready: true },
-  },
-  capabilities: [],
-};
-const OPENCODE_ONLY = {
-  harnesses: { opencode: { version: "1.19.0", ready: true } },
-  capabilities: [],
-};
-const NOT_READY = {
-  harnesses: {
-    opencode: { version: "1.19.0", ready: true },
-    "claude-code": { version: "2.1.311", ready: false },
-  },
-  capabilities: [],
-};
+const BOTH = { harnesses: [...CLAUDE_CODE_ACCESS], capabilities: [] };
+const OPENCODE_ONLY = { harnesses: [...OPENCODE_ACCESS], capabilities: [] };
+// Claude Code is announced only while it is ready: a device whose login or layer is gone leaves it out (#973).
+const NOT_READY = OPENCODE_ONLY;
 
 function claimOf(credential: string, features = NOW_FEATURES) {
   return { token: credential, engines: ["implementer"], features };

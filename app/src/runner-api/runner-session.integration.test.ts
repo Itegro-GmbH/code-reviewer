@@ -6,6 +6,7 @@
 // in Authorization and the lease token in a header. The parts, the digest and the bounds are the handlers' and are shown here once through
 // the runner's door; what is new is who may call: a live runner, for a job of its own workspace that it holds itself, with the lease of
 // its claim. Against a real Postgres with the harness of the runner API.
+import { OPENCODE_ACCESS } from "../test-support/runner-access.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
@@ -90,7 +91,10 @@ async function start() {
       baseSha: sha("a"),
       branch: `implementer/s${String(counter)}`,
       instruction: "Add a health endpoint.",
-      modelChoice: { entryId: "entry-1" },
+      // A runner works with the workspace's own key, a hosted turn with a catalog entry (#973).
+      modelChoice: environment.runner
+        ? { provider: "anthropic", model: "claude-sonnet-5-5" }
+        : { entryId: "entry-1" },
       costLimitCents: null,
       createdBy: "user-1",
       actorLogin: "octocat",
@@ -112,7 +116,13 @@ async function start() {
     const claimed = await h.queue.claimNext(
       customerRunnerId(runner.runnerId),
       IMPLEMENTER,
-      { customerRunner: { workspaceId: h.workspaceId, labels: LABELS } },
+      {
+        customerRunner: {
+          workspaceId: h.workspaceId,
+          labels: LABELS,
+          access: OPENCODE_ACCESS,
+        },
+      },
     );
     if (claimed === null || claimed.job.id !== enqueued.job.id)
       throw new Error("the turn was not claimed");
@@ -147,7 +157,13 @@ async function start() {
     const claimed = await h.queue.claimNext(
       customerRunnerId(runner.runnerId),
       IMPLEMENTER,
-      { customerRunner: { workspaceId: h.workspaceId, labels: LABELS } },
+      {
+        customerRunner: {
+          workspaceId: h.workspaceId,
+          labels: LABELS,
+          access: OPENCODE_ACCESS,
+        },
+      },
     );
     if (claimed === null || claimed.job.id !== held.jobId)
       throw new Error("the turn was not claimed again");

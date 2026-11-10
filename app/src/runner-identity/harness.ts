@@ -3,7 +3,6 @@
 // The harnesses (#854, decision 4 of the runner plan): the platform's catalog holds only OpenCode. Every other harness exists for the
 // app only while a runner announces it as ready, and a profile that names one can run only on a runner environment. Profiles know
 // only OpenCode today, so the rule is here and the field is prepared; nothing in this file adds a harness. Pure.
-import type { RunnerManifest } from "./announcement.ts";
 
 /** The one harness of the platform's catalog: the pinned OpenCode every runner's base provides. */
 export const OPENCODE_HARNESS = "opencode";
@@ -56,12 +55,4 @@ export function harnessOfProfile(profile?: {
  */
 export function harnessNeedsRunner(harness: string): boolean {
   return harness !== OPENCODE_HARNESS;
-}
-
-/** The names of the harnesses a runner announces as ready: only these take a job. */
-export function readyHarnesses(manifest: RunnerManifest): string[] {
-  return Object.entries(manifest.harnesses)
-    .filter(([, harness]) => harness.ready)
-    .map(([name]) => name)
-    .sort();
 }

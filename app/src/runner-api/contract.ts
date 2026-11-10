@@ -341,6 +341,8 @@ export const RUNNER_API_ERROR_CODES = [
   "RUNNER_UPDATE_NEEDED",
   // Runner v2 (#971): a customer's runner announced a label of the platform's reserved namespace `cr:`.
   "RUNNER_LABEL_RESERVED",
+  // Runner v2 (#973): a customer's runner announced the access `managed`, which only the platform identity has.
+  "RUNNER_ACCESS_RESERVED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 

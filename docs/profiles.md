@@ -89,7 +89,7 @@ pass the validator is `422 PROFILE_INVALID` with `errors` (every problem; see be
 
 | Call | What |
 | --- | --- |
-| `POST /profiles/validate` | Checks a profile (the body) and stores nothing. `200` with `{"valid", "errors", "truncated"}`; a profile with problems is a normal answer. |
+| `POST /profiles/validate` | Checks a profile (the body) and stores nothing. `200` with `{"valid", "errors", "truncated"}` and, when there is one, `"warnings"` (the shape of an error, with `severity: "warning"`; a warning never makes the profile invalid); a profile with problems is a normal answer. |
 | `POST /profiles` | Saves a new profile as version 1. `201` with `{"profile": {...}}`. |
 | `GET /profiles` | The profiles that are not archived, by name: `{"profiles": [{id, name, version, createdAt, updatedAt, archivedAt}], "maximum": 100}`. |
 | `GET /profiles/<id>[?version=n]` | The profile with the version asked for (default: the current one) as `document` (the body shape, every optional field filled in), `documentVersion`, and every saved version in `versions`. `environmentGone` is `true` when the version names an environment that was removed since: `document.environment` is `null` then, as for a version saved before #919, and this tells the two apart (the page says "Environment removed – choose another"). |
@@ -122,6 +122,7 @@ Of the body (the same list in `validate` and in a refused save):
 | `environment_unknown` | The workspace has no environment of that name (#919). | Use one of `available`, or create it on the Environments page. |
 | `runner_needs_own_key` | The environment runs on a runner and the model is a managed one (an entry of the catalog). A runner works with the workspace's own key (#854, #919). | Choose a model of your own key, or a hosted environment. |
 | `harness_needs_runner` | The harness is not OpenCode and the environment is a hosted one (#856, #919). | Choose an environment that runs on a runner. |
+| `no_runner_announces` | The environment runs on a runner, a runner with its labels is online, and none announces the harness, the auth and the model of the profile (#973: `claude-code` is a subscription of the device and its model must be one the runner allows; OpenCode on a key of the workspace is announced by every runner). It is a **warning** (`severity: "warning"` in `warnings`, never in `errors`): the profile is valid and saves, because a runner that is asleep or that leaves an entry out for a while (a rate limit) must never block a save. With no such runner online nothing is said. | Choose a model or a harness the runner announces, or start a runner that does; or save anyway, the turn waits. |
 | `model_not_allowed` | The workspace cannot run that model (the message gives the reason). | Pick one from `GET .../implementer/models`. |
 | `cost_limit_above_maximum` | The cost limit is above the operator's maximum per turn (the message says it). | Use that or less. |
 

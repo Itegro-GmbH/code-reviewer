@@ -41,6 +41,7 @@ import {
   type DeliveryPolicy,
 } from "../runner-identity/delivery.ts";
 import { reservedLabelIssues } from "../runner-identity/labels.ts";
+import { reservedAccessIssues } from "../runner-identity/access.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 
 /**
@@ -104,6 +105,21 @@ function reservedLabelsOf(body: unknown): Response | null {
   return issues.length === 0
     ? null
     : errorResponse(422, "RUNNER_LABEL_RESERVED", { fields: issues });
+}
+
+/**
+ * #973: the entries of a body that announce the auth `managed`, as the 422 answer of the door. The platform's keys are the platform identity's
+ * alone; a customer's runner may announce `app-key`, `local-key` and `subscription`. Asked, like the labels, only for a body that passed the form check.
+ */
+function reservedAccessOf(body: unknown): Response | null {
+  const manifest =
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>).manifest
+      : undefined;
+  const issues = reservedAccessIssues(manifest);
+  return issues.length === 0
+    ? null
+    : errorResponse(422, "RUNNER_ACCESS_RESERVED", { fields: issues });
 }
 
 /** The `delivery` of an answer: what the app holds; the secret only when this call made it. Left out for a runner that polls. */
@@ -189,7 +205,7 @@ export function createRunnerRegistrationApi(
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(issues),
           });
-        const reserved = reservedLabelsOf(fields);
+        const reserved = reservedLabelsOf(fields) ?? reservedAccessOf(fields);
         if (reserved !== null) return reserved;
 
         const credential = newRunnerCredential();
@@ -256,7 +272,8 @@ export function createRunnerRegistrationApi(
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(delivery.fields),
           });
-        const reserved = reservedLabelsOf(body.value);
+        const reserved =
+          reservedLabelsOf(body.value) ?? reservedAccessOf(body.value);
         if (reserved !== null) return reserved;
         const announcement: Announcement = checked.value;
         // A runner revoked between the two statements is the same 401.

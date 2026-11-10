@@ -172,8 +172,8 @@ def failing() -> SelfTestResult:
     return SelfTestResult((Check("agent-container", False, "did not start"),), "runc")
 
 
-# #856-T29
-def test_the_announcement_adds_claude_code_and_never_removes_opencode() -> None:
+# #856-T29, #973-T05
+def test_the_announcement_adds_claude_code_as_a_subscription_and_never_removes_opencode() -> None:
     config = RunnerConfig(url="https://app.example")
     announced = announcement_for(
         config,
@@ -182,23 +182,22 @@ def test_the_announcement_adds_claude_code_and_never_removes_opencode() -> None:
         {HARNESS_CLAUDE_CODE: HarnessStatus("2.1.311", True, ())},
     )
 
-    assert announced.manifest["harnesses"] == {
-        "opencode": {"version": "1.19.0", "ready": True},
-        "claude-code": {"version": "2.1.311", "ready": True},
-    }
+    assert announced.manifest["harnesses"] == [
+        {"harness": "opencode", "version": "1.19.0", "auth": "app-key"},
+        {"harness": "claude-code", "version": "2.1.311", "auth": "subscription"},
+    ]
 
 
-# #856-T29
-def test_a_harness_that_is_not_ready_is_announced_as_such() -> None:
+# #856-T29, #973-T03
+def test_a_harness_that_is_not_ready_is_left_out_of_the_announcement() -> None:
     config = RunnerConfig(url="https://app.example")
     announced = announcement_for(
         config, passing(), 4096, {HARNESS_CLAUDE_CODE: HarnessStatus("2.1.311", False, ("x",))}
     )
 
-    assert announced.manifest["harnesses"]["claude-code"] == {  # type: ignore[index]
-        "version": "2.1.311",
-        "ready": False,
-    }
+    assert announced.manifest["harnesses"] == [
+        {"harness": "opencode", "version": "1.19.0", "auth": "app-key"}
+    ]
 
 
 # #856-T29
@@ -228,9 +227,12 @@ def test_prepare_asks_for_the_harnesses_only_when_the_base_is_proven() -> None:
     )
 
     assert asked == [True]
-    assert "claude-code" in good.announcement.manifest["harnesses"]  # type: ignore[operator]
+    assert [e["harness"] for e in good.announcement.manifest["harnesses"]] == [  # type: ignore[union-attr,index]
+        "opencode",
+        "claude-code",
+    ]
     assert good.harness_notes == ("claude-code: a note",)
-    assert "claude-code" not in bad.announcement.manifest["harnesses"]  # type: ignore[operator]
+    assert bad.announcement.manifest["harnesses"] == []
 
 
 # #856-H01

@@ -30,6 +30,7 @@ export function answerOf(document: unknown): ValidateAnswer {
     valid: result.valid,
     errors: result.errors,
     truncated: result.truncated,
+    ...(result.warnings === undefined ? {} : { warnings: result.warnings }),
     steps: result.steps,
     ...(result.budgetUsd === undefined ? {} : { budgetUsd: result.budgetUsd }),
   };

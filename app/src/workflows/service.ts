@@ -22,6 +22,7 @@ import {
   type WorkflowErrorCode,
   type WorkflowRequestIssue,
 } from "./errors.ts";
+import type { OnlineRunner } from "../runner-identity/announced.ts";
 import type { Issue } from "./issues.ts";
 import {
   ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
@@ -135,6 +136,11 @@ export type WorkflowServiceDependencies = {
   environments: ImplementerEnvironmentsRepository;
   /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
   profiles: Pick<ProfilesRepository, "list" | "versionFacts" | "archivedNames">;
+  /**
+   * #973: the runners of the workspace that are online now, with what each announces, so the validator can refuse a profile no runner
+   * announces (`no_runner_announces`). Left out: the validator does not ask.
+   */
+  onlineRunners?: () => Promise<readonly OnlineRunner[]>;
   /** The most a workflow may be given to spend. Until the operator can set it: `BUDGET_OPERATOR_MAX_USD`. */
   maxBudgetUsd?: number;
   /** The most archived workflows a workspace may hold: `ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX`. */
@@ -160,6 +166,7 @@ export function createWorkflowService({
   projects,
   environments,
   profiles,
+  onlineRunners,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
   samples,
@@ -179,6 +186,9 @@ export function createWorkflowService({
       environments: known,
       profiles: build(facts),
       archivedProfiles: await profiles.archivedNames(),
+      ...(onlineRunners === undefined
+        ? {}
+        : { onlineRunners: await onlineRunners() }),
     });
   }
 
