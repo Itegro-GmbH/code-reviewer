@@ -521,8 +521,10 @@ release contains. Nothing of this is built into the app, the Dispatcher bundle o
   (`docker/vm/rootfs/packages.txt`), and Sysbox 0.7.1 (`sysbox-ce`, the package and checksum of the golden snapshot). Docker, containerd and runc are
   Apache-2.0; Sysbox is Apache-2.0; the Ubuntu base carries many licenses, GPL and LGPL among them.
 - Source offer: the packages are Ubuntu's, unmodified. `packages.txt` of each release lists every installed package with the source package and
-  source version it was built from; the sources are in Ubuntu's archive (`archive.ubuntu.com`, `deb-src`). The copyright files of the packages stay in
-  `/usr/share/doc` of the root file system.
+  source version it was built from. The sources are on Ubuntu's snapshot service as of the build date, the manifest's `builtAt`:
+  `https://snapshot.ubuntu.com/ubuntu/<builtAt as YYYYMMDDTHHMMSSZ>/` (`pool/` holds the source packages, `dists/<suite>/<component>/source/Sources.xz`
+  their index), and the notes of every release name that exact address. The archive's own `deb-src` is not the pointer: it moves on and drops
+  superseded sources. The copyright files of the packages stay in `/usr/share/doc` of the root file system.
 - Firecracker itself (Apache-2.0) is not part of a release: the installer of the local Dispatcher downloads its own pinned copy.
 
 ### Data disk

@@ -92,7 +92,7 @@ jq -n --arg ubuntuBase "$UBUNTU_BASE_VERSION" --arg dockerd "$dockerd" --arg bui
   --arg sysboxSha256 "$(jq -r .sysboxSha256 "$recipe/recipe.json")" \
   '{ubuntuBase: $ubuntuBase, dockerd: $dockerd, buildx: $buildx, sysbox: $sysbox, sysboxSha256: $sysboxSha256}' > "$out/rootfs-info.json"
 cat "$out/rootfs-info.json"
-# Every package with the source it was built from: what a GPL source offer for the root file system points at (Ubuntu's archive).
+# Every package with the source it was built from: what a GPL source offer for the root file system points at (Ubuntu's snapshot service as of the build date, see the release notes).
 run dpkg-query -W -f='${binary:Package} ${Version} ${source:Package} ${source:Version}\n' | sort > "$out/packages.txt"
 wc -l "$out/packages.txt"
 run /usr/bin/dockerd --version

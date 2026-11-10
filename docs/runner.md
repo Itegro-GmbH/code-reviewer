@@ -1783,13 +1783,15 @@ the same rule. The build is cached by the fragment and the pins (about 10 minute
 parameters before the `--`.
 
 **GPL source offer.** Every release publishes the exact source tarball, the final `.config`, Firecracker's base configuration and the fragment next to `vmlinux`, all named in the signed manifest (`THIRD_PARTY_LICENSES.md`,
-"Local VM artifacts"). `packages.txt` points the packages of the root file system at Ubuntu's sources.
+"Local VM artifacts"). `packages.txt` lists the source package and version of every package of the root file system, and the notes of each release point at the sources on **Ubuntu's snapshot service as of the
+build date** (`https://snapshot.ubuntu.com/ubuntu/<manifest builtAt as YYYYMMDDTHHMMSSZ>/`), a stable address; the archive's own `deb-src` moves on and drops superseded sources.
 
 ### The data disk
 
 `docker/vm/data/build.sh` boots a guest in `seed` mode with the image archive (`docker save` of the two images the pipeline builds: `runner/Dockerfile`, targets `sandbox` and `agent`, tags `code-reviewer-worker:golden` and
-`code-reviewer-agent:golden`) on a read-only third drive. `vm-init` loads it with `docker load`, reports the image ids, stops dockerd the way the pipeline stops it before it snapshots (SIGTERM, wait for dockerd and containerd to be gone) and
-powers off; the disk is then checked and shrunk to its minimum (`resize2fs -M`). The launcher copies it per job (a reflink copy on XFS), grows the copy to the quota with `resize2fs` on the file (`docker/vm/data/grow.sh`, 20 ms in the spike) and
+`code-reviewer-agent:golden`) on a read-only third drive. `vm-init` loads it with `docker load`, reports the image ids, stops dockerd the way the pipeline stops it before it snapshots (SIGTERM, wait for dockerd and containerd to be gone) **and the two Sysbox
+daemons** (`sysbox-fs`, then `sysbox-mgr`, which keep state under `/var/lib/sysbox`), then unmounts the seed drive, the directories bound from the job disk and the job disk, **checking every unmount**: a daemon that is
+left or an unmount that fails reports `seed_failed` and powers off without `seed_done`, and the build refuses a seed boot without it. The disk is then checked read-only (`e2fsck -fn`: it must be clean as the guest left it, nothing is repaired quietly) and shrunk to its minimum (`resize2fs -M`). The launcher copies it per job (a reflink copy on XFS), grows the copy to the quota with `resize2fs` on the file (`docker/vm/data/grow.sh`, 20 ms in the spike) and
 attaches it as `/dev/vdb`. The image ids in the manifest (`images`) are what the guest's Docker reports for the disk's images, and the smoke boot fails when the guest reports another one.
 
 ### The manifest and its signature
@@ -1801,12 +1803,13 @@ never in the repository.
 
 **The verifier** (`dispatcher/src/vm-artifacts/verify.ts`, used by the build, the release and, later, the install and update of the local Dispatcher, #982) needs nothing but `node:crypto`. Its order: the key must be ECDSA P-256 (`key_invalid` otherwise); the signature must verify over the manifest bytes
 (`signature_invalid`); only then is the manifest read (`manifest_invalid`, `manifest_too_large`: 256 KiB); the release must be higher than the one in use or left by a rollback (`release_not_newer`, the rule of the runner's channel); then each file: present, size, sha256
-(`file_missing`, `size_mismatch`, `digest_mismatch`). No file is read before the signature has verified. `node dispatcher/src/vm-artifacts/verify-main.ts --dir <dir> --manifest ... --signature ... --channel docker/vm/release-channel.json` does it from a shell.
+(`file_missing`, `size_mismatch`, `digest_mismatch`). `--min-release N` (`minRelease`) must be a whole number from 0 and the manifest's release must be **higher** than it: anything else, `abc` or `NaN` included, is an error (`min_release_invalid`, exit status 2 on
+the command line), never "no limit". `--exact-dir` (`exactDir`) also refuses a directory that holds anything the manifest does not name (`unexpected_file`; the manifest and the signature file are allowed when they are in it): what was verified is all there is. No file is read before the signature has verified. `node dispatcher/src/vm-artifacts/verify-main.ts --dir <dir> --manifest ... --signature ... --channel docker/vm/release-channel.json` does it from a shell.
 
 **The version check against the hosted snapshot** (`compare.ts`, `compare-main.ts`; #976-T02): the same dockerd, buildx and Sysbox (version and package checksum) as the hosted pipeline pins, the same image tags, and the image ids against the hosted record
-(`golden-snapshot-record`). The release job runs it against the newest golden snapshot of `main` and fails on a different version. **Image ids do not fail it yet:** the hosted pipeline builds the images inside its builder VM and the local build builds them in CI, and
+(`golden-snapshot-record`). The release job runs it against the newest golden snapshot of `main` (the step "Compare this commit's recipe with the newest golden snapshot record of main": it compares what **this commit** builds) and fails on a different version. **Image ids are reported, not enforced:** the hosted pipeline builds the images inside its builder VM and the local build builds them in CI, and
 two builds of the same Dockerfile are not the same digest (the Dockerfile's Debian packages are not version pinned). The ids agree once both outputs load **one** build of the images (a registry or an OCI archive the pipeline loads); that changes the hosted
-pipeline and is a follow-up (`--require-images` turns the check on).
+pipeline and is a follow-up (`--require-images` turns the check on). Whether to enforce them then is the owner's decision (below).
 
 ### When it runs, and the release
 
@@ -1814,15 +1817,26 @@ pipeline and is a follow-up (`--require-images` turns the check on).
   nothing else pays for a KVM job). The `kernel` job builds the kernel or restores it from the cache and always verifies the configuration; the `build` job makes the root file system, builds the two images, makes the data disk, **boots the result** and builds the manifest. The smoke boot
   (`boot-main.ts`, `console.ts`) fails unless dockerd is ready within the budget (`docker_ready` 10 s after the start of Firecracker; the spike measured 1.4 to 1.9 s on the same kind of runner), Sysbox is ready, the guest's two images are the data disk's, a `runc` container and a `sysbox-runc` container run,
   the root file system is read-only and the golden snapshot's own Worker self-check (`probe`) passes. It ends with `selftest-signing.sh`: a throwaway key signs the real manifest, the verifier accepts it and then refuses a changed byte of the kernel, a changed byte of the manifest and another key.
-- **Release:** a tag `vm-artifacts-v<N>` (N the release number; it only grows) runs `vm-artifacts-release.yml`: the same build, then the one job that has the key. It checks that the channel names a key and that the manifest is this tag's, runs the version check against the hosted snapshot, signs, verifies what it
-  is about to publish with the verifier and the channel's key, and makes a **draft** release with every file. The key is the secret `VM_ARTIFACTS_SIGNING_KEY` of the environment `vm-artifacts-release`, read in one step; the job refuses a key that is not the channel's. Nothing is public until the owner publishes the draft.
+- **Release:** a tag `vm-artifacts-v<N>` (N the release number; it only grows) runs `vm-artifacts-release.yml`. Its jobs, in this order:
+  1. `number`: the tag is `vm-artifacts-v<N>` with N a whole number from 1.
+  2. `guard`: **the tagged commit must be an ancestor of `main`** (the compare API says `identical` or `behind`; no checkout, no code of the tag runs for it). `main` is chosen because it is what was reviewed, merged and released; a commit that is only on `development` has to be released first. Change the one word in the job to take `development`.
+     The guard stops a mistake and tells a reviewer something; it is **not** the protection: a tag can point at a commit whose workflow file has no guard, which is why the environment's required reviewers and the tag ruleset below are mandatory.
+  3. `build` (`vm-artifacts.yml` with `for_release: true`): **no kernel cache**: a release always builds the kernel from the pinned source (a cache is for pull requests only), then the root file system, the images, the data disk, the smoke boot and the manifest. This job has no key, no environment and a read-only token.
+  4. `release` (environment `vm-artifacts-release`, which waits for its required reviewers): installs with **`pnpm install --frozen-lockfile --ignore-scripts`**, so no lifecycle script of a dependency runs in the job that holds the key, and builds nothing. It restores the release's files, checks that the channel file names a key, **this repository** and the asset names and that the manifest is this tag's,
+     checks that the release number is **higher than that of every other release** of the repository (drafts included), compares this commit's recipe with the hosted snapshot's record, signs, verifies what it is about to publish with the verifier and the channel's key (`--min-release` the highest other release, `--exact-dir`) and makes a **draft** release with every file.
+     The key is the secret `VM_ARTIFACTS_SIGNING_KEY` of the environment, read in one step; the job refuses a key that is not the channel's. Nothing is public until the owner publishes the draft.
+- **No workflow artifact holds the data disk.** The repository is public and an artifact of a public repository can be downloaded by anybody who is signed in to GitHub; the data disk holds the Worker image (proprietary code, copyleft packages) and must not become downloadable before the owner decides to publish it. So the release's files go from `build` to `release` **through the Actions cache**
+  (`actions/cache/save` under `vm-release-files-<run id>`, `restore` with `fail-on-cache-miss`): GitHub offers no download of a cache's content to a person, only a workflow of this repository restores it, and `release` verifies every file against the manifest it signs, so other bytes in the cache would fail there before anything is published. The cache is deleted when the draft exists (and expires after 7 days otherwise).
+  A pull request run uploads only the kernel (`vm-kernel`, `retention-days: 1`, needed by its own next job; the kernel and its sources are GPL) and the logs of the guests (`retention-days: 3`); no run uploads the root file system or the data disk. This is pinned by `app/src/ci/vm-artifacts-workflow.test.ts`.
 
-**What the owner does once** (not in this repository, and not done by this change):
+**What the owner does once** (not in this repository, and not done by this change). Items 1 to 4 are **mandatory** before the first tag; without them the key is protected by nothing but the guard:
 
-1. Make the key: `openssl ecparam -genkey -name prime256v1 -noout -out vm-artifacts-key.pem`, keep it secret, derive the public half with `openssl pkey -in vm-artifacts-key.pem -pubout -outform DER | base64 -w0`.
-2. Create the GitHub environment `vm-artifacts-release` (restricted to tags `vm-artifacts-v*`, with required reviewers if wanted) and put the PEM in its secret `VM_ARTIFACTS_SIGNING_KEY`.
-3. Put the public half and the repository in `docker/vm/release-channel.json` (`publicKey`, `repository`): a change of the key is a change of this file.
-4. Decide that the data disk may be published (it holds the Worker image: `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"), then publish the draft.
+1. **Environment `vm-artifacts-release`** (Settings, Environments): **required reviewers** (at least one person who is not the one who pushes the tag; mandatory: the job waits for them and they see the commit it runs), "Prevent self-review", and the **deployment policy "Selected branches and tags" with the tag rule `vm-artifacts-v*` only** (no branch).
+2. **A tag ruleset on `vm-artifacts-v*`** (Settings, Rules): creating, updating and deleting those tags restricted to the admins / the release owner (bypass list), no force pushes. Whoever can create the tag can start the workflow; the reviewers are the second lock.
+3. Make the key: `openssl ecparam -genkey -name prime256v1 -noout -out vm-artifacts-key.pem`, keep it secret (a password manager, not a file on a shared disk), derive the public half with `openssl pkey -in vm-artifacts-key.pem -pubout -outform DER | base64 -w0`, and put the PEM in the **environment secret** `VM_ARTIFACTS_SIGNING_KEY` (not a repository secret: only the environment's job may read it).
+4. Put the public half and the repository in `docker/vm/release-channel.json` (`publicKey`, `repository`, by a reviewed pull request that reaches `main`): the release job refuses a channel without a key or with another repository, and a change of the key is a change of this file.
+5. **Decide whether the data disk may be published** (it holds the Worker image: `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"), then publish the draft. The release is a draft until you do.
+6. **Decide whether the image ids must equal the hosted ones.** Today they are reported and do not fail the comparison (above); enforcing them (`compare-main.ts --require-images`) needs both outputs to load one build of the images, which changes the hosted pipeline (a follow-up). Nothing is enforced until you say so.
 
 ### Measured
 
