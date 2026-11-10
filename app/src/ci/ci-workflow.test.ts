@@ -745,6 +745,31 @@ describe("CI workflow path filter", () => {
       expect(touched("engine", file), file).toBe(false);
   });
 
+  // #976
+  it("sends only a change to the VM artifacts, the golden snapshot's recipe they run or their workflow to the KVM job", () => {
+    for (const file of [
+      "docker/vm/kernel/config.fragment",
+      "docker/vm/rootfs/build.sh",
+      "docker/sandbox/vm-prepare.sh",
+      "dispatcher/src/vm-artifacts/verify.ts",
+      "dispatcher/src/snapshot/config.ts",
+      "dispatcher/src/snapshot/scripts.ts",
+      ".github/workflows/vm-artifacts.yml",
+    ])
+      expect(touched("vm", file), file).toBe(true);
+    for (const file of [
+      "app/src/db/index.ts",
+      "dispatcher/src/app.ts",
+      "dispatcher/src/snapshot/pipeline.ts",
+      "runner/src/code_reviewer_runner/cli.py",
+      "docs/runner.md",
+      "README.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/vm-artifacts-release.yml",
+    ])
+      expect(touched("vm", file), file).toBe(false);
+  });
+
   // #696
   it("sends a change that touches website/ to the website job, whatever else it touches, and a change outside website/ not", () => {
     for (const file of [

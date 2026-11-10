@@ -1,0 +1,147 @@
+name: VM artifacts release
+
+# Signs and publishes the VM artifacts of Runner v2 (#976). Started only by a tag `vm-artifacts-v<N>` (N is the release number of the manifest and only
+# grows); nothing else runs it, no pull request, no push to a branch. The build and the smoke boot are vm-artifacts.yml; this file adds what needs the
+# release key: the one secret `VM_ARTIFACTS_SIGNING_KEY`, a secret of the environment `vm-artifacts-release`, in the one job `release` and in
+# one step of it. The key is the PEM of an ECDSA P-256 key, the way the runner's release is signed (docs/runner.md, "Updates (R2)"); its public
+# half is in docker/vm/release-channel.json, and the job refuses to sign with a key that is not the channel's.
+#
+# The release is made as a DRAFT: its files are not public until the owner publishes it. The repository is public and a release asset is a
+# download for anybody; the data disk holds the Worker image (docs/runner.md, "VM artifacts"; THIRD_PARTY_LICENSES.md, "Copyleft and
+# distribution"), so publishing is a decision of the owner, not of this job.
+on:
+  push:
+    tags:
+      - "vm-artifacts-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-artifacts-release
+  cancel-in-progress: false
+
+jobs:
+  number:
+    name: Release number
+    if: ${{ github.repository == 'Itegro-GmbH/code-reviewer' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.number.outputs.release }}
+    steps:
+      - name: The number is the tag's, and a whole number
+        id: number
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          number="${TAG#vm-artifacts-v}"
+          if ! printf '%s' "$number" | grep -Eq '^[1-9][0-9]{0,8}$'; then
+            echo "the tag $TAG is not vm-artifacts-v<N> with N a whole number from 1" >&2
+            exit 1
+          fi
+          echo "release=$number" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and smoke test
+    needs: number
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vm-artifacts.yml
+    with:
+      release: ${{ fromJSON(needs.number.outputs.release) }}
+      upload: true
+
+  release:
+    name: Sign and make the draft release
+    needs: [number, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: vm-artifacts-release
+    permissions:
+      contents: write
+      # the hosted golden snapshot's record, an artifact of a run of golden-snapshot.yml
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - name: Install the dispatcher dependencies (the verifier and the comparison are TypeScript)
+        run: pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...
+      - uses: actions/download-artifact@v8
+        with:
+          name: vm-artifacts
+          path: ${{ runner.temp }}/release
+      # Before any key is read: a channel without a key is a release nobody can verify, and a manifest of another commit is not this tag's.
+      - name: The channel names a key and the manifest is this tag's
+        env:
+          RELEASE: ${{ needs.number.outputs.release }}
+        run: |
+          set -euo pipefail
+          test -n "$(jq -r .publicKey docker/vm/release-channel.json)" || {
+            echo "docker/vm/release-channel.json has no publicKey: set the public half of the signing key first (docs/runner.md, \"VM artifacts\")" >&2
+            exit 1
+          }
+          test "$(jq -r .release "$RUNNER_TEMP/release/manifest.json")" = "$RELEASE"
+          test "$(jq -r .commit "$RUNNER_TEMP/release/manifest.json")" = "$GITHUB_SHA"
+      # T02 against the hosted snapshot: the same dockerd, buildx and Sysbox as the newest golden snapshot of main. The image ids are reported and
+      # do not fail it until both outputs load one build of the images (docs/runner.md, "VM artifacts").
+      - name: The hosted golden snapshot has the same recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list --workflow golden-snapshot.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          test -n "$run_id" || { echo "no successful run of the Golden snapshot workflow on main: run it first" >&2; exit 1; }
+          gh run download "$run_id" --name golden-snapshot-record --dir "$RUNNER_TEMP/hosted"
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/compare-main.ts \
+            --record "$RUNNER_TEMP/hosted/golden-snapshot.json" --manifest "$RUNNER_TEMP/release/manifest.json"
+      - name: Sign the manifest
+        env:
+          VM_ARTIFACTS_SIGNING_KEY: ${{ secrets.VM_ARTIFACTS_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$VM_ARTIFACTS_SIGNING_KEY" || { echo "the secret VM_ARTIFACTS_SIGNING_KEY of the environment vm-artifacts-release is not set" >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/signing-key.pem"
+          printf '%s\n' "$VM_ARTIFACTS_SIGNING_KEY" > "$key"
+          # It must be the channel's key: the public half of this one is compared with the file of the repository.
+          derived=$(openssl pkey -in "$key" -pubout -outform DER | base64 -w0)
+          test "$derived" = "$(jq -r .publicKey docker/vm/release-channel.json)" || {
+            rm -f "$key"
+            echo "the signing key is not the one of docker/vm/release-channel.json" >&2
+            exit 1
+          }
+          openssl dgst -sha256 -sign "$key" -out "$RUNNER_TEMP/release/manifest.sig" "$RUNNER_TEMP/release/manifest.json"
+          rm -f "$key"
+      - name: Verify what is about to be published, with the verifier a host uses and the channel's key
+        run: |
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/verify-main.ts \
+            --dir "$RUNNER_TEMP/release" --manifest "$RUNNER_TEMP/release/manifest.json" \
+            --signature "$RUNNER_TEMP/release/manifest.sig" --channel docker/vm/release-channel.json
+      - name: Draft release (the owner publishes it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          mv manifest.json vm-artifacts-manifest.json
+          mv manifest.sig vm-artifacts-manifest.sig
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          VM artifacts of Runner v2: the guest kernel, the read-only root file system and the prepared Docker data disk of a Firecracker microVM.
+          Verify them with the signed manifest (`vm-artifacts-manifest.json`, `vm-artifacts-manifest.sig`) before use: docs/runner.md, "VM artifacts".
+
+          **Source offer (GPL).** The Linux kernel in `vmlinux` is built from the unmodified source `linux-*.tar.xz` of this release with the
+          configuration `kernel.config`, which is Firecracker's recommended `fc-base.config` plus `config.fragment`. `packages.txt` lists every
+          package of the root file system with the source package and version it was built from; the sources are those of Ubuntu's archive.
+          NOTES
+          gh release create "$TAG" --draft --verify-tag --title "VM artifacts $TAG" --notes-file "$RUNNER_TEMP/notes.md" ./*
+      - name: No key is left on the runner
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/signing-key.pem"

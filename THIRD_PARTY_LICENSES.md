@@ -498,6 +498,38 @@ packages inside OpenCode (`runner/opencode-bundled-licenses.json`, reviewed 2026
   and the license disclaims implied warranties of merchantability, fitness for a particular purpose
   and non-infringement; the licensor is not liable for any damages arising from its use.
 
+## Local VM artifacts (Linux guest kernel and root file system)
+
+Runner v2 (epic #969, issue #976) lets a customer run jobs on their own Linux machine in a Firecracker microVM. Unlike everything above, **these artifacts
+are meant to be delivered**: the kernel, the root file system and the Docker data disk are release files of this repository that a customer's machine
+downloads (`docs/runner.md`, "VM artifacts"). The release job makes a draft and the owner publishes it, so the duties below are met by what the
+release contains. Nothing of this is built into the app, the Dispatcher bundle or the Worker image.
+
+### Linux kernel
+
+- Package: Linux 6.18.62, unmodified source from kernel.org, pinned by version and sha256 (`docker/vm/pins.env`)
+- Source: https://www.kernel.org
+- License: GPL-2.0-only (with the Linux syscall note). The kernel is built from Firecracker's recommended guest configuration (Apache-2.0, a
+  configuration file, not code) plus our fragment (`docker/vm/kernel/config.fragment`), with no patch.
+- Source offer: every release publishes, next to `vmlinux`, the exact source tarball (`linux-<version>.tar.xz`), the final configuration
+  (`kernel.config`), Firecracker's base configuration (`fc-base.config`) and the fragment (`config.fragment`). They are release files named in the
+  signed manifest, so the source that belongs to a kernel is the one in its own release. Whoever has the kernel can build it again from them.
+
+### Root file system
+
+- Content: Ubuntu Base 26.04.1 (pinned by sha256), the Debian/Ubuntu packages that Docker (`docker.io`, `docker-buildx`) and the local additions need
+  (`docker/vm/rootfs/packages.txt`), and Sysbox 0.7.1 (`sysbox-ce`, the package and checksum of the golden snapshot). Docker, containerd and runc are
+  Apache-2.0; Sysbox is Apache-2.0; the Ubuntu base carries many licenses, GPL and LGPL among them.
+- Source offer: the packages are Ubuntu's, unmodified. `packages.txt` of each release lists every installed package with the source package and
+  source version it was built from; the sources are in Ubuntu's archive (`archive.ubuntu.com`, `deb-src`). The copyright files of the packages stay in
+  `/usr/share/doc` of the root file system.
+- Firecracker itself (Apache-2.0) is not part of a release: the installer of the local Dispatcher downloads its own pinned copy.
+
+### Data disk
+
+The data disk holds the Worker image and the agent image (`runner/Dockerfile`) as the golden snapshot builds them. Their copyleft packages are the ones
+named in "Copyleft and distribution" below, and the images are proprietary code. A release that carries them delivers them to a customer's machine.
+
 ## Copyleft and distribution
 
 The exceptions above include weak and strong copyleft packages (LGPL: sharp/libvips, python-gitlab,
@@ -506,7 +538,8 @@ service: the Worker image, the Vercel build output and the sandbox snapshots sta
 operator's own infrastructure and are never given to a customer or published, so the distribution
 duties of those licenses (source offer, relinking) are not triggered. The image is therefore not
 published to a public registry. If the image or a build were ever delivered to anyone outside Itegro
-GmbH, review these exceptions again first.
+GmbH, review these exceptions again first. The data disk of the VM artifacts ("Local VM artifacts" above) is such a delivery:
+the release job makes a **draft** and nothing is public until the owner has done that review and published it.
 
 ## Updating this file
 

@@ -41,6 +41,7 @@ jobs:
       workflows: ${{ steps.filter.outputs.workflows }}
       licenses: ${{ steps.filter.outputs.licenses }}
       website: ${{ steps.filter.outputs.website }}
+      vm: ${{ steps.filter.outputs.vm }}
     steps:
       - name: Filter changed paths
         id: filter
@@ -88,6 +89,11 @@ jobs:
             # The landing page (#696): its own job, and the repository-wide checks of the licenses job.
             website:
               - 'website/**'
+            # What the Linux VM artifacts (#976) are made from: their own files, the golden snapshot's recipe they run unchanged (the pins
+            # and scripts of the pipeline, the two prepare scripts) and their workflow. This is the one job on a KVM runner and takes
+            # about half an hour, so nothing else starts it. One brace pattern, because the quantifier "every" would read a list as "and".
+            vm:
+              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,.github/workflows/vm-artifacts.yml}'
 
   # The code-review.com landing page (website/, #696): an Astro site and its own pnpm project, deployed by
   # Cloudflare (Workers Builds, root directory website), not by a workflow. This job only proves that it
@@ -823,6 +829,21 @@ jobs:
       - name: Smoke test the Factory-Runner image
         run: docker/smoke/factory-runner.sh factory-runner:ci
 
+  # The Linux VM artifacts of Runner v2 (#976): the guest kernel (built or restored from a cache, its configuration always verified), the
+  # root file system made by the golden snapshot's own install scripts, the data disk with the Worker and agent images, a smoke boot on KVM
+  # (dockerd ready within the budget) and the manifest, signed with a throwaway key and verified. Only for a pull request that changes
+  # one of the files they are made from (the `vm` filter); signing for real and publishing are vm-artifacts-release.yml, on a tag. No secret,
+  # the read-only token.
+  vm-artifacts:
+    name: "VM artifacts: build, smoke boot (KVM)"
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.vm == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vm-artifacts.yml
+    with:
+      release: ${{ github.run_number }}
+
   actionlint:
     name: Lint workflow files
     needs: changes
@@ -839,7 +860,7 @@ jobs:
   # fails on any failed or cancelled job and accepts skipped jobs (path filter).
   ci-passed:
     name: All checks passed?
-    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, actionlint]
+    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, actionlint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
