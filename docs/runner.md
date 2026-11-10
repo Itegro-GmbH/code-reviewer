@@ -1684,7 +1684,7 @@ Vercel cannot boot our own disk, so the one recipe has two outputs: the hosted s
 |---|---|---|
 | `vmlinux` | the guest kernel: Linux 6.18.62, Firecracker's recommended 6.18 configuration plus our fragment | about 27 MiB |
 | `rootfs.ext4.zst` | the read-only root file system: Ubuntu Base 26.04.1, Docker, Sysbox, the prepare scripts, `vm-init` | about 0.2 GB packed |
-| `dockerdata.ext4.zst` | the base of the per-job copy-on-write Docker disk: the Worker image and the agent image loaded into the guest's own Docker | see "Measured" |
+| `dockerdata.ext4.zst` | the base of the per-job copy-on-write Docker disk: the Worker image and the agent image loaded into the guest's own Docker | 1.26 GB packed |
 | `kernel.config`, `fc-base.config`, `config.fragment`, `linux-<version>.tar.xz` | the **GPL source offer** of the kernel: the final configuration, its two inputs and the unmodified source | |
 | `packages.txt` | every package of the root file system with the source package and version it was built from | |
 | `vm-artifacts-manifest.json`, `vm-artifacts-manifest.sig` | the manifest (below) and its detached signature | |
@@ -1776,7 +1776,23 @@ pipeline and is a follow-up (`--require-images` turns the check on).
 
 ### Measured
 
-(Filled from the CI run of this change.)
+On GitHub's `ubuntu-24.04` runners (4 vCPU, nested virtualization; the same kind as the spike), run [42890853746](https://github.com/Itegro-GmbH/code-reviewer/actions/runs/42890853746) of the pull request (#986):
+
+| What | Value |
+|---|---|
+| kernel build, no cache | about 10 minutes (the spike: 566 s); with the cache the job takes 1 minute |
+| `vmlinux` | 27.7 MB |
+| root file system | 604 MiB tree, 788 MiB image, `rootfs.ext4.zst` 187 MB |
+| data disk | 5,901 MiB file system, `dockerdata.ext4.zst` 1,262 MB (under the 2 GiB of a release asset; the Worker and agent images are 3.4 GB of it) |
+| loading the two images into the guest (`docker load`, seed boot) | about 40 s |
+| `docker_ready` after the start of Firecracker (smoke boot, 2 vCPU, 4 GiB, serial console on) | **3.2 s** (2.6 s in the seed boot; the budget is 10 s). The spike measured 1.9 s with the overlay2 store and the static Docker bundle: the Ubuntu `docker.io` with the containerd store starts a second slower |
+| `sysbox_ready` | 3.7 s |
+| the checks of the smoke mode (root file system read-only, a `runc` container, a `sysbox-runc` container, the Worker image's `probe`) | all passed, done 8.3 s after the start |
+| the Worker's `probe` | `{"version":1,"engines":["pr-agent","opencode"],"reasons":[]}` |
+| whole `build` job (root file system, two images from the cache, data disk, smoke, manifest, signing self-test) | 7 minutes |
+| image store the guest runs | `driver=overlayfs snapshotter=io.containerd.snapshotter.v1`: the containerd store |
+| image ids of two builds of the same commit | different (`817449f0...` against `e971f782...` for the Worker image): the ids are not reproducible, see "The manifest" |
+| the signing self-test | the verifier accepted the signed manifest and refused one changed byte of the kernel (`digest_mismatch`), one changed byte of the manifest and another key (`signature_invalid`) |
 
 ### Not proven, and follow-ups
 
