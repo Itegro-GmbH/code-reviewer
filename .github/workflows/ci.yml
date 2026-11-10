@@ -842,7 +842,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/vm-artifacts.yml
     with:
-      release: ${{ github.run_number }}
+      release: ${{ fromJSON(github.run_number) }}
 
   actionlint:
     name: Lint workflow files

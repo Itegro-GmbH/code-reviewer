@@ -70,7 +70,7 @@ jobs:
         with:
           path: ${{ env.VM_WORK }}/vmlinux-cache
           key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
-      - name: The kernel's files (the source offer: source, base config, fragment, final config)
+      - name: "The kernel's files (the source offer: source, base config, fragment, final config)"
         run: |
           set -euo pipefail
           . docker/vm/pins.env
