@@ -200,6 +200,27 @@ def test_a_turn_starts_as_the_root_supervisor_with_what_only_it_needs() -> None:
 
 
 # #765-T04
+def test_a_turn_gets_the_environment_control_of_its_sandbox() -> None:
+    # #975-T02: the session of the job process reads the transport; without it a configured vsock
+    # control would fall through to "no transport" and the agent would start under the wide rule.
+    async def scenario() -> None:
+        harness = Harness(
+            **USERS,
+            engines=ALL_THREE,
+            dynamic_command=("/usr/local/bin/opencode",),
+            dynamic_ripgrep="/usr/local/bin/rg",
+            environment={**PROFILE, "RUNNER_ENVIRONMENT_CONTROL": "vsock"},
+        )
+        harness.api.claims = [implementer_claim()]
+
+        await harness.start()
+
+        assert harness.launcher.processes[0].spec.env["RUNNER_ENVIRONMENT_CONTROL"] == "vsock"
+        await harness.stop()
+
+    run(scenario)
+
+
 def test_the_engine_user_is_swept_after_a_turn() -> None:
     async def scenario() -> None:
         harness = advertising_harness()

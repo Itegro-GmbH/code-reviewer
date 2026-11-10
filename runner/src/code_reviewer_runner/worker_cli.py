@@ -72,7 +72,12 @@ def main(
     code = _run(env, sys.stdin if stdin is None else stdin)
     # #975: the sandbox's environment control hears how the Worker ended (vsock only; best effort,
     # it never changes the exit code).
-    report_worker_end(env, int(code))
+    try:
+        report_worker_end(env, int(code))
+    except Exception:  # the job's result is delivered; nothing here may change how the Worker ends
+        logging.getLogger(LOGGER_NAME).warning(
+            "environment_control: the end could not be reported", exc_info=True
+        )
     return code
 
 
