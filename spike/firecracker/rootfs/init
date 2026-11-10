@@ -48,6 +48,9 @@ fi
 mkdir -p /jobdisk/docker /jobdisk/sysbox /jobdisk/containerd /var/lib/containerd
 mount --bind /jobdisk/sysbox /var/lib/sysbox
 mount --bind /jobdisk/containerd /var/lib/containerd
+# sysbox-fs mounts its FUSE file systems under /var/lib/sysboxfs and fails the container's pre-registration when it cannot create it
+# ("FuseServer with invalid mountpoint"): on a read-only root file system the directory must exist and be writable
+mount -t tmpfs tmpfs /var/lib/sysboxfs
 /spike/agent.py event disk_ready
 
 if [ "$mode" != bare ]; then
