@@ -45,7 +45,8 @@ class _SocketListener:
         self._sock.settimeout(timeout)
         try:
             connection, _ = self._sock.accept()
-        except TimeoutError:
+        except (TimeoutError, BlockingIOError):
+            # A timeout of 0 makes the socket non-blocking: no connection is then a BlockingIOError.
             return None
         return connection
 
