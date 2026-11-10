@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The seed boot makes the data disk: the guest loads the images, and the disk must then be left clean (#976). `docker/vm/rootfs/vm-init` is a
+// The seed boot makes the data disk: the guest loads the images, and the disk must then be left clean (#976). `docker/vm/rootfs/vm-build-init` is a
 // shell script that only a KVM guest can run, so what can be checked here is its shape: the seed branch stops every daemon that writes to the
 // disk (Docker, containerd and the two Sysbox daemons), checks every unmount, and says `seed_done` only after the last one succeeded. The
 // real run is the CI job `VM artifacts`, whose seed boot fails without `seed_done`.
@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SCRIPT = readFileSync(
-  join(import.meta.dirname, "..", "..", "..", "docker/vm/rootfs/vm-init"),
+  join(import.meta.dirname, "..", "..", "..", "docker/vm/rootfs/vm-build-init"),
   "utf8",
 );
 const seed = SCRIPT.slice(

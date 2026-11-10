@@ -1,12 +1,11 @@
 #!/bin/bash
 # SPDX-License-Identifier: LicenseRef-Proprietary
 #
-# PID 1's child in the guest (the kernel starts `/usr/bin/docker-init` = tini, which reaps and runs this). The placeholder of #976 for the
-# real vm-init (#977): the same order the hosted VM has, and enough of it for the build and the smoke boot. Mounts, the job disk (Docker's
-# and Sysbox's state live on it), the cgroup layout, then the SAME two scripts the hosted VM runs: vm-prepare.sh (cgroups + dockerd) and
-# sysbox-prepare.sh (the Sysbox daemons). It reports to the console as `VMINIT <name> uptime=<s> [key=value ...]`, one line each; #977
-# reports the same milestones over vsock. The mode comes from the kernel command line, `vm.mode=`:
-#   run    prepare, then wait (what a job's VM does until vm-init takes over)
+# The init of the BUILD-ONLY boots (#976, #978): `vm.mode=seed` (makes the data disk) and `vm.mode=smoke` (the release's own test). It is what
+# `vm-boot` hands over to after the mounts, the job disk and the cgroup controllers (docker/vm/rootfs/vm-boot, which every boot starts with),
+# and the only place that still runs `vm-prepare.sh` and `sysbox-prepare.sh` in the guest: a job's VM (`vm.mode=run`) never gets here, its
+# vm-init (runner/vm-init/) runs the prepare scripts itself, in the hosted order. It reports to the console as
+# `VMINIT <name> uptime=<s> [key=value ...]`, one line each; the build and the smoke boot read them (dispatcher/src/vm-artifacts/console.ts).
 #   seed   prepare, load the image archive of the second extra disk into Docker, stop Docker cleanly, power off (builds the data disk)
 #   smoke  prepare, run the checks below, power off (the release's own test)
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
@@ -36,48 +35,11 @@ seed_unmount() {
   umount -R "$1" 2> /run/umount.err || seed_fail reason=umount "path=$1" "tail=$(tail -n 2 /run/umount.err | tr '\n ' '|_')"
 }
 
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
-mkdir -p /dev/pts /dev/shm
-mount -t devpts devpts /dev/pts
-mount -t tmpfs -o mode=1777 tmpfs /dev/shm
-mount -t tmpfs tmpfs /run
-mount -t tmpfs -o mode=1777 tmpfs /tmp
-mount -t tmpfs -o mode=1777 tmpfs /var/tmp
-mount -t tmpfs tmpfs /var/log
-mount -t tmpfs tmpfs /var/cache
-mount -t tmpfs -o mode=0700 tmpfs /root
-mount -t cgroup2 none /sys/fs/cgroup
+mode=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vm.mode=//p' | head -n 1)
+mode=${mode:-smoke}
 
-getarg() { tr ' ' '\n' < /proc/cmdline | sed -n "s/^$1=//p" | head -n 1; }
-mode=$(getarg vm.mode)
-mode=${mode:-run}
-
-: > /run/resolv.conf
-hostname code-reviewer-vm
-ip link set lo up
-say init_up mode="$mode"
-
-# The job disk: Docker's state, the containerd image store and Sysbox's state live on it, bound to the places the daemons use. The hosted
-# daemon.json is used as it is (no data-root): Docker 29's containerd image store ignores `data-root` and keeps its images under
-# /var/lib/containerd, so the disk is mounted over the three default directories and nothing in the daemon's configuration differs.
-mkdir -p /jobdisk
-mount -t ext4 -o noatime /dev/vdb /jobdisk || { say disk_failed; power_off; }
-for d in docker containerd sysbox; do
-  mkdir -p "/jobdisk/$d" "/var/lib/$d"
-  mount --bind "/jobdisk/$d" "/var/lib/$d"
-done
-# sysbox-fs mounts its FUSE file systems under /var/lib/sysboxfs and fails the container's pre-registration when it cannot create it
-# ("FuseServer with invalid mountpoint"): on a read-only root file system the directory must exist and be writable.
-mount -t tmpfs tmpfs /var/lib/sysboxfs
-say disk_ready
-
-# vm-prepare.sh (the hosted VM's script) starts by DISabling cpuset/cpu/pids in the root's subtree_control: it expects the layout the
-# platform's init made. A kernel that starts with no controller enabled makes that write fail (EINVAL), so enable them first.
-for controller in cpuset cpu io memory pids; do
-  echo "+$controller" > /sys/fs/cgroup/cgroup.subtree_control || echo "vm-init: cgroup controller $controller cannot be enabled" >&2
-done
+# vm-boot did the mounts and the job disk; what remains is the daemons: vm-prepare.sh (the hosted VM's script: cgroup layout, dockerd) and
+# sysbox-prepare.sh (the two Sysbox daemons).
 if vm-prepare.sh; then say docker_ready; else say docker_failed; fi
 if sysbox-prepare.sh; then say sysbox_ready; else say sysbox_failed; fi
 
@@ -153,7 +115,7 @@ case "$mode" in
     power_off
     ;;
   *)
-    say ready
-    while :; do sleep 3600; done
+    say unknown_mode "mode=$mode"
+    power_off
     ;;
 esac

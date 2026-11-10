@@ -11,9 +11,13 @@
  */
 export const RELEASE_BOOT_ARGS =
   "reboot=k panic=1 pci=off i8042.noaux i8042.nokbd cgroup_no_v1=all root=/dev/vda ro rootfstype=ext4 8250.nr_uarts=0 quiet loglevel=0";
-/** PID 1 and what it runs. `docker-init` is tini, from the root file system: it reaps, vm-init works. */
+/**
+ * PID 1 and what it runs. `docker-init` is tini, from the root file system: it reaps, `vm-boot` (docker/vm/rootfs/vm-boot) prepares the guest
+ * (mounts, the job disk, the cgroup controllers, the network) and then, by `vm.mode`, starts vm-init (`run`: a job's VM) or hands over to
+ * `vm-build-init` (`seed`, `smoke`: the build-only boots).
+ */
 export const RELEASE_INIT_COMMAND =
-  "/usr/bin/docker-init -- /usr/local/sbin/vm-init";
+  "/usr/bin/docker-init -- /usr/local/sbin/vm-boot";
 
 export type BootMode = "run" | "seed" | "smoke";
 

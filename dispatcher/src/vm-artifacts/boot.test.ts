@@ -32,7 +32,7 @@ describe("the kernel command line", () => {
     expect(line).toContain("root=/dev/vda ro rootfstype=ext4");
     expect(line).toContain("reboot=k");
     expect(line).toContain("init=/usr/bin/docker-init");
-    expect(line.endsWith("-- /usr/local/sbin/vm-init")).toBe(true);
+    expect(line.endsWith("-- /usr/local/sbin/vm-boot")).toBe(true);
     expect(line).toContain("vm.mode=smoke");
   });
 
@@ -56,7 +56,7 @@ describe("the kernel command line", () => {
 
     expect(line.indexOf("vm.mode=smoke")).toBeLessThan(line.indexOf(" -- "));
     expect(RELEASE_INIT_COMMAND).toBe(
-      "/usr/bin/docker-init -- /usr/local/sbin/vm-init",
+      "/usr/bin/docker-init -- /usr/local/sbin/vm-boot",
     );
   });
 });
