@@ -8,6 +8,7 @@ import {
   kernelCommandLine,
 } from "./boot.ts";
 import {
+  evaluateSeed,
   evaluateSmoke,
   parseConsoleLine,
   type ConsoleEvent,
@@ -237,5 +238,58 @@ describe("the verdict of the smoke boot", () => {
     expect(evaluateSmoke(without, options).problems).toEqual([
       "check worker_probe: missing",
     ]);
+  });
+});
+
+describe("the verdict of the seed boot", () => {
+  const id = (letter: string): string => `sha256:${letter.repeat(64)}`;
+  const seeded: ConsoleEvent[] = [
+    ev("docker_ready", 2),
+    ev("sysbox_ready", 3),
+    ev("images_loaded", 40),
+    ev("image", 41, { role: "worker", tag: "w:golden", id: id("a") }),
+    ev("image", 41, { role: "agent", tag: "a:golden", id: id("b") }),
+    ev("store", 41, { driver: "overlayfs", snapshotter: "io.containerd" }),
+    ev("seed_done", 50),
+  ];
+
+  // #976-T03
+  it("passes when the images were loaded, both have an id, and the guest finished with seed_done", () => {
+    expect(evaluateSeed(seeded)).toEqual({ ok: true, problems: [] });
+  });
+
+  // #976-T03
+  it("fails without seed_done: the data disk is not known to be clean", () => {
+    const result = evaluateSeed(seeded.filter((e) => e.name !== "seed_done"));
+
+    expect(result.problems).toContain("seed_done: missing");
+  });
+
+  // #976-T03
+  it("fails when the guest reports seed_failed, even when seed_done follows, and says why", () => {
+    const result = evaluateSeed([
+      ...seeded.slice(0, -1),
+      ev("seed_failed", 49, { reason: "umount", path: "/var/lib/sysbox" }),
+      ev("seed_done", 50),
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.problems).toContain(
+      "seed_failed: reason=umount path=/var/lib/sysbox",
+    );
+  });
+
+  // #976-T03
+  it("fails for an image without an id, a docker or Sysbox that did not start, and a disk that did not mount", () => {
+    const without = seeded.filter(
+      (e) => !(e.name === "image" && e.fields.role === "agent"),
+    );
+
+    expect(evaluateSeed(without).problems).toContain("image agent: no id");
+    for (const failure of ["docker_failed", "sysbox_failed", "disk_failed"])
+      expect(
+        evaluateSeed([...seeded, ev(failure, 2)]).problems,
+        failure,
+      ).toContain(failure);
   });
 });

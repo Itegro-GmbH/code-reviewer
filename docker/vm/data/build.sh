@@ -29,8 +29,11 @@ node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON "$REPO_DIR/dispatcher/src/vm
   --work "$work/seed-boot" --vcpus 4 --mem 6144 --timeout-s 1500 \
   --images-out "$out/images.json" --events-out "$work/seed-boot/events.json"
 
-log "shrink the disk to its minimum: a per-job copy is grown (resize2fs on the file) to the quota before the start"
-# e2fsck exits 1 when it corrected something (a journal replayed): fine; 2 and above is a file system that is not.
+log "check the disk the guest left, then shrink it to its minimum: a per-job copy is grown (resize2fs on the file) to the quota before the start"
+# The seed boot says seed_done only after it unmounted the disk without an error, so the file system must be clean as it is: a read-only check
+# that finds anything (a journal to replay, an orphan) fails the build instead of being repaired quietly.
+e2fsck -fn "$work/data.ext4" > "$work/e2fsck-readonly.log" 2>&1 || { cat "$work/e2fsck-readonly.log"; echo "the data disk was not left clean" >&2; exit 1; }
+# resize2fs wants a file system that e2fsck -f has just checked (this one marks it so; there is nothing to repair).
 e2fsck -fy "$work/data.ext4" > "$work/e2fsck.log" || [ $? -le 1 ] || { cat "$work/e2fsck.log"; exit 1; }
 resize2fs -M "$work/data.ext4" 2>&1 | tail -n 1
 blocks=$(dumpe2fs -h "$work/data.ext4" 2> /dev/null | awk -F: '/^Block count/ {gsub(/ /,"",$2); print $2}')

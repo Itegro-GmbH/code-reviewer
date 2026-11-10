@@ -39,6 +39,34 @@ export const REQUIRED_CHECKS = [
   "worker_probe",
 ] as const;
 
+/**
+ * The acceptance of the seed boot (it makes the data disk): the images were loaded and have an id, and the guest ended with `seed_done`, which it
+ * says only after it stopped every daemon and took every mount of the disk down without an error. A `seed_failed` fails it whatever follows.
+ */
+export function evaluateSeed(events: readonly ConsoleEvent[]): SmokeVerdict {
+  const problems: string[] = [];
+  for (const failed of events.filter((event) => event.name === "seed_failed"))
+    problems.push(
+      `seed_failed: ${
+        Object.entries(failed.fields)
+          .map(([key, value]) => `${key}=${value}`)
+          .join(" ") || "no reason"
+      }`,
+    );
+  for (const failure of ["docker_failed", "sysbox_failed", "disk_failed"])
+    if (events.some((event) => event.name === failure)) problems.push(failure);
+  if (!events.some((event) => event.name === "seed_done"))
+    problems.push("seed_done: missing");
+  for (const role of ["worker", "agent"] as const) {
+    const id = events.find(
+      (event) => event.name === "image" && event.fields.role === role,
+    )?.fields.id;
+    if (!id || !/^sha256:[0-9a-f]{64}$/.test(id))
+      problems.push(`image ${role}: no id`);
+  }
+  return { ok: problems.length === 0, problems };
+}
+
 export type SmokeOptions = {
   /** From the start of the Firecracker process to `docker_ready` (the spike measured 1.4 to 1.9 s on a nested-virtualization runner). */
   dockerReadyBudgetMs: number;

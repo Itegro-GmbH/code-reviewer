@@ -18,7 +18,7 @@ import { createInterface } from "node:readline";
 import { parseArgs } from "node:util";
 import { firecrackerConfig } from "./boot.ts";
 import type { BootMode } from "./boot.ts";
-import { evaluateSmoke, parseConsoleLine } from "./console.ts";
+import { evaluateSeed, evaluateSmoke, parseConsoleLine } from "./console.ts";
 import type { ConsoleEvent } from "./console.ts";
 
 const { values } = parseArgs({
@@ -108,8 +108,7 @@ console.error(
 
 const problems: string[] = [];
 if (mode === "seed") {
-  if (!events.some((event) => event.name === "seed_done"))
-    problems.push("seed_done: missing");
+  problems.push(...evaluateSeed(events).problems);
   const image = (role: string): { tag: string; id: string } | undefined => {
     const event = events.find(
       (e) => e.name === "image" && e.fields.role === role,
@@ -119,10 +118,6 @@ if (mode === "seed") {
   };
   const worker = image("worker");
   const agent = image("agent");
-  if (!worker || !/^sha256:[0-9a-f]{64}$/.test(worker.id))
-    problems.push("image worker: no id");
-  if (!agent || !/^sha256:[0-9a-f]{64}$/.test(agent.id))
-    problems.push("image agent: no id");
   const store = events.find((event) => event.name === "store");
   console.error(
     `boot-main: image store ${JSON.stringify(store?.fields ?? {})}`,
