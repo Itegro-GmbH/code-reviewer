@@ -119,6 +119,12 @@ CONFIG_IP6_NF_FILTER=y
 CONFIG_IP6_NF_NAT=y
 CONFIG_IP6_NF_TARGET_MASQUERADE=y
 
+## --- no 32-bit system calls (review of #977): Docker's default seccomp profile, which the agent's container gets, allows `socketcall`
+## and denies AF_VSOCK only as an argument of `socket`. With IA32 or X32 emulation a 32-bit binary or `int 0x80` in that container
+## could open a vsock socket to the host's ports 5100/5101. Without the emulation that path does not exist.
+CONFIG_IA32_EMULATION=n
+CONFIG_X86_X32_ABI=n
+
 ## --- host <-> guest: vsock (the start payload and the exit report), virtio devices (Firecracker has no PCI)
 CONFIG_VSOCKETS=y
 CONFIG_VIRTIO_VSOCKETS=y

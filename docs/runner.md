@@ -1775,7 +1775,9 @@ a store that did not write to the disk would not leave images there.
 `docker/vm/kernel`: the pinned source, Firecracker's recommended 6.18 configuration (tag v1.17.0) and `config.fragment` (the 23 options the spike found, plus the whole list of what
 Docker, Sysbox and the VM need, so that a change of the base cannot drop one silently) are merged with `merge_config.sh` and `make olddefconfig`. **`verify-config.sh` fails when one
 option of the fragment did not end up with the requested value** (an unmet dependency drops an option silently, which is how a hand-written fragment fails), and when `RT_GROUP_SCHED` is on: with it the `cpu` controller cannot be enabled
-for child cgroups and `vm-prepare.sh` fails (`cgroup_root_busy`). The check runs on every build, in seconds, and again on the `.config` of the kernel that is published, so a kernel restored from the CI cache is held to
+for child cgroups and `vm-prepare.sh` fails (`cgroup_root_busy`); and when IA32 or X32 emulation is on (`IA32_EMULATION=n`, `X86_X32_ABI=n`,
+from the review of #977): Docker's default seccomp profile, which the agent's container gets, allows `socketcall` and denies AF_VSOCK only
+as an argument of `socket`, so with 32-bit system calls the agent could open a vsock socket to the host's ports. The check runs on every build, in seconds, and again on the `.config` of the kernel that is published, so a kernel restored from the CI cache is held to
 the same rule. The build is cached by the fragment and the pins (about 10 minutes on 4 cores without the cache).
 
 **No serial console in a release.** The console costs 0.3 to 0.4 s of every boot (spike Q7). The kernel keeps the 8250 driver (the build and the smoke boot read the guest's events from the console), and the release's command line,

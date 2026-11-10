@@ -56,6 +56,23 @@ describe("the kernel configuration fragment", () => {
     );
   });
 
+  // #976-T04 (review of #977): Docker's default seccomp profile allows `socketcall` and denies AF_VSOCK only as an argument of
+  // `socket`, so a 32-bit call in the agent's container could open a vsock socket to the host when the kernel emulates IA32 or X32.
+  it("turns IA32 and X32 emulation off, so no 32-bit call can reach the host's vsock ports", () => {
+    for (const name of ["CONFIG_IA32_EMULATION", "CONFIG_X86_X32_ABI"])
+      expect(options.find((o) => o.name === name)?.value, name).toBe("n");
+  });
+
+  // #976-T04
+  it("refuses a kernel that still emulates IA32", () => {
+    const run = verify([
+      ...finished.filter((line) => !line.includes("CONFIG_IA32_EMULATION")),
+      "CONFIG_IA32_EMULATION=y",
+    ]);
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("IA32");
+  });
+
   // #976-T04
   it("asks for what Docker, Sysbox and the job disk need", () => {
     const wanted = [
