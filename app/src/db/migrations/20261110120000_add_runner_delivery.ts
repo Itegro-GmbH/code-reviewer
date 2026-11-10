@@ -60,10 +60,7 @@ export const migration: Migration = {
       .addColumn("last_code", "text")
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("updated_at", "text", (column) => column.notNull())
-      .addPrimaryKeyConstraint("job_rings_pkey", [
-        "job_id",
-        "runner_id",
-      ])
+      .addPrimaryKeyConstraint("job_rings_pkey", ["job_id", "runner_id"])
       .addCheckConstraint(
         "job_rings_state_check",
         sql`state in ('pending', 'acked', 'stopped')`,

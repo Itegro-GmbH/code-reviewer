@@ -148,7 +148,11 @@ describe("the signing secret of a dispatcher", () => {
 
   it("is kept encrypted, readable only for the runner it was made for and only with the app's secret", () => {
     const { secret } = mintDeliverySecret();
-    const stored = sealDeliverySecret("app-secret-for-tests", "runner-1", secret);
+    const stored = sealDeliverySecret(
+      "app-secret-for-tests",
+      "runner-1",
+      secret,
+    );
 
     expect(stored).not.toContain(secret);
     expect(openDeliverySecret("app-secret-for-tests", "runner-1", stored)).toBe(

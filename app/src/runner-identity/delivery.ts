@@ -20,8 +20,7 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 /** What a dispatcher announced; `poll` is the default and the meaning of a missing `delivery`. */
 export type DeliveryAnnouncement =
-  | { mode: "poll" }
-  | { mode: "webhook"; url: string; rotateSecret: boolean };
+  { mode: "poll" } | { mode: "webhook"; url: string; rotateSecret: boolean };
 
 export type DeliveryCheck =
   | { ok: true; value: DeliveryAnnouncement }
@@ -134,7 +133,8 @@ export function checkDelivery(value: unknown): DeliveryCheck {
       fields: [{ field: "delivery.mode", code: "invalid" }],
     };
   const issues: FieldIssue[] = [];
-  if (url === undefined) issues.push({ field: "delivery.url", code: "required" });
+  if (url === undefined)
+    issues.push({ field: "delivery.url", code: "required" });
   else if (typeof url !== "string" || !deliveryUrlIsUsable(url))
     issues.push({ field: "delivery.url", code: "invalid" });
   if (rotateSecret !== undefined && typeof rotateSecret !== "boolean")

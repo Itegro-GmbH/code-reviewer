@@ -106,11 +106,7 @@ export type RunnerDispatchesRepository = {
    * The pairs of the waiting jobs a freed slot of `group` can serve: queued, due, requiring only labels of the group, whose last ring
    * was answered "not now" (`WAITING_DISPATCH_CODES`, `busy` among them) at least `WAITING_MIN_GAP_MS` ago, whatever time their row says.
    */
-  listWaiting(
-    now: Date,
-    limit: number,
-    group: LabelGroup,
-  ): Promise<RingPair[]>;
+  listWaiting(now: Date, limit: number, group: LabelGroup): Promise<RingPair[]>;
   /** The labels and the holder of jobs whose claim ended, for the groups they free a slot in. Jobs that are none of a runner environment's are left out. */
   endedGroups(jobIds: readonly string[]): Promise<EndedJobGroup[]>;
   /** The webhook delivery of the customer's runner that holds the job, or undefined when none does (a polling runner, a hosted job). */
