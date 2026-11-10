@@ -11,6 +11,7 @@
 // both are safe to repeat, and every send is fenced in its row.
 import type { RunnerQueue } from "../jobs/runner-queue.ts";
 import type { TryLockResult } from "../db/try-lock.ts";
+import type { RingService } from "./rings.ts";
 import { DEFAULT_SEND_LIMIT, type DispatchService } from "./service.ts";
 
 /** The most often one process does it. */
@@ -30,6 +31,8 @@ export type OpportunisticDependencies = {
   queue: Pick<RunnerQueue, "expireStaleJobs">;
   /** Absent in poll mode: nothing is sent, leases are still released. */
   dispatch?: Pick<DispatchService, "sendDue">;
+  /** #972: the doorbell to the webhook dispatchers of customers; absent in poll mode. */
+  rings?: Pick<RingService, "ringDue">;
   /** #405: brings the check runs of the jobs that just ended or went back to the queue in line with GitHub. */
   checks?: {
     reconcileDue(options?: { budgetMs?: number }): Promise<{ synced: number }>;
@@ -65,6 +68,10 @@ export function createOpportunisticMaintenance(
           await deps.queue.expireStaleJobs();
           // A job queued a moment ago is still being sent by the request that queued it.
           await deps.dispatch?.sendDue(DEFAULT_SEND_LIMIT, {
+            minAgeMs: OPPORTUNISTIC_MIN_JOB_AGE_MS,
+          });
+          // The same for the pairs (job, dispatcher) of customers' webhook dispatchers; a full dispatcher's rest is far longer than this.
+          await deps.rings?.ringDue(DEFAULT_SEND_LIMIT, {
             minAgeMs: OPPORTUNISTIC_MIN_JOB_AGE_MS,
           });
           // A write token the end of its turn could not switch off is tried again until it expires (#790).

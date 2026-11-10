@@ -14,6 +14,7 @@ import {
 import {
   dispatchHook,
   runAfterResponse,
+  ringEndedClaims,
   stopEndedClaims,
 } from "../dispatch/shared.ts";
 import { getWriteTokens } from "../runner-api/claimed-keys-shared.ts";
@@ -114,6 +115,8 @@ function createRunnerQueueOfTheServer(): RunnerQueue {
     // #493: and, where billing is on, the wall clock of a job that ran on a runner is recorded (no VM to measure).
     onClaimsEnded: (jobIds) => {
       stopEndedClaims(jobIds);
+      // #972: a slot freed in the label groups of these jobs: the waiting jobs those groups can take are rung again.
+      ringEndedClaims(jobIds);
       // #790: the write tokens of an ended turn of the Implementer, however it ended (a result, the reaper, a stop, the timeout).
       revokeTokensOfEndedClaims(jobIds);
       recordWallClocks(jobIds);

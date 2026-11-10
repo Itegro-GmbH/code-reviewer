@@ -26,7 +26,7 @@ import {
 import type { Database } from "../db/schema.ts";
 import { correctLateMinutes } from "../billing/late-minutes.ts";
 import { VM_NAME_PATTERN } from "../runner-api/contract.ts";
-import type { WebhookDispatchConfig } from "./config.ts";
+import type { DispatchKey, WebhookDispatchConfig } from "./config.ts";
 import { buildStopRequest } from "./request.ts";
 import { parseRetryAfter, type DispatchFetch } from "./send.ts";
 
@@ -120,6 +120,14 @@ async function namedVms(response: Response): Promise<string[]> {
   }
 }
 
+/** Where one stop call goes and what signs it. */
+export type StopTarget = {
+  /** The address of the stop call (`stopUrlOf` of the dispatcher's address), or null for one that has none. */
+  url: string | null;
+  key: DispatchKey;
+  bypassToken?: string;
+};
+
 export type StopService = {
   /** Stops the VMs of these jobs, best effort. Never rejects. */
   stopJobs(jobIds: readonly string[]): Promise<void>;
@@ -139,6 +147,18 @@ export function createStopService(options: {
   log?: StopLog;
   /** #493: where the end of a VM is stored; the VM runs of a job's workspace. */
   vmRuns?: (workspaceId: string) => JobVmRunsRepository;
+  /**
+   * #972: the delivery of the customer's webhook dispatcher that holds the job (the runner of the claim), with its own key; undefined when
+   * none does. Such a dispatcher is told to stop its VM like the platform's, and a serverless one learns from it that a slot is free.
+   */
+  customerTarget?: (jobId: string) => Promise<
+    | {
+        /** The address of its doorbell. */
+        url: string;
+        key: DispatchKey;
+      }
+    | undefined
+  >;
 }): StopService {
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? randomUUID;
@@ -155,23 +175,33 @@ export function createStopService(options: {
     options.vmRuns ??
     ((workspaceId: string) =>
       createJobVmRunsRepository(options.db, workspaceId, now));
-  const url = stopUrlOf(config.url);
+  const platform: StopTarget = {
+    url: stopUrlOf(config.url),
+    key: config.currentKey,
+    ...(config.bypassToken === undefined
+      ? {}
+      : { bypassToken: config.bypassToken }),
+  };
 
   /** One call, whose answer is reduced to what decides the next step. The body of the answer is never read. */
-  async function call(jobId: string, stopId: string): Promise<StopAnswer> {
+  async function call(
+    target: StopTarget,
+    jobId: string,
+    stopId: string,
+  ): Promise<StopAnswer> {
     const sentAt = now();
     const request = buildStopRequest({
-      key: config.currentKey,
-      ...(config.bypassToken === undefined
+      key: target.key,
+      ...(target.bypassToken === undefined
         ? {}
-        : { bypassToken: config.bypassToken }),
+        : { bypassToken: target.bypassToken }),
       jobId,
       stopId,
       now: sentAt,
     });
     const signal = AbortSignal.timeout(timeoutMs);
     try {
-      const response = await send(url as string, {
+      const response = await send(target.url as string, {
         method: "POST",
         headers: request.headers,
         body: request.body,
@@ -236,24 +266,58 @@ export function createStopService(options: {
     }
   }
 
-  async function stopOne(jobId: string): Promise<void> {
-    const row = await dispatches.get(jobId);
-    // No Dispatcher acknowledged this job: a self-hosted runner's job, or one that was never dispatched.
-    if (row === undefined || row.ackedAt === null) return;
-    if (url === null) return fail(jobId, "DISPATCH_STOP_URL_INVALID");
+  /** The call and its repeats for a transient failure, with the same `stopId`: a stop that arrived twice is a replay the receiver ignores. */
+  async function callWithRetries(
+    target: StopTarget,
+    jobId: string,
+  ): Promise<StopAnswer> {
     const stopId = newId();
-    let answer = await call(jobId, stopId);
+    let answer = await call(target, jobId, stopId);
     for (const delay of retryDelays) {
       if (answer.kind !== "transient" && answer.kind !== "unreachable") break;
       const asked = answer.kind === "transient" ? answer.retryAfterMs : null;
       await sleep(
         Math.max(delay, Math.min(asked ?? 0, STOP_RETRY_AFTER_CAP_MS)),
       );
-      answer = await call(jobId, stopId);
+      answer = await call(target, jobId, stopId);
     }
+    return answer;
+  }
+
+  async function stopOne(jobId: string): Promise<void> {
+    const row = await dispatches.get(jobId);
+    // No wake-up of the platform's Dispatcher was acknowledged: a customer's dispatcher may hold the job (#972), else it is a job that was
+    // never dispatched.
+    if (row === undefined || row.ackedAt === null)
+      return stopCustomersOne(jobId);
+    if (platform.url === null) return fail(jobId, "DISPATCH_STOP_URL_INVALID");
+    const answer = await callWithRetries(platform, jobId);
     switch (answer.kind) {
       case "done":
         return recordEnd(jobId, answer.vms);
+      case "unsupported":
+        return fail(jobId, "DISPATCH_STOP_UNSUPPORTED", 404);
+      case "rejected":
+        return fail(jobId, "DISPATCH_STOP_REJECTED", answer.status);
+      case "transient":
+      case "unreachable":
+        return fail(jobId, "DISPATCH_STOP_FAILED");
+    }
+  }
+
+  /**
+   * #972: the job is held by a customer's runner that announced a webhook: its dispatcher gets the stop call, signed with its own secret.
+   * The VMs it names are its own and not billed here (a runner's jobs are not), so nothing of the answer is stored.
+   */
+  async function stopCustomersOne(jobId: string): Promise<void> {
+    const holder = await options.customerTarget?.(jobId);
+    if (holder === undefined) return;
+    const url = stopUrlOf(holder.url);
+    if (url === null) return fail(jobId, "DISPATCH_STOP_URL_INVALID");
+    const answer = await callWithRetries({ url, key: holder.key }, jobId);
+    switch (answer.kind) {
+      case "done":
+        return;
       case "unsupported":
         return fail(jobId, "DISPATCH_STOP_UNSUPPORTED", 404);
       case "rejected":

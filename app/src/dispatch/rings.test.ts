@@ -383,8 +383,8 @@ describe("ringing the webhook dispatchers of customers", () => {
     await service.onEnqueued({
       status: "existing",
       job: { id: "job-1", status: "queued" } as Job,
-      reason: "already_queued",
-    } as EnqueueResult);
+      reason: "same_delivery",
+    });
     await service.onEnqueued({
       status: "created",
       job: { id: "job-1", status: "running" } as Job,

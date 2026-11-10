@@ -7,7 +7,7 @@
 // matching job itself. A job goes to every dispatcher that matches (the workspace and every label the job requires); whoever claims first
 // wins and the others get 204 from the claim. A dispatcher that polls is never rung.
 //
-// Three moments ring, and all three are idempotent in the row of the pair (`runner_job_dispatches`, a compare and set on `next_dispatch_at`
+// Three moments ring, and all three are idempotent in the row of the pair (`job_rings`, a compare and set on `next_dispatch_at`
 // as for the platform's dispatcher, so two instances never ring the same pair twice, and the same back-off applies):
 //
 // - `onEnqueued`: a job was enqueued. The hook of the queue, after the response, never throws.

@@ -24,6 +24,7 @@ import {
 import {
   DispatchConfigError,
   getDispatchService,
+  getRingService,
   runAfterResponse,
 } from "./shared.ts";
 import { loadSweepSettings } from "./sweep-settings.ts";
@@ -33,6 +34,15 @@ type Env = Readonly<Record<string, string | undefined>>;
 function serviceOrUndefined(env: Env) {
   try {
     return getDispatchService(env);
+  } catch (error) {
+    if (error instanceof DispatchConfigError) return undefined;
+    throw error;
+  }
+}
+
+function ringServiceOrUndefined(env: Env) {
+  try {
+    return getRingService(env);
   } catch (error) {
     if (error instanceof DispatchConfigError) return undefined;
     throw error;
@@ -70,10 +80,14 @@ function getMaintenance(env: Env): OpportunisticMaintenance | undefined {
   const dispatch = serviceOrUndefined(env);
   // Poll mode: no Dispatcher, and the long-lived server has its own timers.
   if (dispatch === undefined) return undefined;
+  const rings = getCapabilities().has("implementer")
+    ? ringServiceOrUndefined(env)
+    : undefined;
   maintenance ??= createOpportunisticMaintenance({
     withLock: (work) => tryWithLock(getDatabase(), OPPORTUNISTIC_LOCK, work),
     queue: getRunnerQueue(),
     dispatch,
+    ...(rings === undefined ? {} : { rings }),
     checks: getCheckRunService(),
     ...(getCapabilities().has("implementer")
       ? {

@@ -487,7 +487,7 @@ export interface JobDispatchesTable {
  * #972: where the doorbell of one job stands for one webhook dispatcher of a customer (src/dispatch/README.md). The columns are those of
  * `job_dispatches`, which keeps the platform's own dispatcher; a pair is made when a job that dispatcher could take is rung for.
  */
-export interface RunnerJobDispatchesTable {
+export interface JobRingsTable {
   job_id: string;
   runner_id: string;
   /** `pending`, `acked` or `stopped` (`DISPATCH_STATES`). */
@@ -1670,7 +1670,7 @@ export interface Database {
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;
   job_dispatches: JobDispatchesTable;
-  runner_job_dispatches: RunnerJobDispatchesTable;
+  job_rings: JobRingsTable;
   refusal_notices: RefusalNoticesTable;
   job_check_runs: JobCheckRunsTable;
   job_vm_runs: JobVmRunsTable;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // How a dispatcher learns of a job (#972, Runner v2): the delivery a runner announced (`runners.delivery_*`) and where the doorbell of
-// each (job, dispatcher) pair stands (`runner_job_dispatches`). The platform's own dispatcher keeps `job_dispatches`, one row per job,
+// each (job, dispatcher) pair stands (`job_rings`). The platform's own dispatcher keeps `job_dispatches`, one row per job,
 // and its address and key come from the app's settings (`RUNNER_WEBHOOK_URL` and the signing secret), which is the seed of its delivery.
 //
 // Expand only, safe for the version that is still running and for the live database: four columns on `runners` with a default (`poll`,
@@ -37,13 +37,13 @@ export const migration: Migration = {
       .execute();
 
     await db.schema
-      .createTable("runner_job_dispatches")
+      .createTable("job_rings")
       .addColumn("job_id", "text", (column) =>
         column.notNull().references("jobs.id").onDelete("cascade"),
       )
-      .addColumn("runner_id", "text", (column) =>
-        column.notNull().references("runners.id").onDelete("cascade"),
-      )
+      // No foreign key to `runners`: a runner is revoked, never deleted, and a table that points at it would stop the migration that
+      // made `runners` from being taken back. The rows of a job go with the job.
+      .addColumn("runner_id", "text", (column) => column.notNull())
       .addColumn("state", "text", (column) =>
         column.notNull().defaultTo("pending"),
       )
@@ -60,31 +60,31 @@ export const migration: Migration = {
       .addColumn("last_code", "text")
       .addColumn("created_at", "text", (column) => column.notNull())
       .addColumn("updated_at", "text", (column) => column.notNull())
-      .addPrimaryKeyConstraint("runner_job_dispatches_pkey", [
+      .addPrimaryKeyConstraint("job_rings_pkey", [
         "job_id",
         "runner_id",
       ])
       .addCheckConstraint(
-        "runner_job_dispatches_state_check",
+        "job_rings_state_check",
         sql`state in ('pending', 'acked', 'stopped')`,
       )
       .addCheckConstraint(
-        "runner_job_dispatches_counts_check",
+        "job_rings_counts_check",
         sql`attempts >= 0 and consecutive_failures >= 0`,
       )
       .execute();
 
     // The sweep looks for the rows that are due; a stopped row never is.
     await db.schema
-      .createIndex("runner_job_dispatches_due")
-      .on("runner_job_dispatches")
+      .createIndex("job_rings_due")
+      .on("job_rings")
       .column("next_dispatch_at")
       .where(sql.ref("state"), "<>", "stopped")
       .execute();
-    // The foreign key to the runner is looked at when a runner goes, and the doorbells of one dispatcher are listed by it.
+    // The doorbells of one dispatcher are listed by it.
     await db.schema
-      .createIndex("runner_job_dispatches_runner")
-      .on("runner_job_dispatches")
+      .createIndex("job_rings_runner")
+      .on("job_rings")
       .column("runner_id")
       .execute();
 
@@ -92,7 +92,7 @@ export const migration: Migration = {
   },
 
   async down(db) {
-    await db.schema.dropTable("runner_job_dispatches").execute();
+    await db.schema.dropTable("job_rings").execute();
     await db.schema
       .alterTable("runners")
       .dropColumn("delivery_mode")

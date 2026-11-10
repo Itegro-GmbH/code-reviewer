@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// Access to `runner_job_dispatches` (#972): where the doorbell of one job stands for ONE webhook dispatcher of a customer, and which
+// Access to `job_rings` (#972): where the doorbell of one job stands for ONE webhook dispatcher of a customer, and which
 // (job, dispatcher) pairs there are to ring. The platform's own dispatcher keeps `job_dispatches` (one row per job); a customer's
 // dispatchers are many, so a row here is a pair. Instance level, like `job-dispatches-repository.ts`: the sender, the sweep and the events
 // serve the whole instance and work from ids they hold. The table holds ids and counters, no repository data. The rules (when to ring,
@@ -199,7 +199,7 @@ export function createRunnerDispatchesRepository(
         and r.delivery_url is not null
         and r.delivery_key_id is not null
         and r.delivery_secret is not null
-      left join runner_job_dispatches as d on d.job_id = j.id and d.runner_id = r.id
+      left join job_rings as d on d.job_id = j.id and d.runner_id = r.id
       where j.status = 'queued'
         and j.command = 'review'
         and cardinality(${REQUIRED}) > 0
@@ -213,7 +213,7 @@ export function createRunnerDispatchesRepository(
   return {
     async get(jobId, runnerId) {
       const row = await db
-        .selectFrom("runner_job_dispatches")
+        .selectFrom("job_rings")
         .selectAll()
         .where("job_id", "=", jobId)
         .where("runner_id", "=", runnerId)
@@ -241,7 +241,7 @@ export function createRunnerDispatchesRepository(
     async create(jobId, runnerId, nextDispatchAt) {
       const timestamp = formatTimestamp(now());
       const result = await db
-        .insertInto("runner_job_dispatches")
+        .insertInto("job_rings")
         .values({
           job_id: jobId,
           runner_id: runnerId,
@@ -265,7 +265,7 @@ export function createRunnerDispatchesRepository(
 
     async claimSend(jobId, runnerId, expectedNextDispatchAt, leaseUntil) {
       const result = await db
-        .updateTable("runner_job_dispatches")
+        .updateTable("job_rings")
         .set({
           attempts: sql<number>`attempts + 1`,
           next_dispatch_at: formatTimestamp(leaseUntil),
@@ -282,7 +282,7 @@ export function createRunnerDispatchesRepository(
 
     async record(jobId, runnerId, update, at) {
       await db
-        .updateTable("runner_job_dispatches")
+        .updateTable("job_rings")
         .set({
           state: update.state,
           consecutive_failures: update.consecutiveFailures,
@@ -381,7 +381,7 @@ export function createRunnerDispatchesRepository(
     async reviveStopped(stoppedBefore, at) {
       const timestamp = formatTimestamp(at);
       const result = await db
-        .updateTable("runner_job_dispatches")
+        .updateTable("job_rings")
         .set({
           state: "pending",
           consecutive_failures: 0,
@@ -402,7 +402,7 @@ export function createRunnerDispatchesRepository(
 
     async deleteFinishedBefore(cutoff) {
       const result = await db
-        .deleteFrom("runner_job_dispatches")
+        .deleteFrom("job_rings")
         .where("job_id", "in", (eb) =>
           eb
             .selectFrom("jobs")
