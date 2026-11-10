@@ -23,6 +23,8 @@ while IFS= read -r line; do
   name=${line%%=*}; want=${line#*=}
   got=$(grep -E "^$name=" "$tree/.config" | head -1 | cut -d= -f2- || true)
   base=$(grep -E "^$name=" "$work/fc-base.config" | head -1 | cut -d= -f2- || true)
+  # "=n" in the fragment means the option must not be set: a `# CONFIG_X is not set` line or no line at all
+  if [ "$want" = n ]; then got=${got:-n}; base=${base:-n}; fi
   if [ "$got" != "$want" ]; then
     echo "MISSING $name: wanted $want, got '${got:-unset}' (unmet dependency?)" >&2
     missing=$((missing + 1))

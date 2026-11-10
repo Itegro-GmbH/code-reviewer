@@ -534,6 +534,12 @@ def cmd_timing(a) -> int:
         if i == 0:
             keep_logs(vm)
         vm.stop()
+    quiet = []
+    for i in range(a.n):
+        vm = Vm(f"timing-quiet-{i}", mode="bare", cg=cg, extra_args="quiet loglevel=0")
+        vm.boot("boot_done")
+        quiet.append(vm.boot_timeline())
+        vm.stop()
     for i in range(a.n):
         vm = Vm(f"timing-full-{i}", mode="full", cg=cg, mem_mib=2048)
         vm.boot("boot_done")
@@ -562,6 +568,7 @@ def cmd_timing(a) -> int:
         v = [r[key] for r in rows if key in r]
         return {"min": min(v), "median": statistics.median(v), "max": max(v)} if v else None
     summary = {"bare": {k: agg([b for b in bare], k) for k in ("init_up", "disk_ready", "boot_done", "guest_uptime_at_boot_done_ms")},
+               "bare_quiet": {k: agg(quiet, k) for k in ("init_up", "disk_ready", "boot_done", "guest_uptime_at_boot_done_ms")},
                "full": {k: agg([r["timeline"] for r in runs], k) for k in ("init_up", "disk_ready", "docker_ready", "sysbox_ready", "boot_done",
                                                                               "control_container_ran_ms", "agent_inner_dockerd_after_run_ms")}}
     print(json.dumps(summary, indent=2))
