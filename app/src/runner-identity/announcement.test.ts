@@ -16,7 +16,7 @@ const GOOD = {
   labels: ["gpu", "linux"],
   baseVersion: "1.0.0",
   manifest: {
-    harnesses: { opencode: { version: "1.19.0", ready: true } },
+    harnesses: [{ harness: "opencode", version: "1.19.0", auth: "app-key" }],
     capabilities: ["agent-docker"],
   },
   limits: { cpus: 8, memoryMb: 16384 },
@@ -49,7 +49,7 @@ describe("the announcement of a runner", () => {
       value: {
         labels: [],
         baseVersion: "0.1.0",
-        manifest: { harnesses: {}, capabilities: [] },
+        manifest: { harnesses: [], capabilities: [] },
         limits: {},
       },
     });
@@ -113,7 +113,9 @@ describe("the announcement of a runner", () => {
     const checked = checkAnnouncement({
       ...GOOD,
       manifest: {
-        harnesses: { "custom/my-tool": { version: "0.3", ready: false } },
+        harnesses: [
+          { harness: "custom/my-tool", version: "0.3", auth: "local-key" },
+        ],
       },
     });
 
@@ -124,6 +126,174 @@ describe("the announcement of a runner", () => {
     const checked = checkAnnouncement({ ...GOOD, labels: ["SECRET value"] });
 
     expect(JSON.stringify(checked)).not.toContain("SECRET");
+  });
+});
+
+describe("the harness entries of a manifest (#973)", () => {
+  const manifestOf = (harnesses: unknown) =>
+    checkAnnouncement({ ...GOOD, manifest: { harnesses } });
+
+  // #973-T05
+  it("are a list of harness, version, auth and, for a device's access, models (sorted, no repeats)", () => {
+    const checked = manifestOf([
+      { harness: "opencode", version: "1.19.0", auth: "app-key" },
+      { harness: "opencode", version: "1.19.0", auth: "local-key" },
+      {
+        harness: "claude-code",
+        version: "2.1.311",
+        auth: "subscription",
+        models: ["sonnet", "opus", "sonnet", "haiku"],
+      },
+    ]);
+
+    expect(checked).toMatchObject({
+      ok: true,
+      value: {
+        manifest: {
+          harnesses: [
+            { harness: "opencode", version: "1.19.0", auth: "app-key" },
+            { harness: "opencode", version: "1.19.0", auth: "local-key" },
+            {
+              harness: "claude-code",
+              version: "2.1.311",
+              auth: "subscription",
+              models: ["haiku", "opus", "sonnet"],
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  // #973-T05
+  it.each([
+    ["an entry that is no object", ["opencode"], "manifest.harnesses[0]"],
+    [
+      "a harness in capitals",
+      [{ harness: "OpenCode", version: "1", auth: "app-key" }],
+      "manifest.harnesses[0].harness",
+    ],
+    [
+      "no version",
+      [{ harness: "opencode", auth: "app-key" }],
+      "manifest.harnesses[0].version",
+    ],
+    [
+      "no auth",
+      [{ harness: "opencode", version: "1" }],
+      "manifest.harnesses[0].auth",
+    ],
+    [
+      "an auth that is none of the four",
+      [{ harness: "opencode", version: "1", auth: "token" }],
+      "manifest.harnesses[0].auth",
+    ],
+    [
+      "models on a key of the app",
+      [{ harness: "opencode", version: "1", auth: "app-key", models: ["x"] }],
+      "manifest.harnesses[0].models",
+    ],
+    [
+      "models on the platform's access",
+      [{ harness: "opencode", version: "1", auth: "managed", models: ["x"] }],
+      "manifest.harnesses[0].models",
+    ],
+    [
+      "an empty list of models",
+      [
+        {
+          harness: "claude-code",
+          version: "1",
+          auth: "subscription",
+          models: [],
+        },
+      ],
+      "manifest.harnesses[0].models",
+    ],
+    [
+      "a model with a space",
+      [
+        {
+          harness: "claude-code",
+          version: "1",
+          auth: "subscription",
+          models: ["a b"],
+        },
+      ],
+      "manifest.harnesses[0].models",
+    ],
+    [
+      "the same harness and auth twice",
+      [
+        { harness: "opencode", version: "1", auth: "app-key" },
+        { harness: "opencode", version: "2", auth: "app-key" },
+      ],
+      "manifest.harnesses[1]",
+    ],
+    [
+      "more than 16 entries",
+      Array.from({ length: 17 }, (_, i) => ({
+        harness: `h${String(i)}`,
+        version: "1",
+        auth: "app-key",
+      })),
+      "manifest.harnesses",
+    ],
+  ] as const)("refuse %s", (_what, harnesses, field) => {
+    const checked = manifestOf(harnesses);
+    if (checked.ok) throw new Error("expected a refusal");
+    expect(checked.fields.map((issue) => issue.field)).toContain(field);
+  });
+
+  // #973-T04
+  it("read the old map form: OpenCode as a key of the app, Claude Code as a subscription, an entry that is not ready as none", () => {
+    const checked = manifestOf({
+      opencode: { version: "1.19.0", ready: true },
+      "claude-code": { version: "2.1.311", ready: true },
+      "custom/tool": { version: "0.3", ready: true },
+      "custom/idle": { version: "0.1", ready: false },
+    });
+
+    expect(checked).toMatchObject({
+      ok: true,
+      value: {
+        manifest: {
+          harnesses: [
+            { harness: "opencode", version: "1.19.0", auth: "app-key" },
+            {
+              harness: "claude-code",
+              version: "2.1.311",
+              auth: "subscription",
+            },
+            { harness: "custom/tool", version: "0.3", auth: "app-key" },
+          ],
+        },
+      },
+    });
+  });
+
+  // #973-T04
+  it("keep the field errors of the old map form", () => {
+    expect(
+      fieldsOf({
+        ...GOOD,
+        manifest: { harnesses: { opencode: { version: "1" } } },
+      }),
+    ).toEqual(["manifest.harnesses.opencode.ready"]);
+  });
+
+  it("are read back from the stored text, in either form", () => {
+    const entry = { harness: "opencode", version: "1.19.0", auth: "app-key" };
+    expect(
+      manifestFromText(JSON.stringify({ harnesses: [entry] })).harnesses,
+    ).toEqual([entry]);
+    expect(
+      manifestFromText(
+        JSON.stringify({
+          harnesses: { opencode: { version: "1.19.0", ready: true } },
+        }),
+      ).harnesses,
+    ).toEqual([entry]);
   });
 });
 
@@ -152,11 +322,15 @@ describe("the stored forms", () => {
 
   it("read a manifest or limits text that does not fit as empty", () => {
     expect(manifestFromText("not json")).toEqual({
-      harnesses: {},
+      harnesses: [],
       capabilities: [],
     });
     expect(manifestFromText('{"harnesses":[]}')).toEqual({
-      harnesses: {},
+      harnesses: [],
+      capabilities: [],
+    });
+    expect(manifestFromText('{"harnesses":"x"}')).toEqual({
+      harnesses: [],
       capabilities: [],
     });
     expect(limitsFromText("not json")).toEqual({});

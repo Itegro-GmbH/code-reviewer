@@ -54,10 +54,8 @@ import {
   customerRunnerId,
   type RunnerRegistrationApi,
 } from "./registration.ts";
-import {
-  OPENCODE_HARNESS,
-  readyHarnesses,
-} from "../runner-identity/harness.ts";
+import { OPENCODE_HARNESS } from "../runner-identity/harness.ts";
+import { announcesHarness } from "../runner-identity/access.ts";
 import type { Job } from "../jobs/job-types.ts";
 
 export type RunnerApiDeps = ClaimDeps &
@@ -251,10 +249,11 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
             return errorResponse(400, "RUNNER_REQUEST_INVALID", {
               fields: parsed.fields,
             });
-          // It takes the turns of runner environments of its own workspace whose labels it has, with a harness it announces as ready
-          // (OpenCode, the only harness of a profile today), and nothing else: never a review, never a split claim, never a job by id.
+          // It takes the turns of runner environments of its own workspace whose labels it has and that an entry of its manifest can run
+          // (the harness, the auth and the model of the turn, #973), and nothing else: never a review, never a split claim, never a job by
+          // id. The base of every runner holds OpenCode: a manifest without it is no runner.
           if (
-            !readyHarnesses(customer.runner.manifest).includes(OPENCODE_HARNESS)
+            !announcesHarness(customer.runner.manifest.harnesses, OPENCODE_HARNESS)
           )
             return noContent();
           return await handleClaim(
@@ -271,8 +270,8 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
               customerRunner: {
                 workspaceId: customer.runner.workspaceId,
                 labels: customer.runner.labels,
-                // #856: the harnesses it announced as ready; a turn that asks for another is not its to take.
-                harnesses: readyHarnesses(customer.runner.manifest),
+                // #973: what it announced; a turn that asks for another harness, auth or model is not its to take.
+                access: customer.runner.manifest.harnesses,
               },
             },
           );

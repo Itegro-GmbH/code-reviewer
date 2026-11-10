@@ -33,11 +33,10 @@ describe("the connection to a customer's dispatcher", () => {
       jobId: "job-1",
       reviewKind: "implementer",
       jobAttempts: 0,
-      harness: "opencode",
       runnerId: "runner-a",
       baseVersion: "1.0.0",
       manifest: {
-        harnesses: { opencode: { version: "1", ready: true } },
+        harnesses: [{ harness: "opencode", version: "1", auth: "app-key" }],
         capabilities: [],
       },
       delivery: {

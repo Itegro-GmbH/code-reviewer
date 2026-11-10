@@ -23,6 +23,7 @@ import {
   ignored,
 } from "../test-support/fake-dispatch-receiver.ts";
 import type { DispatchFetch } from "./send.ts";
+import type { HarnessAccess } from "../runner-identity/access.ts";
 import { BUSY_REST_MS } from "./outcome.ts";
 import { createRingService, ENDPOINT_DOWN_MS, RING_LIMIT } from "./rings.ts";
 
@@ -46,14 +47,14 @@ type Dispatcher = {
   keyId: string;
   secret: string;
   labels?: string[];
-  harnesses?: Record<string, { version: string; ready: boolean }>;
+  harnesses?: HarnessAccess[];
   baseVersion?: string;
 };
 
 /** Both dispatchers' secrets are sealed in the real app; here the "sealed" text is the secret itself and `openSecret` returns it. */
 function world(
   dispatchers: Dispatcher[],
-  jobs: { id: string; labels: string[]; harness?: string }[],
+  jobs: { id: string; labels: string[] }[],
 ) {
   const time = clock();
   const rows = new Map<string, DispatchRow>();
@@ -87,13 +88,12 @@ function world(
           jobId: job.id,
           reviewKind: "implementer",
           jobAttempts: 0,
-          harness: job.harness ?? "opencode",
           runnerId: dispatcher.runnerId,
           baseVersion: dispatcher.baseVersion ?? "1.0.0",
           manifest: {
-            harnesses: dispatcher.harnesses ?? {
-              opencode: { version: "1", ready: true },
-            },
+            harnesses: dispatcher.harnesses ?? [
+              { harness: "opencode", version: "1", auth: "app-key" },
+            ],
             capabilities: [],
           },
           delivery: {
@@ -373,19 +373,20 @@ describe("ringing the webhook dispatchers of customers", () => {
     expect(w.receiver(gpu.url).received).toHaveLength(1);
   });
 
-  it("does not ring a dispatcher that cannot run the job (no harness, or a base below the minimum) and does not ask again soon", async () => {
+  // What the job asks for (harness, auth, model) is judged in the listing by `accessRule`, the claim's own rule: the integration test of the rings
+  // and `access.integration.test.ts` prove it. Here the service judges the base.
+  it("does not ring a dispatcher that cannot run the job (no OpenCode, or a base below the minimum) and does not ask again soon", async () => {
     const old = { ...B, baseVersion: "0.9.0" };
     const noHarness = {
       ...A,
       runnerId: "runner-c",
       url: "https://c.example.test/dispatch",
       keyId: "d-cccccccc",
-      harnesses: { opencode: { version: "1", ready: true } },
+      harnesses: [
+        { harness: "claude-code", version: "2", auth: "subscription" as const },
+      ],
     };
-    const w = world(
-      [old, noHarness],
-      [{ id: "job-1", labels: ["linux"], harness: "claude-code" }],
-    );
+    const w = world([old, noHarness], [{ id: "job-1", labels: ["linux"] }]);
 
     await w.service({ minBaseVersion: "1.0.0" }).onEnqueued(queued("job-1"));
 

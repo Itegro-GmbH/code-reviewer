@@ -211,14 +211,17 @@ def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
 # -- the announcement --------------------------------------------------------------------------
 
 
-def test_the_announcement_says_ready_and_the_capabilities_only_when_they_were_proven() -> None:
+# #973-T05
+def test_the_announcement_lists_opencode_with_its_access_and_the_capabilities_only_when_they_were_proven() -> None:
     ready = announcement_for(config(), passing(nested=True), 4096)
     not_ready = announcement_for(config(), failing("runc"), 4096)
 
     assert ready.base_version == BASE_VERSION and list(ready.labels) == ["linux", "gpu"]
-    assert ready.manifest["harnesses"] == {"opencode": {"version": "1.19.0", "ready": True}}
+    assert ready.manifest["harnesses"] == [
+        {"harness": "opencode", "version": "1.19.0", "auth": "app-key"}
+    ]
     assert ready.manifest["capabilities"] == ["agent-docker"]
-    assert not_ready.manifest["harnesses"]["opencode"]["ready"] is False  # type: ignore[index]
+    assert not_ready.manifest["harnesses"] == []  # a base that is not proven announces no OpenCode
     assert "capabilities" not in not_ready.manifest
 
 
@@ -293,7 +296,7 @@ def test_a_machine_that_fails_every_runtime_is_not_ready_and_says_why() -> None:
 
     assert not prepared.ready
     assert prepared.selftest.failed() is not None
-    assert prepared.announcement.manifest["harnesses"]["opencode"]["ready"] is False  # type: ignore[index]
+    assert prepared.announcement.manifest["harnesses"] == []
 
 
 def test_a_memory_limit_below_the_minimum_is_not_ready_and_starts_nothing() -> None:

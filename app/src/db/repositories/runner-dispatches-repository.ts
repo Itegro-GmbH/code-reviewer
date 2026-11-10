@@ -21,6 +21,7 @@ import {
 import { jobKindOf, type JobKind } from "../../job-kind/job-kind.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
+import { accessRule, storedEntries } from "../../runner-identity/access.ts";
 import {
   labelsFromText,
   manifestFromText,
@@ -46,8 +47,6 @@ export type RingPair = {
   reviewKind: JobKind;
   /** The job's lost attempts so far; the call carries the number of the attempt it is on (this plus one). */
   jobAttempts: number;
-  /** The harness the job's profile names (OpenCode when it names none). */
-  harness: string;
   runnerId: string;
   baseVersion: string;
   manifest: RunnerManifest;
@@ -148,7 +147,6 @@ type PairRow = {
   job_id: string;
   review_kind: string;
   job_attempts: number;
-  harness: string;
   runner_id: string;
   base_version: string;
   manifest: string;
@@ -163,7 +161,6 @@ function toPair(row: PairRow): RingPair {
     // A kind this version does not know fails loudly, as in `job-dispatches-repository.ts`.
     reviewKind: jobKindOf(row.review_kind),
     jobAttempts: row.job_attempts,
-    harness: row.harness,
     runnerId: row.runner_id,
     baseVersion: row.base_version,
     manifest: manifestFromText(row.manifest),
@@ -195,7 +192,6 @@ export function createRunnerDispatchesRepository(
   ): Promise<RingPair[]> {
     const { rows } = await sql<PairRow>`
       select j.id as job_id, j.review_kind as review_kind, j.attempts as job_attempts,
-             coalesce(t.profile_harness, 'opencode') as harness,
              r.id as runner_id, r.base_version as base_version, r.manifest as manifest,
              r.delivery_url as delivery_url, r.delivery_key_id as delivery_key_id, r.delivery_secret as delivery_secret
       from jobs as j
@@ -211,6 +207,7 @@ export function createRunnerDispatchesRepository(
         and j.command = 'review'
         and cardinality(${REQUIRED}) > 0
         and ${REQUIRED} <@ string_to_array(r.labels, E'\n')
+        and ${accessRule(storedEntries("r.manifest"), "t")}
         and ${where}
       order by j.run_after, j.id, r.id
       limit ${limit}`.execute(db);

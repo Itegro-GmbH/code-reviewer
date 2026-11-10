@@ -22,7 +22,9 @@ const ANNOUNCEMENT: Announcement = {
   labels: ["gpu", "linux"],
   baseVersion: "1.2.0",
   manifest: {
-    harnesses: { opencode: { version: "1.19.0", ready: true } },
+    harnesses: [
+      { harness: "opencode", version: "1.19.0", auth: "app-key" },
+    ],
     capabilities: ["agent-docker"],
   },
   limits: { cpus: 8 },
@@ -261,7 +263,7 @@ describe("the credential of a runner", () => {
       await credentials.announce(runnerId, {
         labels: ["arm"],
         baseVersion: "1.3.0",
-        manifest: { harnesses: {}, capabilities: [] },
+        manifest: { harnesses: [], capabilities: [] },
         limits: {},
       }),
     ).toBe(true);
@@ -270,7 +272,7 @@ describe("the credential of a runner", () => {
       {
         labels: ["arm"],
         baseVersion: "1.3.0",
-        manifest: { harnesses: {}, capabilities: [] },
+        manifest: { harnesses: [], capabilities: [] },
         limits: {},
       },
     ]);

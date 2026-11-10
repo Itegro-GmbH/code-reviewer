@@ -21,7 +21,7 @@ const RUNNER: StoredRunner = {
   name: "box",
   labels: ["linux"],
   baseVersion: "1.0.0",
-  manifest: { harnesses: {}, capabilities: [] },
+  manifest: { harnesses: [], capabilities: [] },
   limits: {},
   createdAt: "2026-11-10T08:00:00.000Z",
   lastSeenAt: "2026-11-10T08:00:00.000Z",

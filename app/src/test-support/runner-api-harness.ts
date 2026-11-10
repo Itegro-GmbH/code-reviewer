@@ -1273,7 +1273,9 @@ export async function startRunnerApiHarness(
         labels: normalizeLabels(announcement.labels ?? ["linux"]),
         baseVersion: announcement.baseVersion ?? "1.0.0",
         manifest: announcement.manifest ?? {
-          harnesses: { opencode: { version: "1.19.0", ready: true } },
+          harnesses: [
+            { harness: "opencode", version: "1.19.0", auth: "app-key" },
+          ],
           capabilities: [],
         },
         limits: announcement.limits ?? {},

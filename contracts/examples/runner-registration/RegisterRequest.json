@@ -4,7 +4,9 @@
   "labels": ["linux", "gpu", "team-a"],
   "baseVersion": "1.0.0",
   "manifest": {
-    "harnesses": { "opencode": { "version": "1.19.0", "ready": true } },
+    "harnesses": [
+      { "harness": "opencode", "version": "1.19.0", "auth": "app-key" }
+    ],
     "capabilities": ["agent-docker"]
   },
   "limits": { "cpus": 8, "memoryMb": 16384, "diskGb": 100, "parallelRuns": 2 }

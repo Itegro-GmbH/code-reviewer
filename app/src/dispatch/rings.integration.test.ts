@@ -3,6 +3,7 @@
 // The doorbell to the webhook dispatchers of customers (#972) against a real Postgres: which (job, dispatcher) pairs there are (the join of
 // `runner-dispatches-repository.ts` is the claim's rule written as a query), that the claim stays the only way to a job (the first claim
 // wins, the others get 204), that a polling runner is never rung, and the rows of the pairs.
+import { OPENCODE_ACCESS } from "../test-support/runner-access.ts";
 import { describe, expect, it } from "vitest";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnerDispatchesRepository } from "../db/repositories/runner-dispatches-repository.ts";
@@ -45,7 +46,13 @@ async function claimAs(
   const claimed = await h.queue.claimNext(
     customerRunnerId(runner.runnerId),
     ["implementer"],
-    { customerRunner: { workspaceId: h.workspaceId, labels } },
+    {
+      customerRunner: {
+        workspaceId: h.workspaceId,
+        labels,
+        access: OPENCODE_ACCESS,
+      },
+    },
   );
   return claimed === null ? null : claimed.job.id;
 }
@@ -421,7 +428,13 @@ describe("the pairs of a job that went back to the queue, and the dispatchers th
     const claimed = await h.queue.claimNext(
       customerRunnerId(a.runnerId),
       ["implementer"],
-      { customerRunner: { workspaceId: h.workspaceId, labels: ["linux"] } },
+      {
+        customerRunner: {
+          workspaceId: h.workspaceId,
+          labels: ["linux"],
+          access: OPENCODE_ACCESS,
+        },
+      },
     );
     expect(claimed?.job.id).toBe(turn.job.id);
     // The holder gave the turn back before it started: the job waits again.

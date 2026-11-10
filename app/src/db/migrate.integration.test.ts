@@ -157,6 +157,7 @@ describe("the migrations of both epics", () => {
       "20261107230000_add_tracker_items_write_index",
       "20261110090000_add_job_required_labels",
       "20261110120000_add_runner_delivery",
+      "20261110180000_rewrite_runner_manifests",
     ]);
   });
 

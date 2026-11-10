@@ -4,8 +4,8 @@
 agent image, the memory, the self-test, and from them the announcement and the environment of the
 job processes.
 
-The result is `Prepared`. A runner whose base is not proven is `ready: false` in its manifest and
-takes no job (the app routes only to a ready OpenCode); the failed check says why.
+The result is `Prepared`. A runner whose base is not proven announces no OpenCode entry and
+takes no job (the app routes only to a runner that announces OpenCode); the failed check says why.
 """
 
 import json
@@ -18,7 +18,12 @@ from typing import Final
 
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER
 from code_reviewer_runner.factory_runner.app_client import Announcement
-from code_reviewer_runner.factory_runner.base import BASE_VERSION, HARNESS_OPENCODE
+from code_reviewer_runner.factory_runner.base import (
+    AUTH_APP_KEY,
+    AUTH_SUBSCRIPTION,
+    BASE_VERSION,
+    HARNESS_OPENCODE,
+)
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
     home_directory,
@@ -183,17 +188,26 @@ def announcement_for(
     memory_mb: int | None,
     harnesses: Mapping[str, HarnessStatus] | None = None,
 ) -> Announcement:
-    """What this runner says about itself: its labels, the base, the harness it proved, the
-    harnesses it adds (never instead of OpenCode) and the capabilities of the self-test, the limits
-    it works within."""
-    harness: dict[str, object] = {
-        "version": result.opencode_version or pinned_opencode_version() or "0",
-        "ready": result.base_ok,
-    }
-    announced: dict[str, object] = {HARNESS_OPENCODE: harness}
+    """What this runner says about itself: its labels, the base, the entries it can run (a harness
+    with the source of its access, #973), the harnesses it adds (never instead of OpenCode), the
+    capabilities of the self-test, the limits it works within.
+
+    An entry is announced only while the runner can run it: a base that is not proven announces no
+    OpenCode (a runner without it gets no job) and a harness that is not ready is left out. OpenCode
+    runs on the key the app hands out through the Worker API (`app-key`); Claude Code on the
+    subscription of this device, whatever model it reads (no `models`)."""
+    announced: list[dict[str, object]] = []
+    if result.base_ok:
+        announced.append(
+            {
+                "harness": HARNESS_OPENCODE,
+                "version": result.opencode_version or pinned_opencode_version() or "0",
+                "auth": AUTH_APP_KEY,
+            }
+        )
     for name, status in (harnesses or {}).items():
-        if name != HARNESS_OPENCODE:
-            announced[name] = {"version": status.version, "ready": status.ready}
+        if name != HARNESS_OPENCODE and status.ready:
+            announced.append({"harness": name, "version": status.version, "auth": AUTH_SUBSCRIPTION})
     manifest: dict[str, object] = {"harnesses": announced}
     if result.capabilities:
         manifest["capabilities"] = list(result.capabilities)

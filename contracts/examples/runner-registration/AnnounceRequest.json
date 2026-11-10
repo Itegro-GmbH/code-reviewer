@@ -2,12 +2,15 @@
   "labels": ["linux", "gpu"],
   "baseVersion": "1.0.1",
   "manifest": {
-    "harnesses": {
-      "opencode": {
-        "version": "1.19.0",
-        "ready": true
+    "harnesses": [
+      { "harness": "opencode", "version": "1.19.0", "auth": "app-key" },
+      {
+        "harness": "claude-code",
+        "version": "2.1.311",
+        "auth": "subscription",
+        "models": ["haiku", "opus", "sonnet"]
       }
-    },
+    ],
     "capabilities": []
   },
   "limits": {
