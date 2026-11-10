@@ -377,7 +377,7 @@ export type StepRecord = {
   [k: string]: unknown;
 };
 /**
- * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED.
+ * Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED. #971 adds 422 RUNNER_LABEL_RESERVED (a customer's runner announced a label of the platform's reserved namespace `cr:` in `POST /api/runners/v1/register` or `PUT /api/runners/v1/self`; `fields` names each by position, `labels[1]`, with the field code `reserved`; nothing is stored. Only the platform identity, the Dispatcher's shared token, may carry such a label, and it is the identity that decides, never the text).
  */
 export type ApiErrorCode =
   | "RUNNER_UNAUTHORIZED"
@@ -392,7 +392,8 @@ export type ApiErrorCode =
   | "WORKER_CREDENTIAL_INVALID"
   | "RUNNER_JOB_ENDED"
   | "RUNNER_REGISTRATION_TOKEN_INVALID"
-  | "RUNNER_UPDATE_NEEDED";
+  | "RUNNER_UPDATE_NEEDED"
+  | "RUNNER_LABEL_RESERVED";
 
 /**
  * The optional body of POST /api/runners/v1/claim (#195): the engines the calling runner can run. Absent or empty means ['pr-agent'] (a previous-release runner). Unknown or duplicated engine names are refused with 400 RUNNER_REQUEST_INVALID before any job is claimed. #279 adds the optional `features`: what else this runner understands. The app sends a job optional fields a previous-release runner would reject (the job input is closed) only to a runner that names the matching feature, so `dynamic_capabilities` means the runner reads `dynamic.capabilities`. Unknown feature names are ignored, so a newer runner can name features an older app does not know. Unknown fields are ignored, as everywhere in v1. #318 adds the Dispatcher's fields: `jobId` claims exactly that job (anything else, such as a job that is not due, already running, finished, cancelled or of a kind the advertised engines cannot run, is 204), `maxRunning` is the pool cap (the claim is 204 while that many jobs of the same X-Runner-Id are running), and the feature `worker_credential` selects the split answer (SplitClaimResponse: a per-job credential and no job input). Without that feature the answer is the legacy ClaimResponse, unchanged. #424 adds the optional `llmProviders`: the providers the runner can run; absent means ['openrouter'].
@@ -684,7 +685,7 @@ export interface ClaimRequest {
         LlmProviderId,
       ];
   /**
-   * #318: claim exactly this job (a Dispatcher woken by the dispatch webhook). Absent: the next due job, as before.
+   * #318: claim exactly this job (a Dispatcher woken by the dispatch webhook). Every rule of the claim applies to it unchanged, the labels included (#971). Absent (Runner v2, #971): the oldest due job this caller matches: it has every label the job requires (`cr:managed` and a size label for a hosted job, the labels of the environment for a turn of a runner environment), the job is of its workspace (a customer's runner) and of a kind and harness it runs. 204 when there is none. Naming the job stays for a Dispatcher that is still woken by id.
    */
   jobId?: string;
   /**
@@ -1739,6 +1740,10 @@ export interface SplitClaimResponse {
      */
     heartbeatIntervalSeconds: number;
     /**
+     * #971: the size label the job requires, `cr:size-<vCPUs>` of a size of `contracts/environment-sizes.v1.json` (the sizes of the platform: 1, 2, 4, 6, 8). The Dispatcher starts the VM size it names; a label that names a size it does not launch is given back unlaunched. Every job this answer is for is a hosted one and has one: reviews run on `cr:size-1`, a turn of the Implementer on the size of its environment (`cr:size-2` without one). Optional only so that a Dispatcher can read the answer of an app of the previous release, which does not send it; the Dispatcher's own configuration applies then. It comes from the app's authenticated answer only. The namespace `cr:` is reserved for the platform identity (`contracts/runner-registration.v1.json`).
+     */
+    sizeLabel?: string;
+    /**
      * #818: the VM size in vCPUs that the turn's environment asks for. Present only for a job of the kind `implementer` that was started with an environment; absent otherwise, and then the Dispatcher's configuration and default apply. It comes from the app's authenticated answer only. The Dispatcher launches only the sizes of the platform (`contracts/environment-sizes.v1.json`) and fails the launch with its own code for any other, and it ignores the field for every other kind, so a review can never name a size.
      */
     vcpus?: number;
@@ -1946,11 +1951,11 @@ export interface ErrorResponse {
     code: ApiErrorCode;
     message: string;
     /**
-     * For RUNNER_REQUEST_INVALID: which fields were refused and why (never their values).
+     * For RUNNER_REQUEST_INVALID and RUNNER_LABEL_RESERVED (field code `reserved`): which fields were refused and why (never their values).
      */
     fields?: {
       field: string;
-      code: "required" | "invalid" | "too_long";
+      code: "required" | "invalid" | "too_long" | "reserved";
       [k: string]: unknown;
     }[];
     retryAfterSeconds?: number;

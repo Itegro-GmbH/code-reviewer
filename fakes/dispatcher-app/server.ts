@@ -105,6 +105,8 @@ export type EnqueueOptions = {
   input?: Record<string, unknown>;
   /** #818: the VM size the claim answer names (any kind, so a test can show that only the Implementer's is believed). */
   vcpus?: unknown;
+  /** #971: the size label the claim answer names (any kind). */
+  sizeLabel?: unknown;
   /** #745, step 7: the network rule the claim answer names (any kind, like `vcpus`). */
   network?: unknown;
   /** #745, step 7: the provider's host the claim answer names (any kind, like `network`). */
@@ -151,6 +153,7 @@ type JobState = {
   reviewKind: ReviewKind;
   input: Record<string, unknown>;
   vcpus?: unknown;
+  sizeLabel?: unknown;
   network?: unknown;
   modelHost?: unknown;
   status: JobStatus;
@@ -295,6 +298,9 @@ export async function startDispatcherAppFake(
       ...(enqueueOptions.vcpus === undefined
         ? {}
         : { vcpus: enqueueOptions.vcpus }),
+      ...(enqueueOptions.sizeLabel === undefined
+        ? {}
+        : { sizeLabel: enqueueOptions.sizeLabel }),
       ...(enqueueOptions.network === undefined
         ? {}
         : { network: enqueueOptions.network }),
@@ -400,6 +406,9 @@ export async function startDispatcherAppFake(
             reviewKind: job.reviewKind,
             leaseExpiresAt: iso(LEASE_SECONDS),
             heartbeatIntervalSeconds: HEARTBEAT_SECONDS,
+            ...(job.sizeLabel === undefined
+              ? {}
+              : { sizeLabel: job.sizeLabel }),
             ...(job.vcpus === undefined ? {} : { vcpus: job.vcpus }),
             ...(job.network === undefined ? {} : { network: job.network }),
             ...(job.modelHost === undefined
@@ -763,6 +772,7 @@ export async function startDispatcherAppFake(
         reviewKind:
           kind === "dynamic" || kind === "implementer" ? kind : "diff",
         ...(body.vcpus === undefined ? {} : { vcpus: body.vcpus }),
+        ...(body.sizeLabel === undefined ? {} : { sizeLabel: body.sizeLabel }),
         ...(body.network === undefined ? {} : { network: body.network }),
         ...(body.modelHost === undefined ? {} : { modelHost: body.modelHost }),
       });

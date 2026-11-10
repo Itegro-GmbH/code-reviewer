@@ -27,6 +27,15 @@ import {
   implementerJobShape,
 } from "../implementer-job-shape.ts";
 import { JobQueueError } from "../../jobs/errors.ts";
+import {
+  labelsFromText,
+  labelsToText,
+} from "../../runner-identity/announcement.ts";
+import {
+  hostedLabels,
+  REVIEW_VCPUS,
+  requiredLabelsOfTurn,
+} from "../../runner-identity/labels.ts";
 import type { ValidEnqueueInput } from "../../jobs/job-input.ts";
 import { ImplementerStoreError } from "../implementer-errors.ts";
 import {
@@ -259,6 +268,8 @@ export function toJob(row: Selectable<JobsTable>): Job {
     errorCode: row.error_code,
     supersededBy: row.superseded_by,
     cancelRequestedAt: row.cancel_requested_at,
+    requiredLabels:
+      row.required_labels === null ? null : labelsFromText(row.required_labels),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at,
@@ -559,6 +570,8 @@ export function createJobsRepository(
             trigger_kind: input.triggerKind,
             actor_login: input.actorLogin,
             delivery_id: input.deliveryId,
+            // #971: a review runs on the platform's own Dispatcher, on the size reviews have.
+            required_labels: labelsToText(hostedLabels(REVIEW_VCPUS)),
             status: dynamicDisabled ? "failed" : "queued",
             run_after: formatTimestamp(input.runAfter ?? current),
             attempts: 0,
@@ -731,6 +744,8 @@ export function createJobsRepository(
                   trigger_kind: "manual",
                   actor_login: input.actorLogin,
                   delivery_id: shape.deliveryId,
+                  // #971: the labels of the environment the turn was started with.
+                  required_labels: labelsToText(requiredLabelsOfTurn(input)),
                   status: "queued",
                   run_after: timestamp,
                   attempts: 0,
@@ -853,6 +868,8 @@ export function createJobsRepository(
                     trigger_kind: "manual",
                     actor_login: input.actorLogin,
                     delivery_id: shape.deliveryId,
+                    // #971: the labels of the environment the turn was started with.
+                    required_labels: labelsToText(requiredLabelsOfTurn(input)),
                     status: "queued",
                     run_after: timestamp,
                     attempts: 0,

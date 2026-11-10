@@ -72,6 +72,7 @@ function job(reviewKind: ProjectReviewKind): Job {
     errorCode: null,
     supersededBy: null,
     cancelRequestedAt: null,
+    requiredLabels: null,
     createdAt: "2026-10-10T12:00:00.000Z",
     updatedAt: "2026-10-10T12:00:00.000Z",
     finishedAt: null,

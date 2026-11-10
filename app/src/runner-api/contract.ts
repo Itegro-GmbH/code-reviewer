@@ -337,10 +337,12 @@ export const RUNNER_API_ERROR_CODES = [
   // A customer's runner (#854): a registration token that cannot be exchanged, and a base older than the minimum.
   "RUNNER_REGISTRATION_TOKEN_INVALID",
   "RUNNER_UPDATE_NEEDED",
+  // Runner v2 (#971): a customer's runner announced a label of the platform's reserved namespace `cr:`.
+  "RUNNER_LABEL_RESERVED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 
-export type FieldErrorCode = "required" | "invalid" | "too_long";
+export type FieldErrorCode = "required" | "invalid" | "too_long" | "reserved";
 export type FieldError = { field: string; code: FieldErrorCode };
 
 export type ErrorResponse = {
@@ -588,6 +590,8 @@ export type SplitClaimResponse = {
     reviewKind: ReviewKind;
     leaseExpiresAt: string;
     heartbeatIntervalSeconds: number;
+    /** #971: the size label the job requires (`cr:size-<vCPUs>`); the Dispatcher starts the VM size it names. */
+    sizeLabel?: string;
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
     /** #745, step 7: the rule for the agent's network; for every turn of the Implementer, for no other job. */

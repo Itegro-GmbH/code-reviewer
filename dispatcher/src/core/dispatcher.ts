@@ -30,6 +30,7 @@ import {
   VM_LIFECYCLE_FEATURE,
 } from "./app-client.ts";
 import { systemClock } from "./clock.ts";
+import { vcpusOfSizeLabel } from "./size-labels.ts";
 import {
   ENGINE_BY_KIND,
   jobTimeoutFor,
@@ -74,6 +75,15 @@ const LIVE_VMS_STALE_MS = 60 * 1000;
  * only lets an app a little further above its cap, which the platform's own concurrency limit still bounds.
  */
 const OWN_VM_MEMORY_MS = 10 * 60 * 1000;
+
+/** #971: the size a job's VM starts with: what its environment names, else what its size label names; undefined for the kind's own. */
+function launchedVcpus(job: ClaimedJob): number | undefined {
+  if (job.vcpus !== undefined) return job.vcpus;
+  return job.sizeLabel === undefined
+    ? undefined
+    : vcpusOfSizeLabel(job.sizeLabel);
+}
+
 /**
  * How far above its cap an app may be by the Dispatcher's count before a call is refused: twice the cap plus two VMs in all.
  * The App enforces the exact cap at the claim; this is a backstop against an app that ignores it (a runaway, not a fair
@@ -439,6 +449,20 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         await release(state, claimed.job, "launch_failed");
         return { outcome: "not_capable" };
       }
+      // #971: a job requires a size label and this Dispatcher has the labels of the sizes the platform offers. A label that names another
+      // size is not its to run: the job is given back unlaunched, like a kind it does not serve.
+      if (
+        claimed.job.sizeLabel !== undefined &&
+        vcpusOfSizeLabel(claimed.job.sizeLabel) === undefined
+      ) {
+        logger.error("size_not_offered", {
+          app: appId,
+          jobId: claimed.job.id,
+          stage: "claim",
+        });
+        await release(state, claimed.job, "launch_failed");
+        return { outcome: "not_capable" };
+      }
       // The slot is given back when the launch phase ends, by the background work.
       handedOver = true;
       return {
@@ -610,9 +634,10 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         kind: job.reviewKind,
         timeoutSeconds: jobTimeoutFor(settings, job.reviewKind),
         config: launchConfigFor(settings, job.reviewKind),
-        // #818: the size is believed for a turn of the Implementer and for no other kind: a review can never name one.
-        ...(job.reviewKind === "implementer" && job.vcpus !== undefined
-          ? { vcpus: job.vcpus }
+        // #818: the size is believed for a turn of the Implementer and for no other kind: a review can never name one. #971: the size
+        // of its environment when it names one, else the one its size label names.
+        ...(job.reviewKind === "implementer" && launchedVcpus(job) !== undefined
+          ? { vcpus: launchedVcpus(job) }
           : {}),
         // #745, step 7: the same for the rule of the agent's network; a review never carries one.
         ...(job.reviewKind === "implementer" && job.network !== undefined
