@@ -6,7 +6,7 @@
 #   <kernel dir>  vmlinux, kernel.config, fc-base.config, config.fragment, linux-<version>.tar.xz (the kernel job's artifact)
 #   <rootfs dir>  rootfs.ext4, rootfs-info.json, packages.txt (rootfs/build.sh)
 #   <data dir>    dockerdata.ext4, images.json (data/build.sh)
-. "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 out=$(realpath -m "${1:?out dir}"); kdir=$(realpath "${2:?kernel dir}"); rdir=$(realpath "${3:?rootfs dir}"); ddir=$(realpath "${4:?data dir}")
 release=${5:?release number}; commit=${6:?commit}
 mkdir -p "$out"
