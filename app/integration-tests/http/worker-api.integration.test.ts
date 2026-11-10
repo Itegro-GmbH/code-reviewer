@@ -145,6 +145,8 @@ describe("the claim with the feature worker_credential", () => {
       "id",
       "leaseExpiresAt",
       "reviewKind",
+      // #971: the size label the job requires.
+      "sizeLabel",
     ]);
     expect(body).toMatchObject({
       version: 1,
