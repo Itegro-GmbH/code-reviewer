@@ -159,3 +159,21 @@ def test_the_error_code_is_in_the_known_runner_error_codes() -> None:
 
     assert ErrorCode.ENVIRONMENT_CONTROL_FAILED.value == "environment_control_failed"
     assert "environment_control_failed" in codes
+
+
+# #977-T07
+def test_a_request_the_worker_writes_with_the_hosts_token_is_valid() -> None:
+    token = "control-token-of-the-host-0123456789-abcdefghij"
+
+    assert _accepts("NarrowRequest", control.narrow_request(LIST, "api.example.com", token))
+    assert _accepts("EndRequest", control.end_request(0, token))
+    assert "token" not in control.narrow_request(LIST, "api.example.com")
+    assert "token" not in control.end_request(0)
+
+
+# #977-T07
+@pytest.mark.parametrize("token", ["short", "x" * 129, "has space" + "y" * 40, 7, None])
+def test_a_token_that_is_not_the_contracts_is_refused(token: Any) -> None:
+    request = {**control.end_request(0), "token": token}
+
+    assert not _accepts("EndRequest", request)

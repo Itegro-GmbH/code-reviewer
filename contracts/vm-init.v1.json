@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/vm-init.v1.json",
+  "title": "Code Reviewer vm-init, version 1",
+  "description": "#977, epic #969, ADR 0005: what the local Dispatcher (#978) and `vm-init`, the program in a Firecracker VM's root file system (runner/src/code_reviewer_runner/vm_init/), say to each other over vsock. It is the Dispatcher-to-sandbox interface of ADR 0005 for a customer's own Linux machine: the start payload (host to guest) and the exit report (guest to host). The environment control of the Worker (`narrow`, `end`, port 5100, `environment-control.v1.json`) is NOT carried by vm-init: the Control container connects to the host's port 5100 itself, so that contract stays as #975 made it (see runner/vm-init/README.md, \"Why there is no relay\"). THE FRAMING is that of `environment-control.v1.json`: one frame is four bytes, the length of the body as an unsigned big-endian number (1 to `MaxFrameBytes`), then the body, one UTF-8 JSON object valid under the definition named below, closed, with `version` 1; one request and one reply per connection, the connection closed after the reply; a length of 0 or above the limit, a body that is not one such object, a version other than 1, a type the receiver does not know and any byte after the one frame of a request are protocol errors. vm-init answers a protocol error of the start with `refused` (`invalid_start`) and closes the connection, ends the VM and reports `start_invalid`; the host closes the connection of an exit report that is a protocol error without an answer, and vm-init sends the report again. THE START. vm-init listens on `StartPort` of its own CID (VMADDR_CID_ANY) from the moment it runs, so a Firecracker host connects to `<vsock uds path>` with `CONNECT 5000` as soon as the VM is up. It starts the daemon (the hosted launcher's steps up to `vm-prepare.sh`: runtime directories, IPv6, the daemon, bounded by 60 seconds as the hosted launcher's `prepare()` is) while the connection waits in the listen queue, accepts it when it is ready, reads one `StartRequest` within `StartReadSeconds`, answers `ack` (it took the job) or `refused` (it did not, and ends the VM), then goes on in the order of the hosted `prepare()` and launch: checks the image against the manifest's id right after the daemon (`ImageCheck`), prepares Sysbox, makes the job's work volume and runs the Control container with `control.args` (`docker run ...`), the `job` document on its stdin and nothing else. The credential lives in vm-init's memory and in the pipe to Control's stdin: not in an argument, not in a file, not in a log (vm-init refuses a start whose arguments hold it, or the token). THE TOKEN. The start carries `controlToken`, made by the host for this VM: Control gets it on its stdin with the credential, vm-init puts it in its exit reports, Control in its environment-control messages (`environment-control.v1.json`), so that the host can tell a genuine message from one that was forged on the vsock by something in the VM (the agent's container cannot open an AF_VSOCK socket, because of its seccomp profile and the kernel's configuration of #976, which is defence in depth: the token is what the host trusts). THE WALL CLOCK is the host's: vm-init has no timer for the job (Control's own job timeout ends a job that runs too long), and a VM that is still there when the host's limit passes is killed by the host, which holds the VMM's process. vm-init sets its own `oom_score_adj` to -1000. A host that does not connect within `StartWaitSeconds` of the VM's start finds the VM powered off with an exit report of the reason `start_timeout`. THE EXIT REPORT. When Control's container ends (or the start fails before it runs), vm-init connects to the host's CID (2) on `ReportPort` (Firecracker maps it to the file `<vsock uds path>_5101` of the host, on which the host listens before the VM starts), sends one `ExitReport`, waits at most `ReportSeconds` in all (connect, retries every `ReportRetrySeconds`, reply) for the `ack` and powers the VM off whatever came back: a host that never answers leaves a VM that ends without having been told, which the host handles as an end with an unknown outcome. The report is the authority on how the job ended (Control may be killed and never send `end` on port 5100); the host is free to kill the VMM after it. The host takes the first report of a VM; vm-init sends a report again when the `ack` did not come (a lost `ack`), so the host answers a repeated report with the same `ack` (the report is idempotent for the host). The report carries the start's `controlToken` once a start was read.",
+  "version": 1,
+  "$defs": {
+    "HostCid": {
+      "description": "The context id of the host in the VM's AF_VSOCK address space (VMADDR_CID_HOST), where vm-init connects for the exit report.",
+      "type": "integer",
+      "const": 2
+    },
+    "StartPort": {
+      "description": "The vsock port vm-init listens on for the start (Firecracker: the host connects to `<vsock uds path>` and sends `CONNECT 5000`).",
+      "type": "integer",
+      "const": 5000
+    },
+    "ReportPort": {
+      "description": "The vsock port the host listens on for the exit report (Firecracker maps it to the file `<vsock uds path>_5101` of the host).",
+      "type": "integer",
+      "const": 5101
+    },
+    "MaxFrameBytes": {
+      "description": "The most bytes a frame's body has. The largest start is a `docker run` of a few hundred arguments, a few kilobytes; the limit leaves room and stops a host that is wrong from filling the guest's memory.",
+      "type": "integer",
+      "const": 262144
+    },
+    "StartReadSeconds": {
+      "description": "How long vm-init waits for the frame of the start after it accepted the connection.",
+      "type": "number",
+      "const": 10
+    },
+    "StartWaitSeconds": {
+      "description": "How long vm-init waits for the host's connection after it is prepared, counted from its own start.",
+      "type": "number",
+      "const": 300
+    },
+    "ReportSeconds": {
+      "description": "How long vm-init spends on the exit report in all: the connect (with its retries) and the wait for the reply.",
+      "type": "number",
+      "const": 10
+    },
+    "ReportRetrySeconds": {
+      "description": "The pause between two tries to connect for the exit report.",
+      "type": "number",
+      "const": 0.5
+    },
+    "JobDocument": {
+      "description": "What the Worker reads from its stdin (`worker --once`, the input the hosted launcher's `ContainerLauncher` writes): the app, the job and the job's credential `crj_...` (the Worker API's). vm-init writes it to Control's stdin as one JSON line and closes the pipe. It is the only place the credential goes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["appUrl", "jobId", "credential"],
+      "properties": {
+        "appUrl": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 2048,
+          "pattern": "^https?://[!-~]+$"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "credential": {
+          "description": "Printable ASCII without a space.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[!-~]+$"
+        }
+      }
+    },
+    "ControlInvocation": {
+      "description": "The arguments of `docker run` for the Control container, without the word `docker`, as `renderDockerRunArguments` of the Dispatcher (dispatcher/src/launchers/container.ts) renders them from the local Implementer spec (dispatcher/src/launchers/local-control.ts): the same hardened flags as the hosted container plus what the local one needs (RUNNER_ENVIRONMENT_CONTROL, a seccomp profile that allows AF_VSOCK). The first one is `run`. No argument may hold the job's credential. The image operand (the first argument after the options) must be the start's `image.id`, or `image.reference`, which vm-init then replaces with the id, so that what runs is the image whose id was checked; any other image is refused. A cheap deny-list refuses `--privileged`, `seccomp=unconfined`, `apparmor=unconfined`, `--pid`, `--net`, `--network`, `--ipc`, `--userns` and `--uts` with `host`, `--device`, `--cap-add ALL`, `--volume` and every `--mount` but the job's work volume (`workVolume.name` at `/work`) and the Docker socket (read only): it catches a bug of the Dispatcher that renders such an option. The host owns the VMM, the kernel and the root file system and is trusted (`runner/vm-init/README.md`, \"Trust, the token and the wall clock\"); the list is no defence against a host that is hostile.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["args"],
+      "properties": {
+        "args": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "prefixItems": [
+            {
+              "const": "run"
+            }
+          ]
+        }
+      }
+    },
+    "WorkVolume": {
+      "description": "The job's work volume (`workVolumeCommands` of dispatcher/src/launchers/container.ts): a directory of the VM's disk that is a mount of its own with the profile's options, with a reserve disk of `reserveGib` GiB below it that the agent cannot fill, and a Docker named volume `name` over it. vm-init makes it with the same steps as the hosted launcher; only the size of the reserve is the host's (the hosted VM's is 8, an eighth of its 64 GB disk).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "reserveGib"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$"
+        },
+        "reserveGib": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "StartRequest": {
+      "description": "Host to guest: run this job.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "type",
+        "job",
+        "controlToken",
+        "image",
+        "control",
+        "workVolume"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "start"
+        },
+        "job": {
+          "$ref": "#/$defs/JobDocument"
+        },
+        "controlToken": {
+          "$ref": "#/$defs/ControlToken"
+        },
+        "localCredential": {
+          "$ref": "#/$defs/LocalCredential"
+        },
+        "image": {
+          "$ref": "#/$defs/ImageCheck"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlInvocation"
+        },
+        "workVolume": {
+          "$ref": "#/$defs/WorkVolume"
+        }
+      }
+    },
+    "ExitReason": {
+      "description": "Why the VM ends: `worker_exited` (Control's container ran and ended; `exitCode` is its status: 0 ok, 1 the job failed, 2 setup error, 137 killed, anything else it was given), `docker_failed` (`docker run` itself failed: the status was 125, 126 or 127, so the container was not started or its command was not found), `prepare_failed` (a step of the VM's preparation or of the work volume failed, `exitCode` 2), `image_missing` and `image_mismatch` (the image check of `ImageCheck` failed, `exitCode` 2), `start_invalid` (the start was refused, `exitCode` 2), `start_timeout` (no start in time, `exitCode` 2).",
+      "type": "string",
+      "enum": [
+        "worker_exited",
+        "docker_failed",
+        "prepare_failed",
+        "image_missing",
+        "image_mismatch",
+        "start_invalid",
+        "start_timeout"
+      ]
+    },
+    "ExitReport": {
+      "description": "Guest to host: the VM ends with this. `token` is the start's `controlToken`: every report of a VM that read a start carries it (`image_missing`, `image_mismatch`, `prepare_failed` after the start, `worker_exited`, `docker_failed`). The reports of a VM that never read one (`start_timeout`, `start_invalid`, `prepare_failed` of the daemon before the start, a VM that could not listen) cannot: no job and no agent exists then, and the host knows it has no `ack` for a start from that VM, so it accepts a report without a token only until then. A host that has an `ack` for the start refuses a report without the token or with another one (`verify` in `dispatcher/src/launchers/control-token.ts`). THE HOST TAKES THE FIRST REPORT of a VM that passes this check and answers every later one with the same `ack`: vm-init sends the report again when the `ack` did not come, so the report is idempotent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "type", "exitCode", "reason"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "exit"
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "reason": {
+          "$ref": "#/$defs/ExitReason"
+        },
+        "token": {
+          "$ref": "#/$defs/ControlToken"
+        }
+      }
+    },
+    "RequestType": {
+      "description": "The `type` of a request, and the `for` of the reply that answers it.",
+      "type": "string",
+      "enum": ["start", "exit"]
+    },
+    "AckReply": {
+      "description": "The request named in `for` is taken: for `start`, vm-init accepted the job and will run it; for `exit`, the host has the report.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "type", "for"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "ack"
+        },
+        "for": {
+          "$ref": "#/$defs/RequestType"
+        }
+      }
+    },
+    "RefusedReply": {
+      "description": "vm-init refuses a start and ends the VM (`start_invalid`): the document is not a `StartRequest` (a frame that is not whole, too large or not one object, a byte after the frame, a field that does not match, a `controlToken` that is missing), its arguments hold a credential, name another image than the checked one or hold an option of the deny-list. `reason` is a stable code and never a text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "type", "for", "reason"],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "refused"
+        },
+        "for": {
+          "const": "start"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["invalid_start"]
+        }
+      }
+    },
+    "Reply": {
+      "description": "A frame that answers a request.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AckReply"
+        },
+        {
+          "$ref": "#/$defs/RefusedReply"
+        }
+      ]
+    },
+    "LocalCredential": {
+      "description": "The one credential that exists only on the dispatcher's device and that this job needs (`local-key`, `subscription`: for example `CLAUDE_CODE_OAUTH_TOKEN`, #980; ADR 0005, decision 4). vm-init writes it to Control's stdin as the `localCredential` key of the job document and nowhere else: not an argument, not a file, not a log. What Control does with it is #980's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": {
+          "description": "The name of the environment variable the credential is for.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+        },
+        "value": {
+          "description": "Printable ASCII without a space.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[!-~]+$"
+        }
+      }
+    },
+    "ImageCheck": {
+      "description": "The check of the hosted launcher's `prepare()`: `docker image inspect --format {{.Id}} <reference>` must print `id`, the image id of the manifest the local Dispatcher verified (#976, #978). vm-init ends the VM with `image_missing` when the reference is unknown and `image_mismatch` when the id is another one. The id is not a secret.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "id"],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[a-z0-9][A-Za-z0-9._/:@-]{0,255}$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "ControlToken": {
+      "description": "The per-VM token of the host (`ControlToken` of `environment-control.v1.json`, the same value and the same rules): 32 to 96 random bytes in base64url without padding, made by the host for one VM. vm-init writes it to Control's stdin as the `controlToken` key of the job document (with the credential and nowhere else: not an argument, not the environment, not a file, not a log) and puts it in every exit report it sends after it read a start. Control puts it in every message of the environment control. It is a secret of the host's own: the host compares it in constant time and never logs it.",
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{43,128}$"
+    }
+  }
+}

@@ -21,6 +21,7 @@ export const SCHEMAS = [
   "dispatch-webhook",
   "worker-container",
   "environment-control",
+  "vm-init",
 ] as const;
 
 /** Where the generated files go, relative to the repository root. One identical copy per project. */

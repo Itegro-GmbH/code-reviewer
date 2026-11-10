@@ -61,6 +61,8 @@ FETCH_MAX_PAUSE_SECONDS = 30.0
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # WorkerCredential of the runner API contract: `crj_` and 256 bits in base64url.
 _CREDENTIAL = re.compile(r"crj_[A-Za-z0-9_-]{43}")
+# `ControlToken` of the contracts: the host's per-VM token for the environment control (#977).
+_CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,9 @@ class WorkerRequest:
     app_url: str
     job_id: str
     credential: str = field(repr=False)
+    # The host's per-VM token (vm-init puts it on this stdin with the credential, #977): the
+    # environment control sends it in every request. None for a Worker that no vm-init started.
+    control_token: str | None = field(default=None, repr=False)
 
 
 def _invalid(detail: str) -> WorkerSetupError:
@@ -91,8 +96,8 @@ def _app_url(raw: object) -> str:
 
 
 def parse_request(raw: str) -> WorkerRequest:
-    """The start document: `{"appUrl", "jobId", "credential"}`. Other keys are ignored, so a newer
-    Dispatcher can add one without breaking an older Worker."""
+    """The start document: `{"appUrl", "jobId", "credential"}` and, from vm-init, `"controlToken"`.
+    Other keys are ignored, so a newer Dispatcher can add one without breaking an older Worker."""
     if len(raw.encode("utf-8", errors="replace")) > MAX_START_DOCUMENT_BYTES:
         raise _invalid("the start document is too large")
     try:
@@ -108,8 +113,17 @@ def parse_request(raw: str) -> WorkerRequest:
         raise _invalid("jobId must be a UUID")
     if not isinstance(credential, str) or not _CREDENTIAL.fullmatch(credential):
         raise _invalid("credential must be a job credential")
+    control_token: str | None = None
+    if "controlToken" in fields:
+        given = fields["controlToken"]
+        if not isinstance(given, str) or not _CONTROL_TOKEN.fullmatch(given):
+            raise _invalid("controlToken must be a control token")
+        control_token = given
     return WorkerRequest(
-        app_url=_app_url(fields.get("appUrl")), job_id=job_id, credential=credential
+        app_url=_app_url(fields.get("appUrl")),
+        job_id=job_id,
+        credential=credential,
+        control_token=control_token,
     )
 
 
@@ -176,7 +190,9 @@ async def run_worker(
     and give it back (the entry point sets it; a test that runs this in-process does not)."""
     logger = logger or logging.getLogger(LOGGER_NAME)
     clock = clock or RealClock()
-    masker = SecretMasker([request.credential])
+    masker = SecretMasker(
+        [request.credential, *([request.control_token] if request.control_token else [])]
+    )
     log = SafeLog(logger, masker)
     api = api or HttpWorkerApi(
         request.app_url, request.credential, request_timeout=settings.request_timeout
@@ -191,6 +207,7 @@ async def run_worker(
         environment=environment,
         sweeper=sweeper,
         refuse_unadvertised_engine=True,
+        control_token=request.control_token,
     )
     stopping = asyncio.Event()
 

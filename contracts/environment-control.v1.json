@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Itegro-GmbH/code-reviewer/contracts/environment-control.v1.json",
   "title": "Code Reviewer environment control, version 1",
-  "description": "#975, epic #969, ADR 0005: the environment control of a Worker, the one interface through which Control asks whoever started the sandbox to change the sandbox's outer network wall (`narrow`) and tells it that the Worker ended (`report_end`). The Worker (runner/src/code_reviewer_runner/implementer/environment_control.py) has two transports and the environment it is started with chooses one. `https`: the hosted Dispatcher's `POST /network` (docs/dispatcher.md), chosen by `RUNNER_IMPLEMENTER_NETWORK_SWITCH`, unchanged on the wire and not described here. `vsock` (this file): chosen by `RUNNER_ENVIRONMENT_CONTROL=vsock`, used by vm-init of a Firecracker VM on a customer's own Linux machine (#977) and answered by the local Dispatcher (#978, #979). With neither variable the Worker runs with the inner wall (the network door) only and says so once. THE VSOCK TRANSPORT. The Worker opens one stream connection of the address family AF_VSOCK to the host (`ControlHostCid`, 2) on `ControlPort` for every request and closes it after the reply. A message is a frame: four bytes, the length of the body as an unsigned big-endian number (1 to `ControlMaxFrameBytes`), then the body, one UTF-8 JSON object that is valid under `ControlRequest` (Worker to host) or `ControlReply` (host to Worker), closed, with `version` 1. A length of 0 or above the limit, a body that is not one such object, a version other than 1, a type the receiver does not know and any byte after the one frame of a request are protocol errors: the receiver closes the connection without an answer (a host MAY first send a `refused` reply with the reason `invalid_request`). A side that waits for the other waits at most `ControlNarrowSeconds` for `narrow` and `ControlEndSeconds` for `end` (connect included) and then gives up; the Worker ends the job with the error code `environment_control_failed` when `narrow` times out, is refused, or the host cannot be reached, and ignores any failure of `end`. THE HOST'S DUTY. It answers `narrow` with `ack` only after the outer wall holds the job's rule, so that the agent never starts under the setup's wide rule, and answers a rule it does not allow with `refused` (`rule_not_allowed`). Both requests are idempotent: the host answers the same request again the same way. The connection is the VM's own (a Firecracker vsock device is made for one VM), so the host knows which VM and job a request belongs to and nothing in a message names one; a host that serves more than one VM keeps them apart by the connection and never by a field here.",
+  "description": "#975, epic #969, ADR 0005: the environment control of a Worker, the one interface through which Control asks whoever started the sandbox to change the sandbox's outer network wall (`narrow`) and tells it that the Worker ended (`report_end`). The Worker (runner/src/code_reviewer_runner/implementer/environment_control.py) has two transports and the environment it is started with chooses one. `https`: the hosted Dispatcher's `POST /network` (docs/dispatcher.md), chosen by `RUNNER_IMPLEMENTER_NETWORK_SWITCH`, unchanged on the wire and not described here. `vsock` (this file): chosen by `RUNNER_ENVIRONMENT_CONTROL=vsock`, used by vm-init of a Firecracker VM on a customer's own Linux machine (#977) and answered by the local Dispatcher (#978, #979). With neither variable the Worker runs with the inner wall (the network door) only and says so once. THE VSOCK TRANSPORT. The Worker opens one stream connection of the address family AF_VSOCK to the host (`ControlHostCid`, 2) on `ControlPort` for every request and closes it after the reply. A message is a frame: four bytes, the length of the body as an unsigned big-endian number (1 to `ControlMaxFrameBytes`), then the body, one UTF-8 JSON object that is valid under `ControlRequest` (Worker to host) or `ControlReply` (host to Worker), closed, with `version` 1. A length of 0 or above the limit, a body that is not one such object, a version other than 1, a type the receiver does not know and any byte after the one frame of a request are protocol errors: the receiver closes the connection without an answer (a host MAY first send a `refused` reply with the reason `invalid_request`). A side that waits for the other waits at most `ControlNarrowSeconds` for `narrow` and `ControlEndSeconds` for `end` (connect included) and then gives up; the Worker ends the job with the error code `environment_control_failed` when `narrow` times out, is refused, or the host cannot be reached, and ignores any failure of `end`. THE HOST'S DUTY. It answers `narrow` with `ack` only after the outer wall holds the job's rule, so that the agent never starts under the setup's wide rule, and answers a rule it does not allow with `refused` (`rule_not_allowed`). Both requests are idempotent: the host answers the same request again the same way. The connection is the VM's own (a Firecracker vsock device is made for one VM), so the host knows which VM and job a request belongs to and nothing in a message names one; a host that serves more than one VM keeps them apart by the connection and never by a field here. THE TOKEN (additive, still version 1: `token` is optional in the schema, a host that serves a VM of vm-init requires it). The host makes a random `ControlToken` for each VM and sends it in the start; Control receives it on its stdin with its credential (never in an argument, the environment or a log) and puts it in every `narrow` and `end` it sends. A host checks it with the helper of `dispatcher/src/launchers/control-token.ts` and refuses a request without it or with another: what the agent can open of AF_VSOCK is closed by seccomp as defence in depth, the token is what the host trusts. A Worker that has none (not started by vm-init) sends none and is refused by such a host.",
   "version": 1,
   "$defs": {
     "ControlVariable": {
@@ -66,6 +66,13 @@
         }
       }
     },
+    "ControlToken": {
+      "description": "The per-VM token of the host (#977 fix round): 32 to 96 random bytes in base64url without padding, made by the host for one VM and sent to vm-init in the start (`controlToken` of `vm-init.v1.json`), to Control on its stdin and from there in every request of this file. It is the one thing that tells the host a message is the Worker's and not a forged one: `AF_VSOCK` is closed to the agent by the container's seccomp profile, which is defence in depth, and the token is what the host trusts. The host compares it in constant time, refuses a request without it or with another one (`refused`, `invalid_request`, or the connection closed) and never logs it.",
+      "type": "string",
+      "minLength": 43,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{43,128}$"
+    },
     "NarrowRequest": {
       "description": "Worker to host: switch the outer wall from the setup's wide rule to the job's: GitHub, the app, the model provider's host (`modelHost`, a plain lower-case ASCII host name, never an address or a wildcard) and `network`. Sent once, after the setup script ended and before the agent exists.",
       "type": "object",
@@ -80,7 +87,8 @@
           "minLength": 3,
           "maxLength": 253,
           "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
-        }
+        },
+        "token": { "$ref": "#/$defs/ControlToken" }
       }
     },
     "EndRequest": {
@@ -91,12 +99,16 @@
       "properties": {
         "version": { "const": 1 },
         "type": { "const": "end" },
-        "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 }
+        "exitCode": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "token": { "$ref": "#/$defs/ControlToken" }
       }
     },
     "ControlRequest": {
       "description": "A frame from the Worker to the host.",
-      "oneOf": [{ "$ref": "#/$defs/NarrowRequest" }, { "$ref": "#/$defs/EndRequest" }]
+      "oneOf": [
+        { "$ref": "#/$defs/NarrowRequest" },
+        { "$ref": "#/$defs/EndRequest" }
+      ]
     },
     "ControlRequestType": {
       "description": "The `type` of a request, and the `for` of the reply that answers it.",
@@ -133,7 +145,10 @@
     },
     "ControlReply": {
       "description": "A frame from the host to the Worker.",
-      "oneOf": [{ "$ref": "#/$defs/AckReply" }, { "$ref": "#/$defs/RefusedReply" }]
+      "oneOf": [
+        { "$ref": "#/$defs/AckReply" },
+        { "$ref": "#/$defs/RefusedReply" }
+      ]
     }
   }
 }

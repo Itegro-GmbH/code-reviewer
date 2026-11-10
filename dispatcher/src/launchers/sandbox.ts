@@ -394,8 +394,11 @@ export function planForKind(kind: ReviewKind, config: LaunchConfig): Plan {
   });
 }
 
-/** The container's environment by kind: Dynamic gets the operator's Dynamic configuration, the Implementer the names of its profile. */
-function environmentOf(
+/**
+ * The container's environment by kind: Dynamic gets the operator's Dynamic configuration, the Implementer the names of its profile.
+ * Exported for the local Control spec (`local-control.ts`, #977), which adds one name to it and never writes a second list.
+ */
+export function environmentOf(
   kind: ReviewKind,
   dynamicEnvironment: Readonly<Record<string, string>> | undefined,
   plan: Plan,

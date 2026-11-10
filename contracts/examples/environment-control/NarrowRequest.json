@@ -1,6 +1,10 @@
 {
   "version": 1,
   "type": "narrow",
-  "network": { "mode": "list", "hosts": ["registry.npmjs.org", "*.pythonhosted.org"] },
-  "modelHost": "api.example.com"
+  "network": {
+    "mode": "list",
+    "hosts": ["registry.npmjs.org", "*.pythonhosted.org"]
+  },
+  "modelHost": "api.example.com",
+  "token": "Hq3-n0example_control_token_for_the_contract_test_only_7Kd"
 }
