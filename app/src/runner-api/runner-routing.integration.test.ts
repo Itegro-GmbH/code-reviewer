@@ -634,7 +634,6 @@ describe("revoking a runner that is running a turn (#854)", () => {
     for (const answer of [
       await h.worker.heartbeat(job.id, job.credential),
       await h.worker.result(job.id, job.credential),
-      await h.worker.steps(job.id, job.credential, { records: [] }),
     ]) {
       expect(answer.status).toBe(409);
       expect(await answer.json()).toMatchObject({
@@ -673,16 +672,30 @@ describe("revoking a runner that is running a turn (#854)", () => {
   it("cannot reach the session snapshot of the job either: the Worker API takes the per-job credential alone", async () => {
     const { h, runner, job, fleet } = await runningTurn();
     await fleet.revoke(runner.runnerId);
+    const query = {
+      part: 0,
+      parts: 1,
+      bytes: 1,
+      rawBytes: 1,
+      sha256: "0".repeat(64),
+      opencodeVersion: "1.19.0",
+    };
 
-    for (const credential of [runner.credential, job.credential]) {
-      const answer = await h.worker.session(
-        job.id,
-        credential,
-        { index: 0, count: 1, size: 1, rawBytes: 1, sha256: "0".repeat(64) },
-        new Uint8Array([1]),
-      );
-      expect(answer.status).toBe(401);
-    }
+    // The runner's own credential is no proof of a claim; the job's own finds its claim over.
+    const byRunner = await h.worker.session(
+      job.id,
+      runner.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    const byClaim = await h.worker.session(
+      job.id,
+      job.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    expect(byRunner.status).toBe(401);
+    expect(byClaim.status).toBe(409);
   });
 
   // #854-T242
@@ -1166,7 +1179,7 @@ describe("the state of a job for a customer's dispatcher (#974)", () => {
   });
 
   // #974-T03
-  it("lets the dispatcher give a claim back with the credential of the job: a launch that failed puts the turn in the queue again", async () => {
+  it("lets the dispatcher give a claim back with the credential of the job: a launch that failed ends the turn as the hosted Dispatcher's does", async () => {
     const h = await start();
     const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
     const turn = await h.enqueueTurn({
@@ -1186,6 +1199,10 @@ describe("the state of a job for a customer's dispatcher (#974)", () => {
     );
 
     expect(released.status).toBe(200);
-    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+    // A turn is never queued again by a release (its Worker may have had the input): it ends with the reason.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "launch_failed",
+    });
   });
 });

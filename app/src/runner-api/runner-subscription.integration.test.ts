@@ -98,7 +98,8 @@ describe("the claim of a turn on the harness claude-code", () => {
       auth: "subscription",
       model: "claude-sonnet-5-5",
     });
-    expect(h.issuedJobTokens()).toEqual([]);
+    // The git token is made by the Worker's fetch, not by the claim.
+    expect(h.issuedJobTokens()).toHaveLength(1);
     const input = (await turnInput(response)) as unknown as {
       llm?: unknown;
       implementer: Record<string, unknown>;
