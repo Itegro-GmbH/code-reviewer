@@ -43,11 +43,17 @@ if [ "$(getarg spike.resize)" = 1 ]; then
   t0=$(date +%s%N); resize2fs /dev/vdb > /run/resize2fs.log 2>&1
   /spike/agent.py event resize_done "ms=$(( ($(date +%s%N) - t0) / 1000000 ))"
 fi
-mkdir -p /jobdisk/docker /jobdisk/sysbox
+# Everything Docker and Sysbox keep lives on the job disk: the data root (daemon.json), containerd's root (the image store of
+# Docker 29's containerd snapshotter is NOT under the data root) and Sysbox's.
+mkdir -p /jobdisk/docker /jobdisk/sysbox /jobdisk/containerd /var/lib/containerd
 mount --bind /jobdisk/sysbox /var/lib/sysbox
+mount --bind /jobdisk/containerd /var/lib/containerd
 /spike/agent.py event disk_ready
 
 if [ "$mode" != bare ]; then
+  # vm-prepare.sh (the hosted VM's script) starts by DISabling cpuset/cpu/pids in the root's subtree_control: it expects the
+  # layout the platform's init made. A kernel that starts with no controller enabled makes that write fail (EINVAL), so enable them first.
+  echo "+cpuset +cpu +io +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
   /usr/local/sbin/vm-prepare.sh && /spike/agent.py event docker_ready || /spike/agent.py event docker_failed
   /usr/local/sbin/sysbox-prepare.sh && /spike/agent.py event sysbox_ready || /spike/agent.py event sysbox_failed
 fi

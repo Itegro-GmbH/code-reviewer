@@ -14,7 +14,7 @@ for n in 0 1; do
   ip link set "$tap" up
 done
 # A TAP that fcuser does NOT own: the negative control of "ownership is what lets Firecracker open it"
-ip link show rootowned0 >/dev/null 2>&1 || ip tuntap add dev rootowned0 mode tap
+ip link show rootowned0 >/dev/null 2>&1 || ip tuntap add dev rootowned0 mode tap user root group root
 ip link set rootowned0 up
 
 # A "LAN" behind the host: a namespace holding RFC1918 and link-local addresses, reached through the host's FORWARD path

@@ -18,12 +18,17 @@ rm -f "$img"
 truncate -s 12G "$img"
 mkfs.ext4 -q -m 0 -L jobdisk "$img"
 mount -o loop "$img" "$mnt"
-mkdir -p "$mnt/docker" "$mnt/seed" "$mnt/sysbox"
+mkdir -p "$mnt/docker" "$mnt/seed" "$mnt/sysbox" "$mnt/containerd" /var/lib/containerd
 cat > "$run/daemon.json" <<'JSON'
 { "ipv6": false, "ip6tables": false, "live-restore": false, "log-opts": { "max-size": "10m", "max-file": "2" } }
 JSON
-dockerd --config-file "$run/daemon.json" --data-root "$mnt/docker" --host "unix://$run/docker.sock" --pidfile "$run/docker.pid" \
-  --exec-root "$run/exec" --bridge=none --iptables=false --ip-forward=false --ip-masq=false > "$run/dockerd.log" 2>&1 &
+# Docker 29's containerd snapshotter keeps images under containerd's root (/var/lib/containerd), not under the data root: in a private
+# mount namespace that path is the base disk's /containerd, so the runner's own Docker is not touched. The guest does the same bind mount.
+unshare --mount --propagation private bash -c '
+  mount --bind "$1/containerd" /var/lib/containerd
+  exec dockerd --config-file "$2/daemon.json" --data-root "$1/docker" --host "unix://$2/docker.sock" --pidfile "$2/docker.pid" \
+    --exec-root "$2/exec" --bridge=none --iptables=false --ip-forward=false --ip-masq=false
+' _ "$mnt" "$run" > "$run/dockerd.log" 2>&1 &
 dpid=$!
 D="docker -H unix://$run/docker.sock"
 for _ in $(seq 1 100); do $D info >/dev/null 2>&1 && break; sleep 0.3; done
@@ -38,7 +43,7 @@ $D images
 kill -TERM "$dpid"; wait "$dpid" || true
 for _ in $(seq 1 50); do pgrep -f "$run/docker.sock" >/dev/null || break; sleep 0.2; done
 sync
-du -sh "$mnt/docker"
+du -sh "$mnt/docker" "$mnt/containerd"
 umount "$mnt"
 e2fsck -fy "$img" >/dev/null || true
 resize2fs -M "$img" 2>&1 | tail -n 1

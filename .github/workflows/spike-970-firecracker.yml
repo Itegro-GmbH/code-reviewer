@@ -189,7 +189,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cp /tmp/wall-counters.txt /srv/fc/results/ 2>/dev/null || true
-          python3 spike/firecracker/host/report.py /srv/fc/results | tee /srv/fc/results/report.md >> "$GITHUB_STEP_SUMMARY"
+          python3 spike/firecracker/host/report.py /srv/fc/results | sudo tee /srv/fc/results/report.md >> "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"
 
       - name: Results to an artifact
