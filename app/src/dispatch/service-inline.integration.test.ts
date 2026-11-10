@@ -677,6 +677,34 @@ describe("the dispatch inside the request", () => {
       },
     );
 
+    // #972-T02
+    it("rests a job the Dispatcher answered busy: the repair work and the sweep leave it alone, and a freed slot asks it again", async () => {
+      const t = await setup();
+      t.receiver.reply(ignored("busy"));
+      const { job } = await t.enqueue({
+        prNumber: 12,
+        prUrl: "https://github.test/acme/widgets/pull/12",
+        headSha: sha("e"),
+      });
+      await t.settled();
+      expect(await t.dispatches.get(job.id)).toMatchObject({
+        state: "pending",
+        lastCode: "ignored_busy",
+        consecutiveFailures: 0,
+      });
+      const before = t.receiver.received.length;
+
+      // Ten minutes later no timer and no sweep rings it: its rest is the period of the cron.
+      t.fixture.clock.advance(10 * 60 * SECOND);
+      expect(await t.service.sendDue()).toEqual({ sent: 0 });
+      expect(t.receiver.received).toHaveLength(before);
+
+      // A job ended: the slot that freed rings it again, whatever time its row says.
+      t.receiver.reply(accepted);
+      expect(await t.service.sendWaiting({ limit: 5 })).toEqual({ sent: 1 });
+      expect(t.receiver.received.at(-1)?.body?.jobId).toBe(job.id);
+    });
+
     // #479-T03
     it("lists exactly the answers that mean 'not now' as waiting, whatever time their row says", async () => {
       const t = await setup();
@@ -707,8 +735,14 @@ describe("the dispatch inside the request", () => {
       }
 
       expect([...listed].sort()).toEqual([...WAITING_DISPATCH_CODES].sort());
+      // #972: a Dispatcher that said `busy` (it is full and forgets the bell) is asked when a slot frees.
       expect([...WAITING_DISPATCH_CODES].sort()).toEqual(
-        ["ignored_not_claimable", "rate_limited", "unavailable"].sort(),
+        [
+          "ignored_not_claimable",
+          "ignored_busy",
+          "rate_limited",
+          "unavailable",
+        ].sort(),
       );
     });
 
