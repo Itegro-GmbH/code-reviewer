@@ -45,7 +45,7 @@ jobs:
 
       - name: Cache of the built kernel
         id: kcache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /mnt/spike/vmlinux-cache
           key: spike970-vmlinux-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/kernel/**') }}
@@ -54,7 +54,12 @@ jobs:
         if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           spike/firecracker/kernel/build.sh /mnt/spike/kwork /mnt/spike/vmlinux-cache
-          # the .config of this build is the one the cache keeps
+      - name: Save the kernel to the cache (right away, a later failure must not lose a 9 minute build)
+        if: steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/spike/vmlinux-cache
+          key: spike970-vmlinux-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/kernel/**') }}
       - name: Kernel numbers
         run: |
           ls -l /mnt/spike/vmlinux-cache
@@ -63,7 +68,7 @@ jobs:
 
       - name: Cache of the root file system
         id: rcache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /mnt/spike/rootfs-cache
           key: spike970-rootfs-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/rootfs/**', 'docker/sandbox/vm-prepare.sh', 'docker/sandbox/sysbox-prepare.sh') }}
@@ -73,6 +78,12 @@ jobs:
         run: |
           mkdir -p /mnt/spike/rootfs-cache
           sudo spike/firecracker/rootfs/build.sh /mnt/spike/rwork /mnt/spike/rootfs-cache/rootfs.ext4
+      - name: Save the root file system to the cache
+        if: steps.rcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/spike/rootfs-cache
+          key: spike970-rootfs-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/rootfs/**', 'docker/sandbox/vm-prepare.sh', 'docker/sandbox/sysbox-prepare.sh') }}
       - name: Root file system numbers
         run: |
           ls -ls /mnt/spike/rootfs-cache/rootfs.ext4
