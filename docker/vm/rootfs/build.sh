@@ -45,13 +45,15 @@ stage "$recipe/10-install-docker.sh" /tmp/recipe-install-docker.sh 0755
 runscript /tmp/recipe-install-docker.sh
 
 log "install Sysbox (step install_sysbox)"
-# The package's config script runs `docker ps -a` and refuses to go on unless it sees the header line: there is no daemon in a chroot, so a
-# stand-in prints what an idle daemon prints. The hosted VM has the same package and an idle `docker`; the stand-in is removed again below.
-printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/usr/local/sbin/docker"
-chmod 0755 "$root/usr/local/sbin/docker"
+# The package's installer asks Docker for its containers (`docker ps -a`) and refuses to go on when it cannot. The hosted VM has a running daemon at
+# this point (Docker's package starts it through its init script); a chroot has none (policy-rc.d). So the CLI is replaced, for this one step, by a
+# stand-in that prints what an idle daemon prints, whatever way the installer calls it, and put back after.
+mv "$root/usr/bin/docker" "$root/usr/bin/docker.real"
+printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/usr/bin/docker"
+chmod 0755 "$root/usr/bin/docker"
 stage "$recipe/20-install-sysbox.sh" /tmp/recipe-install-sysbox.sh 0755
 runscript /tmp/recipe-install-sysbox.sh
-rm -f "$root/usr/local/sbin/docker"
+mv -f "$root/usr/bin/docker.real" "$root/usr/bin/docker"
 
 log "write the daemon configuration (step write_daemon_config)"
 stage "$recipe/30-daemon.json" "$(paths daemonJson)" 0644
