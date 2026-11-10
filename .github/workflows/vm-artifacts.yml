@@ -208,6 +208,8 @@ jobs:
           sudo ip addr add 172.31.0.1/30 dev fctap0
           sudo ip link set fctap0 up
           mkdir -p "$VM_WORK/launcher-state"
+          # systemd-run looks the program up in root's PATH, not in --setenv: name it by its path.
+          UV="$(command -v uv)"
           sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
             -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
             --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
@@ -216,7 +218,7 @@ jobs:
             --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
             --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
             --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
-            uv run --frozen pytest -m kvm tests/kvm -v -s -p no:cacheprovider
+            "$UV" run --frozen pytest -m kvm tests/kvm -v -s -p no:cacheprovider
       - name: Manifest
         env:
           RELEASE: ${{ inputs.release }}
