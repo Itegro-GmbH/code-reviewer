@@ -18,6 +18,7 @@ from typing import NoReturn, TextIO
 
 from code_reviewer_runner import __version__
 from code_reviewer_runner.dynamic_review.netguard import IsolationError
+from code_reviewer_runner.implementer.environment_control import report_worker_end
 from code_reviewer_runner.job_loop.service import LOGGER_NAME, configure_logging, run_startup
 from code_reviewer_runner.job_loop.settings import SettingsError, worker_settings_from_environment
 from code_reviewer_runner.job_loop.worker import (
@@ -68,8 +69,15 @@ def main(
         return exit_request.code if isinstance(exit_request.code, int) else 1
     env = dict(os.environ if environment is None else environment)
     configure_logging()
+    code = _run(env, sys.stdin if stdin is None else stdin)
+    # #975: the sandbox's environment control hears how the Worker ended (vsock only; best effort,
+    # it never changes the exit code).
+    report_worker_end(env, int(code))
+    return code
+
+
+def _run(env: dict[str, str], source: TextIO) -> int:
     log = logging.getLogger(LOGGER_NAME)
-    source = sys.stdin if stdin is None else stdin
     try:
         settings = worker_settings_from_environment(env)
     except SettingsError as error:

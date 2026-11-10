@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "type": "narrow",
+  "network": { "mode": "list", "hosts": ["registry.npmjs.org", "*.pythonhosted.org"] },
+  "modelHost": "api.example.com"
+}

@@ -57,7 +57,6 @@ from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDR
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.job import (
-    IMPLEMENTER_NETWORK_SWITCH_VARIABLE,
     ImplementerInput,
     JobError,
 )
@@ -84,6 +83,12 @@ from .claude_code.login import ClaudeLogin
 from .config import build_engine_config, implementer_environment
 from .door_launcher import DoorSeams, RunningDoor, start_door
 from .door_model import build_door_ledger
+from .environment_control import (
+    NARROW_SECONDS,
+    Connect,
+    control_from_environment,
+    vsock_connect,
+)
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
@@ -110,7 +115,7 @@ from .network_report import (
     network_report,
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
-from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
+from .network_switch import Post, model_host_of, urllib_post
 from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
@@ -225,6 +230,9 @@ class SessionSeams:
     netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
     switch_post: Post = urllib_post
     switch_pause_seconds: float = 2.0
+    # The connection of the vsock environment control (#975); a test brings a socket of its own.
+    control_connect: Connect = vsock_connect
+    control_narrow_seconds: float = NARROW_SECONDS
     # The system's root certificates, which the agent's trust bundle (#784) starts with: this
     # container has the agent's image's roots (the same Debian bundle); a test brings its own.
     system_roots: Callable[[], bytes] = lambda: Path(SYSTEM_ROOTS_PATH).read_bytes()
@@ -788,20 +796,26 @@ class ImplementerSession:
             self._netdoor = start_network_door(
                 rule, deadline_seconds=self._deadline_seconds(), seams=self.seams.netdoor
             )
-        switch = parse_switch(self.environment.get(IMPLEMENTER_NETWORK_SWITCH_VARIABLE))
+        # The environment control (#975) is the one way to the second wall: https for the hosted
+        # Dispatcher, vsock for a VM on a customer's machine, none for a runner without one.
+        control = control_from_environment(
+            self.environment,
+            post=self.seams.switch_post,
+            pause_seconds=self.seams.switch_pause_seconds,
+            connect=self.seams.control_connect,
+            narrow_seconds=self.seams.control_narrow_seconds,
+        )
         if rule.mode == MODE_OPEN:
             self._vm_policy = VM_POLICY_UNCHANGED
-        elif switch is None:
+        elif control is None:
             # For every mode, `off` included: a second wall that is not there is said.
             self._note("the VM's network policy was not changed: this runner has no way to do it")
-        else:
-            narrow_policy(
-                switch,
-                rule,
-                model_host,
-                post=self.seams.switch_post,
-                pause_seconds=self.seams.switch_pause_seconds,
+            _log.warning(
+                "environment control: none configured, so the outer network wall is not narrowed "
+                "and the job runs with the network door only"
             )
+        else:
+            control.narrow(rule, model_host)
             self._vm_policy = VM_POLICY_NARROWED
 
     def _install_registry_trust(self, place: AgentPlace) -> None:

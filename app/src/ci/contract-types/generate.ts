@@ -20,6 +20,7 @@ export const SCHEMAS = [
   "worker-api",
   "dispatch-webhook",
   "worker-container",
+  "environment-control",
 ] as const;
 
 /** Where the generated files go, relative to the repository root. One identical copy per project. */

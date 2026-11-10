@@ -282,7 +282,7 @@
       ]
     },
     "KnownRunnerErrorCode": {
-      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `no_result` (#843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder; the model was used), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
+      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `no_result` (#843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder; the model was used), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). `environment_control_failed` (#975: the sandbox's environment control did not narrow the outer network wall, because the host did not answer in time, refused the rule, could not be reached or answered something `contracts/environment-control.v1.json` does not know; the agent never started, so it is free). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
       "type": "string",
       "enum": [
         "invalid_job",
@@ -340,7 +340,8 @@
         "implementer_config_invalid",
         "sandbox_unproven",
         "sandbox_size_unsupported",
-        "environment_setup_failed"
+        "environment_setup_failed",
+        "environment_control_failed"
       ]
     },
     "JobEnv": {
