@@ -6,8 +6,8 @@ TAP device, vm-init prepares it and runs Control with the hosted container's fla
 it fetches a job from a fake App over the VM's network, delivers its result, and vm-init reports.
 What is real: KVM, Firecracker, the kernel, vm-init, dockerd, Sysbox, the Worker image, the vsock,
 the TAP, the cgroup, the job disk. What is a double: the App (`runner_app.py`), and the model and
-GitHub, which the job never reaches. (The probe that a container cannot open a vsock socket is in the smoke
-boot of the same workflow: `vsock_denied_agent`, its control and `ia32_unavailable`.)"""
+GitHub, which the job never reaches. (The probe that a container cannot open a vsock socket is in
+the smoke boot of the same workflow: `vsock_denied_agent`, its control and `ia32_unavailable`.)"""
 
 import asyncio
 import dataclasses
