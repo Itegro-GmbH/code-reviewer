@@ -35,7 +35,7 @@ export const MANAGED_AUTH: AccessAuth = "managed";
 export const SUBSCRIPTION_HARNESSES: readonly string[] = [CLAUDE_CODE_HARNESS];
 
 export const MODELS_MAX = 64;
-/** A model as a harness reads it (`sonnet`, `claude-sonnet-5-5`, `anthropic/claude-opus-4`). */
+/** A model as a harness reads it (`sonnet`, `claude-sonnet-5-5`, `vendor/model-name`). */
 export const MODEL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,99}$/;
 
 /** One entry of the manifest: a harness with one source of access. */

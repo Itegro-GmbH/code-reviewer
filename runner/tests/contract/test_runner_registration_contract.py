@@ -152,20 +152,25 @@ def test_a_harness_says_its_version_and_whether_it_is_ready() -> None:
 # #973-T04
 def test_an_entry_names_a_harness_a_version_an_auth_and_for_a_device_the_models() -> None:
     body = _example("AnnounceRequest")
-    opencode = {"harness": "opencode", "version": "1.19.0", "auth": "app-key"}
-    claude = {"harness": "claude-code", "version": "2.1.311", "auth": "subscription"}
+    opencode: dict[str, object] = {"harness": "opencode", "version": "1.19.0", "auth": "app-key"}
+    claude: dict[str, object] = {
+        "harness": "claude-code",
+        "version": "2.1.311",
+        "auth": "subscription",
+    }
     body["manifest"] = {"harnesses": [opencode, {**claude, "models": ["sonnet", "opus"]}]}
     assert _accepts("AnnounceRequest", body)
     body["manifest"] = {"harnesses": [opencode, claude]}  # no models: the device allows any
     assert _accepts("AnnounceRequest", body)
-    for bad in (
+    bad_entries: tuple[dict[str, object], ...] = (
         {**opencode, "auth": "token"},  # not one of the four
         {"harness": "opencode", "version": "1.19.0"},  # no auth
         {**opencode, "models": ["x"]},  # a key of the app: the catalog decides, no models
         {**claude, "models": []},
         {**claude, "models": ["sonnet", "sonnet"]},
         {**claude, "models": ["bad model"]},
-    ):
+    )
+    for bad in bad_entries:
         body["manifest"] = {"harnesses": [bad]}
         assert not _accepts("AnnounceRequest", body), bad
     body["manifest"] = {"harnesses": [{**opencode, "auth": "managed"}]}

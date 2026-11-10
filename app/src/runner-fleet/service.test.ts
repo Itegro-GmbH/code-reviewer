@@ -10,7 +10,6 @@ import { RunnerFleetError } from "./errors.ts";
 import {
   createRunnerFleetService,
   OPEN_TOKENS_PER_WORKSPACE_MAX,
-  onlineRunnersOf,
   statusOf,
 } from "./service.ts";
 import {
@@ -56,36 +55,6 @@ function fakeRepository(
     revoke: async (id) => stored.some((entry) => entry.id === id),
   };
 }
-
-describe("the online runners and what they announce (#973)", () => {
-  const OPENCODE = {
-    harness: "opencode",
-    version: "1",
-    auth: "app-key",
-  } as const;
-
-  // #973-T01
-  it("lists the runners heard from lately and at the minimum base, with their labels and entries, and no other", async () => {
-    const online = runner({
-      id: "online",
-      labels: ["box"],
-      manifest: { harnesses: [OPENCODE], capabilities: [] },
-    });
-    const asleep = runner({
-      id: "asleep",
-      lastSeenAt: "2026-11-05T11:00:00.000Z",
-    });
-    const old = runner({ id: "old", baseVersion: "0.9.0" });
-
-    expect(
-      await onlineRunnersOf(
-        fakeRepository([online, asleep, old]),
-        { minBaseVersion: "1.0.0", onlineWithinSeconds: 120 },
-        NOW,
-      ),
-    ).toEqual([{ labels: ["box"], access: [OPENCODE] }]);
-  });
-});
 
 describe("the state of a runner", () => {
   // #854-T40

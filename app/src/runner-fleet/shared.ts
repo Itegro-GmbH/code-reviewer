@@ -10,28 +10,10 @@ import {
   minimumBaseVersion,
   ONLINE_WITHIN_SECONDS,
 } from "../runner-identity/config.ts";
-import type { OnlineRunner } from "../runner-identity/announced.ts";
 import {
   createRunnerFleetService,
-  onlineRunnersOf,
   type RunnerFleetService,
 } from "./service.ts";
-
-/** #973: the runners of one workspace that are online now and what each announces, for the validator of profiles and workflows. */
-export function onlineRunnersFor(
-  workspaceId: string,
-): () => Promise<OnlineRunner[]> {
-  const runners = createRunnersRepository(getDatabase(), workspaceId);
-  return () =>
-    onlineRunnersOf(
-      runners,
-      {
-        minBaseVersion: minimumBaseVersion(process.env),
-        onlineWithinSeconds: ONLINE_WITHIN_SECONDS,
-      },
-      new Date(),
-    );
-}
 
 /** The runner fleet service of one workspace. */
 export function runnerFleetServiceFor(workspaceId: string): RunnerFleetService {

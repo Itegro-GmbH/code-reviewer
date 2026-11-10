@@ -7,7 +7,8 @@ import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { onlineRunnersFor } from "../runner-fleet/shared.ts";
+import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
+import { onlineRunnersFrom } from "../runner-identity/online.ts";
 import { implementerModelsFor } from "../implementer/shared.ts";
 import { operatorCostLimitCentsFrom } from "../review-settings/operator-cost-limit-source.ts";
 import { createProfileService, type ProfileService } from "./service.ts";
@@ -19,7 +20,7 @@ export function profileServiceFor(workspaceId: string): ProfileService {
     profiles: createProfilesRepository(db, workspaceId),
     models: implementerModelsFor(workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
-    onlineRunners: onlineRunnersFor(workspaceId),
+    onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
     operatorCostLimitCents: operatorCostLimitCentsFrom(db),
   });
 }
