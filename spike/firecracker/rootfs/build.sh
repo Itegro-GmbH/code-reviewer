@@ -32,18 +32,20 @@ chroot "$root" /bin/bash -euxc '
 '
 log "Sysbox $SYSBOX_VERSION (a systemctl that does nothing, as the golden snapshot does: the guest has no systemd)"
 # ... and a `docker` that lists no containers: the package's config script runs `docker ps -a` and refuses to go on when it does not see
-# the one header line (the golden snapshot runs it with a docker installed; here Docker is added after Sysbox)
-mkdir -p "$root/stub"
-printf '#!/bin/sh\nexit 0\n' > "$root/stub/systemctl"
-printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/stub/docker"
-chmod 0755 "$root/stub/systemctl" "$root/stub/docker"
-chroot "$root" /bin/bash -euxc '
-  export DEBIAN_FRONTEND=noninteractive PATH=/stub:$PATH
-  apt-get install -y -qq /tmp/sysbox.deb || dpkg -i --force-depends /tmp/sysbox.deb
-  dpkg-query -W -f="${Version}\n" sysbox-ce | grep -q "^'"$SYSBOX_VERSION"'"
-  sysbox-runc --version
-'
-rm -rf "$root/stub" "$root/tmp/sysbox.deb"
+# the one header line (the golden snapshot runs it with a docker installed; here Docker is added after Sysbox). Both stubs are removed again.
+printf '#!/bin/sh\nexit 0\n' > "$root/usr/local/sbin/systemctl"
+printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/usr/local/sbin/docker"
+chmod 0755 "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/docker"
+cat > "$root/tmp/sysbox-install.sh" <<SH
+set -eux
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y -qq /tmp/sysbox.deb || dpkg -i --force-depends /tmp/sysbox.deb
+installed=\$(dpkg-query -W -f='\${Version}' sysbox-ce)
+case "\$installed" in $SYSBOX_VERSION*) ;; *) echo "sysbox-ce is \$installed" >&2; exit 1 ;; esac
+sysbox-runc --version
+SH
+chroot "$root" /bin/bash /tmp/sysbox-install.sh
+rm -f "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/docker" "$root/tmp/sysbox.deb" "$root/tmp/sysbox-install.sh"
 
 log "Docker $DOCKER_VERSION (static bundle)"
 tar -xzf "$dl/docker.tgz" -C "$root/usr/bin" --strip-components=1
