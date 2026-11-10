@@ -11,7 +11,7 @@ a leaf: the log is checked from its text.
 
 import functools
 import types
-from typing import Any
+from typing import Any, cast
 
 _MAX_DEPTH = 14
 _OURS = "code_reviewer_runner"
@@ -24,11 +24,8 @@ def holds(root: object, needles: tuple[str, ...]) -> str | None:
 
 
 def _contains(value: str | bytes | bytearray, needles: tuple[str, ...]) -> bool:
-    for needle in needles:
-        wanted = needle if isinstance(value, str) else needle.encode()
-        if wanted in value:
-            return True
-    return False
+    text = value if isinstance(value, str) else bytes(value).decode("latin-1")
+    return any(needle in text or needle.encode().decode("latin-1") in text for needle in needles)
 
 
 def _walk(obj: Any, needles: tuple[str, ...], path: str, depth: int, seen: set[int]) -> str | None:
@@ -42,7 +39,7 @@ def _walk(obj: Any, needles: tuple[str, ...], path: str, depth: int, seen: set[i
     children: list[tuple[str, Any]] = []
     if isinstance(obj, dict):
         for key, value in obj.items():  # pyright: ignore[reportUnknownVariableType]
-            children.append((f"{path}[{key!r}]", key))  # pyright: ignore[reportUnknownArgumentType]
+            children.append((f"{path}[{key!r}]", key))
             children.append((f"{path}[{key!r}]", value))
     elif isinstance(obj, (list, tuple, set, frozenset)):
         children = [(f"{path}[{index}]", item) for index, item in enumerate(obj)]  # pyright: ignore[reportUnknownVariableType,reportUnknownArgumentType]
