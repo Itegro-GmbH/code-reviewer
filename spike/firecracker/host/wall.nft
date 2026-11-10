@@ -1,0 +1,26 @@
+# Spike #970: the static outer wall (the plan's "static nft table on our TAP devices").
+# Loaded once as root. It never changes while VMs come and go: it matches the TAP devices by name (fctap*).
+# What a VM may do: open a TCP connection to the proxy port of a host address, and get the answers. Nothing else:
+# not other ports of the host, not ICMP, not UDP, not forwarding to anything (LAN, RFC1918, 169.254/16, the internet,
+# other VMs), not IPv6 at all. Priority -150 runs before Docker's own iptables (filter, priority 0).
+table inet fcwall
+delete table inet fcwall
+table inet fcwall {
+  chain input {
+    type filter hook input priority -150; policy accept;
+    iifname "fctap*" ip saddr != 172.31.0.0/16 counter drop comment "wrong source address"
+    iifname "fctap*" ct state established,related counter accept comment "answers"
+    iifname "fctap*" tcp dport 3128 fib daddr type local counter accept comment "the proxy port"
+    iifname "fctap*" counter drop comment "everything else addressed to the host"
+  }
+  chain forward {
+    type filter hook forward priority -150; policy accept;
+    iifname "fctap*" counter drop comment "a VM forwards to nothing"
+    oifname "fctap*" counter drop comment "nothing forwards to a VM"
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    oifname "fctap*" ct state established,related counter accept comment "answers to the VM's connections"
+    oifname "fctap*" counter drop comment "the host does not open connections to a VM (vsock is the channel)"
+  }
+}

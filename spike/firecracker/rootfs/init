@@ -1,0 +1,57 @@
+#!/bin/bash
+# Spike #970: PID 1's child in the guest (the kernel starts /usr/bin/docker-init = tini, which reaps and runs this).
+# Order = the plan's "vm-init": mounts, network, agent (vsock), job disk, then the SAME two scripts the hosted VM runs
+# (vm-prepare.sh: cgroup layout + dockerd; sysbox-prepare.sh: Sysbox daemons). Milestones go to the host as vsock events.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=1777 tmpfs /var/tmp
+mount -t tmpfs tmpfs /var/log
+mount -t tmpfs -o mode=0700 tmpfs /root
+mount -t cgroup2 none /sys/fs/cgroup
+
+getarg() { tr ' ' '\n' < /proc/cmdline | sed -n "s/^$1=//p" | head -n 1; }
+mode=$(getarg spike.mode)
+
+: > /run/resolv.conf
+hostname spike-vm
+ip link set lo up
+ip link set eth0 up
+if [ -n "$(getarg spike.ip)" ]; then
+  ip addr add "$(getarg spike.ip)" dev eth0
+  ip route add default via "$(getarg spike.gw)"
+fi
+if [ -n "$(getarg spike.ip6)" ]; then
+  sysctl -q -w net.ipv6.conf.eth0.accept_ra=0 net.ipv6.conf.eth0.accept_dad=0 > /dev/null || true
+  ip -6 addr add "$(getarg spike.ip6)" dev eth0 nodad
+  ip -6 route add default via "$(getarg spike.gw6)"
+fi
+
+/spike/agent.py daemon > /run/agent.log 2>&1 &
+/spike/agent.py event init_up || echo "init: no vsock event channel"
+
+mkdir -p /jobdisk
+mount -t ext4 -o noatime /dev/vdb /jobdisk
+if [ "$(getarg spike.resize)" = 1 ]; then
+  t0=$(date +%s%N); resize2fs /dev/vdb > /run/resize2fs.log 2>&1
+  /spike/agent.py event resize_done "ms=$(( ($(date +%s%N) - t0) / 1000000 ))"
+fi
+mkdir -p /jobdisk/docker /jobdisk/sysbox
+mount --bind /jobdisk/sysbox /var/lib/sysbox
+/spike/agent.py event disk_ready
+
+if [ "$mode" != bare ]; then
+  /usr/local/sbin/vm-prepare.sh && /spike/agent.py event docker_ready || /spike/agent.py event docker_failed
+  /usr/local/sbin/sysbox-prepare.sh && /spike/agent.py event sysbox_ready || /spike/agent.py event sysbox_failed
+fi
+/spike/agent.py event boot_done
+
+# The agent daemon is a child of this script; the VM lives until the host says shutdown (agent: sysrq reboot).
+wait

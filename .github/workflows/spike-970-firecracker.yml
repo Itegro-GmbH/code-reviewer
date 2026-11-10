@@ -1,0 +1,194 @@
+name: Spike 970 Firecracker
+
+# THROWAWAY (issue #970): lives on the branch spike-970-firecracker only, never in development.
+# ubuntu-24.04 runners expose /dev/kvm (nested virtualization), this server does not. A push to the spike branch runs
+# everything; workflow_dispatch exists for completeness (GitHub only lists it once the file is on the default branch).
+on:
+  push:
+    branches: [spike-970-firecracker]
+    paths:
+      - "spike/firecracker/**"
+      - ".github/workflows/spike-970-firecracker.yml"
+      - "docker/sandbox/*.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spike-970-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  SPIKE_WORK: /srv/fc
+
+jobs:
+  build:
+    name: Build guest kernel and root file system
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Packages for the kernel build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flex bison libelf-dev libssl-dev bc dwarves
+          sudo mkdir -p /mnt/spike && sudo chown "$USER" /mnt/spike
+
+      - name: Kernel config (fast, always: it fails when an option did not stick)
+        run: |
+          spike/firecracker/kernel/configure.sh /mnt/spike/kwork
+          cat /mnt/spike/kwork/added-options.txt
+          mkdir -p /mnt/spike/out && cp /mnt/spike/kwork/linux/.config /mnt/spike/out/kernel.config && cp /mnt/spike/kwork/added-options.txt /mnt/spike/out/
+          cp spike/firecracker/kernel/config.fragment /mnt/spike/out/
+
+      - name: Cache of the built kernel
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/spike/vmlinux-cache
+          key: spike970-vmlinux-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/kernel/**') }}
+
+      - name: Build the kernel (vmlinux)
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: |
+          spike/firecracker/kernel/build.sh /mnt/spike/kwork /mnt/spike/vmlinux-cache
+          # the .config of this build is the one the cache keeps
+      - name: Kernel numbers
+        run: |
+          ls -l /mnt/spike/vmlinux-cache
+          cat /mnt/spike/vmlinux-cache/build-seconds.txt 2>/dev/null || true
+          cp /mnt/spike/vmlinux-cache/vmlinux /mnt/spike/out/vmlinux
+
+      - name: Cache of the root file system
+        id: rcache
+        uses: actions/cache@v4
+        with:
+          path: /mnt/spike/rootfs-cache
+          key: spike970-rootfs-${{ hashFiles('spike/firecracker/versions.env', 'spike/firecracker/rootfs/**', 'docker/sandbox/vm-prepare.sh', 'docker/sandbox/sysbox-prepare.sh') }}
+
+      - name: Build the root file system
+        if: steps.rcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /mnt/spike/rootfs-cache
+          sudo spike/firecracker/rootfs/build.sh /mnt/spike/rwork /mnt/spike/rootfs-cache/rootfs.ext4
+      - name: Root file system numbers
+        run: |
+          ls -ls /mnt/spike/rootfs-cache/rootfs.ext4
+          zstd -T0 -3 -q -f /mnt/spike/rootfs-cache/rootfs.ext4 -o /mnt/spike/out/rootfs.ext4.zst
+          ls -l /mnt/spike/out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: guest-artifacts
+          path: /mnt/spike/out
+          compression-level: 0
+          retention-days: 14
+
+  run:
+    name: Experiments on a KVM runner
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: guest-artifacts
+          path: /tmp/guest-artifacts
+
+      - name: Runner facts
+        run: |
+          uname -a; lscpu | grep -E 'Model name|^CPU\(s\)|Hypervisor|Virtualization'; free -m | head -n 2; df -h / /mnt | cat
+          systemctl --version | head -n 1; ls -l /dev/kvm || echo "NO /dev/kvm"
+          cat /sys/fs/cgroup/cgroup.controllers; stat -fc %T /sys/fs/cgroup
+
+      - name: Install (root, once; the plan's "root only at install")
+        run: sudo spike/firecracker/host/setup.sh
+
+      - name: Artifacts to the work volume
+        run: |
+          sudo zstd -d -q /tmp/guest-artifacts/rootfs.ext4.zst -o /srv/fc/artifacts/rootfs.ext4
+          sudo cp /tmp/guest-artifacts/vmlinux /srv/fc/artifacts/vmlinux
+          sudo chown fcuser:fcuser /srv/fc/artifacts/*
+          ls -ls /srv/fc/artifacts
+
+      - name: Prepared Docker disk (base image)
+        run: sudo spike/firecracker/host/disk-prep.sh
+
+      - name: Services (proxy, listeners)
+        run: |
+          echo "HOST_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')" >> "$GITHUB_ENV"
+          sudo spike/firecracker/host/services.sh
+
+      - name: Smoke - boot, read-only rootfs, dockerd
+        run: sudo -E spike/firecracker/host/as-fcuser.sh smoke
+
+      - name: T01 - Sysbox container with inner docker run hello-world, runc next to it
+        if: ${{ !cancelled() }}
+        run: sudo -E spike/firecracker/host/as-fcuser.sh t01
+
+      - name: T03 - vsock round trip
+        if: ${{ !cancelled() }}
+        run: sudo -E spike/firecracker/host/as-fcuser.sh t03
+
+      - name: T02 control - the same probes with no wall (NAT on)
+        if: ${{ !cancelled() }}
+        run: |
+          sudo nft -f spike/firecracker/host/open.nft
+          sudo iptables -I FORWARD 1 -i fctap+ -j ACCEPT; sudo iptables -I FORWARD 1 -o fctap+ -j ACCEPT
+          curl -s -m 4 -o /dev/null -w 'host reaches the Azure metadata endpoint: HTTP %{http_code}\n' -H Metadata:true 'http://169.254.169.254/metadata/instance?api-version=2021-02-01' || echo "host cannot reach 169.254.169.254"
+          sudo -E spike/firecracker/host/as-fcuser.sh t02 --phase control
+          sudo iptables -D FORWARD -i fctap+ -j ACCEPT; sudo iptables -D FORWARD -o fctap+ -j ACCEPT
+          sudo nft delete table ip fcopen
+
+      - name: T02 wall - the static nft table
+        if: ${{ !cancelled() }}
+        run: |
+          sudo nft -f spike/firecracker/host/wall.nft
+          sudo nft list table inet fcwall
+          sudo -E spike/firecracker/host/as-fcuser.sh t02 --phase wall
+          sudo nft list table inet fcwall | tee /tmp/wall-counters.txt
+          sudo -E spike/firecracker/host/as-fcuser.sh t02-pull
+
+      - name: Q3 - reflink copy against plain copy (XFS, btrfs)
+        if: ${{ !cancelled() }}
+        run: sudo spike/firecracker/host/disk-bench.sh /srv/fc/results/disk-bench.json
+
+      - name: Q3 - job disk in the VM (read-only rootfs, quota, growing)
+        if: ${{ !cancelled() }}
+        run: sudo -E spike/firecracker/host/as-fcuser.sh disk
+
+      - name: Q4 - what the unprivileged host side can and cannot do, cgroup limits
+        if: ${{ !cancelled() }}
+        run: |
+          sudo -E spike/firecracker/host/as-fcuser.sh q4
+          { echo "--- /dev/kvm and the udev rule"; ls -l /dev/kvm /dev/net/tun; cat /etc/udev/rules.d/99-kvm-spike.rules
+            echo "--- negative control: another user cannot open /dev/kvm"; sudo -u nobody sh -c 'test -r /dev/kvm && echo "nobody CAN read /dev/kvm" || echo "nobody cannot read /dev/kvm"'
+            echo "--- TAP devices"; ip -d tuntap show 2>/dev/null || ip tuntap show
+            echo "--- the file system the job disks live on"; xfs_info /srv/fc | head -n 3; } | tee /srv/fc/results/q4-root-side.txt
+
+      - name: Q7 - timing and memory (5 boots each)
+        if: ${{ !cancelled() }}
+        run: sudo -E spike/firecracker/host/as-fcuser.sh timing -n 5
+
+      - name: Report
+        if: ${{ !cancelled() }}
+        run: |
+          cp /tmp/wall-counters.txt /srv/fc/results/ 2>/dev/null || true
+          python3 spike/firecracker/host/report.py /srv/fc/results | tee /srv/fc/results/report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Results to an artifact
+        if: ${{ !cancelled() }}
+        run: |
+          sudo tar -C /srv/fc -czf /tmp/results.tgz results
+          sudo chmod 644 /tmp/results.tgz
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: spike-results
+          path: /tmp/results.tgz
+          retention-days: 30

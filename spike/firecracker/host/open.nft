@@ -1,0 +1,12 @@
+# Spike #970: the CONTROL for the wall test: no wall, plus NAT, so the same probes reach what they aim at.
+# Without a control that could say "reachable" a probe that says "blocked" proves nothing (the golden snapshot's proof learned this).
+table inet fcwall
+delete table inet fcwall
+table ip fcopen
+delete table ip fcopen
+table ip fcopen {
+  chain post {
+    type nat hook postrouting priority 100; policy accept;
+    ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+  }
+}

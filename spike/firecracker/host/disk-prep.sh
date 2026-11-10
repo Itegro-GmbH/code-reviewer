@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Spike #970: the prepared base disk for the guest's Docker (read by every job through a reflink copy).
+# An ext4 image whose /docker is a Docker data root with the images already loaded (what the recipe would ship: Worker image,
+# agent image) and /seed with a tarball of hello-world for the offline inner-docker test. Run as root, once, after setup.sh.
+# The data root is filled by the SAME pinned dockerd (static bundle) running on the host as a second daemon, no network of its own.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+work=${SPIKE_WORK:-/srv/fc}
+img="$work/base/base-disk.ext4"
+mnt=/mnt/fc-basemnt
+run=/run/fc-prep
+fetch_pinned "$DOCKER_URL" "$DOCKER_SHA256" /tmp/spike-dl/docker.tgz
+mkdir -p /opt/docker-static "$mnt" "$run"
+tar -xzf /tmp/spike-dl/docker.tgz -C /opt/docker-static --strip-components=1
+export PATH=/opt/docker-static:$PATH
+
+rm -f "$img"
+truncate -s 12G "$img"
+mkfs.ext4 -q -m 0 -L jobdisk "$img"
+mount -o loop "$img" "$mnt"
+mkdir -p "$mnt/docker" "$mnt/seed" "$mnt/sysbox"
+cat > "$run/daemon.json" <<'JSON'
+{ "ipv6": false, "ip6tables": false, "live-restore": false, "log-opts": { "max-size": "10m", "max-file": "2" } }
+JSON
+dockerd --config-file "$run/daemon.json" --data-root "$mnt/docker" --host "unix://$run/docker.sock" --pidfile "$run/docker.pid" \
+  --exec-root "$run/exec" --bridge=none --iptables=false --ip-forward=false --ip-masq=false > "$run/dockerd.log" 2>&1 &
+dpid=$!
+D="docker -H unix://$run/docker.sock"
+for _ in $(seq 1 100); do $D info >/dev/null 2>&1 && break; sleep 0.3; done
+$D info --format 'storage={{.Driver}} {{.DriverStatus}} server={{.ServerVersion}}'
+for pair in "$IMG_BUSYBOX busybox:spike" "$IMG_HELLO hello-world:spike" "$IMG_DIND docker:dind-spike"; do
+  set -- $pair
+  $D pull -q "$1" >/dev/null
+  $D tag "$1" "$2"
+done
+$D save hello-world:spike -o "$mnt/seed/hello-world.tar"
+$D images
+kill -TERM "$dpid"; wait "$dpid" || true
+for _ in $(seq 1 50); do pgrep -f "$run/docker.sock" >/dev/null || break; sleep 0.2; done
+sync
+du -sh "$mnt/docker"
+umount "$mnt"
+e2fsck -fy "$img" >/dev/null || true
+resize2fs -M "$img" 2>&1 | tail -n 1
+blocks=$(dumpe2fs -h "$img" 2>/dev/null | awk -F: '/^Block count/ {gsub(/ /,"",$2); print $2}')
+bsize=$(dumpe2fs -h "$img" 2>/dev/null | awk -F: '/^Block size/ {gsub(/ /,"",$2); print $2}')
+truncate -s "$((blocks * bsize))" "$img"
+chown fcuser:fcuser "$img"
+ls -ls "$img"
+log "base disk ready: $(( blocks * bsize / 1024 / 1024 )) MiB filesystem"
