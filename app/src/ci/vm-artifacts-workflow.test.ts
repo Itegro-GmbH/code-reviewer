@@ -85,7 +85,7 @@ describe("the build workflow", () => {
     // The test itself runs as the runner's user, never as root: only the TAP and the transient unit are made with sudo.
     expect(script).toContain("-p Delegate=yes");
     expect(script).toContain('-p User="$USER"');
-    expect(script).toContain("run --frozen pytest -m kvm tests/kvm");
+    expect(script).toContain("-m pytest -m kvm tests/kvm");
     expect(script).not.toMatch(/sudo [^\n]*pytest/);
     expect(script).toContain("tuntap add dev fctap0");
     for (const variable of [
