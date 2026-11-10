@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "type": "start",
+  "job": {
+    "appUrl": "https://code-review.example",
+    "jobId": "job-1",
+    "credential": "crj_example-credential-for-the-contract-test-only"
+  },
+  "controlToken": "Hq3-n0example_control_token_for_the_contract_test_only_7Kd",
+  "localCredential": {
+    "name": "CLAUDE_CODE_OAUTH_TOKEN",
+    "value": "example-local-credential-for-the-contract-test-only"
+  },
+  "image": {
+    "reference": "code-reviewer-worker:golden",
+    "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "control": {
+    "args": [
+      "run",
+      "--interactive",
+      "--rm",
+      "--name",
+      "code-reviewer-worker-job-1",
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "worker-once"
+    ]
+  },
+  "workVolume": {
+    "name": "code-reviewer-work-job-1",
+    "reserveGib": 8
+  }
+}

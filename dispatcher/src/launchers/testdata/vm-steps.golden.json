@@ -1,0 +1,150 @@
+{
+  "preDaemon": [
+    {
+      "label": "run-directories",
+      "argv": ["mkdir", "-p", "--", "/run/docker", "/run/containerd"],
+      "timeoutSeconds": 3
+    },
+    {
+      "label": "run-directory-docker",
+      "argv": [
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=0711,nosuid,nodev",
+        "tmpfs",
+        "/run/docker"
+      ],
+      "timeoutSeconds": 3
+    },
+    {
+      "label": "run-directory-containerd",
+      "argv": [
+        "mount",
+        "-t",
+        "tmpfs",
+        "-o",
+        "size=64m,mode=1777,nosuid,nodev",
+        "tmpfs",
+        "/run/containerd"
+      ],
+      "timeoutSeconds": 3
+    },
+    {
+      "label": "ipv6-off",
+      "argv": [
+        "sh",
+        "-c",
+        "f=/proc/sys/net/ipv6/conf/default/disable_ipv6; [ -e \"$f\" ] || exit 0; echo 1 > \"$f\" || exit 1; [ \"$(cat \"$f\")\" = 1 ] || exit 1"
+      ],
+      "timeoutSeconds": 3
+    },
+    {
+      "label": "vm-prepare",
+      "argv": [
+        "env",
+        "TMPDIR=/run/containerd",
+        "/usr/local/sbin/vm-prepare.sh"
+      ],
+      "timeoutSeconds": 60
+    }
+  ],
+  "sysbox": {
+    "label": "sysbox-prepare",
+    "argv": ["/usr/local/sbin/sysbox-prepare.sh"],
+    "timeoutSeconds": 40
+  },
+  "workVolume": [
+    {
+      "label": "work-volume-dir",
+      "argv": [
+        "mkdir",
+        "-p",
+        "--",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1/reserve"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-reserve-image",
+      "argv": [
+        "fallocate",
+        "-l",
+        "8G",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1.reserve.img"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-reserve-fs",
+      "argv": [
+        "mkfs.ext4",
+        "-q",
+        "-F",
+        "-m",
+        "0",
+        "-O",
+        "^has_journal",
+        "-E",
+        "lazy_itable_init=1,nodiscard",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1.reserve.img"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-reserve-mount",
+      "argv": [
+        "mount",
+        "-o",
+        "loop,nosuid,nodev",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1.reserve.img",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1/reserve"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-mount",
+      "argv": [
+        "mount",
+        "--rbind",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-options",
+      "argv": [
+        "mount",
+        "-o",
+        "remount,bind,rw,nosuid,nodev",
+        "/var/lib/code-reviewer-work/code-reviewer-work-job-1"
+      ],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-check",
+      "argv": ["cat", "/proc/self/mountinfo"],
+      "timeoutSeconds": 9
+    },
+    {
+      "label": "work-volume-create",
+      "argv": [
+        "docker",
+        "volume",
+        "create",
+        "--driver",
+        "local",
+        "--opt",
+        "type=none",
+        "--opt",
+        "device=/var/lib/code-reviewer-work/code-reviewer-work-job-1",
+        "--opt",
+        "o=rbind",
+        "code-reviewer-work-job-1"
+      ],
+      "timeoutSeconds": 9
+    }
+  ]
+}

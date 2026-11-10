@@ -144,7 +144,7 @@ describe("the installs", () => {
     expect(installs.length).toBeGreaterThanOrEqual(10);
     for (const install of installs) {
       expect(install).toMatch(
-        /pnpm install --frozen-lockfile (?:--filter "?(?:code-reviewer-(?:app|dispatcher)|\.\/\$DIRECTORY)\.\.\."? ?)+$/,
+        /pnpm install --frozen-lockfile (?:--ignore-scripts )?(?:--filter "?(?:code-reviewer-(?:app|dispatcher)|\.\/\$DIRECTORY)\.\.\."? ?)+$/,
       );
     }
   });

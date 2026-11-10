@@ -804,6 +804,7 @@ class ImplementerSession:
             pause_seconds=self.seams.switch_pause_seconds,
             connect=self.seams.control_connect,
             narrow_seconds=self.seams.control_narrow_seconds,
+            token=self.job.control_token,
         )
         if rule.mode == MODE_OPEN:
             self._vm_policy = VM_POLICY_UNCHANGED

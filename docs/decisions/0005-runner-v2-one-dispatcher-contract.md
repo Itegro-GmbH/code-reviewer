@@ -101,7 +101,24 @@ App** (the Worker API, `crj_`, everywhere).
 - **The validator says what no online runner announces** (`no_runner_announces`): a warning (`severity: "warning"`), never a refusal, when a runner with the environment's labels is online and none has an entry for the
   profile; with no such runner online nothing is said. A runner that is asleep, or that withdraws an entry for a while (a rate limit), must never block saving a profile or a workflow.
 
-## 3d. Details of #974
+## 3d. Details of #977
+
+- **vm-init** (`runner/src/code_reviewer_runner/vm_init/`, `runner/vm-init/README.md`) is the program in the local VM's root file system that does what the Sandbox API does hosted: it takes the start over vsock, prepares the VM with the
+  hosted launcher's steps, checks the image id against the manifest, makes the work volume, runs the Control container and reports how it ended (`contracts/vm-init.v1.json`). **Python, standard library only**: one language for the whole
+  job-side path and the lane that already tests it; the interpreter in the root file system is the price (Go and Node were the alternatives, see the README).
+- **The `docker run` arguments are rendered once, by the Dispatcher**, from the hosted Implementer spec plus `RUNNER_ENVIRONMENT_CONTROL` and a seccomp profile that allows AF_VSOCK, and sent in the start; vm-init executes them. A
+  golden file (`docker-run.local-control.golden.json`) pins them and the runner's tests feed it to the guest unchanged. The hosted spec and its golden file are untouched.
+- **No relay: Control connects to the host itself** (CID 2, port 5100, `environment-control.v1.json` unchanged). Only the Control container gets the seccomp profile; the agent's container, the doors and the readers keep Docker's
+  default profile, which refuses AF_VSOCK. That denial is **defence in depth**, not what the host trusts (Docker's default profile allows `socketcall`, and a kernel with 32-bit emulation could let a 32-bit call open the socket; the kernel of #976 has none).
+  vm-init's own exit report goes to its own port (5101) and is the authority on how the job ended.
+- **The host trusts a per-VM token, not the denial.** The host makes a random token for each VM and sends it in the start; vm-init puts it in every exit report after a start, Control receives it on its stdin with its credential and puts
+  it in every `narrow` and `end` (`controlToken` of `vm-init.v1.json`, an optional `token` of `environment-control.v1.json`: additive, still version 1). The host refuses a message without it or with another
+  (`dispatcher/src/launchers/control-token.ts`, which #978 reuses). A report without a token counts only while the host has no `ack` for the start (a VM that never took one).
+- **Trust boundary.** The host owns the VMM, the root file system and the kernel and is trusted; vm-init binds the image of `control.args` to the checked image id and refuses a cheap deny-list of options (`--privileged`, `seccomp=unconfined`,
+  host namespaces, `--device`, `--cap-add ALL`, mounts but the work volume and the Docker socket): that catches a bug of the Dispatcher and is no defence against a hostile host. The host owns the job's wall clock (vm-init has none);
+  vm-init sets its own `oom_score_adj` to -1000 and always powers the VM off.
+
+## 3e. Details of #974
 
 - **The customer's claim is the split claim, always.** A claim with a runner credential (`crc_`) is answered like the platform's: the job's id, the credential of its Worker (`crj_`), the `labels` the job required (a customer's job has no `sizeLabel`: size labels
   are the platform's) and, for a turn of the Implementer, `access` (`SplitClaimResponse.job.access`: harness, auth, model; never a credential). The app forces the feature `worker_credential` for a customer's runner whatever the claim names, so no

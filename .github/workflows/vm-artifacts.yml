@@ -1,0 +1,239 @@
+name: VM artifacts
+
+# The Linux VM artifacts of Runner v2 (#976, epic #969): the guest kernel, the read-only root file system and the prepared Docker data
+# disk of a Firecracker microVM, built from the golden snapshot's recipe (docker/vm, dispatcher/src/vm-artifacts), booted once in CI as a
+# smoke test (KVM through nested virtualization: ubuntu-24.04 runners have /dev/kvm, the development server has not) and described by a
+# manifest. One definition for the two callers: ci.yml (a pull request that changes what these files are made from, never anything
+# else) and vm-artifacts-release.yml (a tag, which signs and publishes). This workflow never signs for real and never publishes: it holds no
+# secret, and the one key lives only in the release job, in the environment `vm-artifacts-release` (docs/runner.md, "VM artifacts").
+# A throwaway key signs and verifies the build's own manifest, and a changed byte must be refused (docker/vm/selftest-signing.sh).
+#
+# The files are NOT workflow artifacts. A workflow artifact of a public repository can be downloaded by anybody who is signed in to GitHub, and
+# the data disk holds the Worker image (proprietary code, copyleft packages): it must not be downloadable before the owner has decided to publish
+# it. A pull request run keeps only what its own jobs need, for a day (the kernel), and its logs, for three. A run for a release (`for_release`)
+# hands the release's files to the signing job through the Actions cache (nobody can download a cache's content, only a workflow of this
+# repository restores it, and the key names this run) and builds the kernel again: it never takes one from the cache.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: The release number of the manifest; it only grows (the tag's number, or the run number for a build that is not published)
+        required: true
+        type: number
+      for_release:
+        description: The run feeds a release (vm-artifacts-release.yml). The kernel is built, never taken from the cache, and the release's files go to the job that signs them through the Actions cache, not as an artifact
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      release:
+        description: The release number of the manifest
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  VM_WORK: /mnt/vm
+
+jobs:
+  kernel:
+    name: "VM artifacts: guest kernel"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Packages for the kernel build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flex bison libelf-dev libssl-dev bc dwarves
+          sudo mkdir -p "$VM_WORK"
+          sudo chown "$USER" "$VM_WORK"
+      # Always, and fast (seconds, no compiler beyond the kconfig tools): the kernel's source and Firecracker's base config are
+      # downloaded and checked against their pinned checksums, the fragment is merged, and the step FAILS when an option did not stick
+      # or RT_GROUP_SCHED is on. A kernel that comes from the cache below is never trusted without this.
+      - name: Configuration (fails when an option of the fragment did not stick)
+        run: |
+          docker/vm/kernel/configure.sh "$VM_WORK/kwork"
+          cat "$VM_WORK/kwork/added-options.txt"
+      # Pull requests only: what is signed is built from the source, never restored from a cache that an earlier run wrote.
+      - name: Cache of the built kernel
+        id: kcache
+        if: ${{ !inputs.for_release }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VM_WORK }}/vmlinux-cache
+          key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
+      # A skipped restore is no hit: a release always builds.
+      - name: Build the kernel (about 10 minutes on 4 cores)
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: docker/vm/kernel/build.sh "$VM_WORK/kwork" "$VM_WORK/vmlinux-cache"
+      # Right away: a later failure must not lose a 10 minute build.
+      - name: Save the kernel to the cache
+        if: ${{ !inputs.for_release && steps.kcache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VM_WORK }}/vmlinux-cache
+          key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
+      - name: "The kernel's files (the source offer: source, base config, fragment, final config)"
+        run: |
+          set -euo pipefail
+          . docker/vm/pins.env
+          out="$VM_WORK/kernel-out"
+          mkdir -p "$out"
+          cp "$VM_WORK/vmlinux-cache/vmlinux" "$out/vmlinux"
+          cp "$VM_WORK/vmlinux-cache/kernel.config" "$out/kernel.config"
+          cp "$VM_WORK/kwork/fc-base.config" "$out/fc-base.config"
+          cp "$VM_WORK/kwork/linux-$KERNEL_VERSION.tar.xz" "$out/linux-$KERNEL_VERSION.tar.xz"
+          cp docker/vm/kernel/config.fragment "$out/config.fragment"
+          # The .config of the kernel that is published, built now or restored from the cache, is held to the fragment too.
+          docker/vm/kernel/verify-config.sh "$out/kernel.config" "$out/fc-base.config"
+          ls -l "$out"
+          cat "$VM_WORK/vmlinux-cache/build-seconds.txt" 2> /dev/null || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vm-kernel
+          path: ${{ env.VM_WORK }}/kernel-out
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    name: "VM artifacts: root file system, data disk, smoke boot, manifest"
+    needs: kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install the dispatcher dependencies (the recipe, the boot, the manifest and the verifier are TypeScript)
+        run: pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...
+      - name: Work volume
+        run: |
+          sudo mkdir -p "$VM_WORK"
+          sudo chown "$USER" "$VM_WORK"
+          df -h / "$VM_WORK" | cat
+      - uses: actions/download-artifact@v8
+        with:
+          name: vm-kernel
+          path: ${{ env.VM_WORK }}/kernel
+      - name: KVM and Firecracker
+        run: sudo docker/vm/host/setup.sh
+      # The golden snapshot pipeline's own install scripts and pins, written as the pipeline would send them: the recipe of both outputs.
+      - name: The golden snapshot's recipe
+        id: recipe
+        run: |
+          set -euo pipefail
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/recipe-main.ts "$VM_WORK/recipe"
+          {
+            echo "dockerfile=$(jq -r .dockerfile "$VM_WORK/recipe/recipe.json")"
+            echo "worker_target=$(jq -r .worker.target "$VM_WORK/recipe/recipe.json")"
+            echo "worker_tag=$(jq -r .worker.tag "$VM_WORK/recipe/recipe.json")"
+            echo "agent_target=$(jq -r .agent.target "$VM_WORK/recipe/recipe.json")"
+            echo "agent_tag=$(jq -r .agent.tag "$VM_WORK/recipe/recipe.json")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Root file system (Ubuntu Base, then the golden snapshot's scripts, unchanged, in a chroot)
+        run: sudo docker/vm/rootfs/build.sh "$VM_WORK/recipe" "$VM_WORK/rwork" "$VM_WORK/rootfs-out"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # The two images the hosted snapshot builds, from the same Dockerfile, targets and tags. The cache of the CI image job is read, never written.
+      - name: Worker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ steps.recipe.outputs.dockerfile }}
+          target: ${{ steps.recipe.outputs.worker_target }}
+          load: true
+          push: false
+          tags: ${{ steps.recipe.outputs.worker_tag }}
+          cache-from: type=gha,scope=runner-sandbox
+      - name: Agent image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ steps.recipe.outputs.dockerfile }}
+          target: ${{ steps.recipe.outputs.agent_target }}
+          load: true
+          push: false
+          tags: ${{ steps.recipe.outputs.agent_tag }}
+          cache-from: type=gha,scope=runner-sandbox
+      - name: Save the images
+        env:
+          WORKER_TAG: ${{ steps.recipe.outputs.worker_tag }}
+          AGENT_TAG: ${{ steps.recipe.outputs.agent_tag }}
+        run: |
+          docker save "$WORKER_TAG" "$AGENT_TAG" --output "$VM_WORK/images.tar"
+          docker image ls
+          ls -l "$VM_WORK/images.tar"
+          # The runner's Docker is done: the disk is needed for the data image.
+          docker rmi "$WORKER_TAG" "$AGENT_TAG" > /dev/null
+          docker builder prune --all --force > /dev/null
+      - name: Prepared Docker data disk (the images loaded into a guest's own Docker)
+        run: |
+          docker/vm/data/build.sh "$VM_WORK/images.tar" "$VM_WORK/kernel/vmlinux" "$VM_WORK/rootfs-out/rootfs.ext4" "$VM_WORK/dwork" "$VM_WORK/data-out"
+          rm -f "$VM_WORK/images.tar"
+          cat "$VM_WORK/data-out/images.json"
+      # T03: a job's VM, as the launcher makes it: a copy of the base grown to a quota, booted read-only from the root file system.
+      - name: Smoke boot (dockerd ready within the budget, Sysbox, the images, the Worker's self-check)
+        run: |
+          cp --reflink=auto "$VM_WORK/data-out/dockerdata.ext4" "$VM_WORK/smoke-data.ext4"
+          docker/vm/data/grow.sh "$VM_WORK/smoke-data.ext4" 8G
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/boot-main.ts \
+            --mode smoke --kernel "$VM_WORK/kernel/vmlinux" --rootfs "$VM_WORK/rootfs-out/rootfs.ext4" --data "$VM_WORK/smoke-data.ext4" \
+            --work "$VM_WORK/smoke" --vcpus 2 --mem 4096 --timeout-s 300 --docker-ready-budget-ms 10000 \
+            --images-in "$VM_WORK/data-out/images.json" --events-out "$VM_WORK/smoke/events.json"
+          rm -f "$VM_WORK/smoke-data.ext4"
+      - name: Manifest
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: docker/vm/assemble.sh "$VM_WORK/release" "$VM_WORK/kernel" "$VM_WORK/rootfs-out" "$VM_WORK/data-out" "$RELEASE" "$(git rev-parse HEAD)"
+      - name: Sign with a throwaway key, verify, and see a changed byte refused
+        run: docker/vm/selftest-signing.sh "$VM_WORK/release"
+      - name: Summary
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          {
+            echo "### VM artifacts (release $RELEASE)"
+            echo
+            echo "| File | Size (MiB) |"
+            echo "|---|---|"
+            for f in "$VM_WORK"/release/*; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(( $(stat -c %s "$f") / 1048576 ))"
+            done
+            echo
+            echo "Smoke boot events:"
+            echo
+            echo '```'
+            jq -r '.[] | "\(.hostMs) ms  \(.name) \(.fields | tojson)"' "$VM_WORK/smoke/events.json" | cut -c1-200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Logs of the guests
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-artifacts-logs
+          path: |
+            ${{ env.VM_WORK }}/dwork/seed-boot
+            ${{ env.VM_WORK }}/smoke
+            ${{ env.VM_WORK }}/release/manifest.json
+          retention-days: 3
+          if-no-files-found: ignore
+      # For a release only. Not an artifact (see the top): the cache is restored by the one job that signs, which verifies every file against the
+      # manifest before it publishes anything, so a cache that held other bytes would fail there.
+      - name: The release's files, for the job that signs and publishes them (the Actions cache, not an artifact)
+        if: ${{ inputs.for_release }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VM_WORK }}/release
+          key: vm-release-files-${{ github.run_id }}

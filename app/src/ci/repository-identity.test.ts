@@ -48,6 +48,7 @@ describe("the identity of the repository", () => {
       ".github/workflows/nightly.yml",
       ".github/workflows/rollback-production.yml",
       ".github/workflows/vercel-stage.yml",
+      ".github/workflows/vm-artifacts-release.yml",
     ]);
     for (const [file, names] of Object.entries(compared))
       expect(
