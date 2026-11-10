@@ -3,6 +3,7 @@
 // The profile service with the real repository on a real Postgres (#843): a profile is checked by the validator and against the world
 // (the model, the operator's maximum), an invalid one is refused with the full list and nothing is stored, every save is a new
 // version, the name never changes, an older version stays readable, and a workspace never sees the profiles of another.
+import type { OnlineRunner } from "../runner-identity/announced.ts";
 import { describe, expect, it } from "vitest";
 import type { EnvironmentSummary } from "../db/repositories/implementer-environments-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -64,7 +65,10 @@ async function setup() {
   const state = { maximumCents: 500, ownKey: false };
   const serviceFor = (
     workspaceId: string,
-    options: { archivedMax?: number } = {},
+    options: {
+      archivedMax?: number;
+      onlineRunners?: () => Promise<readonly OnlineRunner[]>;
+    } = {},
   ) =>
     createProfileService({
       profiles: createProfilesRepository(db, workspaceId),
@@ -284,6 +288,74 @@ describe("the profile service", () => {
         })
       ).valid,
     ).toBe(true);
+  });
+
+  // #973-T01
+  it("warns, and never refuses, when no online runner of the environment announces the combination; nothing is said while no runner with the labels is online", async () => {
+    const { serviceFor, idA, state } = await setup();
+    state.ownKey = true;
+    const opencode = {
+      harness: "opencode",
+      version: "1",
+      auth: "app-key",
+    } as const;
+    const claude = {
+      harness: "claude-code",
+      version: "2",
+      auth: "subscription",
+    } as const;
+    const asked = (runners: OnlineRunner[]) =>
+      serviceFor(idA, { onlineRunners: async () => runners });
+    const sonnet = {
+      ...REVIEWER,
+      environment: "Laptop",
+      harness: "claude-code",
+      model: { provider: "claude-code", model: "sonnet" },
+    };
+    const opus = {
+      ...sonnet,
+      model: { provider: "claude-code", model: "opus" },
+    };
+    const online = [
+      {
+        labels: ["laptop"],
+        access: [opencode, { ...claude, models: ["sonnet"] }],
+      },
+    ];
+
+    expect(await asked(online).validate(sonnet)).toMatchObject({
+      valid: true,
+    });
+    expect((await asked(online).validate(sonnet)).warnings).toBeUndefined();
+    // The runner that is online does not announce opus (asleep, rate limited): the profile is valid, and the warning says why it may wait.
+    const warned = await asked(online).validate(opus);
+    expect(warned).toMatchObject({ valid: true, errors: [] });
+    expect(warned.warnings).toEqual([
+      expect.objectContaining({
+        path: "/environment",
+        code: "no_runner_announces",
+        severity: "warning",
+      }),
+    ]);
+    // ... and it can be saved.
+    expect((await asked(online).create(USER, opus)).name).toBe(REVIEWER.name);
+    // No runner with the labels is online: nothing is said, the turn will wait for one.
+    expect(await asked([]).validate(opus)).toMatchObject({ valid: true });
+    expect((await asked([]).validate(opus)).warnings).toBeUndefined();
+    expect(
+      (await asked([{ labels: ["other"], access: [opencode] }]).validate(opus))
+        .warnings,
+    ).toBeUndefined();
+    // A model of the workspace's own key needs the key of the app: any online runner with OpenCode announces it.
+    expect(
+      (
+        await asked(online).validate({
+          ...REVIEWER,
+          environment: "Laptop",
+          model: { provider: "anthropic", model: "claude-sonnet-5-5" },
+        })
+      ).warnings,
+    ).toBeUndefined();
   });
 
   // #919-T07

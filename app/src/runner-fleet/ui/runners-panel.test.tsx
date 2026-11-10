@@ -38,7 +38,15 @@ const BOX: RunnerView = {
   labels: ["gpu", "linux"],
   baseVersion: "1.2.0",
   manifest: {
-    harnesses: { opencode: { version: "1.19.0", ready: true } },
+    harnesses: [
+      { harness: "opencode", version: "1.19.0", auth: "app-key" },
+      {
+        harness: "claude-code",
+        version: "2.1.311",
+        auth: "subscription",
+        models: ["opus", "sonnet"],
+      },
+    ],
     capabilities: ["agent-docker"],
   },
   limits: {},
@@ -52,7 +60,7 @@ const OLD: RunnerView = {
   name: "old-box",
   labels: [],
   baseVersion: "0.9.0",
-  manifest: { harnesses: {}, capabilities: [] },
+  manifest: { harnesses: [], capabilities: [] },
   status: "update_needed",
 };
 
@@ -107,7 +115,11 @@ describe("the list of runners", () => {
     expect(within(box).getByText("Online")).toBeTruthy();
     expect(within(box).getByText("gpu, linux")).toBeTruthy();
     expect(within(box).getByText("1.2.0")).toBeTruthy();
-    expect(within(box).getByText("opencode 1.19.0 (ready)")).toBeTruthy();
+    expect(
+      within(box).getByText(
+        "opencode 1.19.0 (app-key), claude-code 2.1.311 (subscription: opus, sonnet)",
+      ),
+    ).toBeTruthy();
     expect(within(box).getByText("agent-docker")).toBeTruthy();
     expect(within(box).getByText("2026-11-05 11:59 UTC")).toBeTruthy();
     const old = screen.getByText("old-box").closest("li") as HTMLElement;

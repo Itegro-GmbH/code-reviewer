@@ -224,19 +224,16 @@ describe("the claim of a customer's runner", () => {
   });
 
   // #854-T152
-  it("hands a runner whose OpenCode is not ready, or not announced, nothing", async () => {
+  it("hands a runner whose OpenCode is not announced, or only another harness, nothing", async () => {
     const h = await start();
     const notReady = await h.registerRunner({
       labels: ["gpu", "linux"],
-      manifest: {
-        harnesses: { opencode: { version: "1.19.0", ready: false } },
-        capabilities: [],
-      },
+      manifest: { harnesses: [], capabilities: [] },
     });
     const otherOnly = await h.registerRunner({
       labels: ["gpu", "linux"],
       manifest: {
-        harnesses: { "custom/tool": { version: "1", ready: true } },
+        harnesses: [{ harness: "custom/tool", version: "1", auth: "app-key" }],
         capabilities: [],
       },
     });
@@ -527,8 +524,8 @@ describe("the claim of a customer's runner", () => {
     });
   });
 
-  // #854-T159
-  it("ends a runner turn on the operator's key at the claim, before a key or a token exists", async () => {
+  // #854-T159, #973-T02
+  it("never hands a runner a turn on the operator's key: no runner announces managed, so the claim finds nothing and no key or token exists", async () => {
     const h = await start({ key: null });
     await h.llm
       .operatorKey()
@@ -571,10 +568,9 @@ describe("the claim of a customer's runner", () => {
     const response = await h.claim(claimOf(runner.credential));
 
     expect(response.status).toBe(204);
-    expect(await h.queue.get(turn.job.id)).toMatchObject({
-      status: "failed",
-      errorCode: "runner_needs_own_key",
-    });
+    // The rule that was here (a managed selection on a runner ends the job) is the manifest now: the turn asks for `managed` and only the
+    // platform identity announces it. The start of a task and the validator still refuse the combination with `runner_needs_own_key`.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
     expect(h.issuedJobTokens()).toEqual([]);
     expect(h.logLines().join("\n")).not.toContain("dummy-operator");
   });

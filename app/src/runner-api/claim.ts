@@ -112,6 +112,7 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
+import type { HarnessAccess } from "../runner-identity/access.ts";
 import {
   DEFAULT_IMPLEMENTER_VCPUS,
   REVIEW_VCPUS,
@@ -996,7 +997,9 @@ export async function checkJob(
   if (!selected.ok) return refuse(selected.errorCode, selected.detail);
   const { selection } = selected;
   // #854: a turn of a runner environment runs on a customer's machine with the owner's own key. The operator's key never leaves for a
-  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists.
+  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists. Since #973
+  // the routing keeps such a turn from reaching a runner at all (it asks for `managed`, which only the platform announces); this stays as the
+  // last line in front of the key.
   if (turn?.turn.runnerEnvironment != null && selection.keyMode === "managed")
     return refuse("runner_needs_own_key", "kind=implementer");
   await deps.recordSelection(job, selection);
@@ -1995,13 +1998,13 @@ export async function handleClaim(
     /** #424: the providers the caller advertised in its claim; absent means the default provider only. */
     llmProviders?: readonly string[];
     /**
-     * #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. #856: and
-     * whose profile's harness it announced as ready.
+     * #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. #973: and
+     * that an entry of its manifest (`access`) can run: the harness, the auth and the model the turn asks for.
      */
     customerRunner?: {
       workspaceId: string;
       labels: readonly string[];
-      harnesses?: readonly string[];
+      access: readonly HarnessAccess[];
     };
   } = {},
 ): Promise<Response> {

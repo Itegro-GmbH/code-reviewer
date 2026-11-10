@@ -109,3 +109,149 @@ describe("a harness that is not OpenCode (#854)", () => {
     ]);
   });
 });
+
+describe("what the runners of the workspace announce (#973)", () => {
+  const OPENCODE = {
+    harness: "opencode",
+    version: "1",
+    auth: "app-key",
+  } as const;
+  const CLAUDE = {
+    harness: "claude-code",
+    version: "2",
+    auth: "subscription",
+  } as const;
+
+  function resolverWith(
+    onlineRunners: WorkflowResolver["onlineRunners"],
+  ): WorkflowResolver {
+    return {
+      ...RESOLVER,
+      profiles: () => [
+        ...RESOLVER.profiles(),
+        {
+          name: "opus",
+          versions: [1],
+          facts: {
+            1: {
+              canPush: true,
+              managedModel: false,
+              harness: "claude-code",
+              model: "opus",
+            },
+          },
+        },
+      ],
+      environments: () => [
+        { name: "vm", kind: "hosted" },
+        { name: "box", kind: "runner", labels: ["box"] },
+        { name: "nolabels", kind: "runner" },
+      ],
+      ...(onlineRunners === undefined ? {} : { onlineRunners }),
+    };
+  }
+
+  const resultOf = (
+    resolver: WorkflowResolver,
+    profile: string,
+    environment: string,
+  ) => validateWorkflow(workflow(profile, environment), resolver);
+  const codesWith = (
+    resolver: WorkflowResolver,
+    profile: string,
+    environment: string,
+  ) =>
+    resultOf(resolver, profile, environment).errors.map((e) => [
+      e.path,
+      e.code,
+    ]);
+  const warningsWith = (
+    resolver: WorkflowResolver,
+    profile: string,
+    environment: string,
+  ) =>
+    (resultOf(resolver, profile, environment).warnings ?? []).map((e) => [
+      e.path,
+      e.code,
+      e.severity,
+    ]);
+
+  // #973-T01
+  it("warns, and does not refuse, when no online runner with the labels of the environment announces the combination", () => {
+    const resolver = resolverWith(() => [
+      {
+        labels: ["box"],
+        access: [OPENCODE, { ...CLAUDE, models: ["sonnet"] }],
+      },
+    ]);
+
+    // A runner that is asleep, or that withdrew the entry for a while (a rate limit), must never stop a save.
+    expect(resultOf(resolver, "opus", "box")).toMatchObject({ valid: true });
+    expect(codesWith(resolver, "opus", "box")).toEqual([]);
+    expect(warningsWith(resolver, "opus", "box")).toEqual([
+      ["/steps/0/environment", "no_runner_announces", "warning"],
+    ]);
+    const warned = resultOf(resolver, "opus", "box").warnings?.[0];
+    expect(warned?.message).toContain("claude-code");
+    expect(codesWith(resolver, "own", "box")).toEqual([]);
+    expect(warningsWith(resolver, "own", "box")).toEqual([]);
+  });
+
+  // #973-T01
+  it("is quiet once a runner announces the model, or any model", () => {
+    for (const entry of [{ ...CLAUDE, models: ["opus", "sonnet"] }, CLAUDE]) {
+      const resolver = resolverWith(() => [
+        { labels: ["box"], access: [OPENCODE, entry] },
+      ]);
+      expect(codesWith(resolver, "opus", "box")).toEqual([]);
+      expect(warningsWith(resolver, "opus", "box")).toEqual([]);
+    }
+  });
+
+  it("says nothing when no runner with the labels is online, or the resolver does not know the runners", () => {
+    expect(
+      warningsWith(
+        resolverWith(() => []),
+        "opus",
+        "box",
+      ),
+    ).toEqual([]);
+    expect(warningsWith(resolverWith(undefined), "opus", "box")).toEqual([]);
+    expect(
+      codesWith(
+        resolverWith(() => []),
+        "opus",
+        "box",
+      ),
+    ).toEqual([]);
+    expect(
+      codesWith(
+        resolverWith(() => [{ labels: ["other"], access: [OPENCODE] }]),
+        "opus",
+        "box",
+      ),
+    ).toEqual([]);
+    expect(codesWith(resolverWith(undefined), "opus", "box")).toEqual([]);
+    expect(
+      codesWith(
+        resolverWith(() => [{ labels: [], access: [OPENCODE] }]),
+        "opus",
+        "nolabels",
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not refuse a managed model twice, and never judges a platform VM by the runners", () => {
+    const resolver = resolverWith(() => [
+      { labels: ["box"], access: [OPENCODE] },
+    ]);
+
+    expect(codesWith(resolver, "managed", "box")).toEqual([
+      ["/steps/0/environment", "runner_needs_own_key"],
+    ]);
+    expect(codesWith(resolver, "managed", "vm")).toEqual([]);
+    expect(codesWith(resolver, "opus", "vm")).toEqual([
+      ["/steps/0/environment", "harness_needs_runner"],
+    ]);
+  });
+});

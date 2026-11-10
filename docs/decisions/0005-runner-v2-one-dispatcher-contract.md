@@ -85,6 +85,22 @@ App** (the Worker API, `crj_`, everywhere).
 - **Only with the dispatch webhook on** (`RUNNER_DISPATCH=webhook`, hosted): in poll mode the app makes no outgoing call.
 - **Not done here:** the hosted Dispatcher still claims by the `jobId` of the doorbell and still answers a full pool with `429`; a UI to show the secret once and to rotate it.
 
+## 3c. Details of #973
+
+- **The manifest is a list of entries** `{ harness, version, auth, models? }` (`contracts/runner-registration.v1.json`, `HarnessAccess`), one for each harness and source of access: `managed`
+  (the platform identity's keys), `app-key`, `local-key`, `subscription`. `models` only for the two accesses that exist on the device; left out, the device allows any. There is no `ready` flag: an entry is
+  announced only while the dispatcher can run it, a dispatcher that cannot for a while leaves it out, and the app uses the last announcement. The old map form stays readable (OpenCode as `app-key`,
+  Claude Code as `subscription`, not ready as none); the stored text is the list form (migration `20261110180000`).
+- **A job's demand is derived, the profile is untouched:** the harness of the turn's profile, the auth (a harness that runs on a login asks for `subscription`; a catalog entry asks for `managed`; a model
+  of the workspace's own key asks for `app-key`) and, for a subscription, the model of the turn. A dispatcher takes the job when one entry has all three.
+- **`managed` replaces `runner_needs_own_key` in the routing.** Only the platform identity announces it (`RUNNER_ACCESS_RESERVED`, 422, for a customer's runner), so no customer's runner matches a turn that asks for
+  the platform's keys; the check is by identity as for `cr:` labels. The platform's own manifest is `PLATFORM_ACCESS` (OpenCode with `managed` and `app-key`), defined once in the app and not announced.
+  The start of a task and the validator keep the code `runner_needs_own_key` for the person who can act on it; a managed turn that reached the queue on a runner environment now waits (and ends with
+  `no_runner_available`) instead of ending at the claim.
+- **One rule.** `accessRule` is the SQL fragment that both the claim and the pairing of the rings use; `accessMatches` is the same rule in memory. A test runs every manifest against every turn through both.
+- **The validator says what no online runner announces** (`no_runner_announces`): a warning (`severity: "warning"`), never a refusal, when a runner with the environment's labels is online and none has an entry for the
+  profile; with no such runner online nothing is said. A runner that is asleep, or that withdraws an entry for a while (a rate limit), must never block saving a profile or a workflow.
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.
@@ -105,4 +121,4 @@ subscription login through a door.
 
 ## 7. Out of scope
 
-The harness manifest, the local Dispatcher without job secrets and everything of M2 and M3: each is its own issue of epic #969.
+The local Dispatcher without job secrets and everything of M2 and M3: each is its own issue of epic #969.

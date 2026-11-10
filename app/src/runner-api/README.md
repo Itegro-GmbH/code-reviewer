@@ -172,7 +172,7 @@ A runner on a customer's own machine does not hold `RUNNER_TOKEN`. It registers 
 `Authorization: Bearer crc_...`, a credential of its own (`src/runner-fleet/README.md`, `src/runner-api/registration.ts`, `contracts/runner-registration.v1.json`). `claim` looks
 at the form of the header first: a `crc_` credential takes the runner's path (unknown, revoked or blank is the same `401 RUNNER_UNAUTHORIZED`;
 a runner below `RUNNER_MIN_BASE_VERSION` is `426 RUNNER_UPDATE_NEEDED`) and never the shared one. The call sets the runner's `last seen`. Such a claim names the
-engine `implementer` and takes the turns of runner environments of its workspace whose labels it has and whose harness it announces as ready
+engine `implementer` and takes the turns of runner environments of its workspace whose labels it has and that an entry of its manifest can run (the harness, the auth and the model of the turn, #973)
 (`docs/runner.md`, "Routing"). `heartbeat`, `complete`, `release` and `steps` take the credential for a job of its own workspace (`404 RUNNER_JOB_NOT_FOUND`
 for any other); `session` and `resume-session` (#879, below) take it for a job its own runner holds; the Dispatcher's calls (`vm`, the job state) and every other claim take the shared token alone; `version` takes the shared token, the credential of a running claim and (#879) the credential of a live runner. A claim without a runner
 credential never takes a turn of a runner environment (`db/repositories/jobs-claim.ts`).

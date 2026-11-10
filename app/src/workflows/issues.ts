@@ -84,6 +84,12 @@ export const SEMANTIC_ISSUE_CODES = [
   "runner_needs_own_key",
   /** A step runs a profile whose harness is not OpenCode in an environment that is not a runner's (#854). */
   "harness_needs_runner",
+  /**
+   * A step runs a profile in a runner environment, a runner with the environment's labels is online, and none of those announces the harness, the auth
+   * and the model the profile asks for (#973). A WARNING, never an error: a runner that is asleep, or that withdrew an entry for a while (a rate
+   * limit), must not stop a save. With no such runner online nothing is said: the turn waits for one, as always.
+   */
+  "no_runner_announces",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
   /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */
@@ -128,7 +134,23 @@ export type Issue = {
   message: string;
   /** The names that were available at that point, when the problem is a wrong name. */
   available?: string[];
+  /** Left out: the issue is an error and the document cannot be saved. `warning`: it is said and does not stop a save (#973). */
+  severity?: "warning";
 };
+
+/** An issue that is said and does not stop a save: what the document would do depends on something that can change (a runner asleep, a limit that lifts). */
+export function warning(
+  path: string,
+  code: IssueCode,
+  message: string,
+  available?: readonly string[],
+): Issue {
+  return { ...issue(path, code, message, available), severity: "warning" };
+}
+
+export function isWarning(found: Issue): boolean {
+  return found.severity === "warning";
+}
 
 /** The names for `available`: the first `NAMES_LISTED_MAX`, each cut to the length of a name. */
 function listed(names: readonly string[]): string[] {

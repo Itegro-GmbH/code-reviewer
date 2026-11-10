@@ -38,8 +38,8 @@ POST /api/w/:ws/runners/tokens   ->  token crt_... (1 hour, once, hash kept)
   SHA-256 of it. It is valid for one hour and works once: the exchange is a single conditional update, so two runners racing for one token cannot both win.
   An unknown, a used and an expired token are the same answer, `401 RUNNER_REGISTRATION_TOKEN_INVALID`.
 - **Exchange.** The runner says its name (1 to 80 characters, one line), its **labels** (at most 20, lower case, `[a-z0-9][a-z0-9._:-]{0,39}`; **not** in the namespace `cr:`, which is the platform's, see "Routing"), the **version of
-  its base** (`1.4.0`), its **manifest** and its **limits**. The manifest names the harnesses it announces (`opencode`, or `custom/name`), each with its
-  version and whether it is `ready` (installed, logged in, proven by the runner's selftest), and its capabilities such as `agent-docker` (announced only
+  its base** (`1.4.0`), its **manifest** and its **limits**. The manifest names the **entries** it can run (`harnesses`, see "Harness entries" below: a harness with
+  its version, the source of its access and, for an access on the device, the models) and its capabilities such as `agent-docker` (announced only
   when the selftest ran a container in a Docker inside Sysbox, see S2 below). The limits (`cpus`, `memoryMb`, `diskGb`, `parallelRuns`) are informational:
   they are enforced on the machine. What the format does not know is dropped; what it knows and gets wrong is refused with the field's name, never its value.
   The answer carries the runner's **credential** (`crc_` and 43 characters), once; the app keeps a hash.
@@ -69,6 +69,51 @@ Dispatcher's to take.
 The turn copies the kind and the labels with the rest of the environment (`implementer_turns.environment_kind`, `environment_labels`), so editing or
 deleting the environment touches no turn, and the claim routes by the turn's own row.
 
+### Harness entries (#973)
+
+The app needs to know **what** a dispatcher can run, never the names of its credentials. `manifest.harnesses` is a list of entries, one for each harness and source of
+access (`contracts/runner-registration.v1.json`, `HarnessAccess`):
+
+```json
+"harnesses": [
+  { "harness": "claude-code", "version": "2.1.311", "auth": "subscription", "models": ["sonnet", "opus", "haiku"] },
+  { "harness": "opencode",    "version": "1.19.0",   "auth": "app-key" }
+]
+```
+
+| `auth` | Meaning | Who may announce it | `models` |
+|---|---|---|---|
+| `managed` | The platform's own keys | the platform identity only | not allowed |
+| `app-key` | A key the workspace keeps in the app, handed to the Worker through the Worker API | a customer's runner | not allowed (the app's catalog decides) |
+| `local-key` | An API key that exists only on the dispatcher's device | a customer's runner | optional: the models the key allows; left out: any |
+| `subscription` | A login that exists only on the device (`claude setup-token`) | a customer's runner | optional: the models the login allows; left out: any |
+
+- **`managed` is refused for a customer's runner**: `422 RUNNER_ACCESS_RESERVED` (`fields`: `manifest.harnesses[<i>].auth`, code `reserved`), at `POST /register` and `PUT /self`,
+  and nothing is stored. It is the identity that decides, as for `cr:` labels. This replaces the special rule `runner_needs_own_key` in the routing: a turn that asks for the platform's
+  keys cannot match any customer's runner. (The validator and the start of a task still say `runner_needs_own_key` for the combination, because that is the text a person can act on.)
+- **An entry is announced only while the dispatcher can run it.** There is no `ready` flag any more: a dispatcher that cannot run an entry for a while (all its subscriptions are rate
+  limited, the login is gone) leaves it out of its next announcement. `PUT /self` replaces what the app holds, so the last announcement is the one the matching uses. A manifest without
+  an `opencode` entry (the base of every runner) gets no job.
+- **The same harness and auth twice** is `400`; models of an entry are unique and sorted; at most 16 entries and 64 models for each.
+- **The old map form stays readable**: `{ "<harness>": { "version", "ready" } }` is read as one entry for each harness that is `ready` (`claude-code` as `subscription`, any other harness,
+  OpenCode included, as `app-key`); an entry that is not ready is left out. The app stores the list form (migration `20261110180000`), so a stored row is always a list.
+- **The platform's own dispatcher** is not announced over `PUT /self`: its manifest is `PLATFORM_ACCESS` in `app/src/runner-identity/access.ts` (OpenCode with `managed` and `app-key`), and
+  the same matching code applies to it.
+
+**What a job asks for** is derived from what the job already carries (the profile is not changed): the **harness** of the turn's profile (`implementer_turns.profile_harness`, OpenCode when
+null), the **auth** (a harness that runs on a login, `claude-code`, asks for `subscription`; a model that is an entry of the catalog asks for `managed`; a model of the workspace's own key asks
+for `app-key`) and, for a subscription, the **model** the turn was started with. A dispatcher takes the job when an entry has the harness, the auth and, when the turn names a model, a model
+the entry allows (an entry without `models` allows any). A job with no turn (a review) asks for no harness here.
+
+There is **one rule**: `accessRule` (`app/src/runner-identity/access.ts`) is the SQL condition both the claim (`jobs-claim.ts`) and the pairing of the rings
+(`runner-dispatches-repository.ts`) use, and `accessMatches` is the same rule in memory, for the validator; `access.integration.test.ts` runs every manifest against every turn through both
+and demands the same answer.
+
+There is also **one reading** of the stored manifest: the claim and the pairing of the rings both read `runners.manifest` with `manifestFromText` (the list form and the old
+map form; a text that is none reads as no entry) and pass it through `customerAccess`, which drops any `managed` entry (the platform's keys are the platform identity's alone, whatever
+a stored row says). The database only matches the entries it is given. A row that is not JSON, in `runners.manifest` or in a turn's `model_choice` (read through `json_or_null`),
+matches nothing and never fails the query for the other jobs.
+
 ### Routing
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
@@ -77,8 +122,8 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
 
 | Who claims | Its labels | Takes |
 |---|---|---|
-| The **platform identity**: the shared `RUNNER_TOKEN` (the hosted Dispatcher, the poll mode) | `cr:managed` and one `cr:size-<vCPUs>` for each size of `contracts/environment-sizes.v1.json` (1, 2, 4, 6, 8) | The jobs whose labels are all of those: every hosted review and every hosted turn |
-| A **customer's runner** (`crc_` credential) | the labels it announced, never one in `cr:` | The turns of its own workspace whose environment labels it has all of |
+| The **platform identity**: the shared `RUNNER_TOKEN` (the hosted Dispatcher, the poll mode) | `cr:managed` and one `cr:size-<vCPUs>` for each size of `contracts/environment-sizes.v1.json` (1, 2, 4, 6, 8); entries: OpenCode with `managed` and `app-key` | The jobs whose labels are all of those and that its entries can run: every hosted review and every hosted turn, never a turn that asks for a subscription |
+| A **customer's runner** (`crc_` credential) | the labels it announced, never one in `cr:`; the entries it announced, never `managed` | The turns of its own workspace whose environment labels it has all of and whose harness, auth and model an entry of it has |
 
 - **What a job requires** (`jobs.required_labels`, written when the job is enqueued). A hosted review: `cr:managed` and `cr:size-1`. A hosted turn of the
   Implementer: `cr:managed` and the size of its environment (`cr:size-2` for a task without one). A turn of a runner environment: the labels of the
@@ -89,14 +134,14 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
   nothing is stored; a malformed body keeps its `400`. A runner that stored such a label before this release is claimed without it: the claim drops the
   reserved labels of a customer's runner. An environment cannot name one either (see above).
 - **The claim without a job id** returns the oldest due job the caller matches: its labels, its workspace (a customer's runner), the kind its engines run
-  and the harness it announces. With a `jobId` it works as before (the hosted Dispatcher is still woken by id and claims that job), under the same rule:
+  and an entry of its manifest for the harness, the auth and the model of the turn (#973). With a `jobId` it works as before (the hosted Dispatcher is still woken by id and claims that job), under the same rule:
   a job the caller does not match is `204`. Business limits stay in the app (the pool cap, `maxRunning`, answers `204`); technical capacity stays with the
   dispatcher, which claims only with room for the job.
 - **The size in the claim answer.** The answer to a Dispatcher (`SplitClaimResponse`) names the size label the job requires in `sizeLabel`; `vcpus` keeps
   its value (only for a turn with an environment). The label does not choose the VM size (a turn without an environment starts with the operator's configured size), and the Dispatcher gives a
   job back unlaunched (`launch_failed`, log code `size_not_offered`) when the label names a size the platform does not offer.
-- **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, announces the harness of the profile
-  **ready** (today always `opencode`: profiles know no other harness) and is not below the minimum base version. A runner without a ready OpenCode gets
+- **Who takes a runner turn.** Only a runner of the **same workspace** that has **every label** of the environment, has an **entry** of its manifest for what the turn asks for
+  (the harness of the profile, the auth and the model: "Harness entries" above) and is not below the minimum base version. A runner that does not announce OpenCode gets
   nothing; one below the minimum gets `426 RUNNER_UPDATE_NEEDED`. The runner claims with its credential and takes the engine `implementer` only: not a
   review, not a split claim, not a job by id. The claim is the ordinary claim of a turn (the same input, the key and the model entry as the Dispatcher's
   Worker gets them), so a runner's turn is built exactly like a hosted one. Its calls about the job (`heartbeat`, `complete`, `release`, `steps`, and the two snapshot calls below) take the
@@ -125,7 +170,7 @@ The claim stays the only way to a job; the delivery only says what makes a dispa
 | `webhook` with its own **https URL** | the **doorbell**, and a slot that frees on its side | rings it |
 
 - **The doorbell is the signed wake-up call of `contracts/dispatch-webhook.v1.json`** (`POST <url>`, body `job.ready`, no job data, no key, no repository data).
-  It goes to **every** webhook dispatcher that matches the job: the same workspace, every label the job requires, a ready harness, not below the minimum base.
+  It goes to **every** webhook dispatcher that matches the job: the same workspace, every label the job requires, an entry of its manifest the job's turn can run on (the claim's rule, #973), not below the minimum base.
   Whoever claims first wins; the claim of the others finds the job running and answers `204`. A dispatcher claims the **next matching job**, it does not need the
   `jobId` the doorbell names (the hosted Dispatcher still claims by it for now).
 - **A signing secret for each dispatcher.** The app makes it (`crw_` and 43 characters), **shows it once**, in the answer of the call that made it (`delivery.secret`), and
@@ -233,16 +278,20 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `runner_needs_own_key` | A profile (or an agent step) runs a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
 | `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
+| `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
 A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
+
+The validator says which combinations no online runner of the workspace announces (#973, as a warning that never stops a save): it asks the runners that are online (heard from within two minutes, base at the minimum) and have
+every label of the environment whether one has an entry for the profile's harness, auth and model (the claim's rule, `accessMatches`). A managed model is `runner_needs_own_key` and is not
+reported a second time; a model of the workspace's own key is announced by every runner with OpenCode.
 
 The environment of a profile or of a step is also refused when a label of its `labels` is in the reserved namespace `cr:` (`invalid`, #971).
 
 ### Known limits and follow-ups
 
-- **Harness filter in the claim.** The claim checks that the runner announces `opencode` as ready, because profiles name no other harness. When the
-  first second harness exists, the claim must filter on the harness of the turn's profile version (stored with it, see the follow-up in
-  [`profiles.md`](profiles.md)); until then a runner with a ready OpenCode is eligible for every runner turn.
+- **Harness filter in the claim.** Done by #856 and #973: the claim and the pairing of the rings both match the turn's harness, auth and model against the entries of the
+  runner's manifest ("Harness entries"). Harness and model still come from the profile; whether they belong there is open (owner, later).
 - **Waiting turn and a workflow step.** A workflow step that runs in a runner environment waits like any turn, up to `RUNNER_WAIT_DEADLINE_MINUTES`; if no
   runner takes it, the step fails with `no_runner_available` and a text, at no cost, and the run fails with `step_failed`.
 
@@ -258,7 +307,7 @@ claims its own jobs instead of being handed one by the Dispatcher. The code is
 ```
 machine (Linux, Docker)
 ├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work)
-│    ├─ announce (PUT /self): labels, base version, manifest {opencode ready, capabilities}, limits
+│    ├─ announce (PUT /self): labels, base version, manifest {harness entries, capabilities}, limits
 │    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner)
 │    ├─ job host (the hosted one): job process with the job on stdin, heartbeats, steps, result with the lease token
 │    └─ through the host's Docker, per turn:  model door · agent container (the pinned OpenCode) · reader · git mirror
@@ -489,9 +538,9 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
    credential) sweeps nothing and ends with exit code 6: the role label alone never selects what to remove.
 1. **Prepare.** Check the machine (below) and decide the runtime: `auto` tries `sysbox-runc` when the daemon has it and falls back to
    `runc` when the self-test does not pass under it.
-2. **Announce** (`PUT /api/runners/v1/self`): labels, base version, the manifest (`opencode` with the version the runner pins and
-   `ready`; `capabilities` such as `agent-docker`) and the limits it works within. A runner whose base is not proven announces
-   `ready: false` and takes no job (exit code 5; the failed check is in the log).
+2. **Announce** (`PUT /api/runners/v1/self`): labels, base version, the manifest (an entry for `opencode` with the version the runner pins and `auth: app-key`, one for `claude-code` with `auth: subscription` when the device has a
+   login; `capabilities` such as `agent-docker`) and the limits it works within. A runner whose base is not proven announces no OpenCode entry
+   and takes no job (exit code 5; the failed check is in the log).
 3. **Tidy**, before the first claim and again whenever a job has ended: every container and network with the labels `code-reviewer.role`
    and `code-reviewer.runner=<this runner's id>` is removed (what a killed runner left, the door with the workspace's key above all),
    then `/work/reserve`, `/work/repo` and `/work/result` are emptied (a turn refuses to start on leftovers: `setup_failed ... exists
@@ -512,7 +561,7 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
 host ends the process, nothing more is sent) and the next claim stops the service.
 
 What the runner meets of the routing above (R1a part 2): it is offered a turn only when the turn's environment labels are all among its
-own, its workspace is the turn's and it announces a **ready** OpenCode; below `RUNNER_MIN_BASE_VERSION` the claim is the `426` it
+own, its workspace is the turn's and an entry of its manifest has what the turn asks for (it announces OpenCode); below `RUNNER_MIN_BASE_VERSION` the claim is the `426` it
 reads as "update needed". A revoked runner's turn ends in the app as `runner_revoked` (the runner learns it from the `401` of its
 next call and does not report); a turn that no runner takes ends as `no_runner_available` in the app, and the runner is not involved.
 
@@ -911,7 +960,7 @@ The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runn
 | Layer | `layer.py` | The install layer, **built on the device** on top of the agent image through the Engine API (`DockerApi.build_image`) and cached under `code-reviewer-agent-claude-code:<version>-sha512-<digest prefix>-<base id>` (verified) or `...:<version>-unverified-<base id>`; the tag **and** the labels (`com.code-reviewer.claude-code`, `.integrity`) say which, and `find_layer` compares both, so an unverified layer is never taken for the pinned one. The pinned version (2.1.311, the npm `stable` of the R0 spike): its **npm package, which is only a stub**, and the **platform package that holds the program** (`@anthropic-ai/claude-code-linux-x64` or `-arm64`, the glibc builds; the agent image is Debian) are each fetched as a tarball by `npm pack` and **accepted only with their own pinned SHA-512** (`CLAUDE_CODE_INTEGRITY`, `PLATFORM_INTEGRITY`), checked with `sha512sum -c` under `set -e` so a changed digest fails the build; then both are installed from the two files with `npm install --offline`, so npm resolves nothing from the registry on its own. The architecture is the one of the daemon's machine (`uname -m`); a machine of another architecture or libc has no pinned program and cannot build the pinned layer. The layer's labels carry a fingerprint of the platform digests (`com.code-reviewer.claude-code.platform`) and the tag a short form of it, so a layer built when only the stub was pinned is not taken for the pinned one and is built again. The program must report the version, and the user `agent` is made. The device may choose another exact version (`FACTORY_RUNNER_CLAUDE_CODE_VERSION`; no digest to compare then, for neither package; the pinned version named there keeps its digest checks). We never publish or ship Claude Code. |
 | Agent | `agent.py` | `ClaudeCodeAgent`: the surface of `ImplementerAgent` (`start`, `turn`, `stop`, `steps`, `session_id`, `resume`, `step_notes`) for a process-per-message engine. A turn is `claude -p` as an exec in the agent's container (`AgentContainer.run_streaming`), the lines go to the step feeder as they come, the end is the `result` event. A second message is `--resume <id>` in the same container. An empty session volume ("No conversation found", said in `errors`, with no model call) starts a fresh session under the same id and reports `summary_only`. Failures: budget exhausted = `cost_limit_reached`, no login or an expired or revoked token (the `authentication_failed` error, status 401) = `llm_auth`, the subscription's usage limit (`rate_limit`, `billing_error`, status 429 or 402) = `llm_quota`, no result = `implementer_engine_unavailable` with the exit code. |
 | Finish tool | `agent.py`, `result_channel.py` | The same stdio shim as OpenCode's (`factory-submit mcp`), written into the container with the schema, named to Claude Code as the MCP server `finish` (tool `mcp__finish__submit_result`). The server validates; Claude Code does not. |
-| Manifest | `readiness.py`, `factory_runner/prepare.py` | `claude-code` is announced when the device has a login for it: `ready: true` when the token is usable and the layer is on the daemon (a start builds a missing one, the `selftest` command only looks), `ready: false` with a note in the log when not. A device with no login says nothing. It is added beside OpenCode, never instead, and only on a machine whose base holds. |
+| Manifest | `readiness.py`, `factory_runner/prepare.py` | `claude-code` is announced, with `auth: subscription`, when the device has a login for it and the token is usable and the layer is on the daemon (a start builds a missing one, the `selftest` command only looks); when not it is left out of the announcement, with a note in the log (#973: an entry exists only while it can run). A device with no login says nothing. It is added beside OpenCode (`auth: app-key`), never instead, and only on a machine whose base holds. |
 
 ### Verified
 
@@ -943,10 +992,10 @@ the catalog is skipped and the provider name `claude-code` is refused on any oth
 environment that is not a runner's is refused before anything is written (`IMPLEMENTER_HARNESS_NEEDS_RUNNER`, 422); the workflow check
 `harness_needs_runner` says the same for a workflow.
 
-**Routing.** The claim of a customer's runner takes a turn only when the harness of its profile is one of the harnesses the runner
-announced as ready (`jobs-claim.ts`: `coalesce(profile_harness, 'opencode') = any(harnesses)`); the Dispatcher's and the shared token's
-claim never take a turn on `claude-code`. A runner whose `claude-code` is not ready, or that does not announce it, leaves the turn
-queued for one that does.
+**Routing.** The claim of a customer's runner takes a turn only when an entry of its manifest has the harness of the turn's profile, the auth (`claude-code` asks for
+`subscription`) and the model (#973: `accessRule` in `app/src/runner-identity/access.ts`, which replaced the harness test of #856); the platform's claim has no subscription entry, so
+it never takes a turn on `claude-code`. A runner that does not announce `claude-code` as a `subscription` (or whose entry does not list the model), because its login is gone or it
+withdrew the entry, leaves the turn queued for one that does.
 
 **The job.** A turn on `claude-code` is handed to the runner as a job without `llm`, without `implementer.cost` and without
 `implementer.modelEntry`; it carries `implementer.subscription` (`{model?, maxBudgetUsd}`) and `implementer.profile.harness`

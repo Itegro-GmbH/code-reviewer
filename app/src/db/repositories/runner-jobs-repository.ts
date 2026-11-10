@@ -69,6 +69,7 @@ import {
 } from "../../billing/claim-caps.ts";
 import { headNoticeKey } from "../refusal-notice-key.ts";
 import { claimOldestDueJob } from "./jobs-claim.ts";
+import type { HarnessAccess } from "../../runner-identity/access.ts";
 import { toJob } from "./jobs-repository.ts";
 import { createUsageRecordsRepository } from "./usage-records-repository.ts";
 import { agentResultOf, turnResultOf } from "../implementer-turn-result.ts";
@@ -359,12 +360,12 @@ export type ClaimOptions = {
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
    * labels of a customer's runner never include the reserved namespace `cr:`), and never a job of another kind. Without it the claim is
    * the platform identity's: its labels are the reserved ones, so it takes the hosted jobs and never a turn of a runner environment. #856: and whose
-   * profile's harness is one of `harnesses` (the harnesses the runner announces as ready; left out: OpenCode alone).
+   * turn is one an entry of `access` (the entries of the runner's manifest) can run (#973).
    */
   customerRunner?: {
     workspaceId: string;
     labels: readonly string[];
-    harnesses?: readonly string[];
+    access: readonly HarnessAccess[];
   };
 };
 

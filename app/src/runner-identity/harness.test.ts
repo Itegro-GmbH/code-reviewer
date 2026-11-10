@@ -8,7 +8,6 @@ import {
   harnessOfProfile,
   isCatalogHarness,
   OPENCODE_HARNESS,
-  readyHarnesses,
 } from "./harness.ts";
 
 describe("the harnesses", () => {
@@ -27,20 +26,5 @@ describe("the harnesses", () => {
     expect(harnessNeedsRunner("opencode")).toBe(false);
     expect(harnessNeedsRunner("claude-code")).toBe(true);
     expect(harnessNeedsRunner("custom/tool")).toBe(true);
-  });
-
-  // #854-T182
-  it("are ready only as the runner announced them", () => {
-    expect(
-      readyHarnesses({
-        harnesses: {
-          opencode: { version: "1", ready: true },
-          "claude-code": { version: "2", ready: false },
-          "custom/x": { version: "3", ready: true },
-        },
-        capabilities: [],
-      }),
-    ).toEqual(["custom/x", "opencode"]);
-    expect(readyHarnesses({ harnesses: {}, capabilities: [] })).toEqual([]);
   });
 });

@@ -38,10 +38,8 @@ import {
 import { errorCode } from "../db/errors.ts";
 import type { Database } from "../db/schema.ts";
 import type { EnqueueResult } from "../jobs/job-types.ts";
-import {
-  OPENCODE_HARNESS,
-  readyHarnesses,
-} from "../runner-identity/harness.ts";
+import { OPENCODE_HARNESS } from "../runner-identity/harness.ts";
+import { announcesHarness } from "../runner-identity/access.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 import {
   decideOutcome,
@@ -146,11 +144,13 @@ export function createRingService(options: {
     );
   }
 
-  /** Whether the dispatcher could take the job at all: the harness and the version are judged here, the labels in the listing. */
+  /**
+   * Whether the dispatcher could take the job at all: the base and the version are judged here. The labels and what the job asks for (the
+   * harness, the auth, the model) are judged in the listing, by the rule the claim uses (`accessRule`), so no second rule can diverge from it.
+   */
   function capable(pair: RingPair): boolean {
-    const harnesses = readyHarnesses(pair.manifest);
-    if (!harnesses.includes(OPENCODE_HARNESS)) return false;
-    if (!harnesses.includes(pair.harness)) return false;
+    if (!announcesHarness(pair.manifest.harnesses, OPENCODE_HARNESS))
+      return false;
     const minimum = minBaseVersion();
     return minimum === null || meetsMinimum(pair.baseVersion, minimum);
   }
