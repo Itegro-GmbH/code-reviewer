@@ -11,6 +11,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
+- [VM artifacts](#vm-artifacts-976): the kernel, root file system and Docker data disk of that microVM, built from the golden snapshot recipe, signed and verified (#976).
 
 ## Registration and routing (R1a, #854)
 
@@ -1673,3 +1674,112 @@ root (`host/setup.sh`) and runs the tests as `fcuser` through `host/as-fcuser.sh
 - **#982 (install).** The root steps are exactly the table in Q4. The installer checks `/dev/kvm`, `reflink=1` on the work volume (XFS), `e2fsprogs` and a delegating systemd. No Docker is needed on the
   customer's host: nothing of the runtime used one (the spike's base-disk builder ran a second dockerd on the **build** machine, which is the release pipeline's job).
 
+## VM artifacts (#976)
+
+What a customer's Linux machine boots a job in (Runner v2, epic #969; the sandbox of the spike above): a guest kernel, a read-only root file system and a
+prepared Docker data disk, **built from the golden snapshot's recipe** and described by a **signed manifest**. A Vercel snapshot cannot be exported and
+Vercel cannot boot our own disk, so the one recipe has two outputs: the hosted snapshot (`dispatcher/src/snapshot`) and these files.
+
+| File | What | Size (x86_64) |
+|---|---|---|
+| `vmlinux` | the guest kernel: Linux 6.18.62, Firecracker's recommended 6.18 configuration plus our fragment | about 27 MiB |
+| `rootfs.ext4.zst` | the read-only root file system: Ubuntu Base 26.04.1, Docker, Sysbox, the prepare scripts, `vm-init` | about 0.2 GB packed |
+| `dockerdata.ext4.zst` | the base of the per-job copy-on-write Docker disk: the Worker image and the agent image loaded into the guest's own Docker | see "Measured" |
+| `kernel.config`, `fc-base.config`, `config.fragment`, `linux-<version>.tar.xz` | the **GPL source offer** of the kernel: the final configuration, its two inputs and the unmodified source | |
+| `packages.txt` | every package of the root file system with the source package and version it was built from | |
+| `vm-artifacts-manifest.json`, `vm-artifacts-manifest.sig` | the manifest (below) and its detached signature | |
+
+Only x86_64 is built; arm64 comes with the macOS backend.
+
+### One recipe, two outputs
+
+`dispatcher/src/vm-artifacts/recipe.ts` writes the scripts of the golden snapshot pipeline (`installDockerScript`, `installSysboxScript`, the daemon
+configuration, `installHostScriptsScript`) and its pins as data, and `docker/vm/rootfs/build.sh` runs **those scripts, unchanged**, in a chroot of
+Ubuntu Base, in the pipeline's order and with its files staged at its paths. So there is no second copy of a version or a command: the pins
+(`dockerVersion`, `buildxVersion`, `sysboxVersion` and its sha256) are `DEFAULT_CONFIG` of the pipeline, `daemon.json` is `daemonConfigJson()`, and
+`vm-prepare.sh` and `sysbox-prepare.sh` are the files of `docker/sandbox/`. A test pins that the emitted scripts equal the pipeline's, byte for
+byte (`recipe.test.ts`); a bump of the hosted pin is a bump of the local build, and the hosted snapshot's tests are untouched.
+
+What is local to this output, and why:
+
+- **The packages Ubuntu Base lacks** (`docker/vm/rootfs/packages.txt`): the hosted base image (Vercel's Ubuntu 26.04.1) already has them. Ubuntu's signed archive, not
+  version pinned (the hosted recipe pins only `docker.io`, `docker-buildx` and Sysbox either); `packages.txt` of the release records what was installed.
+- **A stand-in `docker`** while the Sysbox package installs, because its configuration script wants the header of `docker ps -a` and there is no daemon in a chroot. It is removed again.
+- **`vm-init`**, the placeholder of #977: mounts, the job disk, the cgroup controllers, then `vm-prepare.sh` and `sysbox-prepare.sh` as the hosted VM runs them. It reports
+  milestones on the console (`VMINIT <name> uptime=<s> ...`); #977 replaces it and reports the same milestones over vsock. PID 1 is `docker-init` (tini).
+- **Every download is pinned by version and sha256**: the kernel source, Firecracker and its base configuration, Ubuntu Base (`docker/vm/pins.env`, each compared with its
+  publisher's own list), and the Sysbox package (checked by the pipeline's own script). The two images come from the digest-pinned bases of `runner/Dockerfile`.
+
+### The Docker image store: the containerd store, as hosted
+
+The hosted default is Docker 29's containerd image store, and **the local VM uses it too**: the same `daemon.json`, no `features` override. The spike found
+that this store ignores `data-root` (its images live under `/var/lib/containerd`) and used overlay2 to get around it; the build here does not need that. `vm-init` mounts
+the job disk and **bind-mounts its three directories over the places the daemons use**: `/jobdisk/docker` on `/var/lib/docker`, `/jobdisk/containerd` on
+`/var/lib/containerd` and `/jobdisk/sysbox` on `/var/lib/sysbox`. Everything Docker, containerd and Sysbox write is then on the per-job disk, and the guest's configuration
+is byte-identical to the hosted one, so a behaviour that differs between the two is not a difference of image store. `/var/lib/sysboxfs` is a tmpfs (sysbox-fs needs a writable
+mount point on a read-only root). The smoke boot reports the store the guest runs (`store driver=... snapshotter=...`), and the data disk is made by the guest's own dockerd, so
+a store that did not write to the disk would not leave images there.
+
+### The kernel
+
+`docker/vm/kernel`: the pinned source, Firecracker's recommended 6.18 configuration (tag v1.17.0) and `config.fragment` (the 23 options the spike found, plus the whole list of what
+Docker, Sysbox and the VM need, so that a change of the base cannot drop one silently) are merged with `merge_config.sh` and `make olddefconfig`. **`verify-config.sh` fails when one
+option of the fragment did not end up with the requested value** (an unmet dependency drops an option silently, which is how a hand-written fragment fails), and when `RT_GROUP_SCHED` is on: with it the `cpu` controller cannot be enabled
+for child cgroups and `vm-prepare.sh` fails (`cgroup_root_busy`). The check runs on every build, in seconds, and again on the `.config` of the kernel that is published, so a kernel restored from the CI cache is held to
+the same rule. The build is cached by the fragment and the pins (about 10 minutes on 4 cores without the cache).
+
+**No serial console in a release.** The console costs 0.3 to 0.4 s of every boot (spike Q7). The kernel keeps the 8250 driver (the build and the smoke boot read the guest's events from the console), and the release's command line,
+`kernel.bootArgs` of the manifest, says `8250.nr_uarts=0 quiet loglevel=0`; the smoke boot adds `console=ttyS0`. `kernel.initCommand` is PID 1 and its arguments (`docker-init -- vm-init`); the launcher (#978) puts a job's own
+parameters before the `--`.
+
+**GPL source offer.** Every release publishes the exact source tarball, the final `.config`, Firecracker's base configuration and the fragment next to `vmlinux`, all named in the signed manifest (`THIRD_PARTY_LICENSES.md`,
+"Local VM artifacts"). `packages.txt` points the packages of the root file system at Ubuntu's sources.
+
+### The data disk
+
+`docker/vm/data/build.sh` boots a guest in `seed` mode with the image archive (`docker save` of the two images the pipeline builds: `runner/Dockerfile`, targets `sandbox` and `agent`, tags `code-reviewer-worker:golden` and
+`code-reviewer-agent:golden`) on a read-only third drive. `vm-init` loads it with `docker load`, reports the image ids, stops dockerd the way the pipeline stops it before it snapshots (SIGTERM, wait for dockerd and containerd to be gone) and
+powers off; the disk is then checked and shrunk to its minimum (`resize2fs -M`). The launcher copies it per job (a reflink copy on XFS), grows the copy to the quota with `resize2fs` on the file (`docker/vm/data/grow.sh`, 20 ms in the spike) and
+attaches it as `/dev/vdb`. The image ids in the manifest (`images`) are what the guest's Docker reports for the disk's images, and the smoke boot fails when the guest reports another one.
+
+### The manifest and its signature
+
+`vm-artifacts-manifest.json` (`dispatcher/src/vm-artifacts/manifest.ts`) holds: a `release` number that only grows, the commit, every file with its **size and sha256** (a compressed file also what it unpacks to), the kernel's inputs, the versions
+the root file system reports as installed (`dockerd`, `buildx`, `sysbox`, the Sysbox package's checksum, Ubuntu Base) and the image ids. The detached signature is made over exactly its bytes, **the way the runner's release channel is signed**: ECDSA over
+P-256 with SHA-256, a DER signature, the public key as base64 of the DER SubjectPublicKeyInfo. The key is in the channel file `docker/vm/release-channel.json` (empty in this repository until the owner sets it, like `runner/release-channel.json`); the private key is
+never in the repository.
+
+**The verifier** (`dispatcher/src/vm-artifacts/verify.ts`, used by the build, the release and, later, the install and update of the local Dispatcher, #982) needs nothing but `node:crypto`. Its order: the key must be ECDSA P-256 (`key_invalid` otherwise); the signature must verify over the manifest bytes
+(`signature_invalid`); only then is the manifest read (`manifest_invalid`, `manifest_too_large`: 256 KiB); the release must be higher than the one in use or left by a rollback (`release_not_newer`, the rule of the runner's channel); then each file: present, size, sha256
+(`file_missing`, `size_mismatch`, `digest_mismatch`). No file is read before the signature has verified. `node dispatcher/src/vm-artifacts/verify-main.ts --dir <dir> --manifest ... --signature ... --channel docker/vm/release-channel.json` does it from a shell.
+
+**The version check against the hosted snapshot** (`compare.ts`, `compare-main.ts`; #976-T02): the same dockerd, buildx and Sysbox (version and package checksum) as the hosted pipeline pins, the same image tags, and the image ids against the hosted record
+(`golden-snapshot-record`). The release job runs it against the newest golden snapshot of `main` and fails on a different version. **Image ids do not fail it yet:** the hosted pipeline builds the images inside its builder VM and the local build builds them in CI, and
+two builds of the same Dockerfile are not the same digest (the Dockerfile's Debian packages are not version pinned). The ids agree once both outputs load **one** build of the images (a registry or an OCI archive the pipeline loads); that changes the hosted
+pipeline and is a follow-up (`--require-images` turns the check on).
+
+### When it runs, and the release
+
+- **Pull request:** `.github/workflows/vm-artifacts.yml`, called by the `vm-artifacts` job of `ci.yml`, **only** when a file of `docker/vm/`, `docker/sandbox/`, `dispatcher/src/vm-artifacts/`, the pipeline's config, scripts and probe flags, or the workflow changed (the `vm` path filter;
+  nothing else pays for a KVM job). The `kernel` job builds the kernel or restores it from the cache and always verifies the configuration; the `build` job makes the root file system, builds the two images, makes the data disk, **boots the result** and builds the manifest. The smoke boot
+  (`boot-main.ts`, `console.ts`) fails unless dockerd is ready within the budget (`docker_ready` 10 s after the start of Firecracker; the spike measured 1.4 to 1.9 s on the same kind of runner), Sysbox is ready, the guest's two images are the data disk's, a `runc` container and a `sysbox-runc` container run,
+  the root file system is read-only and the golden snapshot's own Worker self-check (`probe`) passes. It ends with `selftest-signing.sh`: a throwaway key signs the real manifest, the verifier accepts it and then refuses a changed byte of the kernel, a changed byte of the manifest and another key.
+- **Release:** a tag `vm-artifacts-v<N>` (N the release number; it only grows) runs `vm-artifacts-release.yml`: the same build, then the one job that has the key. It checks that the channel names a key and that the manifest is this tag's, runs the version check against the hosted snapshot, signs, verifies what it
+  is about to publish with the verifier and the channel's key, and makes a **draft** release with every file. The key is the secret `VM_ARTIFACTS_SIGNING_KEY` of the environment `vm-artifacts-release`, read in one step; the job refuses a key that is not the channel's. Nothing is public until the owner publishes the draft.
+
+**What the owner does once** (not in this repository, and not done by this change):
+
+1. Make the key: `openssl ecparam -genkey -name prime256v1 -noout -out vm-artifacts-key.pem`, keep it secret, derive the public half with `openssl pkey -in vm-artifacts-key.pem -pubout -outform DER | base64 -w0`.
+2. Create the GitHub environment `vm-artifacts-release` (restricted to tags `vm-artifacts-v*`, with required reviewers if wanted) and put the PEM in its secret `VM_ARTIFACTS_SIGNING_KEY`.
+3. Put the public half and the repository in `docker/vm/release-channel.json` (`publicKey`, `repository`): a change of the key is a change of this file.
+4. Decide that the data disk may be published (it holds the Worker image: `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"), then publish the draft.
+
+### Measured
+
+(Filled from the CI run of this change.)
+
+### Not proven, and follow-ups
+
+- Image ids equal to the hosted ones (above). Bare metal, other distributions, arm64. The online file system growth is the host's (`resize2fs` on the file); nothing was changed about that.
+- A release asset can hold 2 GiB: the build fails when a file is larger. A data disk that grows past it needs splitting (a manifest entry per part).
+- The Debian packages of the Worker image are not version pinned (the Dockerfile says so); only its bases are digest pinned.
