@@ -9,6 +9,7 @@ import { createRunnerCredentialsRepository } from "../db/repositories/runner-cre
 import { createRunnerDispatchesRepository } from "../db/repositories/runner-dispatches-repository.ts";
 import {
   accessMatches,
+  customerAccess,
   demandOfTurn,
   type HarnessAccess,
 } from "../runner-identity/access.ts";
@@ -16,6 +17,7 @@ import {
   mintDeliverySecret,
   sealDeliverySecret,
 } from "../runner-identity/delivery.ts";
+import { manifestFromText } from "../runner-identity/announcement.ts";
 import { customerRunnerId } from "../runner-identity/tokens.ts";
 import { OPENCODE_ACCESS } from "../test-support/runner-access.ts";
 import {
@@ -291,6 +293,24 @@ describe("the manifest as the rings and the claim read it", () => {
       })
     ).map((pair) => pair.runnerId);
 
+  /**
+   * The claim of the queue for a runner, with the entries of its stored manifest as the API reads them (`manifestFromText`). The model of a turn on the
+   * workspace's own key needs a key and a price book that this test has no use for, so the API call is not made.
+   */
+  const claimAs = async (h: Harness, runnerId: string) => {
+    const { rows } = await sql<{ manifest: string }>`
+      select manifest from runners where id = ${runnerId}`.execute(h.db);
+    return h.queue.claimNext(customerRunnerId(runnerId), ["implementer"], {
+      customerRunner: {
+        workspaceId: h.workspaceId,
+        labels: ["box"],
+        access: customerAccess(
+          manifestFromText(rows[0]?.manifest ?? "").harnesses,
+        ),
+      },
+    });
+  };
+
   // #973-T04
   it("reads the old map form in the rings as the claim does: ready entries only, OpenCode on a key of the app, Claude Code on a subscription", async () => {
     const h = await start();
@@ -315,9 +335,11 @@ describe("the manifest as the rings and the claim read it", () => {
 
     expect(await listed(h, own.job.id)).toEqual([box.runnerId]);
     expect(await listed(h, opus.job.id)).toEqual([box.runnerId]);
-    const claimed = await h.claim(claimOf(box.credential));
-    expect(claimed.status).toBe(200);
-    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(own.job.id);
+    const claimed = [
+      (await claimAs(h, box.runnerId))?.job.id,
+      (await claimAs(h, box.runnerId))?.job.id,
+    ];
+    expect(claimed.sort()).toEqual([own.job.id, opus.job.id].sort());
   });
 
   // #973-T01
@@ -336,9 +358,8 @@ describe("the manifest as the rings and the claim read it", () => {
     expect(await listed(h, turn.job.id)).toEqual([good.runnerId]);
     // A manifest that reads as none is no runner: it takes nothing, and the other one still takes the turn.
     expect((await h.claim(claimOf(broken.credential))).status).toBe(204);
-    const claimed = await h.claim(claimOf(good.credential));
-    expect(claimed.status).toBe(200);
-    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(turn.job.id);
+    expect(await claimAs(h, broken.runnerId)).toBeNull();
+    expect((await claimAs(h, good.runnerId))?.job.id).toBe(turn.job.id);
   });
 
   // #973-T01
@@ -364,9 +385,7 @@ describe("the manifest as the rings and the claim read it", () => {
     expect(pairs.map((pair) => [pair.jobId, pair.runnerId])).toEqual([
       [good.job.id, box.runnerId],
     ]);
-    const claimed = await h.claim(claimOf(box.credential));
-    expect(claimed.status).toBe(200);
-    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(good.job.id);
+    expect((await claimAs(h, box.runnerId))?.job.id).toBe(good.job.id);
     expect(await h.queue.get(broken.job.id)).toMatchObject({
       status: "queued",
     });
@@ -396,6 +415,7 @@ describe("the manifest as the rings and the claim read it", () => {
     });
 
     expect((await h.claim(claimOf(handWritten.credential))).status).toBe(204);
+    expect(await claimAs(h, handWritten.runnerId)).toBeNull();
     expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
     expect(await listed(h, turn.job.id)).toEqual([]);
     // Even a claim that is handed the managed entry directly (past the stored manifest) takes nothing.
@@ -411,7 +431,7 @@ describe("the manifest as the rings and the claim read it", () => {
           },
         },
       ),
-    ).toBeUndefined();
+    ).toBeNull();
     expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
   });
 });
