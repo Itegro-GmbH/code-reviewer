@@ -7,7 +7,13 @@ import {
   type KeyObject,
 } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -92,7 +98,10 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vm-artifacts-"));
   build();
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(`${dir}.channel.json`, { force: true });
+});
 
 function codeOf(run: () => unknown): string | undefined {
   try {
@@ -320,6 +329,56 @@ describe("the files of a release", () => {
     await expect(verify(6)).resolves.toEqual(manifest);
   });
 
+  // #976-T01
+  it("refuses a release number to compare with that is not a whole number, instead of comparing with NaN and passing", async () => {
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY])
+      await expect(verify(bad), String(bad)).rejects.toMatchObject({
+        code: "min_release_invalid",
+      });
+  });
+
+  // #976-T01
+  it("refuses a directory with a file the manifest does not name, when it is asked to", async () => {
+    const { privateKey, publicKey } = newKey();
+    const input = {
+      dir,
+      manifest: manifestBytes,
+      signature: signManifest(manifestBytes, privateKey),
+      publicKey,
+    };
+    writeFileSync(join(dir, "extra.bin"), "not in the manifest");
+
+    await expect(verifyArtifacts(input)).resolves.toEqual(manifest);
+    await expect(
+      verifyArtifacts({ ...input, exactDir: [] }),
+    ).rejects.toMatchObject({ code: "unexpected_file" });
+    // The files that came with the release (the manifest and its signature) are named by the caller.
+    rmSync(join(dir, "extra.bin"));
+    writeFileSync(join(dir, "manifest.json"), manifestBytes);
+    await expect(
+      verifyArtifacts({ ...input, exactDir: ["manifest.json"] }),
+    ).resolves.toEqual(manifest);
+    await expect(
+      verifyArtifacts({ ...input, exactDir: [] }),
+    ).rejects.toMatchObject({ code: "unexpected_file" });
+  });
+
+  // #976-T01
+  it("refuses a directory inside the release's directory, when it is asked to", async () => {
+    const { privateKey, publicKey } = newKey();
+    mkdirSync(join(dir, "sub"));
+
+    await expect(
+      verifyArtifacts({
+        dir,
+        manifest: manifestBytes,
+        signature: signManifest(manifestBytes, privateKey),
+        publicKey,
+        exactDir: [],
+      }),
+    ).rejects.toMatchObject({ code: "unexpected_file" });
+  });
+
   it("can verify a subset of the roles, for a host that does not need the source", async () => {
     const { privateKey, publicKey } = newKey();
     rmSync(join(dir, manifest.files.kernelSource.name));
@@ -333,5 +392,63 @@ describe("the files of a release", () => {
         roles: ["kernel", "rootfs", "dockerData"],
       }),
     ).resolves.toEqual(manifest);
+  });
+});
+
+describe("the command line of the verifier", () => {
+  const MAIN = join(import.meta.dirname, "verify-main.ts");
+
+  /** A release in `dir` as the release job has it: the manifest, its signature and the files, and the channel file with the key. */
+  function release(): string[] {
+    const { privateKey, publicKey } = newKey();
+    writeFileSync(join(dir, "manifest.json"), manifestBytes);
+    writeFileSync(
+      join(dir, "manifest.sig"),
+      signManifest(manifestBytes, privateKey),
+    );
+    const channel = `${dir}.channel.json`;
+    writeFileSync(channel, JSON.stringify({ publicKey }));
+    return [
+      "--dir",
+      dir,
+      "--manifest",
+      join(dir, "manifest.json"),
+      "--signature",
+      join(dir, "manifest.sig"),
+      "--channel",
+      channel,
+    ];
+  }
+
+  const run = (args: string[]) =>
+    spawnSync(
+      process.execPath,
+      ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", MAIN, ...args],
+      { encoding: "utf8" },
+    );
+
+  // #976-T01
+  it("takes --min-release as a whole number and as nothing else", () => {
+    const args = release();
+
+    expect(run([...args, "--min-release", "6"]).status).toBe(0);
+    expect(run([...args, "--min-release", "7"]).status).toBe(1);
+    for (const bad of ["abc", "", "6.5", "-1", "1e3", "0x10", " 6"]) {
+      const result = run([...args, "--min-release", bad]);
+      expect(result.status, JSON.stringify(bad)).toBe(2);
+      expect(result.stderr).toContain("--min-release");
+    }
+  });
+
+  // #976-T01
+  it("rejects files the manifest does not name with --exact-dir, and lets the manifest and the signature be there", () => {
+    const args = release();
+
+    expect(run([...args, "--exact-dir"]).status).toBe(0);
+    writeFileSync(join(dir, "surprise.bin"), "x");
+    const result = run([...args, "--exact-dir"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unexpected_file");
+    expect(run(args).status).toBe(0);
   });
 });

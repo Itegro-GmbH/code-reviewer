@@ -14,11 +14,16 @@ mkdir -p "$out"
 paths() { jq -r ".paths.$1" "$recipe/recipe.json"; }
 
 fetch_pinned "$UBUNTU_BASE_URL" "$UBUNTU_BASE_SHA256" "$dl/ubuntu-base.tar.gz"
-rm -rf "$root"; mkdir -p "$root"
+remove_tree "$root"; mkdir -p "$root"
 tar -xpf "$dl/ubuntu-base.tar.gz" -C "$root"
 
+# The mounts the chroot needed come down in the reverse order; one that does not is an error, and remove_tree then refuses to touch the tree.
 cleanup() {
-  for m in dev/pts dev proc sys; do umount "$root/$m" 2>/dev/null || true; done
+  local m status=0
+  for m in dev/pts dev proc sys; do
+    if mountpoint -q "$root/$m"; then umount "$root/$m" || status=1; fi
+  done
+  return "$status"
 }
 trap cleanup EXIT
 mount -t proc proc "$root/proc"
@@ -97,7 +102,7 @@ log "read-only root: every file that must be written is on a tmpfs or the job di
 run apt-get clean
 rm -f "$root/usr/sbin/policy-rc.d"
 # The copyright files in /usr/share/doc stay: the root file system is distributed.
-rm -rf "$root/var/lib/apt/lists"/* "$root/var/cache/apt"/* "$root/usr/share/man"/* "$root/usr/share/info"/* "$root/tmp"/* "$root/var/log"/*
+rm -rf --one-file-system "$root/var/lib/apt/lists"/* "$root/var/cache/apt"/* "$root/usr/share/man"/* "$root/usr/share/info"/* "$root/tmp"/* "$root/var/log"/*
 rm -f "$root/etc/resolv.conf"; ln -s /run/resolv.conf "$root/etc/resolv.conf"
 ln -sf /proc/self/mounts "$root/etc/mtab"
 echo "code-reviewer-vm" > "$root/etc/hostname"
@@ -106,6 +111,8 @@ mkdir -p "$root/jobdisk" "$root/seed" "$root/var/lib/docker" "$root/var/lib/cont
   "$root/run" "$root/tmp" "$root/var/log" "$root/var/tmp" "$root/var/cache" "$root/root" "$root/sys/fs/cgroup"
 chmod 1777 "$root/tmp" "$root/var/tmp"
 cleanup
+# mkfs.ext4 -d copies what is in the tree: nothing of the host (/dev, /proc) may be in it.
+[ -z "$(mounted_under "$root")" ] || { echo "something is still mounted under $root: $(mounted_under "$root" | tr '\n' ' ')" >&2; exit 1; }
 
 used_kb=$(du -sk "$root" | cut -f1)
 size_mb=$(( used_kb / 1024 * 12 / 10 + 64 ))
@@ -114,4 +121,4 @@ rm -f "$out/rootfs.ext4"
 truncate -s "${size_mb}M" "$out/rootfs.ext4"
 mkfs.ext4 -q -L rootfs -m 0 -O ^has_journal -E root_owner=0:0 -d "$root" "$out/rootfs.ext4"
 ls -ls "$out/rootfs.ext4"
-rm -rf "$root"
+remove_tree "$root"

@@ -7,7 +7,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ARTIFACT_ROLES,
@@ -23,6 +23,8 @@ export const VM_ARTIFACTS_ERROR_CODES = [
   "key_invalid",
   "signature_invalid",
   "release_not_newer",
+  "min_release_invalid",
+  "unexpected_file",
   "file_missing",
   "size_mismatch",
   "digest_mismatch",
@@ -149,8 +151,16 @@ export type VerifyInput = {
   signature: Uint8Array;
   /** The key of the release channel. */
   publicKey: string;
-  /** The release in use, or the one a rollback left: a manifest that is not higher is no way forward. */
+  /**
+   * The release in use, or the one a rollback left, or the last one published: a manifest that is not HIGHER than it is no way forward.
+   * It must be a whole number from 0: anything else (NaN compares false with everything) is refused, never taken as "no limit".
+   */
   minRelease?: number;
+  /**
+   * Refuses a directory that holds anything the manifest does not name (a file, a directory): what is verified is then all there is.
+   * The names in the list are the files that came with the release and are not in the manifest, the manifest and its signature.
+   */
+  exactDir?: readonly string[];
   /** The files to check; all of them when omitted. A host that does not need the source offer asks for the three it boots. */
   roles?: readonly ArtifactRole[];
 };
@@ -162,9 +172,30 @@ export type VerifyInput = {
 export async function verifyArtifacts(input: VerifyInput): Promise<Manifest> {
   verifySignature(input.manifest, input.signature, input.publicKey);
   const manifest = parseManifest(input.manifest);
-  if (input.minRelease !== undefined && manifest.release <= input.minRelease)
-    throw new VmArtifactsError("release_not_newer");
+  if (input.minRelease !== undefined) {
+    if (!Number.isSafeInteger(input.minRelease) || input.minRelease < 0)
+      throw new VmArtifactsError("min_release_invalid");
+    if (manifest.release <= input.minRelease)
+      throw new VmArtifactsError("release_not_newer");
+  }
   for (const role of input.roles ?? ARTIFACT_ROLES)
     await verifyFile(input.dir, role, manifest.files[role]);
+  if (input.exactDir)
+    await verifyNothingElse(input.dir, manifest, input.exactDir);
   return manifest;
+}
+
+/** The directory holds the manifest's files and the `allowed` names, and nothing else. Says how many, never which: names are the sender's. */
+async function verifyNothingElse(
+  dir: string,
+  manifest: Manifest,
+  allowed: readonly string[],
+): Promise<void> {
+  const known = new Set<string>([
+    ...allowed,
+    ...Object.values(manifest.files).map((entry) => entry.name),
+  ]);
+  const extra = (await readdir(dir)).filter((name) => !known.has(name));
+  if (extra.length > 0)
+    throw new VmArtifactsError("unexpected_file", [String(extra.length)]);
 }

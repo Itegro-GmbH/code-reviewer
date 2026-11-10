@@ -28,3 +28,30 @@ fetch_pinned() {
   mv "$dest.part" "$dest"
   log "verified $(basename "$dest") ($sha)"
 }
+
+# mounted_under <dir>: every mount point of this host that is <dir> or below it, one per line. Fails when it cannot list them.
+# findmnt writes a space or a backslash in a target as an escape, so remove_tree refuses a <dir> that has one.
+mounted_under() {
+  local dir=$1
+  findmnt -rn -o TARGET | awk -v dir="$dir" 'index($0, dir) == 1 && (length($0) == length(dir) || substr($0, length(dir) + 1, 1) == "/")'
+}
+
+# remove_tree <dir>: deletes a tree that was built as root with /dev, /proc and the like bind-mounted into it. A `rm -rf` of it while one of
+# those is still mounted deletes the host's own devices, so it refuses while anything under <dir> is mounted (or when it cannot tell), and
+# `--one-file-system` stops it at a mount it did not know about.
+remove_tree() {
+  local dir=$1 mounted
+  case "$dir" in
+    /?*) ;;
+    *) echo "remove_tree: refusing '$dir': not an absolute path below /" >&2; return 1 ;;
+  esac
+  case "$dir" in
+    *[[:space:]\\]*) echo "remove_tree: refusing '$dir': a space or a backslash in it" >&2; return 1 ;;
+  esac
+  mounted=$(mounted_under "$dir") || { echo "remove_tree: cannot list the mounts, refusing to delete $dir" >&2; return 1; }
+  if [ -n "$mounted" ]; then
+    echo "remove_tree: refusing to delete $dir, still mounted: $(printf '%s' "$mounted" | tr '\n' ' ')" >&2
+    return 1
+  fi
+  rm -rf --one-file-system -- "$dir"
+}
