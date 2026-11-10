@@ -23,6 +23,7 @@ from loop_support import (
     make_settings,
     outcome,
     run,
+    settle,
 )
 from release_support import DIGEST, MANIFEST_URL, REPOSITORY, SIGNATURE_URL, Release, fetcher
 
@@ -73,6 +74,7 @@ from code_reviewer_runner.implementer.result_channel import make_result_director
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable
+from code_reviewer_runner.job_loop.http import ApiError
 
 pytestmark = pytest.mark.unit
 
@@ -296,6 +298,7 @@ class Rig:
         auto_update: bool = True,
         channel: Any = None,
         fetch: Any = None,
+        reap_check_seconds: float | None = None,
     ) -> None:
         self.client = FakeClient()
         self.clock = clock or FastClock()
@@ -322,6 +325,9 @@ class Rig:
                 docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
                 hostname=lambda: "runner-container",
                 **({} if channel is None else {"channel": channel, "fetch": fetch}),
+                **(
+                    {} if reap_check_seconds is None else {"reap_check_seconds": reap_check_seconds}
+                ),
             ),
         )
 
@@ -1320,3 +1326,110 @@ def test_the_digest_references_of_old_releases_are_removed_at_the_start(tmp_path
     assert rig.go(once=False) == EXIT_REVOKED
 
     assert daemon.deleted == [old]
+
+
+# -- the local reaper (#974 review, tested in #978) ----------------------------------------------
+
+
+class HangingLauncher(FakeLauncher):
+    """A Worker that never ends by itself: only the reaper or a stop ends it."""
+
+
+def reaped_scenario(rig: Rig, *, seconds: float, step: float) -> int:
+    """Run `once` with a Worker that hangs, move the clock `seconds` in `step`s (waiting for the
+    reaper's thread to ask the app each time), then end whatever still runs and return the code."""
+    codes: list[int] = []
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: bool(rig.launcher.processes))
+        for number in range(1, int(seconds / step) + 1):
+            await rig.clock.advance(step)
+            await until(lambda n=number: len(rig.client.state_calls) >= n)
+            await settle()
+        for process in rig.launcher.processes:
+            process.finish()
+        codes.append(await asyncio.wait_for(task, 5))
+
+    run(scenario)
+    return codes[0]
+
+
+# #978-T10
+def test_a_worker_that_outlives_its_ended_job_is_stopped_after_the_grace(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["ended"]
+    process_before_grace: list[bool] = []
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: bool(rig.launcher.processes))
+        for number in range(1, 6):  # 10 s .. 50 s: over since 10 s, 40 s of the 45 s of grace
+            await rig.clock.advance(10)
+            await until(lambda n=number: len(rig.client.state_calls) >= n)
+            await settle()
+        process_before_grace.append(rig.launcher.processes[0].terminated)
+        await rig.clock.advance(10)  # 60 s: 50 s over, the grace is gone
+        assert await asyncio.wait_for(task, 5) == EXIT_FAILED
+
+    run(scenario)
+
+    assert process_before_grace == [False]
+    assert rig.launcher.processes[0].terminated is True
+    # The app ended the job: there is no claim to give back.
+    assert rig.client.releases == []
+
+
+# #978-T10
+def test_a_worker_whose_job_is_still_running_is_left_alone(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["running"]
+
+    code = reaped_scenario(rig, seconds=200, step=10)
+
+    assert code == EXIT_OK
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_superseded_job_is_still_live_and_its_worker_is_left_alone(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["superseded"]
+
+    reaped_scenario(rig, seconds=120, step=10)
+
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_job_that_was_over_and_is_live_again_starts_the_grace_over(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    # over at 10 s and 20 s, live at 30 s (the grace is reset), over again from 40 s on
+    rig.client.states = ["ended", "ended", "running", "ended", "running"]
+
+    reaped_scenario(rig, seconds=50, step=10)
+
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_check_the_app_cannot_answer_is_ignored_and_never_ends_the_worker(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = [
+        ApiUnavailable("app down"),
+        Revoked("revoked", 401),
+        ApiError("500", 500),
+        "running",
+    ]
+
+    code = reaped_scenario(rig, seconds=120, step=10)
+
+    assert code == EXIT_OK
+    assert rig.launcher.processes[0].terminated is False

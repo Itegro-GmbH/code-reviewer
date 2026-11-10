@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
+from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiError, ApiRejected, ApiUnavailable, ClaimedJob
 from code_reviewer_runner.job_loop.clock import Clock, RealClock
 from code_reviewer_runner.job_loop.host import JobEnd, JobHost
@@ -127,12 +128,13 @@ def parse_request(raw: str) -> WorkerRequest:
     )
 
 
-# A name of a variable the dispatcher of this device hands a Worker (`localEnvironment` of the start
-# document, #974).
-_LOCAL_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# The one variable the dispatcher of this device may hand a Worker (`localEnvironment` of the start
+# document, #974): the Claude Code login. The job process gets `{**env, **local}`, so any other name
+# would let the start document override what the machine decided (PATH, LD_PRELOAD, RUNNER_*).
+LOCAL_ENVIRONMENT_NAMES = frozenset({OAUTH_VARIABLE})
 # What a local credential may be: one printable token, like the login of Claude Code.
 _LOCAL_VALUE = re.compile(r"[\x21-\x7e]{1,4096}")
-MAX_LOCAL_VARIABLES = 8
+MAX_LOCAL_VARIABLES = len(LOCAL_ENVIRONMENT_NAMES)
 
 
 def parse_local_environment(raw: str) -> dict[str, str]:
@@ -149,8 +151,8 @@ def parse_local_environment(raw: str) -> dict[str, str]:
         raise _invalid("localEnvironment must be an object of a few variables")
     result: dict[str, str] = {}
     for name, value in given.items():
-        if not _LOCAL_NAME.fullmatch(name):
-            raise _invalid("localEnvironment names a variable that is not one")
+        if name not in LOCAL_ENVIRONMENT_NAMES:
+            raise _invalid("localEnvironment names a variable that is not a credential of a device")
         if not isinstance(value, str) or not _LOCAL_VALUE.fullmatch(value):
             raise _invalid("localEnvironment holds a value that is not one token")
         result[name] = value

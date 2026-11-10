@@ -2,8 +2,9 @@
 
 // What a snapshot request does once it is read (#839, follow-up turns): one part of the session snapshot of a running turn of the
 // Implementer is stored, and when it is the last one the snapshot is swapped in for the session's old one. Used by the Worker API
-// (`PUT /api/workers/v1/jobs/:id/session`, the credential in the header) and, since #879, by the runner API of a customer's runner
-// (`PUT /api/runners/v1/jobs/:id/session`: the runner credential in `Authorization`, the lease token in `X-Lease-Token`).
+// (`PUT /api/workers/v1/jobs/:id/session`, the credential in the header), by the Worker of every runner, hosted or a customer's (#974:
+// the runner API has no session routes any more; the dispatcher of a customer's runner holds no job secret and the Worker uses the
+// Worker API everywhere).
 //
 // Strict on our side, best effort on the sender's:
 //  - the call proves the claim and nothing else (a cheap look first, the proof in the transaction that stores); it does NOT extend the
