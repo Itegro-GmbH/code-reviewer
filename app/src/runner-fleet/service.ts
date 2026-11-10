@@ -18,6 +18,7 @@ import {
   newRegistrationToken,
   REGISTRATION_TOKEN_TTL_SECONDS,
 } from "../runner-identity/tokens.ts";
+import type { OnlineRunner } from "../runner-identity/announced.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 
 /** How many registration tokens a workspace may hold that are neither used nor expired. */
@@ -75,6 +76,23 @@ export function statusOf(
     !meetsMinimum(runner.baseVersion, settings.minBaseVersion)
     ? "update_needed"
     : "online";
+}
+
+/**
+ * The runners of the workspace that are online at `now` (heard from lately, base at the minimum or above), with what each announces: the
+ * runners the validator asks whether a profile can run (#973). A revoked runner is not listed by the repository.
+ */
+export async function onlineRunnersOf(
+  runners: Pick<RunnersRepository, "list">,
+  settings: { minBaseVersion: string | null; onlineWithinSeconds: number },
+  now: Date,
+): Promise<OnlineRunner[]> {
+  return (await runners.list())
+    .filter((runner) => statusOf(runner, now, settings) === "online")
+    .map((runner) => ({
+      labels: runner.labels,
+      access: runner.manifest.harnesses,
+    }));
 }
 
 export function createRunnerFleetService(deps: {

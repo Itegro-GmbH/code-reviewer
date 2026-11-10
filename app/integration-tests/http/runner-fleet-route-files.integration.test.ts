@@ -48,7 +48,7 @@ const ANNOUNCEMENT = {
   labels: ["Linux", "gpu"],
   baseVersion: "1.2.0",
   manifest: {
-    harnesses: { opencode: { version: "1.19.0", ready: true } },
+    harnesses: [{ harness: "opencode", version: "1.19.0", auth: "app-key" }],
     capabilities: ["agent-docker"],
   },
   limits: { cpus: 8 },

@@ -14,6 +14,12 @@ import type {
 } from "../db/repositories/profiles-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { ImplementerModels } from "../implementer/models.ts";
+import { demandOfProfile } from "../runner-identity/access.ts";
+import {
+  announcedBy,
+  describeDemand,
+  type OnlineRunner,
+} from "../runner-identity/announced.ts";
 import {
   CLAUDE_CODE_HARNESS,
   OPENCODE_HARNESS,
@@ -99,6 +105,11 @@ export type ProfileServiceDependencies = {
   models: Pick<ImplementerModels, "check">;
   /** #919: the environments of the workspace: the one a profile runs in is named by its name and stored by its id. */
   environments: Pick<ImplementerEnvironmentsRepository, "listSummaries">;
+  /**
+   * #973: the runners of the workspace that are online now, with what each announces: a profile in a runner environment is refused when a
+   * runner with its labels is online and none announces the harness, the auth and the model (`no_runner_announces`). Left out: not asked.
+   */
+  onlineRunners?: () => Promise<readonly OnlineRunner[]>;
   /** The operator's maximum cost per turn in whole US cents, read for each call. */
   operatorCostLimitCents(): Promise<number>;
   /** The most profiles a workspace may hold: `PROFILES_PER_WORKSPACE_MAX`. */
@@ -146,6 +157,7 @@ export function createProfileService({
   profiles,
   models,
   environments,
+  onlineRunners,
   operatorCostLimitCents,
   profilesMax = PROFILES_PER_WORKSPACE_MAX,
   archivedMax = ARCHIVED_PROFILES_PER_WORKSPACE_MAX,
@@ -203,6 +215,25 @@ export function createProfileService({
             `The environment ${shown(environment.name)} runs on a runner, which works with the workspace's own key, but the model is a managed one (an entry of the catalog). Choose a model of your own key, or an environment of the platform.`,
           ),
         );
+      if (environment.kind === "runner" && !("entryId" in model)) {
+        // #973: the validator offers only what some online runner of the workspace announces.
+        const demand = demandOfProfile({
+          harness: shape.profile.harness,
+          model: "model" in model ? model.model : null,
+        });
+        if (
+          onlineRunners !== undefined &&
+          announcedBy(await onlineRunners(), environment.labels, demand) ===
+            "not_announced"
+        )
+          errors.push(
+            issue(
+              "/environment",
+              "no_runner_announces",
+              `The environment ${shown(environment.name)} runs on a runner, and the runners with its labels that are online do not announce what this profile asks for (${describeDemand(demand)}). Choose a model or a harness the runner announces, or start a runner that does.`,
+            ),
+          );
+      }
       if (
         environment.kind === "hosted" &&
         shape.profile.harness !== OPENCODE_HARNESS
@@ -221,10 +252,13 @@ export function createProfileService({
   }
 
   /** The environment a body names, by name (case ignored), or the names that exist. */
-  async function findEnvironment(
-    name: string | null,
-  ): Promise<
-    | { kind: "hosted" | "runner"; id: string; name: string }
+  async function findEnvironment(name: string | null): Promise<
+    | {
+        kind: "hosted" | "runner";
+        id: string;
+        name: string;
+        labels: readonly string[];
+      }
     | { kind: "unknown"; names: string[] }
   > {
     const known = await environments.listSummaries();
@@ -234,7 +268,12 @@ export function createProfileService({
     );
     return found === undefined
       ? { kind: "unknown", names: known.map((e) => e.name) }
-      : { kind: found.kind, id: found.id, name: found.name };
+      : {
+          kind: found.kind,
+          id: found.id,
+          name: found.name,
+          labels: found.labels,
+        };
   }
 
   async function viewOf(

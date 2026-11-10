@@ -1117,7 +1117,11 @@ export async function startRunnerApiHarness(
       baseSha: sha("b"),
       branch: `implementer/t${String(turnCounter)}`,
       instruction: "Add a health endpoint.",
-      modelChoice: { entryId: "entry-1" },
+      // A runner works with the workspace's own key: a turn on a runner environment asks for `app-key`, never for a catalog entry (#973).
+      modelChoice:
+        overrides.runnerEnvironment == null
+          ? { entryId: "entry-1" }
+          : { provider: "anthropic", model: "claude-sonnet-5-5" },
       costLimitCents: null,
       createdBy: "turn-user",
       actorLogin: "octocat",

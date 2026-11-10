@@ -122,6 +122,7 @@ Of the body (the same list in `validate` and in a refused save):
 | `environment_unknown` | The workspace has no environment of that name (#919). | Use one of `available`, or create it on the Environments page. |
 | `runner_needs_own_key` | The environment runs on a runner and the model is a managed one (an entry of the catalog). A runner works with the workspace's own key (#854, #919). | Choose a model of your own key, or a hosted environment. |
 | `harness_needs_runner` | The harness is not OpenCode and the environment is a hosted one (#856, #919). | Choose an environment that runs on a runner. |
+| `no_runner_announces` | The environment runs on a runner, a runner with its labels is online, and none announces the harness, the auth and the model of the profile (#973: `claude-code` is a subscription of the device and its model must be one the runner allows; OpenCode on a key of the workspace is announced by every runner). With no such runner online nothing is said. | Choose a model or a harness the runner announces, or start a runner that does. |
 | `model_not_allowed` | The workspace cannot run that model (the message gives the reason). | Pick one from `GET .../implementer/models`. |
 | `cost_limit_above_maximum` | The cost limit is above the operator's maximum per turn (the message says it). | Use that or less. |
 

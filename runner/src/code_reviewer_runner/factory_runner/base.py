@@ -13,8 +13,9 @@ BASE_VERSION: Final = "1.0.0"
 # Where `factory-runner register` goes when `--url` and `FACTORY_RUNNER_URL` are not given.
 DEFAULT_URL: Final = "https://code-review.com"
 HARNESS_OPENCODE: Final = "opencode"
-# The source of the access an announced harness has (`HarnessAuth` of contracts/runner-registration.v1.json, #973). A runner never
-# announces `managed`: the platform's keys are the platform identity's alone.
+# The source of the access an announced harness has (`HarnessAuth` of
+# contracts/runner-registration.v1.json, #973). A runner never announces `managed`: the platform's
+# keys are the platform identity's alone.
 AUTH_APP_KEY: Final = "app-key"
 AUTH_SUBSCRIPTION: Final = "subscription"
 

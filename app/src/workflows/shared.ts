@@ -8,6 +8,7 @@ import { createProfilesRepository } from "../db/repositories/profiles-repository
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
+import { onlineRunnersFor } from "../runner-fleet/shared.ts";
 import {
   createWorkflowService,
   type WorkflowService,
@@ -28,6 +29,7 @@ export function workflowServiceFor(
     projects: createProjectsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
+    onlineRunners: onlineRunnersFor(workspaceId),
     ...(options.samples === undefined ? {} : { samples: options.samples }),
   });
 }

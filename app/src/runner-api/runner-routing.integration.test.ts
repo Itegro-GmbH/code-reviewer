@@ -233,9 +233,7 @@ describe("the claim of a customer's runner", () => {
     const otherOnly = await h.registerRunner({
       labels: ["gpu", "linux"],
       manifest: {
-        harnesses: [
-          { harness: "custom/tool", version: "1", auth: "app-key" },
-        ],
+        harnesses: [{ harness: "custom/tool", version: "1", auth: "app-key" }],
         capabilities: [],
       },
     });

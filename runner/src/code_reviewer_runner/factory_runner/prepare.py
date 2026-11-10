@@ -207,7 +207,9 @@ def announcement_for(
         )
     for name, status in (harnesses or {}).items():
         if name != HARNESS_OPENCODE and status.ready:
-            announced.append({"harness": name, "version": status.version, "auth": AUTH_SUBSCRIPTION})
+            announced.append(
+                {"harness": name, "version": status.version, "auth": AUTH_SUBSCRIPTION}
+            )
     manifest: dict[str, object] = {"harnesses": announced}
     if result.capabilities:
         manifest["capabilities"] = list(result.capabilities)

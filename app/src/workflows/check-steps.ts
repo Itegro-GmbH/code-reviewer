@@ -28,6 +28,8 @@ import {
   NAMES_LISTED_MAX,
   NESTING_DEPTH_MAX,
 } from "./limits.ts";
+import { demandOfProfile } from "../runner-identity/access.ts";
+import { announcedBy, describeDemand } from "../runner-identity/announced.ts";
 import { issue, listNames, pointer, shown } from "./issues.ts";
 import {
   parseProfileRef,
@@ -551,6 +553,24 @@ function checkRunnerRules(
       ),
     );
   const harness = harnessOfProfile(facts);
+  // #973: what the runners of the workspace announce. Only a runner with the environment's labels that is online can say; a managed model is
+  // already refused above, so it is not refused twice.
+  const runners = c.resolver.onlineRunners?.();
+  if (
+    onRunner &&
+    facts.managedModel !== true &&
+    runners !== undefined &&
+    known.labels !== undefined &&
+    announcedBy(runners, known.labels, demandOfProfile(facts)) ===
+      "not_announced"
+  )
+    c.report(
+      issue(
+        where,
+        "no_runner_announces",
+        `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what the profile ${profile} asks for (${describeDemand(demandOfProfile(facts))}). Use a profile the runner announces, or start a runner that does.`,
+      ),
+    );
   if (!onRunner && harnessNeedsRunner(harness))
     c.report(
       issue(

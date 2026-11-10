@@ -133,6 +133,28 @@ export function demandOfTurn(turn: {
   };
 }
 
+/**
+ * What a profile version asks for, from the facts the validator holds of it: the harness, whether its model is the platform's (a catalog entry) and,
+ * for a harness on a login, the model name Claude Code reads. The same derivation as `demandOfTurn`, from what the profile says before a turn exists.
+ */
+export function demandOfProfile(profile: {
+  harness?: string | null;
+  managedModel?: boolean;
+  model?: string | null;
+}): AccessDemand {
+  const harness = profile.harness ?? OPENCODE_HARNESS;
+  const auth: AccessAuth = SUBSCRIPTION_HARNESSES.includes(harness)
+    ? "subscription"
+    : profile.managedModel === true
+      ? MANAGED_AUTH
+      : "app-key";
+  return {
+    harness,
+    auth,
+    model: auth === "subscription" ? (profile.model ?? null) : null,
+  };
+}
+
 /** Whether a demand can run on a customer's runner at all: a managed model is the platform's and never leaves for a device (`runner_needs_own_key`). */
 export function runnerCanServe(demand: AccessDemand): boolean {
   return demand.auth !== MANAGED_AUTH;

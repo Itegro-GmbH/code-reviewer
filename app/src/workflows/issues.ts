@@ -84,6 +84,11 @@ export const SEMANTIC_ISSUE_CODES = [
   "runner_needs_own_key",
   /** A step runs a profile whose harness is not OpenCode in an environment that is not a runner's (#854). */
   "harness_needs_runner",
+  /**
+   * A step runs a profile in a runner environment, a runner with the environment's labels is online, and none of those announces the harness, the auth
+   * and the model the profile asks for (#973). With no such runner online nothing is said: the turn waits for one, as always.
+   */
+  "no_runner_announces",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
   /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */

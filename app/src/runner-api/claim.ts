@@ -997,7 +997,9 @@ export async function checkJob(
   if (!selected.ok) return refuse(selected.errorCode, selected.detail);
   const { selection } = selected;
   // #854: a turn of a runner environment runs on a customer's machine with the owner's own key. The operator's key never leaves for a
-  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists.
+  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists. Since #973
+  // the routing keeps such a turn from reaching a runner at all (it asks for `managed`, which only the platform announces); this stays as the
+  // last line in front of the key.
   if (turn?.turn.runnerEnvironment != null && selection.keyMode === "managed")
     return refuse("runner_needs_own_key", "kind=implementer");
   await deps.recordSelection(job, selection);

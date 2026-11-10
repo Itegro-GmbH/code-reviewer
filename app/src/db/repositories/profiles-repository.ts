@@ -13,6 +13,7 @@
 import "server-only";
 import { type Kysely, type Selectable } from "kysely";
 import {
+  CLAUDE_CODE_PROVIDER,
   OPENCODE_HARNESS,
   isProfileHarness,
   type ProfileHarness,
@@ -113,6 +114,8 @@ export type ProfileVersionFactsRow = {
   managedModel: boolean;
   /** #856: the harness the version runs with. */
   harness: ProfileHarness;
+  /** #973: the model name of a version on a harness that runs on a login (`{ provider: "claude-code", model }`); null for any other model. */
+  model: string | null;
   /** #919: the environment the version runs in; null for a version saved before it. */
   environmentId: string | null;
 };
@@ -188,6 +191,13 @@ function contentFrom(row: Selectable<ProfileVersionsTable>): ProfileContent {
     harness: harnessOf(row.harness),
     environmentId: row.environment_id,
   };
+}
+
+/** The model name of a choice on a login (the provider `claude-code`); null for a catalog entry or a model of a provider's key. */
+function loginModelOf(choice: ModelChoice): string | null {
+  return "model" in choice && choice.provider === CLAUDE_CODE_PROVIDER
+    ? choice.model
+    : null;
 }
 
 /** The harness a stored version names; a version saved before harnesses were stored (null) is OpenCode. */
@@ -366,6 +376,7 @@ export function createProfilesRepository(
         canPush: row.can_push === 1,
         defaultResult: row.default_result,
         managedModel: "entryId" in decodeModelChoice(row.model_choice),
+        model: loginModelOf(decodeModelChoice(row.model_choice)),
         harness: harnessOf(row.harness),
         environmentId: row.environment_id,
       }));

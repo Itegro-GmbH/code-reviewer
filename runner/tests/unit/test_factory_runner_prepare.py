@@ -212,7 +212,9 @@ def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
 
 
 # #973-T05
-def test_the_announcement_lists_opencode_with_its_access_and_the_capabilities_only_when_they_were_proven() -> None:
+def test_the_announcement_lists_opencode_with_its_access_and_capabilities_only_when_proven() -> (
+    None
+):
     ready = announcement_for(config(), passing(nested=True), 4096)
     not_ready = announcement_for(config(), failing("runc"), 4096)
 

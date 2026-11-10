@@ -253,7 +253,10 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
           // (the harness, the auth and the model of the turn, #973), and nothing else: never a review, never a split claim, never a job by
           // id. The base of every runner holds OpenCode: a manifest without it is no runner.
           if (
-            !announcesHarness(customer.runner.manifest.harnesses, OPENCODE_HARNESS)
+            !announcesHarness(
+              customer.runner.manifest.harnesses,
+              OPENCODE_HARNESS,
+            )
           )
             return noContent();
           return await handleClaim(

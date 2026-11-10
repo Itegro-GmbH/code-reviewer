@@ -78,7 +78,8 @@ describe("the rule", () => {
   });
 
   it("lets an entry without models allow any, and an empty manifest allow nothing", () => {
-    const { models: _models, ...open } = CLAUDE;
+    const open: HarnessAccess = { ...CLAUDE };
+    delete open.models;
     const any = demandOfTurn({
       harness: "claude-code",
       modelChoice: { provider: "claude-code", model: "whatever-1" },

@@ -169,7 +169,8 @@ def test_an_entry_names_a_harness_a_version_an_auth_and_for_a_device_the_models(
         body["manifest"] = {"harnesses": [bad]}
         assert not _accepts("AnnounceRequest", body), bad
     body["manifest"] = {"harnesses": [{**opencode, "auth": "managed"}]}
-    assert _accepts("AnnounceRequest", body)  # the file knows it; the app refuses it with 422 for a customer
+    # the file knows `managed`; the app refuses it for a customer with 422
+    assert _accepts("AnnounceRequest", body)
 
 
 def test_the_registration_needs_a_token_a_name_labels_and_a_base_version() -> None:

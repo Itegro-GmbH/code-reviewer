@@ -91,7 +91,10 @@ async function start() {
       baseSha: sha("a"),
       branch: `implementer/s${String(counter)}`,
       instruction: "Add a health endpoint.",
-      modelChoice: { entryId: "entry-1" },
+      // A runner works with the workspace's own key, a hosted turn with a catalog entry (#973).
+      modelChoice: environment.runner
+        ? { provider: "anthropic", model: "claude-sonnet-5-5" }
+        : { entryId: "entry-1" },
       costLimitCents: null,
       createdBy: "user-1",
       actorLogin: "octocat",
