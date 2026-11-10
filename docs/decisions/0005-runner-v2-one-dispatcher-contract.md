@@ -85,6 +85,16 @@ App** (the Worker API, `crj_`, everywhere).
 - **Only with the dispatch webhook on** (`RUNNER_DISPATCH=webhook`, hosted): in poll mode the app makes no outgoing call.
 - **Not done here:** the hosted Dispatcher still claims by the `jobId` of the doorbell and still answers a full pool with `429`; a UI to show the secret once and to rotate it.
 
+## 3c. Details of #977
+
+- **vm-init** (`runner/src/code_reviewer_runner/vm_init/`, `runner/vm-init/README.md`) is the program in the local VM's root file system that does what the Sandbox API does hosted: it takes the start over vsock, prepares the VM with the
+  hosted launcher's steps, checks the image id against the manifest, makes the work volume, runs the Control container and reports how it ended (`contracts/vm-init.v1.json`). **Python, standard library only**: one language for the whole
+  job-side path and the lane that already tests it; the interpreter in the root file system is the price (Go and Node were the alternatives, see the README).
+- **The `docker run` arguments are rendered once, by the Dispatcher**, from the hosted Implementer spec plus `RUNNER_ENVIRONMENT_CONTROL` and a seccomp profile that allows AF_VSOCK, and sent in the start; vm-init executes them. A
+  golden file (`docker-run.local-control.golden.json`) pins them and the runner's tests feed it to the guest unchanged. The hosted spec and its golden file are untouched.
+- **No relay: Control connects to the host itself** (CID 2, port 5100, `environment-control.v1.json` unchanged). Only the Control container gets the seccomp profile; the agent's container, the doors and the readers keep Docker's
+  default profile and cannot open a vsock socket. vm-init's own exit report goes to its own port (5101) and is the authority on how the job ended.
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.

@@ -5,6 +5,8 @@ Python code that runs one review job with [PR-Agent](https://github.com/qodo-ai/
 exactly one job from the app with a per-job credential and starts `code-reviewer-run-job`, the entry point of one job,
 as a process of its own. See the repository `README.md` for setup and `TESTING.md` for the tests.
 
+`src/code_reviewer_runner/vm_init/` is not part of the Worker: it is `vm-init`, the program in the root file system of a local Firecracker VM (Runner v2, #977) that takes the job's start over vsock, prepares the VM, runs the Worker's Control container and reports how it ended (standard library only; `vm-init/README.md`, `contracts/vm-init.v1.json`).
+
 ## The Worker's settings
 
 `code-reviewer-runner worker-once` (the container's command in the Sandbox VM) and `code-reviewer-runner probe` read
