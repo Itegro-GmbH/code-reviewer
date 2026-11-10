@@ -255,7 +255,7 @@ const B: Dispatcher = {
 
 const queued = (id: string): EnqueueResult => ({
   status: "created",
-  job: { id, status: "queued" } as Job,
+  job: { id, status: "queued", reviewKind: "implementer" } as Job,
   supersededJobIds: [],
 });
 
@@ -374,13 +374,25 @@ describe("ringing the webhook dispatchers of customers", () => {
     expect(w.receiver(A.url).received).toHaveLength(1);
   });
 
+  it("leaves a review alone: only a turn of the Implementer can go to a customer's dispatcher", async () => {
+    const w = world([A], [{ id: "job-1", labels: ["linux"] }]);
+
+    await w.service().onEnqueued({
+      status: "created",
+      job: { id: "job-1", status: "queued", reviewKind: "diff" } as Job,
+      supersededJobIds: [],
+    });
+
+    expect(w.receiver(A.url).received).toHaveLength(0);
+  });
+
   it("leaves a job that already exists alone, and a job that is not queued", async () => {
     const w = world([A], [{ id: "job-1", labels: ["linux"] }]);
     const service = w.service();
 
     await service.onEnqueued({
       status: "existing",
-      job: { id: "job-1", status: "queued" } as Job,
+      job: { id: "job-1", status: "queued", reviewKind: "implementer" } as Job,
       reason: "same_delivery",
     });
     await service.onEnqueued({

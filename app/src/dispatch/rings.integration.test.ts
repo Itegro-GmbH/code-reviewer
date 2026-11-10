@@ -300,28 +300,21 @@ describe("ringing again when a job of a label group ends", () => {
     r.reply(gpu, ignored("busy"), ignored("busy"));
     for (const turn of [waitingLinux, waitingGpu])
       await r.service.onEnqueued(created(turn));
-    const before = {
-      a: r.received(a).length,
-      gpu: r.received(gpu).length,
-    };
-    // `a` takes the first job and it ends: a slot of the group of `a` freed.
+    // `a` takes the first job and it ends: a slot of the group of `a` (`linux`) freed.
     expect(await claimAs(h, a)).toBe(running.job.id);
     h.clock.advance(WAITING_MIN_GAP_MS + 1_000);
+    const callsFor = (d: WebhookRunner, job: { job: { id: string } }) =>
+      r.received(d).filter((call) => call.body?.jobId === job.job.id).length;
 
     const { rung } = await r.service.ringGroupsOf([running.job.id]);
 
-    // `a` has `linux`: the waiting job that needs `linux` is rung (on both dispatchers that could take it); the one that needs `gpu` too is not.
-    const calls = [...r.received(a), ...r.received(gpu)].slice();
-    expect(rung).toBeGreaterThan(0);
-    expect(r.received(a).length).toBe(before.a + 1);
-    expect(
-      calls.filter((call) => call.body?.jobId === waitingGpu.job.id),
-    ).toHaveLength(
-      r.received(gpu).filter((c) => c.body?.jobId === waitingGpu.job.id).length,
-    );
-    expect(
-      r.received(a).filter((call) => call.body?.jobId === waitingGpu.job.id),
-    ).toHaveLength(0);
+    // The waiting job that needs `linux` is rung again, on both dispatchers that could take it; the one that needs `gpu` as well is not:
+    // the group of `a` has no `gpu`.
+    expect(rung).toBe(2);
+    expect(callsFor(a, waitingLinux)).toBe(2);
+    expect(callsFor(gpu, waitingLinux)).toBe(2);
+    expect(callsFor(gpu, waitingGpu)).toBe(1);
+    expect(callsFor(a, waitingGpu)).toBe(0);
   });
 });
 

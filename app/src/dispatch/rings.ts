@@ -287,6 +287,8 @@ export function createRingService(options: {
         return;
       const { job } = result;
       if (job.status !== "queued") return;
+      // Only a turn of the Implementer can go to a customer's dispatcher (the engine of its claim): no query for a review.
+      if (job.reviewKind !== "implementer") return;
       await guarded(`job=${job.id}`, undefined, async () => {
         const due = await dispatches.listDue(now(), RING_LIMIT, {
           jobId: job.id,
