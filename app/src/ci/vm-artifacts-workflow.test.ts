@@ -69,6 +69,35 @@ describe("the build workflow", () => {
     expect(smoke?.["continue-on-error"]).toBeUndefined();
   });
 
+  // #978-T05
+  it("runs the launcher lane after the smoke boot: the local Dispatcher's launcher starts a job in a VM, as a normal user in a delegated cgroup", () => {
+    const steps = stepsOf(job(build, "build"));
+    const names = steps.map((step) => step.name ?? "");
+    const lane = steps.find((step) => step.name?.startsWith("Launcher lane"));
+
+    expect(lane).toBeDefined();
+    const at = (text: string): number =>
+      names.findIndex((name) => name.startsWith(text));
+    expect(at("Launcher lane")).toBeGreaterThan(at("Smoke boot"));
+    expect(at("Launcher lane")).toBeLessThan(at("Manifest"));
+    expect(lane?.["continue-on-error"]).toBeUndefined();
+    const script = String(lane?.run);
+    // The test itself runs as the runner's user, never as root: only the TAP and the transient unit are made with sudo.
+    expect(script).toContain("-p Delegate=yes");
+    expect(script).toContain('-p User="$USER"');
+    expect(script).toContain("pytest -m kvm tests/kvm");
+    expect(script).not.toMatch(/sudo [^\n]*pytest/);
+    expect(script).toContain("tuntap add dev fctap0");
+    for (const variable of [
+      "KVM_VM_KERNEL",
+      "KVM_VM_ROOTFS",
+      "KVM_VM_BASE_DISK",
+      "KVM_VM_IMAGES",
+      "KVM_VM_STATE_DIR",
+    ])
+      expect(script).toContain(variable);
+  });
+
   // #976-T04
   it("verifies the kernel configuration on every run, also when the built kernel comes from the cache", () => {
     const steps = stepsOf(job(build, "kernel"));
@@ -360,5 +389,18 @@ describe("the CI workflow's part in it", () => {
     expect(condition).not.toContain("push");
     expect(condition).not.toContain("base_ref");
     expect(call.permissions).toEqual({ contents: "read" });
+  });
+
+  // #978-T05
+  it("runs the build, with the launcher lane in it, when the launcher, vm-init or the lane change", () => {
+    const filter = readText(".github/workflows/ci.yml");
+
+    for (const path of [
+      "runner/src/code_reviewer_runner/factory_runner/firecracker/**",
+      "runner/src/code_reviewer_runner/vm_init/**",
+      "runner/vm-init/**",
+      "runner/tests/kvm/**",
+    ])
+      expect(filter, path).toContain(path);
   });
 });

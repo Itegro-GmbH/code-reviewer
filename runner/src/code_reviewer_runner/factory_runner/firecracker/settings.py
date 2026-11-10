@@ -74,6 +74,10 @@ class FirecrackerSettings:
     # How long a VM that reported gets to power itself off before the host kills it.
     kill_grace_seconds: float = 5.0
     preparation_seconds: float = float(PREPARATION_SECONDS)
+    # A serial console for the guest, written to the VM's log (`firecracker.log`): for the KVM lane
+    # and for a person who debugs a machine. A job's VM has none by default (0.3 to 0.4 s of every
+    # boot, and nothing reads it).
+    console: bool = False
 
     @property
     def vms_dir(self) -> Path:

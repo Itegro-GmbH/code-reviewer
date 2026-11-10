@@ -56,7 +56,7 @@ _log = logging.getLogger(__name__)
 EXIT_NO_REPORT: Final = 1
 EXIT_KILLED: Final = -9
 # The lines of the VMM's own log the outcome carries.
-LOG_TAIL_BYTES: Final = 2048
+LOG_TAIL_BYTES: Final = 6000
 # How long a killed VMM may take to be gone before the slot is not given back.
 GONE_SECONDS: Final = 10.0
 

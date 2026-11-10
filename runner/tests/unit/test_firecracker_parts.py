@@ -585,6 +585,17 @@ def test_the_command_line_names_the_mode_the_address_and_the_init() -> None:
 
 
 # #978-T06
+def test_a_console_is_given_to_the_guest_only_when_asked_for() -> None:
+    quiet = FirecrackerSettings(Path("k"), Path("r"), Path("d"), IMAGE_ID)
+    loud = FirecrackerSettings(Path("k"), Path("r"), Path("d"), IMAGE_ID, console=True)
+
+    assert "8250.nr_uarts=0 quiet loglevel=0" in vmm.kernel_command_line(quiet, Slot(0))
+    line = vmm.kernel_command_line(loud, Slot(0))
+    assert "console=ttyS0 8250.nr_uarts=1" in line
+    assert "quiet" not in line and "8250.nr_uarts=0" not in line
+
+
+# #978-T06
 def test_the_config_file_is_written_once_and_only_the_owner_reads_it() -> None:
     with short_directory() as root:
         path = root / "firecracker.json"

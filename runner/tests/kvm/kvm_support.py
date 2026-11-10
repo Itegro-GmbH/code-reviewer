@@ -55,5 +55,7 @@ def load_machine() -> Machine:
         vcpus=2,
         disk_gib=16,
         job_timeout_seconds=300,
+        # The guest's console goes to the VM's log, which a failed run prints.
+        console=True,
     )
     return Machine(settings, state)

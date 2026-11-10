@@ -33,7 +33,13 @@ def kernel_command_line(settings: FirecrackerSettings, slot: Slot) -> str:
     guest's init sets them up, `docker/vm/rootfs/vm-boot`), then the init command."""
     init, _, rest = settings.init_command.partition(" -- ")
     address = f"vm.ip={slot.guest_address}/{PREFIX_LENGTH} vm.gw={slot.host_address}"
-    return f"{settings.boot_args} vm.mode=run {address} init={init} -- {rest}".rstrip(" -")
+    boot = settings.boot_args
+    if settings.console:
+        # As `kernelCommandLine` of dispatcher/src/vm-artifacts/boot.ts does for the build.
+        boot = (
+            boot.replace(" 8250.nr_uarts=0 quiet loglevel=0", "") + " console=ttyS0 8250.nr_uarts=1"
+        )
+    return f"{boot} vm.mode=run {address} init={init} -- {rest}".rstrip(" -")
 
 
 def firecracker_config(settings: FirecrackerSettings, slot: Slot, vm_dir: Path) -> dict[str, Any]:
