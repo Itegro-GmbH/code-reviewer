@@ -351,7 +351,7 @@ export type KnownReleaseReason = "launch_failed" | "worker_exited";
  */
 export type VmName = string;
 /**
- * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input. `runner_session_snapshot` (#879): PUT /api/runners/v1/jobs/{id}/session and GET /api/runners/v1/jobs/{id}/resume-session exist (the same calls for a customer's runner, which holds a runner credential and no per-job credential: `RunnerLeaseTokenHeader`, `RunnerSessionPartQuery`, `RunnerResumeSessionQuery`); such a runner reads the list from GET /api/runners/v1/version with its own credential and uses the two calls only if the app lists the feature. `implementer_snapshot` does not say it: an app can have the Worker API's calls and not these.
+ * The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input.
  */
 export type KnownAppFeature =
   | "worker_api"
@@ -360,8 +360,7 @@ export type KnownAppFeature =
   | "release"
   | "vm_lifecycle"
   | "implementer_steps"
-  | "implementer_snapshot"
-  | "runner_session_snapshot";
+  | "implementer_snapshot";
 /**
  * #745: the kinds of `StepRecord` the app stores. `reasoning`: a finished reasoning part, with the text the provider returned (often a summary). `text`: a finished assistant text part. `tool`: a tool call, with its name, status, title, the input as JSON text and the error text; the OUTPUT of a tool is never recorded, on either side. `step`: the end of one model call, with its tokens and cost. A record of another kind is left out and counted in `StepsResponse.dropped`: a newer runner may send more kinds.
  */
@@ -1742,9 +1741,23 @@ export interface SplitClaimResponse {
      */
     heartbeatIntervalSeconds: number;
     /**
-     * #971: the size label the job requires, `cr:size-<vCPUs>` of a size of `contracts/environment-sizes.v1.json` (the sizes of the platform: 1, 2, 4, 6, 8). The Dispatcher checks it: a label that names a size it does not launch is given back unlaunched. The size of the VM stays what it was: `vcpus` of the answer when the turn's environment names one, else the Dispatcher's own configuration for the kind (so a hosted turn without an environment gets the size the operator configured, whatever `cr:size-2` says). Every job this answer is for is a hosted one and has one: reviews run on `cr:size-1`, a turn of the Implementer on the size of its environment (`cr:size-2` without one). Optional only so that a Dispatcher can read the answer of an app of the previous release, which does not send it; the Dispatcher's own configuration applies then. It comes from the app's authenticated answer only. The namespace `cr:` is reserved for the platform identity (`contracts/runner-registration.v1.json`).
+     * #971: the size label the job requires, `cr:size-<vCPUs>` of a size of `contracts/environment-sizes.v1.json` (the sizes of the platform: 1, 2, 4, 6, 8). The Dispatcher checks it: a label that names a size it does not launch is given back unlaunched. The size of the VM stays what it was: `vcpus` of the answer when the turn's environment names one, else the Dispatcher's own configuration for the kind (so a hosted turn without an environment gets the size the operator configured, whatever `cr:size-2` says). A hosted job always has one: reviews run on `cr:size-1`, a turn of the Implementer on the size of its environment (`cr:size-2` without one). A job of a customer's runner has none (#974: its labels are `labels`). Optional only so that a Dispatcher can read the answer of an app of the previous release, which does not send it; the Dispatcher's own configuration applies then. It comes from the app's authenticated answer only. The namespace `cr:` is reserved for the platform identity (`contracts/runner-registration.v1.json`).
      */
     sizeLabel?: string;
+    /**
+     * #974: the labels the job requires, for a job of a customer's runner (its environment's labels, never in the reserved namespace `cr:`); a hosted job names its size in `sizeLabel` and has no `labels`. Information: the claim already matched them (a dispatcher takes a job only when it has all of them).
+     *
+     * @maxItems 64
+     */
+    labels?: string[];
+    /**
+     * #974: what a customer's job asks of the dispatcher's device: the harness, the auth and, for a device-bound access, the model (null otherwise). It lets the dispatcher hand the Worker the one local credential the job needs and no other: `subscription` and `local-key` are credentials that exist only on the device (never in the app), `app-key` needs nothing local (the Worker fetches the workspace's key itself). Never a credential or a credential's name. Only for a turn of the Implementer on a customer's runner (`sizeLabel` and `access` are not both present).
+     */
+    access?: {
+      harness: string;
+      auth: "app-key" | "local-key" | "subscription";
+      model: string | null;
+    };
     /**
      * #818: the VM size in vCPUs that the turn's environment asks for. Present only for a job of the kind `implementer` that was started with an environment; absent otherwise, and then the Dispatcher's configuration and default apply. It comes from the app's authenticated answer only. The Dispatcher launches only the sizes of the platform (`contracts/environment-sizes.v1.json`) and fails the launch with its own code for any other, and it ignores the field for every other kind, so a review can never name a size.
      */
@@ -1769,7 +1782,7 @@ export interface ImplementerNetworkRule1 {
   hosts: string[];
 }
 /**
- * #318: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).
+ * #318, #974: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN, or the credential of a customer's runner for a job of its own workspace) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).
  */
 export interface ReleaseRequest {
   credential: WorkerCredential;
@@ -1817,7 +1830,7 @@ export interface VmStartResponse {
   [k: string]: unknown;
 }
 /**
- * #364: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential only; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.
+ * #364, #974: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential, or the credential of a customer's runner for a job of its own workspace: 404 for any other; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.
  */
 export interface JobStateResponse {
   version: 1;
@@ -1885,53 +1898,6 @@ export interface StepsResponse {
   stored: number;
   stale: number;
   dropped: number;
-  [k: string]: unknown;
-}
-/**
- * #879: the request headers of the two runner calls whose body is raw bytes (`PUT .../session`, `GET .../resume-session`), as an object of lower-case header names. The lease token of the claim, which the calls with a JSON body (heartbeat, complete, steps) carry in the body, travels in `X-Lease-Token` here, next to the runner credential in `Authorization: Bearer crc_...` (contracts/runner-registration.v1.json). Secret: never log it. The shared `RUNNER_TOKEN` of a Dispatcher is not accepted by these two calls (401 RUNNER_UNAUTHORIZED): a Dispatcher's Worker has the Worker API's calls of the same names.
- */
-export interface RunnerLeaseTokenHeader {
-  "x-lease-token": LeaseToken;
-  [k: string]: unknown;
-}
-/**
- * #879: the query string of PUT /api/runners/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL): one part of the session snapshot of the running turn of the Implementer a customer's runner holds (follow-up turns). It is the call of the Worker API (`SessionPartQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, at most 3, the same description of the whole file in every part, the same checks, the same replacement of the session's old snapshot once the last part is in) for a runner that holds no per-job credential: the runner credential is in `Authorization`, the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`), the bytes of the part are the body (`application/octet-stream`, up to 3 MiB: 413 RUNNER_BODY_TOO_LARGE above, 400 RUNNER_REQUEST_INVALID with `fields` naming `body` unless exactly as long as `bytes` says for that part). The call proves the claim and nothing more: it does NOT extend the lease. 401 RUNNER_UNAUTHORIZED for a credential the app does not know, a revoked runner's included (and for the shared token); 404 RUNNER_JOB_NOT_FOUND for a job of another workspace, one another runner holds, or a hosted one (a Dispatcher holds it); 409 RUNNER_LEASE_LOST for a lease that ran out, a claim that ended or a token that is not the claim's (stop sending); 400 for a job that is not a turn of the Implementer, a missing or malformed `X-Lease-Token` (`fields`: `x-lease-token`) or a query or body that does not fit. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary. The app lists the feature `runner_session_snapshot` in `KnownAppFeature`; a runner sends the call only to an app that lists it.
- */
-export interface RunnerSessionPartQuery {
-  part: string;
-  parts: string;
-  bytes: string;
-  rawBytes: string;
-  sha256: string;
-  opencodeVersion: string;
-  [k: string]: unknown;
-}
-/**
- * #879: 200 from PUT /api/runners/v1/jobs/{id}/session. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.
- */
-export interface RunnerSessionPartResponse {
-  version: 1;
-  part: number;
-  parts: number;
-  complete: boolean;
-  [k: string]: unknown;
-}
-/**
- * #879: the query string of GET /api/runners/v1/jobs/{id}/resume-session, as an object of its parameters: one part of the session snapshot the earlier turns stored, read by the customer's runner that holds a follow-up turn of the Implementer. It is the call of the Worker API (`ResumeSessionQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, `part` from 0 and 0 when absent, the same answer of 200 with the bytes of the part, 204 when the session has no stored snapshot, a snapshot of the job's own session and of an earlier turn only) with the runner credential in `Authorization` and the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`). The description of the whole file is in the headers of every part (`RunnerResumeSessionHeaders`). It proves the claim and nothing more: it does NOT extend the lease. The refusals are those of `RunnerSessionPartQuery`: 401 RUNNER_UNAUTHORIZED, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST, and 400 RUNNER_REQUEST_INVALID (`fields`: `part` for a part that is not a number or beyond the last, `x-lease-token` for a missing or malformed token) also for a job that is not a turn of the Implementer. The runner checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary, never a failed turn.
- */
-export interface RunnerResumeSessionQuery {
-  part?: string;
-  [k: string]: unknown;
-}
-/**
- * #879: the response headers of a 200 from GET /api/runners/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They are those of `ResumeSessionHeaders` in contracts/worker-api.v1.json and describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.
- */
-export interface RunnerResumeSessionHeaders {
-  "x-snapshot-parts": string;
-  "x-snapshot-bytes": string;
-  "x-snapshot-raw-bytes": string;
-  "x-snapshot-sha256": string;
-  "x-snapshot-opencode-version": string;
   [k: string]: unknown;
 }
 /**

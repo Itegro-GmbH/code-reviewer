@@ -13,6 +13,9 @@ BASE_VERSION: Final = "1.0.0"
 # Where `factory-runner register` goes when `--url` and `FACTORY_RUNNER_URL` are not given.
 DEFAULT_URL: Final = "https://code-review.com"
 HARNESS_OPENCODE: Final = "opencode"
+# The disk budget of a job in bytes (`diskGb` of the limits, #855), for the Worker the local
+# dispatcher starts: it ends a job that fills the machine's disk. Absent: no budget.
+DISK_BUDGET_VARIABLE: Final = "FACTORY_RUNNER_DISK_BUDGET_BYTES"
 # The source of the access an announced harness has (`HarnessAuth` of
 # contracts/runner-registration.v1.json, #973). A runner never announces `managed`: the platform's
 # keys are the platform identity's alone.

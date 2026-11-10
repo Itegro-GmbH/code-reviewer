@@ -22,18 +22,15 @@ import {
 } from "../jobs/worker-credential.ts";
 import { DEFAULT_ENGINES } from "../jobs/runner-capabilities.ts";
 import { bodyLimitFor, readJsonBody, readOptionalJsonBody } from "./body.ts";
-import { readLimitedBody } from "../webhooks/limited-body.ts";
 import { handleClaim, type ClaimDeps } from "./claim.ts";
 import {
   APP_FEATURES,
   RUNNER_API_VERSION,
-  SNAPSHOT_LIMITS,
   type VersionResponse,
 } from "./contract.ts";
 import { handleJobState, type JobStateDeps } from "./job-state.ts";
 import { handleRelease, type ReleaseDeps } from "./release.ts";
 import { handleVmStart, type VmStartDeps } from "./vm.ts";
-import { LEASE_TOKEN_HEADER, parseLeaseTokenHeader } from "./lease-header.ts";
 import { describeError } from "./logger.ts";
 import { parseClaimRequest, parseJobId, parseRunnerId } from "./requests.ts";
 import { handleComplete, handleHeartbeat, type ReportDeps } from "./report.ts";
@@ -43,9 +40,6 @@ import {
   noContent,
   unauthorized,
 } from "./responses.ts";
-import { parseResumePart, readResumeSessionPart } from "./resume-session.ts";
-import { storeSnapshotPart, type SnapshotDeps } from "./snapshot.ts";
-import { parseSnapshotPartRequest } from "./snapshot-request.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
 import { parseStepsRequest } from "./steps-request.ts";
 import { bearerTokenOf, tokensMatch } from "./token-auth.ts";
@@ -56,14 +50,12 @@ import {
 } from "./registration.ts";
 import { OPENCODE_HARNESS } from "../runner-identity/harness.ts";
 import { announcesHarness } from "../runner-identity/access.ts";
-import type { Job } from "../jobs/job-types.ts";
 
 export type RunnerApiDeps = ClaimDeps &
   ReportDeps &
   ReleaseDeps &
   VmStartDeps &
   StepsDeps &
-  Pick<SnapshotDeps, "snapshots"> &
   JobStateDeps & {
     /** #322: the build of the app, reported by the version call. */
     appVersion: string;
@@ -91,10 +83,6 @@ export type RunnerApi = {
   vmStart(request: Request, jobId: string): Promise<Response>;
   /** #745: the steps of a running turn of the Implementer (the live view); proves the claim, does not extend the lease. */
   steps(request: Request, jobId: string): Promise<Response>;
-  /** #879: one part of the session snapshot of the running turn a customer's runner holds; proves the claim, does not extend the lease. */
-  session(request: Request, jobId: string): Promise<Response>;
-  /** #879: one part of the stored session snapshot, read by a customer's runner for a follow-up turn; proves the claim, does not extend the lease. */
-  resumeSession(request: Request, jobId: string): Promise<Response>;
   /** #322: what this app is and can do. */
   version(request: Request): Promise<Response>;
   /** #364: the status of a job, for a Dispatcher that looks for the VMs of jobs that ended. */
@@ -119,9 +107,9 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
   }
 
   /**
-   * Steps 1 to 3 for a call about one job. A customer's runner (#854) is known by its credential and may touch a job of its own
-   * workspace only; the lease token in the body still proves that it holds the job. The Dispatcher's calls (the VM, the state of a job)
-   * do not use this: they take the shared token alone.
+   * Steps 1 to 3 for a call about one job that a Dispatcher makes: the release of a claim and the state of a job. A customer's dispatcher
+   * (#854) is known by its credential and may touch a job of its own workspace only (404 for any other); the credential of the claim
+   * (`crj_`, in the body of a release) still proves that it holds the job. The report of a VM takes the shared token alone.
    */
   async function identifyForJob(
     request: Request,
@@ -151,52 +139,19 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
   }
 
   /**
-   * #879: who is asking, for the calls whose body is raw bytes (the session snapshot): a customer's runner and nobody else. The shared
-   * token (a Dispatcher's) is refused here as it has the Worker API for this; so is a credential the app does not know or has revoked
-   * (the same 401 for all three). The job must be of the runner's own workspace and held by this very runner (404 for any other,
-   * so the answer says nothing about which): a hosted job, whose holder is a Dispatcher's id, and the job of another runner are
-   * "not found". A job nobody holds any more (its lease ran out and it was put back) is let through, and the lease token then
-   * decides, as it does for the steps: 409 `RUNNER_LEASE_LOST`.
+   * #974: the calls about a running job (heartbeat, result, steps) are the Worker's (`/api/workers/v1`, the credential of the claim). A
+   * runner credential (`crc_...`) has no such routes any more: the answer is the one of a job that is not its own, whoever it is and
+   * whatever it sends. The shared token (the platform's Dispatcher) is unchanged.
    */
-  async function identifyOwnedJob(
+  function identifyRunningJobCall(
     request: Request,
-    jobId: string,
-  ): Promise<
-    | { ok: true; runnerId: string; job: Job; leaseToken: string }
-    | { ok: false; response: Response }
-  > {
-    const customer = await deps.fleet?.authenticate(request);
-    if (customer === undefined || customer === null)
-      return { ok: false, response: unauthorized() };
-    if (!parseJobId(jobId))
-      return {
-        ok: false,
-        response: errorResponse(400, "RUNNER_REQUEST_INVALID", {
-          fields: [{ field: "jobId", code: "invalid" }],
-        }),
-      };
-    const runnerId = customerRunnerId(customer.runner.id);
-    const job = await deps.queue.get(jobId);
-    if (
-      job === undefined ||
-      job.workspaceId !== customer.runner.workspaceId ||
-      (job.runnerId !== null && job.runnerId !== runnerId)
-    )
+  ): { ok: true; runnerId: string } | { ok: false; response: Response } {
+    if (bearerRunnerCredential(request.headers.get("authorization")) !== null)
       return {
         ok: false,
         response: errorResponse(404, "RUNNER_JOB_NOT_FOUND"),
       };
-    const leaseToken = parseLeaseTokenHeader(
-      request.headers.get(LEASE_TOKEN_HEADER),
-    );
-    if (!leaseToken.ok)
-      return {
-        ok: false,
-        response: errorResponse(400, "RUNNER_REQUEST_INVALID", {
-          fields: leaseToken.fields,
-        }),
-      };
-    return { ok: true, runnerId, job, leaseToken: leaseToken.value };
+    return identify(request);
   }
 
   /** #322: the Worker's way into the version call: `Bearer crj_...` plus `?jobId=` of the job it holds. */
@@ -250,8 +205,8 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
               fields: parsed.fields,
             });
           // It takes the turns of runner environments of its own workspace whose labels it has and that an entry of its manifest can run
-          // (the harness, the auth and the model of the turn, #973), and nothing else: never a review, never a split claim, never a job by
-          // id. The base of every runner holds OpenCode: a manifest without it is no runner.
+          // (the harness, the auth and the model of the turn, #973), and nothing else: never a review, never a job by id. The answer is
+          // the split one (#974). The base of every runner holds OpenCode: a manifest without it is no runner.
           if (
             !announcesHarness(
               customer.runner.manifest.harnesses,
@@ -263,9 +218,14 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
             deps,
             customerRunnerId(customer.runner.id),
             ["implementer"],
-            (parsed.value.features ?? []).filter(
-              (feature) => feature !== "worker_credential",
-            ),
+            // #974: a customer's dispatcher gets the split answer, always: the credential of the job and nothing secret. The Worker
+            // fetches the job (the git token, the key of the workspace) with it; the dispatcher never holds them.
+            [
+              ...(parsed.value.features ?? []).filter(
+                (feature) => feature !== "worker_credential",
+              ),
+              "worker_credential",
+            ],
             {
               ...(parsed.value.llmProviders === undefined
                 ? {}
@@ -315,7 +275,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async heartbeat(request, jobId) {
       try {
-        const who = await identifyForJob(request, jobId);
+        const who = identifyRunningJobCall(request);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -331,7 +291,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async complete(request, jobId) {
       try {
-        const who = await identifyForJob(request, jobId);
+        const who = identifyRunningJobCall(request);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -383,7 +343,7 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
 
     async steps(request, jobId) {
       try {
-        const who = await identifyForJob(request, jobId);
+        const who = identifyRunningJobCall(request);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
@@ -416,64 +376,10 @@ export function createRunnerApi(deps: RunnerApiDeps): RunnerApi {
       }
     },
 
-    async session(request, jobId) {
-      try {
-        const who = await identifyOwnedJob(request, jobId);
-        if (!who.ok) return who.response;
-        const body = await readLimitedBody(request, SNAPSHOT_LIMITS.partBytes);
-        if (!body.ok) return errorResponse(413, "RUNNER_BODY_TOO_LARGE");
-        const parsed = parseSnapshotPartRequest(
-          new URL(request.url).searchParams,
-          body.bytes,
-        );
-        if (!parsed.ok)
-          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
-            fields: parsed.fields,
-          });
-        const stored = await storeSnapshotPart(deps, {
-          job: who.job,
-          leaseToken: who.leaseToken,
-          parsed: parsed.value,
-          who: `runner=${who.runnerId}`,
-        });
-        if ("response" in stored) return stored.response;
-        deps.logger.info(
-          `[runner-api] session runner=${who.runnerId} job=${jobId} refused: lease lost`,
-        );
-        return errorResponse(409, "RUNNER_LEASE_LOST");
-      } catch (error) {
-        return unexpected("session", error);
-      }
-    },
-
-    async resumeSession(request, jobId) {
-      try {
-        const who = await identifyOwnedJob(request, jobId);
-        if (!who.ok) return who.response;
-        const asked = parseResumePart(new URL(request.url).searchParams);
-        if (!asked.ok)
-          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
-            fields: asked.fields,
-          });
-        const read = await readResumeSessionPart(deps, {
-          job: who.job,
-          leaseToken: who.leaseToken,
-          part: asked.part,
-          who: `runner=${who.runnerId}`,
-        });
-        if ("response" in read) return read.response;
-        deps.logger.info(
-          `[runner-api] resume-session runner=${who.runnerId} job=${jobId} refused: lease lost`,
-        );
-        return errorResponse(409, "RUNNER_LEASE_LOST");
-      } catch (error) {
-        return unexpected("resume-session", error);
-      }
-    },
-
     async jobState(request, jobId) {
       try {
-        const who = identify(request);
+        // #974: also a customer's dispatcher, for a job of its own workspace (its local reaper asks whether a Worker's job is over).
+        const who = await identifyForJob(request, jobId);
         if (!who.ok) return who.response;
         if (!parseJobId(jobId))
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {

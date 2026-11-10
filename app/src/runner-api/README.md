@@ -8,15 +8,16 @@ A second door, the **Worker API** (`/api/workers/v1`, #320), lets one process th
 credential** fetch, heartbeat and deliver exactly one job, and nothing else. It shares the queue, the
 checks and the redaction with the runner API and is described in "The Worker API" below.
 
-| Call                                      | Success                        | Meaning                                                                |
-| ----------------------------------------- | ------------------------------ | ---------------------------------------------------------------------- |
-| `POST /api/runners/v1/claim`              | `200` job, `204` nothing to do | Reserves the oldest due job and hands it out with its credentials      |
-| `POST /api/runners/v1/jobs/:id/heartbeat` | `200`                          | Extends the lease (2 minutes; runners beat every 30 seconds)           |
-| `POST /api/runners/v1/jobs/:id/complete`  | `200`                          | Stores the result and finishes the job                                 |
-| `POST /api/runners/v1/jobs/:id/steps`     | `200`                          | Stores the steps of a running turn of the Implementer (#745, below)    |
-| `POST /api/runners/v1/jobs/:id/release`   | `200`                          | A Dispatcher gives a claimed job back (#322, "The Dispatcher's calls") |
-| `POST /api/runners/v1/jobs/:id/vm`        | `200`                          | A Dispatcher reports the VM it created for a claim (#493)              |
-| `GET /api/runners/v1/version`             | `200`                          | The app's version and features (#322)                                  |
+| Call                                      | Success                        | Meaning                                                                                                                                                                  |
+| ----------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /api/runners/v1/claim`              | `200` job, `204` nothing to do | Reserves the oldest due job and hands it out with its credentials. A customer's runner (`crc_`) always gets the split answer: the job's credential, never the job (#974) |
+| `POST /api/runners/v1/jobs/:id/heartbeat` | `200`                          | Extends the lease (2 minutes; runners beat every 30 seconds). The shared token only: a runner credential is `404` (#974)                                                 |
+| `POST /api/runners/v1/jobs/:id/complete`  | `200`                          | Stores the result and finishes the job. The shared token only (#974)                                                                                                     |
+| `POST /api/runners/v1/jobs/:id/steps`     | `200`                          | Stores the steps of a running turn of the Implementer (#745, below). The shared token only (#974)                                                                        |
+| `POST /api/runners/v1/jobs/:id/release`   | `200`                          | A Dispatcher gives a claimed job back (#322, "The Dispatcher's calls"); also a customer's runner, for a job of its own workspace (#974)                                  |
+| `GET /api/runners/v1/jobs/:id`            | `200`                          | The status of a job; also a customer's runner, for a job of its own workspace, `404` for any other (#974)                                                                |
+| `POST /api/runners/v1/jobs/:id/vm`        | `200`                          | A Dispatcher reports the VM it created for a claim (#493)                                                                                                                |
+| `GET /api/runners/v1/version`             | `200`                          | The app's version and features (#322)                                                                                                                                    |
 
 | File                               | Role                                                                                                                                                                                                                                                                  |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -101,7 +102,7 @@ What happens to a block that is accepted:
 ## The steps of a turn of the Implementer (#745)
 
 The live view shows what the agent thinks and does while a turn runs. The runner sends **records** (`StepRecord`: a finished `reasoning` or `text` part, a `tool` call, the end
-of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST /api/runners/v1/jobs/:id/steps` (the lease token in the body) or, from a Worker,
+of a model call as `step`) in batches of at most 50 records and 48 KiB to `POST /api/runners/v1/jobs/:id/steps` (the shared token's callers; the lease token in the body) or, from a Worker,
 `POST /api/workers/v1/jobs/:id/steps` (the credential in the header). One handler (`steps.ts`) serves both; `steps-request.ts` reads the body.
 
 - **Best effort for the sender, strict for the app.** The call proves the claim and nothing else: it does **not** extend the lease (only the heartbeat does). A lost or stale
@@ -143,12 +144,11 @@ so that a follow-up turn can resume the conversation in a new VM. The body is th
   No app feature and no claim feature: a Worker asks only when the job's `resume.snapshot` says there is something, and an app without the call answers 404, which is a failed download and a summary.
 - **Its own session only.** The session is found from the job (`implementer_turns`), never from the query, in the transaction-free read of a repository scoped to the job's workspace; only the snapshot of the directly preceding turn (turn `n - 1` for turn `n`, #885) is read; an older one stays stored and is not offered. `204` without a body: there is none, and the turn continues from a summary.
 
-### On a customer's runner (#879)
+### On a customer's runner (#879, #974)
 
-`PUT /api/runners/v1/jobs/:id/session` and `GET /api/runners/v1/jobs/:id/resume-session?part=n` are these two calls for a runner that holds a credential of its own (`api.ts`: `session`, `resumeSession`; the handlers
-are the Worker API's, `storeSnapshotPart` and `readResumeSessionPart`, so there is one logic). `Authorization: Bearer crc_...` and the lease token in `X-Lease-Token` (`lease-header.ts`: the body is raw bytes, so it cannot
-be in the body as for `steps`). Order: credential (`401`), job id (`400`), the job (`404` unless it is of the runner's workspace and held by this runner), the header (`400`), the query and body (`413`/`400`), then the claim (`409 RUNNER_LEASE_LOST`).
-The shared token is `401` here. The app feature is `runner_session_snapshot`; a runner reads it from `GET /api/runners/v1/version` with its own credential. `docs/runner.md`, "Resume on customer runners".
+A customer's runner moves the snapshot through the Worker its dispatcher starts: the two Worker routes above, with the per-job credential. The routes `PUT /api/runners/v1/jobs/:id/session` and
+`GET /api/runners/v1/jobs/:id/resume-session` that #879 added for a runner credential and a lease token in a header, `lease-header.ts` and the app feature `runner_session_snapshot` are removed (#974; no runner image is
+published, so there was no caller). `docs/runner.md`, "Resume on customer runners".
 
 ## Authentication
 
@@ -648,7 +648,7 @@ Worker. It cannot count what runs, so the app counts for it. Three additions, al
 
 - **Job state (#364).** `GET /api/runners/v1/jobs/:id` answers `{ version: 1, job: { id, status } }` with the
   status of the job (`queued`, `running`, `succeeded`, `failed`, `superseded`, `cancelled`) and nothing else: no job
-  input, lease, repository or credential, and nothing is written. The dispatcher credential only (a per-job
+  input, lease, repository or credential, and nothing is written. The dispatcher credential, or the credential of a customer's runner for a job of its own workspace (`404` for any other job: #974; a per-job
   credential is `401 RUNNER_UNAUTHORIZED`), a job id that is no UUID is `400` and an unknown job `404
 RUNNER_JOB_NOT_FOUND`, both before anything else is read. A Dispatcher's reaper asks it to find the Sandbox
   VMs of jobs that ended (`dispatcher/README.md`, "The reaper"). It is not in `APP_FEATURES`: a Dispatcher

@@ -21,7 +21,11 @@ import {
   startRunnerApiHarness,
   TEST_LLM_API_KEY,
 } from "../test-support/runner-api-harness.ts";
-import type { ClaimResponse, SplitClaimResponse } from "./contract.ts";
+import type {
+  ClaimResponse,
+  SplitClaimResponse,
+  WorkerJobDetailsResponse,
+} from "./contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerFleetService } from "../runner-fleet/service.ts";
@@ -150,6 +154,16 @@ function claimOf(credential: string, extra: { llmProviders?: string[] } = {}) {
   };
 }
 
+/** #974: the claim of a customer's runner is the split answer: the job's credential and nothing secret. */
+async function claimedJob(
+  h: Awaited<ReturnType<typeof start>>,
+  credential: string,
+) {
+  const response = await h.claim(claimOf(credential));
+  expect(response.status).toBe(200);
+  return ((await response.json()) as SplitClaimResponse).job;
+}
+
 const OWN_MODEL = { provider: "anthropic", model: SONNET } as const;
 const RUNNER_ENV = {
   id: "env-runner",
@@ -172,15 +186,29 @@ describe("the claim of a customer's runner", () => {
     const response = await h.claim(claimOf(credential));
 
     expect(response.status).toBe(200);
-    const { job } = (await response.json()) as ClaimResponse;
+    const { job } = (await response.json()) as SplitClaimResponse;
     expect(job.id).toBe(turn.job.id);
-    expect(job.input).toMatchObject({
+    // #974-T01: the claim holds no job input at all, so no git token and no key of the workspace.
+    expect(job).not.toHaveProperty("input");
+    expect(JSON.stringify(job)).not.toContain(KEY);
+    expect(h.issuedJobTokens()).toEqual([]);
+    // The Worker that holds the credential fetches the job, with its own key (BYOK).
+    const details = await h.worker.details(
+      job.id,
+      job.credential,
+      FEATURES_OF_A_RUNNER.join(","),
+      undefined,
+      "openrouter,anthropic",
+    );
+    expect(details.status).toBe(200);
+    const { job: fetched } = (await details.json()) as WorkerJobDetailsResponse;
+    expect(fetched.input).toMatchObject({
       reviewKind: "implementer",
       llm: { provider: "anthropic", apiKey: KEY },
     });
     // A turn of a runner environment has no size, script or network rule of its own: the runner decides how it works.
     expect(
-      (job.input as { implementer: { environment?: unknown } }).implementer
+      (fetched.input as { implementer: { environment?: unknown } }).implementer
         .environment,
     ).toBeUndefined();
     expect(await h.queue.get(turn.job.id)).toMatchObject({
@@ -359,9 +387,7 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: { id: "env-cpu", name: "CPU box", labels: ["cpu"] },
     });
-    const { job: busyJob } = (await (
-      await h.claim(claimOf(busy.credential))
-    ).json()) as ClaimResponse;
+    const busyJob = await claimedJob(h, busy.credential);
     expect(busyJob.id).toBe(busyTurn.job.id);
     const waiting = await h.enqueueTurn({
       modelChoice: OWN_MODEL,
@@ -372,11 +398,7 @@ describe("the claim of a customer's runner", () => {
     for (let minute = 0; minute < 29; minute += 1) {
       h.clock.advance(60 * 1000);
       expect(
-        (
-          await h.heartbeat(busyJob.id, busyJob.leaseToken, {
-            token: busy.credential,
-          })
-        ).status,
+        (await h.worker.heartbeat(busyJob.id, busyJob.credential)).status,
       ).toBe(200);
     }
     expect((await h.claim(claimOptions())).status).toBe(204);
@@ -386,9 +408,7 @@ describe("the claim of a customer's runner", () => {
 
     // At its own deadline it ends as no_runner_available while the other runner still works.
     h.clock.advance(2 * 60 * 1000);
-    await h.heartbeat(busyJob.id, busyJob.leaseToken, {
-      token: busy.credential,
-    });
+    await h.worker.heartbeat(busyJob.id, busyJob.credential);
     expect((await h.claim(claimOptions())).status).toBe(204);
     expect(await h.queue.get(waiting.job.id)).toMatchObject({
       status: "cancelled",
@@ -470,17 +490,13 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job: runnerJob } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const runnerJob = await claimedJob(h, runner.credential);
     // A hosted turn that no Dispatcher claims (no hosted pool is alive): the running turn of the customer's runner is no sign of one.
     const hosted = await h.enqueueTurn({ modelChoice: OWN_MODEL });
 
     for (let minute = 0; minute < 31; minute += 1) {
       h.clock.advance(60 * 1000);
-      await h.heartbeat(runnerJob.id, runnerJob.leaseToken, {
-        token: runner.credential,
-      });
+      await h.worker.heartbeat(runnerJob.id, runnerJob.credential);
     }
     expect((await h.queue.expireStaleJobs()).noCapableRunner).toBe(1);
 
@@ -493,8 +509,8 @@ describe("the claim of a customer's runner", () => {
     });
   });
 
-  // #854-T158
-  it("lets the runner that holds a turn report on it, and no runner of another workspace", async () => {
+  // #854-T158, #974-T04
+  it("lets the Worker that holds a turn report on it with the job's credential, and answers a runner credential 404 on the job routes that are gone", async () => {
     const h = await start();
     const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
     const otherWorkspace = await addWorkspace(h.db, "other");
@@ -506,22 +522,30 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, runner.credential);
 
-    const own = await h.heartbeat(job.id, job.leaseToken, {
-      token: runner.credential,
-    });
-    const strange = await h.heartbeat(job.id, job.leaseToken, {
-      token: foreign.credential,
-    });
-
+    const own = await h.worker.heartbeat(job.id, job.credential);
+    // The runner credential is not a job's: the Worker API takes the per-job credential alone.
+    const byRunner = await h.worker.heartbeat(job.id, runner.credential);
     expect(own.status).toBe(200);
-    expect(strange.status).toBe(404);
-    expect(await strange.json()).toMatchObject({
-      error: { code: "RUNNER_JOB_NOT_FOUND" },
-    });
+    expect(byRunner.status).toBe(401);
+    // The runner API's job routes have no use for it any more (heartbeat, complete, steps), whoever's runner it is.
+    for (const credential of [runner.credential, foreign.credential])
+      for (const answer of [
+        await h.heartbeat(job.id, job.credential, { token: credential }),
+        await h.complete(job.id, job.credential, {}, { token: credential }),
+        await h.steps(
+          job.id,
+          { leaseToken: job.credential, records: [] },
+          { token: credential },
+        ),
+      ]) {
+        expect(answer.status).toBe(404);
+        expect(await answer.json()).toMatchObject({
+          error: { code: "RUNNER_JOB_NOT_FOUND" },
+        });
+      }
+    expect(await h.queue.get(job.id)).toMatchObject({ status: "running" });
   });
 
   // #854-T159, #973-T02
@@ -584,9 +608,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, runner.credential);
     const fleet = createRunnerFleetService({
       runners: createRunnersRepository(h.db, h.workspaceId, {
         now: h.clock.now,
@@ -603,30 +625,36 @@ describe("revoking a runner that is running a turn (#854)", () => {
   // #854-T240
   it("refuses it every report about the job it was running, and ends the job at once as failed", async () => {
     const { h, runner, turn, job, fleet } = await runningTurn();
+    // The Worker fetches the turn: this is where the GitHub token is made (the claim made none).
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      FEATURES_OF_A_RUNNER.join(","),
+      undefined,
+      "openrouter,anthropic",
+    );
+    expect(fetched.status).toBe(200);
     const issued = h.issuedJobTokens();
-    expect(
-      (await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }))
-        .status,
-    ).toBe(200);
+    expect((await h.worker.heartbeat(job.id, job.credential)).status).toBe(200);
 
     await fleet.revoke(runner.runnerId);
 
+    // The Worker's calls: the claim ended with the runner, so the job is over for it.
     for (const answer of [
-      await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }),
-      await h.complete(
-        job.id,
-        job.leaseToken,
-        {},
-        { token: runner.credential },
-      ),
-      await h.steps(
-        job.id,
-        { leaseToken: job.leaseToken, records: [] },
-        { token: runner.credential },
-      ),
+      await h.worker.heartbeat(job.id, job.credential),
+      await h.worker.result(job.id, job.credential),
+    ]) {
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_JOB_ENDED" },
+      });
+    }
+    // The runner's own credential is refused everywhere it is still taken: the job's state and the release of the claim.
+    for (const answer of [
+      await h.jobState(job.id, { token: runner.credential }),
       await h.release(
         job.id,
-        { leaseToken: job.leaseToken, reason: "shutdown" },
+        { credential: job.credential, reason: "launch_failed" },
         { token: runner.credential },
       ),
     ]) {
@@ -653,16 +681,30 @@ describe("revoking a runner that is running a turn (#854)", () => {
   it("cannot reach the session snapshot of the job either: the Worker API takes the per-job credential alone", async () => {
     const { h, runner, job, fleet } = await runningTurn();
     await fleet.revoke(runner.runnerId);
+    const query = {
+      part: 0,
+      parts: 1,
+      bytes: 1,
+      rawBytes: 1,
+      sha256: "0".repeat(64),
+      opencodeVersion: "1.19.0",
+    };
 
-    for (const credential of [runner.credential, job.leaseToken]) {
-      const answer = await h.worker.session(
-        job.id,
-        credential,
-        { index: 0, count: 1, size: 1, rawBytes: 1, sha256: "0".repeat(64) },
-        new Uint8Array([1]),
-      );
-      expect(answer.status).toBe(401);
-    }
+    // The runner's own credential is no proof of a claim; the job's own finds its claim over.
+    const byRunner = await h.worker.session(
+      job.id,
+      runner.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    const byClaim = await h.worker.session(
+      job.id,
+      job.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    expect(byRunner.status).toBe(401);
+    expect(byClaim.status).toBe(409);
   });
 
   // #854-T242
@@ -673,9 +715,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: { ...RUNNER_ENV, id: "env-2" },
     });
-    const { job } = (await (
-      await h.claim(claimOf(other.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, other.credential);
 
     await fleet.revoke(runner.runnerId);
 
@@ -683,10 +723,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       status: "running",
       runnerId: customerRunnerId(other.runnerId),
     });
-    expect(
-      (await h.heartbeat(job.id, job.leaseToken, { token: other.credential }))
-        .status,
-    ).toBe(200);
+    expect((await h.worker.heartbeat(job.id, job.credential)).status).toBe(200);
   });
 });
 
@@ -1093,5 +1130,88 @@ describe("the labels a job requires (#971)", () => {
     expect((await split(turn.job.id, ["implementer"])).job.sizeLabel).toBe(
       "cr:size-2",
     );
+  });
+});
+
+// #974: the state of a job is the one call about a job that a customer's dispatcher still makes with its own credential (its local reaper asks
+// whether the job of a Worker it started is over); everything else about a running job is the Worker's, with the credential of the claim.
+describe("the state of a job for a customer's dispatcher (#974)", () => {
+  // #974-T03
+  it("answers 200 with the status alone for a job of the runner's own workspace, and 404 for a job of another workspace", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const otherWorkspace = await addWorkspace(h.db, "other");
+    const foreign = await h.registerRunner({
+      labels: ["gpu", "linux"],
+      workspaceId: otherWorkspace,
+    });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    const own = await h.jobState(job.id, { token: runner.credential });
+    const strange = await h.jobState(job.id, { token: foreign.credential });
+
+    expect(own.status).toBe(200);
+    expect(await own.json()).toEqual({
+      version: 1,
+      job: { id: job.id, status: "running" },
+    });
+    expect(strange.status).toBe(404);
+    expect(await strange.json()).toMatchObject({
+      error: { code: "RUNNER_JOB_NOT_FOUND" },
+    });
+    // A job that is not there is one that is not its own.
+    const unknown = await h.jobState("00000000-0000-4000-8000-0000000000ff", {
+      token: runner.credential,
+    });
+    expect(unknown.status).toBe(404);
+  });
+
+  // #974-T03
+  it("keeps answering the shared token as before and refuses a credential the app does not know", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    expect((await h.jobState(job.id)).status).toBe(200);
+    expect(
+      (await h.jobState(job.id, { token: `crc_${"A".repeat(43)}` })).status,
+    ).toBe(401);
+    expect((await h.jobState(job.id, { token: null })).status).toBe(401);
+  });
+
+  // #974-T03
+  it("lets the dispatcher give a claim back with the credential of the job: a launch that failed ends the turn as the hosted Dispatcher's does", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const turn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    const released = await h.release(
+      job.id,
+      {
+        credential: job.credential,
+        reason: "launch_failed",
+        retryAfterSeconds: 1,
+      },
+      { token: runner.credential },
+    );
+
+    expect(released.status).toBe(200);
+    // A turn is never queued again by a release (its Worker may have had the input): it ends with the reason.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "launch_failed",
+    });
   });
 });

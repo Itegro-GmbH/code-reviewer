@@ -90,15 +90,12 @@ of the part, and the description of the whole file is in the headers of every pa
 `examples/implementer/ImplementerResume.json` and `RunnerResult.json` are validated by all suites.
 
 
-## The snapshot calls of a customer's runner (#879)
+## The snapshot calls of a customer's runner (#879, #974)
 
-`RunnerSessionPartQuery`, `RunnerSessionPartResponse`, `RunnerResumeSessionQuery`, `RunnerResumeSessionHeaders` and `RunnerLeaseTokenHeader` in `runner-api.v1.json` describe `PUT /api/runners/v1/jobs/{id}/session` and
-`GET /api/runners/v1/jobs/{id}/resume-session?part=n`: the Worker API's two calls for a runner that holds the credential of its own (`Authorization: Bearer crc_...`, `runner-registration.v1.json`) and no per-job credential. The query, the
-answer and the headers say the same as `SessionPartQuery`, `SessionPartResponse`, `ResumeSessionQuery` and `ResumeSessionHeaders` of `worker-api.v1.json` (a test on each side holds the fields equal; only the descriptions differ); what is new is the
-lease token, which travels in the header `X-Lease-Token` because the body is raw bytes (`RunnerLeaseTokenHeader`), and the answers: `401 RUNNER_UNAUTHORIZED`, `404 RUNNER_JOB_NOT_FOUND` for a job of another workspace, one another runner
-holds or a hosted one, `409 RUNNER_LEASE_LOST`. The app lists the feature `runner_session_snapshot` in `KnownAppFeature` and a runner reads the list from `GET /api/runners/v1/version` with its own credential. The five examples
-(`examples/Runner*.json`) are validated by the app, the runner and the Dispatcher's copy of the types; the app holds its hand-written readings to the schema (`app/src/runner-api/runner-session-contract.test.ts`) and the runner
-the query it builds (`runner/tests/contract/test_snapshot_contract.py`).
+A customer's runner moves the session snapshot with the Worker API's two calls (`SessionPartQuery`, `SessionPartResponse`, `ResumeSessionQuery`, `ResumeSessionHeaders` of `worker-api.v1.json`), through the Worker the
+local dispatcher starts, with the per-job credential (#974). The `Runner*` definitions that #879 added to `runner-api.v1.json` for a runner credential and a lease token in a header (`RunnerLeaseTokenHeader`,
+`RunnerSessionPartQuery`, `RunnerSessionPartResponse`, `RunnerResumeSessionQuery`, `RunnerResumeSessionHeaders`), their examples, the routes `/api/runners/v1/jobs/{id}/session` and `/resume-session` and the app feature
+`runner_session_snapshot` are removed: no runner image is published, so nothing called them.
 
 ## The environment control (#975)
 

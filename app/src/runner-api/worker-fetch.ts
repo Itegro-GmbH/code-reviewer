@@ -16,6 +16,7 @@ import "server-only";
 import type { Job } from "../jobs/job-types.ts";
 import {
   buildJobInput,
+  buildSubscriptionJob,
   cancelJob,
   checkJob,
   endJob,
@@ -28,6 +29,7 @@ import {
   MAX_WORKER_FETCHES,
   RUNNER_API_VERSION,
   type WorkerJobDetailsResponse,
+  type WorkerSubscriptionDetailsResponse,
 } from "./contract.ts";
 import { standingRefusal } from "../usage/enforce-entitlements.ts";
 import { describeError } from "./logger.ts";
@@ -93,19 +95,27 @@ export async function handleFetch(
       await endJob(deps, claimed, ORIGIN, standing);
       return errorResponse(409, "RUNNER_JOB_ENDED");
     }
+    // #856, #974: a turn on the harness claude-code runs on the login of the customer's device: no model, no key and no price are
+    // chosen, only the git token of exactly this repository is made. Any other job takes the road of `checkJob` and `buildJobInput`.
+    const subscription = await buildSubscriptionJob(deps, job, features);
     // #424, #432: the providers this Worker can run, from its own details call. The Dispatcher's claim cannot say, so
     // the decision is made here; a Worker that names none can run the default provider only.
-    const checked = await checkJob(deps, job, {
-      engines: null,
-      classifyReadFailures: true,
-      runnerProviders: callerLlmProviders(
-        parseWorkerLlmProviders(url.searchParams.get("llmProviders")),
-      ),
-    });
+    const checked =
+      subscription === undefined
+        ? await checkJob(deps, job, {
+            engines: null,
+            classifyReadFailures: true,
+            runnerProviders: callerLlmProviders(
+              parseWorkerLlmProviders(url.searchParams.get("llmProviders")),
+            ),
+          })
+        : undefined;
     const outcome =
-      checked.kind === "checked"
+      subscription ??
+      (checked?.kind === "checked"
         ? await buildJobInput(deps, job, checked, features)
-        : checked;
+        : checked);
+    if (outcome === undefined) throw new Error("unreachable: no outcome");
 
     if (outcome.kind === "refused") {
       await endJob(deps, claimed, ORIGIN, outcome.errorCode, outcome.detail);
@@ -132,12 +142,17 @@ export async function handleFetch(
     }
 
     writeToken = outcome.writeToken;
-    // Before the key leaves with the response: if it cannot be remembered, the job is given back (below)
-    // and the Worker does not have the key.
-    await deps.claimedKeys.remember(job.id, outcome.input.llm.apiKey);
-    if (outcome.entryModel !== null)
-      await deps.claimedKeys.rememberModel(job.id, outcome.entryModel);
-    await deps.claimedKeys.rememberNative(job.id, outcome.native);
+    if (outcome.kind === "built-subscription") {
+      // No key of ours to remember: the login is the device's (#856).
+      await deps.claimedKeys.rememberNative(job.id, false);
+    } else {
+      // Before the key leaves with the response: if it cannot be remembered, the job is given back (below)
+      // and the Worker does not have the key.
+      await deps.claimedKeys.remember(job.id, outcome.input.llm.apiKey);
+      if (outcome.entryModel !== null)
+        await deps.claimedKeys.rememberModel(job.id, outcome.entryModel);
+      await deps.claimedKeys.rememberNative(job.id, outcome.native);
+    }
     // The token is remembered (sealed) before it leaves, so the end of the turn can switch it off (#753).
     if (outcome.writeToken !== null)
       await deps.claimedKeys.rememberGitToken(
@@ -151,16 +166,27 @@ export async function handleFetch(
     deps.logger.info(
       `[worker-api] fetch job=${job.id} command=${job.command} details handed out`,
     );
-    return jsonResponse(200, {
+    const answer = {
       version: RUNNER_API_VERSION,
       job: {
         id: job.id,
         leaseExpiresAt: current.leaseExpiresAt,
         heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
         tokenExpiresAt: outcome.tokenExpiresAt,
-        input: outcome.input,
       },
-    } satisfies WorkerJobDetailsResponse);
+    };
+    return jsonResponse(
+      200,
+      outcome.kind === "built-subscription"
+        ? ({
+            ...answer,
+            job: { ...answer.job, input: outcome.input },
+          } satisfies WorkerSubscriptionDetailsResponse)
+        : ({
+            ...answer,
+            job: { ...answer.job, input: outcome.input },
+          } satisfies WorkerJobDetailsResponse),
+    );
   } catch (error) {
     deps.logger.error(
       `[worker-api] fetch job=${job.id} failed: ${describeError(error)}`,

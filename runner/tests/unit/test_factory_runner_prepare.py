@@ -150,31 +150,37 @@ def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> Non
     assert "FACTORY_RUNNER_CREDENTIAL" not in environment  # the credential never leaves the loop
 
 
-# #856-L01
-def test_the_job_environment_hands_the_job_the_path_of_the_token_file_and_not_the_token(
+# #856-L01, #974-T05
+def test_the_job_environment_holds_no_login_of_the_device_whatever_the_source_has(
     tmp_path: Path,
 ) -> None:
-    token = tmp_path / "claude-code-token"
-    token.write_text("sk-" + "ant-" + "oat01-not-a-real-token-0000000000000000")
-    named = job_environment(
-        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(token)}, config(), "runc", 4096
-    )
-    by_default = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path)}, config(), "runc", 4096)
-    none = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path / "empty")}, config(), "runc", 4096)
-
-    assert named["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
-    assert by_default["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
-    assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in none
-    assert "not-a-real-token" not in " ".join(named.values())
-
-
-# #856-L01
-def test_a_login_from_the_runners_environment_is_handed_over_for_the_job_to_use() -> None:
+    """The dispatcher reads the login for the one job that asks for it and hands it on the Worker's
+    standard input (`sandbox.WorkerStart`); the environment of every Worker is without one."""
     token = "sk-" + "ant-" + "oat01-not-a-real-token-0000000000000000"
+    file = tmp_path / "claude-code-token"
+    file.write_text(token)
 
-    environment = job_environment({"CLAUDE_CODE_OAUTH_TOKEN": token}, config(), "runc", 4096)
+    for source in (
+        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(file)},
+        {"FACTORY_RUNNER_HOME": str(tmp_path)},
+        {"CLAUDE_CODE_OAUTH_TOKEN": token},
+    ):
+        environment = job_environment(source, config(), "runc", 4096)
 
-    assert environment["CLAUDE_CODE_OAUTH_TOKEN"] == token
+        assert not any("CLAUDE_CODE" in name for name in environment)
+        assert token not in " ".join(environment.values())
+        assert str(file) not in " ".join(environment.values())
+
+
+# #855-T04, #974
+def test_the_job_environment_carries_the_disk_budget_for_the_worker_and_the_timeout() -> None:
+    environment = job_environment(
+        {"RUNNER_JOB_TIMEOUT_SECONDS": "300"}, config(limits=Limits(disk_gb=5)), "runc", 4096
+    )
+
+    assert environment["FACTORY_RUNNER_DISK_BUDGET_BYTES"] == str(5 * 2**30)
+    assert environment["RUNNER_JOB_TIMEOUT_SECONDS"] == "300"
+    assert "FACTORY_RUNNER_DISK_BUDGET_BYTES" not in job_environment({}, config(), "runc", 4096)
 
 
 # #854-R1

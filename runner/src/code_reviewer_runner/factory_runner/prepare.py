@@ -22,6 +22,7 @@ from code_reviewer_runner.factory_runner.base import (
     AUTH_APP_KEY,
     AUTH_SUBSCRIPTION,
     BASE_VERSION,
+    DISK_BUDGET_VARIABLE,
     HARNESS_OPENCODE,
 )
 from code_reviewer_runner.factory_runner.config import (
@@ -30,6 +31,7 @@ from code_reviewer_runner.factory_runner.config import (
     limits_document,
     runner_identity,
 )
+from code_reviewer_runner.factory_runner.disk_budget import budget_bytes
 from code_reviewer_runner.factory_runner.limits import (
     LimitsError,
     agent_environment,
@@ -44,7 +46,6 @@ from code_reviewer_runner.factory_runner.selftest import (
     run_selftest,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
-from code_reviewer_runner.implementer.claude_code.login import login_source
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessStatus,
@@ -137,12 +138,21 @@ def _failure(check: str, detail: str) -> SelfTestResult:
     return SelfTestResult((Check(check, False, detail),), RUNC)
 
 
+# The setting of the job host a Worker reads from its environment
+# (`worker_settings_from_environment`).
+_WORKER_SETTING_VARIABLES = ("RUNNER_JOB_TIMEOUT_SECONDS",)
+
+
 def job_environment(
     source: Mapping[str, str], config: RunnerConfig, runtime: str, memory_mb: int
 ) -> dict[str, str]:
-    """The environment of the job host: the plain variables the process may have (never the
-    runner's credential), and the variables that describe this machine's containers."""
+    """The environment of the Worker the dispatcher starts (and of the job processes below it): the
+    plain variables the process may have (never the runner's credential), the variables that
+    describe this machine's containers and the disk budget. Nothing about a login of the device:
+    the dispatcher hands the one credential a job needs on the Worker's standard input
+    (`sandbox.WorkerStart`), so the Worker of a job that needs none never holds one (#974)."""
     environment = {name: source[name] for name in PASSTHROUGH_VARIABLES if name in source}
+    environment.update({name: source[name] for name in _WORKER_SETTING_VARIABLES if name in source})
     if "PR_AGENT_COMMAND" in source:  # test stacks only, as for the Worker
         environment["PR_AGENT_COMMAND"] = source["PR_AGENT_COMMAND"]
     environment.update(
@@ -157,8 +167,8 @@ def job_environment(
     )
     if identity := runner_identity(config):
         environment[RUNNER_ID_VARIABLE] = identity
-    # #856: a job that asks for Claude Code reads the login of this device in its own process.
-    environment.update(login_source(source, home_directory(source)))
+    if (budget := budget_bytes(config.limits)) is not None:
+        environment[DISK_BUDGET_VARIABLE] = str(budget)
     return environment
 
 
@@ -237,7 +247,7 @@ def prepare(
     ready: that is a `Prepared` whose base is not proven. `pull=None` only looks: an image that is
     not here, or is not the pinned one, is reported and left alone."""
     settings = worker_settings_from_environment(source)
-    settings = _implementer_settings(settings)
+    settings = implementer_settings(settings)
     reference = config.agent_image or baked_agent_image()
     try:
         memory = agent_memory_mb(config.limits, machine_mb=machine_mb())
@@ -268,7 +278,7 @@ def prepare(
     )
 
 
-def _implementer_settings(settings: WorkerSettings) -> WorkerSettings:
+def implementer_settings(settings: WorkerSettings) -> WorkerSettings:
     """The settings of a runner's job host: it advertises the Implementer engine and nothing else
     (the self-test is the proof, there is no engine user or rule set of the hosted Worker here)."""
     return replace(

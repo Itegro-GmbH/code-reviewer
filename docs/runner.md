@@ -138,6 +138,8 @@ and a dispatcher takes it only when it has all of them.** There is no special ca
   and an entry of its manifest for the harness, the auth and the model of the turn (#973). With a `jobId` it works as before (the hosted Dispatcher is still woken by id and claims that job), under the same rule:
   a job the caller does not match is `204`. Business limits stay in the app (the pool cap, `maxRunning`, answers `204`); technical capacity stays with the
   dispatcher, which claims only with room for the job.
+- **The claim answer of a customer's dispatcher (#974)** is the same `SplitClaimResponse` and never the job: the id and the credential, the `labels` the job required and, for a turn of the Implementer, `access` (the harness, the
+  auth and the model it asks of the device); no `sizeLabel` (a size label is the platform's). See "The service loop".
 - **The size in the claim answer.** The answer to a Dispatcher (`SplitClaimResponse`) names the size label the job requires in `sizeLabel`; `vcpus` keeps
   its value (only for a turn with an environment). The label does not choose the VM size (a turn without an environment starts with the operator's configured size), and the Dispatcher gives a
   job back unlaunched (`launch_failed`, log code `size_not_offered`) when the label names a size the platform does not offer.
@@ -210,64 +212,24 @@ The claim stays the only way to a job; the delivery only says what makes a dispa
   from its worker ending and from the job state call.
 - **Only while the deployment runs the dispatch webhook** (`RUNNER_DISPATCH=webhook`, the hosted one). In poll mode the app makes no outgoing call, so a webhook delivery is stored but never rung.
 
-### Resume on customer runners (#879)
+### Resume on customer runners (#879, #974)
 
 A follow-up turn continues the conversation of the earlier turns: the engine's session is taken as a file at the end of every turn (the session snapshot, [`implementer.md`](implementer.md#the-session-snapshot-839))
-and imported into the engine of the next turn, which may run on another machine ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). On the hosted deployment the Worker moves the file with the
-per-job credential (`PUT /api/workers/v1/jobs/{id}/session`, `GET .../resume-session`). A customer's runner holds no such credential and the runner credential stays out of the Worker API
-(a Worker route answers `401 WORKER_CREDENTIAL_INVALID` to it), so the runner has two calls of its own:
+and imported into the engine of the next turn, which may run on another machine ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). **Since #974 a customer's runner moves the file
+the way the hosted Worker does**: the Worker the local dispatcher starts holds the per-job credential (`crj_`) and calls `PUT /api/workers/v1/jobs/{id}/session` and `GET .../resume-session`
+(`contracts/worker-api.v1.json`: `SessionPartQuery`, `SessionPartResponse`, `ResumeSessionQuery`, `ResumeSessionHeaders`). The two routes of the runner API that #879 added for a runner credential and a
+lease token (`/api/runners/v1/jobs/{id}/session`, `/resume-session`), their contract definitions (`Runner*`) and the app feature `runner_session_snapshot` are **removed**; no runner image is published
+(`runner/release-channel.json` is empty), so nothing calls them and there is no deprecation window.
 
-```
-runner                                                                           app
-PUT /api/runners/v1/jobs/{id}/session?part=0&parts=2&bytes=..&rawBytes=..&sha256=..&opencodeVersion=..
-    Authorization: Bearer crc_...      X-Lease-Token: <lease token of the claim>
-    body: the bytes of the part (up to 3 MiB)                                ->  200 { version, part, parts, complete }
-GET /api/runners/v1/jobs/{id}/resume-session?part=n
-    Authorization: Bearer crc_...      X-Lease-Token: <lease token of the claim>
-                                                                             <-  200 the bytes of the part, x-snapshot-* headers
-                                                                                 204 the session has no stored snapshot
-```
-
-- **The same calls.** The handlers are the Worker API's (`storeSnapshotPart`, `readResumeSessionPart`): the same parts of exactly 3 MiB (at most three), the same description of the whole file in the query or in the
-  headers, the same digest and size checks, the same replacement of the session's snapshot once the last part is in, the same reading of the earlier turns' snapshot of the job's own session and of no other. The wire
-  format is `RunnerSessionPartQuery`, `RunnerSessionPartResponse`, `RunnerResumeSessionQuery` and `RunnerResumeSessionHeaders` of [`contracts/runner-api.v1.json`](../contracts/runner-api.v1.json), which say the same about
-  the fields as the Worker contract's definitions (a test holds them to it). Neither call extends the lease.
-- **The lease token is a header.** The calls with a JSON body (`heartbeat`, `complete`, `steps`) carry the token in the body; here the body is raw bytes (or there is none), so it is `X-Lease-Token`
-  (`RunnerLeaseTokenHeader`: 8 to 256 characters). A missing or malformed one is `400 RUNNER_REQUEST_INVALID` with the field `x-lease-token`, never its value.
-- **Who may call.** A live runner and nobody else: a revoked or unknown credential, the shared token and a per-job credential are the same `401 RUNNER_UNAUTHORIZED`. The job must be of the runner's own workspace
-  **and held by this very runner**: a job of another workspace, a job another runner holds and a hosted job (a Dispatcher holds it) are all `404 RUNNER_JOB_NOT_FOUND`, so the answer says nothing about which. Then the lease
-  token decides, as it does for the steps: a lease that ran out, a claim that ended or a token that is not the claim's is `409 RUNNER_LEASE_LOST` (stop sending). A job that is not a turn of the Implementer is `400`.
-  These two calls answer `404` for a job another runner of the workspace holds, while `steps`, `heartbeat` and `complete` check the workspace and the lease token only and answer `409 RUNNER_LEASE_LOST` for the same job.
-  The difference is deliberate for these two calls and not yet for the others: whether `steps`, `heartbeat` and `complete` should check the holder too is a separate question (a follow-up, not decided here).
-- **The switch.** The app lists the feature `runner_session_snapshot` in `KnownAppFeature`. `implementer_snapshot` says only that the **Worker API's** calls exist, and an app can have those and not these (production
-  lists it today without the runner routes); a runner on a customer's machine reads the list from `GET /api/runners/v1/version` **with its own credential** (the call answers a live runner as well as a Dispatcher
-  or a running claim) and uses the two calls only if it finds `runner_session_snapshot` there. It needs no claim feature: the claim names `implementer_resume` already, and the job says with
-  `implementer.resume.snapshot` whether there is a file to read.
-- **Resume works on customer runners (the runner's side, #879).** `RunnerJobApi` of the `factory-runner` (`runner/src/code_reviewer_runner/factory_runner/job_api.py`) speaks the two calls above, **on the condition that
-  the app lists `runner_session_snapshot`**; against an app without it the runner behaves as before.
-  - *Paths and header.* `snapshot` sends to `/api/runners/v1/jobs/{id}/session` and `resume_session` to `/api/runners/v1/jobs/{id}/resume-session?part=n` (the query, the parts and the checks of the answer are the
-    Worker client's, shared code), with the runner credential in `Authorization` and the lease token of the claim in `X-Lease-Token`. The token is read from the claim the runner holds (`hold`), goes into the header and
-    nowhere else: not into an error text, not into a log line, not into the URL. A job the runner does not hold sends nothing.
-  - *The switch is read for every job.* The service asks the version call (`check_app`, with the runner's credential, `GET /api/runners/v1/version?jobId=...`) after it holds the claim and before the host starts the job.
-    The features of an earlier job are forgotten first: an app that does not answer, or lists nothing, is an app without the snapshot for this job. A runner's job is not a Worker API job, so `worker_api` is not asked for.
-    `supports_snapshot` is true if and only if `runner_session_snapshot` is listed; `implementer_snapshot` (the Worker routes) does not count.
-    The call is bounded as a whole (10 s, `VERSION_CALL_TOTAL_SECONDS`, part of the lease budget in `resume_download.py`). A call that fails, is too slow or gives no list never stops the job: it runs without the snapshot and
-    the runner logs one warning with the class of the failure (nothing of the answer). An app that answers with a list that leaves out `implementer_steps` switches the steps off for the job; only an app that gave no list at all keeps the default (steps on).
-  - *Off means off.* The host opens no snapshot channel for a turn on such an app, so the process takes no export, and does not download a stored session either: the turn runs as before and a follow-up continues from the
-    summary (`summary_only`). This also fixes the fault of #874 in which an app that listed `implementer_snapshot` made the host open the channel while the runner could only call routes that refuse its credential.
-    The constructor switch `RunnerJobApi(snapshot=...)` is gone: the app decides.
-  - *Answers.* Upload: `404` and `409` (`RUNNER_LEASE_LOST`, `RUNNER_JOB_ENDED`) are `LeaseLost` (the sender stops, nothing more is sent for the job), `401` is `CredentialInvalid` (a `LeaseLost` too), any other `4xx` (`400`,
-    `413`) is `ApiRejected` and not retried, `5xx`, `408`, `425`, `429` and no answer are `ApiUnavailable` and retried within the sender's time. Download: `204` is "no stored snapshot" (`no_snapshot`), and every other answer
-    (`400`, `401`, `404`, `409`, `5xx`) is a failed download (`download_failed`): the turn is never failed by it, it continues from the summary, and a lost lease shows at the next heartbeat.
-
-- **What the runner does with it.** Nothing new: the host downloads the stored session before the process starts and uploads the snapshot beside the final push, exactly as for a Worker
-  ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)). Which machine ran the earlier turns does not matter: the snapshot belongs to the session.
-- **Tests.** `app/src/runner-api/runner-session.integration.test.ts` (the parts and the bounds through the runner's door, a snapshot stored by one runner and read by another, another workspace, another runner,
-  a lease that ran out, a revoked runner, a hosted job, the shared token and a per-job credential, the Worker routes still closed to a runner, the version call), `runner-session-contract.test.ts` and
-  `runner/tests/contract/test_snapshot_contract.py` (the contract on both sides). The runner's client: `runner/tests/unit/test_factory_runner_job_api.py` (paths, header, the switch on and off per job, the
-  statuses, no secret in an error or a log), `runner/tests/contract/test_runner_session_client_contract.py` (the real client on HTTP against the fake App, which holds every query, header and answer to the
-  `Runner*` definitions: parts of one to three, 204, a lost lease, a revoked runner, the switch) and, in `runner/tests/integration/test_factory_runner_loopback.py`, two turns through the service in which turn 2 reads the
-  snapshot turn 1 stored, and an app that lists only `implementer_snapshot`, which gets no channel and no download.
+- **The same calls, one logic.** The handlers are the Worker API's (`storeSnapshotPart`, `readResumeSessionPart`): the same parts of exactly 3 MiB (at most three), the same description of the whole file in the
+  query or in the headers, the same digest and size checks, the same replacement of the session's snapshot once the last part is in, the same reading of the earlier turns' snapshot of the job's own session and of
+  no other. Neither call extends the lease.
+- **The switch** is the Worker's, as hosted: the Worker asks `GET /api/runners/v1/version?jobId=...` with its credential and uploads a snapshot (and the host downloads the stored session) when the app lists
+  `implementer_snapshot`. The claim needs no feature for it: the job says with `implementer.resume.snapshot` whether there is a file to read.
+- **Which machine ran the earlier turns does not matter:** the snapshot belongs to the session ([`implementer.md`](implementer.md#follow-up-turns-resume-in-the-runner-840)).
+- **Tests.** `app/src/runner-api/snapshot.integration.test.ts` and `resume-session.integration.test.ts` (the Worker routes), `runner/tests/contract/test_snapshot_contract.py` (the contract on both sides) and, in
+  `runner/tests/integration/test_factory_runner_loopback.py`, two turns through the dispatcher and a real Worker in which turn 2 reads the snapshot turn 1 stored, and an app that does not list
+  `implementer_snapshot`, which gets no channel.
 
 ### Validator rules
 
@@ -300,18 +262,24 @@ The environment of a profile or of a step is also refused when a label of its `l
 
 The runner is the Implementer's Control, packaged to run on a customer's Linux machine: **the same code as the hosted Control**
 (the job host, the model door with the key out of the agent, the cost ledger, the step records, the finish tool, the session
-snapshot, the git rules: no remote in the agent, the runner pushes every local branch, never force), started by a loop that
-claims its own jobs instead of being handed one by the Dispatcher. The code is
+snapshot, the git rules: no remote in the agent, the runner pushes every local branch, never force). Since #974 (Runner v2, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md))
+it is two things, as everywhere: a **local dispatcher** (the `factory-runner` service: registration, announce, renewal of its credential, claim, slots, the start and the stop of the sandbox) and
+the **Worker** it starts (`factory_runner/local_worker.py`: the hosted Worker, unchanged in what it does). The dispatcher claims like every dispatcher and holds **none of a job's secrets**: the
+claim answers with the job's id and the credential of its Worker and nothing else; the Worker fetches the job itself over the Worker API and the git token and the key of the workspace are only ever in the
+Worker and the containers it starts. The code is
 [`runner/src/code_reviewer_runner/factory_runner/`](../runner/src/code_reviewer_runner/factory_runner); the command is
 `factory-runner`.
 
 ```
 machine (Linux, Docker)
-├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work)
+├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work): the local dispatcher
 │    ├─ announce (PUT /self): labels, base version, manifest {harness entries, capabilities}, limits
-│    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner)
-│    ├─ job host (the hosted one): job process with the job on stdin, heartbeats, steps, result with the lease token
-│    └─ through the host's Docker, per turn:  model door · agent container (the pinned OpenCode) · reader · git mirror
+│    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner): the job id and the credential of its Worker (crj_), nothing secret
+│    ├─ start the Worker (today: a process of this container; later the Firecracker launcher, #978) with {appUrl, jobId, credential} on its stdin
+│    │    and, if the job asks for it, the one credential of this device (a Claude Code subscription), read from the token file of R3: never through the app
+│    ├─ watch it: the local reaper (GET /jobs/{id} with the runner's credential), the claim given back when the Worker could not start or ended without a result (POST /jobs/{id}/release)
+│    └─ the Worker (`code-reviewer-runner`'s `local_worker`): fetch the job over /api/workers/v1 with crj_, job host (job process with the job on stdin, heartbeats, steps, result), delivery
+│         └─ through the host's Docker, per turn:  model door · agent container (the pinned OpenCode) · reader · git mirror
 └─ volumes: factory-runner-home (the configuration), factory-runner-work (/work: mirror, repository, result)
 ```
 
@@ -319,12 +287,12 @@ machine (Linux, Docker)
 
 | Part                                     | On a runner                                                                                                                                           |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Model door, key, cost ledger             | As hosted. The key is the workspace's **own** key (BYOK): the claim hands it over, it lives in the door's container, the agent only holds a worthless bearer. A managed model never reaches a runner. |
+| Model door, key, cost ledger             | As hosted. The key is the workspace's **own** key (BYOK): the Worker fetches it over the Worker API (`app-key`; the dispatcher never sees it), it lives in the door's container, the agent only holds a worthless bearer. A managed model never reaches a runner. |
 | Steps, finish tool, result, git rules    | As hosted (same code).                                                                                                                                |
 | Agent's container                        | The same image, the same fixed address on the same internal model network, memory without swap, no host mount, no socket, **but** the runtime is `sysbox-runc` only where the self-test proved it; otherwise the daemon's default (`runc`), with an init that only says "ready". |
 | The agent's own Docker                   | **Not part of the base** (decision 3, S2). The capability `agent-docker` is announced only when the self-test ran a container in a Docker inside Sysbox. A job whose setup needs Docker is for a runner that announces it. |
-| Lease, heartbeat, result                 | The runner API (`/api/runners/v1/jobs/{id}/heartbeat`, `/complete`, `/steps`) with the runner's credential and the lease token of the claim in the body. |
-| Session snapshot and stored session      | The runner API (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) with the runner's credential and the lease token in `X-Lease-Token`, **if the app lists `runner_session_snapshot`** (see "Resume on customer runners"); otherwise none, and a follow-up continues from the summary. |
+| Lease, heartbeat, result                 | As hosted: the Worker API (`/api/workers/v1/jobs/{id}`, `/heartbeat`, `/result`, `/steps`) with the credential of the claim (#974). The runner's own credential is for the dispatcher's calls only (registration, announcement, claim, the state of a job, the release of a claim). |
+| Session snapshot and stored session      | As hosted: `PUT /api/workers/v1/jobs/{id}/session` and `GET .../resume-session` (see "Resume on customer runners"). |
 | Sizing                                   | The configured memory and CPUs, not the VM size the Dispatcher computes. One run at a time.                                                           |
 
 ### Install (one line, R2)
@@ -551,19 +519,31 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
    job. A runner that cannot tidy takes **no job** (it says why in the log, `run --once` ends with exit code 1, `run` tries again after a
    minute): a job it took would fail in its set-up.
 4. **Claim**, every 30 seconds with a little jitter. The claim is the runner's heartbeat: the list shows it online for two minutes after.
-   A claim names the engine `implementer` and the features the job host understands, so the job is built exactly as the Dispatcher's
-   Worker gets it.
-5. **Run** the job through the hosted job host. Its credential is the runner's; the job process gets the job on its stdin and a minimal
-   environment, never the runner's credential. A SIGTERM or SIGINT gives the running job back (`runner_shutdown`) and ends the loop.
+   A claim names the engine `implementer` and the feature `worker_credential` (#974): the answer is the **split** one, `{ job: { id, credential, ... } }` with the credential of the
+   job's Worker (`crj_`), optionally the labels the job required and what it asks of this device (`access`: harness, auth, model), and **nothing secret**: no job input, no git token, no key
+   of the workspace, no lease token. The dispatcher never holds any of them; an answer that carries a job input is refused and never read further.
+5. **Start the Worker** (`sandbox.py`) with `{appUrl, jobId, credential}` on its standard input. Today the Worker is a process of this container, started with an environment of its own (the plain
+   variables and the ones that say how its containers are made, never the runner's credential): `python -m code_reviewer_runner.factory_runner.local_worker`. The sandbox is a seam: the Firecracker
+   launcher (#978) will start the same Worker in a VM. **The one credential of this device a job needs** (a Claude Code subscription, when `access.auth` is `subscription`; `local-key` follows
+   with #980) is read by the dispatcher from the token file of R3 (`FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else `claude-code-token` in the runner's home, else `CLAUDE_CODE_OAUTH_TOKEN`) and handed
+   over in the same start document (`localEnvironment`), never through the app and never to a Worker whose job does not ask for it. The Worker puts it into the environment of the job process
+   and into its masker; it is not in an argument or in the Worker's own environment. The Worker is the hosted one: it fetches the job over the Worker API with its credential (`GET /api/workers/v1/jobs/{id}`:
+   the git token and the key of the workspace are made here and reach only the Worker), runs it through the job host (the job process gets the job on its stdin and a minimal environment, never a
+   credential), keeps the heartbeat, sends the steps and the snapshot and delivers the result. The disk budget (below) ends a job from inside the Worker, as it did when the loop ran the job.
+   A SIGTERM or SIGINT of the dispatcher is passed on to the Worker, which gives its job back (`runner_shutdown`) within its grace (135 s) and ends; the loop ends after it.
+   **When a claim is given back:** the Worker could not be started (`launch_failed`), or it ended with an error code (`worker_exited`); the dispatcher calls
+   `POST /api/runners/v1/jobs/{id}/release` with the credential of the job in the body and its own credential in `Authorization`. The app answers `ended` for a job that already has its result (nothing
+   changes) and counts a lost attempt otherwise. **The local reaper:** while a Worker runs, the dispatcher asks the app every minute for the job's state (`GET /api/runners/v1/jobs/{id}` with the runner's
+   credential, for a job of its own workspace; `404` for any other) and ends a Worker that is still there 45 s after the job stopped being `running` (a hung Worker no heartbeat reaches).
 6. What a claim's failure means: `401` the runner is **revoked**, stop for good (exit 4); `426` **update needed**, say so, wait five
    minutes (`--once`: exit 3); the app unreachable, wait 5 s, 10 s, ... up to five minutes.
 
-**Revoking** a runner in the app ends the job it is running at once (the app cuts the lease; the runner's next heartbeat is a `401`, the
-host ends the process, nothing more is sent) and the next claim stops the service.
+**Revoking** a runner in the app ends the job it is running at once (the app cuts the lease; the Worker's next call is `409 RUNNER_JOB_ENDED`, its host ends the process, nothing more is sent) and the
+dispatcher's next call is a `401`, which stops the service.
 
 What the runner meets of the routing above (R1a part 2): it is offered a turn only when the turn's environment labels are all among its
 own, its workspace is the turn's and an entry of its manifest has what the turn asks for (it announces OpenCode); below `RUNNER_MIN_BASE_VERSION` the claim is the `426` it
-reads as "update needed". A revoked runner's turn ends in the app as `runner_revoked` (the runner learns it from the `401` of its
+reads as "update needed". A revoked runner's turn ends in the app as `runner_revoked` (the Worker learns it from the `409` of its
 next call and does not report); a turn that no runner takes ends as `no_runner_available` in the app, and the runner is not involved.
 
 ### `run --once`: a VM that runs one job and ends
@@ -644,7 +624,7 @@ from (the base image is the runner's, shared, and there before the job), and **o
 own writable layer is not counted any more, because it is what the commit wrote into the image. The Docker images of the runner itself and
 the images and containers of other things on the daemon are not the job's and not counted. When the measure passes the budget:
 
-1. the job process is ended the way a shutdown ends it (`JobHost`, the `guard`), and the job is **reported as failed**, not given back (it
+1. the job process is ended the way a shutdown ends it (the Worker's `JobHost`, the `guard`), and the job is **reported as failed** by the Worker, not given back (it
    would fill the disk again): error code `runner_error`, error reason `disk_budget_exceeded`, and a text that names the budget and what
    was in use;
 2. the cleaning that follows every job removes everything it made: the containers and networks of this runner, the folders of `/work`
@@ -763,12 +743,12 @@ the security notes (`nft delete table ip setup_egress`, and so on) go with the n
 
 ### Tests
 
-Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`, `test_install_script.py`): configuration, command, loop with doubles, once mode, self-test
+Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`, `test_install_script.py`): configuration, command, the dispatcher with doubles (the Worker it starts, the claim it gives back, the reaper, the credential of the device, no secret of a job in its state or its log: `test_factory_runner_dispatcher.py`), the Worker's entry (`test_factory_runner_local_worker.py`), once mode, self-test
 with a double daemon (also: a stale agent image), limits, the cleaning between jobs (two turns in a row over the service, with the
 code of a turn's own directory set-up), the credential's source and the Dockerfile's promises. Contract (`tests/contract/test_factory_runner_contract.py`): the runner's real client against
-a fake App (`tests/runner_app.py`) that holds every body to `runner-registration.v1.json` and `runner-api.v1.json`. Integration
-(`tests/integration/test_factory_runner_loopback.py`): register, announce, claim, run a turn through the real job host with a
-stand-in job process, heartbeat, report; no job in time; the once mode with the environment alone; a revoked runner (before a claim
+a fake App (`tests/runner_app.py`) that holds every body to `runner-registration.v1.json`, `runner-api.v1.json` and `worker-api.v1.json` (the split claim, the Worker's calls, the release, the
+state of a job). Integration (`tests/integration/test_factory_runner_loopback.py`): register, announce, claim, start a real Worker that fetches the job over the Worker API and runs a turn through the
+real job host with a stand-in job process, heartbeat, report; a subscription turn that gets the login of the device from the dispatcher (and a turn that asks for none, which does not); no job in time; the once mode with the environment alone; a revoked runner (before a claim
 and during a turn); an app that requires an update. Lane (`tests/lane/test_runner_selftest.py`): the self-test on a real
 daemon with the real agent image, and the removal of what a killed run left (a labelled container and network; an unlabelled container
 stays), and the disk budget (`tests/lane/test_runner_disk_budget.py`: what a container writes into its layer is
@@ -856,8 +836,8 @@ What the tests cannot know and the first install must check (nothing of this run
   same id (one configuration copied to two machines on one daemon) are not told apart. The lock closes the window of two different runners
   that start in the same moment. Unique names, and with them more runners on one daemon, are a later step. The hosted version sets no id and is
   unchanged.
-- **Snapshot and stored session.** Resume works on customer runners (#879, "Resume on customer runners"): the runner sends `PUT .../session` and `GET .../resume-session` to the runner API's routes when
-  the app lists `runner_session_snapshot`. Against an app that does not list it (an older release) a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones
+- **Snapshot and stored session.** Resume works on customer runners (#879, #974, "Resume on customer runners"): the Worker sends `PUT .../session` and `GET .../resume-session` to the Worker API when
+  the app lists `implementer_snapshot`. Against an app that does not list it a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones
   (the fallback of the plan).
 - **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
 - **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
@@ -1124,8 +1104,8 @@ test needs one), and a wrong redaction would store the login. So it is one slice
    alignment and in a key name goes through the exporter; the result contains none of the forms, and a transcript the redactor cannot
    clean is discarded. A second test lists the tar: only the one path. The lane test (CI) runs a turn, exports, throws the container away,
    imports in a new one and checks that the second turn answers from the first one's content.
-6. **Customer runner and hosted.** Claude Code runs on customer runners only, so only the `runner_session_snapshot` endpoints
-   (`/api/runners/v1/jobs/{id}/session`, `/resume-session`) carry this kind; the hosted Worker API never sees it.
+6. **Customer runner and hosted.** Claude Code runs on customer runners only; since #974 their Worker uses the Worker API's snapshot calls (`/api/workers/v1/jobs/{id}/session`, `/resume-session`)
+   like any Worker, and the hosted Dispatcher never claims a turn on this harness (it asks for a `subscription`, which only a customer's runner announces).
 7. **Not stored by us unredacted, and still the customer's data.** The transcript holds the agent's tool output, i.e. repository content.
    It is kept like the OpenCode snapshot (the stored conversation is kept for good, erased with the workspace). The owner should confirm
    that a Claude Code transcript may be stored in our database at all, since Anthropic's terms are about the login, not the transcript;

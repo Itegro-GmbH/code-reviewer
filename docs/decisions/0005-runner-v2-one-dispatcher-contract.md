@@ -118,6 +118,23 @@ App** (the Worker API, `crj_`, everywhere).
   host namespaces, `--device`, `--cap-add ALL`, mounts but the work volume and the Docker socket): that catches a bug of the Dispatcher and is no defence against a hostile host. The host owns the job's wall clock (vm-init has none);
   vm-init sets its own `oom_score_adj` to -1000 and always powers the VM off.
 
+## 3e. Details of #974
+
+- **The customer's claim is the split claim, always.** A claim with a runner credential (`crc_`) is answered like the platform's: the job's id, the credential of its Worker (`crj_`), the `labels` the job required (a customer's job has no `sizeLabel`: size labels
+  are the platform's) and, for a turn of the Implementer, `access` (`SplitClaimResponse.job.access`: harness, auth, model; never a credential). The app forces the feature `worker_credential` for a customer's runner whatever the claim names, so no
+  caller of a customer's credential can be handed a job input, a git token or a key. What needs no secret is still decided at the claim (the label and access rules of #971 and #973, the guard of the project, the entitlements, a managed
+  selection refused with `runner_needs_own_key`); the input is made when the Worker fetches the job.
+- **The Worker API serves the turns of customer runners.** `GET /api/workers/v1/jobs/{id}` builds the input of any job claimed with a credential, including a turn on the harness `claude-code` (`buildSubscriptionJob`: no model, key or price, the git token of
+  exactly this repository, the features the Worker names), answered as `WorkerSubscriptionDetailsResponse` (no `llm`). Heartbeat, result, steps, snapshot and stored session are the Worker routes, as hosted.
+- **The local dispatcher holds no job secret.** `factory-runner` is the local dispatcher (registration, announcement, renewal, claim, slots, the start and the stop of the sandbox, the release of a claim, the reaping of a Worker whose job is over) and
+  the Worker it starts (`factory_runner/local_worker.py`) is the hosted Worker. The hand-over is `{appUrl, jobId, credential}` on the Worker's standard input, plus `localEnvironment`: the one credential of the device a job asks of it
+  (decision 4; a Claude Code subscription, read by the dispatcher from the token file of R3), never through the app. Until the Firecracker launcher (#978) the Worker is a process of the dispatcher's own container on the host's Docker
+  (`ProcessSandbox`, the seam is `WorkerSandbox`); a test holds that the dispatcher's fields and its log contain no git token and no model key whatever the app answers.
+- **What the dispatcher still calls with its own credential:** registration, announcement, renewal, the claim, `GET /api/runners/v1/jobs/{id}` (the state of a job of its own workspace, `404` for any other: the local reaper) and
+  `POST .../release` (the credential of the claim in the body). **Removed** (no runner image is published, `release-channel.json` is empty, so there is no deprecation window): `/api/runners/v1/jobs/{id}/session` and `/resume-session`
+  (route files, contract definitions `Runner*`, the app feature `runner_session_snapshot`), and `heartbeat`, `complete` and `steps` for a runner credential (they answer `404 RUNNER_JOB_NOT_FOUND`; the shared token's
+  calls of the platform's Dispatcher are unchanged).
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.
@@ -138,4 +155,4 @@ subscription login through a door.
 
 ## 7. Out of scope
 
-The local Dispatcher without job secrets and everything of M2 and M3: each is its own issue of epic #969.
+Everything of M2 and M3 (the Firecracker launcher and the rest): each is its own issue of epic #969.

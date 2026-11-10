@@ -530,7 +530,7 @@ describe("a registered runner's calls", () => {
     expect((await claim(SHARED_TOKEN)).status).toBe(204);
     // It is no runner credential.
     expect((await announce(SHARED_TOKEN, ANNOUNCEMENT)).status).toBe(401);
-    // The runner credential opens the calls about a job of its own workspace (a job that is not there is one that is not its own) ...
+    // The runner credential has no routes about a running job any more (#974: the Worker's are the credential of the claim's); the answer is the one of a job that is not its own ...
     const unknownJob = await heartbeat(credential);
     expect(unknownJob.status).toBe(404);
     expect(await unknownJob.json()).toMatchObject({
