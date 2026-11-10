@@ -175,6 +175,9 @@ class FakeRunnerApp:
     )
     # The Worker's result ends the job with this status.
     complete_status: str = "succeeded"
+    # The address the server listens on. The loopback; the KVM lane (#978) listens on every address,
+    # because the Worker in a VM reaches it through the VM's TAP device.
+    bind_host: str = "127.0.0.1"
     _server: ThreadingHTTPServer | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -184,6 +187,11 @@ class FakeRunnerApp:
     def url(self) -> str:
         assert self._server is not None
         return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None
+        return int(self._server.server_address[1])
 
     def start(self) -> "FakeRunnerApp":
         app = self
@@ -197,7 +205,7 @@ class FakeRunnerApp:
 
             do_POST = do_PUT = do_GET = _serve
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = ThreadingHTTPServer((self.bind_host, 0), Handler)
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self
 
