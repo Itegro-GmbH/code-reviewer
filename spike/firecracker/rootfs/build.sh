@@ -18,6 +18,7 @@ cleanup() {
 trap cleanup EXIT
 mount -t proc proc "$root/proc"
 mount --bind /dev "$root/dev"
+mount -t devpts devpts "$root/dev/pts"
 rm -f "$root/etc/resolv.conf"
 cp /run/systemd/resolve/resolv.conf "$root/etc/resolv.conf" 2>/dev/null || cp /etc/resolv.conf "$root/etc/resolv.conf"
 cp "$dl/sysbox.deb" "$root/tmp/sysbox.deb"
@@ -30,8 +31,12 @@ chroot "$root" /bin/bash -euxc '
     iputils-ping util-linux e2fsprogs xfsprogs python3-minimal ca-certificates curl pigz xz-utils openssl psmisc
 '
 log "Sysbox $SYSBOX_VERSION (a systemctl that does nothing, as the golden snapshot does: the guest has no systemd)"
-stub=$(mktemp -d); printf '#!/bin/sh\nexit 0\n' > "$stub/systemctl"; chmod 0755 "$stub/systemctl"
-mkdir -p "$root/stub"; cp "$stub/systemctl" "$root/stub/systemctl"
+# ... and a `docker` that lists no containers: the package's config script runs `docker ps -a` and refuses to go on when it does not see
+# the one header line (the golden snapshot runs it with a docker installed; here Docker is added after Sysbox)
+mkdir -p "$root/stub"
+printf '#!/bin/sh\nexit 0\n' > "$root/stub/systemctl"
+printf '#!/bin/sh\necho "CONTAINER ID   IMAGE   COMMAND   CREATED   STATUS   PORTS   NAMES"\n' > "$root/stub/docker"
+chmod 0755 "$root/stub/systemctl" "$root/stub/docker"
 chroot "$root" /bin/bash -euxc '
   export DEBIAN_FRONTEND=noninteractive PATH=/stub:$PATH
   apt-get install -y -qq /tmp/sysbox.deb || dpkg -i --force-depends /tmp/sysbox.deb
