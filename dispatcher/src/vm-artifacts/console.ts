@@ -13,7 +13,7 @@ export type ConsoleEvent = {
 };
 
 const EVENT =
-  /VMINIT ([a-z_]+) uptime=([0-9]+(?:\.[0-9]+)?)((?: [a-z_]+=\S*)*)\s*$/;
+  /VMINIT ([a-z_]+) uptime=([0-9]+(?:\.[0-9]+)?)((?: [a-z0-9_]+=\S*)*)\s*$/;
 
 export function parseConsoleLine(line: string): ConsoleEvent | undefined {
   const match = EVENT.exec(line);
@@ -30,6 +30,14 @@ export function parseConsoleLine(line: string): ConsoleEvent | undefined {
     fields,
   };
 }
+
+/** What the guest's smoke mode must have run (docker/vm/rootfs/vm-init): a check that is absent counts as a failure. */
+export const REQUIRED_CHECKS = [
+  "root_read_only",
+  "runc_container",
+  "sysbox_container",
+  "worker_probe",
+] as const;
 
 export type SmokeOptions = {
   /** From the start of the Firecracker process to `docker_ready` (the spike measured 1.4 to 1.9 s on a nested-virtualization runner). */
@@ -73,11 +81,23 @@ export function evaluateSmoke(
         `image ${role}: ${seen.fields.id ?? ""} is not the data disk's ${wanted}`,
       );
   }
+  // The decision of docs/runner.md ("The Docker image store"): the guest runs the containerd image store, as the hosted VM does.
+  const store = first("store");
+  if (!store) problems.push("store: missing");
+  else if (!(store.fields.snapshotter ?? "").includes("containerd"))
+    problems.push(
+      `store: ${store.fields.snapshotter || "none"} is not the containerd image store`,
+    );
+  for (const required of REQUIRED_CHECKS)
+    if (
+      !events.some(
+        (event) => event.name === "check" && event.fields.name === required,
+      )
+    )
+      problems.push(`check ${required}: missing`);
   for (const event of events)
     if (event.name === "check" && event.fields.result !== "ok")
       problems.push(`check ${event.fields.name ?? "?"} failed`);
-  if (!events.some((event) => event.name === "check"))
-    problems.push("check: none ran");
   if (!first("smoke_done")) problems.push("smoke_done: missing");
   else if (first("smoke_done")?.fields.ok !== "1")
     problems.push("smoke_done: ok=0");

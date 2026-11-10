@@ -117,6 +117,11 @@ describe("the events of vm-init on the console", () => {
   });
 
   it("ignores a console line that is not an event, and an event line it cannot read", () => {
+    expect(
+      parseConsoleLine(
+        "VMINIT check uptime=7.5 name=worker_probe result=ok output_b64=eyJ4IjoxfQ==",
+      )?.fields.output_b64,
+    ).toBe("eyJ4IjoxfQ==");
     expect(parseConsoleLine("random kernel output VMINIT")).toBeUndefined();
     expect(parseConsoleLine("VMINIT docker_ready")).toBeUndefined();
     expect(parseConsoleLine("")).toBeUndefined();
@@ -142,8 +147,10 @@ const good: ConsoleEvent[] = [
   }),
   ev("image", 2.5, { role: "worker", tag: "w:golden", id: WORKER }),
   ev("image", 2.5, { role: "agent", tag: "a:golden", id: AGENT }),
+  ev("check", 3, { name: "root_read_only", result: "ok" }),
   ev("check", 3, { name: "runc_container", result: "ok" }),
   ev("check", 4, { name: "sysbox_container", result: "ok" }),
+  ev("check", 5, { name: "worker_probe", result: "ok", output_b64: "e30=" }),
   ev("smoke_done", 6, { ok: "1" }),
 ];
 const options = {
@@ -206,5 +213,29 @@ describe("the verdict of the smoke boot", () => {
     expect(evaluateSmoke(cut, options).problems).toContain(
       "smoke_done: missing",
     );
+  });
+
+  // #976-T03
+  it("fails when the guest runs another image store than the hosted one's containerd store", () => {
+    const overlay2 = good.map((e) =>
+      e.name === "store"
+        ? ev("store", 2.4, { driver: "overlay2", snapshotter: "" })
+        : e,
+    );
+
+    expect(evaluateSmoke(overlay2, options).problems).toEqual([
+      "store: none is not the containerd image store",
+    ]);
+  });
+
+  // #976-T03
+  it("fails when a check the guest must run never ran, the Worker's self-check among them", () => {
+    const without = good.filter(
+      (e) => !(e.name === "check" && e.fields.name === "worker_probe"),
+    );
+
+    expect(evaluateSmoke(without, options).problems).toEqual([
+      "check worker_probe: missing",
+    ]);
   });
 });
