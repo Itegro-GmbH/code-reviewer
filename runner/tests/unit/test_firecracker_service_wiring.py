@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from code_reviewer_runner.factory_runner.app_client import Announced
 from code_reviewer_runner.factory_runner.base import EXIT_NOT_READY
 from code_reviewer_runner.factory_runner.cli import CliSeams, main
 from code_reviewer_runner.factory_runner.config import (
@@ -197,13 +198,14 @@ def test_run_with_the_firecracker_sandbox_prepares_without_docker_and_needs_a_us
         raise AssertionError("the Docker self-test must not run")
 
     class Client:
-        def announce(self, announcement: Any) -> Any:
-            from code_reviewer_runner.factory_runner.app_client import Announced
-
+        def announce(self, announcement: Any) -> Announced:
             return Announced(None, False)
 
         def claim(self) -> None:
             raise AssertionError("a runner that cannot use its sandbox claims nothing")
+
+    def client(url: str, credential: str | None) -> Any:
+        return Client()
 
     state = tmp_path / "state"  # no cgroup, no artifacts: `setup` cannot run
     out, err = io.StringIO(), io.StringIO()
@@ -219,7 +221,7 @@ def test_run_with_the_firecracker_sandbox_prepares_without_docker_and_needs_a_us
             # Never the real cgroup of this process: a directory with no controllers.
             "FACTORY_RUNNER_VM_CGROUP_ROOT": str(tmp_path / "no-cgroup"),
         },
-        seams=CliSeams(client=lambda url, credential: Client(), prepare=docker, prepare_vm=vm),
+        seams=CliSeams(client=client, prepare=docker, prepare_vm=vm),
         out=out,
         err=err,
         stdin=io.StringIO(),

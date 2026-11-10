@@ -90,6 +90,8 @@ install -D -m 0755 "$VM_DIR/rootfs/vm-build-init" "$root/usr/local/sbin/vm-build
 # Control container at /etc/code-reviewer/control-seccomp.json. The shebang is the root file system's python3 (the build host's is not).
 "$REPO_DIR/runner/vm-init/install.sh" "$root"
 install -D -m 0755 "$recipe/check-worker-probe.sh" "$root/usr/local/share/code-reviewer-vm/check-worker-probe.sh"
+# The smoke boot's probe of AF_VSOCK from a container (the review of #977, #978): denied for the agent, allowed for Control, with controls.
+install -D -m 0644 "$VM_DIR/rootfs/vsock-probe.py" "$root/usr/local/share/code-reviewer-vm/vsock-probe.py"
 install -D -m 0644 "$recipe/recipe.json" "$root/etc/code-reviewer-vm/recipe.json"
 
 log "what was installed"

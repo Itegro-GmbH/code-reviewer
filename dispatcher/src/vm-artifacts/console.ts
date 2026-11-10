@@ -36,6 +36,9 @@ export const REQUIRED_CHECKS = [
   "root_read_only",
   "runc_container",
   "sysbox_container",
+  "vsock_denied_agent",
+  "vsock_allowed_control",
+  "ia32_unavailable",
   "worker_probe",
 ] as const;
 

@@ -104,6 +104,18 @@ case "$mode" in
     check root_read_only bash -c '! touch /usr/local/sbin/.write-test'
     check runc_container docker run --rm --runtime=runc --network none --entrypoint true "$worker_tag"
     check sysbox_container docker run --rm --runtime=sysbox-runc --network none --entrypoint true "$agent_tag"
+    # AF_VSOCK is the way to the host (#977, #978): the agent's container must not be able to open one (Docker's default seccomp profile refuses
+    # it, the kernel has no 32-bit entry that would bypass the profile), and every denial has a control that says the probe CAN see one: Control's
+    # own profile allows it. The probe is docker/vm/rootfs/vsock-probe.py (what each mode proves is in its header).
+    probe=/usr/local/share/code-reviewer-vm/vsock-probe.py
+    agent_probe() { docker run --rm --runtime=sysbox-runc --network none --entrypoint python3 -v "$probe:/probe.py:ro" "$agent_tag" /probe.py "$1"; }
+    control_probe() {
+      docker run --rm --runtime=runc --network none --security-opt seccomp=/etc/code-reviewer/control-seccomp.json --entrypoint python3 \
+        -v "$probe:/probe.py:ro" "$worker_tag" /probe.py "$1"
+    }
+    check vsock_denied_agent agent_probe vsock-denied
+    check vsock_allowed_control control_probe vsock-created
+    check ia32_unavailable agent_probe ia32-unavailable
     # The golden snapshot's own self-check of the Worker image (`probe` mode, the hardened container flags): one JSON line, the verdict.
     if probe=$(/usr/local/share/code-reviewer-vm/check-worker-probe.sh 2> /run/check-probe.err); then
       say check name=worker_probe result=ok "output_b64=$(printf '%s' "$probe" | base64 -w0)"
