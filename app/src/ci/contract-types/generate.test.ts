@@ -126,6 +126,7 @@ describe("the generated contract types", () => {
       TYPE_TARGETS.flatMap((t) =>
         [
           "dispatch-webhook",
+          "environment-control",
           "runner-api",
           "worker-api",
           "worker-container",
@@ -150,6 +151,10 @@ describe("the generated contract types", () => {
     expect(text("runner-api")).toContain("export interface SplitClaimResponse");
     expect(text("worker-container")).toContain(
       "export interface WorkerContainerSpec",
+    );
+    // #975
+    expect(text("environment-control")).toContain(
+      "export interface NarrowRequest",
     );
   });
 });
