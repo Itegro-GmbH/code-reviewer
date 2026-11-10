@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import signal
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -113,6 +113,36 @@ def parse_request(raw: str) -> WorkerRequest:
     )
 
 
+# A name of a variable the dispatcher of this device hands a Worker (`localEnvironment` of the start
+# document, #974).
+_LOCAL_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+# What a local credential may be: one printable token, like the login of Claude Code.
+_LOCAL_VALUE = re.compile(r"[\x21-\x7e]{1,4096}")
+MAX_LOCAL_VARIABLES = 8
+
+
+def parse_local_environment(raw: str) -> dict[str, str]:
+    """The credentials of the dispatcher's own device in the start document (`localEnvironment`,
+    #974), as the variables the job reads: a Claude Code subscription token that exists only on
+    that device. They come from the dispatcher, never from the app. A hosted Worker never reads
+    them. A bad name or value is an input error that names the field and never the value."""
+    fields = as_object(json.loads(raw))
+    local = fields.get("localEnvironment") if fields is not None else None
+    if local is None:
+        return {}
+    given = as_object(local)
+    if given is None or len(given) > MAX_LOCAL_VARIABLES:
+        raise _invalid("localEnvironment must be an object of a few variables")
+    result: dict[str, str] = {}
+    for name, value in given.items():
+        if not _LOCAL_NAME.fullmatch(name):
+            raise _invalid("localEnvironment names a variable that is not one")
+        if not isinstance(value, str) or not _LOCAL_VALUE.fullmatch(value):
+            raise _invalid("localEnvironment holds a value that is not one token")
+        result[name] = value
+    return result
+
+
 def _exit_for(end: JobEnd) -> WorkerExit:
     if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED):
         return WorkerExit.OK
@@ -171,12 +201,18 @@ async def run_worker(
     logger: logging.Logger | None = None,
     sweeper: Callable[[int, int], bool] = sweep_user,
     install_signals: bool = False,
+    guard: Callable[[], Awaitable[str]] | None = None,
+    extra_secrets: Sequence[str] = (),
 ) -> WorkerExit:
     """Fetch the job, run it, deliver the result. `install_signals`: SIGTERM and SIGINT end the job
-    and give it back (the entry point sets it; a test that runs this in-process does not)."""
+    and give it back (the entry point sets it; a test that runs this in-process does not).
+
+    `guard` and `extra_secrets` are for a Worker a customer's own dispatcher starts (#974): a guard
+    that ends the job with a text when the machine's disk budget is used up, and the credentials of
+    that device (the environment holds them for the job process; the masker must know them too)."""
     logger = logger or logging.getLogger(LOGGER_NAME)
     clock = clock or RealClock()
-    masker = SecretMasker([request.credential])
+    masker = SecretMasker([request.credential, *extra_secrets])
     log = SafeLog(logger, masker)
     api = api or HttpWorkerApi(
         request.app_url, request.credential, request_timeout=settings.request_timeout
@@ -191,6 +227,7 @@ async def run_worker(
         environment=environment,
         sweeper=sweeper,
         refuse_unadvertised_engine=True,
+        guard=guard,
     )
     stopping = asyncio.Event()
 

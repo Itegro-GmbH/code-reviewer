@@ -1,31 +1,38 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Factory-Runner's loop (#854, R1b): announce, claim, run a job like the hosted Control, again.
+"""The local dispatcher of the Factory-Runner (#854, R1b; #974): announce, claim, start a Worker,
+again.
 
-The job is run by the same `JobHost` as the hosted Worker's: the job process with the job on its
-stdin and a minimal environment, the heartbeats, the hard timeout, the lease questions, the masking
-of every line, the delivery with retries, the orderly end on shutdown. What differs is the door into
-the app (`RunnerJobApi`: the runner's credential and the lease token of the claim) and that the
-runner claims by itself instead of being handed a job by a Dispatcher.
+The dispatcher claims like every dispatcher of Runner v2 (ADR 0005): the claim answers with the
+job's id and the credential of its Worker and nothing secret. It hands `{appUrl, jobId, credential}`
+(and, when the job asks for a credential that exists only on this device, that one) to a Worker it
+starts (`sandbox.py`) and waits for it to end. The Worker is the hosted one (`local_worker.py`): it
+fetches the job over the Worker API, runs it through the job host (the job process with the job on
+its stdin and a minimal environment, the heartbeats, the hard timeout, the masking, the delivery
+with retries, the orderly end on a signal) and delivers the result. So the git token and the key of
+the workspace are only ever in the Worker and the containers it starts, never in this process, its
+state or its log.
 
 - `run` ends on a signal, on a revoked credential (exit 4), or, with `--once`, on an update the app
   requires (exit 3).
-- `run --once` ends when one job ran (its exit code), when no job came within the wait (exit 0
-  and a line saying so) or when the app never answered a claim during the whole wait (exit 7, so a
-  VM that never spoke to the app is told from one that found nothing to do; an app that answered
-  once and was lost later is "no job", exit 0).
+- `run --once` ends when one job ran (exit 0 when its Worker did, 1 otherwise), when no job came
+  within the wait (exit 0 and a line saying so) or when the app never answered a claim during the
+  whole wait (exit 7, so a VM that never spoke to the app is told from one that found nothing to do;
+  an app that answered once and was lost later is "no job", exit 0).
 - A runner starts only on a daemon that no other runner uses (exit 9): the containers of a turn have
   fixed names, so one daemon serves one runner until R2. Any container (in any state) or network of
   Control that is not its own makes it stop, and the log names the first one; a lock container with
   a fixed name, taken at the start and removed at the end, makes two runners that start together
   meet before either has made anything. A runner with no identity ends with exit 6.
 
-The loop owns four things the host does not: the credential's renewal between jobs, the claim's
-rhythm and what a claim's failure means (revoked: stop for good; update needed: say so and wait;
-unavailable: wait and try again, longer each time), and the tidying that a hosted VM gets by being
-thrown away (`housekeeping.py`): before a claim whenever a job ended (or the last tidy failed), and
-right after every job, the leftover containers and networks of Control go and `/work` is emptied.
-A runner that cannot tidy does not claim: a job it takes would end `setup_failed`.
+The loop owns what the Worker does not: the credential's renewal between jobs, the claim's rhythm
+and what a claim's failure means (revoked: stop for good; update needed: say so and wait;
+unavailable: wait and try again, longer each time), the start and the stop of the Worker, the claim
+given back when the Worker could not start or ended without a result (`release`), the reaping of a
+Worker whose job the app has ended, and the tidying that a hosted VM gets by being thrown away
+(`housekeeping.py`): before a claim whenever a job ended (or the last tidy failed), and right after
+every job, the leftover containers and networks of Control go and `/work` is emptied. A runner that
+cannot tidy does not claim: a job it takes would end `setup_failed`.
 """
 
 import asyncio
@@ -34,17 +41,22 @@ import random
 import signal
 import socket
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 
 from code_reviewer_runner.factory_runner.app_client import (
+    RELEASE_LAUNCH_FAILED,
+    RELEASE_WORKER_EXITED,
     Announcement,
     AppClient,
+    ClaimedWorker,
     Revoked,
     UpdateNeeded,
 )
 from code_reviewer_runner.factory_runner.base import (
+    AUTH_SUBSCRIPTION,
     EXIT_APP_UNREACHABLE,
     EXIT_CONFIG,
     EXIT_FAILED,
@@ -59,15 +71,10 @@ from code_reviewer_runner.factory_runner.config import (
     CREDENTIAL_FROM_FILE,
     ConfigError,
     RunnerConfig,
+    home_directory,
     runner_identity,
     update_credential,
     with_credential,
-)
-from code_reviewer_runner.factory_runner.disk_budget import (
-    MEASURE_SECONDS,
-    budget_bytes,
-    guard_for,
-    used_bytes,
 )
 from code_reviewer_runner.factory_runner.housekeeping import (
     NO_IDENTITY,
@@ -77,8 +84,14 @@ from code_reviewer_runner.factory_runner.housekeeping import (
     take_lock,
     tidy,
 )
-from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared
+from code_reviewer_runner.factory_runner.sandbox import (
+    ProcessSandbox,
+    RunningWorker,
+    WorkerOutcome,
+    WorkerSandbox,
+    WorkerStart,
+)
 from code_reviewer_runner.factory_runner.selftest import summary
 from code_reviewer_runner.factory_runner.update import (
     Fetch,
@@ -88,12 +101,13 @@ from code_reviewer_runner.factory_runner.update import (
     load_channel,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
-from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
+from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin, load_login
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
-from code_reviewer_runner.job_loop.api import ApiUnavailable, ClaimedJob
+from code_reviewer_runner.job_loop.api import ApiUnavailable
 from code_reviewer_runner.job_loop.clock import Clock, RealClock
-from code_reviewer_runner.job_loop.host import JobEnd, JobHost
+from code_reviewer_runner.job_loop.host import IMPLEMENTER_TERMINATE_GRACE_SECONDS
+from code_reviewer_runner.job_loop.http import ApiError
 from code_reviewer_runner.job_loop.masking import SafeLog, SecretMasker
 from code_reviewer_runner.job_loop.process import ProcessLauncher, SubprocessLauncher
 
@@ -115,6 +129,18 @@ DEFAULT_ONCE_WAIT_SECONDS = 600.0
 # A credential this old is renewed between jobs (the app keeps the previous one until the new one
 # is used once).
 RENEW_AFTER_SECONDS = 7 * 24 * 3600.0
+# #974: how often the local reaper asks the app whether the job of the running Worker is over, and
+# how long a Worker that outlives its job is left (it is delivering its result and ending) before it
+# is ended.
+REAP_CHECK_SECONDS = 60.0
+REAP_GRACE_SECONDS = 45.0
+# What a Worker gets to end after SIGTERM: the job process's grace (`runner_shutdown` is delivered
+# inside it) and a margin for the Worker's own delivery. Under the 150 s of `--stop-timeout`.
+WORKER_STOP_GRACE_SECONDS = IMPLEMENTER_TERMINATE_GRACE_SECONDS + 15.0
+# The lines of a Worker's log the dispatcher repeats in its own when the Worker ended badly.
+WORKER_LOG_LINES = 40
+# The statuses of a job the app still holds for a Worker (`superseded` drains until its lease ends).
+LIVE_JOB_STATUSES = frozenset({"running", "superseded"})
 
 
 @dataclass(frozen=True)
@@ -127,11 +153,29 @@ class Seams:
     launcher: Callable[[float], ProcessLauncher] = SubprocessLauncher
     docker: Callable[[], DockerApi] = DockerApi
     hostname: Callable[[], str] = socket.gethostname
-    # How often the disk budget is measured while a job runs.
-    measure_seconds: float = MEASURE_SECONDS
+    # Where a Worker is started (#974); the default is a process of the runner's own container. The
+    # Firecracker launcher (#978) is another sandbox.
+    sandbox: Callable[[Mapping[str, str], float], WorkerSandbox] | None = None
+    reap_check_seconds: float = REAP_CHECK_SECONDS
+    reap_grace_seconds: float = REAP_GRACE_SECONDS
     # The release channel of the image and how its documents are fetched (`update.py`).
     channel: Callable[[], ReleaseChannel | None] = load_channel
     fetch: Fetch = fetch_https
+
+
+class WorkerEnd(StrEnum):
+    """How the Worker of a job ended, as far as the dispatcher can tell. Stable: callers branch on
+    it."""
+
+    # The Worker ended with exit code 0: it ran the job to its end, or gave it back, or the app
+    # superseded or cancelled it.
+    OK = "ok"
+    # The Worker ended with an error code: its job failed, or its result was not delivered.
+    FAILED = "failed"
+    # The Worker could not be started: the claim was given back (`launch_failed`).
+    NOT_STARTED = "not_started"
+    # The app ended the job and the Worker did not follow: the dispatcher ended it.
+    REAPED = "reaped"
 
 
 class RunnerService:
@@ -141,7 +185,6 @@ class RunnerService:
         environment: Mapping[str, str],
         prepared: Prepared,
         client: AppClient,
-        job_api: RunnerJobApi,
         *,
         logger: logging.Logger | None = None,
         seams: Seams = Seams(),  # noqa: B008
@@ -150,19 +193,18 @@ class RunnerService:
         self._environment = environment
         self._prepared = prepared
         self._client = client
-        self._api = job_api
         self._seams = seams
         self._clock = seams.clock
-        credentials = [config.credential] if config.credential else []
-        # #856: a login that only the environment holds is handed to the job processes; no line of
-        # the runner's log may carry it.
-        if login := prepared.environment.get(OAUTH_VARIABLE):
-            credentials.append(login)
-        self._masker = SecretMasker(credentials)
+        # The runner's own credential, and the login of this device once a job needed it: neither
+        # may be in a line of the log. The dispatcher holds no other secret (#974).
+        self._masker = SecretMasker([config.credential] if config.credential else [])
         self._logger = logger or logging.getLogger(LOGGER_NAME)
         self._log = SafeLog(self._logger, self._masker)
         self._stopping = asyncio.Event()
-        self._host: JobHost | None = None
+        self._sandbox: WorkerSandbox | None = None
+        # The Worker that runs now, and the task that ends it when the dispatcher is told to stop.
+        self._worker: RunningWorker | None = None
+        self._stopper: asyncio.Task[None] | None = None
         self._announced: Announcement | None = None
         # The machine is tidied before the first claim and again whenever a job has ended.
         self._untidy = True
@@ -204,10 +246,11 @@ class RunnerService:
             await self._unlock()
 
     def stop(self) -> None:
-        """A signal: stop claiming, and give back the job that runs (`runner_shutdown`)."""
+        """A signal: stop claiming, and end the Worker that runs: it gives its job back
+        (`runner_shutdown`) within its grace and is killed after it."""
         self._stopping.set()
-        if self._host is not None:
-            self._host.request_hard_stop()
+        if self._worker is not None and self._stopper is None:
+            self._stopper = asyncio.get_running_loop().create_task(self._worker.stop())
 
     async def _run(self, once: bool, wait_seconds: float) -> int:
         other = await self._other_runner()
@@ -227,7 +270,7 @@ class RunnerService:
                 await self._wait(NOT_READY_WAIT_SECONDS)
             return EXIT_NOT_READY
         await asyncio.to_thread(self._updates.tidy_references)
-        self._host = self._make_host()
+        self._sandbox = self._make_sandbox()
         started = self._clock.monotonic()
         failures = 0
         # The app answered a claim at least once (a job, or none, or an update it requires).
@@ -289,11 +332,7 @@ class RunnerService:
                 continue
             end = await self._run_job(claimed)
             if once:
-                return (
-                    EXIT_OK
-                    if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED)
-                    else EXIT_FAILED
-                )
+                return EXIT_OK if end is WorkerEnd.OK else EXIT_FAILED
         self._log.info("stopped")
         return EXIT_OK
 
@@ -353,61 +392,155 @@ class RunnerService:
             )
         return None
 
-    def _make_host(self) -> JobHost:
-        return JobHost(
-            self._prepared.settings,
-            self._api,
-            self._seams.launcher(self._prepared.settings.terminate_grace),
-            masker=self._masker,
-            clock=self._clock,
-            logger=self._logger,
-            environment=dict(self._prepared.environment),
-            guard=self._disk_guard(),
+    def _make_sandbox(self) -> WorkerSandbox:
+        make = self._seams.sandbox
+        if make is not None:
+            return make(self._prepared.environment, WORKER_STOP_GRACE_SECONDS)
+        return ProcessSandbox(
+            self._seams.launcher(WORKER_STOP_GRACE_SECONDS),
+            self._prepared.environment,
+            grace_seconds=WORKER_STOP_GRACE_SECONDS,
         )
 
-    def _disk_guard(self) -> Callable[[], Awaitable[str]] | None:
-        """The job host's guard for the disk budget (`disk_budget.py`); none without `diskGb`."""
-        limit = budget_bytes(self._config.limits)
-        if limit is None:
-            return None
-        tidy_seams = self._tidy
-        return guard_for(
-            limit,
-            lambda: used_bytes(tidy_seams.api(), tidy_seams.work_dir, tidy_seams.runner_id),
-            interval=self._seams.measure_seconds,
-        )
+    def _local_environment(self, claimed: ClaimedWorker) -> dict[str, str]:
+        """The one credential of this device the job needs, as the variables the job reads, or
+        nothing.
 
-    async def _run_job(self, claimed: ClaimedJob) -> JobEnd:
-        assert self._host is not None
-        self._api.hold(claimed.id, claimed.lease_token)
+        Read from where the device keeps it (the token file of R3,
+        `implementer/claude_code/login.py`) for this job and handed to the Worker on its standard
+        input: never through the app, and never to a Worker whose job does not ask for it (`access`
+        of the claim: the harness and the auth). A login that cannot be used is said in words, and
+        the Worker fails the job with its own reason."""
+        access = claimed.access
+        if access is None or access.auth != AUTH_SUBSCRIPTION:
+            return {}
+        environment = self._environment
+        login = load_login(environment, home_directory(environment))
+        if not isinstance(login, ClaudeLogin):
+            self._log.warning(
+                "job %s: this device has no usable login: %s", claimed.job_id, login.text
+            )
+            return {}
+        self._masker.add("login", [login.secret])
+        return login.environment()
+
+    async def _run_job(self, claimed: ClaimedWorker) -> WorkerEnd:
+        """Start the Worker of the claim, watch it, and give the claim back when it did not do its
+        job."""
+        assert self._sandbox is not None
         try:
-            # Which features this app lists decides, for this job, whether the host opens the
-            # snapshot channel and downloads the stored session (`RunnerJobApi.supports_snapshot`).
-            # The job does not depend on it: whatever goes wrong here, it runs without a snapshot.
-            try:
-                await self._api.check_app(claimed.id)
-            except Exception as error:
-                self._log.warning(
-                    "job %s: the features of the app could not be read (%s): running without "
-                    "the session snapshot",
-                    claimed.id,
-                    type(error).__name__,
-                )
-            else:
-                if not self._api.features_listed:
-                    self._log.warning(
-                        "job %s: the app listed no features: running without the session snapshot",
-                        claimed.id,
-                    )
-            end = await self._host.run_job(claimed)
+            end = await self._supervise(claimed)
         finally:
-            self._api.forget(claimed.id)
+            self._worker = None
+            self._stopper = None
             # The turn's containers hold the workspace's key and its work holds the repository:
             # neither stays until the next claim. A failure here is found again before that claim.
             self._untidy = True
             await self._tidy_up(before_claim=False)
-        self._log.info("job %s ended: %s", claimed.id, end.value)
+        self._log.info("job %s ended: %s", claimed.job_id, end.value)
         return end
+
+    async def _supervise(self, claimed: ClaimedWorker) -> WorkerEnd:
+        assert self._sandbox is not None
+        start = WorkerStart(
+            self._config.url,
+            claimed.job_id,
+            claimed.credential,
+            self._local_environment(claimed),
+        )
+        try:
+            worker = await self._sandbox.start(start)
+        except Exception as error:
+            # Class name only: the text of an error may hold part of the hand-over.
+            self._log.error(
+                "job %s: the Worker could not be started (%s); giving the job back",
+                claimed.job_id,
+                type(error).__name__,
+            )
+            await self._give_back(claimed, RELEASE_LAUNCH_FAILED)
+            return WorkerEnd.NOT_STARTED
+        self._worker = worker
+        if self._stopping.is_set() and self._stopper is None:
+            self._stopper = asyncio.get_running_loop().create_task(worker.stop())
+        reaper = asyncio.ensure_future(self._reap(claimed, worker))
+        try:
+            outcome = await worker.wait()
+        finally:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
+            if self._stopper is not None:
+                await asyncio.gather(self._stopper, return_exceptions=True)
+        reaped = reaper.done() and not reaper.cancelled() and reaper.result() is True
+        if outcome.exit_code == 0 and not reaped:
+            return WorkerEnd.OK
+        self._log_worker(claimed, outcome)
+        if reaped:
+            return WorkerEnd.REAPED
+        # The Worker ended with an error. If it had delivered a result the app answers "ended" and
+        # nothing changes; if it had not, the claim goes back to the queue (an attempt is counted).
+        await self._give_back(claimed, RELEASE_WORKER_EXITED)
+        return WorkerEnd.FAILED
+
+    def _log_worker(self, claimed: ClaimedWorker, outcome: WorkerOutcome) -> None:
+        """What the Worker said when it ended badly, in the dispatcher's log: the lines are the
+        Worker's own, already masked by it (it knows the job's secrets, this process does not),
+        and masked again here."""
+        self._log.warning(
+            "job %s: the Worker ended with exit code %d", claimed.job_id, outcome.exit_code
+        )
+        lines = outcome.log_tail.splitlines()[-WORKER_LOG_LINES:]
+        for line in lines:
+            self._log.warning("worker: %s", line)
+
+    async def _give_back(self, claimed: ClaimedWorker, reason: str) -> None:
+        """Release the claim with the credential of the job. Best effort: a claim that cannot be
+        given back runs out by itself (the lease), and the job is tried again then."""
+        try:
+            answer = await asyncio.to_thread(
+                self._client.release, claimed.job_id, claimed.credential, reason
+            )
+        except Revoked:
+            self._log.warning(
+                "job %s: the claim could not be given back: the runner is revoked", claimed.job_id
+            )
+        except ApiError as error:
+            self._log.warning(
+                "job %s: the claim could not be given back now (%s)",
+                claimed.job_id,
+                type(error).__name__,
+            )
+        else:
+            self._log.info(
+                "job %s: the claim was given back (%s): %s", claimed.job_id, reason, answer
+            )
+
+    async def _reap(self, claimed: ClaimedWorker, worker: RunningWorker) -> bool:
+        """The local reaper (#974): while the Worker runs, ask the app now and then whether the job
+        is over. A Worker that is still there a while after the app ended the job (a hung process
+        that no heartbeat will reach) is ended, so the slot and the machine are free. True when
+        it was."""
+        over_since: float | None = None
+        clock = self._clock
+        while True:
+            await clock.sleep(self._seams.reap_check_seconds)
+            try:
+                status = await asyncio.to_thread(self._client.job_state, claimed.job_id)
+            except (Revoked, ApiError):
+                continue  # the main loop meets a revoked credential at its next claim
+            if status in LIVE_JOB_STATUSES:
+                over_since = None
+                continue
+            now = clock.monotonic()
+            over_since = now if over_since is None else over_since
+            if now - over_since < self._seams.reap_grace_seconds:
+                continue
+            self._log.warning(
+                "job %s is over (%s) and its Worker is still running: ending it",
+                claimed.job_id,
+                status or "unknown",
+            )
+            await worker.stop()
+            return True
 
     async def _tidy_up(self, *, before_claim: bool) -> bool:
         """Remove the leftovers of Control and empty the work folders. True when the machine is
@@ -460,7 +593,6 @@ class RunnerService:
         self._config = with_credential(config, credential, now)
         self._masker.add("credential", [credential])
         self._client.use_credential(credential)
-        self._api.use_credential(credential)
         self._log.info("the runner's credential was renewed")
 
     def _write_credential(self, now: float, credential: str | None = None) -> bool:

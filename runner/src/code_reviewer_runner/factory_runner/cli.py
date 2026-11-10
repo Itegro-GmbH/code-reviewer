@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""`factory-runner`: the command of the Factory-Runner (#854, R1b).
+"""`factory-runner`: the command of the Factory-Runner (#854, R1b), the local dispatcher of Runner
+v2 (#974).
 
 - `register`: exchanges a registration token for the runner's credential and writes the
   configuration (file mode 0600). The token comes from a file (`--token-file`, `-` for the standard
@@ -74,7 +75,6 @@ from code_reviewer_runner.factory_runner.config import (
     load_config,
     save_config,
 )
-from code_reviewer_runner.factory_runner.job_api import RunnerJobApi
 from code_reviewer_runner.factory_runner.prepare import Prepared, prepare
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult, summary
 from code_reviewer_runner.factory_runner.service import (
@@ -434,7 +434,6 @@ def _run(
         env,
         prepared,
         seams.client(config.url, config.credential),
-        RunnerJobApi(config.url, config.credential),
         logger=logging.getLogger(LOGGER_NAME),
         seams=Seams(docker=seams.docker),
     )
