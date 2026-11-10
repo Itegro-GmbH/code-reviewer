@@ -3,6 +3,7 @@
 // What a customer's runner is handed depends on its manifest (#973): a turn goes only to a runner with an entry that has the harness, the auth and the model
 // the turn asks for, and the pairing of the rings lists the same runners as the claim takes (one rule, `accessRule`). A later announcement replaces the
 // last one, so an entry that was withdrawn no longer matches. Against a real Postgres with the harness of the runner API.
+import { sql } from "kysely";
 import { describe, expect, it } from "vitest";
 import { createRunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
 import { createRunnerDispatchesRepository } from "../db/repositories/runner-dispatches-repository.ts";
@@ -273,4 +274,144 @@ describe("the claim and the pairing of the rings", () => {
       }).toEqual({ listed: expected, claimed: expected });
     },
   );
+});
+
+const MANAGED_OPENCODE: HarnessAccess = {
+  harness: "opencode",
+  version: "1.19.0",
+  auth: "managed",
+};
+const CATALOG = { entryId: "entry-1" };
+
+describe("the manifest as the rings and the claim read it", () => {
+  const listed = async (h: Harness, jobId: string) =>
+    (
+      await createRunnerDispatchesRepository(h.db).listDue(h.clock.now(), 10, {
+        jobId,
+      })
+    ).map((pair) => pair.runnerId);
+
+  // #973-T04
+  it("reads the old map form in the rings as the claim does: ready entries only, OpenCode on a key of the app, Claude Code on a subscription", async () => {
+    const h = await start();
+    const box = await runner(h, manifestOf());
+    await sql`update runners set manifest = ${JSON.stringify({
+      harnesses: {
+        opencode: { version: "1.19.0", ready: true },
+        "claude-code": { version: "2.1.311", ready: true },
+        "custom/idle": { version: "0.1", ready: false },
+      },
+      capabilities: [],
+    })} where id = ${box.runnerId}`.execute(h.db);
+    const own = await h.enqueueTurn({
+      modelChoice: OWN,
+      runnerEnvironment: ENV,
+    });
+    const opus = await h.enqueueTurn({
+      modelChoice: OPUS,
+      runnerEnvironment: ENV,
+      profile: { ...PROFILE, harness: "claude-code" },
+    });
+
+    expect(await listed(h, own.job.id)).toEqual([box.runnerId]);
+    expect(await listed(h, opus.job.id)).toEqual([box.runnerId]);
+    const claimed = await h.claim(claimOf(box.credential));
+    expect(claimed.status).toBe(200);
+    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(own.job.id);
+  });
+
+  // #973-T01
+  it("lists and claims the other runners when one runner's stored manifest is no JSON", async () => {
+    const h = await start();
+    const broken = await runner(h, manifestOf());
+    const good = await runner(h, manifestOf());
+    await sql`update runners set manifest = 'not json {' where id = ${broken.runnerId}`.execute(
+      h.db,
+    );
+    const turn = await h.enqueueTurn({
+      modelChoice: OWN,
+      runnerEnvironment: ENV,
+    });
+
+    expect(await listed(h, turn.job.id)).toEqual([good.runnerId]);
+    // A manifest that reads as none is no runner: it takes nothing, and the other one still takes the turn.
+    expect((await h.claim(claimOf(broken.credential))).status).toBe(204);
+    const claimed = await h.claim(claimOf(good.credential));
+    expect(claimed.status).toBe(200);
+    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(turn.job.id);
+  });
+
+  // #973-T01
+  it("lists and claims the other turns when one turn's stored model choice is no JSON", async () => {
+    const h = await start();
+    const box = await runner(h, manifestOf());
+    const broken = await h.enqueueTurn({
+      modelChoice: OWN,
+      runnerEnvironment: ENV,
+    });
+    const good = await h.enqueueTurn({
+      modelChoice: OWN,
+      runnerEnvironment: ENV,
+    });
+    await sql`update implementer_turns set model_choice = 'not json {' where job_id = ${broken.job.id}`.execute(
+      h.db,
+    );
+
+    const pairs = await createRunnerDispatchesRepository(h.db).listDue(
+      h.clock.now(),
+      10,
+    );
+    expect(pairs.map((pair) => [pair.jobId, pair.runnerId])).toEqual([
+      [good.job.id, box.runnerId],
+    ]);
+    const claimed = await h.claim(claimOf(box.credential));
+    expect(claimed.status).toBe(200);
+    expect(((await claimed.json()) as ClaimResponse).job.id).toBe(good.job.id);
+    expect(await h.queue.get(broken.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  it("does not hand the platform's Dispatcher a turn whose stored model choice is no JSON, and still hands it the next one", async () => {
+    const h = await start();
+    const broken = await h.enqueueTurn({ modelChoice: CATALOG });
+    const good = await h.enqueueTurn({ modelChoice: CATALOG });
+    await sql`update implementer_turns set model_choice = 'not json {' where job_id = ${broken.job.id}`.execute(
+      h.db,
+    );
+
+    const claimed = await h.queue.claimNext("runner-a", ["implementer"]);
+
+    expect(claimed?.job.id).toBe(good.job.id);
+  });
+
+  // #973-T02
+  it("never hands a customer's runner a managed turn, whatever its stored manifest says, and issues no key", async () => {
+    const h = await start();
+    // A row written by hand: the registration refuses `managed`, the table does not.
+    const handWritten = await runner(h, manifestOf(MANAGED_OPENCODE));
+    const turn = await h.enqueueTurn({
+      modelChoice: CATALOG,
+      runnerEnvironment: ENV,
+    });
+
+    expect((await h.claim(claimOf(handWritten.credential))).status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+    expect(await listed(h, turn.job.id)).toEqual([]);
+    // Even a claim that is handed the managed entry directly (past the stored manifest) takes nothing.
+    expect(
+      await h.queue.claimNext(
+        customerRunnerId(handWritten.runnerId),
+        ["implementer"],
+        {
+          customerRunner: {
+            workspaceId: h.workspaceId,
+            labels: ["box"],
+            access: [MANAGED_OPENCODE],
+          },
+        },
+      ),
+    ).toBeUndefined();
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+  });
 });

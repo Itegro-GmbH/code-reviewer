@@ -182,28 +182,35 @@ export function entriesParam(
   return sql`${JSON.stringify(entries)}::jsonb`;
 }
 
-/** The entries of a stored manifest (`runners.manifest`, JSON text) for `accessRule`: none when the text holds no list of entries. */
-export function storedEntries(manifestColumn: string): RawBuilder<unknown> {
-  const manifest = sql`${sql.ref(manifestColumn)}::jsonb`;
-  return sql`(case when jsonb_typeof(${manifest} -> 'harnesses') = 'array' then ${manifest} -> 'harnesses' else '[]'::jsonb end)`;
+/**
+ * What a customer's runner can run: its announced entries without any `managed` one. The registration refuses `managed` (`reservedAccessIssues`), but a
+ * stored row is read again at every claim and ring, and the platform's keys must not depend on what the table once held (a row written by hand, by an
+ * older release or by a bug). The claim and the pairing of the rings both read the manifest with `manifestFromText` and pass it through this.
+ */
+export function customerAccess(
+  entries: readonly HarnessAccess[],
+): HarnessAccess[] {
+  return entries.filter((entry) => entry.auth !== MANAGED_AUTH);
 }
 
-/** The three expressions of the demand of a turn of the Implementer, by the alias of its row in `implementer_turns` (the same derivation as `demandOfTurn`). */
+/** The expressions of the demand of a turn of the Implementer, by the alias of its row in `implementer_turns` (the same derivation as `demandOfTurn`). */
 function turnDemand(turn: string) {
   const harness = sql`coalesce(${sql.ref(`${turn}.profile_harness`)}, ${OPENCODE_HARNESS})`;
-  const choice = sql`(${sql.ref(`${turn}.model_choice`)}::jsonb)`;
+  // `json_or_null`: one turn whose stored choice is no JSON matches no dispatcher (see `accessRule`) and does not fail the statement for the others.
+  const choice = sql`json_or_null(${sql.ref(`${turn}.model_choice`)})`;
   const subscription = sql`${harness} = any(array[${sql.join(
     SUBSCRIPTION_HARNESSES.map((name) => sql`${name}`),
     sql`, `,
   )}]::text[])`;
   const auth = sql`(case when ${subscription} then 'subscription' when ${choice} ->> 'entryId' is not null then ${MANAGED_AUTH} else 'app-key' end)`;
   const model = sql`(case when ${subscription} then ${choice} ->> 'model' else null end)`;
-  return { harness, auth, model };
+  return { harness, auth, model, choice };
 }
 
 /**
- * The rule in the database: the dispatcher whose entries are `entries` (a jsonb list, from `entriesParam` or `storedEntries`) can run the turn in the
- * row `turn` of `implementer_turns`. The claim and the pairing of the rings both write their condition with this and nothing else.
+ * The rule in the database: the dispatcher whose entries are `entries` (a jsonb list from `entriesParam`) can run the turn in the row `turn` of
+ * `implementer_turns`. The claim and the pairing of the rings both write their condition with this and nothing else. A turn whose `model_choice` is
+ * not a JSON object is nobody's.
  */
 export function accessRule(
   entries: RawBuilder<unknown>,
@@ -212,7 +219,8 @@ export function accessRule(
   const demand = turnDemand(turn);
   return sql<boolean>`exists (
     select 1 from jsonb_array_elements(${entries}) as announced
-    where announced ->> 'harness' = ${demand.harness}
+    where jsonb_typeof(${demand.choice}) = 'object'
+      and announced ->> 'harness' = ${demand.harness}
       and announced ->> 'auth' = ${demand.auth}
       and (${demand.model} is null
         or announced -> 'models' is null

@@ -109,6 +109,7 @@ import { migration as addWorkflowRunDiscard } from "./20261107200000_add_workflo
 import { migration as addTrackerItemsWriteIndex } from "./20261107230000_add_tracker_items_write_index.ts";
 import { migration as addJobRequiredLabels } from "./20261110090000_add_job_required_labels.ts";
 import { migration as addRunnerDelivery } from "./20261110120000_add_runner_delivery.ts";
+import { migration as createJsonOrNull } from "./20261110170000_create_json_or_null.ts";
 import { migration as rewriteRunnerManifests } from "./20261110180000_rewrite_runner_manifests.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
@@ -246,6 +247,7 @@ const migrations: Record<string, Migration> = {
   "20261107230000_add_tracker_items_write_index": addTrackerItemsWriteIndex,
   "20261110090000_add_job_required_labels": addJobRequiredLabels,
   "20261110120000_add_runner_delivery": addRunnerDelivery,
+  "20261110170000_create_json_or_null": createJsonOrNull,
   "20261110180000_rewrite_runner_manifests": rewriteRunnerManifests,
 };
 

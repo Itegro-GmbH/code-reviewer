@@ -9,7 +9,8 @@
 // Not expand-only in the strict sense: an instance of the previous release that still runs during the deployment reads a list as "no harness"
 // and hands that runner nothing until its next announcement. Tolerated here because no runner image is published yet (the table holds the
 // development runners of the team) and the runner announces at every start. The table is small, so the update holds its lock only briefly; the
-// wait for the lock is bounded like in the migrations before. `down` writes the map form again.
+// wait for the lock is bounded like in the migrations before. `down` writes the map form again. A row whose text is no JSON is left as it is
+// (`json_or_null`, the migration before this one): it must not stop the others from being rewritten.
 import { sql } from "kysely";
 import type { Migration } from "kysely/migration";
 
@@ -34,10 +35,10 @@ export const migration: Migration = {
               'version', announced.value ->> 'version',
               'auth', case when announced.key = 'claude-code' then 'subscription' else 'app-key' end)
             order by announced.key)
-          from jsonb_each(manifest::jsonb -> 'harnesses') as announced
+          from jsonb_each(json_or_null(manifest) -> 'harnesses') as announced
           where announced.value ->> 'ready' = 'true'), '[]'::jsonb),
-        'capabilities', coalesce(manifest::jsonb -> 'capabilities', '[]'::jsonb))::text
-      where jsonb_typeof(manifest::jsonb -> 'harnesses') = 'object'`.execute(
+        'capabilities', coalesce(json_or_null(manifest) -> 'capabilities', '[]'::jsonb))::text
+      where jsonb_typeof(json_or_null(manifest) -> 'harnesses') = 'object'`.execute(
       db,
     );
 
@@ -52,8 +53,10 @@ export const migration: Migration = {
           select jsonb_object_agg(
             announced ->> 'harness',
             jsonb_build_object('version', announced ->> 'version', 'ready', true))
-          from jsonb_array_elements(manifest::jsonb -> 'harnesses') as announced), '{}'::jsonb),
-        'capabilities', coalesce(manifest::jsonb -> 'capabilities', '[]'::jsonb))::text
-      where jsonb_typeof(manifest::jsonb -> 'harnesses') = 'array'`.execute(db);
+          from jsonb_array_elements(json_or_null(manifest) -> 'harnesses') as announced), '{}'::jsonb),
+        'capabilities', coalesce(json_or_null(manifest) -> 'capabilities', '[]'::jsonb))::text
+      where jsonb_typeof(json_or_null(manifest) -> 'harnesses') = 'array'`.execute(
+      db,
+    );
   },
 };

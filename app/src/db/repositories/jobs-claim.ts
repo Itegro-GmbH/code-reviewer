@@ -16,6 +16,7 @@ import { errorCode, UNIQUE_VIOLATION } from "../errors.ts";
 import type { Database, JobsTable } from "../schema.ts";
 import {
   accessRule,
+  customerAccess,
   entriesParam,
   PLATFORM_ACCESS,
   type HarnessAccess,
@@ -149,8 +150,12 @@ function claimQuery(
   const labelRule = sql`and cardinality(${required}) > 0 and ${required} <@ ${labels}`;
   // #973: what the caller can run. A job with a turn is taken by a caller one entry of whose manifest has the harness, the auth and the model of
   // the turn; a job with no turn (a review) asks for no harness here, as before.
+  // The platform's keys are the platform identity's alone: a `managed` entry in the manifest a customer's runner holds (a row written by hand or by an
+  // older release) is dropped before it is matched, so it is never handed a managed turn, and so never a key.
   const entries = entriesParam(
-    scope === undefined ? PLATFORM_ACCESS : scope.customerRunner.access,
+    scope === undefined
+      ? PLATFORM_ACCESS
+      : customerAccess(scope.customerRunner.access),
   );
   const routing =
     scope === undefined

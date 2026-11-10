@@ -109,6 +109,11 @@ There is **one rule**: `accessRule` (`app/src/runner-identity/access.ts`) is the
 (`runner-dispatches-repository.ts`) use, and `accessMatches` is the same rule in memory, for the validator; `access.integration.test.ts` runs every manifest against every turn through both
 and demands the same answer.
 
+There is also **one reading** of the stored manifest: the claim and the pairing of the rings both read `runners.manifest` with `manifestFromText` (the list form and the old
+map form; a text that is none reads as no entry) and pass it through `customerAccess`, which drops any `managed` entry (the platform's keys are the platform identity's alone, whatever
+a stored row says). The database only matches the entries it is given. A row that is not JSON, in `runners.manifest` or in a turn's `model_choice` (read through `json_or_null`),
+matches nothing and never fails the query for the other jobs.
+
 ### Routing
 
 One rule routes every job to every dispatcher (Runner v2, #971, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)): **a job requires labels
@@ -273,11 +278,11 @@ its model is managed and which harness it runs with. Since #919 the environment 
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `runner_needs_own_key` | A profile (or an agent step) runs a **managed model** in an environment of the kind `runner`. Managed models run on platform VMs only. |
 | `harness_needs_runner` | A profile (or an agent step) has a **harness other than OpenCode** in an environment that is not a runner's.                            |
-| `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). With no such runner online nothing is said: the turn waits for one. |
+| `no_runner_announces`  | A profile (or an agent step) in a runner environment asks for a harness, auth and model that **no online runner of the workspace with the environment's labels announces** (#973). A **warning**, not an error (`severity: "warning"`, listed in `warnings`; the save goes through): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. With no such runner online nothing is said: the turn waits for one. |
 
 A profile names its harness (`opencode` or `claude-code`, [`profiles.md`](profiles.md)); a harness other than OpenCode runs only on a runner.
 
-The validator offers only combinations some online runner of the workspace announces (#973): it asks the runners that are online (heard from within two minutes, base at the minimum) and have
+The validator says which combinations no online runner of the workspace announces (#973, as a warning that never stops a save): it asks the runners that are online (heard from within two minutes, base at the minimum) and have
 every label of the environment whether one has an entry for the profile's harness, auth and model (the claim's rule, `accessMatches`). A managed model is `runner_needs_own_key` and is not
 reported a second time; a model of the workspace's own key is announced by every runner with OpenCode.
 

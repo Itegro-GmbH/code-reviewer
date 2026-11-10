@@ -15,6 +15,8 @@ export type ValidateAnswer = {
   valid: boolean;
   errors: Problem[];
   truncated: boolean;
+  /** What is said and does not stop a save (#973). Left out when there is none. */
+  warnings?: Problem[];
   steps: number;
   budgetUsd?: number;
 };

@@ -2,17 +2,16 @@
 
 // The rule of what a dispatcher can run (#973) in the database against the same rule in memory: every manifest against every turn, the two answers
 // must be the same. The claim and the pairing of the rings both write their condition with `accessRule`, so this is the proof that there is one
-// rule. A real Postgres, but no table of the app: the turn is a row of `values`.
+// rule. A real Postgres with the migrated schema (the rule calls `json_or_null`), but no row of the app: the turn is a row of `values`.
 import { sql } from "kysely";
 import { afterAll, describe, expect, it } from "vitest";
-import { createEmptyTestDatabase } from "../test-support/test-database.ts";
+import { createTestDatabase } from "../test-support/test-database.ts";
 import {
   accessMatches,
   accessRule,
   demandOfTurn,
   entriesParam,
   PLATFORM_ACCESS,
-  storedEntries,
   type HarnessAccess,
 } from "./access.ts";
 
@@ -84,14 +83,14 @@ const TURNS: Record<
 };
 
 describe("the rule in the database and in memory", () => {
-  const databases: Awaited<ReturnType<typeof createEmptyTestDatabase>>[] = [];
+  const databases: Awaited<ReturnType<typeof createTestDatabase>>[] = [];
   afterAll(async () => {
     for (const database of databases) await database.db.destroy();
   });
 
   // #973-T01
   it("gives the same answer for every manifest against every turn", async () => {
-    const database = await createEmptyTestDatabase();
+    const database = await createTestDatabase();
     databases.push(database);
     let compared = 0;
     let taken = 0;
@@ -131,31 +130,29 @@ describe("the rule in the database and in memory", () => {
     expect(taken).toBeLessThan(60);
   });
 
-  // #973-T04
-  it("reads the entries of a stored manifest: a list, and nothing from the old map form or from text that holds no list", async () => {
-    const database = await createEmptyTestDatabase();
+  // #973-T01
+  it("takes a turn whose stored choice is no JSON object for nobody's, and does not fail for the turns beside it", async () => {
+    const database = await createTestDatabase();
     databases.push(database);
-    const turn = sql`(values (${null}::text, ${JSON.stringify({ provider: "anthropic", model: "m" })}::text)) as t(profile_harness, model_choice)`;
-    const stored = async (manifest: string) => {
-      const { rows } = await sql<{ ok: boolean }>`
-        select ${accessRule(storedEntries("r.manifest"), "t")} as ok
-        from ${turn}, (values (${manifest}::text)) as r(manifest)`.execute(
-        database.db,
-      );
-      return rows[0]?.ok;
-    };
+    const { rows } = await sql<{ name: string; ok: boolean }>`
+      select t.name as name, ${accessRule(entriesParam([OPENCODE]), "t")} as ok
+      from (values
+        ('good', ${null}::text, ${JSON.stringify({ provider: "anthropic", model: "m" })}::text),
+        ('broken', ${null}::text, 'not json {'),
+        ('empty', ${null}::text, ''),
+        ('a list', ${null}::text, '[1]'),
+        ('a number', ${null}::text, '5'),
+        ('also good', ${"opencode"}::text, ${JSON.stringify({ provider: "openai", model: "gpt-5" })}::text)
+      ) as t(name, profile_harness, model_choice)
+      order by t.name`.execute(database.db);
 
-    expect(await stored(JSON.stringify({ harnesses: [OPENCODE] }))).toBe(true);
-    expect(await stored(JSON.stringify({ harnesses: [] }))).toBe(false);
-    expect(await stored(JSON.stringify({ harnesses: [CLAUDE] }))).toBe(false);
-    // A row the migration has not rewritten yet (the old map) matches nothing instead of failing the statement.
-    expect(
-      await stored(
-        JSON.stringify({
-          harnesses: { opencode: { version: "1", ready: true } },
-        }),
-      ),
-    ).toBe(false);
-    expect(await stored(JSON.stringify({ capabilities: [] }))).toBe(false);
+    expect(Object.fromEntries(rows.map((row) => [row.name, row.ok]))).toEqual({
+      "a list": false,
+      "a number": false,
+      "also good": true,
+      broken: false,
+      empty: false,
+      good: true,
+    });
   });
 });

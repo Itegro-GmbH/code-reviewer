@@ -151,17 +151,33 @@ describe("what the runners of the workspace announce (#973)", () => {
     };
   }
 
+  const resultOf = (
+    resolver: WorkflowResolver,
+    profile: string,
+    environment: string,
+  ) => validateWorkflow(workflow(profile, environment), resolver);
   const codesWith = (
     resolver: WorkflowResolver,
     profile: string,
     environment: string,
   ) =>
-    validateWorkflow(workflow(profile, environment), resolver).errors.map(
-      (e) => [e.path, e.code],
-    );
+    resultOf(resolver, profile, environment).errors.map((e) => [
+      e.path,
+      e.code,
+    ]);
+  const warningsWith = (
+    resolver: WorkflowResolver,
+    profile: string,
+    environment: string,
+  ) =>
+    (resultOf(resolver, profile, environment).warnings ?? []).map((e) => [
+      e.path,
+      e.code,
+      e.severity,
+    ]);
 
   // #973-T01
-  it("refuses a combination that no online runner with the labels of the environment announces", () => {
+  it("warns, and does not refuse, when no online runner with the labels of the environment announces the combination", () => {
     const resolver = resolverWith(() => [
       {
         labels: ["box"],
@@ -169,25 +185,38 @@ describe("what the runners of the workspace announce (#973)", () => {
       },
     ]);
 
-    expect(codesWith(resolver, "opus", "box")).toEqual([
-      ["/steps/0/environment", "no_runner_announces"],
+    // A runner that is asleep, or that withdrew the entry for a while (a rate limit), must never stop a save.
+    expect(resultOf(resolver, "opus", "box")).toMatchObject({ valid: true });
+    expect(codesWith(resolver, "opus", "box")).toEqual([]);
+    expect(warningsWith(resolver, "opus", "box")).toEqual([
+      ["/steps/0/environment", "no_runner_announces", "warning"],
     ]);
+    const warned = resultOf(resolver, "opus", "box").warnings?.[0];
+    expect(warned?.message).toContain("claude-code");
     expect(codesWith(resolver, "own", "box")).toEqual([]);
+    expect(warningsWith(resolver, "own", "box")).toEqual([]);
   });
 
   // #973-T01
-  it("accepts it once a runner announces the model, or any model", () => {
-    for (const entry of [{ ...CLAUDE, models: ["opus", "sonnet"] }, CLAUDE])
-      expect(
-        codesWith(
-          resolverWith(() => [{ labels: ["box"], access: [OPENCODE, entry] }]),
-          "opus",
-          "box",
-        ),
-      ).toEqual([]);
+  it("is quiet once a runner announces the model, or any model", () => {
+    for (const entry of [{ ...CLAUDE, models: ["opus", "sonnet"] }, CLAUDE]) {
+      const resolver = resolverWith(() => [
+        { labels: ["box"], access: [OPENCODE, entry] },
+      ]);
+      expect(codesWith(resolver, "opus", "box")).toEqual([]);
+      expect(warningsWith(resolver, "opus", "box")).toEqual([]);
+    }
   });
 
   it("says nothing when no runner with the labels is online, or the resolver does not know the runners", () => {
+    expect(
+      warningsWith(
+        resolverWith(() => []),
+        "opus",
+        "box",
+      ),
+    ).toEqual([]);
+    expect(warningsWith(resolverWith(undefined), "opus", "box")).toEqual([]);
     expect(
       codesWith(
         resolverWith(() => []),

@@ -114,6 +114,35 @@ describe("the runner manifest migration", () => {
     await db.destroy();
   });
 
+  // #973-T04
+  it("leaves a row whose text is no JSON alone and still rewrites the others", async () => {
+    const { db } = await createEmptyTestDatabase();
+    await migrateToLatest(
+      db,
+      upTo((name) => name < THIS),
+    );
+    await seed(db, {
+      "r-broken": "not json {",
+      "r-map": JSON.stringify({
+        harnesses: { opencode: { version: "1", ready: true } },
+      }),
+    });
+
+    await migrateToLatest(
+      db,
+      upTo((name) => name <= THIS),
+    );
+
+    const { rows } = await sql<{ id: string; manifest: string }>`
+      select id, manifest from runners order by id`.execute(db);
+    expect(rows[0]).toEqual({ id: "r-broken", manifest: "not json {" });
+    expect(JSON.parse(rows[1]?.manifest ?? "")).toEqual({
+      harnesses: [{ harness: "opencode", version: "1", auth: "app-key" }],
+      capabilities: [],
+    });
+    await db.destroy();
+  });
+
   it("is applied once: running it again changes nothing", async () => {
     const { db } = await createEmptyTestDatabase();
     await migrateToLatest(

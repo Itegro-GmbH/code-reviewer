@@ -84,6 +84,8 @@ export type ProfileCheck = {
   errors: Issue[];
   /** Whether more problems were found than `errors` lists. */
   truncated: boolean;
+  /** What is said and does not stop a save (`severity: "warning"`, #973), in the shape of an error. Left out when there is none. */
+  warnings?: Issue[];
   /** The profile, when valid. */
   profile?: ProfileDocument;
 };

@@ -98,8 +98,8 @@ App** (the Worker API, `crj_`, everywhere).
   The start of a task and the validator keep the code `runner_needs_own_key` for the person who can act on it; a managed turn that reached the queue on a runner environment now waits (and ends with
   `no_runner_available`) instead of ending at the claim.
 - **One rule.** `accessRule` is the SQL fragment that both the claim and the pairing of the rings use; `accessMatches` is the same rule in memory. A test runs every manifest against every turn through both.
-- **The validator offers only what some online runner announces** (`no_runner_announces`): refused when a runner with the environment's labels is online and none has an entry for the profile; with no such
-  runner online nothing is said, because a runner that is asleep must not block saving a profile.
+- **The validator says what no online runner announces** (`no_runner_announces`): a warning (`severity: "warning"`), never a refusal, when a runner with the environment's labels is online and none has an entry for the
+  profile; with no such runner online nothing is said. A runner that is asleep, or that withdraws an entry for a while (a rate limit), must never block saving a profile or a workflow.
 
 ## 4. Alternatives considered
 

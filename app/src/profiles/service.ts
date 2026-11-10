@@ -24,7 +24,7 @@ import {
   CLAUDE_CODE_HARNESS,
   OPENCODE_HARNESS,
 } from "../runner-identity/harness.ts";
-import { issue, listNames, shown } from "../workflows/issues.ts";
+import { issue, listNames, shown, warning } from "../workflows/issues.ts";
 import type { ResultSchema } from "../workflows/result-schema.ts";
 import { ProfileError, type ProfileIssue } from "./errors.ts";
 import {
@@ -76,6 +76,8 @@ export type ProfileValidation = {
   valid: boolean;
   errors: ProfileIssue[];
   truncated: boolean;
+  /** #973: what is said and does not stop a save (`severity: "warning"`). Left out when there is none. */
+  warnings?: ProfileIssue[];
 };
 
 export type ProfileService = {
@@ -164,14 +166,16 @@ export function createProfileService({
 }: ProfileServiceDependencies): ProfileService {
   /** The validator's verdict, with what only the world knows added once the body has the right shape. */
   async function check(body: unknown): Promise<
-    Omit<ProfileCheck, "errors"> & {
+    Omit<ProfileCheck, "errors" | "warnings"> & {
       errors: ProfileIssue[];
+      warnings?: ProfileIssue[];
       /** The id of the environment the valid body names. */
       environmentId?: string;
     }
   > {
     const shape = validateProfile(body);
     const errors: ProfileIssue[] = [...shape.errors];
+    const warnings: ProfileIssue[] = [];
     if (shape.profile === undefined) return { ...shape, errors };
     const { model, costLimitCents = null } = shape.profile;
     if (costLimitCents !== null) {
@@ -221,16 +225,17 @@ export function createProfileService({
           harness: shape.profile.harness,
           model: "model" in model ? model.model : null,
         });
+        // A warning, never an error: the runner may be asleep, or leave the entry out for a while (a rate limit), and that must not stop a save.
         if (
           onlineRunners !== undefined &&
           announcedBy(await onlineRunners(), environment.labels, demand) ===
             "not_announced"
         )
-          errors.push(
-            issue(
+          warnings.push(
+            warning(
               "/environment",
               "no_runner_announces",
-              `The environment ${shown(environment.name)} runs on a runner, and the runners with its labels that are online do not announce what this profile asks for (${describeDemand(demand)}). Choose a model or a harness the runner announces, or start a runner that does.`,
+              `The environment ${shown(environment.name)} runs on a runner, and the runners with its labels that are online do not announce what this profile asks for (${describeDemand(demand)}). The profile can still be saved; its turn waits until a runner announces it.`,
             ),
           );
       }
@@ -246,9 +251,10 @@ export function createProfileService({
           ),
         );
     }
+    const said = warnings.length === 0 ? {} : { warnings };
     if (errors.length === shape.errors.length && environment.kind !== "unknown")
-      return { ...shape, errors, environmentId: environment.id };
-    return { valid: false, errors, truncated: shape.truncated };
+      return { ...shape, errors, ...said, environmentId: environment.id };
+    return { valid: false, errors, ...said, truncated: shape.truncated };
   }
 
   /** The environment a body names, by name (case ignored), or the names that exist. */
@@ -346,6 +352,7 @@ export function createProfileService({
         valid: result.valid,
         errors: result.errors,
         truncated: result.truncated,
+        ...(result.warnings === undefined ? {} : { warnings: result.warnings }),
       };
     },
 

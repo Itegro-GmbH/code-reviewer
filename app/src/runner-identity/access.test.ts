@@ -7,6 +7,7 @@ import {
   accessMatches,
   announcesHarness,
   authOfTurn,
+  customerAccess,
   demandOfTurn,
   legacyAccessOf,
   PLATFORM_ACCESS,
@@ -161,5 +162,32 @@ describe("the access managed", () => {
     expect(reservedAccessIssues({ harnesses: [null, "managed", 3] })).toEqual(
       [],
     );
+  });
+});
+
+describe("what a customer's runner can run, as the claim and the rings read it", () => {
+  // #973-T02
+  it("drops every managed entry of a stored manifest, and keeps the others as they are", () => {
+    const managed: HarnessAccess = { ...OPENCODE, auth: "managed" };
+
+    expect(customerAccess([managed, OPENCODE, CLAUDE])).toEqual([
+      OPENCODE,
+      CLAUDE,
+    ]);
+    expect(customerAccess([managed])).toEqual([]);
+    expect(customerAccess([])).toEqual([]);
+    // A turn on a catalog entry then matches nothing the customer's runner has.
+    expect(
+      accessMatches(
+        customerAccess([managed, OPENCODE]),
+        demandOfTurn({ modelChoice: CATALOG }),
+      ),
+    ).toBe(false);
+    expect(
+      accessMatches(
+        customerAccess([managed, OPENCODE]),
+        demandOfTurn({ modelChoice: OWN }),
+      ),
+    ).toBe(true);
   });
 });

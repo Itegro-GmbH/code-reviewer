@@ -291,7 +291,7 @@ describe("the profile service", () => {
   });
 
   // #973-T01
-  it("offers only what an online runner of the environment announces: a model or harness none announces is refused, and nothing is said while no runner with the labels is online", async () => {
+  it("warns, and never refuses, when no online runner of the environment announces the combination; nothing is said while no runner with the labels is online", async () => {
     const { serviceFor, idA, state } = await setup();
     state.ownKey = true;
     const opencode = {
@@ -323,19 +323,29 @@ describe("the profile service", () => {
       },
     ];
 
-    expect((await asked(online).validate(sonnet)).valid).toBe(true);
-    expect((await asked(online).validate(opus)).errors).toEqual([
+    expect(await asked(online).validate(sonnet)).toMatchObject({
+      valid: true,
+    });
+    expect((await asked(online).validate(sonnet)).warnings).toBeUndefined();
+    // The runner that is online does not announce opus (asleep, rate limited): the profile is valid, and the warning says why it may wait.
+    const warned = await asked(online).validate(opus);
+    expect(warned).toMatchObject({ valid: true, errors: [] });
+    expect(warned.warnings).toEqual([
       expect.objectContaining({
         path: "/environment",
         code: "no_runner_announces",
+        severity: "warning",
       }),
     ]);
-    // No runner with the labels is online: the profile may be saved, its turn will wait for one.
-    expect((await asked([]).validate(opus)).valid).toBe(true);
+    // ... and it can be saved.
+    expect((await asked(online).create(USER, opus)).name).toBe(REVIEWER.name);
+    // No runner with the labels is online: nothing is said, the turn will wait for one.
+    expect(await asked([]).validate(opus)).toMatchObject({ valid: true });
+    expect((await asked([]).validate(opus)).warnings).toBeUndefined();
     expect(
       (await asked([{ labels: ["other"], access: [opencode] }]).validate(opus))
-        .valid,
-    ).toBe(true);
+        .warnings,
+    ).toBeUndefined();
     // A model of the workspace's own key needs the key of the app: any online runner with OpenCode announces it.
     expect(
       (
@@ -344,8 +354,8 @@ describe("the profile service", () => {
           environment: "Laptop",
           model: { provider: "anthropic", model: "claude-sonnet-5-5" },
         })
-      ).valid,
-    ).toBe(true);
+      ).warnings,
+    ).toBeUndefined();
   });
 
   // #919-T07

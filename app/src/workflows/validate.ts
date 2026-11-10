@@ -28,6 +28,7 @@ import {
 } from "./limits.ts";
 import {
   IssueSink,
+  isWarning,
   issue,
   listNames,
   pointer,
@@ -69,6 +70,8 @@ export type ValidationResult = {
   errors: Issue[];
   /** There are more problems than `errors` lists (the check stops once it has a few more than that): fix these and validate again. */
   truncated: boolean;
+  /** What is said and does not stop a save (`severity: "warning"`, #973), in the shape of an error. Left out when there is none. */
+  warnings?: Issue[];
   /** The budget the workflow runs with: its own, or the default when it names none. Set when `valid`. */
   budgetUsd?: number;
   /** The time one agent turn may run, in minutes: its own, or the default when the document names none (#918). Set when `valid`. */
@@ -833,12 +836,17 @@ export function validateWorkflow(
     }
   }
 
-  const found = sortIssues(sink.issues);
+  const found = sortIssues(sink.issues.filter((each) => !isWarning(each)));
+  const warnings = sortIssues(sink.issues.filter(isWarning)).slice(
+    0,
+    ERRORS_MAX,
+  );
   const errors = found.slice(0, ERRORS_MAX);
   return {
     valid: found.length === 0,
     errors,
     truncated: sink.full || found.length > errors.length,
+    ...(warnings.length === 0 ? {} : { warnings }),
     steps: stepCount,
     ...(errors.length === 0 && budget !== undefined
       ? { budgetUsd: budget }

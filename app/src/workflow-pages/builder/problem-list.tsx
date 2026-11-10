@@ -12,12 +12,16 @@ export function ProblemList({
   problems,
   onChange,
   heading,
+  severity = "error",
 }: {
   doc: Doc;
   problems: readonly Problem[];
   onChange: (doc: Doc) => void;
   heading: string;
+  /** `warning`: the cards are the warning colours and name a warning (#973); the default is an error. */
+  severity?: "error" | "warning";
 }) {
+  const warning = severity === "warning";
   return (
     <section aria-label={heading} className="flex flex-col gap-2">
       {problems.map((problem, at) => {
@@ -26,12 +30,14 @@ export function ProblemList({
           <div
             key={`${problem.path}-${problem.code}-${String(at)}`}
             role="group"
-            aria-label={`Error ${problem.code}`}
+            aria-label={`${warning ? "Warning" : "Error"} ${problem.code}`}
             data-slot="problem"
-            className="flex flex-col gap-2 rounded-lg border border-danger bg-danger-soft p-3 text-sm"
+            className={`flex flex-col gap-2 rounded-lg border p-3 text-sm ${warning ? "border-warning bg-warning-soft" : "border-danger bg-danger-soft"}`}
           >
             <span className="flex flex-wrap items-center gap-2">
-              <Badge variant="danger">{problem.code}</Badge>
+              <Badge variant={warning ? "warning" : "danger"}>
+                {problem.code}
+              </Badge>
               <code className="text-xs break-all text-muted-foreground">
                 {problem.path === "" ? "/" : problem.path}
               </code>

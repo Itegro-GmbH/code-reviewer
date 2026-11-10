@@ -30,7 +30,7 @@ import {
 } from "./limits.ts";
 import { demandOfProfile } from "../runner-identity/access.ts";
 import { announcedBy, describeDemand } from "../runner-identity/announced.ts";
-import { issue, listNames, pointer, shown } from "./issues.ts";
+import { issue, listNames, pointer, shown, warning } from "./issues.ts";
 import {
   parseProfileRef,
   type EnvironmentInfo,
@@ -553,8 +553,9 @@ function checkRunnerRules(
       ),
     );
   const harness = harnessOfProfile(facts);
-  // #973: what the runners of the workspace announce. Only a runner with the environment's labels that is online can say; a managed model is
-  // already refused above, so it is not refused twice.
+  // #973: what the runners of the workspace announce. Only a runner with the environment's labels that is online can say, and what it says
+  // can change (it may be asleep, or leave an entry out for a while), so this is a warning and never stops a save. A managed model is already
+  // refused above, so it is not judged twice.
   const runners = c.resolver.onlineRunners?.();
   if (
     onRunner &&
@@ -565,10 +566,10 @@ function checkRunnerRules(
       "not_announced"
   )
     c.report(
-      issue(
+      warning(
         where,
         "no_runner_announces",
-        `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what the profile ${profile} asks for (${describeDemand(demandOfProfile(facts))}). Use a profile the runner announces, or start a runner that does.`,
+        `The environment ${shown(known.name)} runs on a runner, and the runners with its labels that are online do not announce what the profile ${profile} asks for (${describeDemand(demandOfProfile(facts))}). The workflow can still be saved; the turn waits until a runner announces it.`,
       ),
     );
   if (!onRunner && harnessNeedsRunner(harness))
