@@ -289,17 +289,34 @@ variant() { # variant <name> <battery 0|1> <exec series 0|1> <hook|-> <asserts, 
   fact "loadavg after $v: $(cut -d' ' -f1-3 /proc/loadavg)"
 }
 
-host_variant() { # the same series with Docker on the runner itself, no Incus
-  BENCH_VARIANT=host-docker
-  say "variant host-docker"
+host_variant() { # host_variant <name> <battery 0|1>: the same series with Docker on the runner itself, no Incus
+  BENCH_VARIANT=$1
+  say "variant $1"
   must docker pull -q "$BUSYBOX_REF"
   must docker tag "$BUSYBOX_REF" busybox
   must docker pull -q "$HELLO_REF"
   must docker tag "$HELLO_REF" hello-world
-  fact "--- host-docker"
+  fact "--- $1"
   fact "$(docker info --format 'docker {{.ServerVersion}}; driver {{.Driver}} {{.DriverStatus}}; cgroup {{.CgroupDriver}} v{{.CgroupVersion}}; security {{.SecurityOptions}}; root {{.DockerRootDir}}')"
-  BENCH_N=$N BENCH_BATTERY=1 CTR_SOCK=/run/containerd/containerd.sock bash "$HERE/guest.sh" host-docker "$DIR/out-host.tsv" || record guest.host-docker 0 FAILED "guest.sh failed"
-  cat "$DIR/out-host.tsv" >>"$BENCH_OUT" 2>/dev/null
+  rm -f "$DIR/out-$1.tsv"
+  BENCH_N=$N BENCH_BATTERY=$2 CTR_SOCK=/run/containerd/containerd.sock bash "$HERE/guest.sh" "$1" "$DIR/out-$1.tsv" || record "guest.$1" 0 FAILED "guest.sh failed"
+  cat "$DIR/out-$1.tsv" >>"$BENCH_OUT" 2>/dev/null
+  fact "loadavg after $1: $(cut -d' ' -f1-3 /proc/loadavg)"
+}
+
+# The hypothesis of the DevBox runs: the host was busy (load 5 to 20 on 4 vCPUs). The same series with K busy loops on the runner, Docker on the host and Docker in
+# an instance, fewer repetitions.
+HOGS=()
+start_hogs() { local _; for _ in $(seq 1 "$1"); do bash -c 'while :; do :; done' & HOGS+=("$!"); done; sleep 20; }
+stop_hogs() { [ "${#HOGS[@]}" -gt 0 ] && kill "${HOGS[@]}" 2>/dev/null; wait "${HOGS[@]}" 2>/dev/null; HOGS=(); }
+loaded() { # loaded <busy loops>
+  local saved=$N
+  N=6
+  start_hogs "$1"
+  host_variant "host-docker-load$1" 0
+  variant "btrfs-default-load$1" 0 1 - 'apparmor-on userns containerd-store limits' "${base[@]}"
+  stop_hogs
+  N=$saved
 }
 
 install_incus
@@ -307,14 +324,16 @@ init_incus
 build_golden
 base=(-p default -p bench-base -p bench-limits)
 startup_series startup-btrfs "$BOOTS_BTRFS"
-host_variant
+host_variant host-docker 1
 variant btrfs-default 1 1 - 'apparmor-on userns containerd-store limits' "${base[@]}"
 variant apparmor-off 1 0 - 'apparmor-off userns containerd-store limits' "${base[@]}" -c raw.lxc=lxc.apparmor.profile=unconfined
 variant privileged 0 0 - 'privileged containerd-store limits' "${base[@]}" -c security.privileged=true -c security.idmap.isolated=false
 variant no-limits 0 0 - 'apparmor-on userns containerd-store nolimits' -p default -p bench-base
-variant classic-overlay2 0 0 "$HOOK_CLASSIC" 'apparmor-on userns classic-store limits' "${base[@]}"
+variant classic-overlay2 1 0 "$HOOK_CLASSIC" 'apparmor-on userns classic-store limits' "${base[@]}"
 variant tmpfs-root 0 0 "$HOOK_TMPFS" 'apparmor-on userns containerd-store limits tmpfs-root' "${base[@]}"
 variant btrfs-default-again 0 0 - 'apparmor-on userns containerd-store limits' "${base[@]}"
 startup_series startup-dir "$BOOTS_DIR" -s dirpool
-variant dir-pool 0 0 - 'apparmor-on userns containerd-store limits' "${base[@]}" -s dirpool
+variant dir-pool 1 0 - 'apparmor-on userns containerd-store limits' "${base[@]}" -s dirpool
+loaded 8
+loaded 16
 fact "loadavg at the end: $(cut -d' ' -f1-3 /proc/loadavg)"
