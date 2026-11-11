@@ -304,11 +304,13 @@ describe("the release workflow", () => {
       "actions/cache/restore@v4",
     ]);
     expect(restores[0]?.with?.path).toBe("${{ env.PROGRAM_WORK }}/release");
-    expect(signing.env?.PROGRAM_WORK).toBe("/mnt/program");
+    expect(releaseText).toMatch(
+      /^ {4}env:\n {6}PROGRAM_WORK: \/mnt\/program$/m,
+    );
     const volume = steps.find((step) => step.name === "Work volume");
     expect(volume?.run).toContain('sudo mkdir -p "$PROGRAM_WORK"');
     expect(releaseText).not.toMatch(/GITHUB_PATH/);
-    expect(JSON.stringify(signing.env)).not.toMatch(/PATH/);
+    expect(releaseText).not.toMatch(/^ {6}PATH:/m);
   });
 
   // #1002-T01
