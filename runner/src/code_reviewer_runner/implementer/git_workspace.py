@@ -76,6 +76,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from ..job import ImplementerResume, JobError
+from ..outer_proxy import OuterProxy
 from ..result import ErrorCode
 from .git_process import (
     DEFAULT_TIMEOUT,
@@ -443,6 +444,7 @@ class GitWorkspace:
         timeout: float = DEFAULT_TIMEOUT,
         before_push: Callable[[], None] | None = None,
         guard_secrets: Sequence[str] = (),
+        proxy: OuterProxy | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         space: Callable[[Path], DiskSpace] = disk_space,
@@ -459,6 +461,9 @@ class GitWorkspace:
         # #856: the values no branch may carry to the provider (the login of the device); none: no
         # branch is read for them.
         self._guard_secrets = tuple(guard_secrets)
+        # The outer wall's proxy of a VM on a customer's machine (#994): the clone, the fetch and the
+        # push go through it and through nothing else. None: git dials the provider itself.
+        self._proxy = proxy
         self.layout = layout
         self.identity = identity
         self._access = access
@@ -1614,7 +1619,11 @@ class GitWorkspace:
         """Git as the runner, never with the agent's repository as its directory."""
         environment = self._process.base_environment(protocols)
         if token:
-            environment.update(token_environment(self.spec.token))
+            environment.update(
+                token_environment(
+                    self.spec.token, proxy=None if self._proxy is None else self._proxy.url
+                )
+            )
         return self._process.run(args, env=environment, timeout=timeout or self._timeout)
 
     def _mirror(

@@ -40,15 +40,24 @@ def basic_authorization(token: str) -> str:
     return "Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
 
 
-def token_environment(token: str) -> dict[str, str]:
+def token_environment(token: str, *, proxy: str | None = None) -> dict[str, str]:
     """The token for one git process, as `GIT_CONFIG_*` environment variables: never in argv, a
     config file or a URL. Redirects are not followed (a header must not follow a redirect), and no
-    credential helper is consulted."""
-    settings = (
+    credential helper is consulted.
+
+    `proxy` (`http://host:port`) is the outer wall's proxy of a VM on a customer's machine (#994,
+    `outer_proxy.py`), the VM's only way out: git asks it for a tunnel (`CONNECT host:443`) and
+    speaks TLS to the provider through it, so the proxy sees the name and never the token. The
+    closed environment holds no `no_proxy` and no other proxy variable, so nothing takes a request
+    around it, and a proxy that refuses ends the command: git does not retry a refused tunnel
+    directly. None: git dials the provider itself, as hosted."""
+    settings = [
         ("http.extraHeader", f"Authorization: {basic_authorization(token)}"),
         ("http.followRedirects", "false"),
         ("credential.helper", ""),
-    )
+    ]
+    if proxy is not None:
+        settings.append(("http.proxy", proxy))
     environment = {"GIT_CONFIG_COUNT": str(len(settings))}
     for number, (key, value) in enumerate(settings):
         environment[f"GIT_CONFIG_KEY_{number}"] = key
