@@ -896,9 +896,9 @@ jobs:
       - name: What the machine's rules and Incus looked like
         if: ${{ failure() }}
         run: |
-          sudo nft list ruleset | head -n 400 || true
-          sudo incus list || true
-          sudo incus network list || true
+          sudo nft list ruleset | head -n 400
+          sudo incus list
+          sudo incus network list
 
   actionlint:
     name: Lint workflow files

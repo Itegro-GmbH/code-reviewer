@@ -20,11 +20,12 @@ say() { printf '== %s\n' "$*"; }
 say "Incus ${VERSION_SERIES} from the Zabbly stable repository"
 mkdir -p /etc/apt/keyrings
 curl -fsSL --retry 3 --max-time 60 https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+codename="$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2)"
 cat >/etc/apt/sources.list.d/zabbly-incus-stable.sources <<SOURCES
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
-Suites: $(. /etc/os-release && echo "${VERSION_CODENAME}")
+Suites: ${codename}
 Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.asc
