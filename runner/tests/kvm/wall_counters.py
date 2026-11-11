@@ -19,12 +19,16 @@ counter where it was. `NFT -j` prints each rule with its comment and counter; th
 workflow. Reloading the table between the two (a counter that went down) is an error: nothing can
 be said about what happened in between.
 
-**The one rule that may move** is "no IPv6": the guest kernel may send router solicitations or
-multicast listener reports on its TAP whatever a client does, and the table drops them. A client
-cannot reach the internet over IPv6 whether or not it is dropped (the guest has no IPv6 route and
-the containers have IPv6 switched off), so a count there says nothing about the proxy. Every other
-drop (a packet to the host's other ports, to anything forwarded, from a source that is not the
-slot's) is a client that did not use the proxy."""
+**The two rules that may move** are noise of IPv6 and are not a client's traffic. "no IPv6" (input):
+the guest kernel may send router solicitations or multicast listener reports on its TAP whatever a
+client does. "the host opens no connection to a VM" (output): packets the *host* originates toward
+the TAP, which the first lane run showed as ten packets of 88 bytes (the size of an IPv6 multicast
+listener report: the host kernel announcing itself on a new interface), counted at the interface's
+coming up, never a client's. A client cannot reach the internet over IPv6 whether or not it is
+dropped (the guest has no IPv6 route and the containers have IPv6 switched off), and nothing a
+client of the VM does is counted in the output chain, so a count there says nothing about the proxy.
+Every other drop (a packet from the VM to the host's other ports, to anything forwarded, from a
+source that is not the slot's) is a client that did not use the proxy."""
 
 import json
 import sys
@@ -33,7 +37,9 @@ from typing import Any, Final, cast
 
 TABLE: Final = "code_reviewer_wall"
 # The comment of the rule that drops IPv6 (docker/vm/host/outer-wall.nft); the rest is a bypass.
-ALLOWED: Final = frozenset({"input: no IPv6"})
+ALLOWED: Final = frozenset(
+    {"input: no IPv6", "output: the host opens no connection to a VM (vsock is the channel)"}
+)
 
 
 class TableReloaded(Exception):

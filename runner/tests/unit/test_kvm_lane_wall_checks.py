@@ -115,6 +115,13 @@ def test_the_rendering_is_a_program_that_writes_the_files_it_is_asked_to(tmp_pat
 
 
 # #999-T06 (the drop counters)
+NOISE_OUTPUT = "the host opens no connection to a VM (vsock is the channel)"
+QUIET_WITH_OUTPUT = [
+    (chain, NOISE_OUTPUT if chain == "output" else comment, packets, size, verdict)
+    for chain, comment, packets, size, verdict in QUIET
+]
+
+
 def test_a_quiet_table_has_no_drop_counter_that_moved() -> None:
     before = wall_counters.drop_counters(document(QUIET))
 
@@ -162,18 +169,24 @@ def test_the_lists_of_a_table_that_was_reloaded_between_two_snapshots_are_not_tr
         )
 
 
-def test_the_noise_of_ipv6_neighbour_discovery_is_the_one_rule_that_may_move() -> None:
+def test_the_noise_of_ipv6_is_the_two_rules_that_may_move_and_no_vm_traffic_is_among_it() -> None:
     noisy = [
-        (chain, comment, 2 if comment == "no IPv6" else packets, size, verdict)
-        for chain, comment, packets, size, verdict in QUIET
+        (chain, comment, 2 if comment in ("no IPv6", NOISE_OUTPUT) else packets, size, verdict)
+        for chain, comment, packets, size, verdict in QUIET_WITH_OUTPUT
     ]
     after = wall_counters.drop_counters(document(noisy))
-    before = wall_counters.drop_counters(document(QUIET))
+    before = wall_counters.drop_counters(document(QUIET_WITH_OUTPUT))
 
-    assert wall_counters.moved(before, after) == {"input: no IPv6": 2}
+    assert wall_counters.moved(before, after) == {
+        "input: no IPv6": 2,
+        f"output: {NOISE_OUTPUT}": 2,
+    }
     assert wall_counters.unexpected(wall_counters.moved(before, after)) == {}
     direct = {**wall_counters.moved(before, after), "forward: a VM forwards to nothing": 1}
     assert wall_counters.unexpected(direct) == {"forward: a VM forwards to nothing": 1}
+    # What the VM sends to the host is in the input chain and never allowed (but the IPv6 rule).
+    from_the_vm = {"input: everything else addressed to the host": 1}
+    assert wall_counters.unexpected(from_the_vm) == from_the_vm
 
 
 def test_the_program_exits_nonzero_and_names_the_rule_when_a_direct_connection_was_dropped(

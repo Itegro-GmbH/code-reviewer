@@ -2457,8 +2457,9 @@ agent made, so the outer wall and the doors carried the whole path.
 **Fail closed, for a whole job.** A second job runs with the git host left without a name: the proxy cannot clone for it, the Worker ends the job `clone_failed`
 (a stable code) with nothing pushed, and the proxy's record shows no provider call. And the **negative side of every positive check** is the table's own counters:
 the workflow reads the drop counters of `code_reviewer_wall` (`nft -j list table`, as root) before and after the job and `tests/kvm/wall_counters.py none` fails
-the step when any drop rule counted a packet, except the "no IPv6" rule (the guest kernel may send a router solicitation whatever a client does; a client has no IPv6 route
-whether or not it is dropped). A client that dialled directly, fell back to the proxy and let the job pass would show in "everything else addressed to the host" or
+the step when any drop rule counted a packet, except two rules that are IPv6 noise and never a client's traffic: "no IPv6" (the guest kernel may send a router
+solicitation whatever a client does; a client has no IPv6 route whether or not it is dropped) and "the host opens no connection to a VM" (the *host's* own packets toward
+the TAP: the first run showed ten of 88 bytes, the size of an IPv6 multicast listener report, at the interface's coming up; nothing a VM sends is counted in that chain). A client that dialled directly, fell back to the proxy and let the job pass would show in "everything else addressed to the host" or
 "a VM forwards to nothing". **The control** is the outer wall lane's own run: the same program, `wall_counters.py some`, requires its probes' direct dials to
 have moved the counters, so "nothing moved" is not the answer of a table that counts nothing.
 
