@@ -67,6 +67,8 @@ for rep in $(seq 0 "$N"); do
   timed ctl.api.ps "$rep" -- docker ps -q
   timed ctl.client.version "$rep" -- docker --version
   t0=$EPOCHREALTIME; for _ in $(seq 1 200); do /bin/true; done; record ctl.spawn200 "$rep" "$(elapsed "$t0" "$EPOCHREALTIME")"
+  # what Docker waits for when the disk is busy: 20 small writes, each forced to the disk (on the file system Docker's data root is on)
+  timed ctl.fsync20 "$rep" -- dd if=/dev/zero of="$WORK/fsync" bs=4k count=20 oflag=dsync
   # below dockerd: containerd's client (the shim, runc) and runc alone
   if [ "$ctl_ctr" = 1 ]; then timed ctl.ctr "$rep" -- ctr -a "$CTR_SOCK" -n moby run --rm docker.io/library/busybox:latest bench-probe true; fi
   if [ "$ctl_runc" = 1 ]; then t0=$EPOCHREALTIME; if (cd "$WORK/bundle" && runc run bench-probe >/dev/null 2>&1 </dev/null); then record ctl.runc "$rep" "$(elapsed "$t0" "$EPOCHREALTIME")"; else record ctl.runc "$rep" FAILED "runc run exited non-zero"; fi; fi

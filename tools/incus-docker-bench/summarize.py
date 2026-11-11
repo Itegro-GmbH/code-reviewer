@@ -25,6 +25,7 @@ COMPARED = [
     "ctl.api.ps",
     "ctl.client.version",
     "ctl.spawn200",
+    "ctl.fsync20",
     "ctl.runc",
     "ctl.ctr",
 ]

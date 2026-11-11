@@ -319,9 +319,9 @@ stop_hogs() {
   HOGS=()
   find /mnt/incus-bench -maxdepth 1 -name 'hog.*' -delete
 }
-loaded() { # loaded <name> <busy loops> <fsync writers>
+loaded() { # loaded <name> <busy loops> <fsync writers> <repetitions>
   local saved=$N
-  N=6
+  N=$4
   start_hogs "$2" "$3"
   host_variant "host-docker-$1" 0
   variant "btrfs-default-$1" 0 1 - 'apparmor-on userns containerd-store limits' "${base[@]}"
@@ -344,8 +344,7 @@ variant tmpfs-root 0 0 "$HOOK_TMPFS" 'apparmor-on userns containerd-store limits
 variant btrfs-default-again 0 0 - 'apparmor-on userns containerd-store limits' "${base[@]}"
 startup_series startup-dir "$BOOTS_DIR" -s dirpool
 variant dir-pool 1 0 - 'apparmor-on userns containerd-store limits' "${base[@]}" -s dirpool
-loaded load8 8 0
-loaded load16 16 0
-loaded io4 0 4
-loaded mixed 8 4
+loaded load16 16 0 6
+loaded io1 0 1 6
+loaded io4 0 4 3
 fact "loadavg at the end: $(cut -d' ' -f1-3 /proc/loadavg)"
