@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LicenseRef-Proprietary
+# Spike #1005: the inner wall, loaded INSIDE instance A (Control, doors) in A's own network namespace.
+# B (setup + agent) is on the other side of eth1 and may reach exactly the two doors; nothing else of A, and nothing through A.
+table inet spk_inner {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    iifname "eth1" ct state established,related accept
+    iifname "eth1" ip saddr 10.98.0.3 tcp dport { 8080, 8081 } accept
+    iifname "eth1" drop
+  }
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    iifname "eth1" drop
+    oifname "eth1" ct state established,related accept
+    oifname "eth1" drop
+  }
+}

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: LicenseRef-Proprietary
+# Spike #1005. NOTE: the two `drop ... 53` rules do NOT take effect: Incus accepts DNS/DHCP of an ACL-protected bridge before the ACL (docs/runner.md, Q4).
+description: spike 1005 outer wall - an instance may open a TCP connection to the proxy of the host and nothing else
+egress:
+- action: drop
+  description: nothing of the host or beyond on DNS (the bridges' dnsmasq of other networks is host-local)
+  protocol: tcp
+  destination_port: "53"
+  state: enabled
+- action: drop
+  protocol: udp
+  destination_port: "53"
+  state: enabled
+- action: allow
+  destination: 10.99.0.1/32
+  protocol: tcp
+  destination_port: "3128"
+  state: enabled
+ingress: []
