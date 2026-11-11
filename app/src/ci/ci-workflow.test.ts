@@ -770,6 +770,33 @@ describe("CI workflow path filter", () => {
       expect(touched("vm", file), file).toBe(false);
   });
 
+  // #1002
+  it("sends only a change to what the program tarball is made of, or its workflow, to the program job", () => {
+    for (const file of [
+      "runner/release/build_program.py",
+      "runner/release/pins.env",
+      "runner/release/pair.json",
+      "runner/install/install.sh",
+      "runner/uv.lock",
+      "runner/pyproject.toml",
+      "docker/vm/pins.env",
+      "docker/vm/host/outer-wall.nft",
+      "runner/src/code_reviewer_runner/factory_runner/cli.py",
+      ".github/workflows/runner-program.yml",
+    ])
+      expect(touched("program", file), file).toBe(true);
+    for (const file of [
+      "app/src/db/index.ts",
+      "dispatcher/src/app.ts",
+      "runner/src/code_reviewer_runner/cli.py",
+      "docs/runner.md",
+      "README.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/runner-program-release.yml",
+    ])
+      expect(touched("program", file), file).toBe(false);
+  });
+
   // #696
   it("sends a change that touches website/ to the website job, whatever else it touches, and a change outside website/ not", () => {
     for (const file of [
@@ -962,13 +989,15 @@ describe("CI workflow installation and runtimes", () => {
   });
 
   // CR-16-T07
-  it("calls a reusable workflow only from the engine job and the VM artifacts job, the jobs exempt from their own time limit", () => {
+  it("calls a reusable workflow only from the engine job, the VM artifacts job and the program job, the jobs exempt from their own time limit", () => {
     expect(
       jobs.filter(([, job]) => job.uses).map(([id, job]) => [id, job.uses]),
     ).toEqual([
       ["engine", "./.github/workflows/engine.yml"],
       // The VM artifacts (#976): a KVM build of about half an hour, which runs only for a pull request that changes what they are made from.
       ["vm-artifacts", "./.github/workflows/vm-artifacts.yml"],
+      // The program tarball of the Factory-Runner (#1002): a build and an installer lane of about ten minutes, for a pull request that changes what it is made of.
+      ["runner-program", "./.github/workflows/runner-program.yml"],
     ]);
   });
 
@@ -979,7 +1008,8 @@ describe("CI workflow installation and runtimes", () => {
     // other job still needs a limit of its own.
     const exempt = (job: Job) =>
       job.uses === "./.github/workflows/engine.yml" ||
-      job.uses === "./.github/workflows/vm-artifacts.yml";
+      job.uses === "./.github/workflows/vm-artifacts.yml" ||
+      job.uses === "./.github/workflows/runner-program.yml";
     for (const [id, job] of jobs.filter(([, job]) => !exempt(job))) {
       expect(job["timeout-minutes"], `${id} timeout`).toBeGreaterThan(0);
       expect(job["timeout-minutes"], `${id} timeout`).toBeLessThanOrEqual(30);

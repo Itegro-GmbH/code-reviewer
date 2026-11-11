@@ -1,0 +1,264 @@
+name: Runner program release
+
+# Signs and publishes the program of the Factory-Runner (#1002, epic #969): the tarball `factory-runner-<N>-x86_64.tar.zst` and its signed manifest, the
+# program half of what `runner/install/install.sh` installs and updates (the other half is the VM artifacts, vm-artifacts-release.yml). Started only by a
+# tag `factory-runner-v<N>` (N is the release number of the manifest and only grows); nothing else runs it, no pull request, no push to a branch. The
+# build is runner-program.yml; this file adds what needs the release key: the one secret `RUNNER_PROGRAM_SIGNING_KEY`, a secret of the environment
+# `runner-program-release`, in the one job `release` and in one step of it. The key is the PEM of an ECDSA P-256 key, the way the VM artifacts' key is
+# (docs/runner.md, "Updates", "The program release"); its public half is in runner/release-channel.json, and the job refuses to sign with a key that
+# is not the channel's. One key may serve both channels (the owner puts the same PEM into both environments) or each has its own.
+#
+# What stands between a tag and the key (docs/runner.md, "The program release", "For the owner"): the environment's REQUIRED REVIEWERS (the job waits for
+# a person, who sees the commit), its deployment policy (tags `factory-runner-v*` only), the repository's tag ruleset for that pattern, and the job
+# `guard` below: the tagged commit must be on `main`, i.e. reviewed and merged. The guard stops a mistake and tells the reviewer something; the reviewers
+# and the ruleset are the protection, because a tag can point at a commit whose workflow file has no guard.
+#
+# The job that holds the key runs no third-party code and installs nothing: not a package, not an action beyond `actions/checkout` and the cache's
+# restore, not a script of anybody's. It needs `gh`, `jq`, `openssl`, `zstd`, `tar` and `sha256sum`, which the runner image has, and the scripts of the
+# commit that was reviewed (runner/release/verify-release.sh). The build is the job `build` (runner-program.yml: downloads of pinned and checksummed
+# files, the bundled Python, no key, no environment, read-only token), and its files reach `release` through the Actions cache, never as a workflow
+# artifact. `release` verifies the tarball against the manifest it signs, with the verifier a customer's machine's checks are copied into, before anything
+# is published.
+#
+# The release is made as a DRAFT: nothing is public until the owner publishes it, and where it is published for the installers to find (a GitHub release,
+# or protected storage reached with `--curl-config`) is the owner's decision (docs/runner.md, "The program release").
+#
+# The program is released together with the VM artifacts it needs (the installer stages the two as a pair and switches them together):
+# runner/release/pair.json names that release, and the job refuses a program whose VM artifacts release does not exist, does not verify with the VM
+# channel's key, or was built from a commit that is not in this commit's history.
+on:
+  push:
+    tags:
+      - "factory-runner-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-program-release
+  cancel-in-progress: false
+
+jobs:
+  number:
+    name: Release number
+    if: ${{ github.repository == 'Itegro-GmbH/code-reviewer' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.number.outputs.release }}
+    steps:
+      - name: The number is the tag's, and a whole number
+        id: number
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          number="${TAG#factory-runner-v}"
+          if ! printf '%s' "$number" | grep -Eq '^[1-9][0-9]{0,8}$'; then
+            echo "the tag $TAG is not factory-runner-v<N> with N a whole number from 1" >&2
+            exit 1
+          fi
+          echo "release=$number" >> "$GITHUB_OUTPUT"
+
+  # The tagged commit is on main (reviewed, merged), before anything is built or any key is asked for. By the API, so that no code of the tag runs
+  # for it: `behind` is a commit that main has passed, `identical` is main's own head.
+  guard:
+    name: The tagged commit is on main
+    needs: number
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Is the commit an ancestor of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)
+          case "$status" in
+            identical | behind) echo "$GITHUB_SHA is on main ($status)" ;;
+            *)
+              echo "the commit $GITHUB_SHA of the tag is not on main (compare says: $status): tag a commit that was merged into main" >&2
+              exit 1
+              ;;
+          esac
+
+  build:
+    name: Build the tarball
+    needs: [number, guard]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/runner-program.yml
+    with:
+      release: ${{ fromJSON(needs.number.outputs.release) }}
+      for_release: true
+
+  release:
+    name: Sign and make the draft release
+    needs: [number, guard, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: runner-program-release
+    env:
+      PROGRAM_WORK: /mnt/program
+    permissions:
+      contents: write
+      # `actions: write` also deletes the cache that carried the files here when the draft is made
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Work volume
+        run: |
+          sudo mkdir -p "$PROGRAM_WORK"
+          sudo chown "$USER" "$PROGRAM_WORK"
+      # The files of the build job of this run (runner-program.yml saves them under this key). Not an artifact: see the top of that file.
+      - name: The release's files, from the build job
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PROGRAM_WORK }}/release
+          key: program-release-files-${{ github.run_id }}
+          fail-on-cache-miss: true
+      # Before any key is read: a channel without a key is a release nobody can verify, a channel with other asset names is not what the installer
+      # reads, and a tarball of another commit is not this tag's.
+      - name: The channel names a key and the assets the installer reads
+        run: |
+          set -euo pipefail
+          channel=runner/release-channel.json
+          test -n "$(jq -r .publicKey "$channel")" || {
+            echo "$channel has no publicKey: set the public half of the signing key first (docs/runner.md, \"The program release\")" >&2
+            exit 1
+          }
+          test "$(jq -r .version "$channel")" = 2
+          test "$(jq -r .manifestAsset "$channel")" = runner-manifest.json
+          test "$(jq -r .signatureAsset "$channel")" = runner-manifest.sig
+          if test -z "$(jq -r .baseUrl "$channel")"; then
+            echo "::warning::$channel has no baseUrl yet: no installer finds this release until the owner sets where it is published"
+          fi
+      # What a host takes only when it is higher: the number must be higher than that of every other release of this repository, drafts included.
+      - name: The release number is higher than that of every other release
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RELEASE: ${{ needs.number.outputs.release }}
+        run: |
+          set -euo pipefail
+          # A failure of gh stops the step (set -e); a list with no earlier release of ours is the first release.
+          tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName')
+          last=$(printf '%s\n' "$tags" | grep -E '^factory-runner-v[1-9][0-9]{0,8}$' | grep -vxF "$TAG" | sed 's/^factory-runner-v//' | sort -n | tail -n 1 || true)
+          last=${last:-0}
+          echo "the highest other release: $last"
+          test "$RELEASE" -gt "$last" || {
+            echo "release $RELEASE is not higher than the published release $last: the number only grows" >&2
+            exit 1
+          }
+          echo "last=$last" >> "$GITHUB_OUTPUT"
+      # The pair: the program of this commit is made for the VM artifacts of runner/release/pair.json. That release must exist (a draft counts: the owner
+      # publishes both), its manifest must verify with the VM channel's key (the same openssl check the installer makes), and the commit it was built
+      # from must be in the history of this one (the program cannot need a protocol the VM artifacts were built before).
+      - name: The VM artifacts release this program needs exists, verifies and is older than this commit
+        id: pair
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          needed=$(jq -r .vmArtifactsRelease runner/release/pair.json)
+          printf '%s' "$needed" | grep -Eq '^[1-9][0-9]{0,8}$' || { echo "runner/release/pair.json has no vmArtifactsRelease" >&2; exit 1; }
+          tag="vm-artifacts-v$needed"
+          vm_channel=docker/vm/release-channel.json
+          test -n "$(jq -r .publicKey "$vm_channel")" || { echo "$vm_channel has no publicKey: the VM artifacts release cannot be checked" >&2; exit 1; }
+          pair_dir="$RUNNER_TEMP/pair"
+          mkdir -p "$pair_dir"
+          # By the API, not `gh release download`: a draft has no page by its tag, and the list includes drafts for a token that can write.
+          export TAG="$tag"
+          for asset in vm-artifacts-manifest.json vm-artifacts-manifest.sig; do
+            export ASSET="$asset"
+            ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.tag_name == env.TAG) | .assets[] | select(.name == env.ASSET) | .id')
+            id=${ids%%$'\n'*}
+            test -n "$id" || { echo "the release $tag has no $asset: release the VM artifacts first (vm-artifacts-release.yml)" >&2; exit 1; }
+            gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$pair_dir/$asset"
+          done
+          jq -r .publicKey "$vm_channel" | base64 -d > "$pair_dir/key.der"
+          openssl pkey -pubin -inform DER -in "$pair_dir/key.der" -out "$pair_dir/key.pem"
+          openssl dgst -sha256 -verify "$pair_dir/key.pem" -signature "$pair_dir/vm-artifacts-manifest.sig" "$pair_dir/vm-artifacts-manifest.json" \
+            || { echo "the manifest of $tag does not verify with the key of $vm_channel" >&2; exit 1; }
+          test "$(jq -r .release "$pair_dir/vm-artifacts-manifest.json")" = "$needed"
+          vm_commit=$(jq -r .commit "$pair_dir/vm-artifacts-manifest.json")
+          status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$vm_commit...$GITHUB_SHA" --jq .status)
+          case "$status" in
+            identical | ahead) echo "the VM artifacts release $needed was built from $vm_commit, which is in the history of $GITHUB_SHA ($status)" ;;
+            *)
+              echo "the VM artifacts release $needed was built from $vm_commit, which is not in the history of $GITHUB_SHA (compare says: $status)" >&2
+              exit 1
+              ;;
+          esac
+          echo "vm=$needed" >> "$GITHUB_OUTPUT"
+      - name: Sign the manifest
+        env:
+          RUNNER_PROGRAM_SIGNING_KEY: ${{ secrets.RUNNER_PROGRAM_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$RUNNER_PROGRAM_SIGNING_KEY" || { echo "the secret RUNNER_PROGRAM_SIGNING_KEY of the environment runner-program-release is not set" >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/signing-key.pem"
+          printf '%s\n' "$RUNNER_PROGRAM_SIGNING_KEY" > "$key"
+          # It must be the channel's key: the public half of this one is compared with the file of the repository.
+          derived=$(openssl pkey -in "$key" -pubout -outform DER | base64 -w0)
+          test "$derived" = "$(jq -r .publicKey runner/release-channel.json)" || {
+            rm -f "$key"
+            echo "the signing key is not the one of runner/release-channel.json" >&2
+            exit 1
+          }
+          openssl dgst -sha256 -sign "$key" -out "$PROGRAM_WORK/release/manifest.sig" "$PROGRAM_WORK/release/manifest.json"
+          rm -f "$key"
+      # The tarball against the signed manifest, with the checks a customer's machine makes of it, and nothing else in the directory (--exact-dir):
+      # what is about to be published is exactly what was signed, and it is this tag's release of this commit.
+      - name: Verify what is about to be published, with the checks of the installer and the channel's key
+        env:
+          LAST: ${{ steps.published.outputs.last }}
+          RELEASE: ${{ needs.number.outputs.release }}
+        run: |
+          bash runner/release/verify-release.sh --dir "$PROGRAM_WORK/release" --manifest "$PROGRAM_WORK/release/manifest.json" \
+            --signature "$PROGRAM_WORK/release/manifest.sig" --channel runner/release-channel.json \
+            --release "$RELEASE" --commit "$GITHUB_SHA" --min-release "$LAST" --exact-dir
+      - name: Draft release (the owner publishes it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VM_RELEASE: ${{ steps.pair.outputs.vm }}
+        run: |
+          set -euo pipefail
+          cd "$PROGRAM_WORK/release"
+          mv manifest.json runner-manifest.json
+          mv manifest.sig runner-manifest.sig
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Program of the Factory-Runner (Runner v2): \`bin/factory-runner\`, Firecracker, the outer wall's nft table, \`libexec/host.sh\` (the installer) and a
+          standalone Python with the package and \`cryptography\`, as one tarball. The machine needs no Python and no Docker.
+
+          Verify it with the signed manifest (\`runner-manifest.json\`, \`runner-manifest.sig\`) before use: docs/runner.md, "The program release".
+          \`sudo sh install.sh\` and \`sudo factory-runner update\` do it. The tarball is reproducible: its build is \`runner/release/build_program.py\` at this commit.
+
+          **Needs the VM artifacts release ${VM_RELEASE}** (tag \`vm-artifacts-v${VM_RELEASE}\`): the installer stages the two as a pair.
+
+          Licences: \`share/licenses/\` in the tarball (Firecracker, Apache-2.0; Python, PSF-2.0; cryptography, cffi and pycparser in their \`.dist-info\`) and
+          THIRD_PARTY_LICENSES.md, "Factory-Runner program release".
+          NOTES
+          gh release create "$TAG" --draft --verify-tag --title "Factory-Runner program $TAG" --notes-file "$RUNNER_TEMP/notes.md" ./*
+      # The files were only for this run. A failed run keeps them (a re-run of the failed jobs needs them; GitHub drops a cache that is not used for 7 days).
+      - name: Delete the cache that carried the files
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh cache delete "program-release-files-$GITHUB_RUN_ID" || true
+      - name: No key is left on the runner
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/signing-key.pem"
