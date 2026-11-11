@@ -41,6 +41,7 @@ from code_reviewer_runner.factory_runner.firecracker.launcher import (
     StartFailed,
 )
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
+from code_reviewer_runner.factory_runner.firecracker.proxy_wall import PROXY_PORT
 from code_reviewer_runner.factory_runner.firecracker.wire import (
     CONTROL_PORT,
     MAX_CONTROL_FRAME_BYTES,
@@ -129,6 +130,92 @@ def test_the_start_carries_the_job_the_token_the_image_and_controls_arguments() 
             "name": "code-reviewer-work-00000000-0000-4000-8000-000000000001",
             "reserveGib": 2,
         }
+
+
+# #994-T01
+@pytest.mark.parametrize("slots", [1, 2])
+def test_with_the_proxy_wall_the_start_names_the_proxy_of_the_slot_the_vm_runs_in(
+    slots: int,
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root, outer_wall=OuterWallMode.PROXY, slots=slots)
+
+        class Wall:
+            async def admit(self, vm: Any) -> None: ...
+
+            async def narrow(self, vm: Any, message: Any) -> None: ...
+
+            async def forget(self, vm: Any) -> None: ...
+
+        go(lambda: run_job(rig, rig.sandbox(wall=Wall())))
+
+        start = rig.seen()["start"]
+        assert Draft202012Validator({"$ref": "#/$defs/StartRequest", **VM_INIT}).is_valid(start)  # pyright: ignore[reportUnknownMemberType]
+        # The host's address on the slot's TAP, where the proxy listens (the first job runs in slot
+        # 0 in both rigs): never an address of the job.
+        assert start["outerProxy"] == {"host": "172.31.0.1", "port": PROXY_PORT}
+        # The rendered arguments are the ones of the machine without the wall.
+        assert "172.31." not in "\n".join(start["control"]["args"])
+
+
+# #994-T01
+def test_the_proxy_a_vm_gets_is_the_one_of_its_own_slot_not_slot_zero() -> None:
+    with short_directory() as root:
+        rig = Rig(root, outer_wall=OuterWallMode.PROXY, slots=2)
+
+        class Wall:
+            async def admit(self, vm: Any) -> None: ...
+
+            async def narrow(self, vm: Any, message: Any) -> None: ...
+
+            async def forget(self, vm: Any) -> None: ...
+
+        rig.behavior(mode="good", run=1.5)
+
+        async def scenario() -> dict[str, Any]:
+            sandbox = rig.sandbox(wall=Wall())
+            first = await sandbox.start(start_for(1))
+            # Slot 0 is taken: the next job runs in slot 1 (172.31.0.4/30, its host side .5).
+            second = await sandbox.start(start_for(2))
+            document: dict[str, Any] = rig.seen()["start"]
+            await asyncio.gather(first.wait(), second.wait())
+            return document
+
+        start = go(scenario)
+
+        assert start["outerProxy"] == {"host": "172.31.0.5", "port": PROXY_PORT}
+
+
+# #994-T04
+def test_an_app_on_a_port_the_proxy_does_not_dial_is_said_at_the_start_not_only_at_narrow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root, outer_wall=OuterWallMode.PROXY)
+
+        class Wall:
+            async def admit(self, vm: Any) -> None: ...
+
+            async def narrow(self, vm: Any, message: Any) -> None: ...
+
+            async def forget(self, vm: Any) -> None: ...
+
+        with caplog.at_level(logging.WARNING):
+            go(lambda: run_job(rig, rig.sandbox(wall=Wall())))
+
+        # `start_for` puts the app on port 8080.
+        assert "the app is on port 8080" in caplog.text and "does not dial" in caplog.text
+
+
+# #994-T03
+@pytest.mark.parametrize("mode", [OuterWallMode.INNER_ONLY, OuterWallMode.REFUSE])
+def test_without_the_proxy_wall_the_start_has_no_proxy(mode: OuterWallMode) -> None:
+    with short_directory() as root:
+        rig = Rig(root, outer_wall=mode)
+
+        go(lambda: run_job(rig))
+
+        assert "outerProxy" not in rig.seen()["start"]
 
 
 # #978-T06

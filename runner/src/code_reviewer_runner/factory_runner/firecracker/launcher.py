@@ -44,8 +44,9 @@ from .cgroups import CgroupError, CgroupTree, VmLimits, delegated_root
 from .control_run import ControlRunError, ControlTemplate, build_start, load_template
 from .disks import DiskError, make_job_disk, remove_vm_directory
 from .endpoint import HostListeners, StartNotAnswered, StartRefused, send_start
-from .outer_rule import app_endpoint
-from .outer_wall import OuterWall, VmIdentity, WallLifecycle, outer_wall_for
+from .outer_rule import WEB_PORTS, app_endpoint
+from .outer_wall import OuterWall, OuterWallMode, VmIdentity, WallLifecycle, outer_wall_for
+from .proxy_wall import PROXY_PORT
 from .reaper import Reaped, reap_leftovers
 from .session import VmSession
 from .settings import FirecrackerSettings
@@ -215,12 +216,15 @@ class FirecrackerSandbox:
         # The start document is made and checked before anything exists: a job whose id, URL or
         # credential the VM would refuse costs no slot, no disk copy and no VMM.
         token = self.new_token()
-        document = self._start_document(start, token)
+        # Checked with the address of the first slot: the document does not depend on which slot
+        # the job gets, and the slot's own address is put in below, once there is one.
+        self._start_document(start, token, Slot(0))
         slot = self._pool.acquire()
         if slot is None:
             raise NoFreeSlot
         vm: _Vm | None = None
         try:
+            document = self._start_document(start, token, slot)
             vm = await self._create(slot, start, token)
             await self._hand_over(vm, document)
         except BaseException:
@@ -241,6 +245,16 @@ class FirecrackerSandbox:
         directory.mkdir(parents=True, mode=0o700)
         wall = self.wall or outer_wall_for(settings.outer_wall, settings.slots)
         app_host, app_port = app_endpoint(start.app_url)
+        if settings.outer_wall is OuterWallMode.PROXY and app_port not in (None, *WEB_PORTS):
+            # The Worker's own calls go through the proxy, which dials 80 and 443 only: this job
+            # ends at its first call to the app, and its `narrow` is refused.
+            self.logger.warning(
+                "%s: the app is on port %s, which the outer wall's proxy does not dial (only "
+                "%d and %d): the job cannot reach it",
+                vm_id,
+                app_port,
+                *WEB_PORTS,
+            )
         session = VmSession(VmIdentity(vm_id, slot, app_host, app_port), wall, token)
         listeners = HostListeners(directory / "vsock.sock", session)
         vm = _Vm(vm_id, slot, directory, session, listeners)
@@ -365,7 +379,15 @@ class FirecrackerSandbox:
                 task.cancel()
             await asyncio.gather(sender, exited, reported, return_exceptions=True)
 
-    def _start_document(self, start: WorkerStart, token: str) -> dict[str, Any]:
+    def _outer_proxy(self, slot: Slot) -> dict[str, Any] | None:
+        """The proxy the VM in `slot` dials through, or None: with the proxy wall it is the host's
+        side of the slot's TAP, where the proxy listens (`proxy_wall.py`); with another wall the
+        VM has none (the inner wall only, or no wall at all)."""
+        if self.settings.outer_wall is not OuterWallMode.PROXY:
+            return None
+        return {"host": slot.host_address, "port": PROXY_PORT}
+
+    def _start_document(self, start: WorkerStart, token: str, slot: Slot) -> dict[str, Any]:
         settings = self.settings
         try:
             document = build_start(
@@ -379,6 +401,7 @@ class FirecrackerSandbox:
                 vcpus=settings.vcpus,
                 reserve_gib=settings.reserve_gib,
                 local=start.local_environment,
+                outer_proxy=self._outer_proxy(slot),
             )
             # What vm-init would check, checked here first (it names a field, never a value).
             parse_start(document)
