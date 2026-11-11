@@ -14,12 +14,15 @@
 #
 # What `install` does, in this order. Nothing is changed before the checks and the two signed manifests have passed
 # (a machine without /dev/kvm, without nft, a manifest that does not verify: it stops and says so).
-#   1. preflight: Linux, x86_64, root, systemd, cgroup v2, /dev/kvm, nft, tools, no other install, free space;
+#   1. preflight: Linux, x86_64, root, systemd, cgroup v2, /dev/kvm, /dev/net/tun, nft, tools, no other install, nothing
+#      of ours in the way (the directories, the units, the command), the network of the slots (the first candidate that
+#      overlaps no address and no route of this machine), free space;
 #   2. the two release channels (runner/release-channel.json and docker/vm/release-channel.json, or the files you
-#      name): the program and the VM artifacts, each a signed manifest that is verified with `openssl`;
-#   3. the service user (a member of `kvm`), the directories, the program and the VM artifacts downloaded by their
-#      digest and verified (the artifacts are owned by root and read-only for the service), the TAP devices of
-#      `--parallel-runs` slots owned by the user, the static nft table loaded AND listed again, the units;
+#      name): the program and the VM artifacts, each a signed manifest that is verified with `openssl`; the program is
+#      downloaded, verified and unpacked, and its nft table is checked on this kernel (`nft -c`);
+#   3. the service user (a member of `kvm`), the directories, the VM artifacts downloaded by their digest and verified
+#      (the artifacts are owned by root and read-only for the service), the TAP devices of `--parallel-runs` slots
+#      owned by the user, the static nft table rendered for the slots' network, loaded AND listed again, the units;
 #   4. registers the machine with the token and starts the service.
 # The service runs `FACTORY_RUNNER_SANDBOX=firecracker`; `FACTORY_RUNNER_OUTER_WALL=proxy` is in its unit only because
 # `nft list table inet code_reviewer_wall` succeeded, and the service checks it again before every start.
@@ -32,7 +35,7 @@
 #   rollback [--now]       go back to the release before, or cancel a staged one; the release left is never taken again
 #   status                 the releases that are current, previous and waiting
 #   uninstall              remove everything this installer made, and nothing else
-#   prestart | run-service | switch   what the unit runs
+#   prestart | run-service | switch | check-wall   what the units run
 #
 # Under `curl | sh` the shell reads this file while it runs. So all of it is functions and the last line is the only
 # command that does anything: a download that is cut off changes nothing. `--dry-run` says what would be done.
@@ -65,7 +68,15 @@ PROGRAM_CHANNEL_URL="https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer
 VM_CHANNEL_URL="https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/docker/vm/release-channel.json"
 MAX_PROGRAM_MANIFEST=65536
 MAX_VM_MANIFEST=262144
+# Nothing a release names is bigger than this when it is unpacked, whatever its manifest says (a hard limit for the process
+# that writes it, see `capped`).
+MAX_UNPACKED=34359738368
+MAX_PROGRAM_FILE=1073741824
 MIN_SYSTEMD=247
+# The network of the slots (a /24 holds 64 slots of 4 addresses): the first of these that overlaps no address and no route of the
+# machine. Ranges that cloud networks and VPNs rarely use, never 100.64.0.0/10 (Tailscale) and never 172.16.0.0/12 (Docker's pools, the
+# default VPC of AWS is 172.31.0.0/16).
+SLOT_CANDIDATES="10.250.0.0 10.251.0.0 10.252.0.0 10.253.0.0 10.254.0.0 10.255.0.0 10.240.0.0 10.241.0.0 10.242.0.0 10.243.0.0 10.244.0.0 10.245.0.0 10.246.0.0 10.247.0.0 10.248.0.0 10.249.0.0 192.168.250.0 192.168.251.0 192.168.252.0 192.168.253.0 192.168.254.0"
 
 # -- options ---------------------------------------------------------------------------------------------------
 CMD="install"
@@ -85,29 +96,60 @@ RUNNER_CPUS=""
 RUNNER_MEMORY=""
 RUNNER_DISK=""
 PARALLEL=""
+SLOT_NETWORK_GIVEN=""
 
 # -- bookkeeping -----------------------------------------------------------------------------------------------
 TMPDIRS=""
 WORK=""
-# The directory the downloads are staged in (removed when the script ends, however it ends).
-STAGING_ROOT=""
+# The directories this run staged downloads in (removed when the script ends, however it ends).
+STAGING_ROOTS=""
 # Set once an install changed the machine for the first time; a failure after that removes what was made.
 FRESH=0
 UNDOING=0
 NO_TOKEN=0
 SWITCH_LOCKED=0
+# The network of the slots (a /24): chosen by the preflight of a new install, read from the state afterwards.
+SLOT_NETWORK=""
+# Where this run stages the program (the work directory of an install, so that nothing but the work directory is
+# touched before the checks have passed; the directory of the releases for an update) and the VM artifacts.
+PROGRAM_STAGE_BASE=""
+VM_STAGE_BASE=""
+PROGRAM_RELEASE=""
+PROGRAM_BASE_URL=""
+VM_RELEASE=""
+VM_BASE_URL=""
+# The directories of what was staged and verified, waiting to be moved into place.
+STAGED_program=""
+STAGED_vm=""
+STAGED_ANY=0
 
 cleanup() {
   unset IFS
-  if [ -n "$STAGING_ROOT" ]; then
-    rm -rf -- "$STAGING_ROOT"
-  fi
-  # shellcheck disable=SC2086 # the paths of mktemp hold no space
-  for dir in $TMPDIRS; do
+  # shellcheck disable=SC2086 # the paths hold no space
+  for dir in $STAGING_ROOTS $TMPDIRS; do
     rm -rf -- "$dir"
   done
 }
 trap cleanup EXIT
+
+# A signal ends the script like a failure does: what an install made is removed, the work directory goes (`exit` runs the EXIT trap;
+# dash runs none on a signal itself).
+on_signal() { # on_signal STATUS
+  trap '' INT HUP TERM
+  printf 'install: interrupted\n' >&2
+  if [ "$FRESH" = 1 ] && [ "$UNDOING" = 0 ]; then
+    UNDOING=1
+    warn "removing what this install made, so that nothing is left behind"
+    remove_everything >/dev/null 2>&1 || warn "the removal did not finish: run this script with --uninstall"
+  fi
+  exit "$1"
+}
+set_signal_traps() {
+  trap 'on_signal 130' INT
+  trap 'on_signal 129' HUP
+  trap 'on_signal 143' TERM
+}
+set_signal_traps
 
 say() { printf '%s\n' "$*"; }
 warn() { printf 'install: %s\n' "$*" >&2; }
@@ -126,6 +168,13 @@ make_tmpdir() { # sets TMPDIR_MADE
   TMPDIRS="$TMPDIRS $TMPDIR_MADE"
 }
 
+# A staging directory of this run: removed when the script ends.
+make_stage_root() { # make_stage_root DIR
+  rm -rf "$1"
+  mkdir -p "$1"
+  STAGING_ROOTS="$STAGING_ROOTS $1"
+}
+
 usage() {
   cat <<'EOF'
 Usage: sh install.sh [install] [options]       sh install.sh update|rollback|status|uninstall [options]
@@ -141,7 +190,10 @@ Usage: sh install.sh [install] [options]       sh install.sh update|rollback|sta
   --program-channel-file F the release channel of the program (default: runner/release-channel.json of main)
   --vm-channel-file F      the release channel of the VM artifacts (default: docker/vm/release-channel.json of main)
   --curl-config FILE       a curl configuration (a header with a token, say) for a release address that needs a login;
-                           kept for updates in a file only root can read
+                           kept for updates in a file only root can read; a new one replaces the kept one. While one is in
+                           use a redirect is followed only within the same host (the headers are never sent anywhere else)
+  --slot-network CIDR      the network of the VMs' TAP devices, a /24 inside 10/8 or 192.168/16 (default: the first free one of
+                           a list, 10.250.0.0/24 first); it must overlap no address and no route of the machine
   --refresh                run the install again over one that exists (never restarts a running service)
   --now                    rollback: restart the service at once instead of waiting for it to be between two jobs
   --dry-run                say what would be done, change nothing
@@ -152,7 +204,7 @@ EOF
 parse_args() {
   if [ $# -gt 0 ]; then
     case "$1" in
-      install|update|rollback|status|uninstall|switch|prestart|run-service) CMD="$1"; shift ;;
+      install|update|rollback|status|uninstall|switch|prestart|run-service|check-wall) CMD="$1"; shift ;;
     esac
   fi
   while [ $# -gt 0 ]; do
@@ -168,6 +220,7 @@ parse_args() {
       --program-channel-file) [ $# -ge 2 ] || fail "--program-channel-file needs a file"; PROGRAM_CHANNEL_FILE="$2"; shift 2 ;;
       --vm-channel-file) [ $# -ge 2 ] || fail "--vm-channel-file needs a file"; VM_CHANNEL_FILE="$2"; shift 2 ;;
       --curl-config) [ $# -ge 2 ] || fail "--curl-config needs a file"; CURL_CONFIG="$2"; shift 2 ;;
+      --slot-network) [ $# -ge 2 ] || fail "--slot-network needs a network"; SLOT_NETWORK_GIVEN="$2"; shift 2 ;;
       --refresh) REFRESH=1; shift ;;
       --now) NOW=1; shift ;;
       --scheduled) SCHEDULED=1; shift ;;
@@ -240,16 +293,56 @@ nearest_dir() {
   printf '%s' "$probe"
 }
 
-# A small download from an https address only: no other scheme, and no redirect to one. A login for a protected
-# release address is a curl configuration that only root can read (`--curl-config`).
+# What a process may write: a limit (`ulimit -S -f`, 512-byte blocks) on top of the size the manifest names, so a server that sends
+# more than it said (no Content-Length, an endless body, a compression bomb) cannot fill the disk. `curl --max-filesize` alone trusts a
+# header. The process dies of SIGXFSZ at the limit.
+capped() { # capped BYTES COMMAND...
+  limit="$1"
+  shift
+  ( ulimit -S -f $(( limit / 512 + 2 )) || exit 1; "$@" )
+}
+
+# A download from an https address only: no other scheme, and no redirect to one, at most MAXBYTES (as a hard limit, see `capped`). A
+# login for a protected release address is a curl configuration that only root can read (`--curl-config`; a new one wins over the kept
+# one). Custom headers of such a configuration would be sent to wherever a redirect points, so with one in use a redirect is followed
+# only within the same host (`fetch_same_host`); without one, redirects (a release asset on a CDN) are followed.
 fetch() { # fetch URL FILE MAXBYTES
-  if [ -r "$CONF/download.curlrc" ]; then
-    curl -K "$CONF/download.curlrc" --proto '=https' --proto-redir '=https' -fsSL --max-filesize "$3" -o "$2" "$1"
-  elif [ -n "$CURL_CONFIG" ]; then
-    curl -K "$CURL_CONFIG" --proto '=https' --proto-redir '=https' -fsSL --max-filesize "$3" -o "$2" "$1"
-  else
-    curl --proto '=https' --proto-redir '=https' -fsSL --max-filesize "$3" -o "$2" "$1"
+  config=""
+  if [ -n "$CURL_CONFIG" ]; then
+    config="$CURL_CONFIG"
+  elif [ -r "$CONF/download.curlrc" ]; then
+    config="$CONF/download.curlrc"
   fi
+  if [ -z "$config" ]; then
+    capped "$3" curl --proto '=https' --proto-redir '=https' -fsSL --max-filesize "$3" -o "$2" "$1"
+  else
+    capped "$3" fetch_same_host "$config" "$1" "$2" "$3"
+  fi
+}
+
+fetch_same_host() { # fetch_same_host CONFIG URL FILE MAXBYTES
+  url="$2"
+  origin="${url#https://}"
+  origin="${origin%%/*}"
+  headers="$3.headers"
+  hops=0
+  while :; do
+    code="$(curl -K "$1" --proto '=https' -sS --max-filesize "$4" -o "$3" -D "$headers" -w '%{http_code}' "$url")" || return 1
+    case "$code" in
+      200) rm -f "$headers"; return 0 ;;
+      301|302|303|307|308)
+        hops=$(( hops + 1 ))
+        [ "$hops" -le 5 ] || return 1
+        location="$(sed -n 's/^[Ll]ocation: *//p' "$headers" | tail -n 1 | tr -d '\r')"
+        rm -f "$headers" "$3"
+        case "$location" in
+          https://"$origin"/*) url="$location" ;;
+          /*) url="https://$origin$location" ;;
+          *) warn "a redirect to another host is not followed while a curl configuration is in use (its headers would be sent there)"; return 1 ;;
+        esac ;;
+      *) rm -f "$headers"; return 1 ;;
+    esac
+  done
 }
 
 as_service_user() { runuser -u "$SVC_USER" -- "$@"; }
@@ -318,6 +411,101 @@ pending_release() { # pending_release program|vm: the release waiting to be swit
   sed -n "s/^$1=//p" "$STATE/pending" | head -n 1
 }
 
+# -- the network of the slots -----------------------------------------------------------------------------------
+
+ip_to_int() { # ip_to_int A.B.C.D
+  IFS=. read -r o1 o2 o3 o4 <<EOF
+$1
+EOF
+  unset IFS
+  printf '%s' $(( o1 * 16777216 + o2 * 65536 + o3 * 256 + o4 ))
+}
+
+int_to_ip() { # int_to_ip N
+  printf '%s.%s.%s.%s' $(( ($1 >> 24) & 255 )) $(( ($1 >> 16) & 255 )) $(( ($1 >> 8) & 255 )) $(( $1 & 255 ))
+}
+
+# Whether two networks share an address: they do when they agree on the bits of the shorter prefix.
+networks_overlap() { # networks_overlap A_INT A_PREFIX B_INT B_PREFIX
+  shortest="$2"
+  [ "$4" -lt "$shortest" ] && shortest="$4"
+  bits=$(( 32 - shortest ))
+  [ $(( $1 >> bits )) -eq $(( $3 >> bits )) ]
+}
+
+# Every network this machine has an address in or a route to, one `A.B.C.D/P` per line (a host address is a /32; the default route
+# overlaps everything and says nothing). `ip` answers for every routing table, so a VPN's or a Docker network's routes are in.
+used_networks() {
+  { ip -4 -o addr show 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "inet") print $(i + 1)}'
+    ip -4 route show table all 2>/dev/null | awk '$1 == "default" { next }
+      { d = $1; if (d ~ /^(local|broadcast|unreachable|blackhole|prohibit|throw|anycast|multicast|unicast)$/) d = $2
+        if (d ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ && d != "0.0.0.0/0") print d }'
+  } | sort -u
+}
+
+# Whether the /24 at A.B.C.0 overlaps nothing the machine has.
+network_is_free() { # network_is_free A.B.C.0
+  wanted_int="$(ip_to_int "$1")"
+  while IFS= read -r used; do
+    [ -n "$used" ] || continue
+    case "$used" in
+      */*) used_address="${used%/*}"; used_prefix="${used#*/}" ;;
+      *) used_address="$used"; used_prefix=32 ;;
+    esac
+    is_uint "$used_prefix" || continue
+    if networks_overlap "$wanted_int" 24 "$(ip_to_int "$used_address")" "$used_prefix"; then
+      return 1
+    fi
+  done <<EOF
+$(used_networks)
+EOF
+  return 0
+}
+
+# A network the operator named: a /24 of 10/8 or 192.168/16 with no host bits.
+check_given_network() { # check_given_network A.B.C.0/24
+  usage_hint="--slot-network is a /24 inside 10.0.0.0/8 or 192.168.0.0/16, such as 10.250.0.0/24"
+  case "$1" in
+    10.*.*.0/24|192.168.*.0/24) ;;
+    *) fail "$usage_hint" ;;
+  esac
+  IFS=. read -r a b c d <<EOF
+${1%/24}
+EOF
+  unset IFS
+  for each in "$a" "$b" "$c"; do
+    { is_uint "$each" && [ "$each" -le 255 ]; } || fail "$usage_hint"
+  done
+}
+
+# Chooses the network of the slots of a new install, or keeps the one an install made: SLOT_NETWORK, `A.B.C.0/24`. Refuses when every
+# candidate (or the network named) overlaps an address or a route of the machine: the VMs would be unreachable from the host, or a
+# network of the host's unreachable from it.
+choose_slot_network() {
+  kept="$(state_value slot_network)"
+  if [ -n "$kept" ]; then
+    SLOT_NETWORK="$kept"
+    return 0
+  fi
+  if [ -n "$SLOT_NETWORK_GIVEN" ]; then
+    check_given_network "$SLOT_NETWORK_GIVEN"
+    network_is_free "${SLOT_NETWORK_GIVEN%/24}" || fail "the network $SLOT_NETWORK_GIVEN overlaps an address or a route of this machine (see 'ip route show table all'; nothing was changed)"
+    SLOT_NETWORK="$SLOT_NETWORK_GIVEN"
+    return 0
+  fi
+  for candidate in $SLOT_CANDIDATES; do
+    if network_is_free "$candidate"; then
+      SLOT_NETWORK="$candidate/24"
+      return 0
+    fi
+  done
+  fail "no network is free for the VMs: every candidate ($SLOT_CANDIDATES, each a /24) overlaps an address or a route of this machine. Name another with --slot-network, a /24 inside 10.0.0.0/8 or 192.168.0.0/16 that nothing else uses (nothing was changed)"
+}
+
+slot_network() { # the network of the slots: chosen by this run, or kept by the install
+  if [ -n "$SLOT_NETWORK" ]; then printf '%s' "$SLOT_NETWORK"; else state_value slot_network; fi
+}
+
 # -- checks (nothing is changed) -------------------------------------------------------------------------------
 
 preflight() {
@@ -341,6 +529,8 @@ preflight() {
   fi
   getent group "$KVM_GROUP" >/dev/null 2>&1 || fail "the group $KVM_GROUP does not exist: /dev/kvm is opened through it (a udev rule: KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0660\")"
 
+  [ -e "$ROOT/dev/net/tun" ] || fail "/dev/net/tun is missing: the TAP devices of the VMs need it (modprobe tun; nothing was changed)"
+
   [ -d "$ROOT/run/systemd/system" ] || fail "systemd is not the init of this machine (/run/systemd/system is missing)"
   command -v systemctl >/dev/null 2>&1 || fail "systemctl is not available"
   version="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')"
@@ -360,16 +550,25 @@ preflight() {
     fi
   else
     [ ! -e "$UNIT_DIR/$SERVICE.service" ] || fail "a unit $SERVICE.service exists that this installer did not make (an older, Docker-based install?): remove it first, there is no migration"
+    for unit in "$SERVICE-update.service" "$SERVICE-update.timer" "$SERVICE-wall.service" "$SERVICE-wall.timer"; do
+      [ ! -e "$UNIT_DIR/$unit" ] || fail "$UNIT_DIR_PATH/$unit exists and was not made by this installer (nothing was changed)"
+    done
+    { [ ! -e "$COMMAND" ] && [ ! -L "$COMMAND" ]; } || fail "$COMMAND_PATH exists and was not made by this installer (nothing was changed)"
     user_exists && fail "the user $SVC_USER exists and was not made by this installer: the service user must own nothing else (nothing was changed)"
-    if [ -d "$STATE" ] && [ -n "$(ls -A "$STATE" 2>/dev/null)" ]; then
+    # What an install makes is removed again by the uninstall and by a failed install: so none of it may exist before. The state
+    # directory may be an empty directory (a volume of its own, with a lost+found); it stays, its contents go.
+    if [ -d "$STATE" ] && [ -n "$(ls -A "$STATE" 2>/dev/null | grep -v '^lost+found$' || true)" ]; then
       fail "$STATE_PATH exists and is not empty: it is the state directory of the runner (nothing was changed)"
     fi
-    [ ! -e "$OPT" ] || fail "$OPT_PATH exists and was not made by this installer (nothing was changed)"
+    { [ ! -e "$OPT" ] && [ ! -L "$OPT" ]; } || fail "$OPT_PATH exists and was not made by this installer (nothing was changed)"
+    { [ ! -e "$CONF" ] && [ ! -L "$CONF" ]; } || fail "$CONF_PATH exists and was not made by this installer (nothing was changed)"
+    { [ ! -e "$HOME_DIR" ] && [ ! -L "$HOME_DIR" ]; } || fail "$HOME_PATH exists and was not made by this installer (nothing was changed)"
     nft list table inet "$WALL_TABLE" >/dev/null 2>&1 && fail "the nft table $WALL_TABLE is loaded and was not made by this installer (nothing was changed)"
     if [ -n "$(ip -o link show 2>/dev/null | grep ': fctap[0-9]*:' || true)" ]; then
       fail "TAP devices named fctapN exist and were not made by this installer (nothing was changed)"
     fi
   fi
+  choose_slot_network
   probe_reflink
 }
 
@@ -447,8 +646,8 @@ channel_file() { # channel_file program|vm: the channel of this component (the s
   [ -r "$CHANNEL_FILE_USED" ] || fail "the release channel file of the $1 cannot be read"
 }
 
-# Fetches the signed manifest of a component and proves it: WORK/COMP.manifest.json, M_RELEASE. Returns 1 for a channel
-# that is empty (nothing is published yet).
+# Fetches the signed manifest of a component and proves it: WORK/COMP.manifest.json, PROGRAM_RELEASE or VM_RELEASE and the address
+# the files are under. Returns 1 for a channel that is empty (nothing is published yet).
 fetch_manifest() { # fetch_manifest program|vm
   COMP="$1"
   channel_file "$1"
@@ -461,7 +660,10 @@ fetch_manifest() { # fetch_manifest program|vm
   M_RELEASE="$(jq -r 'if (.release|type)=="number" and .release>=1 and .release==(.release|floor) then .release else empty end' "$WORK/$1.manifest.json" 2>/dev/null)"
   is_uint "$M_RELEASE" || fail "the $1 manifest has no release number"
   [ "$(jq -r '.arch // ""' "$WORK/$1.manifest.json")" = "x86_64" ] || fail "the $1 manifest is not for x86_64"
-  CH_BASE_OF_MANIFEST="$base"
+  case "$1" in
+    program) PROGRAM_RELEASE="$M_RELEASE"; PROGRAM_BASE_URL="$base" ;;
+    vm) VM_RELEASE="$M_RELEASE"; VM_BASE_URL="$base" ;;
+  esac
   case "$1" in
     program)
       jq -e '.version==1 and (.file.name|type)=="string" and (.file.size|type)=="number" and (.file.sha256|type)=="string"' \
@@ -474,9 +676,12 @@ fetch_manifest() { # fetch_manifest program|vm
   esac
 }
 
-# -- staging: download, verify, unpack, then move into place ---------------------------------------------------
+# -- staging: download and verify with no lock held, then move into place in one short step ------------------------
 
-lock_switch() { # one holder at a time of the files that say what is current, previous and pending
+# The switch lock guards the files that say what is current, previous and pending (the links, `pending`, `rejected-*`). It is held for a
+# few renames and one write, never for a download: a start of the service, a rollback and an update's own commit wait for each other for
+# milliseconds. (`update.lock` is another lock: it only keeps two updaters from staging at once.)
+lock_switch() {
   [ "$SWITCH_LOCKED" = 1 ] && return 0
   mkdir -p "$STATE"
   exec 8>"$STATE/switch.lock"
@@ -489,22 +694,33 @@ unlock_switch() {
   SWITCH_LOCKED=0
 }
 
-write_pending() { # write_pending program|vm RELEASE: keeps the other component's line
+# The lines of `pending` are `program=N`, `vm=M` and `pair=1` (the two were staged together by one update: they are switched together, and
+# a program that does not run takes its VM artifacts with it). Writes the given lines and keeps the other component's, in one rename.
+write_pending() { # write_pending LINE...  (KEY=VALUE; the lock is held)
   lock_switch
+  : >"$STATE/pending.new"
   if [ -f "$STATE/pending" ]; then
-    grep -v "^$1=" "$STATE/pending" >"$STATE/pending.new" || true
-  else
-    : >"$STATE/pending.new"
+    keep="$(for line in "$@"; do printf '%s\n' "${line%%=*}"; done)"
+    while IFS= read -r old; do
+      [ -n "$old" ] || continue
+      if [ "${old%%=*}" = pair ] || printf '%s\n' "$keep" | grep -qx "${old%%=*}"; then continue; fi
+      printf '%s\n' "$old" >>"$STATE/pending.new"
+    done <"$STATE/pending"
   fi
-  printf '%s=%s\n' "$1" "$2" >>"$STATE/pending.new"
+  for line in "$@"; do printf '%s\n' "$line" >>"$STATE/pending.new"; done
   chmod 0644 "$STATE/pending.new"
   root_owned "$STATE/pending.new"
   mv "$STATE/pending.new" "$STATE/pending"
 }
 
-drop_pending() { # drop_pending program|vm
+drop_pending() { # drop_pending program|vm|pair
   [ -f "$STATE/pending" ] || return 0
   grep -v "^$1=" "$STATE/pending" >"$STATE/pending.new" || true
+  # A pair of which one is gone is no pair.
+  if [ "$1" != pair ] && [ -s "$STATE/pending.new" ] && ! { grep -q '^program=' "$STATE/pending.new" && grep -q '^vm=' "$STATE/pending.new"; }; then
+    grep -v '^pair=' "$STATE/pending.new" >"$STATE/pending.new2" || true
+    mv "$STATE/pending.new2" "$STATE/pending.new"
+  fi
   if [ -s "$STATE/pending.new" ]; then
     mv "$STATE/pending.new" "$STATE/pending"
   else
@@ -520,12 +736,11 @@ stage_program() {
   if ! is_file_name "$name" || ! is_uint "$size" || ! is_sha256 "$digest"; then
     fail "the program manifest names a file in a form this installer does not accept"
   fi
-  STAGING_ROOT="$STATE/staging"
-  stage="$STAGING_ROOT/program-$M_RELEASE"
+  stage="$PROGRAM_STAGE_BASE/program-$PROGRAM_RELEASE"
   rm -rf "$stage"
   mkdir -p "$stage/tree"
-  say "downloading the program, release $M_RELEASE"
-  fetch "$CH_BASE_OF_MANIFEST$name" "$stage/bundle.tar.zst" "$size" || fail "the program could not be downloaded"
+  say "downloading the program, release $PROGRAM_RELEASE"
+  fetch "$PROGRAM_BASE_URL$name" "$stage/bundle.tar.zst" "$size" || fail "the program could not be downloaded"
   [ "$(file_size "$stage/bundle.tar.zst")" = "$size" ] || fail "the program is not the size its manifest names: nothing was installed"
   [ "$(file_sha256 "$stage/bundle.tar.zst")" = "$digest" ] || fail "the program does not match the digest in its manifest: nothing was installed"
 
@@ -534,7 +749,7 @@ stage_program() {
   if grep -Eq '(^/|(^|/)\.\.(/|$)|[^A-Za-z0-9._+/@=-])' "$stage/names"; then
     fail "the program holds a path outside its own tree or an odd name: nothing was installed"
   fi
-  zstd -dcq "$stage/bundle.tar.zst" | tar -xf - -C "$stage/tree" --no-same-owner --no-same-permissions 2>/dev/null \
+  capped "$MAX_PROGRAM_FILE" sh -c 'zstd -dcq "$1" | tar -xf - -C "$2" --no-same-owner --no-same-permissions' sh "$stage/bundle.tar.zst" "$stage/tree" 2>/dev/null \
     || fail "the program could not be unpacked"
   rm -f "$stage/bundle.tar.zst" "$stage/names"
   if [ -n "$(find "$stage/tree" \( -type b -o -type c -o -type p -o -type s \) 2>/dev/null)" ]; then
@@ -555,18 +770,14 @@ stage_program() {
   chmod -R go-w "$stage/tree"
   chmod 0755 "$stage/tree/bin/factory-runner" "$stage/tree/bin/firecracker" "$stage/tree/libexec/host.sh"
   chmod 0644 "$stage/tree/share/outer-wall.nft"
-  # A kernel without the netfilter modules of the table is found now, not when the service starts.
-  nft -c -f "$stage/tree/share/outer-wall.nft" >/dev/null 2>&1 \
+  # A kernel without the netfilter modules of the table is found now, not when the service starts: the table as it will be loaded,
+  # for the network of this machine's slots.
+  render_wall "$stage/tree/share/outer-wall.nft" "$stage/rendered.nft"
+  nft -c -f "$stage/rendered.nft" >/dev/null 2>&1 \
     || fail "the nft table of this release does not load on this kernel (nft -c -f failed: are the nft_fib modules there?)"
-  root_owned "$stage/tree"
+  rm -f "$stage/rendered.nft"
   chown -R root:root "$stage/tree"
-  lock_switch
-  mkdir -p "$OPT/releases"
-  chmod 0755 "$OPT/releases"
-  root_owned "$OPT/releases"
-  rm -rf "$OPT/releases/$M_RELEASE"
-  mv "$stage/tree" "$OPT/releases/$M_RELEASE"
-  rm -rf "$stage"
+  STAGED_program="$stage/tree"
 }
 
 # One file of the VM release: downloaded by its name, its size and its sha256 checked, and, if it is packed, the
@@ -581,16 +792,16 @@ fetch_artifact() { # fetch_artifact DIR ROLE FILENAME-EXPECTED UNPACKED-NAME
   if ! is_file_name "$name" || ! is_uint "$size" || ! is_sha256 "$digest"; then
     fail "the VM manifest names $role in a form this installer does not accept"
   fi
-  fetch "$CH_BASE_OF_MANIFEST$name" "$1/$name" "$size" || fail "the $role file could not be downloaded"
+  fetch "$VM_BASE_URL$name" "$1/$name" "$size" || fail "the $role file could not be downloaded"
   [ "$(file_size "$1/$name")" = "$size" ] || fail "the $role file is not the size its manifest names: nothing was installed"
   [ "$(file_sha256 "$1/$name")" = "$digest" ] || fail "the $role file does not match the digest in its manifest: nothing was installed"
   if [ "$name" != "$4" ]; then
     usize="$(jq -r "$jq_file.uncompressed.size" "$WORK/vm.manifest.json")"
     udigest="$(jq -r "$jq_file.uncompressed.sha256" "$WORK/vm.manifest.json")"
-    if ! is_uint "$usize" || ! is_sha256 "$udigest"; then
+    if ! is_uint "$usize" || ! is_sha256 "$udigest" || [ "$usize" -gt "$MAX_UNPACKED" ]; then
       fail "the VM manifest gives no size and digest for what $role unpacks to"
     fi
-    zstd -dq --no-progress "$1/$name" -o "$1/$4" || fail "the $role file could not be unpacked"
+    capped "$usize" zstd -dq --no-progress "$1/$name" -o "$1/$4" || fail "the $role file could not be unpacked"
     rm -f "$1/$name"
     [ "$(file_size "$1/$4")" = "$usize" ] || fail "the unpacked $role file is not the size its manifest names: nothing was installed"
     [ "$(file_sha256 "$1/$4")" = "$udigest" ] || fail "the unpacked $role file does not match the digest in its manifest: nothing was installed"
@@ -613,11 +824,10 @@ stage_vm() {
   image_id="$(jq -r .images.worker.id "$manifest")"
   case "$image_id" in sha256:*) is_sha256 "${image_id#sha256:}" || fail "the VM manifest has no Worker image id" ;; *) fail "the VM manifest has no Worker image id" ;; esac
   check_space
-  STAGING_ROOT="$STATE/staging"
-  stage="$STAGING_ROOT/vm-$M_RELEASE"
+  stage="$VM_STAGE_BASE/vm-$VM_RELEASE"
   rm -rf "$stage"
   mkdir -p "$stage"
-  say "downloading the VM artifacts, release $M_RELEASE"
+  say "downloading the VM artifacts, release $VM_RELEASE"
   fetch_artifact "$stage" kernel vmlinux vmlinux
   fetch_artifact "$stage" rootfs rootfs.ext4.zst rootfs.ext4
   fetch_artifact "$stage" dockerData dockerdata.ext4.zst dockerdata.ext4
@@ -632,40 +842,89 @@ stage_vm() {
   chmod 0755 "$stage"
   chmod 0644 "$stage"/*
   chown -R root:root "$stage"
-  lock_switch
-  mkdir -p "$STATE/artifact-releases"
-  chmod 0755 "$STATE/artifact-releases"
-  root_owned "$STATE/artifact-releases"
-  rm -rf "$STATE/artifact-releases/$M_RELEASE"
-  mv "$stage" "$STATE/artifact-releases/$M_RELEASE"
+  STAGED_vm="$stage"
 }
 
-# Looks for the newest release of one component and stages it when it is newer than what is installed, staged, and
-# the release a rollback left. Returns 0 either way; STAGED_ANY is set when something was staged.
-update_component() { # update_component program|vm
-  comp="$1"
-  if ! fetch_manifest "$comp"; then
-    say "the $comp release channel is empty: nothing is published yet"
-    return 0
+# Whether the channel's release of a component is one to take: newer than what is installed, staged and the release a rollback left.
+# Says why not when it is not. Reads the state without the lock: the commit asks again under it.
+wanted() { # wanted program|vm
+  case "$1" in program) release="$PROGRAM_RELEASE" ;; vm) release="$VM_RELEASE" ;; esac
+  if [ -z "$release" ]; then
+    say "the $1 release channel is empty: nothing is published yet"
+    return 1
   fi
-  installed="$(installed_release "$comp")"
-  waiting="$(pending_release "$comp")"
-  rejected="$(rejected_release "$comp")"
+  installed="$(installed_release "$1")"
+  waiting="$(pending_release "$1")"
+  rejected="$(rejected_release "$1")"
   newest="$installed"
   if [ -n "$waiting" ] && [ "$waiting" -gt "$newest" ]; then newest="$waiting"; fi
-  if [ "$M_RELEASE" -le "$newest" ]; then
-    say "the $comp is at release $installed${waiting:+ (release $waiting is staged)}; the channel announces $M_RELEASE: nothing to do"
-    return 0
+  if [ "$release" -le "$newest" ]; then
+    say "the $1 is at release $installed${waiting:+ (release $waiting is staged)}; the channel announces $release: nothing to do"
+    return 1
   fi
-  if [ "$M_RELEASE" -le "$rejected" ]; then
-    say "the $comp release $M_RELEASE was rolled back on this machine: waiting for a higher one"
-    return 0
+  if [ "$release" -le "$rejected" ]; then
+    say "the $1 release $release was rolled back on this machine: waiting for a higher one"
+    return 1
   fi
-  release="$M_RELEASE"
-  case "$comp" in program) stage_program ;; vm) stage_vm ;; esac
-  write_pending "$comp" "$release"
-  STAGED_ANY=1
-  say "staged the $comp release $release (verified)"
+  return 0
+}
+
+# The same question under the lock, once the download is over: a rollback or another start may have happened meanwhile.
+still_wanted() { # still_wanted program|vm RELEASE
+  installed="$(installed_release "$1")"
+  waiting="$(pending_release "$1")"
+  [ "$2" -gt "$installed" ] || return 1
+  [ "$2" -gt "$(rejected_release "$1")" ] || return 1
+  # A rollback waits (a release below the installed one), or an equal or newer release is staged already.
+  if [ -n "$waiting" ] && { [ "$waiting" -lt "$installed" ] || [ "$waiting" -ge "$2" ]; }; then return 1; fi
+  return 0
+}
+
+# Moves what was staged and verified into place and says so in `pending`, as one pair, in one short step under the switch lock. Nothing is
+# switched to before both parts are there: a failed download of the VM artifacts never leaves a new program waiting.
+commit_staged() {
+  [ -n "$STAGED_program$STAGED_vm" ] || return 0
+  lock_switch
+  program_to=""
+  vm_to=""
+  if [ -n "$STAGED_program" ]; then
+    if still_wanted program "$PROGRAM_RELEASE"; then program_to="$PROGRAM_RELEASE"; else say "the program release $PROGRAM_RELEASE is not taken any more (a rollback or another update came first)"; fi
+  fi
+  if [ -n "$STAGED_vm" ]; then
+    if still_wanted vm "$VM_RELEASE"; then vm_to="$VM_RELEASE"; else say "the VM artifacts release $VM_RELEASE are not taken any more (a rollback or another update came first)"; fi
+  fi
+  if [ -n "$program_to" ]; then
+    mkdir -p "$OPT/releases"
+    chmod 0755 "$OPT/releases"
+    root_owned "$OPT/releases"
+    rm -rf "$OPT/releases/$program_to"
+    mv "$STAGED_program" "$OPT/releases/$program_to"
+  fi
+  if [ -n "$vm_to" ]; then
+    mkdir -p "$STATE/artifact-releases"
+    chmod 0755 "$STATE/artifact-releases"
+    root_owned "$STATE/artifact-releases"
+    rm -rf "$STATE/artifact-releases/$vm_to"
+    mv "$STAGED_vm" "$STATE/artifact-releases/$vm_to"
+  fi
+  if [ -n "$program_to" ] && [ -n "$vm_to" ]; then
+    write_pending "program=$program_to" "vm=$vm_to" "pair=1"
+  elif [ -n "$program_to" ]; then
+    write_pending "program=$program_to"
+  elif [ -n "$vm_to" ]; then
+    write_pending "vm=$vm_to"
+  fi
+  [ -z "$program_to$vm_to" ] || STAGED_ANY=1
+  [ -z "$program_to" ] || say "staged the program release $program_to (verified)"
+  [ -z "$vm_to" ] || say "staged the VM artifacts release $vm_to (verified)"
+}
+
+# The newest release of both components, downloaded and verified with no lock held (the manifests are fetched already), then committed.
+stage_releases() {
+  STAGED_ANY=0
+  if wanted program; then stage_program; fi
+  if wanted vm; then stage_vm; fi
+  commit_staged
 }
 
 # -- the switch: current <- pending, between two starts of the service ------------------------------------------
@@ -699,16 +958,21 @@ prune_releases() { # prune_releases DIR: only the current, the previous and the 
 apply_pending() {
   lock_switch
   [ -f "$STATE/pending" ] || return 0
+  # A pair was staged together: when its program does not come, its VM artifacts do not either (they were made for it).
+  paired="$(pending_release pair)"
+  program_failed=0
   target="$(pending_release program)"
   if [ -n "$target" ]; then
     if [ "$target" = "$(link_release "$OPT/current")" ]; then
       drop_pending program
     elif [ ! -d "$OPT/releases/$target" ]; then
       warn "the staged program release $target is gone: it is dropped"
+      program_failed=1
       drop_pending program
     elif ! smoke_program "$OPT/releases/$target"; then
       warn "the program release $target does not run on this machine: it is dropped and not taken again; the current release stays"
       reject_release program "$target"
+      program_failed=1
       drop_pending program
     else
       old="$(link_release "$OPT/current")"
@@ -728,7 +992,11 @@ apply_pending() {
   fi
   target="$(pending_release vm)"
   if [ -n "$target" ]; then
-    if [ "$target" = "$(link_release "$STATE/artifacts")" ]; then
+    if [ "$program_failed" = 1 ] && [ "$paired" = 1 ]; then
+      warn "the VM artifacts release $target came with the program release that was dropped: it is dropped with it"
+      reject_release vm "$target"
+      drop_pending vm
+    elif [ "$target" = "$(link_release "$STATE/artifacts")" ]; then
       drop_pending vm
     elif [ ! -f "$STATE/artifact-releases/$target/vm.env" ]; then
       warn "the staged VM artifacts release $target is gone: it is dropped"
@@ -748,6 +1016,7 @@ apply_pending() {
       drop_pending vm
     fi
   fi
+  drop_pending pair
   prune_releases "$OPT/releases"
   prune_releases "$STATE/artifact-releases"
 }
@@ -764,9 +1033,9 @@ reject_release() { # reject_release program|vm RELEASE: never taken again, nor a
 
 # -- the machine: TAP devices, the nft table ---------------------------------------------------------------------
 
-tap_address() { # tap_address N: the host's side of slot N's /30 (the launcher's slots.py derives the same)
-  first=$(( $1 * 4 + 1 ))
-  printf '172.31.%s.%s' $(( first / 256 )) $(( first % 256 ))
+tap_address() { # tap_address N: the host's side of slot N's /30 (the launcher's slots.py derives the same: the first address of it)
+  network="$(slot_network)"
+  int_to_ip $(( $(ip_to_int "${network%/*}") + $1 * 4 + 1 ))
 }
 
 slots() { # the number of slots of this machine
@@ -774,8 +1043,13 @@ slots() { # the number of slots of this machine
   if is_uint "$count" && [ "$count" -ge 1 ]; then printf '%s' "$count"; else printf '1'; fi
 }
 
+# The TAP devices of the slots. The number is written to the state BEFORE the first one is made (the higher of the old and the new
+# number), so an install that is interrupted, or fails, half way is undone by the same record: nothing made is left unnamed.
 ensure_taps() {
   total="$(slots)"
+  made="$(state_value taps)"
+  is_uint "$made" || made=0
+  if [ "$total" -gt "$made" ]; then set_state taps "$total"; fi
   n=0
   while [ "$n" -lt "$total" ]; do
     tap="fctap$n"
@@ -787,21 +1061,28 @@ ensure_taps() {
     n=$(( n + 1 ))
   done
   # A smaller number of slots than before: the devices above it are ours to remove.
-  made="$(state_value taps)"
-  if is_uint "$made"; then
-    while [ "$n" -lt "$made" ]; do
-      ip link delete "fctap$n" >/dev/null 2>&1 || true
-      n=$(( n + 1 ))
-    done
-  fi
+  while [ "$n" -lt "$made" ]; do
+    ip link delete "fctap$n" >/dev/null 2>&1 || true
+    n=$(( n + 1 ))
+  done
   set_state taps "$total"
+}
+
+# The table is a template: the one thing in it that differs between machines is the network of the slots.
+render_wall() { # render_wall TEMPLATE OUTPUT
+  network="$(slot_network)"
+  [ -n "$network" ] || fail "the network of the slots is not known"
+  sed "s#@SLOT_NETWORK@#$network#g" "$1" >"$2"
 }
 
 # Loads the table and proves it with a second command. The service cannot read nft state, so this is the only check.
 load_wall() {
-  table="$OPT/current/share/outer-wall.nft"
-  [ -f "$table" ] || fail "the program has no nft table to load"
-  nft -f "$table" || fail "the nft table could not be loaded"
+  template="$OPT/current/share/outer-wall.nft"
+  [ -f "$template" ] || fail "the program has no nft table to load"
+  render_wall "$template" "$STATE/outer-wall.nft"
+  chmod 0644 "$STATE/outer-wall.nft"
+  root_owned "$STATE/outer-wall.nft"
+  nft -f "$STATE/outer-wall.nft" || fail "the nft table could not be loaded"
   verify_wall
 }
 
@@ -820,6 +1101,7 @@ write_runner_env() {
     echo "FACTORY_RUNNER_VM_STATE_DIR=$STATE_PATH"
     echo "FACTORY_RUNNER_FIRECRACKER=$OPT_PATH/current/bin/firecracker"
     echo "FACTORY_RUNNER_PARALLEL_RUNS=$total"
+    echo "FACTORY_RUNNER_SLOT_NETWORK=$(slot_network)"
     echo "FACTORY_RUNNER_PENDING_FILE=$STATE_PATH/pending"
   } | write_file "$CONF/runner.env" 0644
 }
@@ -834,8 +1116,12 @@ write_units() {
 [Unit]
 Description=Factory-Runner (Code Reviewer): the local Dispatcher
 Documentation=https://github.com/Itegro-GmbH/code-reviewer/blob/main/docs/runner.md
-After=network-online.target
+After=network-online.target nftables.service
 Wants=network-online.target
+# Where the machine has nftables.service (a reload of the rules flushes ours with the rest): a restart of it restarts this service, and the
+# start loads the table again before the service runs. A machine without that unit ignores both lines. A flush by anything else is what
+# $SERVICE-wall.timer catches.
+PartOf=nftables.service
 
 [Service]
 Type=simple
@@ -907,6 +1193,32 @@ IOSchedulingClass=idle
 NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
+EOF
+  # The outer wall is checked while the service runs, as root (the service user cannot read nft): a flush of the rules by anything
+  # (nftables.service, a firewall tool, a person) ends in a restart, whose start loads the table again or, when it cannot, does not start.
+  write_file "$UNIT_DIR/$SERVICE-wall.service" 0644 <<EOF
+[Unit]
+Description=Factory-Runner (Code Reviewer): the outer wall of the VMs is still loaded
+Documentation=https://github.com/Itegro-GmbH/code-reviewer/blob/main/docs/runner.md
+
+[Service]
+Type=oneshot
+ExecStart=$OPT_PATH/current/libexec/host.sh check-wall
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+EOF
+  write_file "$UNIT_DIR/$SERVICE-wall.timer" 0644 <<EOF
+[Unit]
+Description=Factory-Runner (Code Reviewer): look every ten seconds whether the outer wall is loaded
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
 EOF
   write_file "$UNIT_DIR/$SERVICE-update.timer" 0644 <<EOF
 [Unit]
@@ -991,7 +1303,8 @@ ask_for_token() {
   stty -echo </dev/tty 2>/dev/null || true
   IFS= read -r TOKEN_TYPED </dev/tty || TOKEN_TYPED=""
   stty echo </dev/tty 2>/dev/null || true
-  trap - INT TERM QUIT
+  trap - QUIT
+  set_signal_traps
   printf '\n' >/dev/tty
 }
 
@@ -1047,6 +1360,8 @@ ensure_user() {
 }
 
 ensure_directories() {
+  # An existing, empty state directory (a volume of its own) is the operator's: the uninstall empties it and leaves it.
+  if [ -d "$STATE" ] && [ "$REFRESH" != 1 ]; then set_state state_existed 1; fi
   mkdir -p "$OPT" "$STATE" "$CONF" "$HOME_DIR" "$STATE/vms"
   # Explicit modes: a default ACL on a parent directory (some images have one on /opt) would otherwise be inherited.
   chmod 0755 "$OPT" "$STATE" "$CONF"
@@ -1057,11 +1372,18 @@ ensure_directories() {
   [ -e "$STATE/dispatcher.lock" ] || : >"$STATE/dispatcher.lock"
   chmod 0600 "$STATE/dispatcher.lock"
   chown "$SVC_USER:$SVC_USER" "$STATE/dispatcher.lock"
-  if [ -n "$CURL_CONFIG" ]; then
-    cp "$CURL_CONFIG" "$CONF/download.curlrc"
-    chmod 0600 "$CONF/download.curlrc"
-    root_owned "$CONF/download.curlrc"
-  fi
+  store_curl_config
+}
+
+# The curl configuration (a token, say) kept for the updates: made readable by root alone from its first byte, and a newly given one
+# replaces the one kept.
+store_curl_config() {
+  [ -n "$CURL_CONFIG" ] || return 0
+  mkdir -p "$CONF"
+  ( umask 077; cat "$CURL_CONFIG" >"$CONF/download.curlrc.new" )
+  chmod 0600 "$CONF/download.curlrc.new"
+  root_owned "$CONF/download.curlrc.new"
+  mv "$CONF/download.curlrc.new" "$CONF/download.curlrc"
 }
 
 # The service user must be able to open /dev/kvm: the proof is a try, as that user.
@@ -1075,8 +1397,8 @@ dry_run_plan() {
   say "dry run: nothing is changed. The install would:"
   say "  - make the user $SVC_USER (a member of $KVM_GROUP), $OPT_PATH, $STATE_PATH, $CONF_PATH and $HOME_PATH"
   say "  - download and verify the program and the VM artifacts (signed manifests, sha256 of every file) into root-owned, read-only directories"
-  say "  - make ${PARALLEL:-1} TAP device(s) fctap0... owned by $SVC_USER, load and verify the nft table $WALL_TABLE"
-  say "  - write $UNIT_DIR_PATH/$SERVICE.service, $SERVICE-update.service and .timer, and $COMMAND_PATH"
+  say "  - make ${PARALLEL:-1} TAP device(s) fctap0... owned by $SVC_USER in the network $SLOT_NETWORK (the first free one: it overlaps no address or route of this machine), load and verify the nft table $WALL_TABLE"
+  say "  - write $UNIT_DIR_PATH/$SERVICE.service, $SERVICE-update.service and .timer, $SERVICE-wall.service and .timer, and $COMMAND_PATH"
   say "  - register the machine with a token and start the service"
   say "install: done"
 }
@@ -1090,15 +1412,25 @@ do_install() {
     dry_run_plan
     return 0
   fi
-  # The two manifests are fetched and proven, and the space is counted, before the first change.
+  # Before the first change: the two manifests are fetched and proven, the program is downloaded, verified and unpacked and its nft
+  # table is checked on this kernel, and the space for the VM artifacts is counted. Only the work directory is touched.
   if ! fetch_manifest program; then no_release_yet program; fi
   if ! fetch_manifest vm; then no_release_yet vm; fi
+  PROGRAM_STAGE_BASE="$WORK/stage"
+  make_stage_root "$PROGRAM_STAGE_BASE"
+  if wanted program; then stage_program; fi
   check_space
   if [ "$REFRESH" != 1 ]; then FRESH=1; fi
   set_state version 1
+  [ -n "$(state_value slot_network)" ] || set_state slot_network "$SLOT_NETWORK"
   ensure_user
   check_kvm_access
   ensure_directories
+  # Another updater (the timer's) may be staging: this one waits for nobody and takes the staging directory only with its lock.
+  exec 9>"$STATE/update.lock"
+  flock -n 9 || fail "an update is running"
+  VM_STAGE_BASE="$STATE/staging"
+  make_stage_root "$VM_STAGE_BASE"
   for comp in program vm; do
     cp "$(channel_file_of "$comp")" "$CONF/channel-$comp.json"
     chmod 0644 "$CONF/channel-$comp.json"
@@ -1107,8 +1439,8 @@ do_install() {
   total="${PARALLEL:-1}"
   write_runner_env "$total"
   STAGED_ANY=0
-  update_component program
-  update_component vm
+  if wanted vm; then stage_vm; fi
+  commit_staged
   rm -rf "$STATE/staging"
   running=0
   if [ "$REFRESH" = 1 ] && systemctl is-active --quiet "$SERVICE" </dev/null 2>/dev/null; then running=1; fi
@@ -1125,8 +1457,10 @@ do_install() {
   FRESH=0
   unlock_switch
   systemctl daemon-reload </dev/null
-  systemctl enable "$SERVICE-update.timer" >/dev/null 2>&1 </dev/null || true
-  systemctl start "$SERVICE-update.timer" >/dev/null 2>&1 </dev/null || true
+  for timer in "$SERVICE-update.timer" "$SERVICE-wall.timer"; do
+    systemctl enable "$timer" >/dev/null 2>&1 </dev/null || true
+    systemctl start "$timer" >/dev/null 2>&1 </dev/null || true
+  done
   registered=1
   if ! register_or_configure; then
     registered=0
@@ -1181,13 +1515,21 @@ do_update() {
   make_tmpdir
   WORK="$TMPDIR_MADE"
   mkdir -p "$STATE"
+  # `update.lock` keeps two updaters from staging at once. The switch lock is not held while anything is downloaded: a start of the
+  # service and a rollback never wait for an update.
   exec 9>"$STATE/update.lock"
   flock -n 9 || fail "another update is running"
-  rm -rf "$STATE/staging"
-  STAGED_ANY=0
-  update_component program
-  update_component vm
-  rm -rf "$STATE/staging"
+  PROGRAM_STAGE_BASE="$OPT/staging"
+  VM_STAGE_BASE="$STATE/staging"
+  make_stage_root "$PROGRAM_STAGE_BASE"
+  make_stage_root "$VM_STAGE_BASE"
+  fetch_manifest program || true
+  fetch_manifest vm || true
+  # The manifests were proven by this configuration: it is the one kept for the next update.
+  store_curl_config
+  stage_releases
+  unlock_switch
+  rm -rf "$PROGRAM_STAGE_BASE" "$VM_STAGE_BASE"
   if [ "$STAGED_ANY" = 1 ]; then
     say "the service switches to it between two jobs (it ends, and the start switches); 'systemctl restart $SERVICE' switches now and gives a running job back to the queue"
   fi
@@ -1225,7 +1567,7 @@ do_rollback() {
     esac
     if [ -z "$previous" ] || [ -z "$current" ] || [ "$previous" = "$current" ]; then continue; fi
     reject_release "$comp" "$current"
-    write_pending "$comp" "$previous"
+    write_pending "$comp=$previous"
     say "the $comp goes back from release $current to release $previous (release $current is not taken again, nor any below it)"
     went=1
   done
@@ -1265,6 +1607,20 @@ do_prestart() {
   chown "$SVC_USER:$SVC_USER" "$STATE/vms" "$STATE/dispatcher.lock" 2>/dev/null || true
 }
 
+# Run by the wall timer as root: when the service runs and the table is gone, the service is restarted. The restart stops the VMs (their
+# jobs go back to the queue) and its start loads the table again; when it cannot, the service does not start. Within one period of the
+# timer (10 s) plus the time of a stop, a VM does not run without its wall.
+do_check_wall() {
+  require_root
+  require_installed
+  systemctl is-active --quiet "$SERVICE" </dev/null 2>/dev/null || return 0
+  if nft list table inet "$WALL_TABLE" >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "the nft table $WALL_TABLE is gone while the service runs: restarting it (its start loads the table again, or fails without it)"
+  systemctl restart "$SERVICE" </dev/null || warn "the service did not restart: it stays stopped until the table can be loaded"
+}
+
 do_run_service() {
   dir="$(readlink -f "$OPT/current")"
   vm_env="$STATE/artifacts/vm.env"
@@ -1280,17 +1636,20 @@ do_run_service() {
 
 # -- uninstall -------------------------------------------------------------------------------------------------------
 
-remove_tree() { # remove_tree DIR: the contents and the directory, unless it is a mount point (then the contents only)
+remove_tree() { # remove_tree DIR [KEEP]: the contents and the directory, unless it is a mount point or KEEP is 1 (it was there before: the contents only)
   [ -e "$1" ] || [ -L "$1" ] || return 0
   find "$1" -mindepth 1 -xdev -delete 2>/dev/null || rm -rf --one-file-system "$1"
-  rmdir "$1" 2>/dev/null || true
+  [ "${2:-0}" = 1 ] || rmdir "$1" 2>/dev/null || true
 }
 
+# Removes what an install made and nothing else: the install refuses to start where any of it exists, and writes `install.state` before
+# its first change, so the state is the record. A machine without it is not ours.
 remove_everything() {
-  [ -f "$CONF/install.state" ] || [ -e "$OPT" ] || [ -e "$STATE" ] || return 0
+  [ -f "$CONF/install.state" ] || return 0
   made_user="$(state_value user_created)"
+  state_kept="$(state_value state_existed)"
   total="$(state_value taps)"
-  systemctl disable --now "$SERVICE-update.timer" </dev/null >/dev/null 2>&1 || true
+  systemctl disable --now "$SERVICE-update.timer" "$SERVICE-wall.timer" </dev/null >/dev/null 2>&1 || true
   systemctl disable --now "$SERVICE" </dev/null >/dev/null 2>&1 || true
   nft delete table inet "$WALL_TABLE" >/dev/null 2>&1 || true
   if is_uint "$total"; then
@@ -1300,11 +1659,12 @@ remove_everything() {
       n=$(( n + 1 ))
     done
   fi
-  rm -f "$UNIT_DIR/$SERVICE.service" "$UNIT_DIR/$SERVICE-update.service" "$UNIT_DIR/$SERVICE-update.timer" "$COMMAND"
+  rm -f "$UNIT_DIR/$SERVICE.service" "$UNIT_DIR/$SERVICE-update.service" "$UNIT_DIR/$SERVICE-update.timer" \
+    "$UNIT_DIR/$SERVICE-wall.service" "$UNIT_DIR/$SERVICE-wall.timer" "$COMMAND"
   systemctl daemon-reload </dev/null >/dev/null 2>&1 || true
-  systemctl reset-failed "$SERVICE" "$SERVICE-update.service" </dev/null >/dev/null 2>&1 || true
+  systemctl reset-failed "$SERVICE" "$SERVICE-update.service" "$SERVICE-wall.service" </dev/null >/dev/null 2>&1 || true
   remove_tree "$OPT"
-  remove_tree "$STATE"
+  remove_tree "$STATE" "$state_kept"
   remove_tree "$HOME_DIR"
   remove_tree "$CONF"
   if [ "$made_user" = 1 ]; then
@@ -1314,8 +1674,8 @@ remove_everything() {
 
 do_uninstall() {
   require_root
-  if [ ! -f "$CONF/install.state" ] && [ ! -e "$OPT" ] && [ ! -e "$STATE" ]; then
-    say "the runner is not installed on this machine: nothing to remove"
+  if [ ! -f "$CONF/install.state" ]; then
+    say "the runner is not installed on this machine by this installer ($CONF_PATH/install.state is missing): nothing to remove"
     return 0
   fi
   if [ "$DRY_RUN" = 1 ]; then
@@ -1341,6 +1701,7 @@ main() {
     uninstall) do_uninstall ;;
     switch) require_root; require_installed; apply_pending ;;
     prestart) do_prestart ;;
+    check-wall) do_check_wall ;;
     run-service) do_run_service ;;
   esac
 }

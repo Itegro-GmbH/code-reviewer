@@ -2147,27 +2147,31 @@ what an earlier load made (`table`, `delete table`, `table`). The file, exactly 
 # SPDX-License-Identifier: LicenseRef-Proprietary
 #
 # The outer wall of a customer's machine (#979, Runner v2, ADR 0005, decision 7): a static nft table, loaded once at
-# install as root (`nft -f outer-wall.nft`; the installer, #982) and never changed while VMs come and go. It is a table
+# install as root (the installer, #982, renders this template and runs `nft -f` on the result) and never changed while
+# VMs come and go. `@SLOT_NETWORK@` is the network of the slots, chosen at install so that it overlaps no address or
+# route of the machine (`FACTORY_RUNNER_SLOT_NETWORK`); the installer replaces it and nothing else. It is a table
 # of its own and every rule of it names our TAP devices (`fctap*`, one per slot), so the host's own traffic and every
 # other table of the machine are untouched. A VM may do exactly one thing: open a TCP connection to the proxy of the
-# local Dispatcher (port 3128) on a slot's address of 172.31.0.0/16 (the proxy listens on those addresses only, and
+# local Dispatcher (port 3128) on a slot's address of @SLOT_NETWORK@ (the proxy listens on those addresses only, and
 # only the slot's own VM is served), and receive the answers. Everything else a VM sends is dropped: the host's other
 # ports, addresses, ICMP and UDP (DNS included: the proxy resolves names), the LAN, RFC1918, link-local and the cloud
 # metadata address (169.254.169.254), the other VMs, the internet, and IPv6 altogether. A packet must come from the
 # address of the slot whose TAP it arrives on (a reverse-path check): a VM cannot send another slot's source address.
 # The VM has no way out but the proxy, which enforces the rule of the job (wide for the setup, narrowed after
 # `narrow`): changing it never touches this table. Priority -150 runs before the filter hooks of other firewalls at
-# priority 0.
+# priority 0. A rule that is missing never opens anything: the last rule of each chain drops all that is of ours, and
+# `nft -f` loads the file in one transaction. Only the table itself being gone opens the wall: the service checks it at
+# every start and as root while it runs (`factory-runner check-wall`, docs/runner.md, "The outer wall is checked").
 table inet code_reviewer_wall
 delete table inet code_reviewer_wall
 table inet code_reviewer_wall {
   chain input {
     type filter hook input priority -150; policy accept;
     iifname "fctap*" meta nfproto ipv6 counter drop comment "no IPv6"
-    iifname "fctap*" ip saddr != 172.31.0.0/16 counter drop comment "not an address of a slot"
+    iifname "fctap*" ip saddr != @SLOT_NETWORK@ counter drop comment "not an address of a slot"
     iifname "fctap*" meta nfproto ipv4 fib saddr . iif oif missing counter drop comment "source not routed back to this TAP (reverse path)"
     iifname "fctap*" ct state established,related counter accept comment "answers"
-    iifname "fctap*" tcp dport 3128 ip daddr 172.31.0.0/16 fib daddr type local counter accept comment "the proxy"
+    iifname "fctap*" tcp dport 3128 ip daddr @SLOT_NETWORK@ fib daddr type local counter accept comment "the proxy"
     iifname "fctap*" counter drop comment "everything else addressed to the host"
   }
   chain forward {

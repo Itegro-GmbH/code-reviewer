@@ -12,6 +12,7 @@ a real `nft` and a real kernel do with the files is the job of the first install
 bad signature; #982-T04 rollback."""
 
 import fcntl
+import ipaddress
 import json
 import os
 import select
@@ -25,6 +26,7 @@ from typing import cast
 
 import pytest
 from host_install_support import (
+    FIRST_NETWORK,
     PROGRAM_BASE,
     REPOSITORY_ROOT,
     SCRIPT,
@@ -285,10 +287,10 @@ def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_uni
     # One TAP device, owned by the user, with the /30 of slot 0.
     assert machine.taps == ["fctap0"]
     assert "ip tuntap add dev fctap0 mode tap user factory-runner group factory-runner" in calls
-    assert "ip addr replace 172.31.0.1/30 dev fctap0" in calls
+    assert "ip addr replace 10.250.0.1/30 dev fctap0" in calls
     # The table: checked, loaded, listed; only then is the unit written and started.
     check = next(index for index, call in enumerate(calls) if call.startswith("nft -c -f "))
-    load = calls.index(f"nft -f {machine.opt}/current/share/outer-wall.nft")
+    load = calls.index(f"nft -f {machine.state_dir}/outer-wall.nft")
     listed = calls.index("nft list table inet code_reviewer_wall", load)
     enabled = calls.index("systemctl enable factory-runner")
     assert check < load < listed < enabled < calls.index("systemctl start factory-runner")
@@ -296,6 +298,7 @@ def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_uni
     assert (machine.conf / "install.state").read_text().splitlines()[:1] == ["version=1"]
     assert "user_created=1" in (machine.conf / "install.state").read_text()
     assert "taps=1" in (machine.conf / "install.state").read_text()
+    assert "slot_network=10.250.0.0/24" in (machine.conf / "install.state").read_text()
 
 
 def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on(
@@ -440,8 +443,8 @@ def test_parallel_runs_make_a_tap_device_and_an_address_per_slot_and_scale_the_l
     assert done.returncode == 0, done.stderr
     assert machine.taps == ["fctap0", "fctap1", "fctap2"]
     calls = machine.calls()
-    assert "ip addr replace 172.31.0.5/30 dev fctap1" in calls
-    assert "ip addr replace 172.31.0.9/30 dev fctap2" in calls
+    assert "ip addr replace 10.250.0.5/30 dev fctap1" in calls
+    assert "ip addr replace 10.250.0.9/30 dev fctap2" in calls
     assert "FACTORY_RUNNER_PARALLEL_RUNS=3" in (machine.conf / "runner.env").read_text()
     unit = machine.unit.read_text()
     assert "LimitNOFILE=8384" in unit and "TasksMax=1156" in unit
@@ -457,9 +460,11 @@ def test_a_hundred_slots_are_refused(machine: Machine) -> None:
 def test_the_slot_addresses_are_the_ones_the_launcher_derives() -> None:
     from code_reviewer_runner.factory_runner.firecracker.slots import Slot
 
+    network = ipaddress.IPv4Network(FIRST_NETWORK)
     script = SCRIPT.read_text()
-    assert "172.31." in script and "* 4 + 1" in script
-    assert Slot(0).host_address == "172.31.0.1" and Slot(65).host_address == "172.31.1.5"
+    assert "* 4 + 1" in script and 'int_to_ip $(( $(ip_to_int "${network%/*}")' in script
+    assert Slot(0, network).host_address == "10.250.0.1"
+    assert Slot(63, network).host_address == "10.250.0.253"
 
 
 @pytest.mark.parametrize(
@@ -558,6 +563,8 @@ def test_a_curl_configuration_for_a_protected_address_is_kept_for_updates_for_ro
     kept = machine.conf / "download.curlrc"
     assert kept.read_text() == rc.read_text() and stat.S_IMODE(kept.stat().st_mode) == 0o600
     assert f"curl -K {rc}" in " ".join(machine.calls("curl"))
+    # Made readable by root alone from its first byte (a umask, not a chmod afterwards).
+    assert 'umask 077; cat "$CURL_CONFIG"' in SCRIPT.read_text()
     assert "secret-value" not in done.stdout + done.stderr
     update = machine.host("update")
     assert update.returncode == 0, update.stderr
@@ -688,12 +695,17 @@ def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(
 
     assert done.returncode == 0, done.stderr
     assert (
-        "staged the program release 2" in done.stdout and "staged the vm release 11" in done.stdout
+        "staged the program release 2" in done.stdout
+        and "staged the VM artifacts release 11" in done.stdout
     )
     # What runs is untouched: only the marker says there is something to switch to.
     assert os.readlink(installed.opt / "current") == "releases/1"
     assert os.readlink(installed.state_dir / "artifacts") == "artifact-releases/10"
-    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=2", "vm=11"]
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
     assert (installed.opt / "releases/2/bin/factory-runner").is_file()
     assert (installed.state_dir / "artifact-releases/11/vm.env").is_file()
     assert len(installed.calls("systemctl")) == restarts  # nothing was restarted
@@ -905,7 +917,7 @@ def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it
     assert "was rolled back" in again.stdout and not (installed.state_dir / "pending").exists()
     publish(installed, program=3, vm=12)
     assert installed.host("update").returncode == 0
-    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=3", "vm=12"]
+    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=3", "vm=12", "pair=1"]
 
 
 def test_a_rollback_with_a_staged_release_cancels_it_instead_of_going_back(
@@ -1016,7 +1028,11 @@ def test_an_install_run_again_with_refresh_is_idempotent_and_never_restarts_a_ru
     assert "config set --labels linux,fast" in (installed.state / "cli.log").read_text()
     # The running service keeps its release: the new one waits for its start.
     assert installed.release_of("current") == "1"
-    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=2", "vm=11"]
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
     assert machine_user_count(installed) == 1
 
 
@@ -1144,8 +1160,11 @@ def test_the_file_names_the_installer_expects_are_the_ones_of_the_release_and_th
 
 def test_the_nft_table_the_program_carries_is_the_one_of_the_repository(installed: Machine) -> None:
     loaded = (installed.state / "nft-table").read_text()
+    template = (REPOSITORY_ROOT / "docker/vm/host/outer-wall.nft").read_text()
 
-    assert loaded == (REPOSITORY_ROOT / "docker/vm/host/outer-wall.nft").read_text()
+    # Rendered for the machine's network and nothing else.
+    assert loaded == template.replace("@SLOT_NETWORK@", FIRST_NETWORK)
+    assert "@SLOT_NETWORK@" not in loaded
     assert "table inet code_reviewer_wall" in loaded
 
 

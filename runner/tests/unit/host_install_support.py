@@ -28,6 +28,8 @@ RUNNER = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = RUNNER.parent
 SCRIPT = RUNNER / "install" / "install.sh"
 NFT_FILE = REPOSITORY_ROOT / "docker" / "vm" / "host" / "outer-wall.nft"
+# The network the installer picks on a machine with no address or route in the way (the first candidate).
+FIRST_NETWORK = "10.250.0.0/24"
 
 PROGRAM_BASE = "https://releases.example/runner/"
 VM_BASE = "https://releases.example/vm/"
@@ -316,9 +318,17 @@ printf 'ip %s\n' "$*" >>"$STUB_LOG"
 taps="$STUB_STATE/taps"
 mkdir -p "$taps"
 case "$*" in
+  "-4 -o addr show") printf '%s' "${STUB_IP_ADDRS:-}" ;;
+  "-4 route show table all") printf '%s' "${STUB_IP_ROUTES:-}" ;;
   "-o link show"*) for tap in "$taps"/*; do [ -e "$tap" ] && echo "7: $(basename "$tap"): <BROADCAST> mtu 1500"; done; exit 0 ;;
   "link show "*) [ -e "$taps/$3" ] ;;
-  "tuntap add dev "*) [ -n "${STUB_TUNTAP_FAIL:-}" ] && exit 1; echo "$*" >"$taps/$4" ;;
+  "tuntap add dev "*)
+    [ -n "${STUB_TUNTAP_FAIL:-}" ] && exit 1
+    [ "$4" = "${STUB_TUNTAP_FAIL_AT:-}" ] && exit 1
+    echo "$*" >"$taps/$4"
+    # The signal of an operator's Ctrl-C reaches the script (the parent of this stand-in) in the middle of the work.
+    [ "$4" = "${STUB_TUNTAP_SIGNAL_AT:-}" ] && kill -TERM "$PPID"
+    exit 0 ;;
   "link delete "*) rm -f "$taps/$3" ;;
   *) exit 0 ;;
 esac
@@ -334,16 +344,31 @@ case "$*" in
 esac
 """,
     "curl": r"""
+# The installer runs a download under a limit on the size of any file a process writes; the log of the calls is not a download.
+saved="$(ulimit -S -f)"
+ulimit -S -f unlimited 2>/dev/null || true
 printf 'curl %s\n' "$*" >>"$STUB_LOG"
-out=""; url=""
+[ "$saved" = unlimited ] || ulimit -S -f "$saved"
+out=""; url=""; headers=""; write_code=""
 while [ $# -gt 0 ]; do
-  case "$1" in -o) out="$2"; shift ;; https://*|http://*) url="$1" ;; esac
+  case "$1" in -o) out="$2"; shift ;; -D) headers="$2"; shift ;; -w) write_code=1; shift ;; https://*|http://*) url="$1" ;; esac
   shift
 done
 [ -z "${STUB_CURL_FAIL:-}" ] || exit 7
+case "$url" in *"?again") url="${url%\?again}"; again=1 ;; *) again="" ;; esac
 name="${url##*/}"
-[ -f "$STUB_SERVED/$name" ] || exit 22
-cp "$STUB_SERVED/$name" "$out"
+# A redirect the test asked for, to another host, or once to the same host (only answered to a request that asks for the status code).
+if [ -n "$write_code" ] && [ -n "${STUB_REDIRECT_TO:-}" ]; then
+  printf 'HTTP/1.1 302 Found\r\nLocation: %s\r\n\r\n' "$STUB_REDIRECT_TO" >"$headers"; printf 302; exit 0
+fi
+if [ -n "$write_code" ] && [ -n "${STUB_REDIRECT_ONCE:-}" ] && [ -z "$again" ]; then
+  printf 'HTTP/1.1 302 Found\r\nLocation: /%s?again\r\n\r\n' "${url#https://*/}" >"$headers"; printf 302; exit 0
+fi
+[ -f "$STUB_SERVED/$name" ] || { [ -n "$write_code" ] && printf 404; exit 22; }
+# A server that sends more than its manifest said (no Content-Length): the file is as long as the test made it.
+cp "$STUB_SERVED/$name" "$out" || exit 23
+[ -z "$headers" ] || printf 'HTTP/1.1 200 OK\r\n\r\n' >"$headers"
+[ -z "$write_code" ] || printf 200
 """,
     "resize2fs": "exit 0",
     "e2fsck": "exit 0",
@@ -516,6 +541,8 @@ def new_machine(tmp_path: Path, release: Release | None = None) -> Machine:
     ):
         (root / folder).mkdir(parents=True)
     (root / "dev" / "kvm").write_text("")
+    (root / "dev" / "net").mkdir()
+    (root / "dev" / "net" / "tun").write_text("")
     (root / "sys/fs/cgroup/cgroup.controllers").write_text("cpuset cpu io memory pids\n")
     bin_dir.mkdir()
     state.mkdir()

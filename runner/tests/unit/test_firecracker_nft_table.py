@@ -14,7 +14,6 @@ import pytest
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import PROXY_PORT
 from code_reviewer_runner.factory_runner.firecracker.slots import (
     MAX_SLOTS,
-    NETWORK_PREFIX,
     TAP_PREFIX,
     Slot,
 )
@@ -28,7 +27,8 @@ RULES = [
     line.strip() for line in TEXT.splitlines() if line.strip() and not line.strip().startswith("#")
 ]
 TAPS = f'"{TAP_PREFIX}*"'
-NETWORK = f"{NETWORK_PREFIX}.0.0/16"
+# The installer renders this for the network of the machine's slots (`install.sh`, `render_wall`).
+NETWORK = "@SLOT_NETWORK@"
 
 
 def chain(name: str) -> list[str]:
@@ -112,7 +112,7 @@ def test_the_source_of_a_vm_is_a_slot_address_and_ipv6_is_dropped_before_anythin
 
     assert rules[0].startswith(f"iifname {TAPS} meta nfproto ipv6") and " drop " in f"{rules[0]} "
     assert f"ip saddr != {NETWORK}" in rules[1] and " drop " in f"{rules[1]} "
-    assert f"{NETWORK_PREFIX}.0.0/16" == NETWORK
+    assert TEXT.count(NETWORK) >= 2
 
 
 # #979 (review: a TAP could send another slot's source address, the table let any of the /16 in)
@@ -153,3 +153,11 @@ def test_docs_print_the_file_in_full() -> None:
     # The page prints the file as it is, comment lines included: a change to one without the other
     # fails here.
     assert TEXT.strip() in docs
+
+
+# #982-T41
+def test_the_only_thing_the_installer_fills_in_is_the_network_of_the_slots() -> None:
+    assert set(re.findall(r"@[A-Z_]+@", TEXT)) == {"@SLOT_NETWORK@"}
+    assert "172.31" not in TEXT
+    # A rule that is missing never opens anything: the last rule of each chain drops what is ours.
+    assert rules_of("input")[-1].startswith(f"iifname {TAPS} counter drop")
