@@ -11,11 +11,12 @@ is the KVM lane's."""
 
 import asyncio
 import contextlib
+import errno
 import logging
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,10 @@ from firecracker_support import CREDENTIAL, short_directory, start_for
 from firecracker_support import Rig as MachineRig
 from netdoor_support import PUBLIC, Lookups, Origin, status_of
 
+from code_reviewer_runner.factory_runner.firecracker.host_addresses import (
+    HostAddresses,
+    local_addresses,
+)
 from code_reviewer_runner.factory_runner.firecracker.launcher import FirecrackerSandbox
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import VmIdentity
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import (
@@ -71,11 +76,21 @@ def run(coroutine: Any) -> Any:
     return asyncio.run(coroutine)
 
 
+class Hooks:
+    """Where a test stops the proxy's own steps: `on_lookup` runs in the thread that resolves a
+    name, `on_connect` in the one that connects (both before the real double answers)."""
+
+    def __init__(self) -> None:
+        self.on_lookup: Callable[[str], None] = lambda name: None
+        self.on_connect: Callable[[str], None] = lambda address: None
+
+
 @dataclass
 class Rig:
     wall: ProxyOuterWall
     lookups: Lookups
     origin: Origin
+    hooks: Hooks
 
     def ask(
         self,
@@ -115,26 +130,46 @@ class Rig:
         return client
 
 
-@pytest.fixture
-def rig() -> Iterator[Rig]:
+@contextlib.contextmanager
+def running(**options: Any) -> Generator[Rig]:
+    """A started wall of two slots over loopback; `options` are those of `ProxyOuterWall`."""
     origin = Origin()
     lookups = Lookups()
+    hooks = Hooks()
     lookups.servers[PUBLIC] = origin.port
     for name in (SETUP_ONLY, "github.com", "api.github.com", MODEL, APP, "registry.npmjs.org"):
         lookups.table[name] = [PUBLIC]
-    wall = ProxyOuterWall(
-        slots=2,
-        port=0,
-        addresses=tap_addresses,
-        resolver=lookups.resolve,
-        connector=lookups.connect,
-    )
+
+    def resolve(name: str, port: int) -> list[str]:
+        hooks.on_lookup(name)
+        return lookups.resolve(name, port)
+
+    def reach(address: str, port: int, timeout: float) -> socket.socket:
+        hooks.on_connect(address)
+        return lookups.connect(address, port, timeout)
+
+    settings: dict[str, Any] = {
+        "slots": 2,
+        "port": 0,
+        "addresses": tap_addresses,
+        "resolver": resolve,
+        "connector": reach,
+        # What the host has is the host's: a test names the addresses it needs.
+        "host_addresses": HostAddresses(lambda: frozenset({"192.0.2.77"})),
+    }
+    wall = ProxyOuterWall(**{**settings, **options})
     run(wall.start())
     try:
-        yield Rig(wall, lookups, origin)
+        yield Rig(wall, lookups, origin, hooks)
     finally:
         run(wall.close())
         origin.close()
+
+
+@pytest.fixture
+def rig() -> Iterator[Rig]:
+    with running() as made:
+        yield made
 
 
 def connect(target: str) -> bytes:
@@ -466,6 +501,400 @@ def test_forget_never_raises_for_a_vm_it_does_not_know(rig: Rig) -> None:
     run(rig.wall.forget(vm()))
 
 
+# -- a tunnel ends as a whole ---
+
+
+# #979 (review: the origin's half stayed open, the handler waited for it and kept its permit)
+def test_narrow_ends_the_whole_tunnel_and_gives_the_slots_permits_back() -> None:
+    with running(slot_connections=2) as rig:
+        identity = admitted(rig)
+        held = [hold_a_tunnel(rig, f"held{n}.example.com", f"151.101.1.{n + 1}") for n in range(2)]
+        try:
+            assert wait_for(lambda: all(each.accepted.is_set() for each in held))
+            full = rig.ask(connect(f"{SETUP_ONLY}:443"))
+            assert status_of(full) == 503 and reason_of(full) == "too_many_connections"
+
+            run(rig.wall.narrow(identity, narrow_message()))
+
+            # The origins are silent and never close: only the proxy can end the tunnels.
+            assert wait_for(lambda: rig.wall.open_connections(FIRST) == 0, 3.0), (
+                "the handlers of the setup's tunnels did not return"
+            )
+            assert all(each.origin_saw_the_end() for each in held)
+            for host in ("github.com", MODEL):
+                assert status_of(rig.ask(connect(f"{host}:443"))) == 200, host
+        finally:
+            for each in held:
+                each.stop()
+
+
+# #979
+def test_forget_ends_the_whole_tunnel_too() -> None:
+    with running(slot_connections=1) as rig:
+        identity = admitted(rig)
+        held = hold_a_tunnel(rig)
+        try:
+            assert wait_for(lambda: held.accepted.is_set())
+
+            run(rig.wall.forget(identity))
+
+            assert wait_for(lambda: rig.wall.open_connections(FIRST) == 0, 3.0)
+            assert held.origin_saw_the_end()
+        finally:
+            held.stop()
+
+
+# -- a decision belongs to the rule it was made under ---
+
+
+def was_dropped_for_the_rule(rig: Rig, answer: bytes) -> bool:
+    """The request met no connection and no 200: `narrow` already ended the guest's connection
+    (nothing to read) or the refusal reached it, and the log says `rule_changed` either way."""
+
+    def logged() -> bool:
+        return any(
+            each["reason"] == "rule_changed" and each["outcome"] == "refused"
+            for each in rig.wall.log_of(FIRST)["connections"]
+        )
+
+    ended = answer == b"" or (status_of(answer) == 403 and reason_of(answer) == "rule_changed")
+    # The handler may still be in the step the test stopped when the guest's end is seen.
+    return ended and wait_for(logged, 5.0)
+
+
+def narrowed_while(rig: Rig, identity: VmIdentity, entered: threading.Event) -> Callable[[], None]:
+    """What the test does once the proxy is inside the step it stopped: narrow, which is acked."""
+
+    def narrow_now() -> None:
+        assert entered.wait(10), "the proxy never reached the step"
+        assert run(rig.wall.narrow(identity, narrow_message())) is None
+
+    return narrow_now
+
+
+# #979 (review: a decision made under the wide rule was acted on after `narrow` was acked)
+def test_a_name_looked_up_under_the_wide_rule_is_not_connected_once_narrow_is_acked(
+    rig: Rig,
+) -> None:
+    identity = admitted(rig)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_resolver(name: str) -> None:
+        if name == SETUP_ONLY:
+            entered.set()
+            assert release.wait(10)
+
+    rig.hooks.on_lookup = slow_resolver
+    answers: list[bytes] = []
+    asking = threading.Thread(target=lambda: answers.append(rig.ask(connect(f"{SETUP_ONLY}:443"))))
+    asking.start()
+    narrow_now = narrowed_while(rig, identity, entered)
+    narrow_now()
+    release.set()
+    asking.join(10)
+
+    assert was_dropped_for_the_rule(rig, answers[0])
+    assert rig.lookups.connected == [], "a connection was made under a rule that was gone"
+    # The same name asked now meets the job's rule.
+    assert reason_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == "not_listed"
+
+
+# #979
+def test_a_connection_made_under_the_wide_rule_sends_nothing_once_narrow_is_acked(
+    rig: Rig,
+) -> None:
+    identity = admitted(rig)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_connector(_address: str) -> None:
+        entered.set()
+        assert release.wait(10)
+
+    rig.hooks.on_connect = slow_connector
+    answers: list[bytes] = []
+    request = (
+        b"POST http://"
+        + SETUP_ONLY.encode()
+        + b"/x HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nbody"
+    )
+    asking = threading.Thread(target=lambda: answers.append(rig.ask(request)))
+    asking.start()
+    narrowed_while(rig, identity, entered)()
+    release.set()
+    asking.join(10)
+
+    assert was_dropped_for_the_rule(rig, answers[0])
+    assert b"".join(rig.origin.received) == b"", "bytes read under the wide rule were sent"
+
+
+# #979
+def test_a_tunnel_made_under_the_wide_rule_says_nothing_of_a_connection_once_narrow_is_acked(
+    rig: Rig,
+) -> None:
+    identity = admitted(rig)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_connector(_address: str) -> None:
+        entered.set()
+        assert release.wait(10)
+
+    rig.hooks.on_connect = slow_connector
+    answers: list[bytes] = []
+    asking = threading.Thread(target=lambda: answers.append(rig.ask(connect(f"{SETUP_ONLY}:443"))))
+    asking.start()
+    narrowed_while(rig, identity, entered)()
+    release.set()
+    asking.join(10)
+
+    assert b"Connection Established" not in answers[0]
+    assert was_dropped_for_the_rule(rig, answers[0])
+
+
+# #979
+def test_a_decision_made_for_a_forgotten_vm_is_dropped_too() -> None:
+    with running() as rig:
+        identity = admitted(rig)
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_resolver(_name: str) -> None:
+            entered.set()
+            assert release.wait(10)
+
+        rig.hooks.on_lookup = slow_resolver
+        answers: list[bytes] = []
+        asking = threading.Thread(
+            target=lambda: answers.append(rig.ask(connect(f"{SETUP_ONLY}:443")))
+        )
+        asking.start()
+        assert entered.wait(10)
+        run(rig.wall.forget(identity))
+        release.set()
+        asking.join(10)
+
+        assert was_dropped_for_the_rule(rig, answers[0]) and rig.lookups.connected == []
+
+
+# -- the process's own limits ---
+
+
+# #979 (review: busy slots could use up the descriptors of the whole dispatcher)
+def test_the_slots_share_one_budget_that_a_busy_slot_cannot_use_up() -> None:
+    with running(slot_connections=4, total_connections=2) as rig:
+        first = admitted(rig, FIRST)
+        admitted(rig, SECOND)
+        held = [hold_a_tunnel(rig, f"held{n}.example.com", f"151.101.1.{n + 1}") for n in range(2)]
+        try:
+            assert wait_for(lambda: all(each.accepted.is_set() for each in held))
+
+            other = rig.ask(connect(f"{SETUP_ONLY}:443"), SECOND)
+            assert status_of(other) == 503 and reason_of(other) == "too_many_connections"
+            assert rig.wall.log_of(SECOND)["refused"] == 1
+
+            run(rig.wall.forget(first))
+
+            assert wait_for(lambda: rig.wall.open_connections(FIRST) == 0, 3.0)
+            assert wait_for(
+                lambda: status_of(rig.ask(connect(f"{SETUP_ONLY}:443"), SECOND)) == 200
+            ), "the budget was not given back"
+        finally:
+            for each in held:
+                each.stop()
+
+
+# #979
+def test_a_connection_refused_for_the_budget_does_not_take_a_permit() -> None:
+    with running(slot_connections=4, total_connections=1) as rig:
+        admitted(rig)
+        held = hold_a_tunnel(rig)
+        try:
+            assert wait_for(lambda: held.accepted.is_set())
+            for _ in range(5):
+                assert reason_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == "too_many_connections"
+            assert rig.wall.open_connections(FIRST) == 1
+        finally:
+            held.stop()
+        # The one that was held ends with its client; nothing leaked on the way.
+        run(rig.wall.forget(vm()))
+        assert wait_for(lambda: rig.wall.open_connections(FIRST) == 0, 3.0)
+        admitted(rig, FIRST, "next")
+        assert wait_for(lambda: status_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == 200)
+
+
+# #979 (review: accept failed with EMFILE and the listener was readable again at once)
+def test_a_listener_out_of_descriptors_backs_off_instead_of_spinning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    with running() as rig:
+        admitted(rig)
+        target = rig.wall.listening()[0]
+        failing = threading.Event()
+        failing.set()
+        calls: list[int] = []
+        original = socket.socket.accept
+
+        def ours(listener: socket.socket) -> bool:
+            try:
+                return listener.getsockname() == target
+            except OSError:
+                return False
+
+        def accept(self: socket.socket) -> Any:
+            if failing.is_set() and ours(self):
+                calls.append(1)
+                raise OSError(errno.EMFILE, "Too many open files")
+            return original(self)
+
+        monkeypatch.setattr(socket.socket, "accept", accept)
+        client = rig.client()
+        try:
+            with caplog.at_level(logging.WARNING):
+                time.sleep(1.0)
+                spun = len(calls)
+            assert 1 <= spun <= 10, f"{spun} accept calls in a second"
+            assert "descriptors" in caplog.text
+            failing.clear()
+            client.sendall(connect(f"{SETUP_ONLY}:443"))
+            client.settimeout(10)
+            assert client.recv(4096).startswith(b"HTTP/1.1 200"), "the listener did not recover"
+        finally:
+            client.close()
+            failing.clear()
+
+
+# -- the host's own addresses ---
+
+
+# #979 (review: a name that resolves to the host itself passed the public-address check)
+def test_a_name_that_resolves_to_an_address_of_the_host_is_refused_in_every_phase() -> None:
+    with running(host_addresses=HostAddresses(lambda: frozenset({PUBLIC}))) as rig:
+        identity = admitted(rig)
+
+        wide = rig.ask(connect(f"{SETUP_ONLY}:443"))
+        run(rig.wall.narrow(identity, narrow_message()))
+        narrowed = rig.ask(connect(f"{APP}:443"))
+
+        assert status_of(wide) == 403 and reason_of(wide) == "private_address"
+        assert status_of(narrowed) == 403 and reason_of(narrowed) == "private_address"
+        assert rig.lookups.connected == []
+
+
+def test_a_name_with_one_address_of_the_host_among_public_ones_is_refused_as_a_whole() -> None:
+    with running(host_addresses=HostAddresses(lambda: frozenset({"151.101.9.9"}))) as rig:
+        rig.lookups.table[SETUP_ONLY] = [PUBLIC, "151.101.9.9"]
+        admitted(rig)
+
+        assert status_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == 403
+        assert rig.lookups.connected == []
+
+
+# #979
+def test_an_address_the_host_gains_later_is_refused_after_the_next_refresh() -> None:
+    now = [100.0]
+    have: list[frozenset[str]] = [frozenset({"192.0.2.77"})]
+    reads: list[int] = []
+
+    def read() -> frozenset[str]:
+        reads.append(1)
+        return have[0]
+
+    addresses = HostAddresses(read, clock=lambda: now[0], max_age=30.0)
+    with running(host_addresses=addresses) as rig:
+        admitted(rig)
+        assert status_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == 200
+
+        have[0] = frozenset({PUBLIC})
+        now[0] += 5.0
+        assert status_of(rig.ask(connect(f"{SETUP_ONLY}:443"))) == 200, "read again too early"
+        now[0] += 30.0
+        answer = rig.ask(connect(f"{SETUP_ONLY}:443"))
+
+        assert status_of(answer) == 403 and reason_of(answer) == "private_address"
+        assert len(reads) == 2  # the start's, then the one after the age
+
+
+def test_a_host_that_cannot_list_its_addresses_has_no_wall_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def unreadable() -> frozenset[str]:
+        raise OSError("no /proc")
+
+    wall = ProxyOuterWall(
+        slots=1, port=0, addresses=tap_addresses, host_addresses=HostAddresses(unreadable)
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(OuterWallUnavailable):
+        run(wall.start())
+
+    assert "addresses of this host" in caplog.text
+    assert wall.listening() == []
+
+
+def test_a_refresh_that_fails_keeps_the_last_known_addresses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [0.0]
+    answers: list[frozenset[str] | None] = [frozenset({PUBLIC}), None]
+
+    def read() -> frozenset[str]:
+        answer = answers.pop(0)
+        if answer is None:
+            raise OSError("gone")
+        return answer
+
+    addresses = HostAddresses(read, clock=lambda: now[0], max_age=10.0)
+    assert addresses.contains(PUBLIC)
+
+    now[0] = 11.0
+    with caplog.at_level(logging.WARNING):
+        assert addresses.contains(PUBLIC), "an address was forgotten because a read failed"
+    assert "addresses of this host" in caplog.text
+
+
+# #979
+def test_the_real_list_of_the_host_holds_loopback() -> None:
+    assert "127.0.0.1" in local_addresses()
+
+
+# -- the startup warning, the app's port ---
+
+
+# #979 (review: the dispatcher cannot see the nft table, so it says so)
+def test_the_proxy_says_at_startup_that_it_cannot_verify_the_nft_table(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wall = ProxyOuterWall(slots=1, port=0, addresses=tap_addresses)
+
+    with caplog.at_level(logging.WARNING):
+        run(wall.start())
+    try:
+        assert "cannot verify" in caplog.text and "code_reviewer_wall" in caplog.text
+    finally:
+        run(wall.close())
+
+
+# #979 (review: the app's port is not 80 or 443, the proxy could not carry it)
+def test_a_narrow_for_an_app_on_another_port_is_refused_and_says_why(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    identity = VmIdentity("vm-0-port", FIRST, APP, 3000)
+    run(rig.wall.admit(identity))
+
+    with caplog.at_level(logging.ERROR):
+        refusal = run(rig.wall.narrow(identity, narrow_message()))
+
+    assert refusal is Refusal.UNAVAILABLE
+    assert "port 3000" in caplog.text
+
+
+def test_a_narrow_for_an_app_on_a_web_port_is_held(rig: Rig) -> None:
+    for port in (80, 443, None):
+        identity = VmIdentity(f"vm-0-{port}", FIRST, APP, port)
+        run(rig.wall.admit(identity))
+
+        assert run(rig.wall.narrow(identity, narrow_message())) is None, port
+        run(rig.wall.forget(identity))
+
+
 # -- helpers: a tunnel that stays open ---
 
 
@@ -495,6 +924,17 @@ class Held:
             return True
         return data == b""
 
+    def origin_saw_the_end(self) -> bool:
+        """The proxy shut the origin's side of the tunnel (it reads the end of the stream)."""
+        assert self.peer is not None
+        self.peer.settimeout(0.2)
+        try:
+            return self.peer.recv(4096) == b""
+        except TimeoutError:
+            return False
+        except OSError:
+            return True
+
     def stop(self) -> None:
         for each in (self.client, self.peer, self.origin):
             if each is not None:
@@ -502,15 +942,21 @@ class Held:
                     each.close()
 
 
-def hold_a_tunnel(rig: Rig) -> Held:
-    """A tunnel to a host of the setup, kept open: the origin accepts and says nothing."""
+def hold_a_tunnel(
+    rig: Rig,
+    name: str = "held.example.com",
+    address: str = "151.101.1.1",
+    slot: Slot = FIRST,
+) -> Held:
+    """A tunnel to a host of the setup, kept open: the origin accepts and says nothing, and never
+    closes it."""
     origin = socket.socket()
     origin.bind(("127.0.0.1", 0))
     origin.listen(1)
-    rig.lookups.servers["151.101.1.1"] = origin.getsockname()[1]
-    rig.lookups.table["held.example.com"] = ["151.101.1.1"]
-    client = rig.client()
-    client.sendall(connect("held.example.com:443"))
+    rig.lookups.servers[address] = origin.getsockname()[1]
+    rig.lookups.table[name] = [address]
+    client = rig.client(slot)
+    client.sendall(connect(f"{name}:443"))
     client.settimeout(10)
     assert client.recv(4096).startswith(b"HTTP/1.1 200")
     return Held(rig, origin, client)
@@ -577,3 +1023,25 @@ def test_narrow_is_refused_when_the_app_cannot_be_reached_through_the_proxy(
         expected = {"version": 1, "type": "refused", "for": "narrow", "reason": "unavailable"}
         assert control["narrow"] == expected
         assert "the app's host" in caplog.text
+
+
+# #979 (review: a non-web port of the app is refused at narrow, as the proxy could not carry it)
+def test_narrow_is_refused_when_the_apps_url_names_a_port_the_proxy_does_not_dial(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with short_directory() as root:
+        rig = MachineRig(root)
+        wall = ProxyOuterWall(
+            1,
+            port=0,
+            addresses=lambda slot: SlotAddresses(f"127.0.2.{slot.index + 1}", "127.0.2.100"),
+        )
+        start = WorkerStart("https://app.example.test:8443", start_for().job_id, CREDENTIAL)
+
+        with caplog.at_level(logging.ERROR):
+            run_job(lambda: whole_sandbox_job(rig.sandbox(wall=wall), start))
+
+        control = rig.seen()["control"]
+        expected = {"version": 1, "type": "refused", "for": "narrow", "reason": "unavailable"}
+        assert control["narrow"] == expected
+        assert "port 8443" in caplog.text

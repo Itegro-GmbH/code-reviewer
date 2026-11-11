@@ -35,7 +35,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
-from urllib.parse import urlsplit
 
 from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutcome, WorkerStart
 from code_reviewer_runner.vm_init.wire import InvalidStart, parse_start
@@ -45,6 +44,7 @@ from .cgroups import CgroupError, CgroupTree, VmLimits, delegated_root
 from .control_run import ControlRunError, ControlTemplate, build_start, load_template
 from .disks import DiskError, make_job_disk, remove_vm_directory
 from .endpoint import HostListeners, StartNotAnswered, StartRefused, send_start
+from .outer_rule import app_endpoint
 from .outer_wall import OuterWall, VmIdentity, WallLifecycle, outer_wall_for
 from .reaper import Reaped, reap_leftovers
 from .session import VmSession
@@ -240,7 +240,8 @@ class FirecrackerSandbox:
         directory = settings.vms_dir / vm_id
         directory.mkdir(parents=True, mode=0o700)
         wall = self.wall or outer_wall_for(settings.outer_wall, settings.slots)
-        session = VmSession(VmIdentity(vm_id, slot, urlsplit(start.app_url).hostname), wall, token)
+        app_host, app_port = app_endpoint(start.app_url)
+        session = VmSession(VmIdentity(vm_id, slot, app_host, app_port), wall, token)
         listeners = HostListeners(directory / "vsock.sock", session)
         vm = _Vm(vm_id, slot, directory, session, listeners)
         self._vms[vm_id] = vm

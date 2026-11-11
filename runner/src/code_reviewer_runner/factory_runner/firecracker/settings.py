@@ -63,7 +63,7 @@ class FirecrackerSettings:
     vcpus: int = 2
     disk_gib: int = DEFAULT_DISK_GIB
     job_timeout_seconds: int = DEFAULT_JOB_TIMEOUT_SECONDS
-    outer_wall: OuterWallMode = OuterWallMode.PROXY
+    outer_wall: OuterWallMode = OuterWallMode.REFUSE
     boot_args: str = BOOT_ARGS
     init_command: str = INIT_COMMAND
     # The delegated cgroup; None: the one this process runs in.
@@ -140,7 +140,7 @@ def settings_from_environment(
     image_id = environment.get("FACTORY_RUNNER_VM_IMAGE_ID", "").strip()
     if not image_id:
         raise SettingsError("FACTORY_RUNNER_VM_IMAGE_ID is not set (the Worker image's id)")
-    wall = environment.get("FACTORY_RUNNER_OUTER_WALL", "").strip() or OuterWallMode.PROXY.value
+    wall = environment.get("FACTORY_RUNNER_OUTER_WALL", "").strip() or OuterWallMode.REFUSE.value
     try:
         mode = OuterWallMode(wall)
     except ValueError:

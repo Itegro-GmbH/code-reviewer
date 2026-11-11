@@ -15,6 +15,7 @@ from code_reviewer_runner.factory_runner.firecracker.outer_rule import (
     WIDE,
     OuterRuleError,
     allow_list,
+    app_endpoint,
     narrowed_rule,
 )
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
@@ -116,3 +117,47 @@ def test_an_app_that_cannot_be_named_in_a_rule_is_an_error_not_a_hole(app_host: 
 def test_a_model_host_that_is_no_name_is_an_error() -> None:
     with pytest.raises(OuterRuleError):
         narrowed_rule(NetworkRule(), "10.0.0.5", "app.example.test")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("port", [None, 80, 443])
+def test_an_app_on_a_web_port_is_named_in_the_list_as_before(port: int | None) -> None:
+    found = allow_list(NetworkRule(MODE_LIST), "api.anthropic.com", "app.example.test", port)
+
+    assert found is not None and "app.example.test" in found
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("port", [0, 22, 3000, 8080, 8443, 65535])
+def test_an_app_on_another_port_is_an_error_not_a_rule_that_cannot_work(port: int) -> None:
+    # The proxy dials 80 and 443 only (the door's decision), so the Worker could never reach its
+    # app: `narrow` is refused and the log says which port.
+    with pytest.raises(OuterRuleError, match=f"port {port}"):
+        allow_list(NetworkRule(MODE_LIST), "api.anthropic.com", "app.example.test", port)
+
+
+@pytest.mark.unit
+def test_an_open_rule_is_not_narrowed_whatever_the_apps_port() -> None:
+    assert allow_list(NetworkRule(MODE_OPEN), "api.anthropic.com", "app.example.test", 3000) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://app.example.test", ("app.example.test", 443)),
+        ("https://app.example.test/", ("app.example.test", 443)),
+        ("https://app.example.test:443/x", ("app.example.test", 443)),
+        ("http://app.example.test", ("app.example.test", 80)),
+        ("http://app.example.test:3000", ("app.example.test", 3000)),
+        ("https://App.Example.Test:8443", ("app.example.test", 8443)),
+        ("ftp://app.example.test", ("app.example.test", 0)),
+        ("https://app.example.test:99999", (None, None)),
+        ("not a url", (None, None)),
+        ("", (None, None)),
+    ],
+)
+def test_the_apps_host_and_the_port_it_is_reached_on_come_from_its_url(
+    url: str, expected: tuple[str | None, int | None]
+) -> None:
+    assert app_endpoint(url) == expected

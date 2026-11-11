@@ -656,7 +656,7 @@ def test_the_artifacts_and_the_state_are_below_var_lib_code_reviewer() -> None:
     assert settings.vms_dir == Path("/var/lib/code-reviewer/vms")
     assert settings.slots == 3  # parallelRuns
     assert settings.quota_bytes == 40 * 1024**3 and settings.reserve_gib == 5
-    assert settings.memory_mib == 4096 and settings.outer_wall is OuterWallMode.PROXY
+    assert settings.memory_mib == 4096 and settings.outer_wall is OuterWallMode.REFUSE
 
 
 # #978-T10
@@ -687,10 +687,10 @@ def test_the_environment_moves_the_paths_the_size_the_wall_and_the_timeout() -> 
         ("proxy", OuterWallMode.PROXY),
         ("refuse", OuterWallMode.REFUSE),
         ("inner-only", OuterWallMode.INNER_ONLY),
-        ("", OuterWallMode.PROXY),
+        ("", OuterWallMode.REFUSE),
     ],
 )
-def test_the_proxy_is_the_outer_wall_unless_the_operator_chose_another(
+def test_no_wall_is_the_default_and_the_proxy_only_when_the_operator_chose_it(
     value: str, mode: OuterWallMode
 ) -> None:
     settings = settings_from_environment(machine(FACTORY_RUNNER_OUTER_WALL=value))

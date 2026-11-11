@@ -17,6 +17,7 @@ list below is a `NetworkRule` of the mode `list`, which that code already reads.
 before anything is resolved: a name the rule does not list is never sent to a resolver."""
 
 from typing import Final
+from urllib.parse import urlsplit
 
 from code_reviewer_runner.implementer.network_rule import (
     MODE_LIST,
@@ -32,6 +33,8 @@ GITHUB_HOSTS: Final = ("github.com", "api.github.com")
 
 # The rule of the setup: any public name on 80 and 443 (the setup's own internet, as hosted).
 WIDE: Final = NetworkRule(MODE_OPEN)
+# The ports the proxy dials (the door's decision: `NetworkRule.allows_port`).
+WEB_PORTS: Final = (80, 443)
 
 
 class OuterRuleError(ValueError):
@@ -46,23 +49,54 @@ def _name(value: str | None, what: str) -> str:
     return value
 
 
-def allow_list(rule: NetworkRule, model_host: str, app_host: str | None) -> tuple[str, ...] | None:
+def app_endpoint(app_url: str) -> tuple[str | None, int | None]:
+    """The host of the app's URL (lower case) and the port it is reached on: the URL's own, else
+    the scheme's (443 for https, 80 for http, 0 for any other scheme: no web port). (None, None)
+    for a URL that has no host or an invalid port."""
+    try:
+        parts = urlsplit(app_url)
+        port = parts.port
+    except ValueError:
+        return None, None
+    if parts.hostname is None:
+        return None, None
+    if port is None:
+        port = {"https": 443, "http": 80}.get(parts.scheme.lower(), 0)
+    return parts.hostname, port
+
+
+def allow_list(
+    rule: NetworkRule, model_host: str, app_host: str | None, app_port: int | None = None
+) -> tuple[str, ...] | None:
     """The names a narrowed VM may reach, or None when the rule is `open` (it is not narrowed).
     Raises `OuterRuleError` when the model provider's host or the app's host is not a name a rule
-    can hold (an address, a host of one label): the Worker could not reach it through the proxy,
-    so the wall refuses to claim it holds a rule that cannot work."""
+    can hold (an address, a host of one label), or when the app is on a port the proxy does not
+    dial: the Worker could not reach it through the proxy, so the wall refuses to claim it holds a
+    rule that cannot work. `app_port` None is the scheme's default port (a web port).
+
+    The proxy dials 80 and 443 for every name, the app's included, so an app on another port
+    (`http://localhost:3000`, a customer's staging on 8443) is refused at `narrow` and not given an
+    exception to the port rule: opening one more port for one name would be a second decision the
+    hosted rule code does not make."""
     if rule.mode == MODE_OPEN:
         return None
     names = [*GITHUB_HOSTS, _name(model_host, "the model host"), _name(app_host, "the app's host")]
+    if app_port is not None and app_port not in WEB_PORTS:
+        raise OuterRuleError(
+            f"the app is on port {app_port}, which the proxy does not dial "
+            f"(only {WEB_PORTS[0]} and {WEB_PORTS[1]})"
+        )
     names.extend(rule.hosts)
     return tuple(dict.fromkeys(names))
 
 
-def narrowed_rule(rule: NetworkRule, model_host: str, app_host: str | None) -> NetworkRule:
+def narrowed_rule(
+    rule: NetworkRule, model_host: str, app_host: str | None, app_port: int | None = None
+) -> NetworkRule:
     """The rule the proxy holds once the job's rule is in: `WIDE` for `open`, else a list of
     `allow_list`'s names (which may be more than the contract's hundred: the cap is the job's own
     hosts)."""
-    names = allow_list(rule, model_host, app_host)
+    names = allow_list(rule, model_host, app_host, app_port)
     if names is None:
         return WIDE
     return NetworkRule(MODE_LIST, names)

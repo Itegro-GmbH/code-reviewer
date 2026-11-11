@@ -1968,7 +1968,7 @@ a field the contract does not have, a version other than 1 is a protocol error a
 is closed). **Each listener serves at most 4 connections at a time** and closes every other one the moment it is accepted, so whatever
 opens connections in a loop holds a few file descriptors of the service, not all of them, and never those of another VM's listeners.
 The service's unit still needs a `LimitNOFILE` that covers its slots (the installer sets it, #982: 2 listeners × 4 connections × slots,
-the VMs' files and the app's connections, with room).
+the VMs' files and the app's connections, and the outer wall's proxy: a budget of 256 connections of two descriptors each, with room; 8192).
 
 | Port | Message | The host |
 |---|---|---|
@@ -1979,11 +1979,14 @@ The token's check has a twin in TypeScript (`dispatcher/src/launchers/control-to
 The token is in the start, in Control's stdin and in the messages; never in an argument, the environment, a file or a log.
 
 **`narrow` and the outer wall.** The hook is `OuterWall` (`outer_wall.py`: `admit(vm)` before the VMM exists, `narrow(vm, message)`
-and `forget(vm)`, the VM identified by its slot and TAP and the host of its app). `FACTORY_RUNNER_OUTER_WALL` chooses it: **`proxy`
-(the default)** is the real wall, [the outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979), `narrow` answered
-`ack` only once the proxy holds the job's rule; `refuse` answers `refused` `unavailable`, so the Worker ends the job
-`environment_control_failed` before an agent exists; `inner-only` answers `ack` and logs a warning for every VM that nothing was
-narrowed (the agent's network is then the inner wall, the network door, only). The two stand-ins stay as the operator's **explicit**
+and `forget(vm)`, the VM identified by its slot and TAP and the host and port of its app). `FACTORY_RUNNER_OUTER_WALL` chooses it:
+**`refuse` (the default)** answers `refused` `unavailable`, so the Worker ends the job `environment_control_failed` before an agent
+exists; **`proxy`** is the real wall, [the outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979), `narrow`
+answered `ack` only once the proxy holds the job's rule; `inner-only` answers `ack` and logs a warning for every VM that nothing was
+narrowed (the agent's network is then the inner wall, the network door, only). **`proxy` is never the default:** the dispatcher is a
+normal user and cannot read nft state, so it cannot know that the table is loaded, and a machine without the table has no outer wall.
+The installer (#982) sets `proxy` explicitly, and only after `nft list table inet code_reviewer_wall` succeeds; in `proxy` mode the
+dispatcher logs a warning at startup that it cannot verify the table itself. The two other modes are the operator's **explicit**
 choices, never a silent `ack`. **A wall that raises or does not answer** (`narrow` is given 10 s at the wall) is answered `refused`
 `unavailable` and logged with the kind of the error, never by dropping the connection: the Worker would wait for its own 30 s with the
 failure unexplained in the host's log.
@@ -2098,9 +2101,11 @@ what an earlier load made (`table`, `delete table`, `table`). The file, exactly 
 # local Dispatcher (port 3128) on a slot's address of 172.31.0.0/16 (the proxy listens on those addresses only, and
 # only the slot's own VM is served), and receive the answers. Everything else a VM sends is dropped: the host's other
 # ports, addresses, ICMP and UDP (DNS included: the proxy resolves names), the LAN, RFC1918, link-local and the cloud
-# metadata address (169.254.169.254), the other VMs, the internet, and IPv6 altogether. The VM has no way out but the
-# proxy, which enforces the rule of the job (wide for the setup, narrowed after `narrow`): changing it never touches
-# this table. Priority -150 runs before the filter hooks of other firewalls at priority 0.
+# metadata address (169.254.169.254), the other VMs, the internet, and IPv6 altogether. A packet must come from the
+# address of the slot whose TAP it arrives on (a reverse-path check): a VM cannot send another slot's source address.
+# The VM has no way out but the proxy, which enforces the rule of the job (wide for the setup, narrowed after
+# `narrow`): changing it never touches this table. Priority -150 runs before the filter hooks of other firewalls at
+# priority 0.
 table inet code_reviewer_wall
 delete table inet code_reviewer_wall
 table inet code_reviewer_wall {
@@ -2108,6 +2113,7 @@ table inet code_reviewer_wall {
     type filter hook input priority -150; policy accept;
     iifname "fctap*" meta nfproto ipv6 counter drop comment "no IPv6"
     iifname "fctap*" ip saddr != 172.31.0.0/16 counter drop comment "not an address of a slot"
+    iifname "fctap*" meta nfproto ipv4 fib saddr . iif oif missing counter drop comment "source not routed back to this TAP (reverse path)"
     iifname "fctap*" ct state established,related counter accept comment "answers"
     iifname "fctap*" tcp dport 3128 ip daddr 172.31.0.0/16 fib daddr type local counter accept comment "the proxy"
     iifname "fctap*" counter drop comment "everything else addressed to the host"
@@ -2131,6 +2137,7 @@ What each rule does:
 |---|---|---|
 | input | from a TAP: IPv6, drop | the guest has no IPv6 and the proxy none; nothing of IPv6 is allowed anywhere |
 | input | from a TAP: source not in `172.31.0.0/16`, drop | a slot's addresses are in that /16 (`slots.py`); anything else is a spoof |
+| input | from a TAP: IPv4 whose source is not routed back to this TAP (`fib saddr . iif oif missing`), drop | the reverse-path check: the table lets any address of the /16 in, so without it a VM could send **another slot's source address** (and the answers of the proxy to it would go to the real owner); with it a packet is accepted only from the address of the slot whose TAP it arrives on |
 | input | from a TAP: established or related, accept | the answers of the proxy |
 | input | from a TAP: TCP to port 3128 of a local address in `172.31.0.0/16`, accept | **the one thing a VM may open**: a connection to the proxy, on a slot's address (the proxy binds those and no other) |
 | input | from a TAP: everything else, drop | the host's other ports, ICMP, UDP (a guest's DNS included: the proxy resolves), the host's other addresses |
@@ -2139,14 +2146,18 @@ What each rule does:
 
 The table lets a TAP reach the proxy port of **any** slot's address (the /16), because the table is static and a slot's address is
 derived from its number; the proxy therefore **closes unanswered any connection whose source is not its own slot's guest** (a VM
-that connects to another slot's proxy, or one that spoofs a source and cannot complete the handshake because the answer goes to the real
-owner). Port 3128 is a constant of the code too (`PROXY_PORT`); a test holds the file to it, to `fctap*` and to the /16 of `slots.py`.
+that connects to another slot's proxy). **The reverse-path rule** (`fib saddr . iif oif missing`) is what stops a VM from sending
+another slot's source address in the first place: a packet is accepted only when the route back to its source leaves by the TAP it
+arrived on, which is the case for the source of the slot that TAP belongs to and for no other (the proxy's own check stays, the two
+are independent). The lane checks the file with `nft -c -f` and then loads it. Port 3128 is a constant of the code too (`PROXY_PORT`); a test holds the file to it, to `fctap*` and to the /16 of `slots.py`.
 
 ### The proxy
 
 Part of the local dispatcher, the service's own user, no root. `ProxyOuterWall` is the `OuterWall` of `FACTORY_RUNNER_OUTER_WALL=proxy`,
 started by the launcher's `setup` (after the lock of the machine) and stopped by its `close`; a proxy that cannot listen ends the start of
-the service and says which TAP and address (the usual cause: the TAP was not made or has no address, #982).
+the service and says which TAP and address (the usual cause: the TAP was not made or has no address, #982). **At startup it logs a warning
+that it cannot verify the nft table** (it has no way to read nft state as a normal user): `proxy` is set by the installer after it has
+verified the table, never assumed.
 
 * **It listens on each slot's TAP address and on nothing else** (`172.31.<N*4 div 256>.<N*4 mod 256 + 1>:3128`). The spike (#970)
   found that a guest could also reach a proxy on the host's other addresses (eth0, loopback); a proxy bound to the host's side of each TAP
@@ -2155,14 +2166,43 @@ the service and says which TAP and address (the usual cause: the TAP was not mad
   public name on ports 80 and 443. `narrow` replaces it by the **job's rule** and returns, so the host answers `ack`, only when the proxy
   holds it; it also ends the connections the setup left open (a tunnel opened under the wide rule must not outlive it). `forget` takes the
   VM's rule away (it never takes the rule of a newer VM of the same slot). A slot with no VM serves nobody (`no_job`).
+* **A tunnel ends as a whole.** Ending the setup's connections (at `narrow` and `forget`) shuts **both halves of each tunnel**, the guest's
+  and the origin's: an origin that says nothing and never closes would otherwise keep the handler (and the slot's permit) until the idle
+  timeout. The handler returns at once and the permit is given back (tested with a silent origin that never closes).
+* **A decision belongs to the rule it was made under.** Every `narrow` and `forget` makes a new *generation* of the slot's rule, and a
+  decision carries the generation it was made under. A request that was decided under the wide rule (a slow resolver, a slow connect)
+  is dropped (`403 rule_changed`) once the `narrow` is acked: the generation is checked before the connection is made and again before
+  the first byte is sent (the bytes of the request that were already read are never sent under a rule that is gone). Without it a name
+  looked up under the wide rule could be connected after the acked `narrow`.
+* **Limits of the process.** Each slot serves at most 128 connections; **all slots share one budget of 256** (`TOTAL_CONNECTIONS`: a
+  connection holds two descriptors, the guest's and the origin's), so busy slots cannot use up the descriptors of the dispatcher. A
+  connection over the budget gets `503 too_many_connections` without a thread. A listener that meets `EMFILE` (or `ENFILE`, `ENOBUFS`,
+  `ENOMEM`) **backs off** (0.2 s) and logs a warning at most every ten seconds, instead of spinning on its readable socket. The unit
+  needs a `LimitNOFILE` that covers the budget (8192 is ample; the installer sets it, #982: see the note on `LimitNOFILE` above).
+* **The host's own addresses are refused too.** A name that resolves to an address of the machine the proxy runs on (its public one, on a
+  machine that has one) is public by range; the proxy refuses it (`private_address`) and a name with one such address among public ones as a
+  whole. The addresses are every IPv4 address of the host, from the kernel's table (`/proc/net/fib_trie`: no command, no privilege), read
+  at startup (a host that cannot list them has no wall: the start fails and says so) and again when older than 30 s, so an address the
+  host gains later is refused after the next read; a read that fails keeps the last list. **The in-VM network door has the same gap**
+  (a name that resolves to the machine the door runs on; a VM has only private addresses, but the door also runs as a process of a
+  machine): the shared decision has the hook (`Decider(excluded=...)`, off by default so the door and hosted decide as before), and the
+  door's use of it is a follow-up issue.
 * **The job's rule is the hosted second wall's**: GitHub (`github.com`, `api.github.com`), the model provider's host (`modelHost` of the
   `narrow`), the host of the app (the job's `appUrl`) and the rule's own hosts, a `*.suffix` as itself (strictly below the suffix, as the
   door matches); a rule that is `open` is not narrowed, as hosted. It is **`policyFor` of `dispatcher/src/network/rule.ts`** without the
   Dispatcher's own host (a local machine has none), and a test holds the two to **one examples file**,
   [`contracts/network-rule-examples.json`](../contracts/network-rule-examples.json): which rule documents are rules
   (`dispatcher/src/network/network-examples.test.ts` with the hosted schema, `runner/tests/unit/test_firecracker_outer_rule.py` with the
-  runner's), which names the narrowed list holds, and the verdict on a set of names and ports. A model or app host that is not a name a rule
-  can hold (an address, a host of one label) is a **refused `narrow` (`unavailable`) that says so**, not a rule that cannot work.
+  runner's), which names the narrowed list holds, and the verdict on a set of names and ports. **What runs hosted code on each side:** the
+  TypeScript suite runs the hosted schema (`NetworkRuleSchema`) for the rule documents and the hosted `policyFor` for the lists; **its
+  verdict half (T03's last test) runs a small matching helper of the test file**, not the hosted matching, which is Vercel's network
+  policy and cannot run in a unit test. The runner's suite runs the runner's own parser, list and decision (`Decider`) for all three. A
+  model or app host that is not a name a rule can hold (an address, a host of one label) is a **refused `narrow` (`unavailable`) that says
+  so**, not a rule that cannot work. **So is an app on another port than 80 and 443** (`http://localhost:3000`, a staging on 8443): the proxy
+  dials 80 and 443 for every name and the wall does not make an exception to the port rule for one name (a second decision the hosted rule
+  code does not make), so the `narrow` of such a job is refused with the port in the log (`OuterRuleError`), not acknowledged with a rule
+  the Worker cannot use. The port comes from the job's `appUrl` (the URL's own, else the scheme's); a customer whose app is not on a web
+  port needs a decision of its own (#994 wires the software in the VM to the proxy and meets the app's URL there).
 * **DNS is the proxy's.** A guest asks for `CONNECT name:443` (or an absolute-form HTTP request) and the proxy looks the name up; the guest has
   no name server it can reach (UDP is dropped). The decision is **the network door's own code** (`implementer/netdoor/proxy.py`), so the two
   walls cannot drift: an IP address is never a name (`ip_literal`, in every spelling a resolver reads), only ports 80 and 443, the rule must
@@ -2174,8 +2214,8 @@ the service and says which TAP and address (the usual cause: the TAP was not mad
 * **What the host's log keeps** is a count and the kind of an error: at the end of a VM `outer wall: N connections allowed, M refused`; the
   slot's record (`log_of`: host, port, allowed or refused, reason word, bytes; never a path or a header) is what the lane reads.
 
-The settings: `FACTORY_RUNNER_OUTER_WALL` is `proxy` (the default), `refuse` or `inner-only` (see above); the port is not a setting (the table
-names it).
+The settings: `FACTORY_RUNNER_OUTER_WALL` is `refuse` (the default), `proxy` (set by the installer after it verified the table) or
+`inner-only` (see above); the port is not a setting (the table names it).
 
 ### What the lane proves (and what it cannot)
 
@@ -2214,7 +2254,9 @@ exercised by a packet; the lane says no more than that.
   Control, git and the setup container; the name resolution moves to the proxy). Until then `FACTORY_RUNNER_OUTER_WALL=inner-only` (and no
   table) is how a local VM job runs. It is the first thing to do before #982 turns the launcher on.
 * The installer loads the table and makes the TAPs with their addresses (#982); the service cannot read nft state as a normal user, so it
-  cannot check that the table is loaded (a machine without it has no outer wall: the install must fail without it).
+  cannot check that the table is loaded (a machine without it has no outer wall: the install must fail without it). That is why
+  `refuse` is the default: **the installer sets `FACTORY_RUNNER_OUTER_WALL=proxy` only after `nft list table inet code_reviewer_wall`
+  succeeds**, and sets `LimitNOFILE` (8192) in the unit.
 * IPv4 only (the table drops IPv6, the proxy resolves IPv4); a name with only an AAAA record is unreachable.
 * Docker's nftables backend on the host next to this table is not proven (the spike did not either); the table is its own and runs at
   priority -150.

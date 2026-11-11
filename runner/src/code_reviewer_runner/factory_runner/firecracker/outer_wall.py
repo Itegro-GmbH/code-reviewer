@@ -8,12 +8,15 @@ the job's own rule (decision 7 of ADR 0005). The Worker asks for the job's rule 
 (`narrow`) and the host answers `ack` **only once the outer wall holds it**, so the agent never
 starts under the setup's wide rule. `FACTORY_RUNNER_OUTER_WALL` chooses the wall:
 
-* `proxy` (the default): the real wall (`proxy_wall.py`). The proxy listens on each slot's TAP
-  address and on nothing else; `admit` gives a VM the wide rule, `narrow` swaps in the job's rule,
-  `forget` takes the VM's rule away.
-* `refuse`: `narrow` is answered `refused` (`unavailable`). The Worker ends the job
+* `refuse` (the default): `narrow` is answered `refused` (`unavailable`). The Worker ends the job
   `environment_control_failed` before an agent exists. A job that needs the wall does not run
-  without it.
+  without it. This stays the default until the installer (#982) has loaded the static nft table
+  and verified it (`nft list table`): the dispatcher runs as a normal user and cannot see nft
+  state, so it must never assume a wall it cannot check.
+* `proxy`: the real wall (`proxy_wall.py`), set by the installer once the table is verified. The
+  proxy listens on each slot's TAP address and on nothing else; `admit` gives a VM the wide rule,
+  `narrow` swaps in the job's rule, `forget` takes the VM's rule away. It logs a warning at
+  startup that it cannot verify the table itself.
 * `inner-only`: `narrow` is answered `ack` and a warning says so once per VM. The agent's network is
   then the inner wall (the network door) only, as on the Worker-as-a-process mode. For a machine
   whose owner accepts that."""
@@ -40,11 +43,13 @@ class VmIdentity:
     """Which VM a request is from: the connection is the VM's own (Firecracker makes a vsock device
     for one VM), and the TAP and the guest's address are what the proxy tells jobs apart by.
     `app_host` is the host of the app the job's Worker calls (the one name a narrowed VM needs
-    besides GitHub and the model provider)."""
+    besides GitHub and the model provider) and `app_port` the port it is reached on (None: the
+    scheme's default, a web port; the proxy dials 80 and 443 only)."""
 
     vm_id: str
     slot: Slot
     app_host: str | None = None
+    app_port: int | None = None
 
 
 class OuterWall(Protocol):

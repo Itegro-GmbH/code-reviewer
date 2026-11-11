@@ -44,6 +44,7 @@ from .connections import (
     REASON_NOT_LISTED,
     REASON_PORT,
     REASON_REGISTRY,
+    REASON_RULE_CHANGED,
     REASON_TOO_MANY,
     REASON_UPSTREAM,
     ConnectionLog,
@@ -75,10 +76,13 @@ def tcp_connector(address: str, port: int, timeout: float) -> socket.socket:
 @dataclass(frozen=True)
 class Decision:
     """What the door does with a request: the addresses to connect to (allowed), or the word of
-    the refusal."""
+    the refusal. `generation` is the version of the rule the decision was made under (0 for the
+    door, whose rule never changes; the outer wall's rule is swapped at `narrow`, and a decision of
+    an earlier generation is dropped by `ProxyServer.is_current`)."""
 
     addresses: tuple[str, ...] = ()
     reason: str | None = None
+    generation: int = 0
 
     @property
     def allowed(self) -> bool:
@@ -130,12 +134,14 @@ class Decider:
         *,
         resolver: Resolver = system_resolver,
         test_network: IPv4Network | None = None,
+        excluded: Callable[[str], bool] | None = None,
     ) -> None:
         self.matcher = RuleMatcher(rule)
         self._rule = rule
         self.log = log
         self._resolver = resolver
         self._test_network = test_network
+        self._excluded = excluded
 
     def decide(self, host: str, port: int) -> Decision:
         if is_ip_literal(host):
@@ -147,7 +153,9 @@ class Decider:
             return Decision(reason=REASON_PORT)
         if not self.matcher.allows(name):
             return Decision(reason=REASON_NOT_LISTED)
-        found: Resolution = resolve_public(name, port, self._resolver, self._test_network)
+        found: Resolution = resolve_public(
+            name, port, self._resolver, self._test_network, self._excluded
+        )
         if found.reason is not None:
             return Decision(reason=found.reason)
         return Decision(addresses=found.addresses)
@@ -269,6 +277,9 @@ class _Handler(socketserver.BaseRequestHandler):
             proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, decision.reason)
             self._refuse(client, 403, decision.reason)
             return
+        if not self._current(decision, authority):
+            self._refuse(client, 403, REASON_RULE_CHANGED)
+            return
         name = ascii_name(authority.host) or authority.host
         gate = proxy.registry_gate
         if gate is not None and is_registry_name(name):
@@ -280,6 +291,10 @@ class _Handler(socketserver.BaseRequestHandler):
             self._refuse(client, 502, REASON_UPSTREAM)
             return
         try:
+            # Nothing of the client's, read before this point, is sent under a rule that is gone.
+            if not self._current(decision, authority):
+                self._refuse(client, 403, REASON_RULE_CHANGED)
+                return
             if path is None:
                 respond(client, 200)
                 pending = head.rest
@@ -303,6 +318,13 @@ class _Handler(socketserver.BaseRequestHandler):
             bytes_in=pair.to_client,
             bytes_out=pair.to_upstream,
         )
+
+    def _current(self, decision: Decision, authority: Authority) -> bool:
+        """Whether the rule the decision was made under still holds; a refusal is logged here."""
+        if self.proxy.is_current(decision):
+            return True
+        self.proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, REASON_RULE_CHANGED)
+        return False
 
     def _registry(
         self,
@@ -363,6 +385,12 @@ class ProxyServer(socketserver.ThreadingTCPServer):
         self.connector = connector
         self.slots = threading.BoundedSemaphore(max_connections)
         super().__init__(bind, _Handler)
+
+    def is_current(self, decision: Decision) -> bool:
+        """Whether `decision` was made under the rule that holds now. The door's rule never changes
+        (always); the outer wall's does, and says so here."""
+        _ = decision
+        return True
 
     @property
     def port(self) -> int:

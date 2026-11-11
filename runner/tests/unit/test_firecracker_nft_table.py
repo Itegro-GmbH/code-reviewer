@@ -115,6 +115,18 @@ def test_the_source_of_a_vm_is_a_slot_address_and_ipv6_is_dropped_before_anythin
     assert f"{NETWORK_PREFIX}.0.0/16" == NETWORK
 
 
+# #979 (review: a TAP could send another slot's source address, the table let any of the /16 in)
+def test_a_vm_cannot_send_the_source_address_of_another_slot() -> None:
+    rules = rules_of("input")
+    rpf = [line for line in rules if "fib saddr . iif oif missing" in line]
+
+    # Reverse path: the route back to the source must leave by the TAP the packet came in on.
+    assert len(rpf) == 1 and rpf[0].startswith(f"iifname {TAPS}") and " drop " in f"{rpf[0]} "
+    # Before anything is accepted, so no accept below it is reachable with another slot's source.
+    first_accept = next(i for i, line in enumerate(rules) if " accept " in f"{line} ")
+    assert rules.index(rpf[0]) < first_accept
+
+
 # #979
 def test_everything_else_addressed_to_the_host_or_forwarded_is_dropped() -> None:
     assert rules_of("input")[-1].startswith(f"iifname {TAPS} counter drop")
