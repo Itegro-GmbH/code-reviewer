@@ -59,7 +59,11 @@ def test_every_example_is_valid(definition: str) -> None:
 # #975-T02
 def test_the_constants_of_the_worker_are_the_constants_of_the_file() -> None:
     assert _DEFS["ControlVariable"]["const"] == control.ENVIRONMENT_CONTROL_VARIABLE
-    assert _DEFS["ControlTransportValue"]["const"] == control.TRANSPORT_VSOCK
+    assert _DEFS["ControlTransportValue"]["enum"] == [
+        control.TRANSPORT_VSOCK,
+        control.TRANSPORT_UNIX,
+    ]
+    assert _DEFS["ControlSocketPath"]["const"] == control.UNIX_SOCKET_PATH
     assert _DEFS["ControlHostCid"]["const"] == control.VSOCK_HOST_CID
     assert _DEFS["ControlPort"]["const"] == control.VSOCK_PORT
     assert _DEFS["ControlMaxFrameBytes"]["const"] == control.MAX_FRAME_BYTES

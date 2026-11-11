@@ -98,10 +98,13 @@ class OuterWallUnavailable(Exception):
 
 @dataclass(frozen=True)
 class SlotAddresses:
-    """The two ends of a slot's /30: the host's, where the proxy listens, and the guest's."""
+    """The two ends of a slot's network: the host's, where the proxy listens, and the guest's.
+    `also` are further addresses of the same slot that may use the proxy (the Incus backend's second
+    instance, #1007); the Firecracker backend has none."""
 
     host: str
     guest: str
+    also: tuple[str, ...] = ()
 
 
 def tap_addresses(slot: Slot) -> SlotAddresses:
@@ -172,8 +175,10 @@ class SlotProxyServer(ProxyServer):
         connector: Connector,
         max_connections: int = MAX_CONNECTIONS,
         budget: threading.BoundedSemaphore | None = None,
+        also: tuple[str, ...] = (),
     ) -> None:
         self._guest = guest
+        self._also = also
         self._slot_decider = decider
         self._budget = budget
         self._dial = connector
@@ -192,7 +197,7 @@ class SlotProxyServer(ProxyServer):
         )
 
     def verify_request(self, request: Any, client_address: Any) -> bool:
-        if client_address[0] == self._guest:
+        if client_address[0] == self._guest or client_address[0] in self._also:
             return True
         self.log.add("", 0, OUTCOME_REFUSED, REASON_WRONG_SOURCE)
         return False
@@ -379,6 +384,7 @@ class ProxyOuterWall:
                         connector=self._connector,
                         max_connections=self._slot_connections,
                         budget=self._budget,
+                        also=ends.also,
                     )
                 except OSError as error:
                     _log.error(

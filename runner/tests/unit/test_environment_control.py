@@ -499,13 +499,73 @@ def test_the_vsock_variable_chooses_vsock(host_factory: Any) -> None:
     assert host.requests[0]["type"] == "narrow"
 
 
+# #1007-T02
+def test_the_unix_variable_chooses_the_unix_socket_of_the_contract(
+    host_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[tuple[str, float]] = []
+    host = host_factory(ACK)
+
+    def unix_connect(timeout: float) -> Any:
+        opened.append((control.UNIX_SOCKET_PATH, timeout))
+        return host.connect(timeout)
+
+    monkeypatch.setattr(control, "unix_connect", unix_connect)
+
+    transport = control_from_environment({ENVIRONMENT_CONTROL_VARIABLE: "unix"})
+
+    assert isinstance(transport, VsockControl)
+    transport.narrow(LIST, MODEL_HOST)
+    assert host.requests[0]["type"] == "narrow"
+    assert opened == [("/ctl.sock", control.NARROW_SECONDS)]
+
+
+# #1007-T02
+def test_the_unix_socket_connects_to_the_path_of_the_contract(tmp_path: Path) -> None:
+    path = tmp_path / "ctl.sock"
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen(1)
+    try:
+        connection = control.unix_connect(2.0, str(path))
+        peer, _ = server.accept()
+        connection.sendall(b"x")
+        assert peer.recv(1) == b"x"
+        connection.close()
+        peer.close()
+    finally:
+        server.close()
+
+
+# #1007-T02
+def test_the_worker_reports_its_exit_code_over_the_unix_socket(host_factory: Any) -> None:
+    host = host_factory(ACK)
+
+    report_worker_end({ENVIRONMENT_CONTROL_VARIABLE: "unix"}, 0, connect=host.connect)
+
+    assert host.requests == [{"version": 1, "type": "end", "exitCode": 0}]
+
+
+# #1007-T02
+def test_unix_next_to_the_https_switch_is_ambiguous_and_refused() -> None:
+    with pytest.raises(JobError) as caught:
+        control_from_environment(
+            {
+                ENVIRONMENT_CONTROL_VARIABLE: "unix",
+                IMPLEMENTER_NETWORK_SWITCH_VARIABLE: SWITCH_TEXT,
+            }
+        )
+
+    assert caught.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+
+
 # #975-T03
 @pytest.mark.parametrize("environment", [{}, {IMPLEMENTER_NETWORK_SWITCH_VARIABLE: "  "}])
 def test_no_transport_is_none(environment: dict[str, str]) -> None:
     assert control_from_environment(environment) is None
 
 
-@pytest.mark.parametrize("value", ["", "https", "VSOCK", "tcp", "vsock "])
+@pytest.mark.parametrize("value", ["", "https", "VSOCK", "tcp", "vsock ", "UNIX", "unix "])
 def test_a_vsock_variable_that_is_not_vsock_is_a_config_error(value: str) -> None:
     with pytest.raises(JobError) as caught:
         control_from_environment({ENVIRONMENT_CONTROL_VARIABLE: value})

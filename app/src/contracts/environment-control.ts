@@ -4,13 +4,17 @@
 // `make verify` fails while this file differs from what the schema generates.
 
 /**
- * The environment variable that chooses the vsock transport; its one value is `ControlTransportValue`. The Worker refuses a container that sets it to anything else, and one that sets it next to `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (the https transport), with `implementer_config_invalid`. It holds no secret and is set by whoever starts the Worker container (vm-init, #977).
+ * The environment variable that chooses the socket transport; its value is one of `ControlTransportValue`. The Worker refuses a container that sets it to anything else than one of `ControlTransportValue`, and one that sets it next to `RUNNER_IMPLEMENTER_NETWORK_SWITCH` (the https transport), with `implementer_config_invalid`. It holds no secret and is set by whoever starts the Worker container (vm-init, #977).
  */
 export type ControlVariable = "RUNNER_ENVIRONMENT_CONTROL";
 /**
- * The value of `ControlVariable`.
+ * The values of `ControlVariable`: `vsock` (a Firecracker VM, #977) and `unix` (an Incus instance, #1007).
  */
-export type ControlTransportValue = "vsock";
+export type ControlTransportValue = "vsock" | "unix";
+/**
+ * The Unix socket of the `unix` transport, in the instance the Worker's Control runs in (and bind-mounted into the Control container at the same path). The launcher makes it with an Incus `proxy` device that listens there (`bind=instance`) and connects to the dispatcher's own socket on the host. It is not under `/run`, which the instance's init hides under a tmpfs (Incus 7.6, spike #1005).
+ */
+export type ControlSocketPath = "/ctl.sock";
 /**
  * The context id of the host in the VM's AF_VSOCK address space (VMADDR_CID_HOST).
  */

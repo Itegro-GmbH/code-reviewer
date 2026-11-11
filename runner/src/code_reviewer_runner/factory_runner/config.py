@@ -62,6 +62,10 @@ MAX_PARALLEL_RUNS = 1
 SANDBOX_VARIABLE = "FACTORY_RUNNER_SANDBOX"
 SANDBOX_FIRECRACKER = "firecracker"
 MAX_FIRECRACKER_PARALLEL_RUNS = 64
+# The one local backend (#1007, Runner v2): two Incus instances per job, a pair of bridges per slot.
+# `firecracker` stays selectable until its code is retired (#1012).
+SANDBOX_INCUS = "incus"
+MAX_INCUS_PARALLEL_RUNS = 32
 
 
 # Where the credential of a loaded configuration came from. Only a credential of the file is the
@@ -191,12 +195,21 @@ def _limit(name: str, raw: object) -> int | None:
     return value
 
 
+def _max_parallel_runs(sandbox: str) -> int:
+    """The most jobs at once the sandbox allows: one per slot (a TAP device, or two bridges)."""
+    if sandbox == SANDBOX_INCUS:
+        return MAX_INCUS_PARALLEL_RUNS
+    if sandbox == SANDBOX_FIRECRACKER:
+        return MAX_FIRECRACKER_PARALLEL_RUNS
+    return MAX_PARALLEL_RUNS
+
+
 def check_limits(raw: Mapping[str, object], *, max_parallel: int = MAX_PARALLEL_RUNS) -> Limits:
     parallel = _limit("parallelRuns", raw.get("parallelRuns")) or MAX_PARALLEL_RUNS
     if parallel > max_parallel:
         raise ConfigError(
             "parallelRuns: this runner takes one job at a time "
-            f"(the Firecracker sandbox, {SANDBOX_VARIABLE}={SANDBOX_FIRECRACKER}, takes more)"
+            f"(the Incus sandbox, {SANDBOX_VARIABLE}={SANDBOX_INCUS}, takes more)"
             if max_parallel == MAX_PARALLEL_RUNS
             else f"parallelRuns: at most {max_parallel} jobs at a time"
         )
@@ -318,11 +331,7 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         runner_id=runner_id,
         limits=check_limits(
             limits_raw,
-            max_parallel=(
-                MAX_FIRECRACKER_PARALLEL_RUNS
-                if environment.get(SANDBOX_VARIABLE, "").strip() == SANDBOX_FIRECRACKER
-                else MAX_PARALLEL_RUNS
-            ),
+            max_parallel=_max_parallel_runs(environment.get(SANDBOX_VARIABLE, "").strip()),
         ),
         agent_image=None if image in (None, "") else check_image(image),
         runtime=check_runtime(pick("FACTORY_RUNNER_RUNTIME", "runtime") or "auto"),
