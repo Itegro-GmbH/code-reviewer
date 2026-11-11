@@ -272,7 +272,12 @@ printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
 case "$1" in
   --version) echo "systemd ${STUB_SYSTEMD:-255} (${STUB_SYSTEMD:-255}.4-1)" ;;
   is-active) [ -f "$STUB_STATE/active" ] ;;
-  enable|start|restart) touch "$STUB_STATE/active" ;;
+  start|restart)
+    # The service's start takes the switch lock (prestart): the caller must not hold it, or it waits for ever.
+    lock="$FACTORY_RUNNER_ROOT/var/lib/code-reviewer/switch.lock"
+    if [ -f "$lock" ] && ! flock -n "$lock" true; then echo "the switch lock is held across a start" >&2; exit 1; fi
+    touch "$STUB_STATE/active" ;;
+  enable) touch "$STUB_STATE/active" ;;
   stop) rm -f "$STUB_STATE/active" ;;
   disable) case "$*" in *--now*) rm -f "$STUB_STATE/active" ;; esac ;;
 esac

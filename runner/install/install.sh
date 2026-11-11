@@ -179,7 +179,9 @@ parse_args() {
     esac
   done
   if [ -n "$PARALLEL" ]; then
-    is_uint "$PARALLEL" && [ "$PARALLEL" -ge 1 ] && [ "$PARALLEL" -le 64 ] || fail "--parallel-runs is a whole number from 1 to 64"
+    if ! is_uint "$PARALLEL" || [ "$PARALLEL" -lt 1 ] || [ "$PARALLEL" -gt 64 ]; then
+      fail "--parallel-runs is a whole number from 1 to 64"
+    fi
   fi
   if [ -n "$TOKEN_FILE" ] && [ "$TOKEN_FILE" != "-" ] && [ ! -r "$TOKEN_FILE" ]; then
     fail "the token file $TOKEN_FILE does not exist or cannot be read"
@@ -331,7 +333,9 @@ preflight() {
     say "  Nothing was changed." >&2
     exit 1
   fi
-  [ -r "$KVM" ] && [ -w "$KVM" ] || fail "/dev/kvm cannot be opened by root: check its permissions (nothing was changed)"
+  if [ ! -r "$KVM" ] || [ ! -w "$KVM" ]; then
+    fail "/dev/kvm cannot be opened by root: check its permissions (nothing was changed)"
+  fi
   if [ "$(stat -c %G "$KVM" 2>/dev/null || echo "$KVM_GROUP")" != "$KVM_GROUP" ]; then
     warn "warning: /dev/kvm does not belong to the group $KVM_GROUP: the service user is added to it and may still not be able to open the device (the check after the user is made says)"
   fi
@@ -558,6 +562,8 @@ stage_program() {
   chown -R root:root "$stage/tree"
   lock_switch
   mkdir -p "$OPT/releases"
+  chmod 0755 "$OPT/releases"
+  root_owned "$OPT/releases"
   rm -rf "$OPT/releases/$M_RELEASE"
   mv "$stage/tree" "$OPT/releases/$M_RELEASE"
   rm -rf "$stage"
@@ -628,6 +634,8 @@ stage_vm() {
   chown -R root:root "$stage"
   lock_switch
   mkdir -p "$STATE/artifact-releases"
+  chmod 0755 "$STATE/artifact-releases"
+  root_owned "$STATE/artifact-releases"
   rm -rf "$STATE/artifact-releases/$M_RELEASE"
   mv "$stage" "$STATE/artifact-releases/$M_RELEASE"
 }
@@ -665,7 +673,7 @@ update_component() { # update_component program|vm
 # Smoke test of a program release as the service user: the command runs and says its version; and the release
 # carries the script that is installed from it.
 smoke_program() { # smoke_program DIR
-  [ -f "$1/libexec/host.sh" ] && sh -n "$1/libexec/host.sh" 2>/dev/null || return 1
+  if [ ! -f "$1/libexec/host.sh" ] || ! sh -n "$1/libexec/host.sh" 2>/dev/null; then return 1; fi
   as_service_user "$1/bin/factory-runner" --version >/dev/null 2>&1 </dev/null || return 1
   as_service_user "$1/bin/firecracker" --version >/dev/null 2>&1 </dev/null || return 1
 }
@@ -1040,6 +1048,7 @@ ensure_user() {
 
 ensure_directories() {
   mkdir -p "$OPT" "$STATE" "$CONF" "$HOME_DIR" "$STATE/vms"
+  # Explicit modes: a default ACL on a parent directory (some images have one on /opt) would otherwise be inherited.
   chmod 0755 "$OPT" "$STATE" "$CONF"
   root_owned "$OPT" "$STATE" "$CONF"
   # The service's own: the credential and the configuration, the VMs' directories, the lock it takes.
@@ -1111,8 +1120,10 @@ do_install() {
   load_wall
   write_units "$total"
   write_command
-  # The machine is installed: what follows (the token) never removes it.
+  # The machine is installed: what follows (the token) never removes it. The lock goes before the service starts: its start
+  # (`prestart`) takes the same lock.
   FRESH=0
+  unlock_switch
   systemctl daemon-reload </dev/null
   systemctl enable "$SERVICE-update.timer" >/dev/null 2>&1 </dev/null || true
   systemctl start "$SERVICE-update.timer" >/dev/null 2>&1 </dev/null || true
@@ -1220,6 +1231,7 @@ do_rollback() {
   done
   [ "$went" = 1 ] || fail "there is no earlier release to go back to"
   if [ "$NOW" = 1 ]; then
+    unlock_switch
     systemctl restart "$SERVICE" </dev/null
     say "the service is restarted"
   else
