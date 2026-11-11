@@ -32,6 +32,7 @@ client that went round the proxy and was dropped would still pass here, and show
 
 import asyncio
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any
 
@@ -114,7 +115,8 @@ def run_job(machine: Machine, tmp_path: Path, job_id: str, *, with_git: bool) ->
         outcome, seconds = asyncio.run(scenario())
         print(f"\nexit {outcome.exit_code} after {seconds:.0f} s")
         print(outcome.log_tail[-3000:])
-        print(f"delivered: {[(c.get('ok'), c.get('errorCode')) for c in fakes.app.completions]}")
+        for each in fakes.app.completions:
+            print(f"delivered: {json.dumps(each)[:6000]}")
         print(f"the proxy decided: {logs[0]['connections']}")
         print(f"dialled: {fakes.internet.dialled}")
         return Ran(outcome, fakes, wall, logs[0], seconds)

@@ -62,8 +62,9 @@ AGENT_COPY: Final = "from-agent.txt"
 CLOSING: Final = "I added what the setup and the network door fetched, and committed it."
 
 SETUP_SCRIPT: Final = f"""\
-curl -fsS http://{FILES_HOST}/setup -o /opt/setup-fetched.txt
-curl -fsS http://{SETUP_ONLY_HOST}/setup -o /opt/mirror-fetched.txt
+echo "proxy variables: http_proxy=$http_proxy HTTP_PROXY=$HTTP_PROXY"
+curl -fsSv --max-time 40 http://{FILES_HOST}/setup -o /opt/setup-fetched.txt
+curl -fsSv --max-time 40 http://{SETUP_ONLY_HOST}/setup -o /opt/mirror-fetched.txt
 cp /opt/setup-fetched.txt setup-fetched.txt
 echo "the lane's setup is done"
 """
