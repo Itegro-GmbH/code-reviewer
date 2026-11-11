@@ -68,6 +68,11 @@ class WorkerOutcome:
     log_tail: str
 
 
+class SandboxInUse(Exception):
+    """Another dispatcher of this machine holds the sandbox (its VMs, its cgroups, its slots). The
+    message is for the log: it names no path and no value."""
+
+
 class RunningWorker(Protocol):
     async def wait(self) -> WorkerOutcome: ...
 
@@ -102,6 +107,11 @@ class WorkerSandbox(Protocol):
         ...
 
     async def start(self, start: WorkerStart) -> RunningWorker: ...
+
+    async def close(self) -> None:
+        """After the last Worker ended (or when the run could not begin): let go of what `setup`
+        took. Never raises."""
+        ...
 
 
 class _ProcessWorker:
@@ -144,6 +154,9 @@ class ProcessSandbox:
 
     async def setup(self) -> None:
         """A process of this container needs nothing made."""
+
+    async def close(self) -> None:
+        """Nothing was taken."""
 
     async def start(self, start: WorkerStart) -> RunningWorker:
         spec = ProcessSpec(

@@ -23,6 +23,7 @@ from firecracker_support import (
     IMAGE_ID,
     LOCAL_CREDENTIAL,
     Rig,
+    StuckCgroups,
     short_directory,
     start_for,
 )
@@ -31,6 +32,7 @@ from jsonschema import Draft202012Validator
 from code_reviewer_runner.factory_runner.firecracker.cgroups import MIB, VMM_OVERHEAD_MIB
 from code_reviewer_runner.factory_runner.firecracker.control_run import load_template
 from code_reviewer_runner.factory_runner.firecracker.disks import DiskError
+from code_reviewer_runner.factory_runner.firecracker.endpoint import MAX_CONNECTIONS, port_path
 from code_reviewer_runner.factory_runner.firecracker.launcher import (
     EXIT_KILLED,
     EXIT_NO_REPORT,
@@ -39,7 +41,14 @@ from code_reviewer_runner.factory_runner.firecracker.launcher import (
     StartFailed,
 )
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
-from code_reviewer_runner.factory_runner.sandbox import WorkerOutcome
+from code_reviewer_runner.factory_runner.firecracker.wire import (
+    CONTROL_PORT,
+    MAX_CONTROL_FRAME_BYTES,
+    REPORT_PORT,
+    encode_frame,
+    read_frame,
+)
+from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutcome
 
 pytestmark = pytest.mark.unit
 
@@ -580,3 +589,216 @@ def test_a_vmm_that_will_not_die_keeps_its_slot_out_of_use_and_the_log_says_so(
 
         assert sandbox.free == 0 and "is out of use" in caplog.text
         assert rig.vm_directories() == []  # the files are gone all the same
+        assert rig.cgroups.removed == []  # a cgroup with a live VMM in it stays for the reaper
+
+
+# -- one dispatcher per state directory ---
+
+
+# #978-T09
+def test_a_second_dispatcher_on_the_same_state_directory_refuses_to_start_and_touches_nothing() -> (
+    None
+):
+    with short_directory() as root:
+        rig = Rig(root)
+        first, second = rig.sandbox(), rig.sandbox()
+        go(first.setup)
+        # What the first one's VMs would look like: the second must not mistake it for a leftover.
+        running = root / "vms" / "vm-0-deadbeef"
+        running.mkdir()
+
+        with pytest.raises(SandboxInUse, match="another dispatcher"):
+            go(second.setup)
+
+        assert rig.cgroups.prepared == 1 and running.is_dir()
+        # When the first lets go (it ended), the second may start.
+        go(first.close)
+        go(second.setup)
+        assert rig.cgroups.prepared == 2
+        go(second.close)
+
+
+# -- connections to a VM's listeners ---
+
+
+async def report_of(vm_uds: Path, token: str) -> dict[str, Any]:
+    reader, writer = await asyncio.open_unix_connection(str(port_path(vm_uds, REPORT_PORT)))
+    try:
+        writer.write(
+            encode_frame(
+                {
+                    "version": 1,
+                    "type": "exit",
+                    "exitCode": 0,
+                    "reason": "worker_exited",
+                    "token": token,
+                }
+            )
+        )
+        await writer.drain()
+        return await read_frame(reader, max_bytes=MAX_CONTROL_FRAME_BYTES, seconds=3)
+    finally:
+        writer.close()
+
+
+# #978-T07
+def test_a_flood_on_one_vms_listener_is_closed_at_once_and_does_not_stop_another_vms_report() -> (
+    None
+):
+    with short_directory() as root:
+        rig = Rig(root, slots=2)
+        rig.behavior(mode="hang")
+        sandbox = rig.sandbox()
+
+        async def scenario() -> tuple[int, dict[str, Any]]:
+            first = await sandbox.start(start_for(1))
+            second = await sandbox.start(start_for(2))
+            vm_a = sandbox._vms[first.vm_id]  # pyright: ignore[reportPrivateUsage]
+            vm_b = sandbox._vms[second.vm_id]  # pyright: ignore[reportPrivateUsage]
+            held: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+            for port in (CONTROL_PORT, REPORT_PORT):
+                for _ in range(120):
+                    held.append(await asyncio.open_unix_connection(str(port_path(vm_a.uds, port))))
+            closed = 0
+            for reader, _ in held:
+                with contextlib.suppress(TimeoutError):
+                    if await asyncio.wait_for(reader.read(1), 0.05) == b"":
+                        closed += 1
+            reply = await report_of(vm_b.uds, vm_b.session.token)
+            for _, writer in held:
+                writer.close()
+            await first.stop()
+            await asyncio.gather(first.wait(), second.wait())
+            return closed, reply
+
+        closed, reply = go(scenario)
+
+        assert closed >= 240 - 2 * MAX_CONNECTIONS
+        assert reply == {"version": 1, "type": "ack", "for": "exit"}
+
+
+# -- the VMM's log ---
+
+
+# #978-T09
+def test_the_vmms_log_is_bounded_and_the_outcome_carries_its_last_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_reviewer_runner.factory_runner.firecracker import launcher as launcher_module
+
+    monkeypatch.setattr(launcher_module, "LOG_FILE_MAX_BYTES", 64 * 1024)
+    with short_directory() as root:
+        rig = Rig(root)
+        rig.behavior(mode="no_report", log_bytes=2 * 1024 * 1024)
+        sandbox = rig.sandbox()
+        sizes: list[int] = []
+
+        async def scenario() -> WorkerOutcome:
+            worker = await sandbox.start(start_for())
+            vm = sandbox._vms[worker.vm_id]  # pyright: ignore[reportPrivateUsage]
+            outcome = await worker.wait()
+            sizes.append(vm.log_written)
+            return outcome
+
+        outcome = go(scenario)
+
+        assert outcome.exit_code == EXIT_NO_REPORT
+        assert "LAST-LINE-OF-THE-VMM" in outcome.log_tail
+        assert len(outcome.log_tail) < 20_000
+        assert sizes[0] <= 64 * 1024 + 65536  # never more than the cap and one chunk
+
+
+# #978-T09
+def test_the_tail_of_a_huge_log_is_read_by_seeking_not_by_reading_it_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+        sandbox = rig.sandbox()
+        directory = root / "vms" / "vm-0-deadbeef"
+        directory.mkdir()
+        with (directory / "firecracker.log").open("wb") as handle:
+            handle.seek(300 * 1024 * 1024)  # a sparse file of 300 MiB
+            handle.write(b"the last line\n")
+
+        def never(self: Path) -> bytes:
+            raise AssertionError("the whole log was read")
+
+        monkeypatch.setattr(Path, "read_bytes", never)
+
+        vm = type("Vm", (), {"directory": directory})()
+        tail = sandbox._log_tail(vm)  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+
+        assert tail.endswith("the last line\n") and len(tail) <= 6000
+
+
+# -- the end of a VM does not block the others ---
+
+
+# #978-T09
+def test_a_cgroup_that_cannot_be_removed_for_a_while_does_not_block_another_vms_listener() -> None:
+    with short_directory() as root:
+        rig = Rig(root, slots=2)
+        stuck = StuckCgroups()
+        rig.cgroups = stuck
+        rig.behavior(mode="hang")
+        sandbox = rig.sandbox()
+
+        async def scenario() -> tuple[dict[str, Any], float]:
+            first = await sandbox.start(start_for(1))
+            second = await sandbox.start(start_for(2))
+            vm_a = sandbox._vms[first.vm_id]  # pyright: ignore[reportPrivateUsage]
+            vm_b = sandbox._vms[second.vm_id]  # pyright: ignore[reportPrivateUsage]
+            destroying = asyncio.ensure_future(
+                sandbox._destroy(vm_a)  # pyright: ignore[reportPrivateUsage]
+            )
+            while not stuck.entered.is_set():
+                await asyncio.sleep(0.01)
+            began = asyncio.get_running_loop().time()
+            reply = await report_of(vm_b.uds, vm_b.session.token)
+            took = asyncio.get_running_loop().time() - began
+            stuck.gate.set()
+            await destroying
+            await second.stop()
+            await second.wait()
+            return reply, took
+
+        reply, took = go(scenario)
+
+        assert reply["type"] == "ack" and took < 2.0
+
+
+# -- what the VMM is, and what it is told, before it exists ---
+
+
+# #978-T09
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"job_id": "not a job id/../etc"},
+        {"app_url": "file:///etc/passwd"},
+        {"app_url": "https://a b"},
+        {"credential": "crj_ a"},
+    ],
+    ids=["job id", "app url scheme", "app url space", "credential space"],
+)
+def test_a_start_that_is_not_valid_is_refused_before_a_disk_is_copied_or_a_vmm_started(
+    change: dict[str, str],
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+        copies: list[Path] = []
+
+        def noting_disk(base: Path, destination: Path, quota: int) -> bool:
+            copies.append(destination)
+            return False
+
+        sandbox = rig.sandbox(make_disk=noting_disk)
+        start = dataclasses.replace(start_for(), **change)
+
+        with pytest.raises(StartFailed):
+            go(lambda: sandbox.start(start))
+
+        assert copies == [] and rig.vm_directories() == []
+        assert not rig.behavior_file.with_suffix(".seen").exists()  # no VMM was spawned
+        assert rig.cgroups.created == [] and sandbox.free == sandbox.capacity

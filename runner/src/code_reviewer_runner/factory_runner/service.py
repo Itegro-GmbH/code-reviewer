@@ -96,6 +96,7 @@ from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.sandbox import (
     ProcessSandbox,
     RunningWorker,
+    SandboxInUse,
     WorkerOutcome,
     WorkerSandbox,
     WorkerStart,
@@ -266,6 +267,8 @@ class RunnerService:
             for number in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(number)
             await self._unlock()
+            if self._sandbox is not None:
+                await self._sandbox.close()
 
     def stop(self) -> None:
         """A signal: stop claiming, and end the Worker that runs: it gives its job back
@@ -307,6 +310,10 @@ class RunnerService:
             await asyncio.to_thread(self._updates.tidy_references)
         try:
             await sandbox.setup()
+        except SandboxInUse as error:
+            # Its text is the sandbox's own and holds no path or value.
+            self._log.error("%s", error)
+            return EXIT_SHARED_DAEMON
         except Exception as error:
             # Class name only: the text of an error may name a path or hold a value of the setup.
             self._log.error("the sandbox cannot be used: %s", type(error).__name__)

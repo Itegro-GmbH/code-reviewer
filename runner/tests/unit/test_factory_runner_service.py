@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -53,7 +53,11 @@ from code_reviewer_runner.factory_runner.config import (
     save_config,
 )
 from code_reviewer_runner.factory_runner.prepare import Prepared
-from code_reviewer_runner.factory_runner.sandbox import WORKER_MODULE, WorkerOutcome
+from code_reviewer_runner.factory_runner.sandbox import (
+    WORKER_MODULE,
+    SandboxInUse,
+    WorkerOutcome,
+)
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import (
     POLL_SECONDS,
@@ -1473,7 +1477,7 @@ class FakeVmSandbox:
         capacity: int,
         *,
         setup_error: Exception | None = None,
-        start_errors: list[Exception | None] | None = None,
+        start_errors: Sequence[Exception | None] | None = None,
         lose_slot_at_end: bool = False,
     ) -> None:
         self.capacity = capacity
@@ -1481,7 +1485,7 @@ class FakeVmSandbox:
         self.setup_error = setup_error
         # One entry per start, in order: an error is raised, None starts a Worker; once the list is
         # used up every start works.
-        self.start_errors = start_errors or []
+        self.start_errors = list(start_errors or [])
         # A slot that cannot be given back when the Worker of the first job ends (its VMM would not
         # die): the sandbox has one slot less from then on.
         self.lose_slot_at_end = lose_slot_at_end
@@ -1499,6 +1503,9 @@ class FakeVmSandbox:
         self.events.append("setup")
         if self.setup_error is not None:
             raise self.setup_error
+
+    async def close(self) -> None:
+        self.events.append("close")
 
     async def start(self, start: Any) -> FakeVmWorker:
         self.events.append(f"start {start.job_id}")
@@ -1760,3 +1767,33 @@ def test_a_failed_start_in_once_mode_ends_the_run_with_a_failure(tmp_path: Path)
 
     assert rig.go(once=True) == EXIT_FAILED
     assert rig.client.claim_calls == 1
+
+
+# #978-T15
+def test_a_second_dispatcher_on_the_same_machine_ends_with_the_shared_daemon_code_and_no_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    sandbox = FakeVmSandbox(2, setup_error=SandboxInUse("another dispatcher runs on this machine"))
+    rig = vm_rig(tmp_path, sandbox)
+
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert rig.client.claim_calls == 0 and "another dispatcher runs on this machine" in caplog.text
+
+
+# #978-T15
+def test_the_sandbox_is_closed_when_the_run_ends(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(1)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim()]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert sandbox.events[-1] == "close"

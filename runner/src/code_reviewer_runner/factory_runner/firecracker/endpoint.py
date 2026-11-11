@@ -10,7 +10,10 @@ connects to `<uds>`, writes `CONNECT 5000\\n`, reads `OK <port>\\n`, and then sp
 vm-init's start on that stream (`contracts/vm-init.v1.json`).
 
 Each connection is one request and one reply, then closed. A connection that is slow (10 s for its
-frame), too large or outside the contract is closed; nothing about it is believed."""
+frame), too large or outside the contract is closed; nothing about it is believed. A listener
+serves at most `MAX_CONNECTIONS` connections at a time and closes every other one the moment it is
+accepted: whatever opens connections in a loop (a process of the VM that can reach its vsock) holds
+a few file descriptors of the service, not all of them, and not those of another VM's listeners."""
 
 import asyncio
 import contextlib
@@ -33,6 +36,9 @@ from .wire import (
 _log = logging.getLogger(__name__)
 
 CONNECT_RETRY_SECONDS: Final = 0.1
+# The connections one listener serves at once. Control, the Worker's `end` and vm-init's report each
+# open one at a time and close it again; four leaves room for a retry that overlaps.
+MAX_CONNECTIONS: Final = 4
 # A ready line is `OK <port>\n`.
 _MAX_LINE_BYTES: Final = 64
 
@@ -49,6 +55,7 @@ class HostListeners:
         self._uds = uds
         self._session = session
         self._servers: list[asyncio.Server] = []
+        self._open: dict[int, int] = {}
 
     async def start(self) -> None:
         """Listen on both ports. Raises `OSError` when a socket cannot be made."""
@@ -76,24 +83,28 @@ class HostListeners:
             port_path(self._uds, port).unlink(missing_ok=True)
 
     async def _control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await self._serve(reader, writer, self._session.control, MAX_CONTROL_FRAME_BYTES)
+        await self._serve(CONTROL_PORT, reader, writer, self._session.control)
 
     async def _report(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         async def answer(document: dict[str, Any]) -> dict[str, Any] | None:
             return self._session.exit_report(document)
 
-        await self._serve(reader, writer, answer, MAX_CONTROL_FRAME_BYTES)
+        await self._serve(REPORT_PORT, reader, writer, answer)
 
     async def _serve(
         self,
+        port: int,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         answer: Any,
-        max_bytes: int,
     ) -> None:
+        if self._open.get(port, 0) >= MAX_CONNECTIONS:
+            writer.close()
+            return
+        self._open[port] = self._open.get(port, 0) + 1
         try:
             try:
-                document = await read_frame(reader, max_bytes=max_bytes)
+                document = await read_frame(reader, max_bytes=MAX_CONTROL_FRAME_BYTES)
             except (ProtocolError, TimeoutError, ConnectionError, OSError) as error:
                 _log.warning(
                     "%s: a connection was closed (%s)", self._session.vm.vm_id, type(error).__name__
@@ -106,6 +117,7 @@ class HostListeners:
         except (ConnectionError, OSError):
             pass
         finally:
+            self._open[port] -= 1
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

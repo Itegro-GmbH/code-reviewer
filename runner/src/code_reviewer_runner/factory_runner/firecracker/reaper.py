@@ -6,10 +6,13 @@ A service that ends cleanly leaves nothing (every VM is killed and its directory
 worker ends). One that is killed, or whose machine loses power, can leave a Firecracker process, the
 directory of its VM (a job disk of GiB) and its cgroup. At every start of the service, before the
 first claim, this removes them: each `vms/vm-*` directory is a VM of an earlier service (this one
-has not started any), its process is found by its command line (`--config-file <directory>/...`,
-never by a remembered pid: a pid may have been reused), killed with its cgroup, and the directory
-deleted. A cgroup named like a VM's with no directory is removed too."""
+has not started any), its process is found by its command line (the configured Firecracker binary
+as argv[0] and `--config-file <directory>/firecracker.json`; never by a remembered pid, which may
+have been reused, and never by a file name alone: a `tail -f` on the VM's log is not a VMM), killed
+with its cgroup, and the directory deleted. A cgroup named like a VM's with no directory is removed
+too."""
 
+import itertools
 import logging
 import os
 import signal
@@ -36,8 +39,8 @@ class Reaped:
     cgroups: tuple[str, ...] = ()
 
 
-def _command_lines(proc: Path) -> dict[int, str]:
-    found: dict[int, str] = {}
+def _command_lines(proc: Path) -> dict[int, list[str]]:
+    found: dict[int, list[str]] = {}
     try:
         entries = list(proc.iterdir())
     except OSError:
@@ -49,15 +52,29 @@ def _command_lines(proc: Path) -> dict[int, str]:
             raw = (entry / "cmdline").read_bytes()
         except OSError:
             continue
-        found[int(entry.name)] = raw.replace(b"\0", b" ").decode("utf-8", errors="replace")
+        argv = raw.rstrip(b"\0").split(b"\0")
+        found[int(entry.name)] = [each.decode("utf-8", errors="replace") for each in argv]
     return found
 
 
-def processes_of(directory: Path, proc: Path = PROC) -> list[int]:
-    """The processes whose command line names a file of this VM directory."""
-    needle = f"{directory}/"
+def _is_vmm_of(argv: list[str], firecracker: Path, directory: Path) -> bool:
+    """Whether `argv` is the Firecracker of this VM: the program is the configured binary, and it
+    was given `--config-file <directory>/firecracker.json` (the launcher's own command line). A
+    `tail -f` on the VM's log, an editor with its disk open, a shell in the directory are not."""
+    if not argv or argv[0] != str(firecracker):
+        return False
+    config = f"{directory}/firecracker.json"
+    return any(
+        option == "--config-file" and value == config for option, value in itertools.pairwise(argv)
+    )
+
+
+def processes_of(directory: Path, firecracker: Path, proc: Path = PROC) -> list[int]:
+    """The processes that are the Firecracker of this VM directory (`_is_vmm_of`)."""
     return [
-        pid for pid, line in _command_lines(proc).items() if needle in line and pid != os.getpid()
+        pid
+        for pid, argv in _command_lines(proc).items()
+        if pid != os.getpid() and _is_vmm_of(argv, firecracker, directory)
     ]
 
 
@@ -73,7 +90,12 @@ def _kill_and_wait(pids: list[int], proc: Path, seconds: float) -> None:
 
 
 def reap_leftovers(
-    vms: Path, cgroups: CgroupTree | None, *, proc: Path = PROC, wait_seconds: float = GONE_SECONDS
+    vms: Path,
+    cgroups: CgroupTree | None,
+    *,
+    firecracker: Path,
+    proc: Path = PROC,
+    wait_seconds: float = GONE_SECONDS,
 ) -> Reaped:
     """Remove the VMs, disks and cgroups an earlier service left. Never raises: what cannot be
     removed is logged and found again at the next start."""
@@ -87,7 +109,7 @@ def reap_leftovers(
     for directory in listing:
         if not directory.is_dir():
             continue
-        pids = processes_of(directory, proc)
+        pids = processes_of(directory, firecracker, proc)
         _kill_and_wait(pids, proc, wait_seconds)
         killed.extend(pids)
         try:

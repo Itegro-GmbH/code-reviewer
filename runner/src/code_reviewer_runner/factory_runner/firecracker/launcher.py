@@ -25,8 +25,10 @@ and its reaper end a VM whose job is over, or a service that is told to stop).""
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
+import os
 import secrets
 import time
 from collections.abc import Callable
@@ -34,7 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
 
-from code_reviewer_runner.factory_runner.sandbox import WorkerOutcome, WorkerStart
+from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutcome, WorkerStart
+from code_reviewer_runner.vm_init.wire import InvalidStart, parse_start
 
 from . import vmm
 from .cgroups import CgroupError, CgroupTree, VmLimits, delegated_root
@@ -59,6 +62,14 @@ EXIT_KILLED: Final = -9
 LOG_TAIL_BYTES: Final = 6000
 # How long a killed VMM may take to be gone before the slot is not given back.
 GONE_SECONDS: Final = 10.0
+# `firecracker.log` holds the end of what the VMM wrote and never more than this (a VMM that loops
+# on an error, or a serial console, would fill the disk): when the file would pass it, it is
+# truncated and the last `LOG_KEEP_BYTES` are written again, so the tail is never lost to the cut.
+LOG_FILE_MAX_BYTES: Final = 4 * 1024 * 1024
+LOG_KEEP_BYTES: Final = 16 * 1024
+LOG_CHUNK_BYTES: Final = 64 * 1024
+# The lock of the state directory: one dispatcher per machine.
+LOCK_FILE: Final = "dispatcher.lock"
 
 
 class NoFreeSlot(Exception):
@@ -92,6 +103,9 @@ class _Vm:
     listeners: HostListeners
     cgroup: Path | None = None
     process: asyncio.subprocess.Process | None = None
+    # Reads the VMM's output into `firecracker.log` (bounded); `log_written` is the file's size.
+    pump: "asyncio.Future[None] | None" = None
+    log_written: int = 0
     started_at: float = 0.0
     ended: bool = False
     stopped: bool = False
@@ -114,6 +128,7 @@ class FirecrackerSandbox:
     logger: logging.Logger = _log
     # The slots that cannot be given back because their VMM would not die.
     _pool: SlotPool = field(init=False)
+    _lock_fd: int | None = field(init=False, default=None)
     _lost: list[Slot] = field(init=False, default_factory=list[Slot])
     _vms: dict[str, _Vm] = field(init=False, default_factory=dict[str, _Vm])
     # What the last `setup` removed.
@@ -142,24 +157,65 @@ class FirecrackerSandbox:
         return self._pool.free
 
     async def setup(self) -> None:
-        """Before the first claim: make the cgroup tree usable and remove what an earlier service
-        left (`reaped`). Raises `CgroupError` when the delegated cgroup cannot be used."""
+        """Before the first claim: take the lock of the state directory, make the cgroup tree usable
+        and remove what an earlier service left (`reaped`). Raises `SandboxInUse` when another
+        dispatcher holds the machine (it touches nothing then: what it would remove as a leftover
+        is that dispatcher's running VMs), `CgroupError` when the delegated cgroup cannot be
+        used."""
+        self.settings.vms_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._take_lock()
         if self.cgroups is None:
             tree = CgroupTree(self.settings.cgroup_root or delegated_root())
             self.cgroups = tree
         self.cgroups.prepare()
-        self.settings.vms_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         tree = self.cgroups if isinstance(self.cgroups, CgroupTree) else None
-        self.reaped = await asyncio.to_thread(reap_leftovers, self.settings.vms_dir, tree)
+        self.reaped = await asyncio.to_thread(
+            lambda: reap_leftovers(
+                self.settings.vms_dir, tree, firecracker=self.settings.firecracker
+            )
+        )
+
+    def _take_lock(self) -> None:
+        """An exclusive `flock` on `<state_dir>/dispatcher.lock`, kept until `close` or the end of
+        the process (the kernel lets go of it then, whatever way the process ends). Two dispatchers
+        on one state directory would reap each other's VMs and share its slots and TAPs."""
+        if self._lock_fd is not None:
+            return
+        descriptor = os.open(
+            self.settings.state_dir / LOCK_FILE, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+        )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            raise SandboxInUse(
+                "another dispatcher runs on this machine (it holds the lock of the state "
+                "directory); one dispatcher per machine, `run --once` included"
+            ) from None
+        except OSError:
+            os.close(descriptor)
+            raise
+        self._lock_fd = descriptor
+
+    async def close(self) -> None:
+        """Let go of the lock."""
+        descriptor, self._lock_fd = self._lock_fd, None
+        if descriptor is not None:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
 
     async def start(self, start: WorkerStart) -> "FirecrackerWorker":
+        # The start document is made and checked before anything exists: a job whose id, URL or
+        # credential the VM would refuse costs no slot, no disk copy and no VMM.
+        token = self.new_token()
+        document = self._start_document(start, token)
         slot = self._pool.acquire()
         if slot is None:
             raise NoFreeSlot
         vm: _Vm | None = None
         try:
-            vm = await self._create(slot, start)
-            await self._hand_over(vm, start)
+            vm = await self._create(slot, start, token)
+            await self._hand_over(vm, document)
         except BaseException:
             if vm is not None:
                 await self._destroy(vm)
@@ -171,7 +227,7 @@ class FirecrackerSandbox:
 
     # -- one VM ---
 
-    async def _create(self, slot: Slot, start: WorkerStart) -> _Vm:
+    async def _create(self, slot: Slot, start: WorkerStart, token: str) -> _Vm:
         settings = self.settings
         vm_id = f"vm-{slot.index}-{secrets.token_hex(4)}"
         directory = settings.vms_dir / vm_id
@@ -179,7 +235,7 @@ class FirecrackerSandbox:
         session = VmSession(
             VmIdentity(vm_id, slot),
             self.wall or outer_wall_for(settings.outer_wall),
-            self.new_token(),
+            token,
         )
         listeners = HostListeners(directory / "vsock.sock", session)
         vm = _Vm(vm_id, slot, directory, session, listeners)
@@ -212,29 +268,63 @@ class FirecrackerSandbox:
             procs = vm.cgroup / "cgroup.procs"
             if procs.exists():
                 preexec, close = vmm.into_cgroup(procs)
-        log = (vm.directory / "firecracker.log").open("ab")
+        log = os.open(
+            vm.directory / "firecracker.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+        )
         try:
-            return await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *vmm.command(settings, vm.directory / "firecracker.json"),
                 stdin=asyncio.subprocess.DEVNULL,
-                stdout=log,
-                stderr=log,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
                 env={},
                 cwd=vm.directory,
                 start_new_session=True,
                 preexec_fn=preexec,
             )
+        except BaseException:
+            os.close(log)
+            raise
         finally:
-            log.close()
             if close is not None:
                 close()
+        assert process.stdout is not None
+        # The VMM's output goes through a pipe this service reads: the file is bounded, not the
+        # VMM's own to fill.
+        vm.pump = asyncio.ensure_future(self._pump(vm, process.stdout, log))
+        return process
 
-    async def _hand_over(self, vm: _Vm, start: WorkerStart) -> None:
+    async def _pump(self, vm: _Vm, stream: asyncio.StreamReader, descriptor: int) -> None:
+        """Copy the VMM's output into `firecracker.log`, never more than `LOG_FILE_MAX_BYTES` of it:
+        past the limit the file is cut and the last `LOG_KEEP_BYTES` written again. The reading
+        never stops while the VMM lives (a VMM whose pipe is full would block); what cannot be
+        written (a full disk) is dropped."""
+        recent = bytearray()
+        try:
+            while chunk := await stream.read(LOG_CHUNK_BYTES):
+                try:
+                    if vm.log_written + len(chunk) > LOG_FILE_MAX_BYTES:
+                        os.ftruncate(descriptor, 0)
+                        os.write(descriptor, bytes(recent))
+                        vm.log_written = len(recent)
+                    os.write(descriptor, chunk)
+                    vm.log_written += len(chunk)
+                except OSError:
+                    pass
+                recent += chunk
+                del recent[:-LOG_KEEP_BYTES]
+        finally:
+            os.close(descriptor)
+
+    async def _drain_log(self, vm: _Vm) -> None:
+        """Wait a moment for the pump to read what the VMM wrote before it ended."""
+        if vm.pump is not None:
+            await asyncio.wait({vm.pump}, timeout=1.0)
+
+    async def _hand_over(self, vm: _Vm, document: dict[str, Any]) -> None:
         """Send the start and wait for vm-init's `ack`. The start fails when the VM refuses it,
         ends first, reports first (before it ever took the job) or does not answer in time."""
         settings = self.settings
-        token = vm.session.token
-        document = self._start_document(start, token)
         process = vm.process
         assert process is not None
         sender = asyncio.ensure_future(
@@ -270,7 +360,7 @@ class FirecrackerSandbox:
     def _start_document(self, start: WorkerStart, token: str) -> dict[str, Any]:
         settings = self.settings
         try:
-            return build_start(
+            document = build_start(
                 self.template,
                 app_url=start.app_url,
                 job_id=start.job_id,
@@ -282,8 +372,13 @@ class FirecrackerSandbox:
                 reserve_gib=settings.reserve_gib,
                 local=start.local_environment,
             )
+            # What vm-init would check, checked here first (it names a field, never a value).
+            parse_start(document)
         except ControlRunError as error:
             raise StartFailed(str(error)) from None
+        except InvalidStart as error:
+            raise StartFailed(str(error)) from None
+        return document
 
     # -- the end of a VM ---
 
@@ -298,9 +393,17 @@ class FirecrackerSandbox:
             await vm.listeners.close()
         with contextlib.suppress(Exception):
             await (self.wall or outer_wall_for(self.settings.outer_wall)).forget(vm.session.vm)
-        if vm.cgroup is not None and self.cgroups is not None:
+        if vm.pump is not None:
+            await self._drain_log(vm)
+            vm.pump.cancel()
+            await asyncio.gather(vm.pump, return_exceptions=True)
+        if vm.cgroup is not None and self.cgroups is not None and gone:
+            # Off the event loop: removing a cgroup retries for seconds while a process leaves it,
+            # and every other VM's listeners are served by this loop. A VMM that is not gone keeps
+            # its cgroup (the reaper of the next start removes it).
             try:
-                self.cgroups.remove(vm.cgroup)
+                if not await asyncio.to_thread(self.cgroups.remove, vm.cgroup):
+                    self.logger.warning("%s: its cgroup stays", vm.vm_id)
             except CgroupError:
                 self.logger.warning("%s: its cgroup could not be removed", vm.vm_id)
         try:
@@ -336,8 +439,13 @@ class FirecrackerSandbox:
         return True
 
     def _log_tail(self, vm: _Vm) -> str:
+        """The end of the VMM's log: the file is read from `LOG_TAIL_BYTES` before its end, never
+        whole."""
         try:
-            raw = (vm.directory / "firecracker.log").read_bytes()[-LOG_TAIL_BYTES:]
+            with (vm.directory / "firecracker.log").open("rb") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                handle.seek(max(size - LOG_TAIL_BYTES, 0))
+                raw = handle.read(LOG_TAIL_BYTES)
         except OSError:
             return ""
         return raw.decode("utf-8", errors="replace")
@@ -381,6 +489,7 @@ class FirecrackerSandbox:
             if report is not None:
                 # The VM powers itself off after the host's `ack`; the grace is for that.
                 await self._let_power_off(vm)
+                await self._drain_log(vm)
                 return WorkerOutcome(
                     report.exit_code,
                     f"vm-init reported {report.reason.value} ({report.exit_code})\n"
@@ -388,6 +497,7 @@ class FirecrackerSandbox:
                 )
             if vm.stopped:
                 return WorkerOutcome(EXIT_KILLED, "the VM was stopped")
+            await self._drain_log(vm)
             return WorkerOutcome(
                 EXIT_NO_REPORT, "the VM ended without an exit report\n" + self._log_tail(vm)
             )

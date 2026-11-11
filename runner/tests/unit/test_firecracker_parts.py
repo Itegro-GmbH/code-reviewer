@@ -367,6 +367,27 @@ def test_killing_a_cgroup_writes_cgroup_kill_and_falls_back_to_each_process() ->
 # -- the leftovers of an earlier service ---
 
 
+def firecracker_path(root: Path) -> Path:
+    return root / "bin" / "firecracker"
+
+
+def vmm_like(root: Path, directory: Path) -> subprocess.Popen[bytes]:
+    """A process that Firecracker's own command line describes: its argv[0] is the binary's path
+    and it is given `--no-api --config-file <directory>/firecracker.json`."""
+    return subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'exec -a "$0" "$1" -c "import time; time.sleep(60)" "${@:2}"',
+            str(firecracker_path(root)),
+            sys.executable,
+            "--no-api",
+            "--config-file",
+            f"{directory}/firecracker.json",
+        ]
+    )
+
+
 # #978-T13
 def test_a_leftover_vm_with_its_process_and_disk_is_removed_at_the_start() -> None:
     with short_directory() as root:
@@ -375,20 +396,11 @@ def test_a_leftover_vm_with_its_process_and_disk_is_removed_at_the_start() -> No
         leftover = vms / "vm-0-deadbeef"
         leftover.mkdir()
         (leftover / "disk.ext4").write_bytes(b"x" * 100_000)
-        # A process whose command line names the VM's configuration, as Firecracker's does.
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import time; time.sleep(60)",
-                "--config-file",
-                f"{leftover}/firecracker.json",
-            ]
-        )
+        process = vmm_like(root, leftover)
         try:
-            assert processes_of(leftover) == [process.pid]
+            assert processes_of(leftover, firecracker_path(root)) == [process.pid]
 
-            reaped = reap_leftovers(vms, None)
+            reaped = reap_leftovers(vms, None, firecracker=firecracker_path(root))
 
             assert process.wait(timeout=5) == -9
             assert reaped.processes == (process.pid,)
@@ -411,9 +423,9 @@ def test_a_process_that_does_not_name_a_vm_directory_of_this_machine_is_not_touc
             [sys.executable, "-c", "import time; time.sleep(60)", f"{elsewhere}/firecracker.json"]
         )
         try:
-            assert processes_of(leftover) == []
+            assert processes_of(leftover, firecracker_path(root)) == []
 
-            reaped = reap_leftovers(vms, None)
+            reaped = reap_leftovers(vms, None, firecracker=firecracker_path(root))
 
             assert reaped.processes == () and stranger.poll() is None
         finally:
@@ -429,7 +441,7 @@ def test_a_directory_that_is_not_a_vms_is_left_alone() -> None:
         (vms / "keep-me").mkdir()
         (vms / "a-file").write_text("x")
 
-        reaped = reap_leftovers(vms, None)
+        reaped = reap_leftovers(vms, None, firecracker=firecracker_path(root))
 
         assert reaped.directories == ()
         assert sorted(p.name for p in vms.iterdir()) == ["a-file", "keep-me"]
@@ -438,7 +450,9 @@ def test_a_directory_that_is_not_a_vms_is_left_alone() -> None:
 # #978-T13
 def test_a_missing_vms_directory_is_nothing_to_reap() -> None:
     with short_directory() as root:
-        assert reap_leftovers(root / "vms", None).directories == ()
+        assert (
+            reap_leftovers(root / "vms", None, firecracker=firecracker_path(root)).directories == ()
+        )
 
 
 # #978-T13
@@ -454,7 +468,9 @@ def test_a_cgroup_of_a_vm_without_a_directory_is_removed_too() -> None:
         (root / "unit" / "service").mkdir()
         (root / "vms").mkdir()
 
-        reaped = reap_leftovers(root / "vms", Plain(root / "unit"))
+        reaped = reap_leftovers(
+            root / "vms", Plain(root / "unit"), firecracker=firecracker_path(root)
+        )
 
         assert reaped.cgroups == ("vm-3-0a0b0c0d",)
         assert (root / "unit" / "service").exists()
@@ -682,3 +698,31 @@ def test_a_setting_that_cannot_work_is_an_error_that_names_it(
 ) -> None:
     with pytest.raises(SettingsError, match=message):
         settings_from_environment(environment, **kwargs)
+
+
+# #978-T13
+def test_a_tail_on_a_vm_directory_is_not_killed_but_the_vmm_of_that_directory_is() -> None:
+    with short_directory() as root:
+        vms = root / "vms"
+        vms.mkdir()
+        leftover = vms / "vm-0-deadbeef"
+        leftover.mkdir()
+        (leftover / "firecracker.log").write_text("log\n")
+        watcher = subprocess.Popen(["tail", "-f", f"{leftover}/firecracker.log"])
+        editor = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", f"{leftover}/firecracker.json"]
+        )
+        # Firecracker's binary, but another VM's configuration: not this directory's process.
+        other = vmm_like(root, vms / "vm-1-cafebabe")
+        vmm = vmm_like(root, leftover)
+        try:
+            assert processes_of(leftover, firecracker_path(root)) == [vmm.pid]
+
+            reaped = reap_leftovers(vms, None, firecracker=firecracker_path(root))
+
+            assert vmm.wait(timeout=5) == -9 and reaped.processes == (vmm.pid,)
+            assert watcher.poll() is None and editor.poll() is None and other.poll() is None
+        finally:
+            for each in (watcher, editor, other, vmm):
+                each.kill()
+                each.wait()

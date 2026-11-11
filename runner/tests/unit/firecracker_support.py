@@ -9,6 +9,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,20 @@ class RecordingCgroups:
         return []
 
 
+@dataclass
+class StuckCgroups(RecordingCgroups):
+    """A cgroup that cannot be removed for a while (a process in uninterruptible sleep): `remove`
+    blocks until `gate` is set, as the real one sleeps and retries."""
+
+    gate: threading.Event = field(default_factory=threading.Event)
+    entered: threading.Event = field(default_factory=threading.Event)
+
+    def remove(self, path: Path) -> bool:
+        self.entered.set()
+        self.gate.wait(10)
+        return super().remove(path)
+
+
 def copying_disk(base: Path, destination: Path, quota: int) -> bool:
     shutil.copyfile(base, destination)
     destination.write_bytes(destination.read_bytes() + b"\0" * 16)
@@ -107,7 +122,7 @@ class Rig:
         }
         values.update(settings)
         self.settings = FirecrackerSettings(**values)
-        self.cgroups = RecordingCgroups()
+        self.cgroups: RecordingCgroups = RecordingCgroups()
         (root / "vms").mkdir()
 
     def behavior(self, **behavior: Any) -> None:

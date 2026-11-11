@@ -45,6 +45,14 @@ def main() -> int:
 
     save()
     mode = behavior.get("mode", "good")
+    if behavior.get("log_bytes"):
+        # A VMM that is very talkative (a serial console, an error in a loop): what it writes to
+        # its stderr, then a last line that the tail must hold.
+        line = b"x" * 1023 + b"\n"
+        for _ in range(int(behavior["log_bytes"]) // len(line)):
+            sys.stderr.buffer.write(line)
+        sys.stderr.buffer.write(b"LAST-LINE-OF-THE-VMM\n")
+        sys.stderr.buffer.flush()
     if mode == "die_at_boot":
         return 1
     if mode == "report_before_start":
