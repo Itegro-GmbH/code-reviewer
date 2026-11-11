@@ -11,8 +11,12 @@ goes away is told apart, that a script that ended well leaves the container aliv
 network and frozen, for the agent to take over (nothing is stopped, committed or reset), and that
 a container that is not handed over is always taken away."""
 
+import contextlib
 import json
+import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -39,7 +43,7 @@ from code_reviewer_runner.implementer.agent_container import (
     WRITE_FILE_SCRIPT,
     agent_document,
 )
-from code_reviewer_runner.implementer.docker_api import DockerApi
+from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.door_launcher import PRIVATE_RANGES
 from code_reviewer_runner.implementer.setup_container import (
     OUTCOME_NOT_HANDED_OVER,
@@ -343,13 +347,14 @@ def test_the_script_is_a_file_in_the_container_run_as_root_in_the_repository(rig
     assert done.outcome == OUTCOME_OK and done.exit_code == 0
     assert rig.script_text == "#!/bin/bash\napt-get update\n"
     ran = next(e for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", sc.RUN_SCRIPT])
-    assert ran[0][3:] == ["run", sc.SCRIPT_PATH]
+    assert ran[0][3:] == ["run", sc.SCRIPT_PATH, sc.SCRIPT_OUTPUT]
     assert ran[1] == sc.SCRIPT_ENVIRONMENT
     assert ran[2] == "/work/repo"
     # The script is never in an argument of a call: it is the standard input of one exec.
     assert "apt-get" not in calls_text(rig.engine)
-    # Both streams in one, in order: the merge is the script's wrapper's (`2>&1`).
-    assert "2>&1" in sc.RUN_SCRIPT
+    # Both streams in one, in order, in a file and not the exec's stream: the shell around the
+    # script does it (`> "$2" 2>&1`, run for real by the `Shell` tests below).
+    assert '> "$2" 2>&1' in sc.RUN_SCRIPT
 
 
 # #818-T08
@@ -482,17 +487,98 @@ def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_netw
     assert set(setup.networks) == set(), "it has no network at all until the agent takes it over"
     # The one thing the agent's tools must not find: the script's file.
     assert any(e[0][:3] == ["/bin/sh", "-c", sc.CLEAN_SCRIPT] for e in rig.execs)
-    assert 'rm -f "$1"' in sc.CLEAN_SCRIPT
+    assert 'rm -f "$1" "$2"' in sc.CLEAN_SCRIPT
 
 
 # #1009-S03
-def test_a_container_that_cannot_be_frozen_is_a_note_and_still_handed_over(rig: Rig) -> None:
+def test_a_container_that_cannot_be_frozen_is_not_handed_over_and_is_removed(rig: Rig) -> None:
+    """A refused freeze is a failure, not a note: the script's root processes would go on writing
+    the repository (a link into the work volume) while Control reads it."""
     rig.engine.pause_refused = 500
     done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.container is None
+    assert done.adopted is None
+    assert "could not be frozen" in done.detail
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1009-S03b
+def test_a_freeze_the_daemon_answers_with_a_conflict_is_not_handed_over_either(rig: Rig) -> None:
+    rig.engine.pause_refused = 409
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1009-S03c
+def test_a_freeze_that_was_answered_but_that_the_daemon_does_not_report_is_not_trusted(
+    rig: Rig,
+) -> None:
+    """After a 204 the daemon is asked: `State.Paused` is what says the container is frozen."""
+    rig.engine.pause_has_no_effect = True
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert "not report" in done.detail
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1009-S03d
+def test_a_freeze_the_client_gave_up_on_is_looked_at_and_taken_when_the_daemon_did_it(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client timeout is no answer: the daemon is asked what it did, never guessed about."""
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 0.5)
+    rig.engine.pause_answers_after = 2.0
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK and done.adopted is not None
+    assert done.adopted.paused is True
+    assert rig.engine.container(AGENT_CONTAINER_NAME).paused
+
+
+# #1009-S03e
+def test_a_freeze_the_client_gave_up_on_and_the_daemon_did_not_do_is_not_handed_over(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 0.5)
+    rig.engine.pause_answers_after = 2.0
+    rig.engine.pause_has_no_effect = True
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1009-S03f
+def test_the_memory_guard_keeps_watching_until_the_freeze_is_confirmed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The container is still running while the freeze is asked for: a VM that runs out of memory
+    meanwhile still loses the container (it is no longer in the agent's or Control's hands)."""
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 5.0)
+    rig.engine.pause_answers_after = 1.5
+
+    def low_once_the_freeze_is_asked_for() -> None:
+        for _ in range(200):
+            if any(target.endswith("/pause") for _, target, _ in list(rig.engine.calls)):
+                break
+            threading.Event().wait(0.02)
+        rig.set_left(300_000)
+
+    threading.Thread(target=low_once_the_freeze_is_asked_for, daemon=True).start()
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert any(n.endswith("/kill") for n in posted(rig.engine))
+
+
+# #1009-S03g
+def test_a_container_the_script_left_frozen_is_not_one_the_turn_can_exec_into(rig: Rig) -> None:
+    """The fake daemon refuses an exec in a frozen container as the real one does, so a step that
+    ran a command after the freeze would fail here and not only on a VM."""
+    done = run(rig)
     assert done.outcome == OUTCOME_OK
-    assert done.adopted is not None and done.adopted.paused is False
-    assert any("could not be frozen" in note for note in done.notes)
-    assert not rig.engine.container(AGENT_CONTAINER_NAME).paused
+    api = rig.api()
+    with pytest.raises(DockerError) as refused:
+        api.create_exec(done.container or "", {"Cmd": ["/bin/true"]})
+    assert refused.value.status == 409
 
 
 # #1009-S04
@@ -539,6 +625,127 @@ def test_the_overhead_counts_the_rules_the_ready_wait_the_kill_steps_and_the_han
     # A script that has to be killed: the kill, the wait for its exec, and the kill of the clean-up.
     assert sc.KILL_STEPS_SECONDS == 3 * sc.KILL_SECONDS
     assert parts + 3 * sc.KILL_SECONDS == sc.SETUP_OVERHEAD_SECONDS
+
+
+# -- the script run for real: the shell around it (#1009) ------------------------------------------
+
+
+class Shell:
+    """`RUN_SCRIPT` run by the host's `/bin/sh` as the exec runs it in the container: its standard
+    output is a pipe, read to its end, as the daemon's attach is."""
+
+    def __init__(self, directory: Path, text: str) -> None:
+        self.script = directory / "setup.sh"
+        self.script.write_text(text)
+        self.output_file = directory / "setup.out"
+        self.pid_file = directory / "daemon.pid"
+        self.ended = False
+        self.status: int | None = None
+        self.seen = bytearray()
+        self.process = subprocess.Popen(
+            ["/bin/sh", "-c", sc.RUN_SCRIPT, "run", str(self.script), str(self.output_file)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def read() -> None:
+            assert self.process.stdout is not None
+            while chunk := self.process.stdout.read(65536):
+                self.seen += chunk
+            self.ended = True
+
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
+
+    def finish(self, seconds: float = 20.0) -> None:
+        self.status = self.process.wait(timeout=seconds)
+        self.reader.join(5.0)
+
+    def daemon(self) -> int | None:
+        text = self.pid_file.read_text().strip() if self.pid_file.exists() else ""
+        return int(text) if text.isdigit() else None
+
+
+@pytest.fixture
+def shell(tmp_path: Path) -> Iterator[Callable[[str], Shell]]:
+    made: list[Shell] = []
+
+    def start(text: str) -> Shell:
+        made.append(Shell(tmp_path, text))
+        return made[-1]
+
+    yield start
+    for each in made:
+        pid = each.daemon()
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        each.process.kill()
+
+
+# #1009-D01
+def test_a_daemon_that_inherits_the_scripts_output_does_not_keep_the_exec_stream_open(
+    shell: Callable[[str], Shell], tmp_path: Path
+) -> None:
+    """`nohup postgres &`, `pg_ctl start`, `./server &`: the daemon holds whatever standard output
+    the script had. With the daemon holding the exec's pipe the stream never ended, the step waited
+    for its time limit though the script had exited 0, and the daemon got SIGPIPE later."""
+    pid_file = tmp_path / "daemon.pid"
+    run_it = shell(
+        f"nohup /bin/sh -c 'echo $$ > {pid_file}; exec sleep 120' &\n"
+        f"for i in $(seq 1 50); do [ -s {pid_file} ] && break; sleep 0.1; done\n"
+        "echo started\n"
+    )
+    run_it.finish()
+    assert run_it.status == 0
+    assert run_it.ended, "the stream ended with the script, not with the daemon"
+    assert bytes(run_it.seen) == b"started\n"
+    pid = run_it.daemon()
+    assert pid is not None
+    os.kill(pid, 0)  # still there for the agent
+    # Its standard output is the script's output file, not the pipe of the exec: nothing for it to
+    # keep open and no SIGPIPE when the pipe goes.
+    target = os.readlink(f"/proc/{pid}/fd/1")
+    assert not target.startswith("pipe:") and target == str(run_it.output_file), target
+    assert os.readlink(f"/proc/{pid}/fd/2") == str(run_it.output_file)
+
+
+# #1009-D02
+def test_the_exit_status_is_the_scripts_and_both_its_streams_are_in_the_output_in_order(
+    shell: Callable[[str], Shell],
+) -> None:
+    run_it = shell("#!/bin/sh\necho first\necho second >&2\necho third\nexit 7\n")
+    run_it.finish()
+    assert run_it.status == 7
+    assert bytes(run_it.seen) == b"first\nsecond\nthird\n"
+
+
+# #1009-D03
+def test_a_script_without_a_shebang_runs_under_bash_dash_e(shell: Callable[[str], Shell]) -> None:
+    run_it = shell("false\necho not-reached\n")
+    run_it.finish()
+    assert run_it.status == 1
+    assert bytes(run_it.seen) == b""
+
+
+# #1009-D04
+def test_a_long_output_arrives_whole_and_in_order(shell: Callable[[str], Shell]) -> None:
+    run_it = shell("i=0; while [ $i -lt 20000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; "
+                   "i=$((i+1)); done\n")
+    run_it.finish(60.0)
+    lines = bytes(run_it.seen).decode().splitlines()
+    assert run_it.status == 0
+    assert len(lines) == 20000 and lines[0].startswith("line-0-") and lines[-1].startswith(
+        "line-19999-"
+    )
+
+
+# #1009-D05
+def test_the_script_has_no_input(shell: Callable[[str], Shell]) -> None:
+    run_it = shell("read -r line || echo no-input\n")
+    run_it.finish()
+    assert bytes(run_it.seen) == b"no-input\n"
 
 
 # -- what is checked before the script -------------------------------------------------------------

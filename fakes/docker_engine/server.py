@@ -142,6 +142,12 @@ class FakeDockerEngine:
         self.stop_hangs = False
         # `pause` of a container is refused with this status (a runtime that cannot freeze).
         self.pause_refused: int | None = None
+        # `pause` is answered 204 but freezes nothing (a daemon that says one thing and a kernel
+        # that does another): `inspect` goes on saying the container is not paused.
+        self.pause_has_no_effect = False
+        # The daemon freezes the container, then answers only after this many seconds: a client
+        # whose timeout is shorter gives up on a container that is frozen (#1009).
+        self.pause_answers_after = 0.0
         self._lock = threading.Lock()
         self._count = 0
         engine = self
@@ -272,7 +278,10 @@ class FakeDockerEngine:
         elif method == "POST" and path == "/containers/create":
             self._create(connection, target, body)
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "attach":
-            self._attach(connection, reader, parts[1])
+            if self._paused(parts[1]):
+                self._reply(connection, 409, {"message": f"container {parts[1]} is paused"})
+            else:
+                self._attach(connection, reader, parts[1])
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "wait":
             self._wait(connection, parts[1])
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "kill":
@@ -346,6 +355,8 @@ class FakeDockerEngine:
             return
         state = {
             "Running": container.running,
+            "Paused": container.paused,
+            "Status": "paused" if container.paused else "running" if container.running else "exited",
             "ExitCode": container.exit_code if container.exit_code is not None else 0,
             "OOMKilled": container.oom_killed,
         }
@@ -576,13 +587,26 @@ class FakeDockerEngine:
         )
         if container is None:
             self._reply(connection, 404, {"message": "no such container"})
-        elif self.pause_refused is not None:
+        elif pause and self.pause_refused is not None:
             self._reply(connection, self.pause_refused, {"message": "cannot pause"})
         elif not container.running or container.paused == pause:
             self._reply(connection, 409, {"message": "wrong state"})
         else:
-            container.paused = pause
-            self._reply(connection, 204)
+            if not (pause and self.pause_has_no_effect):
+                container.paused = pause
+            if pause and self.pause_answers_after:
+                threading.Event().wait(self.pause_answers_after)
+            # A client that gave up on a slow answer is gone: the freeze stays done.
+            with contextlib.suppress(OSError):
+                self._reply(connection, 204)
+
+    def _paused(self, ref: str) -> bool:
+        """Whether the container is frozen: the daemon refuses to run an exec in it or to attach to
+        it, as the real one does (`Container ... is paused, unpause the container before exec`)."""
+        container = self.containers.get(ref) or next(
+            (c for c in reversed(self.containers.values()) if c.name == ref), None
+        )
+        return container is not None and container.paused
 
     def _wait(self, connection: socket.socket, ref: str) -> None:
         container = self.containers.get(ref) or next(
@@ -603,6 +627,14 @@ class FakeDockerEngine:
         if container is None or not container.running:
             self._reply(connection, 409 if container else 404, {"message": "not running"})
             return
+        if container.paused:
+            self._reply(
+                connection,
+                409,
+                {"message": f"Container {container.identifier} is paused, unpause the container "
+                 "before exec"},
+            )
+            return
         identifier = self._next()
         self.execs[identifier] = FakeExec(identifier, container.name, body)
         self._reply(connection, 201, {"Id": identifier})
@@ -620,6 +652,9 @@ class FakeDockerEngine:
         made = self.execs.get(ref)
         if made is None:
             self._reply(connection, 404, {"message": "no such exec"})
+            return
+        if self._paused(made.container):
+            self._reply(connection, 409, {"message": "the container is paused"})
             return
         stdin_read, stdin_write = os.pipe()
         stdout_read, stdout_write = os.pipe()

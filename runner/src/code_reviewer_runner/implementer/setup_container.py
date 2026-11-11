@@ -117,16 +117,48 @@ BASH: Final = "/bin/bash"
 SH: Final = "/bin/sh"
 # The environment of the script: the image's own, and these two (no terminal, no prompt, a home).
 SCRIPT_ENVIRONMENT: Final = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-# The script runs through this (the script path is the one argument); a script that starts with a
-# `#!` line is executed as itself.
-RUN_SCRIPT: Final = (
-    'if head -c 2 "$1" | grep -q "^#!"; then chmod 700 "$1"; exec "$1" 2>&1; '
-    'else exec /bin/bash -e "$1" 2>&1; fi'
-)
+SCRIPT_OUTPUT: Final = "/tmp/code-reviewer-setup.out"
+# The script runs through this (`$1` is the script's path, `$2` the file its output goes to); a
+# script that starts with a `#!` line is executed as itself. The script's standard output and error
+# are that **file**, never the exec's stream: a daemon the script leaves behind (`nohup postgres
+# &`, `pg_ctl start`, `./server &`) inherits them, and a daemon that held the exec's pipe kept the
+# stream open after the script had exited 0 (the step then waited for its time limit) and got
+# SIGPIPE when the stream was closed. The shell sends the file's new bytes on its own standard
+# output while the script's own process runs, and the rest once it has exited (`$2.done` tells the
+# reader), so that the output reaches Control as it is written and the exec ends with the script.
+# Its status is the script's. The script has no input.
+RUN_SCRIPT: Final = r"""
+rm -f "$2.done"
+: > "$2"
+(
+  if head -c 2 "$1" | grep -q "^#!"; then chmod 700 "$1"; exec "$1"
+  else exec /bin/bash -e "$1"; fi
+) < /dev/null > "$2" 2>&1 &
+script=$!
+(
+  sent=0
+  while :; do
+    [ -e "$2.done" ] && last=1 || last=0
+    size=$(wc -c < "$2")
+    if [ "$size" -gt "$sent" ]; then
+      tail -c +$((sent + 1)) "$2" | head -c $((size - sent))
+      sent=$size
+    fi
+    [ "$last" = 1 ] && break
+    sleep 0.1
+  done
+) &
+reader=$!
+wait "$script"
+status=$?
+: > "$2.done"
+wait "$reader"
+exit "$status"
+"""
 
-# What happens after a script that ended well: its file is removed (the hand-over keeps the
-# container, and the agent must not find the script lying around in it).
-CLEAN_SCRIPT: Final = 'rm -f "$1"'
+# What happens after a script that ended well: its file and its output are removed (the hand-over
+# keeps the container, and the agent must not find the script lying around in it).
+CLEAN_SCRIPT: Final = 'rm -f "$1" "$2" "$2.done"'
 
 # The VM's firewall for the Setup container's bridge (see the module text). An `ip` table in the
 # host's namespace, hooked before Docker's own rules (priority -10), whose only verdicts are drops:
@@ -384,6 +416,8 @@ class SetupContainer:
         self._ended = threading.Event()
         self._guard: MemoryGuard | None = None
         self._notes: list[str] = []
+        # Set when a freeze was asked for: the container may be frozen, and is thawed to be removed.
+        self._pause_sent = False
 
     # -- the whole run -----------------------------------------------------------------------------
 
@@ -417,7 +451,7 @@ class SetupContainer:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
             try:
-                paused = self._hand_over(container)
+                self._hand_over(container)
             except _Unavailable as reason:
                 self._clean()
                 return self._ended_run(
@@ -447,7 +481,7 @@ class SetupContainer:
                 adopted=Adopted(
                     container,
                     setup_environment=() if proxy is None else tuple(proxy.tool_environment()),
-                    paused=paused,
+                    paused=True,
                     setup_network=SETUP_NETWORK_NAME,
                 ),
                 notes=tuple(self._notes),
@@ -653,7 +687,7 @@ class SetupContainer:
                 run_exec(
                     self._api,
                     container,
-                    [SH, "-c", RUN_SCRIPT, "run", SCRIPT_PATH],
+                    [SH, "-c", RUN_SCRIPT, "run", SCRIPT_PATH, SCRIPT_OUTPUT],
                     env=SCRIPT_ENVIRONMENT,
                     workdir=AGENT_REPO,
                     timeout=seconds + 60.0,
@@ -725,23 +759,22 @@ class SetupContainer:
 
     # -- the hand-over -----------------------------------------------------------------------------
 
-    def _hand_over(self, container: str) -> bool:
-        """The script ended well; the container goes on. The memory guard stops (the agent's
-        container object starts its own). The script's file is removed. The container leaves the
-        setup network (which stays until the agent's container object has joined the model
-        network): from here on nothing of it has the internet, and a process of the script that
-        held a connection loses it before the outer wall narrows and before any door exists. Then
-        the container is frozen (`docker pause`), so that Control reads the repository while
-        nothing in it changes; a freeze that is refused is a note, not a
-        failure. True when it is frozen. Raises `_Unavailable` or `DockerError` when the container
-        could not be taken off the network, which is the one step that must hold."""
+    def _hand_over(self, container: str) -> None:
+        """The script ended well; the container goes on. The script's file and output are removed.
+        The container leaves the setup network (which stays until the agent's container object has
+        joined the model network): from here on nothing of it has the internet, and a process of the
+        script that held a connection loses it before the outer wall narrows and before any door
+        exists. Then the container is frozen (`docker pause`) and the daemon is asked whether it
+        is: Control reads the repository next (`settle_after_setup`), and a root process the
+        script left would go on writing it while it does (a link into the work volume). The
+        memory guard watches until the freeze is confirmed. Raises `_Unavailable` or `DockerError`
+        when the container could not be taken off the network or frozen: the two steps that must
+        hold."""
         api = self._api
-        if self._guard is not None:
-            self._guard.close()
         removed = run_exec(
             api,
             container,
-            [SH, "-c", CLEAN_SCRIPT, "clean", SCRIPT_PATH],
+            [SH, "-c", CLEAN_SCRIPT, "clean", SCRIPT_PATH, SCRIPT_OUTPUT],
             timeout=HANDOVER_SECONDS,
             name="the end of the setup",
         )
@@ -752,15 +785,40 @@ class SetupContainer:
         # network: the daemon refuses a `connect` of a container whose network mode names a
         # network that is gone ("could not find a network matching network mode", measured on the
         # KVM lane), so the one who connects removes it (`Adopted.setup_network`).
+        self._freeze(container)
+        if self._guard is not None:
+            self._guard.close()
+
+    def _freeze(self, container: str) -> None:
+        """Freeze the container and see that it is. Any refusal (a status, a conflict), an answer
+        the daemon does not back up (`State.Paused`) and a client timeout the daemon did not
+        complete is `_Unavailable`: a container that is not known to be frozen is never handed
+        over. After a timeout the daemon is asked what it did, nothing is guessed."""
+        self._pause_sent = True
         try:
-            api.pause_container(container, timeout=HANDOVER_SECONDS)
+            self._api.pause_container(container, timeout=HANDOVER_SECONDS)
         except DockerError as error:
-            self._notes.append(
-                f"the container could not be frozen ({error.status}): its processes ran while "
-                "the repository was read"
-            )
+            if error.status != 0:
+                raise _Unavailable(
+                    f"the container could not be frozen ({error.status}: {error.message[:160]})"
+                ) from None
+            if not self._is_frozen(container):
+                raise _Unavailable(
+                    "the container could not be frozen (the daemon did not answer in time and "
+                    "does not report it frozen)"
+                ) from None
+            self._notes.append("the daemon answered the freeze late; it reports the container frozen")
+            return
+        if not self._is_frozen(container):
+            raise _Unavailable("the daemon did not report the container frozen after the freeze")
+
+    def _is_frozen(self, container: str) -> bool:
+        """What the daemon says: running, and paused. A daemon that cannot say is no."""
+        try:
+            state = as_object(self._api.inspect_container(container).get("State")) or {}
+        except DockerError:
             return False
-        return True
+        return state.get("Running") is True and state.get("Paused") is True
 
     def discard(self) -> None:
         """Remove the container and what is left of the network, for a container nothing took over
@@ -785,6 +843,11 @@ class SetupContainer:
         if self._guard is not None:
             self._guard.close()
         if container is not None:
+            if self._pause_sent:
+                # A frozen container is not killed or removed by every daemon: thaw it first (the
+                # turn ends here, nothing reads the repository again).
+                with contextlib.suppress(DockerError):
+                    self._api.unpause_container(container, timeout=KILL_SECONDS)
             self._kill()
             try:
                 self._api.remove_container(container, timeout=REMOVE_SECONDS)
