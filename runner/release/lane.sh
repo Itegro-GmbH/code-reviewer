@@ -110,15 +110,19 @@ if as_service sh -c 'touch /opt/code-reviewer/current/should-not-exist' 2> /dev/
 jq -e --arg c "$commit" '.release == 1 and .commit == $c' /opt/code-reviewer/current/share/release.json > /dev/null || fail "release.json does not name release 1 and this commit"
 jq . /opt/code-reviewer/current/share/release.json
 
-echo "== update: release 2 is staged as a pair with the VM artifacts, the switch runs the smoke test of the new release"
+echo "== update: release 2 is staged as a pair with newer VM artifacts, the switch runs the smoke test of the new release"
 publish 2
+uv run --no-project --python 3.13 --with cryptography python "$here/lane_vm.py" \
+  --served "$work/served" --keyfile "$work/key.pem" --vm 11 --channels "$work/channels2" --base "https://localhost:$port/"
 sudo factory-runner update | tee "$work/update.out"
 grep -q "staged the program release 2" "$work/update.out" || fail "release 2 was not staged"
+grep -q "staged the VM artifacts release 11" "$work/update.out" || fail "the VM artifacts release 11 was not staged with it"
 grep -q '^pair=1$' /var/lib/code-reviewer/pending || fail "the two parts were not staged as a pair"
 test "$(readlink /opt/code-reviewer/current)" = "releases/1" || fail "the update switched by itself"
 sudo sh /opt/code-reviewer/current/libexec/host.sh switch
 test "$(readlink /opt/code-reviewer/current)" = "releases/2" || fail "current is not release 2"
 test "$(readlink /opt/code-reviewer/previous)" = "releases/1" || fail "previous is not release 1"
+test "$(readlink /var/lib/code-reviewer/artifacts)" = "artifact-releases/11" || fail "the VM artifacts did not switch with the program"
 as_service /opt/code-reviewer/current/bin/factory-runner --version | grep -q '^factory-runner 0\.' || fail "release 2 does not run"
 sudo factory-runner status
 
@@ -126,6 +130,7 @@ echo "== rollback goes back and the release it left is not taken again"
 sudo factory-runner rollback
 sudo sh /opt/code-reviewer/current/libexec/host.sh switch
 test "$(readlink /opt/code-reviewer/current)" = "releases/1" || fail "the rollback did not go back to release 1"
+test "$(readlink /var/lib/code-reviewer/artifacts)" = "artifact-releases/10" || fail "the VM artifacts did not go back with the program"
 sudo factory-runner update | tee "$work/update2.out"
 grep -q "was rolled back" "$work/update2.out" || fail "the update took the release the rollback left"
 test ! -e /var/lib/code-reviewer/pending || fail "a rolled back release is staged again"
