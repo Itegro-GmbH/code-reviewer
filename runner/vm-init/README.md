@@ -52,7 +52,7 @@ listener on <vsock uds>_5101  ◀──── connect, frame: ExitReport (with t
    `image.id` or `image.reference`; a reference is replaced by the id before `docker run`, so what runs is what the check printed the id of, and any other image
    is refused (`start_invalid`).
 6. **Runs Control**: `docker` with the start's `control.args` (rendered by the Dispatcher's `renderDockerRunArguments` from the local spec), the job
-   document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one) as one JSON line on stdin, then the pipe is closed. Nothing
+   document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one: vm-init checks its shape, **Control checks the name against its own allow-list** and refuses any it does not know, #980) as one JSON line on stdin, then the pipe is closed. Nothing
    else carries a credential or the token.
 7. **Reports and powers off.** The exit report (`ExitReport`: the container's status and a stable reason) goes to the host's port 5101, tried again every
    0.5 s for at most 10 s in all, then the VM is ended whatever came back (the power off is in a `finally`: a failure of the report, of a close or a bug of ours

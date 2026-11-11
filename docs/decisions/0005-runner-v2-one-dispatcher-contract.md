@@ -135,6 +135,26 @@ App** (the Worker API, `crj_`, everywhere).
   (route files, contract definitions `Runner*`, the app feature `runner_session_snapshot`), and `heartbeat`, `complete` and `steps` for a runner credential (they answer `404 RUNNER_JOB_NOT_FOUND`; the shared token's
   calls of the platform's Dispatcher are unchanged).
 
+## 3f. Details of #980
+
+- **One hand-over shape.** The dispatcher hands a job's Worker at most **one** credential of the device, as `localCredential: {name, value}`: on the standard input of a Worker that is a process (`WorkerStart.document`,
+  replacing the `localEnvironment` map of §3e) and as the `localCredential` of vm-init's start (`contracts/vm-init.v1.json`, unchanged in shape), which vm-init writes to Control's standard input. There is **one
+  allow-list of names** (`LOCAL_CREDENTIAL_NAMES`, today `CLAUDE_CODE_OAUTH_TOKEN`; `job_loop/local_credential.py`) that the host checks before the start, that vm-init does not check (it checks the shape) and that **Control
+  checks itself** (`worker_cli`, `parse_local_credential`) before it puts a value into any environment, closing the review of #977: a name such as `PATH` or `LD_PRELOAD` is an input error. The Worker of a process (`local_worker`)
+  uses the same parser. Control had read no `localCredential` before this issue; the host's per-VM `controlToken` in the same document goes to the environment control and not to the agent.
+- **The store** (`implementer/claude_code/credentials.py`): `<runner home>/credentials/` (0700) with an index without values and one 0600 secret file for each credential, **sealed with `systemd-creds --user`
+  when that works** and otherwise a plain 0600 file (`FACTORY_RUNNER_CREDENTIAL_STORAGE`: `auto`, `systemd-creds`, `plain`). Added from the standard input only (`factory-runner credential add claude --name`, `list`,
+  `remove`, `retry`, `add --replace`); never mirrored from `~/.claude/.credentials.json`. The token files of R3 are read only while the store is empty.
+- **The manifest** announces `claude-code`, `auth: subscription` and the union of the `models` of the credentials that can be used now (defaults `sonnet`, `opus`, `haiku`), never a name. **Alias or id (settled):** the runner
+  announces what its owner gave and the matching learns the alias-to-id map: `contracts/claude-model-aliases.v1.json` (patterns and vectors), a typed copy in the app (`model-aliases.ts`, also written into `accessRule`)
+  and in the runner (`model_names.py`), a test of each side against the file, the vectors run through the SQL rule as well. Announcing ids was rejected: it would need a list that changes with every model release.
+- **Choice, withdrawal and verdicts** (`factory_runner/credential_pool.py`, `service.py`): one credential for a job, the one that is not rate limited, not refused and allows the job's model, the one unused longest first. A job the
+  subscription refused ends with `subscription_auth`, `subscription_limit` or `subscription_model_refused` (free; contract, app copy and billing class), and the Worker's exit code (20, 21, 22) tells the dispatcher, which cannot read the
+  result: the credential is put aside for an hour, kept out until it is replaced, or loses the model. The entry is withdrawn from the manifest (a new `PUT /self` before the next claim) while no credential is usable, and returns by itself.
+- **Not built, on purpose:** running `claude setup-token` in a throwaway VM. It is interactive, and neither vm-init (one start, one report, no terminal) nor the missing outer wall (#979) can carry it; a follow-up of #978 and #979.
+  Claude Code's answer to a model the subscription does not allow was not measured against the real program (status 404 and its own sentence are read). In Firecracker mode the entry is not announced yet: whether the golden image
+  holds Claude Code is #981.
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.
