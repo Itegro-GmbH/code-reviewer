@@ -84,6 +84,13 @@ class WorkerSandbox(Protocol):
         ...
 
     @property
+    def free(self) -> int:
+        """The Workers that can be started now: `capacity` less the slots that are in use or out of
+        use (a VMM that would not die keeps its slot). The dispatcher claims only when this is
+        above zero: a job it cannot start is a job that loses an attempt."""
+        ...
+
+    @property
     def uses_host_docker(self) -> bool:
         """Whether the Worker's containers run on this machine's Docker (the dispatcher then
         takes the lock on the daemon and tidies it). A VM sandbox has its own Docker inside."""
@@ -130,6 +137,9 @@ class ProcessSandbox:
         self._grace = grace_seconds
 
     capacity = 1
+    # The dispatcher runs one Worker at a time here (one slot), so a free one is always there when
+    # it asks.
+    free = 1
     uses_host_docker = True
 
     async def setup(self) -> None:

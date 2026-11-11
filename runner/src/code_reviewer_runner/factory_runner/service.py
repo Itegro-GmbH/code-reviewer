@@ -36,8 +36,11 @@ cannot tidy does not claim: a job it takes would end `setup_failed`.
 
 With the Firecracker sandbox (#978) none of the Docker housekeeping applies: the Worker's Docker is
 inside its VM, so there is no lock on a daemon and nothing to tidy, and the sandbox has more than
-one slot: the dispatcher claims whenever one is free and runs the jobs beside each other (a job in
-`run --once` is still one job).
+one slot: the dispatcher claims only while `sandbox.free` is above zero (a slot whose VMM would not
+die stays out of use) and runs the jobs beside each other (a job in `run --once` is still one
+job). A Worker that cannot be started is given back (`launch_failed`: the app counts an attempt
+for it, and has no release that does not), and the next claim waits, longer for every start that
+fails in a row: a fault of the machine does not spend an attempt of every queued job.
 """
 
 import asyncio
@@ -129,6 +132,13 @@ UPDATE_NEEDED_WAIT_SECONDS = 300.0
 NOT_READY_WAIT_SECONDS = 300.0
 # How long a runner that cannot tidy waits before it tries again (it claims nothing meanwhile).
 TIDY_RETRY_SECONDS = 60.0
+# How long a dispatcher waits after a Worker that could not be started (a fault of this machine: the
+# disk is full, /dev/kvm or a TAP is gone, a cgroup fails), before it claims again; doubled with
+# every start that fails in a row, reset by one that works. The app counts an attempt for every
+# claim that is given back (three, then the job fails), so a fault that fails every start must not
+# be paid for by every job of the queue.
+START_FAILURE_BACKOFF_FIRST_SECONDS = 10.0
+START_FAILURE_BACKOFF_MAX_SECONDS = 300.0
 # How long `run --once` waits for a job by default.
 DEFAULT_ONCE_WAIT_SECONDS = 600.0
 # A credential this old is renewed between jobs (the app keeps the previous one until the new one
@@ -212,6 +222,12 @@ class RunnerService:
         self._workers: dict[str, RunningWorker] = {}
         self._stoppers: dict[str, asyncio.Task[None]] = {}
         self._announced: Announcement | None = None
+        # The Workers that could not be started one after the other, and the time before which no
+        # claim is made because of them.
+        self._start_failures = 0
+        self._claim_not_before = 0.0
+        # The sandbox has no free slot (logged once per spell).
+        self._no_slot_logged = False
         # The machine is tidied before the first claim and again whenever a job has ended.
         self._untidy = True
         # This runner holds the lock container (`housekeeping.take_lock`).
@@ -321,6 +337,25 @@ class RunnerService:
             jobs.difference_update({job for job in jobs if job.done()})
             if len(jobs) >= slots:
                 await self._wait_for_a_slot(jobs)
+                continue
+            assert self._sandbox is not None
+            if self._sandbox.free <= 0:
+                # A claim without a slot to run it in is a job that loses an attempt.
+                if not jobs and once:
+                    self._log.error("no free slot: nothing can run (every slot is out of use)")
+                    return EXIT_FAILED
+                if not self._no_slot_logged:
+                    self._no_slot_logged = True
+                    self._log.error(
+                        "no free slot: claiming stops until one is free (a slot whose VM would "
+                        "not end is out of use until the service restarts)"
+                    )
+                await self._wait(self._poll_pause(), jobs)
+                continue
+            self._no_slot_logged = False
+            pause = self._claim_not_before - self._clock.monotonic()
+            if pause > 0:
+                await self._wait(pause, jobs)
                 continue
             if host_docker and self._untidy and not await self._tidy_up(before_claim=True):
                 if once:
@@ -520,7 +555,9 @@ class RunnerService:
                 type(error).__name__,
             )
             await self._give_back(claimed, RELEASE_LAUNCH_FAILED)
+            self._start_failed()
             return WorkerEnd.NOT_STARTED
+        self._start_failures = 0
         self._workers[claimed.job_id] = worker
         if self._stopping.is_set():
             self._stop_worker(claimed.job_id)
@@ -543,6 +580,16 @@ class RunnerService:
         # nothing changes; if it had not, the claim goes back to the queue (an attempt is counted).
         await self._give_back(claimed, RELEASE_WORKER_EXITED)
         return WorkerEnd.FAILED
+
+    def _start_failed(self) -> None:
+        """No claim for a while, longer for every start that fails in a row."""
+        self._start_failures += 1
+        pause = min(
+            START_FAILURE_BACKOFF_FIRST_SECONDS * 2 ** (self._start_failures - 1),
+            START_FAILURE_BACKOFF_MAX_SECONDS,
+        )
+        self._claim_not_before = self._clock.monotonic() + pause
+        self._log.warning("claiming again in %gs at the earliest (a start failed)", pause)
 
     def _log_worker(self, claimed: ClaimedWorker, outcome: WorkerOutcome) -> None:
         """What the Worker said when it ended badly, in the dispatcher's log: the lines are the
