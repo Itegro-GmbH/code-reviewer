@@ -273,21 +273,41 @@ async def tcp_verdict(
     raise AssertionError(f"{instance} to {host}:{port}: {text!r}")
 
 
-async def ping6_verdict(client: IncusClient, instance: str, address: str, device: str) -> str:
-    """`open` when an ICMPv6 echo to a link-local `address` is answered, else `timeout: ` and what
-    `ping` and the instance's IPv6 said (for the message of a failed lane)."""
-    result = await run_exec(
+async def ping6_verdict(
+    client: IncusClient, instance: str, address: str, host_mac: str, device: str
+) -> tuple[str, str]:
+    """An ICMPv6 echo from `instance` to the host's link-local `address`. Neighbour discovery is
+    taken out of the picture (the instance and the host get a permanent entry for each other), so
+    that what is asked is only whether the echo reaches the host. Returns `open` or `timeout` and
+    what `ping` and the instance's IPv6 said (for the message of a failed lane): `(verdict, text)`,
+    with the instance's link-local address and MAC in the text for the host's own entry."""
+    setup = await run_exec(
         client,
         instance,
         (
             "sh",
             "-c",
-            f"ping -6 -c 1 -W 2 {address}%{device} 2>&1; echo rc=$?; "
-            f"ip -6 addr show dev {device} 2>&1; ip -6 neigh show dev {device} 2>&1",
+            f"ip -6 neigh replace {address} lladdr {host_mac} dev {device} nud permanent; "
+            f"ip -6 -o addr show dev {device} scope link; cat /sys/class/net/{device}/address",
         ),
         timeout=30.0,
     )
-    return "open" if "rc=0" in result.stdout else f"timeout: {result.stdout}"
+    lines = setup.stdout.split()
+    own_address = lines[lines.index("inet6") + 1].split("/")[0]
+    own_mac = lines[-1]
+    sh("ip", "-6", "neigh", "replace", own_address, "lladdr", own_mac, "dev", HOST_BRIDGE[0],
+       "nud", "permanent")  # fmt: skip
+    result = await run_exec(
+        client,
+        instance,
+        ("sh", "-c", f"ping -6 -c 1 -W 2 {address}%{device} 2>&1; echo rc=$?"),
+        timeout=30.0,
+    )
+    return ("open" if "rc=0" in result.stdout else "timeout"), result.stdout
+
+
+# The host bridge the IPv6 probe talks to (set by the lane before it probes).
+HOST_BRIDGE: list[str] = ["unset"]
 
 
 async def send_udp(client: IncusClient, instance: str, host: str, port: int) -> None:

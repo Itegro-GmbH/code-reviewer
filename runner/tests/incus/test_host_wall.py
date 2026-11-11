@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 from host_wall_lane import (
+    HOST_BRIDGE,
     INTERNET_ADDRESS,
     LAB_ADDRESS,
     METADATA_ADDRESS,
@@ -441,13 +442,16 @@ def test_ipv6_to_the_host_is_dropped_and_reached_without_the_table(bench: Bench)
         )
         local = sh("ip", "-6", "-o", "addr", "show", "dev", bench.outer, "scope", "link").split()
         host = local[local.index("inet6") + 1].split("/")[0]
+        host_mac = sh("cat", f"/sys/class/net/{bench.outer}/address").strip()
+        HOST_BRIDGE[0] = bench.outer
         verdicts: dict[tuple[str, str], str] = {}
         for phase in ("control", "table", "full"):
             set_phase(bench, phase)
             for who, instance in bench.instances.items():
-                verdicts[(phase, who)] = go(
-                    lambda i=instance: ping6_verdict(bench.client, i, host, "eth0")
+                verdict, text = go(
+                    lambda i=instance: ping6_verdict(bench.client, i, host, host_mac, "eth0")
                 )
+                verdicts[(phase, who)] = verdict if verdict == "open" else f"timeout: {text}"
         for who in bench.instances:
             seen = sh("ip", "-6", "addr", "show", "dev", bench.outer) + sh(
                 "nft", "list", "table", "inet", "incus"
