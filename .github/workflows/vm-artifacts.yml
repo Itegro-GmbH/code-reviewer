@@ -229,7 +229,7 @@ jobs:
       # First a CONTROL: no table, NAT on, so every target of T01 must be REACHED from the VM and the host's listeners must see the connection arrive.
       # A probe that is "blocked" proves nothing unless the same probe reached its target without the wall (spike #970). Then the table is loaded and
       # the same probes must reach nothing, while the proxy lets a setup-only host through before a real `narrow` (the Worker's own client, over vsock,
-      # with the VM's token) and refuses it after. Targets on the host: RFC1918 and link-local addresses on a dummy interface, an IPv6 address on the TAP.
+      # with the VM's token) and refuses it after. The proxy connects to the real internet here, so the runner's `--disable-socket` is forced off. Targets on the host: RFC1918 and link-local addresses on a dummy interface, an IPv6 address on the TAP.
       # The host forwards on purpose (as the runner does for its own Docker): the table, not the absence of routing, is what stops the VM.
       - name: Outer wall lane (T01 and T02, the nft table, the proxy, a real narrow over vsock, with a control)
         run: |
@@ -238,6 +238,10 @@ jobs:
           sudo nft --version
           sudo nft -c -f docker/vm/host/outer-wall.nft
           sudo sysctl -w net.ipv4.ip_forward=1
+          # The runner's Docker sets the policy of the FORWARD chain to DROP: the control's forwarded packets (and the wall run's, which the table must be
+          # the one to drop) need an explicit accept for our TAP devices.
+          sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
           sudo ip link add lanehost type dummy
           sudo ip link set lanehost up
           for address in 10.77.0.2 172.16.77.2 192.168.77.2 169.254.169.253; do
@@ -264,7 +268,7 @@ jobs:
               --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
               --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
               --setenv=KVM_WALL_PHASE="$1" \
-              "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_outer_wall.py -k "$2" -v -s -p no:cacheprovider
+              "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_outer_wall.py -k "$2" --force-enable-socket -v -s -p no:cacheprovider
           }
           lane control control
           sudo nft -f docker/vm/host/outer-wall.nft
