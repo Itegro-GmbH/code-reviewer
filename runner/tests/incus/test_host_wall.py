@@ -272,7 +272,7 @@ async def _make_instance(
     )
     gateway = str(ipaddress.IPv4Address(address) - (int(address.split(".")[-1]) % 8) + 1)
     commands = (
-        f"ip addr flush dev eth0; ip addr add {address}/29 dev eth0; ip link set eth0 up; "
+        f"ip -4 addr flush dev eth0; ip addr add {address}/29 dev eth0; ip link set eth0 up; "
         f"ip route add default via {gateway} dev eth0"
     )
     done = await run_exec(client, name, ("sh", "-c", commands), timeout=60.0)
