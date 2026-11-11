@@ -81,7 +81,7 @@ def test_a_name_has_the_verdict_of_the_hosted_rule_code(case: dict[str, Any]) ->
 
 @pytest.mark.unit
 def test_open_is_not_narrowed_and_the_setup_runs_under_the_wide_rule() -> None:
-    assert WIDE == NetworkRule(MODE_OPEN)
+    assert NetworkRule(MODE_OPEN) == WIDE
     assert narrowed_rule(NetworkRule(MODE_OPEN), "api.anthropic.com", "app.example.test") == WIDE
 
 
@@ -106,7 +106,8 @@ def test_the_narrowed_rule_is_a_list_of_the_names_and_nothing_else() -> None:
 @pytest.mark.parametrize("app_host", [None, "", "10.0.0.5", "localhost", "App.Example.Test"])
 def test_an_app_that_cannot_be_named_in_a_rule_is_an_error_not_a_hole(app_host: str | None) -> None:
     # The proxy refuses an address and cannot name a host of one label, so the Worker could not
-    # reach its app after the narrowing: the wall says so instead of holding a rule that cannot work.
+    # reach its app after the narrowing: the wall says so instead of holding a rule that cannot
+    # work.
     with pytest.raises(OuterRuleError):
         narrowed_rule(NetworkRule(), "api.anthropic.com", app_host)
 

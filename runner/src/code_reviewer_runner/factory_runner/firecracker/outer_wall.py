@@ -1,26 +1,27 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The hook for the outer network wall (#979 builds it; #978 answers for it).
+"""The outer network wall of a job's VM (#979; #978 made the hook).
 
-A job's VM has no direct internet: a static nft table lets the VM's TAP reach only a proxy of this
-dispatcher, which enforces the wide rule of the setup and then the job's own rule (decision 7 of ADR
-0005). The Worker asks for the job's rule over vsock (`narrow`) and the host answers `ack` **only
-once the outer wall holds it**, so the agent never starts under the setup's wide rule.
+A job's VM has no direct internet: a static nft table (`docker/vm/host/outer-wall.nft`) lets the
+VM's TAP reach only a proxy of this dispatcher, which enforces the wide rule of the setup and then
+the job's own rule (decision 7 of ADR 0005). The Worker asks for the job's rule over vsock
+(`narrow`) and the host answers `ack` **only once the outer wall holds it**, so the agent never
+starts under the setup's wide rule. `FACTORY_RUNNER_OUTER_WALL` chooses the wall:
 
-#979 implements `OuterWall`. Until it does there is no wall to switch, so the answer is a decision
-of the operator, never a silent `ack`:
-
-* `refuse` (the default): `narrow` is answered `refused` (`unavailable`). The Worker ends the job
+* `proxy` (the default): the real wall (`proxy_wall.py`). The proxy listens on each slot's TAP
+  address and on nothing else; `admit` gives a VM the wide rule, `narrow` swaps in the job's rule,
+  `forget` takes the VM's rule away.
+* `refuse`: `narrow` is answered `refused` (`unavailable`). The Worker ends the job
   `environment_control_failed` before an agent exists. A job that needs the wall does not run
   without it.
-* `inner-only` (`FACTORY_RUNNER_OUTER_WALL=inner-only`): `narrow` is answered `ack` and a warning
-  says so once per VM. The agent's network is then the inner wall (the network door) only, as on
-  the Worker-as-a-process mode. For a machine whose owner accepts that, and for the KVM lane."""
+* `inner-only`: `narrow` is answered `ack` and a warning says so once per VM. The agent's network is
+  then the inner wall (the network door) only, as on the Worker-as-a-process mode. For a machine
+  whose owner accepts that."""
 
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .slots import Slot
 from .wire import NarrowMessage, Refusal
@@ -29,6 +30,7 @@ _log = logging.getLogger(__name__)
 
 
 class OuterWallMode(StrEnum):
+    PROXY = "proxy"
     REFUSE = "refuse"
     INNER_ONLY = "inner-only"
 
@@ -36,13 +38,22 @@ class OuterWallMode(StrEnum):
 @dataclass(frozen=True)
 class VmIdentity:
     """Which VM a request is from: the connection is the VM's own (Firecracker makes a vsock device
-    for one VM), and the TAP and the guest's address are what the proxy tells jobs apart by."""
+    for one VM), and the TAP and the guest's address are what the proxy tells jobs apart by.
+    `app_host` is the host of the app the job's Worker calls (the one name a narrowed VM needs
+    besides GitHub and the model provider)."""
 
     vm_id: str
     slot: Slot
+    app_host: str | None = None
 
 
 class OuterWall(Protocol):
+    async def admit(self, vm: VmIdentity) -> None:
+        """A VM is about to start on `vm.slot`: give it the wide rule of the setup. Called before
+        the VMM exists, so that nothing of the VM can reach the wall without a rule; raises when the
+        wall cannot (the start fails and the claim is given back)."""
+        ...
+
     async def narrow(self, vm: VmIdentity, message: NarrowMessage) -> Refusal | None:
         """Make the outer wall of `vm` hold the rule of `message`. None: it does (`ack`); a reason:
         it does not (`refused`)."""
@@ -53,15 +64,30 @@ class OuterWall(Protocol):
         ...
 
 
+@runtime_checkable
+class WallLifecycle(Protocol):
+    """A wall with something that runs (the proxy's listeners): started by the launcher's `setup`,
+    closed by its `close`. The stand-ins have nothing to run."""
+
+    async def start(self) -> None:
+        """Raises `OuterWallUnavailable` (named in the log) when the wall cannot be made."""
+        ...
+
+    async def close(self) -> None: ...
+
+
 class RefusingOuterWall:
-    """There is no outer wall to narrow (before #979): the request is refused, and the log says
-    why."""
+    """The operator chose no outer wall at all: the request is refused, and the log says why."""
+
+    async def admit(self, vm: VmIdentity) -> None:
+        _ = vm
 
     async def narrow(self, vm: VmIdentity, message: NarrowMessage) -> Refusal | None:
         _ = message
         _log.error(
-            "%s: narrow refused: this dispatcher has no outer wall yet "
-            "(FACTORY_RUNNER_OUTER_WALL=inner-only runs jobs with the inner wall only)",
+            "%s: narrow refused: this dispatcher has no outer wall "
+            "(FACTORY_RUNNER_OUTER_WALL=refuse; =proxy is the outer wall, =inner-only runs jobs "
+            "with the inner wall only)",
             vm.vm_id,
         )
         return Refusal.UNAVAILABLE
@@ -73,6 +99,9 @@ class RefusingOuterWall:
 class InnerWallOnly:
     """The operator chose to run jobs with the inner wall only: `narrow` is acknowledged, and a
     warning says that nothing was narrowed."""
+
+    async def admit(self, vm: VmIdentity) -> None:
+        _ = vm
 
     async def narrow(self, vm: VmIdentity, message: NarrowMessage) -> Refusal | None:
         _ = message
@@ -87,5 +116,10 @@ class InnerWallOnly:
         _ = vm
 
 
-def outer_wall_for(mode: OuterWallMode) -> OuterWall:
+def outer_wall_for(mode: OuterWallMode, slots: int = 1) -> OuterWall:
+    """The wall of a mode. `slots` is the number of TAP addresses the proxy listens on."""
+    if mode is OuterWallMode.PROXY:
+        from .proxy_wall import ProxyOuterWall  # the proxy imports this module's types
+
+        return ProxyOuterWall(slots)
     return InnerWallOnly() if mode is OuterWallMode.INNER_ONLY else RefusingOuterWall()

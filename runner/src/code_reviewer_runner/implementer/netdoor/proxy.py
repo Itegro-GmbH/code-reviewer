@@ -212,12 +212,15 @@ class _Handler(socketserver.BaseRequestHandler):
     def proxy(self) -> "ProxyServer":
         return cast("ProxyServer", self.server)
 
+    def _refuse(self, client: socket.socket, code: int, reason: str | None) -> None:
+        respond(client, code, reason, self.proxy.voice)
+
     def handle(self) -> None:
         client: socket.socket = self.request
         proxy = self.proxy
         if not proxy.slots.acquire(blocking=False):
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_TOO_MANY)
-            respond(client, 503, REASON_TOO_MANY)
+            self._refuse(client, 503, REASON_TOO_MANY)
             return
         try:
             self._serve(client)
@@ -234,17 +237,17 @@ class _Handler(socketserver.BaseRequestHandler):
         head = read_head(client)
         if head is None:
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            respond(client, 400, REASON_BAD_REQUEST)
+            self._refuse(client, 400, REASON_BAD_REQUEST)
             return
         parts = head.request_line.split(" ")
         if len(parts) != 3 or not parts[2].startswith("HTTP/1."):
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            respond(client, 400, REASON_BAD_REQUEST)
+            self._refuse(client, 400, REASON_BAD_REQUEST)
             return
         method, target, _version = parts
         if _METHOD_TOKEN.fullmatch(method) is None:
             proxy.log.add("", 0, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            respond(client, 400, REASON_BAD_REQUEST)
+            self._refuse(client, 400, REASON_BAD_REQUEST)
             return
         if method.upper() == "CONNECT":
             authority = split_authority(target, None)
@@ -259,12 +262,12 @@ class _Handler(socketserver.BaseRequestHandler):
                 OUTCOME_REFUSED,
                 REASON_BAD_REQUEST,
             )
-            respond(client, 400, REASON_BAD_REQUEST)
+            self._refuse(client, 400, REASON_BAD_REQUEST)
             return
         decision = proxy.decider.decide(authority.host, authority.port)
         if not decision.allowed:
             proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, decision.reason)
-            respond(client, 403, decision.reason)
+            self._refuse(client, 403, decision.reason)
             return
         name = ascii_name(authority.host) or authority.host
         gate = proxy.registry_gate
@@ -274,7 +277,7 @@ class _Handler(socketserver.BaseRequestHandler):
         upstream = self._connect(decision.addresses, authority.port)
         if upstream is None:
             proxy.log.add(authority.host, authority.port, OUTCOME_REFUSED, REASON_UPSTREAM)
-            respond(client, 502, REASON_UPSTREAM)
+            self._refuse(client, 502, REASON_UPSTREAM)
             return
         try:
             if path is None:
@@ -318,11 +321,11 @@ class _Handler(socketserver.BaseRequestHandler):
         proxy = self.proxy
         if path is not None or authority.port != 443:
             proxy.log.add(name, authority.port, OUTCOME_REFUSED, REASON_REGISTRY)
-            respond(client, 403, REASON_REGISTRY)
+            self._refuse(client, 403, REASON_REGISTRY)
             return
         if pending:
             proxy.log.add(name, authority.port, OUTCOME_REFUSED, REASON_BAD_REQUEST)
-            respond(client, 400, REASON_BAD_REQUEST)
+            self._refuse(client, 400, REASON_BAD_REQUEST)
             return
         respond(client, 200)
         gate.serve(client, name, addresses, self._connect)
@@ -350,7 +353,10 @@ class ProxyServer(socketserver.ThreadingTCPServer):
         connector: Connector = tcp_connector,
         max_connections: int = MAX_CONNECTIONS,
         registry_gate: RegistryGate | None = None,
+        voice: str = "network door",
     ) -> None:
+        # Who speaks in the body of a refusal: the outer wall's proxy (#979) is this class too.
+        self.voice = voice
         self.decider = decider
         self.registry_gate = registry_gate
         self.log = decider.log

@@ -656,7 +656,7 @@ def test_the_artifacts_and_the_state_are_below_var_lib_code_reviewer() -> None:
     assert settings.vms_dir == Path("/var/lib/code-reviewer/vms")
     assert settings.slots == 3  # parallelRuns
     assert settings.quota_bytes == 40 * 1024**3 and settings.reserve_gib == 5
-    assert settings.memory_mib == 4096 and settings.outer_wall is OuterWallMode.REFUSE
+    assert settings.memory_mib == 4096 and settings.outer_wall is OuterWallMode.PROXY
 
 
 # #978-T10
@@ -678,6 +678,24 @@ def test_the_environment_moves_the_paths_the_size_the_wall_and_the_timeout() -> 
         "/opt/fc"
     )
     assert settings.wall_clock_seconds(150) == 1200 + 150 + 300
+
+
+# #979
+@pytest.mark.parametrize(
+    ("value", "mode"),
+    [
+        ("proxy", OuterWallMode.PROXY),
+        ("refuse", OuterWallMode.REFUSE),
+        ("inner-only", OuterWallMode.INNER_ONLY),
+        ("", OuterWallMode.PROXY),
+    ],
+)
+def test_the_proxy_is_the_outer_wall_unless_the_operator_chose_another(
+    value: str, mode: OuterWallMode
+) -> None:
+    settings = settings_from_environment(machine(FACTORY_RUNNER_OUTER_WALL=value))
+
+    assert settings.outer_wall is mode
 
 
 @pytest.mark.parametrize(
