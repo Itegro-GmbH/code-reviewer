@@ -28,7 +28,10 @@ def incus_sandbox_factory(
             job_environment=environment,
         )
         return IncusSandbox(
-            settings, CliIncusClient(settings.incus, call_seconds=settings.call_seconds)
+            settings,
+            CliIncusClient(
+                settings.incus, call_seconds=settings.call_seconds, state_dir=settings.state_dir
+            ),
         )
 
     return make

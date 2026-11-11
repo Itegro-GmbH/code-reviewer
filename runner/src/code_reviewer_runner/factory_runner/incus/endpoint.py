@@ -20,6 +20,7 @@ from pathlib import Path
 from code_reviewer_runner.factory_runner.firecracker.endpoint import MAX_CONNECTIONS
 from code_reviewer_runner.factory_runner.firecracker.session import VmSession
 from code_reviewer_runner.factory_runner.firecracker.wire import (
+    FRAME_SECONDS,
     MAX_CONTROL_FRAME_BYTES,
     ProtocolError,
     encode_frame,
@@ -32,9 +33,12 @@ _log = logging.getLogger(__name__)
 class ControlListener:
     """The listener of one job, closed when the job is gone."""
 
-    def __init__(self, path: Path, session: VmSession) -> None:
+    def __init__(
+        self, path: Path, session: VmSession, *, frame_seconds: float = FRAME_SECONDS
+    ) -> None:
         self._path = path
         self._session = session
+        self._frame_seconds = frame_seconds
         self._server: asyncio.Server | None = None
         self._open = 0
 
@@ -63,7 +67,9 @@ class ControlListener:
         self._open += 1
         try:
             try:
-                document = await read_frame(reader, max_bytes=MAX_CONTROL_FRAME_BYTES)
+                document = await read_frame(
+                    reader, max_bytes=MAX_CONTROL_FRAME_BYTES, seconds=self._frame_seconds
+                )
             except (ProtocolError, TimeoutError, ConnectionError, OSError) as error:
                 _log.warning(
                     "%s: a connection was closed (%s)", self._session.vm.vm_id, type(error).__name__

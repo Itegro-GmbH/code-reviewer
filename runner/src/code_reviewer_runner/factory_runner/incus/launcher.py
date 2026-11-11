@@ -77,8 +77,8 @@ from code_reviewer_runner.implementer.environment_control import UNIX_SOCKET_PAT
 from .client import ExecProcess, ExecResult, IncusClient, IncusError, InstanceSpec, run_exec
 from .control_run import ControlLaunch, build_control
 from .endpoint import ControlListener
-from .provision import missing_objects
-from .reaper import MARK, ROLE_MARK, SLOT_MARK, Reaped, reap_leftovers
+from .provision import misconfigured_objects, missing_objects
+from .reaper import MARK, OWNER_MARK, ROLE_MARK, SLOT_MARK, Reaped, reap_leftovers
 from .settings import IncusSettings
 from .slots import INNER_A_ADDRESS, INNER_B_ADDRESS, IncusSlot, SlotPool
 from .walls import (
@@ -87,10 +87,12 @@ from .walls import (
     INNER_NIC_A,
     INNER_NIC_B,
     INNER_WALL_PATH,
+    INNER_WALL_TABLE,
     OUTER_NIC,
     OUTER_NIC_B,
     JobWall,
     inner_nic,
+    inner_wall_holds,
     inner_wall_ruleset,
     network_files_a,
     network_files_b,
@@ -153,6 +155,8 @@ class _Job:
     started_at: float = 0.0
     ended: bool = False
     stopped: bool = False
+    # Why the launcher stopped the job itself (None: `stop()` asked for it).
+    stop_reason: str | None = None
     b_plugged: bool = True
 
     @property
@@ -213,7 +217,10 @@ class IncusSandbox:
         lacking = await missing_objects(self._client, self.settings)
         if lacking:
             raise IncusNotReady(f"missing: {', '.join(lacking.items)}")
-        self.reaped = await reap_leftovers(self._client, self.settings.prefix)
+        wrong = await misconfigured_objects(self._client, self.settings)
+        if wrong:
+            raise IncusNotReady(f"not as the launcher needs them: {'; '.join(wrong)}")
+        self.reaped = await reap_leftovers(self._client, self.settings.prefix, self.settings.owner)
         for leftover in self.settings.jobs_dir.glob("job-*"):
             with contextlib.suppress(OSError):
                 _remove_directory(leftover, self.settings.jobs_dir)
@@ -325,7 +332,9 @@ class IncusSandbox:
         identity = VmIdentity(short, slot, app_host, app_port)
         # The wall of this job unplugs B's NIC, which needs the job: the closure is bound below.
         holder: list[_Job] = []
-        wall = JobWall(self._wall, lambda: self._unplug(holder[0]))
+        wall = JobWall(
+            self._wall, lambda: self._unplug(holder[0]), lambda: self._end_unplugged(holder[0])
+        )
         session = VmSession(identity, wall, token)
         job = _Job(
             short=short,
@@ -356,9 +365,13 @@ class IncusSandbox:
             "limits.memory.swap": "false",
             "limits.processes": str(settings.processes),
             "boot.autostart": "false",
+            # The guest's devlxd socket (the host's API for an instance) is nothing the launcher
+            # or the jobs use: not offered to the setup or the agent.
+            "security.devlxd": "false",
             MARK: job.start.job_id,
             SLOT_MARK: str(job.slot.index),
             ROLE_MARK: role,
+            OWNER_MARK: self.settings.owner,
         }
         return InstanceSpec(
             name=job.instance_a if a else job.instance_b,
@@ -424,6 +437,20 @@ class IncusSandbox:
             self._ready(job.instance_a, (slot.guest_address, INNER_A_ADDRESS), "A"),
             self._ready(job.instance_b, (INNER_B_ADDRESS, slot.b_address), "B"),
         )
+        await self._read_back_the_inner_wall(job)
+
+    async def _read_back_the_inner_wall(self, job: _Job) -> None:
+        """`nft -f` ending well is not the wall: read the table back from A, now that both
+        instances run, and fail the start when it is not there with its rules (the drops
+        especially)."""
+        listing = await run_exec(
+            self._client,
+            job.instance_a,
+            ("nft", "list", "table", "inet", INNER_WALL_TABLE),
+            timeout=PROBE_CALL_SECONDS,
+        )
+        if listing.exit_code != 0 or not inner_wall_holds(listing.stdout):
+            raise StartFailed("the inner wall is not in place in instance A")
 
     async def _ready(self, instance: str, addresses: tuple[str, ...], role: str) -> None:
         """An instance is ready when systemd-networkd has applied its addresses (they come from the
@@ -497,6 +524,13 @@ class IncusSandbox:
         await self._client.remove_device(job.instance_b, DEVICE_B_OUTER)
         job.b_plugged = False
 
+    async def _end_unplugged(self, job: _Job) -> None:
+        """B's outer NIC could not be unplugged, so B still has its way to the host: the launcher
+        ends the job itself (Control is killed, `wait()` returns and deletes both instances)."""
+        job.stop_reason = "B's outer NIC could not be unplugged: the job was ended"
+        self.logger.error("%s: %s", job.short, job.stop_reason)
+        await self.stop_job(job)
+
     # -- the end ---
 
     async def _destroy(self, job: _Job) -> None:
@@ -547,7 +581,7 @@ class IncusSandbox:
                 self.logger.error("%s: no end within %gs: killing the job", job.short, wall)
                 return WorkerOutcome(EXIT_KILLED, "the job was killed at its wall clock")
             if job.stopped:
-                return WorkerOutcome(EXIT_KILLED, "the job was stopped")
+                return WorkerOutcome(EXIT_KILLED, job.stop_reason or "the job was stopped")
             result = waiter.result()
             text = f"{result.stdout}\n{result.stderr}"
             if result.exit_code != 0 and QUOTA_TEXT in text.lower():

@@ -6,6 +6,7 @@ time, and how it reads Incus's answers. No test needs Incus."""
 
 import asyncio
 import json
+import os
 import stat
 import sys
 from collections.abc import Callable, Coroutine
@@ -40,7 +41,7 @@ class Rig:
         wrapper = root / "incus"
         wrapper.write_text(f'#!/bin/sh\nFAKE_INCUS_DIR={root} exec {sys.executable} {FAKE} "$@"\n')
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
-        self.client = CliIncusClient(str(wrapper), call_seconds=3.0)
+        self.client = CliIncusClient(str(wrapper), call_seconds=3.0, state_dir=root)
 
     def set(self, **behavior: Any) -> None:
         behavior.setdefault("record", str(self.record))
@@ -123,10 +124,72 @@ def test_the_environment_of_incus_is_bare(monkeypatch: pytest.MonkeyPatch) -> No
         assert "PATH" in call["env"]
 
 
+# #1007-T05
+def test_the_operators_own_incus_configuration_is_never_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A personal remote or a switched project in `~/.config/incus` must not point the launcher at
+    another server or project: every call has a private configuration directory (no remote, so the
+    local daemon) and the `default` project."""
+    with short_directory() as root:
+        home = root / "home"
+        (home / ".config" / "incus").mkdir(parents=True)
+        (home / ".config" / "incus" / "config.yml").write_text(
+            "default-remote: elsewhere\nremotes:\n  elsewhere:\n    addr: https://10.0.0.9:8443\n"
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("INCUS_CONF", str(home / ".config" / "incus"))
+        monkeypatch.setenv("INCUS_PROJECT", "someone-elses")
+        rig = Rig(root)
+
+        go(lambda: rig.client.start("x"))
+
+        (call,) = rig.calls()
+        private = root / "incus-conf"
+        assert call["conf"] == str(private) and call["project"] == "default"
+        assert private.is_dir() and stat.S_IMODE(private.stat().st_mode) == 0o700
+        assert list(private.iterdir()) == []
+        assert "elsewhere" not in " ".join(call["argv"])
+
+
+def test_a_client_configuration_directory_that_cannot_be_made_is_an_error_not_a_default() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+        rig.client = CliIncusClient(str(root / "incus"), state_dir=root / "missing" / "deeper")
+
+        with pytest.raises(IncusError, match="client configuration directory"):
+            go(lambda: rig.client.start("x"))
+
+        assert not rig.record.exists()
+
+
+def test_a_call_that_is_cancelled_kills_and_reaps_its_incus_process() -> None:
+    with short_directory() as root:
+        rig = Rig(root, sleep=30)
+
+        async def scenario() -> int:
+            task = asyncio.ensure_future(rig.client.start("x"))
+            for _ in range(100):
+                if rig.record.exists() and rig.record.read_text():
+                    break
+                await asyncio.sleep(0.05)
+            pid = int(rig.calls()[0]["pid"])
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return pid
+
+        pid = go(scenario)
+
+        # Killed and waited for: no such process, not even a zombie of ours.
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
 def test_a_call_that_does_not_answer_in_time_is_killed_and_an_error() -> None:
     with short_directory() as root:
         rig = Rig(root, sleep=30)
-        rig.client = CliIncusClient(str(root / "incus"), call_seconds=0.3)
+        rig.client = CliIncusClient(str(root / "incus"), call_seconds=0.3, state_dir=root)
 
         with pytest.raises(IncusError, match="no answer"):
             go(lambda: rig.client.start("x"))
@@ -301,6 +364,49 @@ def test_objects_are_asked_for_by_name() -> None:
         ]
         rig.set(exit=1)
         assert go(scenario) == [False] * 4
+
+
+def test_a_network_and_an_acl_are_read_from_the_api_in_the_default_project() -> None:
+    with short_directory() as root:
+        network = {
+            "type": "bridge",
+            "config": {"ipv4.nat": "false", "ipv4.address": "10.99.0.1/29"},
+            "managed": True,
+        }
+        acl = {
+            "name": "a",
+            "ingress": [],
+            "egress": [{"action": "allow", "destination_port": "3128", "description": ""}],
+        }
+        rig = Rig(root, stdout=json.dumps(network))
+
+        found = go(lambda: rig.client.network_info("cr-ab12-o0"))
+        rig.set(stdout=json.dumps(acl))
+        rules = go(lambda: rig.client.acl_info("cr-ab12-o0"))
+
+        assert found is not None and found.type == "bridge"
+        assert found.config == {"ipv4.nat": "false", "ipv4.address": "10.99.0.1/29"}
+        assert rules is not None and rules.ingress == ()
+        assert rules.egress == ({"action": "allow", "destination_port": "3128", "description": ""},)
+        assert [call["argv"] for call in rig.calls()] == [
+            ["query", "/1.0/networks/cr-ab12-o0?project=default"],
+            ["query", "/1.0/network-acls/cr-ab12-o0?project=default"],
+        ]
+
+
+def test_an_object_that_is_not_there_is_none_and_any_other_failure_is_an_error() -> None:
+    with short_directory() as root:
+        rig = Rig(root, exit=1, stderr="Error: Network not found\n")
+        assert go(lambda: rig.client.network_info("n")) is None
+        assert go(lambda: rig.client.acl_info("n")) is None
+
+        rig.set(exit=1, stderr="Error: permission denied\n")
+        with pytest.raises(IncusError, match="permission denied"):
+            go(lambda: rig.client.network_info("n"))
+
+        rig.set(stdout="[]")
+        with pytest.raises(IncusError, match="not an object"):
+            go(lambda: rig.client.network_info("n"))
 
 
 def test_an_acl_is_created_and_its_rules_added() -> None:

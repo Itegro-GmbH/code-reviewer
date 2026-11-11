@@ -29,6 +29,9 @@ with calls.open("a") as handle:
                 "argv": sys.argv[1:],
                 "stdin": stdin_data.decode(errors="replace"),
                 "env": sorted(os.environ),
+                "conf": os.environ.get("INCUS_CONF"),
+                "project": os.environ.get("INCUS_PROJECT"),
+                "pid": os.getpid(),
             }
         )
         + "\n"

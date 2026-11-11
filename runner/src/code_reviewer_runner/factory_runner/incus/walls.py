@@ -23,7 +23,9 @@ at start: a NIC change re-creates the interface, and an address set by hand is g
 Q4).
 The files are pushed before the instance starts, and systemd-networkd of the image applies them."""
 
+import contextlib
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from typing import Final
 
@@ -85,6 +87,27 @@ table inet {INNER_WALL_TABLE} {{
   }}
 }}
 """
+
+
+def _rule_lines(text: str) -> Counter[str]:
+    """The rules of a ruleset or of nft's listing of it, one entry per rule line: not the comments,
+    the braces or the chain declarations (nft's listing names a priority in words)."""
+    rules: Counter[str] = Counter()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", "table ", "chain ", "type ")) or line in ("{", "}"):
+            continue
+        rules[line] += 1
+    return rules
+
+
+def inner_wall_holds(listing: str, *, b_address: str = INNER_B_ADDRESS) -> bool:
+    """Whether `nft list table inet cr_inner` shows the inner wall: every rule of the ruleset the
+    launcher loaded (the doors' accept and every drop) is in the listing, as often as it was
+    loaded. A table that is empty, or lost a drop, is not the wall."""
+    wanted = _rule_lines(inner_wall_ruleset(b_address=b_address))
+    found = _rule_lines(listing)
+    return all(found[line] >= count for line, count in wanted.items())
 
 
 def _network_file(nic: str, address: str, prefix: int) -> tuple[str, bytes]:
@@ -152,11 +175,21 @@ class JobWall:
     """The `OuterWall` of one job: the dispatcher's wall, and at `narrow` the unplug of B's outer
     NIC once the wall holds the job's rule. The answer is `ack` only after both, so the agent never
     starts with a way to the host: a wall that refuses leaves the NIC in place and the Worker ends
-    the job `environment_control_failed` before an agent exists."""
+    the job `environment_control_failed` before an agent exists. When the unplug itself fails, B
+    keeps a way to the host: the job is **ended by the launcher** (`unplug_failed`: stopped, Control
+    killed, both instances deleted), not left to a Worker that may not end it."""
 
-    def __init__(self, wall: OuterWall, unplug: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        wall: OuterWall,
+        unplug: Callable[[], Awaitable[None]],
+        unplug_failed: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._wall = wall
         self._unplug = unplug
+        # What the launcher does when B's NIC stays: it ends the job itself (the Worker's own end
+        # of the job is not something to rely on for a wall that did not close).
+        self._unplug_failed = unplug_failed
 
     async def admit(self, vm: VmIdentity) -> None:
         await self._wall.admit(vm)
@@ -173,6 +206,9 @@ class JobWall:
                 vm.vm_id,
                 type(error).__name__,
             )
+            if self._unplug_failed is not None:
+                with contextlib.suppress(Exception):
+                    await self._unplug_failed()
             return Refusal.UNAVAILABLE
         return None
 

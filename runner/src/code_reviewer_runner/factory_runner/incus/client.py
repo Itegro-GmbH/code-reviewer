@@ -10,9 +10,14 @@ which is root-equivalent: documented in `docs/runner.md`). Three rules that the 
   wait for its end**, so a pipe that never closes hangs them forever. Every call that is not an
   `exec` with input starts with stdin closed (`/dev/null`); an `exec` with input gets exactly the
   bytes and then end of file.
-* **The environment is bare** (`PATH` and `HOME`): the dispatcher's own environment holds its
-  credential and `incus` needs none of it. No argument ever carries a secret, so what `incus` prints
-  on a failure is safe to log.
+* **The environment is bare** (`PATH`, `HOME`, the locale): the dispatcher's own environment holds
+  its credential and `incus` needs none of it. No argument ever carries a secret, so what `incus`
+  prints on a failure is safe to log.
+* **The operator's own `incus` configuration is never read**: `INCUS_CONF` is a private directory
+  (the state directory's `incus-conf`) with no remote and no project of its own, so the default
+  remote is the local daemon and the project is `default` whatever `~/.config/incus` says (a
+  personal remote or a `incus project switch` must not point the launcher at another server or
+  project, where it would create, list and delete).
 * **Every call has a limit of time**; one that runs over is killed and is an `IncusError`.
 """
 
@@ -22,7 +27,9 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Final, Protocol, cast
+from urllib.parse import quote
 
 # What an `incus exec` keeps of its output: the end of it (the log tail of a failed job).
 STDOUT_KEEP_BYTES: Final = 64 * 1024
@@ -30,6 +37,9 @@ STDERR_KEEP_BYTES: Final = 16 * 1024
 _READ_CHUNK: Final = 64 * 1024
 # The part of a failed call's own error output that an `IncusError` carries.
 _ERROR_KEEP_BYTES: Final = 2000
+# The project every call is made in, and the directory of the private client configuration.
+PROJECT: Final = "default"
+CONFIG_DIRECTORY: Final = "incus-conf"
 
 
 class IncusError(Exception):
@@ -54,6 +64,22 @@ class InstanceSpec:
     config: Mapping[str, str] = field(default_factory=dict[str, str])
     # Size of the root disk in GiB: the quota (it counts what the instance shares with its image).
     disk_gib: int | None = None
+
+
+@dataclass(frozen=True)
+class NetworkInfo:
+    """A network as Incus has it: its type and its configuration (what is set, not the defaults)."""
+
+    type: str
+    config: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class AclInfo:
+    """A network ACL as Incus has it: its rules, as the API names them."""
+
+    ingress: tuple[Mapping[str, str], ...]
+    egress: tuple[Mapping[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -93,11 +119,19 @@ class IncusClient(Protocol):
 
     async def network_exists(self, name: str) -> bool: ...
 
+    async def network_info(self, name: str) -> NetworkInfo | None:
+        """The network, or None when there is none of that name."""
+        ...
+
     async def create_network(self, name: str, config: Mapping[str, str]) -> None: ...
 
     async def delete_network(self, name: str) -> None: ...
 
     async def acl_exists(self, name: str) -> bool: ...
+
+    async def acl_info(self, name: str) -> AclInfo | None:
+        """The ACL, or None when there is none of that name."""
+        ...
 
     async def create_acl(self, name: str, egress: Sequence[Mapping[str, str]]) -> None: ...
 
@@ -167,15 +201,38 @@ class _CliExec:
 class CliIncusClient:
     """The real client: the `incus` command line."""
 
-    def __init__(self, program: str = "incus", *, call_seconds: float = 120.0) -> None:
+    def __init__(
+        self,
+        program: str = "incus",
+        *,
+        call_seconds: float = 120.0,
+        state_dir: Path,
+    ) -> None:
+        """`state_dir` is the directory that holds the private client configuration
+        (`incus-conf`): the service's state directory."""
         self._program = program
         self._call_seconds = call_seconds
+        self._config_dir = state_dir / CONFIG_DIRECTORY
+        self._config_ready = False
 
     # -- the one way to run it ---
 
-    @staticmethod
-    def _environment() -> dict[str, str]:
-        keep = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "LC_ALL": "C.UTF-8"}
+    def _environment(self) -> dict[str, str]:
+        if not self._config_ready:
+            try:
+                self._config_dir.mkdir(mode=0o700, exist_ok=True)
+            except OSError:
+                raise IncusError(
+                    "config",
+                    f"the client configuration directory {self._config_dir} cannot be made",
+                ) from None
+            self._config_ready = True
+        keep = {
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "LC_ALL": "C.UTF-8",
+            "INCUS_CONF": str(self._config_dir),
+            "INCUS_PROJECT": PROJECT,
+        }
         if "HOME" in os.environ:
             keep["HOME"] = os.environ["HOME"]
         return keep
@@ -212,10 +269,13 @@ class CliIncusClient:
                 )
                 status = await process.wait()
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
+            await _kill_and_reap(process)
             raise IncusError(operation, f"no answer in {self._call_seconds:g} s") from None
+        except BaseException:
+            # Cancelled (a job's end while a call runs) or any other end: the child is not left
+            # running, nor a zombie.
+            await _kill_and_reap(process)
+            raise
         finally:
             if writer is not None:
                 writer.cancel()
@@ -247,6 +307,36 @@ class CliIncusClient:
         return (
             await self._run("network show", ["network", "show", name], check=False)
         ).exit_code == 0
+
+    async def _query(self, operation: str, path: str) -> dict[str, Any] | None:
+        """One object of the API, or None when it is not there."""
+        result = await self._run(operation, ["query", f"{path}?project={PROJECT}"], check=False)
+        if result.exit_code != 0:
+            if "not found" in result.stderr.lower():
+                return None
+            last = result.stderr.strip().splitlines()[-1:] or [f"exit status {result.exit_code}"]
+            raise IncusError(operation, last[0])
+        try:
+            document = json.loads(result.stdout)
+        except ValueError:
+            raise IncusError(operation, "the answer is not JSON") from None
+        if not isinstance(document, dict):
+            raise IncusError(operation, "the answer is not an object")
+        return cast("dict[str, Any]", document)
+
+    async def network_info(self, name: str) -> NetworkInfo | None:
+        document = await self._query("query network", f"/1.0/networks/{quote(name, safe='')}")
+        if document is None:
+            return None
+        return NetworkInfo(str(document.get("type", "")), _strings(document.get("config")))
+
+    async def acl_info(self, name: str) -> AclInfo | None:
+        document = await self._query(
+            "query network acl", f"/1.0/network-acls/{quote(name, safe='')}"
+        )
+        if document is None:
+            return None
+        return AclInfo(_rules(document.get("ingress")), _rules(document.get("egress")))
 
     async def create_network(self, name: str, config: Mapping[str, str]) -> None:
         await self._run(
@@ -345,6 +435,25 @@ class CliIncusClient:
         )
         writer = asyncio.ensure_future(_feed(process, stdin)) if stdin is not None else None
         return _CliExec(process, writer)
+
+
+def _strings(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in cast("dict[Any, Any]", value).items()}
+
+
+def _rules(value: object) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(_strings(rule) for rule in cast("list[Any]", value))
+
+
+async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    with contextlib.suppress(Exception):
+        await process.wait()
 
 
 async def _feed(process: asyncio.subprocess.Process, data: bytes | None) -> None:

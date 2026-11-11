@@ -2218,22 +2218,24 @@ the claim loop, the reaper and the credential pool do not know which backend the
 ```
                       the host (this dispatcher, a user of incus-admin)
  job socket ctl.sock  ◀──── incusd (proxy device) ◀──── A: Control, model door, network door, inner wall (nft)
- proxy 10.99.0.<8n+1>:3128 ◀── outer bridge <prefix>-out<n> ◀── A eth0 (.2)       │ eth1 10.98.0.2
+ proxy 10.99.0.<8n+1>:3128 ◀── outer bridge <prefix>-<owner>-o<n> ◀── A eth0 (.2) │ eth1 10.98.0.2
                                               ◀── B eth1 (.3), unplugged at narrow │
-                                                                                   │ inner bridge <prefix>-in<n> (no address on the host)
+                                                                                   │ inner bridge <prefix>-<owner>-i<n> (no address on the host)
                                                                   B: setup, then agent ── eth0 10.98.0.3  ──▶ only A:8080 and A:8081
 ```
 
 ### What a job does
 
 1. **Slot.** `parallelRuns` slots (1 to 32). Slot *n* has two bridges, made once by `provision.py` (the installer, #1011): the **outer bridge**
-   `<prefix>-out<n>` (a /29 of the slots' network: the host's address first, where the outer wall's proxy listens, A's second, B's third; no DHCP, no NAT, no
-   routing, no IPv6, no DNS from the bridge's dnsmasq, an ACL that lets a TCP connection to the proxy through and drops the rest) and the **inner bridge** `<prefix>-in<n>` (no address at all: the host is not on it).
+   `<prefix>-<owner>-o<n>` (a /29 of the slots' network: the host's address first, where the outer wall's proxy listens, A's second, B's third; no DHCP, no NAT, no
+   routing, no IPv6, no DNS from the bridge's dnsmasq, an ACL that lets a TCP connection to the proxy through and drops the rest) and the **inner bridge** `<prefix>-<owner>-i<n>` (no address at all: the host is not on it).
+   **The owner** is four hex digits of a hash of the user and the state directory (`owner_id`): it is in the name of every instance, network and ACL and in the mark `user.cr.owner`, so two dispatchers on one Incus daemon
+   (two users of `incus-admin`, as Luca and Vincent on the DevBox) never reap or reuse each other's objects. Two owners need **two slot networks** (the host's address of an outer bridge is on the host); a network's name is an interface name (15 characters: the prefix is short, `validated()` refuses a longer one).
    The dispatcher claims only while a slot is free; a job whose instances could not be deleted keeps its slot out of use until the service restarts.
 2. **Token, socket, wall.** The start document is built and **checked first** (by vm-init's own parser: no credential in an argument, a job id and URL of the contract), so a start that would be refused costs
    no slot and no instance. A random per-job token; the job's directory `<state>/jobs/job-<slot>-<random>/` (0700) and **the listener on its `ctl.sock` before any instance exists**; the outer
    wall admits the job (the wide rule of the setup).
-3. **Two instances** (`incus init`, **no profile**: the `default` profile and `incusbr0` are never applied), from the golden image on the pool, marked `user.cr.job`, `user.cr.slot`, `user.cr.role`:
+3. **Two instances** (`incus init`, **no profile**: the `default` profile and `incusbr0` are never applied), from the golden image on the pool, marked `user.cr.job`, `user.cr.slot`, `user.cr.role`, `user.cr.owner`:
 
    | | A (trusted) | B (untrusted) |
    |---|---|---|
@@ -2243,20 +2245,21 @@ the claim loop, the reaper and the credential pool do not know which backend the
    | `limits.processes` | 4096 | 4096 |
    | NICs | `eth0` outer, `eth1` inner; the `ctl` proxy device | `eth0` inner; `eth1` outer **until `narrow`** |
 
-   Every instance: `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true` (its own id range), `limits.memory.swap=false`, `boot.autostart=false`.
+   Every instance: `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true` (its own id range), `limits.memory.swap=false`, `boot.autostart=false`, `security.devlxd=false` (the guest's `devlxd` socket, the host's API for an instance, is nothing the setup or the agent needs: the launcher uses `incus exec` and a `proxy` device, not it).
    **The quota counts what the instance shares with its image** (referenced size on btrfs), so it must leave the job room; the write that passes it fails with `Disk quota exceeded` (EDQUOT, not "No space left"),
    and a full quota also stops Docker's own bookkeeping in that instance (it ends at the wall clock or by `end` and is deleted; **A's quota is its own, not a slice of B's**).
    Outer NICs have a **static address**, `security.ipv4_filtering` and `security.mac_filtering` (a packet must come from the NIC's address and MAC) and **`security.port_isolation`** (an isolated port reaches only the bridge's own address:
    A and B cannot reach each other there). The addresses come from **files pushed before the instance starts** (`/etc/systemd/network/05-code-reviewer-*.network`, applied by the image's systemd-networkd, no gateway and no
    route: nothing is routed): a NIC change re-creates the interface, and an address set by hand is gone.
-4. **Start A, load the inner wall, start B**, wait until `docker info` answers in both (`ready_seconds`, 120). The wall is an nft table **inside A**, loaded before B runs
+4. **Start A, load the inner wall, start B**, wait until their addresses are applied and `docker info` answers in both (`ready_seconds`, 120), then **read the wall back** (`nft list table inet cr_inner` in A: every rule of the loaded ruleset, the drops especially, must be there; an absent or reduced table fails the start and everything is cleaned up: `nft -f` ending well is not proof). The wall is an nft table **inside A**, loaded before B runs
    (`walls.py`, printed by `inner_wall_ruleset()`): from B's NIC only a TCP connection from B's address to A's two door ports (8080, 8081) and the answers to what A asked; every other packet from B, and anything forwarded to or from B,
    is dropped; A's outer NIC takes nothing in but answers. Incus's own ACLs do **not** do this between two ports of one bridge (they need `br_netfilter`), which is why the table is ours; B cannot change it (another instance,
    another network namespace), A's root can, and A is the trusted side.
 5. **Check, volume, Control.** In A: the Worker image's id must be the verified one (`image_missing`, `image_mismatch`), the work volume is made, and **Control runs with `incus exec`**: `docker run …` with the job document
    (`{appUrl, jobId, credential, controlToken[, localCredential][, outerProxy]}`, the one vm-init wrote) **on its stdin and nowhere else**. The arguments are the renderer's (`local-control.ts`) with three changes held by a test
    (`control_run.py`): `RUNNER_ENVIRONMENT_CONTROL=unix`, no vsock seccomp profile, `/ctl.sock` bind-mounted. `incus` is started with **stdin closed** (`/dev/null`) for everything that has no input: `incus init` and `launch` wait for the end of a
-   stdin that is not a terminal and hang on a pipe that never closes (found in #1005). Its environment is `PATH` and `HOME` only; no argument holds a secret.
+   stdin that is not a terminal and hang on a pipe that never closes (found in #1005). Its environment is `PATH`, `HOME` and the locale, plus `INCUS_CONF` (a **private directory**, `<state>/incus-conf`: no remote, no project) and `INCUS_PROJECT=default`, so the operator's own `~/.config/incus` (a personal remote, a switched project) is never what the launcher talks to; no argument holds a secret.
+   A call that is cancelled kills and reaps its `incus` process.
 
 ### The environment control: a unix socket through a proxy device
 
@@ -2266,7 +2269,7 @@ Control connects to the Unix socket **`/ctl.sock`** (not under `/run`, which the
 (the check of the token and the first-wins rules are the vsock transport's: `VmSession`). The socket is on the service user's volume: **`incusd` does not see `/tmp`**. The round trip is 0.3 ms (p50, spike #1005).
 
 **`narrow`** is answered `ack` only after the outer wall holds the job's rule **and B's outer NIC is hot-unplugged** (`JobWall`, 0.1 to 0.35 s): B has no way to the host from then on, and what the setup started in B (files, containers, **processes**) keeps running
-(the same instance). A wall that refuses leaves the NIC in place and the Worker ends the job `environment_control_failed` before an agent exists. A live change of `security.*` on a running NIC does **not** apply on Incus 7.6, which is why
+(the same instance). A wall that refuses leaves the NIC in place and the Worker ends the job `environment_control_failed` before an agent exists; **an unplug that fails** (B keeps its way to the host) is refused too and **the launcher ends the job itself** (Control killed, `wait()` returns a stopped job with the reason, both instances deleted). A live change of `security.*` on a running NIC does **not** apply on Incus 7.6, which is why
 `narrow` is an unplug and a changed rule would be a re-plug.
 
 ### The outer wall
@@ -2278,8 +2281,8 @@ table adds (port 53 of host-local addresses, which Incus leaves open to an insta
 
 A job ends with the **first** of: the end of Control's `docker run` (its exit status is the Worker's, as vm-init's exit report was; **`EXIT_DISK_QUOTA` (122, EDQUOT) when it failed with the disk's quota**, the log tail starting `disk_quota_exceeded:`) or the **wall clock** (the job's timeout + Control's stop timeout + the
 preparation, exit code −9). `stop()` kills Control's `exec` at once. Whatever ends it, **both instances are deleted** (`incus delete --force`, 0.3 to 4 s), the listener closed, the wall told (`forget`), the directory deleted and the slot given back before `wait()` returns.
-**After a crash** the next service finds the instances **by their mark**: `user.cr.job` **and** a name `<prefix>-a-…` or `<prefix>-b-…`; an instance without the mark, with another prefix, or the owner's is never touched.
-`setup` also takes the **lock** of the state directory (one dispatcher per machine) and **checks** that the pool, the image and both bridges of every slot exist (`IncusNotReady` names what is missing).
+**After a crash** the next service finds the instances **by their mark**: `user.cr.job`, **its own** `user.cr.owner` **and** a name `<prefix>-<owner>-a-…` or `<prefix>-<owner>-b-…`; an instance without the mark, with another prefix, of another owner (another dispatcher on the same daemon) or the machine owner's is never touched.
+`setup` also takes the **lock** of the state directory (one dispatcher per machine) and **checks** that the pool, the image and both bridges of every slot exist **and are configured as the launcher needs** (`IncusNotReady` names what is missing or what differs): the inner bridge without IPv4/IPv6 addresses, the outer bridge with its ACL, `ipv4.nat=false`, `ipv4.routing=false`, no DHCP, `raw.dnsmasq=port=0`, and the ACL with exactly its one rule. A bridge that is there with another configuration is a foreign or drifted object: it is **never reconfigured**, the check (and `provision.ensure_objects`) fails and says which setting.
 
 ### Settings (`FACTORY_RUNNER_*`) and what the machine needs
 
@@ -2288,7 +2291,7 @@ preparation, exit code −9). `stop()` kills Control's `exec` at once. Whatever 
 | `INCUS_POOL` (required) | the btrfs storage pool of the jobs (a copy-on-write pool: a job's disk is a snapshot, **0.2 s**, and the quota is enforced) |
 | `INCUS_IMAGE` | the golden image's alias (default `code-reviewer-golden`) |
 | `VM_IMAGE_ID` (required) | the Worker image's id the launcher checks in A |
-| `INCUS_PREFIX` | the prefix of every object (default `cr`) |
+| `INCUS_PREFIX` | the prefix of every object (default `cr`; the owner id follows it in every name) |
 | `SLOT_NETWORK` | the slots' network, a /24 for up to 32 slots, chosen at install |
 | `OUTER_WALL`, `VM_VCPUS`, `VM_STATE_DIR` | as for the Firecracker launcher |
 | `INCUS_A_DISK_GB`, `INCUS_A_MEMORY_MB`, `INCUS` | A's quota, A's memory, the path of the `incus` program |

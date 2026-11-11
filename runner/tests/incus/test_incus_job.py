@@ -28,7 +28,17 @@ from code_reviewer_runner.factory_runner.sandbox import WorkerStart
 pytestmark = pytest.mark.incus
 
 A_INNER = "10.98.0.2"
+B_INNER = "10.98.0.3"
+# A source address that is not B's: what a spoofing agent would put on its packets.
+SPOOFED = "10.98.0.9"
 HOST = "10.99.0.1"
+# A forwards and masquerades what leaves its outer NIC: the way "through A" if the wall did not
+# stop it.
+ROUTE_THROUGH_A = (
+    "sysctl -w net.ipv4.ip_forward=1 && nft add table ip cr_probe && "
+    "nft 'add chain ip cr_probe post { type nat hook postrouting priority 100; }' && "
+    "nft add rule ip cr_probe post oifname eth0 masquerade"
+)
 SLOT_OUTER_A = "10.99.0.2"
 
 
@@ -46,7 +56,7 @@ async def names(client: StandInClient, settings: IncusSettings) -> list[str]:
     return sorted(
         instance.name
         for instance in await client.list_instances()
-        if instance.name.startswith((f"{settings.prefix}-a-", f"{settings.prefix}-b-"))
+        if instance.name.startswith((f"{settings.name_prefix}-a-", f"{settings.name_prefix}-b-"))
     )
 
 
@@ -188,20 +198,49 @@ def test_the_inner_wall_lets_b_reach_only_the_two_doors_of_a(
             walled = await view()
             icmp_walled = (await probe(client, b, f"ping -c1 -W2 {A_INNER}")).exit_code == 0
             routed_walled = await reaches(client, b, "1.1.1.1", 443)
+
+            # Routing through A, for real: B has no other NIC, its default route is A, and A
+            # forwards and masquerades. The host's proxy address is what A's outer NIC reaches.
+            await client.remove_device(b, "eth1")
+            setup = await probe(
+                client, b, f"ip route replace default via {A_INNER} dev eth0 && ip route"
+            )
+            assert setup.exit_code == 0, setup.stderr
+            prepared = await probe(client, a, ROUTE_THROUGH_A)
+            assert prepared.exit_code == 0, prepared.stderr
+            # B has the second address that a spoofing agent would use.
+            spoof = await probe(client, b, f"ip addr add {SPOOFED}/24 dev eth0")
+            assert spoof.exit_code == 0, spoof.stderr
+            through_walled = await reaches(client, b, HOST, 3128)
+            spoofed_walled = await probe(client, b, f"nc -z -w3 -s {SPOOFED} {A_INNER} 8080")
+
             # The control: the same probes with the wall's table deleted must reach.
             await probe(client, a, "nft delete table inet cr_inner")
             open_view = await view()
             icmp_open = (await probe(client, b, f"ping -c1 -W2 {A_INNER}")).exit_code == 0
+            through_open = await reaches(client, b, HOST, 3128)
+            spoofed_open = await probe(client, b, f"nc -z -w3 -s {SPOOFED} {A_INNER} 8080")
             # The wall again.
             await probe(client, a, "nft -f /etc/code-reviewer/inner-wall.nft")
             again = await view()
+            through_again = await reaches(client, b, HOST, 3128)
+            spoofed_again = await probe(client, b, f"nc -z -w3 -s {SPOOFED} {A_INNER} 8080")
             await probe(client, a, "touch /tmp/finish")
             await worker.wait()
         finally:
             await sandbox.close()
-        return walled, icmp_walled, routed_walled, open_view, icmp_open, again
+        return (
+            walled,
+            icmp_walled,
+            routed_walled,
+            open_view,
+            icmp_open,
+            again,
+            (through_walled, through_open, through_again),
+            (spoofed_walled.exit_code, spoofed_open.exit_code, spoofed_again.exit_code),
+        )
 
-    walled, icmp_walled, routed_walled, open_view, icmp_open, again = go(scenario)
+    walled, icmp_walled, routed_walled, open_view, icmp_open, again, through, spoofed = go(scenario)
 
     assert walled == {"door-8080": True, "door-8081": True, "secrets": False, "docker-api": False}
     assert icmp_walled is False and routed_walled is False
@@ -209,6 +248,11 @@ def test_the_inner_wall_lets_b_reach_only_the_two_doors_of_a(
     assert open_view == {"door-8080": True, "door-8081": True, "secrets": True, "docker-api": True}
     assert icmp_open is True
     assert again == walled
+    # Through A to the host's proxy: stopped by the wall, reached without it (the control), stopped
+    # again once it is back.
+    assert through == (False, True, False)
+    # From a source that is not B's address to a door: dropped, then reached, then dropped.
+    assert spoofed[0] != 0 and spoofed[1] == 0 and spoofed[2] != 0
 
 
 # #1007-T04
@@ -242,3 +286,32 @@ def test_a_write_past_the_quota_fails_with_edquot_and_the_job_ends_with_a_stable
     assert small.exit_code == 0
     assert outcome.exit_code == EXIT_DISK_QUOTA
     assert outcome.log_tail.startswith("disk_quota_exceeded:")
+
+
+# #1007-T01
+def test_the_launcher_ignores_the_operators_own_incus_configuration(
+    client: StandInClient,
+    settings: IncusSettings,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A personal remote as the default (here one that does not exist) must not matter: the client
+    has a private configuration and talks to the local daemon's `default` project."""
+    home = tmp_path / "home"
+    (home / ".config" / "incus").mkdir(parents=True)
+    (home / ".config" / "incus" / "config.yml").write_text(
+        "default-remote: nowhere\nremotes:\n  nowhere:\n    addr: https://192.0.2.1:8443\n"
+        "    protocol: incus\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("INCUS_CONF", str(home / ".config" / "incus"))
+    monkeypatch.setenv("INCUS_PROJECT", "nowhere")
+
+    async def scenario() -> Any:
+        return await client.pool_exists(settings.pool), await client.network_info(
+            settings.outer_network(0)
+        )
+
+    pool, network = go(scenario)
+
+    assert pool is True and network is not None and network.type == "bridge"

@@ -36,6 +36,7 @@ from code_reviewer_runner.factory_runner.incus.launcher import (
     NoFreeSlot,
     StartFailed,
 )
+from code_reviewer_runner.factory_runner.incus.walls import inner_wall_ruleset
 from code_reviewer_runner.factory_runner.sandbox import SandboxInUse
 from code_reviewer_runner.implementer.environment_control import end_request, narrow_request
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
@@ -84,7 +85,9 @@ def test_a_job_gets_two_instances_with_the_configured_limits_and_quota_and_both_
 
         seen, names, outcome = go(scenario)
 
-        assert len(names) == 2 and names[0].startswith("cr-a-") and names[1].startswith("cr-b-")
+        owner = rig.settings.owner
+        assert len(names) == 2
+        assert names[0].startswith(f"cr-{owner}-a-") and names[1].startswith(f"cr-{owner}-b-")
         spec_a, spec_b = seen["a"][0], seen["b"][0]
         # Both from the golden image on the pool, with no profile (the spec has none to name).
         assert spec_a.image == spec_b.image == "code-reviewer-golden"
@@ -100,6 +103,8 @@ def test_a_job_gets_two_instances_with_the_configured_limits_and_quota_and_both_
             assert spec.config["limits.memory.swap"] == "false"
             assert spec.config["boot.autostart"] == "false"
             assert spec.config["user.cr.job"] == "00000000-0000-4000-8000-000000000001"
+            assert spec.config["user.cr.owner"] == owner
+            assert spec.config["security.devlxd"] == "false"
         assert outcome.exit_code == 0
         # Both are gone, and so is the job's directory; the slot is free again.
         assert rig.incus.instances == {}
@@ -123,14 +128,21 @@ def test_the_devices_are_the_two_bridges_with_filtering_isolation_and_the_proxy_
         devices, socket = go(scenario)
 
         outer_a = devices["a"]["eth0"]
-        assert outer_a["network"] == "cr-out0" and outer_a["ipv4.address"] == "10.99.0.2"
+        assert (
+            outer_a["network"] == rig.settings.outer_network(0)
+            and outer_a["ipv4.address"] == "10.99.0.2"
+        )
         assert devices["b"]["eth1"]["ipv4.address"] == "10.99.0.3"
         for nic in (outer_a, devices["b"]["eth1"]):
             assert nic["security.ipv4_filtering"] == "true"
             assert nic["security.mac_filtering"] == "true"
             assert nic["security.port_isolation"] == "true"
         # The inner bridge has the host nowhere on it; both instances are on it.
-        assert devices["a"]["eth1"]["network"] == devices["b"]["eth0"]["network"] == "cr-in0"
+        assert (
+            devices["a"]["eth1"]["network"]
+            == devices["b"]["eth0"]["network"]
+            == rig.settings.inner_network(0)
+        )
         # Control's socket: a proxy device that listens in A, not under /run, and connects to the
         # dispatcher's own socket on the host.
         control = devices["a"]["ctl"]
@@ -205,14 +217,21 @@ def test_everything_is_made_before_a_is_started_and_the_wall_is_loaded_before_b_
 def test_a_job_that_crashes_the_dispatcher_is_found_by_its_mark_and_only_by_its_mark() -> None:
     with short_directory() as root:
         rig = Rig(root)
-        mark = {"user.cr.job": "j-1", "user.cr.slot": "0", "user.cr.role": "a"}
+        owner = rig.settings.owner
+        mark = {
+            "user.cr.job": "j-1",
+            "user.cr.slot": "0",
+            "user.cr.role": "a",
+            "user.cr.owner": owner,
+        }
+        ours_a, ours_b = f"cr-{owner}-a-0-deadbeef", f"cr-{owner}-b-0-deadbeef"
 
         async def scenario() -> Any:
-            await rig.incus.create(_spec("cr-a-0-deadbeef", mark))
-            await rig.incus.create(_spec("cr-b-0-deadbeef", mark))
+            await rig.incus.create(_spec(ours_a, mark))
+            await rig.incus.create(_spec(ours_b, mark))
             # Not ours: no mark; another prefix; the owner's own instance.
-            await rig.incus.create(_spec("cr-a-0-nomark", {}))
-            await rig.incus.create(_spec("zz-a-0-deadbeef", mark))
+            await rig.incus.create(_spec(f"cr-{owner}-a-0-nomark", {}))
+            await rig.incus.create(_spec(f"zz-{owner}-a-0-deadbeef", mark))
             rig.incus.foreign["owner"] = InstanceInfo("owner", "Running", {"user.cr.job": "x"})
             sandbox = rig.sandbox()
             await sandbox.setup()
@@ -221,9 +240,55 @@ def test_a_job_that_crashes_the_dispatcher_is_found_by_its_mark_and_only_by_its_
 
         reaped, left, foreign = go(scenario)
 
-        assert sorted(reaped.instances) == ["cr-a-0-deadbeef", "cr-b-0-deadbeef"]
-        assert left == ["cr-a-0-nomark", "zz-a-0-deadbeef"]
+        assert sorted(reaped.instances) == [ours_a, ours_b]
+        assert left == sorted([f"cr-{owner}-a-0-nomark", f"zz-{owner}-a-0-deadbeef"])
         assert foreign == ["owner"]
+
+
+# #1007-T01
+def test_the_reaper_never_deletes_another_dispatchers_jobs_on_the_same_daemon() -> None:
+    """Luca and Vincent are both `incus-admin` on one daemon and may share a prefix; each state
+    directory is its own owner, and the owner is in the mark **and** the name."""
+    with short_directory() as first, short_directory() as second:
+        mine, theirs = Rig(first), Rig(second)
+        assert mine.settings.owner != theirs.settings.owner
+        theirs_mark = {"user.cr.job": "j-2", "user.cr.owner": theirs.settings.owner}
+        theirs_name = f"cr-{theirs.settings.owner}-a-0-cafe"
+        mine_mark = {"user.cr.job": "j-1", "user.cr.owner": mine.settings.owner}
+        mine_name = f"cr-{mine.settings.owner}-b-0-beef"
+
+        async def scenario() -> Any:
+            # One daemon: both dispatchers' instances in the same Incus.
+            await mine.incus.create(_spec(theirs_name, theirs_mark))
+            await mine.incus.create(_spec(mine_name, mine_mark))
+            # An instance of theirs whose name was cut to ours is still not ours by its mark,
+            # and one of ours without the owner's name is not either.
+            await mine.incus.create(_spec(f"cr-{mine.settings.owner}-a-0-bad", theirs_mark))
+            await mine.incus.create(_spec(f"cr-{theirs.settings.owner}-a-0-bad", mine_mark))
+            sandbox = mine.sandbox()
+            await sandbox.setup()
+            await sandbox.close()
+            return sandbox.reaped, sorted(mine.incus.instances)
+
+        reaped, left = go(scenario)
+
+        assert reaped.instances == (mine_name,)
+        assert theirs_name in left and len(left) == 3
+
+
+# #1007-T01
+def test_two_owners_on_one_daemon_have_objects_of_their_own() -> None:
+    with short_directory() as first, short_directory() as second:
+        mine, theirs = Rig(first), Rig(second)
+        names = {
+            *(mine.settings.outer_network(i) for i in range(1)),
+            *(mine.settings.inner_network(i) for i in range(1)),
+        }
+        others = {theirs.settings.outer_network(0), theirs.settings.inner_network(0)}
+
+        assert names.isdisjoint(others)
+        # Each fits the 15 characters of a Linux interface name.
+        assert all(len(name) <= 15 for name in names | others)
 
 
 def _spec(name: str, config: dict[str, str]) -> Any:
@@ -268,6 +333,96 @@ def test_an_instance_that_does_not_become_ready_fails_the_start_and_leaves_nothi
 
         assert go(scenario) == 1
         assert rig.incus.instances == {}
+
+
+# #1007-T03
+def test_an_inner_wall_that_cannot_be_loaded_fails_the_start_before_b_runs_and_leaves_nothing() -> (
+    None
+):
+    with short_directory() as root:
+        rig = Rig(root, ready_seconds=0.3)
+        rig.incus.responder = lambda name, argv: (
+            ExecResult(1, "", "Error: syntax error") if argv[:2] == ("nft", "-f") else None
+        )
+
+        async def scenario() -> Any:
+            sandbox = rig.sandbox()
+            with pytest.raises(StartFailed, match="inner wall"):
+                await sandbox.start(start_for())
+            return sandbox.free
+
+        free = go(scenario)
+
+        started = [call[1] for call in rig.incus.calls if call[0] == "start"]
+        assert len(started) == 1 and "-a-" in started[0]
+        assert rig.incus.instances == {} and free == 1
+        assert not list((root / "jobs").glob("job-*"))
+        assert not rig.incus.controls
+
+
+# #1007-T03
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ExecResult(1, "", "Error: No such file or directory"),
+        ExecResult(0, "table inet cr_inner {\n}\n"),
+        # The accept rules are there but a drop was taken out of the input chain.
+        ExecResult(
+            0,
+            inner_wall_ruleset().replace(
+                '    iifname "eth1" drop\n    iifname "eth0" ct', '    iifname "eth0" ct'
+            ),
+        ),
+    ],
+    ids=["table absent", "table empty", "a drop rule missing"],
+)
+def test_an_inner_wall_that_is_not_in_a_when_both_are_ready_fails_the_start(
+    answer: ExecResult,
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+        rig.incus.responder = lambda name, argv: (
+            answer if argv[:4] == ("nft", "list", "table", "inet") else None
+        )
+
+        async def scenario() -> Any:
+            sandbox = rig.sandbox()
+            with pytest.raises(StartFailed, match="inner wall"):
+                await sandbox.start(start_for())
+            return sandbox.free
+
+        free = go(scenario)
+
+        assert rig.incus.instances == {} and free == 1
+        assert not rig.incus.controls
+        assert not list((root / "jobs").glob("job-*"))
+
+
+# #1007-T03
+def test_the_inner_wall_is_read_back_from_a_after_both_instances_are_ready() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        async def scenario() -> Any:
+            worker = await started(rig)
+            finish_control(rig)
+            await worker.wait()
+
+        go(scenario)
+
+        calls = rig.incus.calls
+        listed = next(
+            n
+            for n, c in enumerate(calls)
+            if c[0] == "exec" and c[2:6] == ("nft", "list", "table", "inet")
+        )
+        assert "-a-" in calls[listed][1] and calls[listed][6] == "cr_inner"
+        # After Docker answered in B, before the image check and Control.
+        b_ready = max(
+            n for n, c in enumerate(calls) if c[0] == "exec" and "-b-" in c[1] and c[2] == "docker"
+        )
+        image_check = next(n for n, c in enumerate(calls) if c[2:4] == ("docker", "image"))
+        assert b_ready < listed < image_check
 
 
 # #1007-T01
@@ -453,22 +608,30 @@ def test_a_wall_that_refuses_leaves_the_nic_in_place_and_refuses() -> None:
 
 
 # #1007-T02
-def test_a_nic_that_cannot_be_unplugged_is_a_refusal_not_an_ack() -> None:
+def test_a_nic_that_cannot_be_unplugged_is_a_refusal_and_the_launcher_ends_the_job_itself() -> None:
+    """B would keep its way to the host: the launcher does not wait for a Worker to end the job. It
+    kills Control, `wait()` returns a stopped job and both instances are deleted."""
     with short_directory() as root:
         rig = Rig(root)
 
         async def scenario() -> Any:
-            worker = await started(rig)
+            sandbox = rig.sandbox()
+            worker = await sandbox.start(start_for())
             socket = next(iter(root.glob("jobs/job-*/ctl.sock")))
             rig.incus.fail["remove_device"] = IncusError("config device remove", "gone")
+            waiting = asyncio.ensure_future(worker.wait())
             reply = await ask(socket, narrow_request(RULE, "api.example.com", TOKEN))
-            finish_control(rig)
-            await worker.wait()
-            return reply
+            # Nobody finishes Control: the launcher's own kill is what ends the job.
+            outcome = await asyncio.wait_for(waiting, 5)
+            return reply, outcome, sandbox.free
 
-        reply = go(scenario)
+        reply, outcome, free = go(scenario)
 
         assert reply["type"] == "refused" and reply["reason"] == "unavailable"
+        assert rig.incus.controls[-1].killed
+        assert outcome.exit_code == EXIT_KILLED and "could not be unplugged" in outcome.log_tail
+        assert rig.incus.instances == {} and free == 1
+        assert not list((root / "jobs").glob("job-*"))
 
 
 # #1007-T02
@@ -606,11 +769,14 @@ def test_a_second_dispatcher_on_the_same_state_directory_refuses_to_start_and_to
 def test_setup_names_what_the_machine_lacks() -> None:
     with short_directory() as root:
         rig = Rig(root, slots=2)
-        rig.incus.networks.discard("cr-in1")
+        missing = rig.settings.inner_network(1)
+        rig.incus.networks.discard(missing)
         rig.incus.images.clear()
 
         async def scenario() -> None:
-            with pytest.raises(IncusNotReady, match=r"image code-reviewer-golden.*network cr-in1"):
+            with pytest.raises(
+                IncusNotReady, match=rf"image code-reviewer-golden.*network {missing}"
+            ):
                 await rig.sandbox().setup()
 
         go(scenario)

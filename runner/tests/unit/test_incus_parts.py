@@ -8,8 +8,10 @@ import asyncio
 import io
 import ipaddress
 import json
+import re
 from collections import Counter
 from collections.abc import Callable, Coroutine
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,8 +26,10 @@ from code_reviewer_runner.factory_runner.firecracker.control_run import (
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import ProxyOuterWall, SlotAddresses
 from code_reviewer_runner.factory_runner.incus.control_run import build_control, unix_arguments
+from code_reviewer_runner.factory_runner.incus.launcher import IncusNotReady
 from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
 from code_reviewer_runner.factory_runner.incus.provision import (
+    ProvisionError,
     ensure_objects,
     missing_objects,
     remove_objects,
@@ -33,6 +37,7 @@ from code_reviewer_runner.factory_runner.incus.provision import (
 from code_reviewer_runner.factory_runner.incus.settings import (
     IncusSettings,
     SettingsError,
+    owner_id,
     settings_from_environment,
 )
 from code_reviewer_runner.factory_runner.incus.slots import (
@@ -156,8 +161,33 @@ def test_the_settings_come_from_the_environment_the_limits_and_the_workers_timeo
     assert settings.slots == 3 and settings.disk_gib == 20 and settings.vcpus == 4
     assert settings.job_timeout_seconds == 900 and settings.outer_wall is OuterWallMode.PROXY
     assert settings.memory_mib == 4 * 2048
-    assert settings.instance_a("0-ab") == "cr1007-a-0-ab"
-    assert settings.outer_network(2) == "cr1007-out2" and settings.inner_network(2) == "cr1007-in2"
+    owner = settings.owner
+    assert settings.instance_a("0-ab") == f"cr1007-{owner}-a-0-ab"
+    assert settings.instance_b("0-ab") == f"cr1007-{owner}-b-0-ab"
+    assert settings.outer_network(2) == f"cr1007-{owner}-o2"
+    assert settings.inner_network(2) == f"cr1007-{owner}-i2"
+
+
+def test_the_owner_is_the_state_directory_of_a_user_and_is_in_every_name() -> None:
+    first = IncusSettings(pool="p", image_id=IMAGE_ID, state_dir=Path("/var/lib/a"))
+    again = IncusSettings(pool="p", image_id=IMAGE_ID, state_dir=Path("/var/lib/a/"))
+    other = IncusSettings(pool="p", image_id=IMAGE_ID, state_dir=Path("/home/vincent/state"))
+
+    assert first.owner == again.owner and first.owner != other.owner
+    assert re.fullmatch(r"[0-9a-f]{4}", first.owner)
+    # The same state directory under another user is another owner.
+    assert owner_id(Path("/var/lib/a"), uid=1006) != owner_id(Path("/var/lib/a"), uid=1007)
+    for name in (first.instance_a("0-x"), first.outer_network(0), first.inner_network(0)):
+        assert first.owner in name
+
+
+def test_a_prefix_whose_network_names_would_not_fit_an_interface_name_is_refused() -> None:
+    # `<prefix>-<owner>-o<N>` is a Linux interface name: 15 characters at most.
+    longest = IncusSettings(pool="p", image_id=IMAGE_ID, prefix="abcdefgh", slots=10).validated
+    with pytest.raises(SettingsError, match="prefix"):
+        longest()
+    fits = IncusSettings(pool="p", image_id=IMAGE_ID, prefix="cr1007", slots=2).validated()
+    assert len(fits.outer_network(1)) <= 15
 
 
 @pytest.mark.parametrize(
@@ -347,6 +377,8 @@ def test_the_objects_of_every_slot_are_made_once_and_only_what_is_missing() -> N
     with short_directory() as root:
         rig = Rig(root, slots=2)
         rig.incus.networks.clear()
+        rig.incus.network_configs.clear()
+        rig.incus.acls.clear()
 
         async def scenario() -> tuple[list[str], list[str], Any]:
             first = await ensure_objects(rig.incus, rig.settings)
@@ -355,18 +387,19 @@ def test_the_objects_of_every_slot_are_made_once_and_only_what_is_missing() -> N
 
         first, second, lacking = go(scenario)
 
+        names = rig.settings
         assert sorted(first) == sorted(
             [
-                "acl cr-out0",
-                "network cr-out0",
-                "network cr-in0",
-                "acl cr-out1",
-                "network cr-out1",
-                "network cr-in1",
+                f"acl {names.outer_network(0)}",
+                f"network {names.outer_network(0)}",
+                f"network {names.inner_network(0)}",
+                f"acl {names.outer_network(1)}",
+                f"network {names.outer_network(1)}",
+                f"network {names.inner_network(1)}",
             ]
         )
         assert second == [] and not lacking
-        (rule,) = rig.incus.acls["cr-out0"]
+        (rule,) = rig.incus.acls[names.outer_network(0)]
         assert rule["destination"] == "10.99.0.1/32" and rule["destination_port"] == "3128"
         assert rule["action"] == "allow" and rule["protocol"] == "tcp"
 
@@ -383,21 +416,140 @@ def test_removing_the_objects_touches_the_prefixs_networks_and_acls_and_nothing_
 
         removed = go(scenario)
 
-        assert sorted(removed) == ["acl cr-out0", "network cr-in0", "network cr-out0"]
+        outer, inner = rig.settings.outer_network(0), rig.settings.inner_network(0)
+        assert sorted(removed) == sorted([f"acl {outer}", f"network {inner}", f"network {outer}"])
         assert rig.incus.networks == {"incusbr0", "docker0"} and "someone-elses" in rig.incus.acls
         deleted = [call[1] for call in rig.incus.calls if call[0].startswith("delete_")]
-        assert set(deleted) == {"cr-out0", "cr-in0"}
+        assert set(deleted) == {outer, inner}
 
 
 def test_missing_objects_are_named() -> None:
-    incus = FakeIncus(slots=1)
-    incus.pools.clear()
-    incus.networks.discard("cr-in0")
     settings = IncusSettings(pool="pool", image_id=IMAGE_ID)
+    incus = FakeIncus(settings)
+    incus.pools.clear()
+    incus.networks.discard(settings.inner_network(0))
 
     lacking = go(lambda: missing_objects(incus, settings))
 
-    assert lacking.items == ("storage pool pool", "network cr-in0")
+    assert lacking.items == ("storage pool pool", f"network {settings.inner_network(0)}")
+
+
+# -- objects that are there with another configuration ---
+
+
+def _widen_acl(incus: FakeIncus, name: str) -> None:
+    incus.acls[name] = [{**incus.acls[name][0], "destination_port": "22"}]
+
+
+def _extra_rule(incus: FakeIncus, name: str) -> None:
+    incus.acls[name] = [*incus.acls[name], {"action": "allow", "protocol": "tcp"}]
+
+
+MISMATCHES: list[tuple[str, Callable[[FakeIncus, IncusSettings], object], str]] = [
+    (
+        "inner ipv4 address",
+        lambda i, s: i.network_configs[s.inner_network(0)].update({"ipv4.address": "10.5.0.1/24"}),
+        r"network \S+-i0: ipv4.address is '10.5.0.1/24', expected 'none'",
+    ),
+    (
+        "inner ipv6 address unset",
+        lambda i, s: i.network_configs[s.inner_network(0)].pop("ipv6.address"),
+        r"network \S+-i0: ipv6.address is not set, expected 'none'",
+    ),
+    (
+        "outer acls",
+        lambda i, s: i.network_configs[s.outer_network(0)].update({"security.acls": "other"}),
+        r"network \S+-o0: security.acls is 'other'",
+    ),
+    (
+        "outer nat",
+        lambda i, s: i.network_configs[s.outer_network(0)].update({"ipv4.nat": "true"}),
+        r"ipv4.nat is 'true', expected 'false'",
+    ),
+    (
+        "outer routing",
+        lambda i, s: i.network_configs[s.outer_network(0)].update({"ipv4.routing": "true"}),
+        r"ipv4.routing is 'true', expected 'false'",
+    ),
+    (
+        "outer dhcp",
+        lambda i, s: i.network_configs[s.outer_network(0)].update({"ipv4.dhcp": "true"}),
+        r"ipv4.dhcp is 'true', expected 'false'",
+    ),
+    (
+        "outer dns",
+        lambda i, s: i.network_configs[s.outer_network(0)].pop("raw.dnsmasq"),
+        r"raw.dnsmasq is not set, expected 'port=0'",
+    ),
+    (
+        "outer address",
+        lambda i, s: i.network_configs[s.outer_network(0)].update({"ipv4.address": "10.1.0.1/24"}),
+        r"ipv4.address is '10.1.0.1/24'",
+    ),
+    ("acl rule widened", lambda i, s: _widen_acl(i, s.outer_network(0)), r"acl \S+-o0: .*rule"),
+    ("acl extra rule", lambda i, s: _extra_rule(i, s.outer_network(0)), r"acl \S+-o0: .*rule"),
+    (
+        "not a bridge",
+        lambda i, s: i.network_types.update({s.inner_network(0): "macvlan"}),
+        r"network \S+-i0: type is 'macvlan', expected 'bridge'",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"), [(m[1], m[2]) for m in MISMATCHES], ids=[m[0] for m in MISMATCHES]
+)
+def test_a_bridge_or_acl_with_another_configuration_fails_setup_and_is_never_changed(
+    change: Callable[[FakeIncus, IncusSettings], object], problem: str
+) -> None:
+    from code_reviewer_runner.factory_runner.incus.provision import misconfigured_objects
+
+    with short_directory() as root:
+        rig = Rig(root)
+        change(rig.incus, rig.settings)
+
+        async def scenario() -> Any:
+            found = await misconfigured_objects(rig.incus, rig.settings)
+            with pytest.raises(IncusNotReady, match=problem):
+                await rig.sandbox().setup()
+            return found
+
+        found = go(scenario)
+
+        assert any(re.search(problem, line) for line in found)
+        # Not reconfigured, not deleted, not re-created: a foreign object is the owner's to fix.
+        assert not [c for c in rig.incus.calls if c[0].startswith(("create", "delete", "update"))]
+
+
+def test_the_machine_check_fails_naming_the_object_that_is_configured_otherwise() -> None:
+    with short_directory() as root:
+        incus = FakeIncus(pool="crpool")
+        env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
+
+        def client(each: IncusSettings) -> FakeIncus:
+            incus.provision(each)
+            incus.network_configs[each.outer_network(0)]["ipv4.nat"] = "true"
+            return incus
+
+        prepared = prepare_incus(runner_config(), env, client=client)
+
+        failed = [check for check in prepared.selftest.checks if not check.ok]
+        assert [check.name for check in failed] == ["incus-objects"]
+        assert "ipv4.nat is 'true', expected 'false'" in failed[0].detail
+
+
+def test_provisioning_over_an_object_that_is_there_with_another_configuration_fails() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+        rig.incus.network_configs[rig.settings.outer_network(0)]["ipv4.nat"] = "true"
+
+        async def scenario() -> None:
+            with pytest.raises(ProvisionError, match=r"ipv4\.nat"):
+                await ensure_objects(rig.incus, rig.settings)
+
+        go(scenario)
+
+        assert rig.incus.network_configs[rig.settings.outer_network(0)]["ipv4.nat"] == "true"
 
 
 # -- what `run` checks, and the choice of the sandbox ---
@@ -416,7 +568,7 @@ def test_a_machine_that_has_everything_is_ready() -> None:
         incus = FakeIncus(pool="crpool")
         env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
 
-        prepared = prepare_incus(runner_config(), env, client=lambda settings: incus)
+        prepared = prepare_incus(runner_config(), env, client=incus.provision)
 
         names = {check.name: check.ok for check in prepared.selftest.checks}
         assert names["incus"] and names["incus-objects"] and names["state-dir"]
@@ -428,7 +580,7 @@ def test_a_machine_that_lacks_something_says_what() -> None:
         incus.images.clear()
         env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
 
-        prepared = prepare_incus(runner_config(), env, client=lambda settings: incus)
+        prepared = prepare_incus(runner_config(), env, client=incus.provision)
 
         failed = [check for check in prepared.selftest.checks if not check.ok]
         assert [check.name for check in failed] == ["incus-objects"]

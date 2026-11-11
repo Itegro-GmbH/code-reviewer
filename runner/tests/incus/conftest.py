@@ -65,7 +65,7 @@ def settings(machine: Machine) -> IncusSettings:
 def client(settings: IncusSettings) -> Iterator[StandInClient]:
     """The lane's client, with the bridges and ACLs of its slots made for the session and removed
     after it (only the lane's own prefix)."""
-    incus = StandInClient(call_seconds=settings.call_seconds)
+    incus = StandInClient(call_seconds=settings.call_seconds, state_dir=settings.state_dir)
     asyncio.run(ensure_objects(incus, settings))
     try:
         yield incus

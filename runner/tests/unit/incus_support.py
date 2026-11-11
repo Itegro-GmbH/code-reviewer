@@ -14,13 +14,22 @@ from typing import Any
 
 from code_reviewer_runner.factory_runner.firecracker.wire import Refusal, encode_frame, read_frame
 from code_reviewer_runner.factory_runner.incus.client import (
+    AclInfo,
     ExecResult,
     IncusError,
     InstanceInfo,
     InstanceSpec,
+    NetworkInfo,
 )
 from code_reviewer_runner.factory_runner.incus.launcher import IncusSandbox
+from code_reviewer_runner.factory_runner.incus.provision import (
+    INNER_NETWORK_CONFIG,
+    outer_acl_rules,
+    outer_network_config,
+)
 from code_reviewer_runner.factory_runner.incus.settings import IncusSettings
+from code_reviewer_runner.factory_runner.incus.slots import IncusSlot
+from code_reviewer_runner.factory_runner.incus.walls import INNER_WALL_PATH
 from code_reviewer_runner.factory_runner.sandbox import WorkerStart
 from code_reviewer_runner.job_loop.local_credential import LocalCredential
 
@@ -90,20 +99,33 @@ class FakeIncus:
     `fail` makes an operation raise; `responder` answers a command in an instance (None: the
     default, which makes the instance look healthy)."""
 
-    def __init__(self, *, slots: int = 1, prefix: str = "cr", pool: str = "pool") -> None:
+    def __init__(self, settings: IncusSettings | None = None, *, pool: str = "pool") -> None:
+        settings = settings or IncusSettings(pool=pool, image_id=IMAGE_ID)
         self.instances: dict[str, FakeInstance] = {}
         self.foreign: dict[str, InstanceInfo] = {}
-        self.pools = {pool}
+        self.pools = {settings.pool}
         self.images = {"code-reviewer-golden"}
         self.networks: set[str] = set()
+        self.network_configs: dict[str, dict[str, str]] = {}
+        self.network_types: dict[str, str] = {}
         self.acls: dict[str, list[Mapping[str, str]]] = {}
         self.calls: list[tuple[str, ...]] = []
         self.fail: dict[str, IncusError] = {}
         self.responder: Responder | None = None
         self.controls: list[FakeExec] = []
         self.control_created = asyncio.Event()
-        for index in range(slots):
-            self.networks |= {f"{prefix}-out{index}", f"{prefix}-in{index}"}
+        self.provision(settings)
+
+    def provision(self, settings: IncusSettings) -> "FakeIncus":
+        """The bridges and ACLs of the settings' slots, as `provision.py` makes them."""
+        for index in range(settings.slots):
+            slot = IncusSlot(index, settings.slot_network)
+            outer, inner = settings.outer_network(index), settings.inner_network(index)
+            self.networks |= {outer, inner}
+            self.network_configs[outer] = dict(outer_network_config(slot, outer))
+            self.network_configs[inner] = dict(INNER_NETWORK_CONFIG)
+            self.acls[outer] = list(outer_acl_rules(slot))
+        return self
 
     def _note(self, *call: str) -> None:
         self.calls.append(call)
@@ -126,16 +148,30 @@ class FakeIncus:
     async def network_exists(self, name: str) -> bool:
         return name in self.networks
 
+    async def network_info(self, name: str) -> NetworkInfo | None:
+        if name not in self.networks:
+            return None
+        return NetworkInfo(
+            self.network_types.get(name, "bridge"), dict(self.network_configs.get(name, {}))
+        )
+
     async def create_network(self, name: str, config: Mapping[str, str]) -> None:
         self._note("create_network", name)
         self.networks.add(name)
+        self.network_configs[name] = dict(config)
 
     async def delete_network(self, name: str) -> None:
         self._note("delete_network", name)
         self.networks.discard(name)
+        self.network_configs.pop(name, None)
 
     async def acl_exists(self, name: str) -> bool:
         return name in self.acls
+
+    async def acl_info(self, name: str) -> AclInfo | None:
+        if name not in self.acls:
+            return None
+        return AclInfo(ingress=(), egress=tuple(self.acls[name]))
 
     async def create_acl(self, name: str, egress: Sequence[Mapping[str, str]]) -> None:
         self._note("create_acl", name)
@@ -193,6 +229,12 @@ class FakeIncus:
             answer = self.responder(name, argv)
             if answer is not None:
                 return _Done(answer)
+        if argv[:4] == ("nft", "list", "table", "inet"):
+            # What `nft -f` loaded (the real listing leaves out the comments and says the priority
+            # in words; the rules are the same).
+            return _Done(
+                ExecResult(0, self.instances[name].files.get(INNER_WALL_PATH, b"").decode())
+            )
         if argv[:3] == ("ip", "-4", "-o"):
             # What systemd-networkd would have applied from the files pushed before the start.
             return _Done(ExecResult(0, _addresses_of(self.instances[name])))
@@ -261,7 +303,7 @@ class Rig:
         }
         values.update(settings)
         self.settings = IncusSettings(**values)
-        self.incus = FakeIncus(slots=self.settings.slots, prefix=self.settings.prefix)
+        self.incus = FakeIncus(self.settings)
         self.wall = RecordingWall(sink=self.incus.calls)
 
     def sandbox(self, **changes: Any) -> IncusSandbox:

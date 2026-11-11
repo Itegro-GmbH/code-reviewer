@@ -3,11 +3,14 @@
 """What the Incus launcher is told (#1007): which pool, image and names it uses, how big the two
 instances of a job are, how many jobs run at once and how long one may take.
 
-Everything the launcher makes is named after `prefix` (default `cr`): instances `<prefix>-a-<id>`
-and `<prefix>-b-<id>`, the networks and ACLs `<prefix>-out<N>` and `<prefix>-in<N>` of slot N. The
-launcher touches only objects of that name and only instances that carry its mark
-(`user.cr.job`): never the `default` pool or profile, `incusbr0`, or an instance, network or
-profile it did not make.
+Everything the launcher makes is named after `prefix` (default `cr`) and the **owner**, a short id
+of the user and the state directory that run it (`owner_id`): instances `<prefix>-<owner>-a-<id>`
+and `<prefix>-<owner>-b-<id>`, the networks and ACLs `<prefix>-<owner>-o<N>` and
+`<prefix>-<owner>-i<N>` of slot N (a network's name is an interface name: 15 characters at most).
+The owner is also in the mark of every instance (`user.cr.owner`). Two dispatchers on one Incus
+daemon (two users of `incus-admin`) therefore never see each other's objects as their own. The
+launcher touches only objects of that name **and** mark: never the `default` pool or profile,
+`incusbr0`, or an instance, network or profile it did not make, nor another owner's.
 
 Files under the state directory (`FACTORY_RUNNER_VM_STATE_DIR`, `/var/lib/code-reviewer`):
 
@@ -17,7 +20,9 @@ Files under the state directory (`FACTORY_RUNNER_VM_STATE_DIR`, `/var/lib/code-r
                                         `/tmp`, which its unit may hide)
 """
 
+import hashlib
 import ipaddress
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -50,12 +55,23 @@ PREPARATION_SECONDS: Final = 300
 READY_COMMAND: Final = ("docker", "info")
 
 VARIABLE_PREFIX: Final = "FACTORY_RUNNER_"
+OWNER_LENGTH: Final = 4
+# A bridge's name is a Linux interface name.
+MAX_NETWORK_NAME: Final = 15
 _PREFIX = re.compile(r"[a-z][a-z0-9]{0,15}")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 
 
 class SettingsError(Exception):
     """A setting is missing or unusable. The message names it, never a value."""
+
+
+def owner_id(state_dir: Path, uid: int | None = None) -> str:
+    """Who runs this dispatcher on a daemon that other dispatchers use too: a hash of the user and
+    the state directory (the unit the lock protects). Four hex digits: a name, not a secret."""
+    who = os.getuid() if uid is None else uid
+    digest = hashlib.sha256(f"{who}\0{os.path.abspath(state_dir)}".encode()).hexdigest()
+    return digest[:OWNER_LENGTH]
 
 
 @dataclass(frozen=True)
@@ -111,17 +127,26 @@ class IncusSettings:
         """The hard limit of a job: the job's timeout, Control's stop timeout, the preparation."""
         return self.job_timeout_seconds + stop_timeout_seconds + self.preparation_seconds
 
+    @property
+    def owner(self) -> str:
+        return owner_id(self.state_dir)
+
+    @property
+    def name_prefix(self) -> str:
+        """What every instance, network and ACL of this dispatcher starts with."""
+        return f"{self.prefix}-{self.owner}"
+
     def instance_a(self, job: str) -> str:
-        return f"{self.prefix}-a-{job}"
+        return f"{self.name_prefix}-a-{job}"
 
     def instance_b(self, job: str) -> str:
-        return f"{self.prefix}-b-{job}"
+        return f"{self.name_prefix}-b-{job}"
 
     def outer_network(self, slot: int) -> str:
-        return f"{self.prefix}-out{slot}"
+        return f"{self.name_prefix}-o{slot}"
 
     def inner_network(self, slot: int) -> str:
-        return f"{self.prefix}-in{slot}"
+        return f"{self.name_prefix}-i{slot}"
 
     def validated(self) -> "IncusSettings":
         if not _PREFIX.fullmatch(self.prefix):
@@ -132,6 +157,12 @@ class IncusSettings:
             raise SettingsError("image: not an alias or fingerprint of an Incus image")
         if not 1 <= self.slots <= MAX_SLOTS:
             raise SettingsError(f"slots: 1 to {MAX_SLOTS}")
+        longest = self.outer_network(self.slots - 1)
+        if len(longest) > MAX_NETWORK_NAME:
+            raise SettingsError(
+                f"prefix: too long, a network's name ({longest}) is at most "
+                f"{MAX_NETWORK_NAME} characters"
+            )
         if self.slot_network.num_addresses < self.slots * 8:
             raise SettingsError("slotNetwork: too small for the number of slots")
         if self.vcpus not in VCPU_SIZES:

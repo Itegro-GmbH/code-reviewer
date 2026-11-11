@@ -29,7 +29,7 @@ from code_reviewer_runner.factory_runner.selftest import (
 from code_reviewer_runner.job_loop.settings import worker_settings_from_environment
 
 from .client import CliIncusClient, IncusClient, IncusError
-from .provision import missing_objects
+from .provision import misconfigured_objects, missing_objects
 from .settings import IncusSettings, SettingsError, settings_from_environment
 
 RUNTIME = "incus"
@@ -39,7 +39,11 @@ ClientFactory = Callable[[IncusSettings], IncusClient]
 
 
 def _real_client(settings: IncusSettings) -> IncusClient:
-    return CliIncusClient(settings.incus, call_seconds=min(settings.call_seconds, 30.0))
+    return CliIncusClient(
+        settings.incus,
+        call_seconds=min(settings.call_seconds, 30.0),
+        state_dir=settings.state_dir,
+    )
 
 
 async def _host_checks(settings: IncusSettings, client: IncusClient) -> tuple[Check, ...]:
@@ -61,12 +65,15 @@ async def _host_checks(settings: IncusSettings, client: IncusClient) -> tuple[Ch
     check("incus", True, "")
     try:
         lacking = await missing_objects(client, settings)
+        wrong = await misconfigured_objects(client, settings)
     except IncusError as error:
         check("incus-objects", False, f"Incus could not be asked ({error.detail})")
     else:
-        check(
-            "incus-objects", not lacking, f"missing: {', '.join(lacking.items)} (made at install)"
-        )
+        problems = [
+            *([f"missing: {', '.join(lacking.items)} (made at install)"] if lacking else []),
+            *([f"not as the launcher needs them: {'; '.join(wrong)}"] if wrong else []),
+        ]
+        check("incus-objects", not problems, " | ".join(problems))
     writable = os.access(settings.state_dir, os.W_OK)
     check("state-dir", writable, f"{settings.state_dir} is missing or not writable")
     return tuple(checks)
