@@ -2364,7 +2364,7 @@ verified the table, never assumed.
   code does not make), so the `narrow` of such a job is refused with the port in the log (`OuterRuleError`), not acknowledged with a rule
   the Worker cannot use. The port comes from the job's `appUrl` (the URL's own, else the scheme's); a customer whose app is not on a web
   port needs a decision of its own, not a silent widening of the port rule (#994 wired the software in the VM to the proxy: the app's
-  calls now go through it, so the app must be on a web port; the launcher says so in its log at the start of such a job).
+  calls now go through it, so the app must be on a web port; with the proxy wall the launcher **refuses such a job before it takes a slot, a disk or a VMM** (`StartFailed`: the claim goes back, #999), instead of booting a VM that ends at its first call).
 * **DNS is the proxy's.** A guest asks for `CONNECT name:443` (or an absolute-form HTTP request) and the proxy looks the name up; the guest has
   no name server it can reach (UDP is dropped). The decision is **the network door's own code** (`implementer/netdoor/proxy.py`), so the two
   walls cannot drift: an IP address is never a name (`ip_literal`, in every spelling a resolver reads), only ports 80 and 443, the rule must
@@ -2403,9 +2403,9 @@ holds that). Code: [`outer_proxy.py`](../runner/src/code_reviewer_runner/outer_p
 |---|---|---|
 | Control's calls to the app (`HttpWorkerApi`) | the opener's one handler is the proxy (`job_loop/http.py`): `http` as an absolute-form request, `https` as `CONNECT`, **no bypass** (urllib's own handler skips a host the environment's `no_proxy` names, this one never does) | a refusal is a status the Worker API reads as a refusal, an `https` refusal and a proxy that is not there are `ApiUnavailable`; nothing dials the app |
 | `git` (the mirror's clone and fetch, the final push) | `http.proxy` in the one process's `GIT_CONFIG_*` (`git_process.token_environment`), beside the token header; `GIT_ALLOW_PROTOCOL` stays `https`; the closed environment has no `no_proxy` and no other proxy variable | git does not retry a refused tunnel directly; the proxy sees `CONNECT host:443` and never the token |
-| the model door's upstream (`HttpsUpstream`) | `CONNECT <name>:443` to the proxy, then TLS to the name through the tunnel (certificate and name verified as before); the door does no lookup and connects to no address of its own (the proxy decides every address with the same code) | a refusal is `address_refused` (403) or `unreachable`, a call that never left and sent no key; the door's **firewall** (`door_launcher.egress_rules`) lets it dial the proxy's address and port and nothing else (no DNS, no port 443, the model network shut) |
+| the model door's upstream (`HttpsUpstream`) | `CONNECT <name>:443` to the proxy, then TLS to the name through the tunnel (certificate and name verified as before); the door does no lookup and connects to no address of its own (the proxy decides every address with the same code) | a refusal is `address_refused` (403) or `unreachable`, a call that never left and sent no key (**a base URL that is an IP literal always fails this way**: the proxy never serves an address, so a provider reached by address, `https://203.0.113.9/v1`, does not work on a local machine; give it a name, which is what the catalog's own rule asks for too); the door's **firewall** (`door_launcher.egress_rules`) lets it dial the proxy's address and port and nothing else (no DNS, no port 443, the model network shut) |
 | the network door (agent → door → proxy) | after the door's rule and port decision it asks the proxy for `CONNECT <name>:<port>` and relays (plain `http://` too: a tunnel to port 80 and the request in origin form); an IP literal, a port other than 80 and 443 and a name outside the rule are refused by the door before the proxy is asked | a refusal or a missing proxy is the `502 upstream_failed` the agent gets for a host that does not answer; the door's firewall (`netdoor_launcher.egress_rules`) allows the proxy and drops the rest, the test network's seam included |
-| the Setup container (wide phase) | `HTTP_PROXY`, `HTTPS_PROXY` (and lower case) and a loopback `NO_PROXY` in its definition, so the script's package managers, `git`, `curl` and its Docker daemon (which reads them for pulls) go through the proxy, which applies the wide rule; the seal check allows exactly those variables | the VM's table for the Setup bridge (`setup_container.egress_rules`) lets it reach the proxy's address and port and **drops everything else** (no DNS, no other address, no other port): a tool that ignores the variables finds no way out |
+| the Setup container (wide phase) | `HTTP_PROXY`, `HTTPS_PROXY` (and lower case) and a loopback `NO_PROXY` in its definition, so the script's package managers, `git`, `curl` and its Docker daemon (which reads them for pulls) go through the proxy, which applies the wide rule; the seal check allows exactly those variables | the VM's table for the Setup bridge (`setup_container.egress_rules`) lets it reach the proxy's address and port and **drops everything else** (no DNS, no other address, no other port): a tool that ignores the variables finds no way out. **What the variables do not reach: a container the script starts itself** (`docker run`, `docker build`, a `RUN npm ci` of a Dockerfile). The Docker *client* gives a container the proxy variables only from its own config (`~/.docker/config.json`, `proxies`) or from the command line, so such a container has no proxy, the bridge's table drops its traffic, and its tool fails to connect. Pass them: `docker run -e HTTP_PROXY -e HTTPS_PROXY ...`, `docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY ...` (the script's environment holds them; an argument without a value takes the script's). Only the proxy's address is reachable from the bridge, so this is the whole recipe |
 
 The **inner wall is unchanged**: the agent still reaches only its doors, and the doors are the only things that dial for it. The network
 door's decision (rule, port, IP literal) is the same code in both walls, so the outer wall repeats it with the proxy's own lookup and
@@ -2461,13 +2461,88 @@ exercised by a packet; the lane says no more than that.
 
 **What the clients lane does not do.** It does not run a whole job: the outer wall's `narrow` is still the probe's, the clone is a
 `git ls-remote` of a public repository and not the Worker's clone of a customer's repository, and the Setup container and the agent are not
-started in Sysbox with the table loaded (their rules are held by unit tests against the fake daemon). A whole job needs an https git
-endpoint the Worker image trusts (a test CA in the lane's copy of the image or a public repository the lane may clone with a token it
-cannot have) and an app on a public name the proxy may dial; that is the follow-up #999.
+started in Sysbox with the table loaded. That is the whole-job lane below.
+
+### A whole job in the lane (#999)
+
+`tests/kvm/test_whole_job.py`, the `Whole-job lane` step (20 minutes at most) and the `Whole-job lane, the drop counters` step (always) of `.github/workflows/vm-artifacts.yml` (a real VM, the table loaded, `FACTORY_RUNNER_OUTER_WALL=proxy`).
+One real Implementer job, from the claim to the push:
+
+```
+ fake App ◀──claim (runner API, loopback)── the lane's dispatcher side ──start {http://app.lane.example.com, jobId, crj_}──▶ launcher ──▶ VM
+ fake App ◀──Worker API ◀─proxy◀── Control (Worker image) ── clone / push ──▶ proxy ──▶ https://git.lane.example.com/acme/widgets.git   (a git endpoint, TLS)
+                                    Setup container (python3, http_proxy) ─────▶ proxy ──▶ http://files.lane.example.com, http://mirror.lane.example.com
+                                    real `narrow` over vsock (VM's token): the job's rule replaces the wide rule
+                                    agent ─▶ network door ─▶ proxy ──▶ http://files.lane.example.com/agent          (after the narrowing)
+                                    model door ─(CONNECT)─▶ proxy ──▶ https://models.lane.example.com/v1            (a fake provider, TLS, scripted)
+```
+
+**What is real:** KVM, Firecracker, the kernel, vm-init, dockerd, Sysbox, the Worker image and the agent image, the vsock, the TAP, the nft table
+(rendered for the slots' network as the installer does, then loaded), the proxy wall of the launcher, the clone and the push of the git workspace, the
+reader, the Setup container under its table, the real `narrow` with the VM's token, the network door and the model door under their tables **in the guest's
+kernel**, and OpenCode in the agent's container. **What is a double:** the internet (below), the certificates (below), and the model (the scripted fake of
+`fakes/wire`, the one the Docker lane uses). No real network or model call is made.
+
+**The names, and why the wall is not weaker for them.** The fakes listen on the host's loopback behind **public-looking names** below
+`lane.example.com` (`example.com` is reserved: nothing below it resolves). The proxy refuses private addresses by design and has no test network
+(the door's `NETDOOR_TEST_PUBLIC_CIDR` seam is not used), so the lane gives `ProxyOuterWall` the two seams its unit tests use (`tests/kvm/lane_internet.py`):
+a resolver (a lane name answers a public-looking address, `151.101.1.x`; any other name is an error: no real DNS) and a connector (a connection to such an
+address and port is made to the fake's port on the loopback; any other address or port is refused). **The decision stays real:** the rule lists the name
+before anything is looked up, every address must be public, only 80 and 443, the connection goes to the address that was checked. The Worker's app URL is
+`http://app.lane.example.com` (port 80, a name), so the Worker's first call goes through the proxy under the wide rule, as on a customer's machine.
+
+**A certificate the Worker image trusts, and how it stays out of releases.** The Worker clones over https only (`GIT_ALLOW_PROTOCOL=https`, closed
+environment) and its model door verifies the provider's certificate, so the git endpoint and the provider need certificates the **image's** trust store
+holds. The lane chose a **lane-only copy of the Worker image** over a public repository (a public repository would need the token, which the lane must not
+have, and no provider has a public name the lane may call):
+
+1. the workflow makes a CA for this run (`runner/tests/kvm/lane_pki.py ca`): EC P-256, three days, and a **critical name constraint** that lets it sign for
+   DNS names `lane.example.com` and below and nothing else (the permitted subtree is that one domain; IPv4 `0.0.0.0/0` and IPv6 `::/0` are excluded, so it cannot sign an IP
+   address either, and no email or URI name is permitted); its key stays on the runner (`$VM_WORK/lane-pki`, mode 0600, never an artifact, never committed, `*.key` and `*.crt`
+   made here are not in the repository);
+2. the workflow derives `code-reviewer-worker:golden` from the release's image in the runner's Docker (`docker buildx build --builder default`; `USER 0:0`, the CA appended
+   to `/etc/ssl/certs/ca-certificates.crt`, the image's own `USER` back), under **the same tag**, and saves the images **a second time** (`images-lane.tar`) after the
+   release's own `images.tar`;
+3. the data disk recipe runs **a second time** on that archive (`data-lane-out/`: its own `dockerdata.ext4` and `images.json`, whose image id is the lane's);
+4. the whole-job lane starts its VMs from that disk (`KVM_VM_BASE_DISK`, `KVM_VM_IMAGES`) and nothing else does. The release's `data-out/` (the disk the manifest
+   describes, the signature, the published files) is the one made before the derivation and is never touched; `assemble.sh` reads it and the lane's directory never.
+
+The test CA is therefore in **no release image, disk or manifest**, and the lane's disk is deleted with the runner. If the derivation failed to take (the CA not
+in the bundle), the clone fails with a certificate error in the Worker's log and the lane fails; `tests/unit/test_whole_job_lane_support.py` holds the other
+half on this machine (a client that does not hold the CA does not trust the endpoint, a certificate of the CA for a name outside its domain is refused).
+
+**The job.** The contract's example job with the lane's repository (`https://git.lane.example.com/acme/widgets.git`, a bare repository served by
+`git http-backend` behind TLS and the token's header), the provider `lane-provider` (a provider of the catalog: the key goes to the entry's address, here
+`https://models.lane.example.com/v1`), and an environment: a setup script that fetches a file from a plain host and from a host the job's rule does not list, and
+a `list` rule with the git host and the files host. The scripted model uses what the setup left, fetches a file through its network door and commits both. The
+checks: the job is delivered `ok` with `pushed: true`; the branch on the lane's git endpoint is at the head commit and holds both files with the bytes the fake
+hosts served; the setup's request came **before** the narrowing was acknowledged and the agent's **after** it; the narrowing carried the job's rule and the provider's
+host; the proxy's record shows the app, the git host (clone and push), the provider and the files host allowed on 80 and 443 and the setup-only host allowed under the
+wide rule, and no address and no other port; the provider saw the real key; the Worker's report says the VM's policy was narrowed. The tree's file names are the commit the
+agent made, so the outer wall and the doors carried the whole path.
+
+**Fail closed, for a whole job.** A second job runs with the git host left without a name: the proxy cannot clone for it, the Worker ends the job `clone_failed`
+(a stable code) with nothing pushed, and the proxy's record shows no provider call. And the **negative side of every positive check** is the table's own counters:
+the workflow reads the drop counters of `code_reviewer_wall` (`nft -j list table`, as root) before and after the job and `tests/kvm/wall_counters.py none` fails
+the step when any drop rule counted a packet, except two rules that are IPv6 noise and never a client's traffic: "no IPv6" (the guest kernel may send a router
+solicitation whatever a client does; a client has no IPv6 route whether or not it is dropped) and "the host opens no connection to a VM" (the *host's* own packets toward
+the TAP: the first run showed ten of 88 bytes, the size of an IPv6 multicast listener report, at the interface's coming up; nothing a VM sends is counted in that chain). A client that dialled directly, fell back to the proxy and let the job pass would show in "everything else addressed to the host" or
+"a VM forwards to nothing". **The control** is the outer wall lane's own run: the same program, `wall_counters.py some`, requires its probes' direct dials to
+have moved a drop rule **other than those two** ("everything else addressed to the host", "a VM forwards to nothing", ...): the noise moves in every run, so a control
+that counted it would pass for a table that never counts a direct dial, and "nothing moved" would be the answer of a table that counts nothing.
+
+**The three in-VM rulesets** (the model door's, the network door's and the Setup bridge's with the proxy) are loaded for real by this job in the guest's kernel, and
+checked as files before it: `runner/tests/kvm/render_rulesets.py` writes them from the launchers' own `egress_rules` and the `In-VM rulesets (nft -c)` step runs
+`nft -c -f` on each, so a rule `nft` does not accept fails there and not on a customer's machine.
+
+**What it still does not prove.** The service loop of the local dispatcher (its configured URL is both the host's and the VM's, and the lane's name has no
+address on the host) is not run: the lane's side claims from the fake App over the runner API and starts the VM through the launcher, as the earlier lanes do
+(the loop is covered by the loopback tests of `test_factory_runner_loopback.py`). IPv6 has no control (above). A real GitHub, a real provider and a bare-metal
+machine are not exercised; the model's cost is the scripted usage.
 
 ### Not done here, follow-ups
 
-* **The software in the VM goes through the proxy** (#994, above). A whole job with the table loaded in the lane is #999.
+* **The software in the VM goes through the proxy** (#994, above). A whole job with the table loaded in the lane is in the lane since #999 (above).
 * The installer loads the table and makes the TAPs with their addresses (#982); the service cannot read nft state as a normal user, so it
   cannot check that the table is loaded (a machine without it has no outer wall: the install **fails** without it, and the unit's `ExecStartPre=+` fails the start of the service at every start without it). That is why
   `refuse` is the default: **the installer writes `FACTORY_RUNNER_OUTER_WALL=proxy` into the unit only after `nft list table inet code_reviewer_wall`

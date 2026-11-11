@@ -53,12 +53,25 @@ from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutc
 
 pytestmark = pytest.mark.unit
 
+# An app a customer's machine can have: a name on a web port (the proxy dials 80 and 443 only).
+WEB_APP = "http://app.example.com"
+
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
 VM_INIT = json.loads((CONTRACTS / "vm-init.v1.json").read_text())
 
 
 def go(scenario: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
     return asyncio.run(scenario())
+
+
+class NoWall:
+    """An outer wall that holds nothing: the tests here are about the launcher, not the proxy."""
+
+    async def admit(self, vm: Any) -> None: ...
+
+    async def narrow(self, vm: Any, message: Any) -> None: ...
+
+    async def forget(self, vm: Any) -> None: ...
 
 
 async def run_job(
@@ -140,14 +153,7 @@ def test_with_the_proxy_wall_the_start_names_the_proxy_of_the_slot_the_vm_runs_i
     with short_directory() as root:
         rig = Rig(root, outer_wall=OuterWallMode.PROXY, slots=slots)
 
-        class Wall:
-            async def admit(self, vm: Any) -> None: ...
-
-            async def narrow(self, vm: Any, message: Any) -> None: ...
-
-            async def forget(self, vm: Any) -> None: ...
-
-        go(lambda: run_job(rig, rig.sandbox(wall=Wall())))
+        go(lambda: run_job(rig, rig.sandbox(wall=NoWall()), app_url=WEB_APP))
 
         start = rig.seen()["start"]
         assert Draft202012Validator({"$ref": "#/$defs/StartRequest", **VM_INIT}).is_valid(start)  # pyright: ignore[reportUnknownMemberType]
@@ -163,20 +169,13 @@ def test_the_proxy_a_vm_gets_is_the_one_of_its_own_slot_not_slot_zero() -> None:
     with short_directory() as root:
         rig = Rig(root, outer_wall=OuterWallMode.PROXY, slots=2)
 
-        class Wall:
-            async def admit(self, vm: Any) -> None: ...
-
-            async def narrow(self, vm: Any, message: Any) -> None: ...
-
-            async def forget(self, vm: Any) -> None: ...
-
         rig.behavior(mode="good", run=1.5)
 
         async def scenario() -> dict[str, Any]:
-            sandbox = rig.sandbox(wall=Wall())
-            first = await sandbox.start(start_for(1))
+            sandbox = rig.sandbox(wall=NoWall())
+            first = await sandbox.start(start_for(1, app_url=WEB_APP))
             # Slot 0 is taken: the next job runs in slot 1 (172.31.0.4/30, its host side .5).
-            second = await sandbox.start(start_for(2))
+            second = await sandbox.start(start_for(2, app_url=WEB_APP))
             document: dict[str, Any] = rig.seen()["start"]
             await asyncio.gather(first.wait(), second.wait())
             return document
@@ -186,25 +185,50 @@ def test_the_proxy_a_vm_gets_is_the_one_of_its_own_slot_not_slot_zero() -> None:
         assert start["outerProxy"] == {"host": "172.31.0.5", "port": PROXY_PORT}
 
 
-# #994-T04
-def test_an_app_on_a_port_the_proxy_does_not_dial_is_said_at_the_start_not_only_at_narrow(
+# #999 (review of #994: refuse before the VM, do not warn and boot one)
+def test_an_app_on_a_port_the_proxy_does_not_dial_is_refused_before_a_slot_a_disk_or_a_vm_exists(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with short_directory() as root:
         rig = Rig(root, outer_wall=OuterWallMode.PROXY)
+        sandbox = rig.sandbox(wall=NoWall())
 
-        class Wall:
-            async def admit(self, vm: Any) -> None: ...
+        async def scenario() -> None:
+            with pytest.raises(StartFailed) as raised, caplog.at_level(logging.WARNING):
+                # `start_for` puts the app on port 8080.
+                await sandbox.start(start_for())
+            # A stable reason that names the port and the two that work, never a value of the job.
+            assert "port 8080" in str(raised.value) and "80 and 443" in str(raised.value)
+            assert CREDENTIAL not in str(raised.value)
 
-            async def narrow(self, vm: Any, message: Any) -> None: ...
+        go(scenario)
 
-            async def forget(self, vm: Any) -> None: ...
+        # The service logs only the exception's type, so the reason is logged where it is made:
+        # the port and the two that work, and nothing of the URL's secrets.
+        [refusal] = [r for r in caplog.records if "job refused before a VM exists" in r.message]
+        assert "port 8080" in refusal.getMessage() and "80 and 443" in refusal.getMessage()
+        assert CREDENTIAL not in caplog.text and "172.31.0.1" not in caplog.text
+        assert sandbox.free == sandbox.capacity
+        assert rig.vm_directories() == [] and rig.cgroups.created == []
+        assert not rig.behavior_file.with_suffix(".seen").exists(), "no VMM was ever started"
 
-        with caplog.at_level(logging.WARNING):
-            go(lambda: run_job(rig, rig.sandbox(wall=Wall())))
 
-        # `start_for` puts the app on port 8080.
-        assert "the app is on port 8080" in caplog.text and "does not dial" in caplog.text
+# #999: the ports the proxy dials, and any scheme's default, are not refused at the start
+@pytest.mark.parametrize(
+    "app_url",
+    ["http://app.example.com", "https://app.example.com", "http://app.example.com:80",
+     "https://app.example.com:443"],
+)  # fmt: skip
+def test_an_app_on_a_web_port_or_the_schemes_default_is_started_with_the_proxy_wall(
+    app_url: str,
+) -> None:
+    with short_directory() as root:
+        rig = Rig(root, outer_wall=OuterWallMode.PROXY)
+
+        outcome = go(lambda: run_job(rig, rig.sandbox(wall=NoWall()), app_url=app_url))
+
+        assert outcome.exit_code == 0
+        assert rig.seen()["start"]["job"]["appUrl"] == app_url
 
 
 # #994-T03

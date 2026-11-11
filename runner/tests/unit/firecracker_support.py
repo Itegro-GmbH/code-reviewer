@@ -27,9 +27,11 @@ IMAGE_ID = "sha256:" + "ab" * 32
 FAKE = Path(__file__).with_name("fake_firecracker.py")
 
 
-def start_for(number: int = 1, *, local: bool = False) -> WorkerStart:
+def start_for(
+    number: int = 1, *, local: bool = False, app_url: str = "http://172.31.0.1:8080"
+) -> WorkerStart:
     return WorkerStart(
-        "http://172.31.0.1:8080",
+        app_url,
         f"00000000-0000-4000-8000-{number:012d}",
         CREDENTIAL,
         LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", LOCAL_CREDENTIAL) if local else None,

@@ -122,7 +122,7 @@ jobs:
     name: "VM artifacts: root file system, data disk, smoke boot, manifest"
     needs: kernel
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:
@@ -135,6 +135,10 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install the dispatcher dependencies (the recipe, the boot, the manifest and the verifier are TypeScript)
         run: pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...
+      # The launcher lanes are Python, and so is the lane's test CA (below): the runner's dependencies first.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install the runner's dependencies (the launcher lanes are Python)
+        run: uv --directory runner sync --frozen
       - name: Work volume
         run: |
           sudo mkdir -p "$VM_WORK"
@@ -191,14 +195,43 @@ jobs:
           docker save "$WORKER_TAG" "$AGENT_TAG" --output "$VM_WORK/images.tar"
           docker image ls
           ls -l "$VM_WORK/images.tar"
+          # The whole-job lane's own copy of the Worker image (#999). A job clones over https and calls its provider over https, and the lane has
+          # neither a git host nor a provider on the internet: its fakes answer with certificates of a CA made in this run
+          # (runner/tests/kvm/lane_pki.py: one domain only, a critical name constraint), and ONLY this copy trusts it (the CA appended to the image's
+          # bundle). The release's image, its data disk and its manifest are the ones saved above and are never touched; the lane's copy goes to a
+          # data disk of its own (below), is never assembled and never published, and the CA's key lives in $VM_WORK of this run.
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/lane_pki.py ca "$VM_WORK/lane-pki"
+          lane_context="$VM_WORK/lane-image"
+          mkdir -p "$lane_context"
+          cp "$VM_WORK/lane-pki/lane-ca.crt" "$lane_context/lane-ca.crt"
+          worker_user="$(docker image inspect --format '{{.Config.User}}' "$WORKER_TAG")"
+          cat > "$lane_context/Dockerfile" <<DOCKERFILE
+          FROM $WORKER_TAG
+          USER 0:0
+          COPY lane-ca.crt /usr/local/share/ca-certificates/lane-ca.crt
+          RUN cat /usr/local/share/ca-certificates/lane-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+          USER $worker_user
+          DOCKERFILE
+          # The daemon's own builder: the base is the image just loaded into the daemon, which a builder container would not see.
+          # The same tag, so the VM's start names the same reference; the image id is the lane disk's own (its images.json).
+          docker buildx build --builder default --load --tag "$WORKER_TAG" "$lane_context"
+          docker save "$WORKER_TAG" "$AGENT_TAG" --output "$VM_WORK/images-lane.tar"
+          ls -l "$VM_WORK/images-lane.tar"
           # The runner's Docker is done: the disk is needed for the data image.
           docker rmi "$WORKER_TAG" "$AGENT_TAG" > /dev/null
+          docker image prune --force > /dev/null
           docker builder prune --all --force > /dev/null
       - name: Prepared Docker data disk (the images loaded into a guest's own Docker)
         run: |
           docker/vm/data/build.sh "$VM_WORK/images.tar" "$VM_WORK/kernel/vmlinux" "$VM_WORK/rootfs-out/rootfs.ext4" "$VM_WORK/dwork" "$VM_WORK/data-out"
           rm -f "$VM_WORK/images.tar"
           cat "$VM_WORK/data-out/images.json"
+      # The whole-job lane's data disk (#999): the same recipe on the lane's copy of the Worker image (the test CA in its bundle). Used by that lane only.
+      - name: Lane-only data disk (the Worker image with the lane's test CA, for the whole-job lane alone)
+        run: |
+          docker/vm/data/build.sh "$VM_WORK/images-lane.tar" "$VM_WORK/kernel/vmlinux" "$VM_WORK/rootfs-out/rootfs.ext4" "$VM_WORK/dwork-lane" "$VM_WORK/data-lane-out"
+          rm -f "$VM_WORK/images-lane.tar"
+          cat "$VM_WORK/data-lane-out/images.json"
       # T03: a job's VM, as the launcher makes it: a copy of the base grown to a quota, booted read-only from the root file system.
       - name: Smoke boot (dockerd ready within the budget, Sysbox, the images, the Worker's self-check)
         run: |
@@ -215,9 +248,6 @@ jobs:
       # listens on every address, so the Worker in the VM reaches it through the TAP, which the outer wall of #979 forbids (the VM reaches the host
       # only through the proxy), so this lane runs with the inner wall only (`inner-only`), an explicit choice of the launcher; the outer wall has
       # its own step below.
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: Install the runner's dependencies (the launcher lane is Python)
-        run: uv --directory runner sync --frozen
       - name: Launcher lane (T05, a real job in a VM; the wall clock; narrow over vsock; two slots; a crashed dispatcher's VM)
         run: |
           set -euo pipefail
@@ -239,7 +269,7 @@ jobs:
             --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
             --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
             --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
-            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm --ignore=tests/kvm/test_outer_wall.py --ignore=tests/kvm/test_clients_through_proxy.py -v -s -p no:cacheprovider
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm --ignore=tests/kvm/test_outer_wall.py --ignore=tests/kvm/test_clients_through_proxy.py --ignore=tests/kvm/test_whole_job.py -v -s -p no:cacheprovider
       # T01 and T02 (#979): the outer wall. The static nft table (docker/vm/host/outer-wall.nft) is checked as a file (`nft -c`), then a real VM runs the
       # lane's probe in Control's own container (tests/kvm/wall_probe.py: a job clones over https before it narrows, and no lane has a git host) twice.
       # First a CONTROL: no table, NAT on, so every target of T01 must be REACHED from the VM and the host's listeners must see the connection arrive.
@@ -290,7 +320,12 @@ jobs:
           }
           lane control control
           sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/wall-before.json" > /dev/null
           lane wall "not control"
+          # The control of the whole-job lane's negative proof (#999): the probes above dial the host, the LAN and the internet directly, and the
+          # table drops them, so its drop counters MUST have moved. A table whose counters never move would make "they did not move" worth nothing.
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/wall-after.json" > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/wall_counters.py some "$RUNNER_TEMP/wall-before.json" "$RUNNER_TEMP/wall-after.json"
       # T01 and T02 (#994): every client in the VM goes through the proxy. The table is loaded again (a no-op after the step above, and the one
       # thing that stops a direct connection), the launcher runs with the proxy wall (the start carries the slot's `outerProxy`, vm-init writes it
       # into Control's stdin), and a real VM runs tests/kvm/clients_probe.py in Control's own container: the product's own clients from the image
@@ -328,6 +363,71 @@ jobs:
             --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
             --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
             "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_clients_through_proxy.py --force-enable-socket -v -s -p no:cacheprovider
+      # The three rulesets the guest loads (the model door's, the network door's and the Setup bridge's, with the proxy), checked by `nft -c -f` on this
+      # runner's kernel (#999, the review of #994): nothing is loaded, a rule nft does not accept fails here and not on a customer's machine. The
+      # whole-job lane below loads them for real in the guest.
+      - name: In-VM rulesets (nft -c)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/render_rulesets.py "$RUNNER_TEMP/rulesets" | while read -r file; do
+            echo "nft -c -f $file"
+            sudo nft -c -f "$file"
+          done
+      # T01 to T05 (#999): a whole Implementer job in a VM with the outer wall's table loaded and `FACTORY_RUNNER_OUTER_WALL=proxy`. The local dispatcher's
+      # side claims from the fake App, the Worker fetches its job over the Worker API through the proxy, clones from a lane-local https git endpoint, runs
+      # a setup that reaches a public-looking host, gets the real `narrow`, the agent works behind the network door chained to the proxy and the model
+      # door reaches a fake provider through it, and the job pushes to the lane's git endpoint. The fakes are on this runner's loopback behind names
+      # below lane.example.com (the proxy gets a resolver and a connector of the lane: runner/tests/kvm/lane_internet.py); the Worker image is the
+      # lane's own copy with a test CA (built above, a data disk of its own). The table's drop counters are read before and after: a client that went
+      # round the proxy would be dropped and counted (the control is the outer wall lane above).
+      - name: Whole-job lane (T01 to T05 of #999: a whole job through the proxy, the table loaded)
+        # The run takes about two minutes; a Worker that hangs would otherwise hold the job until its own limit. The step is stopped here, and the
+        # next step (always) still reads and prints the counters.
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft list table inet code_reviewer_wall > /dev/null
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo iptables -C FORWARD -i 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -C FORWARD -o 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
+          sudo nft -f - <<'NAT'
+          table ip lanenat
+          delete table ip lanenat
+          table ip lanenat {
+            chain post {
+              type nat hook postrouting priority 100; policy accept;
+              ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+            }
+          }
+          NAT
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/job-before.json" > /dev/null
+          sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+            -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+            --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+            --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+            --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+            --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-lane-out/dockerdata.ext4" \
+            --setenv=KVM_VM_IMAGES="$VM_WORK/data-lane-out/images.json" \
+            --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+            --setenv=KVM_LANE_PKI="$VM_WORK/lane-pki" \
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_whole_job.py --force-enable-socket -v -s -p no:cacheprovider
+      # The negative side of the whole-job lane (#999): no drop counter moved while the job ran (the control is the outer wall lane). Its own step, and
+      # `always()`, so that a job that failed, hung or was stopped by the step's timeout still prints what the table counted; it is skipped only when the
+      # snapshot before the job was never taken.
+      - name: Whole-job lane, the drop counters (none moved)
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUNNER_TEMP/job-before.json" ]; then
+            echo "no snapshot before the whole-job lane: it did not start"
+            exit 0
+          fi
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/job-after.json" > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/wall_counters.py none "$RUNNER_TEMP/job-before.json" "$RUNNER_TEMP/job-after.json"
       # What the table did, for the log of a run (and of a failed one): the counters of each rule.
       - name: The outer wall's counters
         if: ${{ always() }}

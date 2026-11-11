@@ -140,10 +140,13 @@ EGRESS_RULES: Final = "; ".join(
 def egress_rules(outer_proxy: OuterProxy | None = None) -> str:
     """The door's table. With the host's outer-wall proxy (#994, a VM on a customer's machine) the
     door has **one** way out, a connection to that proxy's address and port, and nothing else: no
-    DNS (the proxy resolves), no port 443 of the internet, no private range (the proxy's own
-    address is in one, and is let through before anything else is looked at). A door whose proxy
-    refuses it fails; no rule lets it dial the provider directly. Without a proxy the table is
-    `EGRESS_RULES`, as hosted."""
+    DNS (the proxy resolves), no port 443 of the internet, no private range listed (the proxy's own
+    address is in one, so nothing is dropped by range: the last rule drops all that is not
+    accepted). The order is: loopback, replies to what the door started, a drop of the model
+    network, then the proxy's accept, then the drop of everything else. The proxy's accept is not
+    first, and it does not need to be: the model network is not the proxy's range. A door whose
+    proxy refuses it fails; no rule lets it dial the provider directly. Without a proxy the table
+    is `EGRESS_RULES`, as hosted."""
     if outer_proxy is None:
         return EGRESS_RULES
     return "; ".join(
