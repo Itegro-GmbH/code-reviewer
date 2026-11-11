@@ -174,7 +174,11 @@ def test_a_start_that_names_another_proxy_than_the_slots_gateway_is_reported_as_
 # #994-T03
 def test_the_probe_program_is_valid_python_and_decodes_what_it_encodes() -> None:
     config = clients_probe.lane_config("172.31.0.1")
-    compile(clients_probe.render(config), "<probe>", "exec")
+    rendered = clients_probe.render(config)
+    compile(rendered, "<probe>", "exec")
+    # One argument of Control's `docker run`: vm-init refuses a longer one, and the lane's first run
+    # found that out.
+    assert len(rendered) <= clients_probe.MAX_ARGUMENT_CHARACTERS, len(rendered)
     bits = "".join(
         "1" if clients_probe.EXPECTED[name] else "0" for name in clients_probe.LANE_CHECKS
     )

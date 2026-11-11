@@ -26,7 +26,9 @@ Outside a VM the same program runs against loopback stand-ins
 control instead of vsock and, for the proxy's address check, the loopback network. The lane's
 configuration is `lane_config`."""
 
+import base64
 import json
+import zlib
 from typing import Any, Final
 
 # The checks, in the order of the bits of the report. A bit is "this happened" (see `EXPECTED`).
@@ -105,9 +107,17 @@ def lane_config(gateway: str, expected_port: int = 3128) -> dict[str, Any]:
     }
 
 
+# The most characters one argument of Control's `docker run` may have (`vm-init`'s contract).
+MAX_ARGUMENT_CHARACTERS: Final = 4096
+
+
 def render(config: dict[str, Any]) -> str:
-    """The program, with `config` in it."""
-    return _SOURCE.replace("@CONFIG@", repr(json.dumps(config)))
+    """The program, with `config` in it, as the one argument of `python -c`. It is longer than an
+    argument of `docker run` may be (vm-init refuses more than 4096 characters), so it travels
+    compressed and decompresses itself."""
+    source = _SOURCE.replace("@CONFIG@", repr(json.dumps(config)))
+    packed = base64.b85encode(zlib.compress(source.encode(), 9)).decode()
+    return f"import base64,zlib;exec(zlib.decompress(base64.b85decode({packed!r})).decode())"
 
 
 def decode(host: str, checks: tuple[str, ...] = LANE_CHECKS) -> dict[str, bool] | None:
