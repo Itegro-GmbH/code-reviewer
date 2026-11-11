@@ -42,10 +42,11 @@ function lib(script: string, env: Record<string, string> = {}): Samples {
     ["-c", `. "${BENCH}lib.sh"\nBENCH_VARIANT=v\n${script}`],
     {
       env: {
+        NODE_ENV: "test",
         PATH: process.env.PATH ?? "",
         BENCH_OUT: out,
         ...env,
-      } as NodeJS.ProcessEnv,
+      },
       input: "data on stdin\n",
       encoding: "utf8",
     },
@@ -279,9 +280,10 @@ describe("the bench script", () => {
   it("refuses to run outside GitHub Actions: it installs a package and changes the firewall", () => {
     const run = spawnSync("bash", [`${BENCH}bench.sh`], {
       env: {
+        NODE_ENV: "test",
         PATH: process.env.PATH ?? "",
         BENCH_DIR: scratch(),
-      } as NodeJS.ProcessEnv,
+      },
       encoding: "utf8",
     });
 
