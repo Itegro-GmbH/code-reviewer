@@ -13,6 +13,7 @@ import pytest
 from code_reviewer_runner.vm_init import wire
 from vm_init_support import (
     BAD_STARTS,
+    OUTER_PROXY,
     CONTROL_TOKEN,
     CREDENTIAL,
     IMAGE_ID,
@@ -122,6 +123,26 @@ def test_the_stdin_document_is_one_json_line_with_the_local_credential_under_its
         "controlToken": CONTROL_TOKEN,
         "localCredential": {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": LOCAL_CREDENTIAL},
     }
+
+
+# #994-T03
+def test_a_start_without_a_proxy_is_read_as_before_and_its_stdin_has_no_proxy() -> None:
+    request = wire.parse_start(start_document())
+
+    assert request.outer_proxy is None
+    assert "outerProxy" not in json.loads(request.stdin_document())
+
+
+# #994-T01
+def test_the_outer_proxy_of_the_start_is_read_and_goes_to_controls_stdin_under_its_own_key() -> (
+    None
+):
+    request = wire.parse_start(start_document(outerProxy=OUTER_PROXY))
+
+    assert request.outer_proxy == wire.OuterProxy("172.31.0.5", 3128)
+    assert json.loads(request.stdin_document())["outerProxy"] == OUTER_PROXY
+    # Control's arguments are what the host rendered: the proxy is not added to them.
+    assert request.args == wire.parse_start(start_document()).args
 
 
 # #977-T04

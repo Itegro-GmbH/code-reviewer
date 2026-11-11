@@ -21,7 +21,7 @@
 // The start the Dispatcher sends over vsock (`buildStartRequest`) carries these arguments, never the credential in them: the job
 // document goes to Control's stdin in the guest, exactly as the hosted launcher writes it to the pipe of `docker run`.
 import type { ImplementerContainerSpec } from "../contracts/worker-container.ts";
-import type { StartRequest } from "../contracts/vm-init.ts";
+import type { OuterProxy, StartRequest } from "../contracts/vm-init.ts";
 import type { LaunchSpec } from "../core/types.ts";
 import {
   ContainerLauncher,
@@ -116,6 +116,12 @@ export interface StartRequestOptions extends LocalControlOptions {
   controlToken: string;
   /** The one credential that exists only on the dispatcher's device, if the job needs one (#980). */
   localCredential?: { name: string; value: string };
+  /**
+   * The outer wall's proxy of the VM's slot (#994): set when the dispatcher runs the proxy wall (the VM has no direct internet),
+   * absent otherwise (the inner wall only; hosted never has one). It travels in the start, never in the rendered arguments: the
+   * address is per slot, and the Control spec and its golden file are the same with and without the wall.
+   */
+  outerProxy?: OuterProxy;
 }
 
 /**
@@ -154,6 +160,9 @@ export async function buildStartRequest(
     ...(options.localCredential === undefined
       ? {}
       : { localCredential: options.localCredential }),
+    ...(options.outerProxy === undefined
+      ? {}
+      : { outerProxy: options.outerProxy }),
     image: {
       reference: options.imageReference ?? LOCAL_IMAGE_REFERENCE,
       id: options.image,
