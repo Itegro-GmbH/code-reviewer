@@ -385,7 +385,8 @@ jobs:
     needs: changes
     if: ${{ github.event_name == 'push' || github.base_ref == 'main' || needs.changes.outputs.runner == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 20: the unit tests alone take 9 minutes since the installer and its fake machine have 130 tests (#982); 15 was reached after them.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: runner
