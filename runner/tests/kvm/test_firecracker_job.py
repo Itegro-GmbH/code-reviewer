@@ -19,7 +19,7 @@ import pytest
 from kvm_support import HOST_ADDRESS, Machine
 
 from code_reviewer_runner.factory_runner.app_client import AppClient
-from code_reviewer_runner.factory_runner.firecracker.cgroups import CgroupTree, delegated_root
+from code_reviewer_runner.factory_runner.firecracker.cgroups import CgroupTree
 from code_reviewer_runner.factory_runner.firecracker.control_run import load_template
 from code_reviewer_runner.factory_runner.firecracker.launcher import (
     EXIT_KILLED,
@@ -92,6 +92,13 @@ def sandbox_for(machine: Machine, wall: RecordingWall, **changes: Any) -> Firecr
     return FirecrackerSandbox(settings, wall=wall)
 
 
+def delegated_tree(sandbox: FirecrackerSandbox) -> CgroupTree:
+    """The delegated cgroup the launcher works in. Not `delegated_root()` again: after `setup` this
+    process lives in the leaf below it."""
+    assert isinstance(sandbox.cgroups, CgroupTree)
+    return sandbox.cgroups
+
+
 def ran(machine: Machine) -> list[str]:
     return sorted(path.name for path in machine.settings.vms_dir.iterdir())
 
@@ -107,7 +114,7 @@ def test_a_real_job_runs_end_to_end_in_a_vm_and_leaves_nothing(
 
     async def scenario() -> tuple[WorkerOutcome, float]:
         await sandbox.setup()
-        watcher = CgroupWatcher(CgroupTree(sandbox.settings.cgroup_root or delegated_root()))
+        watcher = CgroupWatcher(delegated_tree(sandbox))
         watcher_box.append(watcher)
         watcher.start()
         began = time.monotonic()
@@ -145,7 +152,7 @@ def test_a_real_job_runs_end_to_end_in_a_vm_and_leaves_nothing(
     # And nothing is left: no directory, no disk, no cgroup, the slot is free.
     assert ran(machine) == []
     assert sandbox.free == sandbox.capacity
-    assert CgroupTree(sandbox.settings.cgroup_root or delegated_root()).vm_cgroups() == []
+    assert delegated_tree(sandbox).vm_cgroups() == []
 
 
 # #978-T09
@@ -176,4 +183,4 @@ def test_a_vm_that_outlives_its_wall_clock_is_killed_for_real(
     assert outcome.exit_code == EXIT_KILLED and "wall clock" in outcome.log_tail
     assert ran(machine) == []
     assert sandbox.free == sandbox.capacity
-    assert CgroupTree(sandbox.settings.cgroup_root or delegated_root()).vm_cgroups() == []
+    assert delegated_tree(sandbox).vm_cgroups() == []
