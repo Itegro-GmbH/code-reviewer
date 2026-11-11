@@ -10,13 +10,15 @@ derives it: `FROM` the release's Worker image, the CA appended to the image's bu
 made from that copy and used by this lane alone). The release's image and data disk are never
 touched; the CA's key is made in the run, lives on the runner and is gone with it.
 
-The CA may sign for **one domain only** (a critical name constraint): even in the lane's image it
-could not vouch for any other name. Nothing here is a secret worth keeping, and nothing here is ever
-committed (`*.key` and `*.pem` are ignored by the repository).
+The CA may sign for **one DNS domain only** (a critical name constraint: that domain is the one
+permitted subtree, every IPv4 and IPv6 address is excluded): even in the lane's image it could not
+vouch for any other name, nor for an IP address. Nothing here is a secret worth keeping, and
+nothing here is ever committed (`*.key` and `*.pem` are ignored by the repository).
 
     python lane_pki.py ca <directory>        makes `lane-ca.crt` and `lane-ca.key` there"""
 
 import datetime
+import ipaddress
 import ssl
 import sys
 from dataclasses import dataclass
@@ -83,7 +85,13 @@ def create_ca(directory: Path, domain: str = LANE_DOMAIN) -> Ca:
             critical=True,
         )
         .add_extension(
-            x509.NameConstraints(permitted_subtrees=[x509.DNSName(domain)], excluded_subtrees=None),
+            x509.NameConstraints(
+                permitted_subtrees=[x509.DNSName(domain)],
+                excluded_subtrees=[
+                    x509.IPAddress(ipaddress.ip_network("0.0.0.0/0")),
+                    x509.IPAddress(ipaddress.ip_network("::/0")),
+                ],
+            ),
             critical=True,
         )
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)

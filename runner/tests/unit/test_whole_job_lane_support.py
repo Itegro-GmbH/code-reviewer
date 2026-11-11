@@ -12,6 +12,8 @@ What is not here, and only the lane proves: the Worker image trusting the CA, th
 the three rulesets in it, Sysbox, the agent."""
 
 import asyncio
+import datetime
+import ipaddress
 import json
 import os
 import socket
@@ -26,6 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from fakes.wire.formats import Turn
@@ -217,6 +223,38 @@ def test_the_lanes_job_carries_no_address_and_every_host_of_it_is_below_the_cas_
     assert "151.101" not in text and "127.0.0.1" not in text
 
 
+def handshake(server_context: ssl.SSLContext, ca: lane_pki.Ca, name: str) -> str:
+    """One TLS handshake on the loopback, a client that trusts only the CA and verifies `name`;
+    "ok", or what the verification said."""
+    client = ssl.create_default_context(cafile=str(ca.certificate_path))
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve() -> None:
+        try:
+            connection, _ = listener.accept()
+            with server_context.wrap_socket(connection, server_side=True):
+                pass
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        address = ("127.0.0.1", listener.getsockname()[1])
+        with (
+            socket.create_connection(address, 10) as raw_,
+            client.wrap_socket(raw_, server_hostname=name),
+        ):
+            return "ok"
+    except ssl.SSLCertVerificationError as error:
+        return error.verify_message
+    finally:
+        thread.join(5)
+        listener.close()
+
+
 # #999-T02 (the test CA vouches for one domain and nothing else)
 def test_a_certificate_of_the_ca_is_good_for_a_lane_name_and_for_no_other_name(
     tmp_path: Path,
@@ -224,41 +262,66 @@ def test_a_certificate_of_the_ca_is_good_for_a_lane_name_and_for_no_other_name(
     ca = lane_pki.create_ca(tmp_path / "pki")
     good = lane_pki.server_context(ca, [GIT_HOST], tmp_path / "good")
     elsewhere = lane_pki.server_context(ca, ["github.com"], tmp_path / "elsewhere")
-    client = ssl.create_default_context(cafile=str(ca.certificate_path))
 
-    def handshake(server_context: ssl.SSLContext, name: str) -> str:
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-
-        def serve() -> None:
-            try:
-                connection, _ = listener.accept()
-                with server_context.wrap_socket(connection, server_side=True):
-                    pass
-            except OSError:
-                pass
-
-        thread = threading.Thread(target=serve, daemon=True)
-        thread.start()
-        try:
-            address = ("127.0.0.1", listener.getsockname()[1])
-            with (
-                socket.create_connection(address, 10) as raw_,
-                client.wrap_socket(raw_, server_hostname=name),
-            ):
-                return "ok"
-        except ssl.SSLCertVerificationError as error:
-            return error.verify_message
-        finally:
-            thread.join(5)
-            listener.close()
-
-    assert handshake(good, GIT_HOST) == "ok"
-    assert handshake(good, "git.other.example.org") != "ok", "the name does not match"
+    assert handshake(good, ca, GIT_HOST) == "ok"
+    assert handshake(good, ca, "git.other.example.org") != "ok", "the name does not match"
     # A certificate of the CA for a name outside its domain is refused by the constraint, even
     # though the name on the certificate is the name asked for.
-    assert "permitted" in handshake(elsewhere, "github.com")
+    assert "permitted" in handshake(elsewhere, ca, "github.com")
+
+
+def test_the_ca_cannot_sign_an_ip_address_either_so_a_leaf_with_one_fails_verification(
+    tmp_path: Path,
+) -> None:
+    ca = lane_pki.create_ca(tmp_path / "pki")
+    key = ec.generate_private_key(ec.SECP256R1())
+    begin = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
+    # A leaf the CA signs for the loopback address (and for a lane name, which the CA may sign).
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, GIT_HOST)]))
+        .issuer_name(ca.certificate.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(begin)
+        .not_valid_after(begin + datetime.timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName(GIT_HOST), x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca.key.public_key()),
+            critical=False,
+        )
+        .sign(ca.key, hashes.SHA256())
+    )
+    chain, private = tmp_path / "ip.crt", tmp_path / "ip.key"
+    chain.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    private.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(chain, private)
+
+    constraints = ca.certificate.extensions.get_extension_for_class(x509.NameConstraints)
+    assert constraints.critical
+    assert constraints.value.permitted_subtrees == [x509.DNSName(lane_pki.LANE_DOMAIN)]
+    assert constraints.value.excluded_subtrees == [
+        x509.IPAddress(ipaddress.ip_network("0.0.0.0/0")),
+        x509.IPAddress(ipaddress.ip_network("::/0")),
+    ]
+    # The constraint is on the certificate, not on the name asked for: the address it carries makes
+    # the whole certificate invalid, whether the client asks for the address or for the lane name.
+    assert "excluded" in handshake(context, ca, "127.0.0.1")
+    assert "excluded" in handshake(context, ca, GIT_HOST)
 
 
 def test_the_ca_and_its_key_are_the_only_secret_and_the_key_is_private_to_its_owner(
@@ -435,9 +498,27 @@ def test_the_fetch_the_setup_and_the_agent_use_reaches_a_plain_host_through_the_
     }
 
 
+def test_the_scripted_upstream_reports_the_scheme_it_listens_with(tmp_path: Path) -> None:
+    ca = lane_pki.create_ca(tmp_path / "pki")
+    secure = ScriptedUpstream(
+        "chat",
+        job.agent_script(),
+        job.MODEL,
+        real_key=job.MODEL_KEY,
+        tls=lane_pki.server_context(ca, [MODEL_HOST], tmp_path),
+    )
+    plain = ScriptedUpstream("chat", job.agent_script(), job.MODEL, real_key=job.MODEL_KEY)
+
+    with secure, plain:
+        assert secure.url == f"https://127.0.0.1:{secure.port}"
+        assert plain.url == f"http://127.0.0.1:{plain.port}"
+
+
 def test_the_lanes_scripted_model_is_the_one_script_the_job_needs() -> None:
     script = job.agent_script()
 
     assert [turn.tool for turn in script] == ["bash", None]
     assert isinstance(script[0], Turn) and job.AGENT_COPY in str(script[0].args)
+    # It also asks for the host only the setup may reach, and commits what it met.
+    assert SETUP_ONLY_HOST in str(script[0].args) and job.CLOSED_NOTE in str(script[0].args)
     assert script[1].text == job.CLOSING

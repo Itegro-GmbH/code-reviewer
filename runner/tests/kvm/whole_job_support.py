@@ -59,6 +59,11 @@ INSTRUCTION: Final = "Fetch the two files of the lane and commit them."
 # The commit the agent makes, and the two files in it.
 SETUP_COPY: Final = "from-setup.txt"
 AGENT_COPY: Final = "from-agent.txt"
+# What the agent finds when it asks for the host only the setup may reach, after the narrowing: the
+# file is in the commit, so the test reads the answer where the agent met it.
+CLOSED_NOTE: Final = "setup-only-host.txt"
+CLOSED: Final = "refused"
+REACHED: Final = "reached"
 CLOSING: Final = "I added what the setup and the network door fetched, and committed it."
 
 # The agent image has no curl (Python is its HTTP client here): urllib reads `http_proxy`, which
@@ -143,11 +148,16 @@ def parsed(document: dict[str, Any] | None = None) -> ImplementerInput:
 
 
 def agent_script() -> list[Turn]:
-    """What the model does: use the setup's file, fetch one through the door, commit, say so."""
+    """What the model does: use the setup's file, fetch one through the door, try the setup-only
+    host, commit, say so."""
     command = (
         f"cp /opt/setup-fetched.txt {SETUP_COPY} && "
         f"{FETCH} http://{FILES_HOST}/agent > {AGENT_COPY} && "
-        f"git add {SETUP_COPY} {AGENT_COPY} && git commit -qm 'Add what the lane fetched'"
+        # The host the setup reached under its wide rule, asked for after the narrowing.
+        f"if {FETCH} http://{SETUP_ONLY_HOST}/setup > /dev/null 2>&1; "
+        f"then echo {REACHED}; else echo {CLOSED}; fi > {CLOSED_NOTE} && "
+        f"git add {SETUP_COPY} {AGENT_COPY} {CLOSED_NOTE} && "
+        "git commit -qm 'Add what the lane fetched'"
     )
     return [
         Turn(tool="bash", args={"command": command, "description": "use the setup and fetch"}),

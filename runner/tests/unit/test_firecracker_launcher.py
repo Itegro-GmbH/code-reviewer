@@ -203,6 +203,11 @@ def test_an_app_on_a_port_the_proxy_does_not_dial_is_refused_before_a_slot_a_dis
 
         go(scenario)
 
+        # The service logs only the exception's type, so the reason is logged where it is made:
+        # the port and the two that work, and nothing of the URL's secrets.
+        [refusal] = [r for r in caplog.records if "job refused before a VM exists" in r.message]
+        assert "port 8080" in refusal.getMessage() and "80 and 443" in refusal.getMessage()
+        assert CREDENTIAL not in caplog.text and "172.31.0.1" not in caplog.text
         assert sandbox.free == sandbox.capacity
         assert rig.vm_directories() == [] and rig.cgroups.created == []
         assert not rig.behavior_file.with_suffix(".seen").exists(), "no VMM was ever started"

@@ -92,9 +92,10 @@ jobs:
               - 'website/**'
             # What the Linux VM artifacts (#976) are made from: their own files, the golden snapshot's recipe they run unchanged (the pins
             # and scripts of the pipeline, the two prepare scripts) and their workflow. This is the one job on a KVM runner and takes
-            # about half an hour, so nothing else starts it. One brace pattern, because the quantifier "every" would read a list as "and".
+            # about half an hour, so nothing else starts it. The four files that render the rulesets the guest loads (the model door's, the network door's, the Setup
+            # bridge's and the proxy) are in it too: the lanes load what they render. One brace pattern, because the quantifier "every" would read a list as "and".
             vm:
-              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/install/**,runner/tests/unit/host_install_support.py,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,runner/tests/git_support.py,runner/tests/runner_app.py,fakes/wire/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
+              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/src/code_reviewer_runner/implementer/door_launcher.py,runner/src/code_reviewer_runner/implementer/netdoor_launcher.py,runner/src/code_reviewer_runner/implementer/setup_container.py,runner/src/code_reviewer_runner/outer_proxy.py,runner/install/**,runner/tests/unit/host_install_support.py,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,runner/tests/git_support.py,runner/tests/runner_app.py,fakes/wire/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
             # What the program tarball of the Factory-Runner (#1002) is made of: the release tooling and its pins, the installer it carries as
             # `libexec/host.sh`, the Firecracker pin and the nft table, the one dependency of the host program (the lock), the package's own
             # command, and its workflow. A KVM-free job of about ten minutes (real systemd, no VM). One brace pattern, as above.

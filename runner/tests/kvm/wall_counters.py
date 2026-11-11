@@ -11,9 +11,10 @@ counter where it was. `NFT -j` prints each rule with its comment and counter; th
 
     wall_counters.py none <before.json> <after.json>    exit 1 and name every rule whose drop
                                                          counter moved (but the allowed ones)
-    wall_counters.py some <before.json> <after.json>    the control: exit 1 unless at least one
-                                                         drop counter moved (a table whose
-                                                         counters never move proves nothing)
+    wall_counters.py some <before.json> <after.json>    the control: exit 1 unless a drop rule
+                                                         other than the two noise rules moved
+                                                         (a table whose counters never move for
+                                                         a direct dial proves nothing)
 
 `before.json` and `after.json` are `nft -j list table inet code_reviewer_wall`, taken as root by the
 workflow. Reloading the table between the two (a counter that went down) is an error: nothing can
@@ -113,10 +114,14 @@ def main(arguments: list[str]) -> int:
     for name, (packets, size) in sorted(after.items()):
         print(f"  {name}: {packets} packets, {size} bytes (+{grown.get(name, 0)})")
     if expectation == "some":
-        if not grown:
-            print("no drop counter moved: the control proves nothing")
+        counted = unexpected(grown)
+        if not counted:
+            print(
+                "no drop counter moved but the allowed noise (or none at all): the control "
+                "proves nothing"
+            )
             return 1
-        print(f"the control: {len(grown)} drop counters moved")
+        print(f"the control: {len(counted)} drop counters moved besides the noise")
         return 0
     bypass = unexpected(grown)
     if bypass:

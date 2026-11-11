@@ -249,10 +249,14 @@ class FirecrackerSandbox:
         _, port = app_endpoint(start.app_url)
         if port is None or port in WEB_PORTS:
             return
-        raise StartFailed(
+        reason = (
             f"the app is on port {port}, which the outer wall's proxy does not dial (only "
             f"{WEB_PORTS[0]} and {WEB_PORTS[1]}): the job cannot reach it"
         )
+        # The service logs the type of what a start raises and nothing else; the port is no secret
+        # (the URL's userinfo, path and query are, and are not in this line).
+        _log.warning("job refused before a VM exists: %s", reason)
+        raise StartFailed(reason)
 
     # -- one VM ---
 

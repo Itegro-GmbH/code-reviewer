@@ -154,6 +154,7 @@ class ScriptedUpstream:
             def log_message(self, format: str, *args: Any) -> None:
                 return
 
+        self._scheme = "https" if tls is not None else "http"
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         if tls is not None:
@@ -170,7 +171,7 @@ class ScriptedUpstream:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
+        return f"{self._scheme}://127.0.0.1:{self.port}"
 
     def __enter__(self) -> Self:
         self._thread.start()

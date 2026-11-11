@@ -2465,7 +2465,7 @@ started in Sysbox with the table loaded. That is the whole-job lane below.
 
 ### A whole job in the lane (#999)
 
-`tests/kvm/test_whole_job.py`, the `Whole-job lane` step of `.github/workflows/vm-artifacts.yml` (a real VM, the table loaded, `FACTORY_RUNNER_OUTER_WALL=proxy`).
+`tests/kvm/test_whole_job.py`, the `Whole-job lane` step (20 minutes at most) and the `Whole-job lane, the drop counters` step (always) of `.github/workflows/vm-artifacts.yml` (a real VM, the table loaded, `FACTORY_RUNNER_OUTER_WALL=proxy`).
 One real Implementer job, from the claim to the push:
 
 ```
@@ -2497,7 +2497,8 @@ holds. The lane chose a **lane-only copy of the Worker image** over a public rep
 have, and no provider has a public name the lane may call):
 
 1. the workflow makes a CA for this run (`runner/tests/kvm/lane_pki.py ca`): EC P-256, three days, and a **critical name constraint** that lets it sign for
-   `lane.example.com` and below and nothing else; its key stays on the runner (`$VM_WORK/lane-pki`, mode 0600, never an artifact, never committed, `*.key` and `*.crt`
+   DNS names `lane.example.com` and below and nothing else (the permitted subtree is that one domain; IPv4 `0.0.0.0/0` and IPv6 `::/0` are excluded, so it cannot sign an IP
+   address either, and no email or URI name is permitted); its key stays on the runner (`$VM_WORK/lane-pki`, mode 0600, never an artifact, never committed, `*.key` and `*.crt`
    made here are not in the repository);
 2. the workflow derives `code-reviewer-worker:golden` from the release's image in the runner's Docker (`docker buildx build --builder default`; `USER 0:0`, the CA appended
    to `/etc/ssl/certs/ca-certificates.crt`, the image's own `USER` back), under **the same tag**, and saves the images **a second time** (`images-lane.tar`) after the
@@ -2527,7 +2528,8 @@ the step when any drop rule counted a packet, except two rules that are IPv6 noi
 solicitation whatever a client does; a client has no IPv6 route whether or not it is dropped) and "the host opens no connection to a VM" (the *host's* own packets toward
 the TAP: the first run showed ten of 88 bytes, the size of an IPv6 multicast listener report, at the interface's coming up; nothing a VM sends is counted in that chain). A client that dialled directly, fell back to the proxy and let the job pass would show in "everything else addressed to the host" or
 "a VM forwards to nothing". **The control** is the outer wall lane's own run: the same program, `wall_counters.py some`, requires its probes' direct dials to
-have moved the counters, so "nothing moved" is not the answer of a table that counts nothing.
+have moved a drop rule **other than those two** ("everything else addressed to the host", "a VM forwards to nothing", ...): the noise moves in every run, so a control
+that counted it would pass for a table that never counts a direct dial, and "nothing moved" would be the answer of a table that counts nothing.
 
 **The three in-VM rulesets** (the model door's, the network door's and the Setup bridge's with the proxy) are loaded for real by this job in the guest's kernel, and
 checked as files before it: `runner/tests/kvm/render_rulesets.py` writes them from the launchers' own `egress_rules` and the `In-VM rulesets (nft -c)` step runs

@@ -43,6 +43,8 @@ from lane_pki import load_ca
 from whole_job_support import (
     AGENT_COPY,
     BRANCH,
+    CLOSED,
+    CLOSED_NOTE,
     CLOSING,
     MODEL_KEY,
     SETUP_COPY,
@@ -197,6 +199,16 @@ def test_the_real_narrow_carried_the_jobs_rule_and_the_provider_and_the_setup_on
         assert (host, port, "allowed", None) in entries, entries
     for host, port, outcome, reason in entries:
         assert port in (80, 443) and reason != "ip_literal", (host, port, outcome, reason)
+    # After it the agent asked for that host and was refused (it wrote what it met into the
+    # commit), and the files host never saw a request for it after the narrowing.
+    met = raw("show", f"{BRANCH}:{CLOSED_NOTE}", cwd=whole.fakes.origin.path, git="git")
+    assert met.strip() == CLOSED, met
+    assert whole.wall.narrowed_at is not None
+    assert not [
+        each
+        for each in whole.fakes.files.requests
+        if each.host == SETUP_ONLY_HOST and each.at > whole.wall.narrowed_at
+    ]
     # The report the Worker made of the agent's door says the VM's policy was narrowed.
     [result] = whole.fakes.app.completions
     network = result["implementer"]["network"]
@@ -230,10 +242,11 @@ def test_when_the_proxy_cannot_clone_for_the_job_it_ends_with_a_stable_code_and_
     assert result["ok"] is False, explain(refused)
     assert result["errorCode"] == "clone_failed", explain(refused)
     assert refused.fakes.origin.tip(BRANCH) is None
-    # The clone was asked for by name, refused for want of an address, and nothing else was dialled
-    # for the job (not the provider, not the files host: the job never got that far).
+    # The clone was asked for by name, refused as unresolvable (no address), and nothing else was
+    # dialled for the job (not the provider, not the files host: the job never got that far).
     assert not refused.fakes.model.records
     assert all(host != MODEL_HOST for host, _, _, _ in decided(refused))
+    assert (GIT_HOST, 443, "refused", "unresolvable") in decided(refused), decided(refused)
     assert GIT_HOST not in {
         host for host, _, outcome, _ in decided(refused) if outcome == "allowed"
     }

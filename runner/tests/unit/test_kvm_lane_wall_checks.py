@@ -231,6 +231,43 @@ def test_the_program_exits_nonzero_and_names_the_rule_when_a_direct_connection_w
     assert nothing_moved.returncode == 1 and "no drop counter moved" in nothing_moved.stdout
 
 
+def test_a_control_where_only_the_two_noise_rules_moved_proves_nothing_and_fails(
+    tmp_path: Path,
+) -> None:
+    first, second = tmp_path / "before.json", tmp_path / "after.json"
+    first.write_text(json.dumps(document(QUIET_WITH_OUTPUT)))
+    # Both noise rules count packets (as in the first lane run), and no other drop rule does: the
+    # probes' direct dials were not counted, so the table was not shown to count them.
+    second.write_text(
+        json.dumps(
+            document(
+                [
+                    (c, k, 10 if k in ("no IPv6", NOISE_OUTPUT) else p, b, v)
+                    for c, k, p, b, v in QUIET_WITH_OUTPUT
+                ]
+            )
+        )
+    )
+
+    control = subprocess.run(
+        [sys.executable, str(Path(wall_counters.__file__)), "some", str(first), str(second)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    quiet = subprocess.run(
+        [sys.executable, str(Path(wall_counters.__file__)), "none", str(first), str(second)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert control.returncode == 1, control.stdout + control.stderr
+    assert "control proves nothing" in control.stdout
+    # The same two snapshots are what "none" accepts: the noise is allowed there and only there.
+    assert quiet.returncode == 0, quiet.stdout + quiet.stderr
+
+
 def test_the_table_the_counters_belong_to_is_the_one_the_install_loads() -> None:
     lines = TABLE.read_text().splitlines()
 
