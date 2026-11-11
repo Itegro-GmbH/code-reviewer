@@ -35,6 +35,8 @@ BENCH_VARIANT=setup
 say() { printf '\n=== %s\n' "$*"; }
 die() { echo "bench: $*" >&2; exit 1; }
 must() { "$@" >/dev/null || die "failed: $*"; }
+# retry <command...>: a registry may rate-limit a runner ("toomanyrequests"); five tries, waiting longer each time
+retry() { local n; for n in 1 2 3 4 5; do "$@" && return 0; sleep $((n * 15)); done; return 1; }
 
 [ "${GITHUB_ACTIONS:-}" = true ] || [ "${BENCH_I_KNOW_THIS_INSTALLS_INCUS:-}" = yes ] || die "refusing to run outside GitHub Actions: this installs Incus and changes the firewall"
 [ "$(id -u)" = 0 ] || die "run as root"
@@ -241,11 +243,10 @@ assert_variant() { # assert_variant <variant> <instance> <kind...>: the variant 
 }
 
 # shellcheck disable=SC2016 # the hooks are scripts for the instance's shell
-HOOK_CLASSIC='set -e; systemctl stop docker
+HOOK_CLASSIC='set -e; docker save busybox hello-world -o /root/images.tar; systemctl stop docker
 printf "{\"features\":{\"containerd-snapshotter\":false}}\n" >/etc/docker/daemon.json
 systemctl start docker; for _ in $(seq 1 150); do docker info >/dev/null 2>&1 && break; sleep 0.2; done
-docker pull -q '"$BUSYBOX_REF"' >/dev/null; docker tag '"$BUSYBOX_REF"' busybox
-docker pull -q '"$HELLO_REF"' >/dev/null; docker tag '"$HELLO_REF"' hello-world'
+docker load -i /root/images.tar >/dev/null; rm -f /root/images.tar'
 # shellcheck disable=SC2016
 HOOK_TMPFS='set -e; systemctl stop docker
 mkdir -p /mnt/dd; mount -t tmpfs -o size=768m tmpfs /mnt/dd; cp -a /var/lib/docker/. /mnt/dd/
@@ -292,9 +293,9 @@ variant() { # variant <name> <battery 0|1> <exec series 0|1> <hook|-> <asserts, 
 host_variant() { # host_variant <name> <battery 0|1>: the same series with Docker on the runner itself, no Incus
   BENCH_VARIANT=$1
   say "variant $1"
-  must docker pull -q "$BUSYBOX_REF"
+  must retry docker pull -q "$BUSYBOX_REF"
   must docker tag "$BUSYBOX_REF" busybox
-  must docker pull -q "$HELLO_REF"
+  must retry docker pull -q "$HELLO_REF"
   must docker tag "$HELLO_REF" hello-world
   fact "--- $1"
   fact "$(docker info --format 'docker {{.ServerVersion}}; driver {{.Driver}} {{.DriverStatus}}; cgroup {{.CgroupDriver}} v{{.CgroupVersion}}; security {{.SecurityOptions}}; root {{.DockerRootDir}}')"

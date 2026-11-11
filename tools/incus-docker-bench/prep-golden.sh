@@ -41,9 +41,10 @@ systemctl enable docker
 systemctl start docker
 for _ in $(seq 1 150); do docker info >/dev/null 2>&1 && break; sleep 0.2; done
 docker info >/dev/null
-docker pull -q "$BUSYBOX_REF" >/dev/null
+pull() { local n; for n in 1 2 3 4 5; do docker pull -q "$1" >/dev/null && return 0; sleep $((n * 15)); done; return 1; }
+pull "$BUSYBOX_REF"
 docker tag "$BUSYBOX_REF" busybox
-docker pull -q "$HELLO_REF" >/dev/null
+pull "$HELLO_REF"
 docker tag "$HELLO_REF" hello-world
 # what the image must hold, checked: both images by tag, a container that really runs, the containerd image store
 docker image inspect busybox hello-world >/dev/null
