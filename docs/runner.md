@@ -2275,7 +2275,112 @@ Control connects to the Unix socket **`/ctl.sock`** (not under `/run`, which the
 ### The outer wall
 
 Unchanged in kind: the proxy of this dispatcher (`firecracker/proxy_wall.py`, #979) listens on the host's address of each slot's outer bridge and serves **A's and B's addresses of that slot** (`SlotAddresses.also`) and no other source; `FACTORY_RUNNER_OUTER_WALL=proxy` as before. What the host's static nft
-table adds (port 53 of host-local addresses, which Incus leaves open to an instance; the per-slot rules) is **#1008**; until it is installed an instance can still reach port 53 of an address of the host.
+table adds (port 53 of host-local addresses, which Incus leaves open to an instance; the per-slot rules) is [the next section](#the-hosts-nft-table-1008): **without it an instance can still reach port 53 of every address of the host, so the dispatcher takes no job** (its gate, below).
+
+### The host's nft table (#1008)
+
+Incus alone leaves **port 53 of every host-local address** open to an instance: it accepts DNS and DHCP of an ACL-protected bridge before the ACL, still so on 7.6 (spike #1005), so a job reaches the dnsmasq of `incusbr0`,
+the bridge's own address, Docker's `docker0` address and the machine's own address on port 53. An ACL cannot be told otherwise, so the outer wall has a part of our own: **one static nft table per dispatcher**, written by
+our code ([`incus/host_wall.py`](../runner/src/code_reviewer_runner/factory_runner/incus/host_wall.py)), loaded once at install **as root** and never changed while jobs come and go. It is a table of its own (`inet code_reviewer_wall_<owner>`: the owner is
+in the name, so two dispatchers on one machine, as Luca's and Vincent's, never replace each other's) and every rule of it names a bridge `<prefix>-<owner>-*` and nothing else, so **the machine's own traffic and every other table, Docker's and Incus's, are
+untouched**: the code never names, lists for change or edits them. It hooks at priority -150, before the filter hooks at priority 0 that Docker, Incus and ufw have, and a drop there is final for the packet whatever they would accept. The file for `cr`, owner `a1b2` and a /27 (four slots), exactly as
+the generator prints it (a test holds this page to it):
+
+```
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# The outer wall of the Incus instance bridges of one dispatcher (#1008).
+# Every rule names a bridge `cr-a1b2-*` and nothing else, so the
+# machine's own traffic and every other table (Docker's, Incus's) are untouched.
+# Loaded once at install as root; never changed while jobs run.
+table inet code_reviewer_wall_a1b2
+delete table inet code_reviewer_wall_a1b2
+table inet code_reviewer_wall_a1b2 {
+  chain input {
+    type filter hook input priority -150; policy accept;
+    iifname "cr-a1b2-o0" ip saddr { 10.99.0.2, 10.99.0.3 } ip daddr 10.99.0.1 tcp dport 3128 counter accept comment "slot 0: the proxy"
+    iifname "cr-a1b2-o1" ip saddr { 10.99.0.10, 10.99.0.11 } ip daddr 10.99.0.9 tcp dport 3128 counter accept comment "slot 1: the proxy"
+    iifname "cr-a1b2-o2" ip saddr { 10.99.0.18, 10.99.0.19 } ip daddr 10.99.0.17 tcp dport 3128 counter accept comment "slot 2: the proxy"
+    iifname "cr-a1b2-o3" ip saddr { 10.99.0.26, 10.99.0.27 } ip daddr 10.99.0.25 tcp dport 3128 counter accept comment "slot 3: the proxy"
+    iifname "cr-a1b2-*" meta nfproto ipv6 counter drop comment "no IPv6"
+    iifname "cr-a1b2-*" counter drop comment "all else to the host, DNS included"
+  }
+  chain forward {
+    type filter hook forward priority -150; policy accept;
+    iifname "cr-a1b2-*" counter drop comment "an instance forwards to nothing"
+    oifname "cr-a1b2-*" counter drop comment "nothing forwards to an instance"
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    oifname "cr-a1b2-*" ct state established,related counter accept comment "answers"
+    oifname "cr-a1b2-*" counter drop comment "the host opens no connection"
+  }
+}
+```
+
+| Chain | Rule | Why |
+|---|---|---|
+| input | from slot *n*'s outer bridge: TCP from A's or B's address to the host's address of that slot, port 3128, accept | **the one thing an instance may open**: the dispatcher's proxy, on its own slot's address (a slot's proxy is not reachable from another slot's bridge, nor from its own bridge at another address) |
+| input | from any instance bridge, outer or inner: IPv6, drop | no IPv6 anywhere |
+| input | from any instance bridge: everything else, drop | the host's other ports, the bridge's own `:53`, **every other host-local address's `:53`** (`incusbr0`, `docker0`, the machine's), ICMP, UDP, DHCP; the last rule of the chain, so a rule that is missing never opens anything |
+| forward | from or to an instance bridge, drop | an instance forwards to nothing: the LAN, the cloud metadata address, the internet, the other bridges, Docker's containers; and nothing forwards to an instance |
+| output | to an instance bridge: answers (established, related), accept; everything else drop | the host opens no connection to an instance |
+
+The table is for the **slots the network has room for** (up to 32, `slot_count`), not for the number of jobs the runner runs, so a change of `parallelRuns` does not change it; the slots' network, the prefix and the owner do, and a table loaded for other settings is refused by the gate. The accept rule names A's and B's
+addresses as sources too (Incus's `ipv4_filtering` already makes a packet come from its NIC's address; the table does not rely on it).
+
+#### Commands, and what the gate does
+
+`factory-runner host-wall` (`incus/host_wall_cli.py`):
+
+| Command | Runs as | Does |
+|---|---|---|
+| `host-wall print` | anyone | prints the table for the settings |
+| `host-wall apply` | root | loads the table in one transaction (`table`, `delete table`, `table`: the first time and every time after), lists it back, writes the **status file** |
+| `host-wall check [--reapply]` | root | lists the kernel's table (counters left out) and compares it with what `apply` loaded and with what this program renders now; writes the verdict to the status file; with `--reapply` a table that is gone or differs is loaded again and the command says `reapplied: <why>` |
+| `host-wall status` | anyone | what the dispatcher sees: the status file and its verdict |
+
+Every command takes the dispatcher's settings, because the owner, the table and the bridges' names come from them: `--user` (or `--owner`), `--state-dir` (`FACTORY_RUNNER_VM_STATE_DIR`, the other half of the owner id), `--prefix` (`FACTORY_RUNNER_INCUS_PREFIX`),
+`--slot-network` (`FACTORY_RUNNER_SLOT_NETWORK`), `--status-file` (`FACTORY_RUNNER_HOST_WALL_STATUS`, default `/run/code-reviewer/host-wall-<owner>.json`). Exit code 0 in place, 1 not in place, 6 configuration.
+
+**The dispatcher is an unprivileged user and cannot read nft**, so what it asks before it takes a job is the **status file** that root writes (a world-readable file in a directory only root can write to, on tmpfs: a reboot, which empties nft too, removes it). `HostWallGate` accepts it only when
+the last check found the table **loaded, for exactly these settings** (the digest of the table this dispatcher would render), **and** the record is not older than `FACTORY_RUNNER_HOST_WALL_MAX_AGE_SECONDS` (60) and not dated in the future. A missing, unreadable, foreign, stale or failed record means: `setup` fails (`IncusNotReady`, the service does
+not start), `prepare` reports the failed check `outer-wall-table` (the self-test, `run`), `free` is 0 (the dispatcher claims nothing) and `start` refuses (`StartFailed`) before it makes an instance. A job in progress is not stopped by it. What is on the machine in the meantime is the table, until the next check puts it back.
+
+For the installer (#1011) the shape is: a oneshot unit that runs `host-wall apply` before the dispatcher's unit (`Before=`, and `After=incus.service`), and a **timer every 10 seconds** that runs `host-wall check --reapply` (as #979's `check-wall` did): a flush of the machine's rules, a reload of `nftables.service`, a person who deletes the table
+or a rule of it is found within the period, put back, and reported (`reapplied: …`) in the journal; the status file is then fresh again. The window between the flush and the next check is the table's known limit: a running job's bridge has no table for up to 10 seconds, new jobs are refused from the first failed look, and a restart of
+the daemon is not needed.
+
+**On the DevBox, after the owner installs it** (as root; `STATE` is the dispatcher's `FACTORY_RUNNER_VM_STATE_DIR`, `USER` the user it runs as, `NET` its `FACTORY_RUNNER_SLOT_NETWORK`; `factory-runner` is the program's command, or `runner/.venv/bin/factory-runner` in a checkout):
+
+```
+sudo factory-runner host-wall print  --user "$USER" --state-dir "$STATE" --slot-network "$NET"      # read it first
+sudo factory-runner host-wall apply  --user "$USER" --state-dir "$STATE" --slot-network "$NET"
+sudo factory-runner host-wall check  --user "$USER" --state-dir "$STATE" --slot-network "$NET"      # exit 0: in place
+factory-runner host-wall status      --user "$USER" --state-dir "$STATE" --slot-network "$NET"      # as the dispatcher's user
+sudo nft list table inet code_reviewer_wall_<owner>                                                   # the table, with its counters
+```
+
+#### What the lane proves (and what it cannot)
+
+The lane (`runner/tests/incus/test_host_wall.py`, the `incus-wall` job of `ci.yml`, setup in `runner/tests/incus/ci-setup.sh`) runs on a GitHub `ubuntu-24.04` runner **as root**, with **Incus 7.6 from the Zabbly stable repository**, a **btrfs loop pool**, the default bridge `incusbr0`,
+the launcher's own bridges and ACLs (`ensure_objects`) and the runner's own **Docker running a container**. It makes two real instances A and B on the real outer bridge of slot 0 with the launcher's NIC (`outer_nic`: static address, filtering, port isolation), a stand-in proxy on the bridge's address, decoy servers for the host's services,
+and a network namespace behind a veth pair for what is forwarded (a "LAN" host, the metadata address `169.254.169.254`, an "internet" address). The instances get a default route through the host, as an agent that is root of its instance could add one.
+Every probe runs from both instances in four phases, because **a probe that is blocked proves nothing unless the same probe reached once**:
+
+| Phase | Incus ACL | Routing | Our table | Every probe must |
+|---|---|---|---|---|
+| control | off | on | absent | **reach** (the control) |
+| acl | on | off | absent | Incus alone: the proxy and **port 53 of the host's addresses reach** (the gap), the rest is blocked |
+| table | off | on | loaded | our table alone: only the proxy reaches |
+| full | on | off | loaded | the production wall: only the proxy reaches |
+
+Probed (TCP, 3 s; a refused connection counts as reached, a timeout as blocked, "no route" as an error of the lane): the proxy, the bridge's `:22`, a decoy port, the bridge's `:53`, `incusbr0`'s `:53` (its real dnsmasq) and decoy, the machine's own address, another slot's proxy, the LAN host, the metadata address, the internet
+address and Docker's `docker0` address; DNS over UDP (a decoy records whether the datagram arrived); and IPv6 (an echo to the bridge's link-local address, which the lane turns on for the control). The drops are counted in the table's own counters, which the lane reads.
+With Docker's container running, the lane checks that **Docker's networking works** (the published port from the host, and a container that reaches the lab through the host's forwarding and masquerade) with the table loaded, that **no other table changes** when ours is loaded or removed (`nft list tables`, each table without counters, before and after), and that the
+probes stay blocked. Then it **restarts Incus and Docker** and requires the table, the check and the blocked probes after each, **deletes the table** and **deletes a rule** and requires that `check` finds it, the gate refuses and `check --reapply` puts it back and says so, and runs the real command (`factory-runner host-wall`) the way the installer will.
+**Not proven:** the DevBox itself (the owner installs the table there and runs the commands above), a host with `ufw` or `firewalld`, a flush of the whole ruleset (it would remove Docker's and Incus's tables too; the lane removes ours and a rule), a kernel with `br_netfilter` (where the bridge's own frames would also pass the inet hooks), nftables older than 1.0.9, and the instances' own content (the golden image is
+#1011/#1012).
 
 ### Ending a job, clean-up
 
@@ -2295,10 +2400,11 @@ preparation, exit code −9). `stop()` kills Control's `exec` at once. Whatever 
 | `SLOT_NETWORK` | the slots' network, a /24 for up to 32 slots, chosen at install |
 | `OUTER_WALL`, `VM_VCPUS`, `VM_STATE_DIR` | as for the Firecracker launcher |
 | `INCUS_A_DISK_GB`, `INCUS_A_MEMORY_MB`, `INCUS` | A's quota, A's memory, the path of the `incus` program |
+| `HOST_WALL_STATUS`, `HOST_WALL_MAX_AGE_SECONDS` | where root records that the host's nft table is loaded (default `/run/code-reviewer/host-wall-<owner>.json`) and how old the record may be (60 s): [the host's nft table](#the-hosts-nft-table-1008) |
 
 The service user is a member of **`incus-admin`, which is root-equivalent** (a member can create a privileged instance with the host's disks): the installer (#1011) creates a user that owns nothing else, and the service's unit is sandboxed as the
 Firecracker service's is. The restricted per-user `incus-user` socket cannot set the options the instances need. **Root is needed at install only** (the group, the pool, the image and one throwaway instance so that
-the first job does not pay the ≈ 21 s unpack of the image, the bridges and ACLs of `provision.py`, the host's nft table of #1008); `provision.py` creates only objects of the prefix, idempotently, and never touches the `default` pool or profile, `incusbr0`, or the host's Docker.
+the first job does not pay the ≈ 21 s unpack of the image, the bridges and ACLs of `provision.py`, the host's nft table of #1008 with `factory-runner host-wall apply` and its timer); `provision.py` creates only objects of the prefix, idempotently, and never touches the `default` pool or profile, `incusbr0`, or the host's Docker.
 
 ### Start budget
 
@@ -2324,15 +2430,15 @@ Nothing to the first container ≈ **4.5 s** at a moderate load (spike #1005 on 
 
 The lane found two defects the unit tests could not: **`incus config device add` takes the device type as a word of its own** (`… eth0 nic network=…`), not as `type=nic`; and **Docker (or any readiness command) can answer before systemd-networkd has applied the pushed addresses**, so the launcher now also
 waits until both instances show their addresses (`ip -4 -o addr show`; the golden image needs `iproute2`), which turned two flaky lane failures into none.
-**What the lane does not prove**: Docker inside B and the agent's own containers (so "from the agent's Docker" of the walls is the spike's measurement, not this lane's), the real Worker image and the golden image, the host's static nft table (#1008), AppArmor and the real hardening flags.
+**What the lane does not prove**: Docker inside B and the agent's own containers (so "from the agent's Docker" of the walls is the spike's measurement, not this lane's), the real Worker image and the golden image, the host's static nft table (#1008, its own lane), AppArmor and the real hardening flags.
 
 ### Not done here, follow-ups
 
 - **The Worker's use of the two instances.** Control runs in A with **A's** Docker; the setup and the agent must run in **B's** Docker and the doors in A's, reachable on A's inner address, and the agent must see what the setup left (the owner's "same environment" decision, **#1009**, hosted too).
   Until that change a real Worker image would run its containers in A. The launcher gives it the environment (instances, wall, control socket, quota); it does not yet make it use it.
 - **The golden Incus image** (Docker, the Worker image pre-loaded, systemd-networkd, `nft`) and its release artifact (#1012, #1011); the first start of an image in a pool unpacks it (≈ 21 s), which the installer pays once.
-- **A CI lane with Incus** on `ubuntu-24.04` (needs the image above and root for Incus's own install); the lane here runs on the DevBox.
-- **The host's nft table** (#1008), the installer and updater (#1011), conformance suite (#1010), removal of the Firecracker code, the kernel/rootfs release artifacts, the KVM lane and vm-init's vsock side (#1012).
+- **A CI lane of the launcher itself with Incus** on `ubuntu-24.04` (the golden image above and the Worker image): the lane of the host's nft table (#1008) runs the real Incus there, but not a job; the launcher's lane runs on the DevBox.
+- The installer and updater (#1011: the table's `apply` before the service and its check timer), conformance suite (#1010), removal of the Firecracker code, the kernel/rootfs release artifacts, the KVM lane and vm-init's vsock side (#1012).
 
 ## The outer wall on a customer's machine (#979)
 

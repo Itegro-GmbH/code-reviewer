@@ -43,6 +43,7 @@ jobs:
       website: ${{ steps.filter.outputs.website }}
       vm: ${{ steps.filter.outputs.vm }}
       program: ${{ steps.filter.outputs.program }}
+      incus: ${{ steps.filter.outputs.incus }}
     steps:
       - name: Filter changed paths
         id: filter
@@ -101,6 +102,10 @@ jobs:
             # command, and its workflow. A KVM-free job of about ten minutes (real systemd, no VM). One brace pattern, as above.
             program:
               - '{runner/release/**,runner/install/**,runner/pyproject.toml,runner/uv.lock,runner/tests/unit/host_install_support.py,docker/vm/pins.env,docker/vm/host/outer-wall.nft,runner/src/code_reviewer_runner/factory_runner/**,.github/workflows/runner-program.yml}'
+            # What the Incus lane of the host's nft table (#1008) runs: the Incus launcher and the table's code, the slots it shares with the
+            # Firecracker backend, the lane's own tests and setup script. A job on a real Incus 7.6 as root (about ten minutes). One brace pattern, as above.
+            incus:
+              - '{runner/src/code_reviewer_runner/factory_runner/incus/**,runner/src/code_reviewer_runner/factory_runner/firecracker/slots.py,runner/src/code_reviewer_runner/factory_runner/cli.py,runner/tests/incus/**,runner/pyproject.toml,runner/uv.lock}'
 
   # The code-review.com landing page (website/, #696): an Astro site and its own pnpm project, deployed by
   # Cloudflare (Workers Builds, root directory website), not by a workflow. This job only proves that it
@@ -421,7 +426,7 @@ jobs:
       # The installer of the Factory-Runner (#855) and the scripts of its program release (#1002). The runner image of GitHub's ubuntu-24.04 has shellcheck. Its
       # behaviour is tested by tests/unit/test_install_script.py against stand-ins for docker and systemd.
       - name: Shellcheck the installer
-        run: shellcheck install/install.sh release/verify-release.sh release/lane.sh
+        run: shellcheck install/install.sh release/verify-release.sh release/lane.sh tests/incus/ci-setup.sh
       - name: Unit tests
         run: uv run pytest -m unit
       - name: Integration and contract tests on the host
@@ -850,6 +855,51 @@ jobs:
     with:
       release: ${{ fromJSON(github.run_number) }}
 
+  # The host's static nft table of the Incus outer wall (#1008) on a real Incus 7.6 (the Zabbly stable repository, a btrfs loop pool), as root on the
+  # GitHub-hosted VM, with the runner's own Docker running a container: the table is loaded, probes run from two real instances on the real bridge
+  # (each blocked probe with a control that reached without the table), Docker's networking is checked, and the table is put through a restart of
+  # Incus and of Docker and through a missing table and a missing rule (runner/tests/incus/test_host_wall.py). Only for a pull request that changes
+  # what the lane runs (the `incus` filter). No secret, the read-only token; like e2e-dynamic it runs the code of the pull request as root and must
+  # never move to a self-hosted runner or to `pull_request_target`.
+  incus-wall:
+    name: "Runner: host nft table on a real Incus 7.6 (root)"
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.incus == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+          enable-cache: true
+          cache-dependency-glob: runner/uv.lock
+      - name: Install the runner
+        working-directory: runner
+        run: uv sync --locked
+      # Incus 7.6 from the Zabbly stable repository, a btrfs pool on a loop file, incusbr0 (the other bridge whose port 53 the table must close) and an
+      # image with the probes' tools.
+      - name: Install Incus 7.6 and make the pool, the bridge and the image
+        run: sudo runner/tests/incus/ci-setup.sh
+      - name: Run the lane as root
+        working-directory: runner
+        env:
+          CR_INCUS_LANE_POOL: crpool
+          CR_INCUS_LANE_IMAGE: crlane-ubuntu
+          CR_INCUS_LANE_STATE: /var/lib/crlane
+          CR_INCUS_LANE_PREFIX: crlane
+        run: sudo -E env "PATH=$PATH" .venv/bin/python -m pytest -m incus --force-enable-socket tests/incus/test_host_wall.py -v -s -p no:cacheprovider
+      - name: What the machine's rules and Incus looked like
+        if: ${{ failure() }}
+        run: |
+          sudo nft list ruleset | head -n 400 || true
+          sudo incus list || true
+          sudo incus network list || true
+
   actionlint:
     name: Lint workflow files
     needs: changes
@@ -866,7 +916,7 @@ jobs:
   # fails on any failed or cancelled job and accepts skipped jobs (path filter).
   ci-passed:
     name: All checks passed?
-    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, runner-program, actionlint]
+    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, runner-program, incus-wall, actionlint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

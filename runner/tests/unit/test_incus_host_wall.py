@@ -387,6 +387,22 @@ def test_a_table_that_lost_a_rule_differs_and_is_loaded_again() -> None:
 
 
 # #1008-T03
+def test_a_failed_check_forgets_nothing_so_a_table_put_back_by_hand_passes_the_next_one() -> None:
+    with short_directory() as root:
+        nft, path = FakeNft(), status_file(root)
+        apply(SPEC, path, run=nft, now=lambda: NOW)
+        loaded = nft.tables[SPEC.table]
+        nft.tables[SPEC.table] = loaded.replace("policy accept;", "policy drop;", 1)
+
+        assert not check(SPEC, path, run=nft, now=lambda: NOW + 1).ok
+        assert "differs" in check(SPEC, path, run=nft, now=lambda: NOW + 2).reason
+        nft.tables[SPEC.table] = loaded
+
+        assert check(SPEC, path, run=nft, now=lambda: NOW + 3).ok
+        assert HostWallGate(SPEC, path, clock=lambda: NOW + 4).verify().ok
+
+
+# #1008-T03
 def test_a_table_loaded_for_other_settings_or_by_hand_is_not_the_one_the_gate_wants() -> None:
     with short_directory() as root:
         nft, path = FakeNft(), status_file(root)

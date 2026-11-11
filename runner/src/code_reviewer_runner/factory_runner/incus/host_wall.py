@@ -124,7 +124,7 @@ class HostWallSpec:
             "# SPDX-License-Identifier: LicenseRef-Proprietary",
             "#",
             "# The outer wall of the Incus instance bridges of one dispatcher (#1008).",
-            f"# Every rule names a bridge `{self.name_prefix}-*` and nothing else: the",
+            f"# Every rule names a bridge `{self.name_prefix}-*` and nothing else, so the",
             "# machine's own traffic and every other table (Docker's, Incus's) are untouched.",
             "# Loaded once at install as root; never changed while jobs run.",
         ]
