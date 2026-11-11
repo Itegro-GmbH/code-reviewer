@@ -15,6 +15,16 @@ name of every request by the environment's rule, and connects to the address it 
 * Anything else (a request in origin form, `https://` as a URL, a user name in the authority, a
   malformed line) is refused with 400.
 
+**Chained to the outer wall's proxy** (#994, a door in a VM on a customer's machine): the VM has no
+direct internet and no name server, so the door makes no lookup and no connection to an address of
+its own. After the rule and the port are decided it asks the host's proxy for `CONNECT <name>:<port>`
+(`chained_connector`) and relays through that tunnel, for a plain `http://` request too (a tunnel to
+port 80 and the request in origin form). The proxy does the lookup, judges every address and
+connects to one it checked, with the same decision (it is this class's decision). A proxy that
+refuses, or cannot be reached, is the same `502 upstream_failed` the agent gets for a host that does
+not answer: the door never dials anything but the proxy, and its own firewall says so
+(`netdoor_launcher.egress_rules`).
+
 The decision, in this order, and it is the same in every mode: an IP literal is refused; a name
 that is no plausible DNS name is refused; a port other than 80 and 443 is refused; the rule must
 list the name (mode `list`; `open` lists everything); the name is looked up (only now, so a name
@@ -33,6 +43,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from ipaddress import IPv4Network
 from typing import Final, cast
+
+from code_reviewer_runner.outer_proxy import Connect, OuterProxy, open_tunnel
 
 from ..network_rule import NetworkRule, RuleMatcher, ascii_name, is_ip_literal
 from .addresses import Resolution, Resolver, resolve_public, system_resolver
@@ -73,10 +85,25 @@ def tcp_connector(address: str, port: int, timeout: float) -> socket.socket:
     return socket.create_connection((address, port), timeout=timeout)
 
 
+def chained_connector(proxy: OuterProxy, connect: Connect | None = None) -> Connector:
+    """A connector that dials the host's outer-wall proxy and asks it for a tunnel to the name it
+    is given (the "address" of a chained door's decision is the name: see `Decider`). It never
+    dials anything else, and a refusal is an `OSError`, which the door answers as it answers a host
+    that does not answer. `connect` is for a test."""
+
+    def connector(name: str, port: int, timeout: float) -> socket.socket:
+        if connect is None:
+            return open_tunnel(proxy, name, port, timeout)
+        return open_tunnel(proxy, name, port, timeout, connect=connect)
+
+    return connector
+
+
 @dataclass(frozen=True)
 class Decision:
-    """What the door does with a request: the addresses to connect to (allowed), or the word of
-    the refusal. `generation` is the version of the rule the decision was made under (0 for the
+    """What the door does with a request: the addresses to connect to (allowed; for a chained door
+    the one entry is the checked name, which the outer wall's proxy resolves), or the word of the
+    refusal. `generation` is the version of the rule the decision was made under (0 for the
     door, whose rule never changes; the outer wall's rule is swapped at `narrow`, and a decision of
     an earlier generation is dropped by `ProxyServer.is_current`)."""
 
@@ -135,6 +162,7 @@ class Decider:
         resolver: Resolver = system_resolver,
         test_network: IPv4Network | None = None,
         excluded: Callable[[str], bool] | None = None,
+        chained: bool = False,
     ) -> None:
         self.matcher = RuleMatcher(rule)
         self._rule = rule
@@ -142,6 +170,10 @@ class Decider:
         self._resolver = resolver
         self._test_network = test_network
         self._excluded = excluded
+        # A door chained to the outer wall's proxy decides on the name, the port and the rule and
+        # leaves the lookup and the public-address check to that proxy, which makes them with this
+        # same decision (a VM has no name server it can reach).
+        self._chained = chained
 
     def decide(self, host: str, port: int) -> Decision:
         if is_ip_literal(host):
@@ -153,6 +185,8 @@ class Decider:
             return Decision(reason=REASON_PORT)
         if not self.matcher.allows(name):
             return Decision(reason=REASON_NOT_LISTED)
+        if self._chained:
+            return Decision(addresses=(name,))
         found: Resolution = resolve_public(
             name, port, self._resolver, self._test_network, self._excluded
         )
