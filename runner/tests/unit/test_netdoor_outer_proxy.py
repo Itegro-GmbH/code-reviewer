@@ -9,17 +9,18 @@ and then asks the proxy for the name, looks nothing up and dials nothing but the
 or a missing proxy is the `502` the agent gets for a host that does not answer, and the door's
 firewall and start document name the proxy."""
 
+import contextlib
 import io
 import json
 import socket
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 import pytest
 from netdoor_support import Lookups, Origin
-from test_netdoor_launcher import rig  # noqa: F401  (the fixture)
+from test_netdoor_launcher import rig  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 from code_reviewer_runner.implementer.netdoor import service
 from code_reviewer_runner.implementer.netdoor.connections import ConnectionLog
@@ -100,10 +101,8 @@ def relay(client: socket.socket, upstream: socket.socket) -> None:
         except OSError:
             pass
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 sink.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
 
     threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
     pump(upstream, client)
@@ -126,7 +125,7 @@ def chained_door(
     origins: dict[tuple[str, int], int] | None = None,
     refuse: set[str] | None = None,
     outer_up: bool = True,
-) -> Iterator[Chained]:
+) -> Generator[Chained]:
     outer = OuterProxyStandIn(origins or {}, refuse)
     log = ConnectionLog()
     dialled: list[tuple[str, int]] = []
@@ -155,7 +154,7 @@ def chained_door(
 
 
 def agent(door: Chained, request: bytes, then: bytes = b"") -> bytes:
-    """What the agent reads from the door after it sends `request` (and `then` once it is told 200)."""
+    """What the agent reads from the door after it sends `request` (and `then` once told 200)."""
     with socket.create_connection(("127.0.0.1", door.port), timeout=5) as sock:
         sock.sendall(request)
         answer = b""

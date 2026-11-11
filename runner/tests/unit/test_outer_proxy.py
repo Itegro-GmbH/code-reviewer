@@ -5,9 +5,10 @@ what is refused, and the tunnel a chained client opens. The proxy here is a loop
 real one is `test_firecracker_proxy_wall.py`); the VM's own address is reached through the
 `connect` seam."""
 
+import contextlib
 import socket
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 
 import pytest
@@ -25,8 +26,8 @@ PROXY = OuterProxy("172.31.0.1", 3128)
 
 
 @contextmanager
-def stand_in(answer: bytes, seen: list[bytes] | None = None) -> Iterator[tuple[str, int]]:
-    """A loopback proxy that reads the request head and sends `answer`, then waits for the client."""
+def stand_in(answer: bytes, seen: list[bytes] | None = None) -> Generator[tuple[str, int]]:
+    """A loopback proxy that reads the request head and sends `answer`, then waits for the peer."""
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(4)
@@ -47,10 +48,8 @@ def stand_in(answer: bytes, seen: list[bytes] | None = None) -> Iterator[tuple[s
                 seen.append(data)
             connection.sendall(answer)
             connection.settimeout(2)
-            try:
+            with contextlib.suppress(OSError):
                 connection.recv(1)
-            except OSError:
-                pass
 
     threading.Thread(target=serve, daemon=True).start()
     try:
@@ -160,9 +159,9 @@ def test_a_tunnel_asks_the_proxy_for_the_name_and_returns_the_open_socket() -> N
 def test_a_proxy_that_refuses_gives_no_tunnel_and_the_caller_never_dials_itself(
     status: int,
 ) -> None:
-    with stand_in(f"HTTP/1.1 {status} No\r\nContent-Length: 0\r\n\r\n".encode()) as target:
-        with pytest.raises(TunnelRefused) as refused:
-            open_tunnel(PROXY, "example.com", 443, 5, connect=loopback(target))
+    answer = f"HTTP/1.1 {status} No\r\nContent-Length: 0\r\n\r\n".encode()
+    with stand_in(answer) as target, pytest.raises(TunnelRefused) as refused:
+        open_tunnel(PROXY, "example.com", 443, 5, connect=loopback(target))
 
     assert refused.value.status == status
 
@@ -178,9 +177,8 @@ def test_a_proxy_that_refuses_gives_no_tunnel_and_the_caller_never_dials_itself(
     ],
 )
 def test_an_answer_that_is_not_a_clean_200_is_a_refusal(answer: bytes) -> None:
-    with stand_in(answer) as target:
-        with pytest.raises((TunnelRefused, OSError)):
-            open_tunnel(PROXY, "example.com", 443, 5, connect=loopback(target))
+    with stand_in(answer) as target, pytest.raises((TunnelRefused, OSError)):
+        open_tunnel(PROXY, "example.com", 443, 5, connect=loopback(target))
 
 
 # #994-T04

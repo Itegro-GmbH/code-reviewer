@@ -15,8 +15,9 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
-from test_model_door_launcher import Rig, rig  # noqa: F401  (the fixture)
+from test_model_door_launcher import Rig, rig  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
+from code_reviewer_runner.dynamic_review.model_door_route import MODEL_NETWORK_SUBNET
 from code_reviewer_runner.dynamic_review.passthrough.upstream import (
     HttpsUpstream,
     UpstreamError,
@@ -33,7 +34,6 @@ from code_reviewer_runner.implementer.door_launcher import (
     rules_document,
     start_document,
 )
-from code_reviewer_runner.dynamic_review.model_door_route import MODEL_NETWORK_SUBNET
 from code_reviewer_runner.outer_proxy import OuterProxy
 
 PROXY = OuterProxy("172.31.0.5", 3128)

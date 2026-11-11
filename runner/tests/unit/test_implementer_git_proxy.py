@@ -7,7 +7,7 @@ stand-in for the proxy and a loopback "origin" that must never be dialled when t
 import shutil
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -77,7 +77,7 @@ class Listener:
 
 
 @contextmanager
-def listener(answer: bytes | None = None) -> Iterator[Listener]:
+def listener(answer: bytes | None = None) -> Generator[Listener]:
     found = Listener(answer)
     try:
         yield found
@@ -231,10 +231,9 @@ def test_the_workspace_hands_the_proxy_to_every_command_that_talks_to_the_provid
     plain = workspace(tmp_path, None)
 
     for each in (proxied, plain):
-        each._mirror(
-            ["fetch", "https://github.com/acme/widgets.git"], protocols="https", token=True
-        )  # pyright: ignore[reportPrivateUsage]
-        each._mirror(["gc"], protocols="file")  # pyright: ignore[reportPrivateUsage]
+        mirror = each._mirror  # pyright: ignore[reportPrivateUsage]
+        mirror(["fetch", "https://github.com/acme/widgets.git"], protocols="https", token=True)
+        mirror(["gc"], protocols="file")
 
     with_proxy, local_with, without_proxy, local_without = seen
     values = set(with_proxy.values())

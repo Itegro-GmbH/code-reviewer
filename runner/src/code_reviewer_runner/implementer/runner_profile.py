@@ -21,13 +21,24 @@ configuration); nothing in a job sets them. Unset, everything is as hosted.
 
 and a fourth, `RUNNER_IMPLEMENTER_RUNNER_ID` (`role_labels.py`): the runner's id, which every
 container and network of the job carries as a label so that the runner removes only its own.
+
+A VM on a customer's machine has one more, `RUNNER_OUTER_PROXY` (#994, `outer_proxy.py`): the host's
+outer-wall proxy, the VM's only way to the internet. It is not one of the names above: Control sets
+it itself for the job process, from the start vm-init read (`job_loop/host.py`), and the container's
+own environment cannot. Every client of the job process that dials the internet reads it here:
+`git`, the model door, the network door and the Setup container. Unset, all of them dial as hosted.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Final
 
+from ..job import JobError
+from ..outer_proxy import OuterProxy, OuterProxyError, outer_proxy_of
+from ..result import ErrorCode
 from .agent_container import AGENT_RUNTIME, AgentSeams
+from .door_launcher import DoorSeams
+from .netdoor_launcher import NetDoorSeams
 from .reader import ReaderSeams
 from .role_labels import RUNNER_ID_VARIABLE
 from .setup_container import SetupSeams
@@ -75,6 +86,17 @@ def agent_seams(environment: Mapping[str, str], base: AgentSeams = AgentSeams())
     )
 
 
+def outer_proxy_for_job(environment: Mapping[str, str]) -> OuterProxy | None:
+    """The outer wall's proxy Control gave this job process, or None (hosted, or a machine without
+    the proxy wall). A value that is set and is not an address of the slots' network ends the turn
+    `setup_failed`, free, before anything is started: a process told to use a proxy never dials
+    directly because it could not read which one."""
+    try:
+        return outer_proxy_of(environment)
+    except OuterProxyError as error:
+        raise JobError(ErrorCode.SETUP_FAILED, f"outer_proxy_invalid: {error}") from None
+
+
 def setup_seams(environment: Mapping[str, str], base: SetupSeams = SetupSeams()) -> SetupSeams:  # noqa: B008
     runtime = runtime_of(environment)
     return replace(
@@ -82,7 +104,20 @@ def setup_seams(environment: Mapping[str, str], base: SetupSeams = SetupSeams())
         runtime=runtime,
         entrypoint=entrypoint_for(runtime),
         nano_cpus=nano_cpus_of(environment),
+        outer_proxy=outer_proxy_for_job(environment) or base.outer_proxy,
     )
+
+
+def door_seams(environment: Mapping[str, str], base: DoorSeams) -> DoorSeams:
+    """The model door's seams with the host's proxy, when this job process has one."""
+    proxy = outer_proxy_for_job(environment)
+    return base if proxy is None else replace(base, outer_proxy=proxy)
+
+
+def netdoor_seams(environment: Mapping[str, str], base: NetDoorSeams) -> NetDoorSeams:
+    """The network door's seams with the host's proxy, when this job process has one."""
+    proxy = outer_proxy_for_job(environment)
+    return base if proxy is None else replace(base, outer_proxy=proxy)
 
 
 def reader_seams(environment: Mapping[str, str], base: ReaderSeams = ReaderSeams()) -> ReaderSeams:  # noqa: B008

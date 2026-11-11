@@ -461,8 +461,8 @@ class GitWorkspace:
         # #856: the values no branch may carry to the provider (the login of the device); none: no
         # branch is read for them.
         self._guard_secrets = tuple(guard_secrets)
-        # The outer wall's proxy of a VM on a customer's machine (#994): the clone, the fetch and the
-        # push go through it and through nothing else. None: git dials the provider itself.
+        # The outer wall's proxy of a VM on a customer's machine (#994): the clone, the fetch and
+        # the push go through it and through nothing else. None: git dials the provider itself.
         self._proxy = proxy
         self.layout = layout
         self.identity = identity

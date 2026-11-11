@@ -9,8 +9,7 @@ others, and without a proxy everything is as hosted."""
 from dataclasses import replace
 from typing import Any
 
-import pytest
-from test_setup_container import Rig, rig, run  # noqa: F401  (the fixture)
+from test_setup_container import Rig, rig, run  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 from code_reviewer_runner.implementer import host_rules
 from code_reviewer_runner.implementer import setup_container as sc

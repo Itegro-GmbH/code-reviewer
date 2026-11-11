@@ -19,9 +19,9 @@ given up on after the budget: `getaddrinfo` has no timeout of its own), each con
 left after the connection) and then each read of the answer. A call with no budget makes no
 lookup and no connection.
 
-**Through the outer wall's proxy** (#994, a model door in a VM on a customer's machine, `proxy`): the
-VM has no direct internet and no name server, so the door does not resolve the name or connect to
-an address itself. It asks the host's proxy for `CONNECT <name>:443` and speaks TLS to the name
+**Through the outer wall's proxy** (#994, a model door in a VM on a customer's machine, `proxy`):
+the VM has no direct internet and no name server, so the door does not resolve the name or connect
+to an address itself. It asks the host's proxy for `CONNECT <name>:443` and speaks TLS to the name
 through the tunnel (certificate and name verified as ever); the proxy looks the name up, judges
 every address and connects to one it checked, which is this module's own check done by the same
 decision (`implementer/netdoor/proxy.py`). A proxy that refuses, or cannot be reached, is a call

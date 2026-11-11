@@ -17,12 +17,12 @@ name of every request by the environment's rule, and connects to the address it 
 
 **Chained to the outer wall's proxy** (#994, a door in a VM on a customer's machine): the VM has no
 direct internet and no name server, so the door makes no lookup and no connection to an address of
-its own. After the rule and the port are decided it asks the host's proxy for `CONNECT <name>:<port>`
-(`chained_connector`) and relays through that tunnel, for a plain `http://` request too (a tunnel to
-port 80 and the request in origin form). The proxy does the lookup, judges every address and
-connects to one it checked, with the same decision (it is this class's decision). A proxy that
-refuses, or cannot be reached, is the same `502 upstream_failed` the agent gets for a host that does
-not answer: the door never dials anything but the proxy, and its own firewall says so
+its own. After the rule and the port are decided it asks the host's proxy for
+`CONNECT <name>:<port>` (`chained_connector`) and relays through that tunnel, for a plain `http://`
+request too (a tunnel to port 80 and the request in origin form). The proxy does the lookup,
+judges every address and connects to one it checked, with the same decision (it is this class's
+decision). A proxy that refuses, or cannot be reached, is the same `502 upstream_failed` the agent
+gets for a host that does not answer: the door never dials anything but the proxy, and its own firewall says so
 (`netdoor_launcher.egress_rules`).
 
 The decision, in this order, and it is the same in every mode: an IP literal is refused; a name

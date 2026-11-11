@@ -13,12 +13,12 @@ import pytest
 from code_reviewer_runner.vm_init import wire
 from vm_init_support import (
     BAD_STARTS,
-    OUTER_PROXY,
     CONTROL_TOKEN,
     CREDENTIAL,
     IMAGE_ID,
     IMAGE_REFERENCE,
     LOCAL_CREDENTIAL,
+    OUTER_PROXY,
     VOLUME_NAME,
     start_document,
 )

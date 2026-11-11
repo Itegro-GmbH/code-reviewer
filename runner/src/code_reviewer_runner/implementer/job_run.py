@@ -76,7 +76,7 @@ from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
-from .runner_profile import agent_seams, reader_seams, setup_seams
+from .runner_profile import agent_seams, outer_proxy_for_job, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
 from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
@@ -277,6 +277,9 @@ def production_setup(
         reader,
         before_push=gate,
         guard_secrets=() if harness is None else (harness.login.secret,),
+        # A VM on a customer's machine (#994): the clone, the fetch and the push go through the
+        # host's outer-wall proxy and nowhere else.
+        proxy=outer_proxy_for_job(environment),
     )
 
     def run_environment(

@@ -10,7 +10,7 @@ import json
 import socket
 import threading
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -89,7 +89,7 @@ class Proxy:
 
 
 @contextmanager
-def proxy(answer: bytes) -> Iterator[Proxy]:
+def proxy(answer: bytes) -> Generator[Proxy]:
     stand_in = Proxy(answer)
     try:
         yield stand_in
@@ -237,12 +237,12 @@ def test_the_environments_no_proxy_cannot_take_a_name_around_the_proxy(
 
 # #994-T03
 def test_without_a_proxy_the_opener_is_the_one_it_was_and_dials_directly() -> None:
-    opener = build_opener()
+    opener: Any = build_opener()
 
-    handlers = [type(handler) for handler in opener.handlers]
-    assert NoRedirects in handlers
+    handlers: list[object] = list(opener.handlers)
+    assert NoRedirects in [type(handler) for handler in handlers]
     # `ProxyHandler({})` adds no handler at all: nothing proxies, whatever the environment says.
-    assert not [h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler)]
+    assert not [h for h in handlers if isinstance(h, urllib.request.ProxyHandler)]
 
 
 # #994-T01

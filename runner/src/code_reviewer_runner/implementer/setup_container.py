@@ -162,8 +162,8 @@ EGRESS_RULES: Final = "; ".join(
 
 
 def egress_rules(outer_proxy: OuterProxy | None = None) -> str:
-    """The VM's firewall for the Setup bridge. With the host's outer-wall proxy (#994) the bridge may
-    open a connection to that proxy's address and port (let through before the drop; the table's
+    """The VM's firewall for the Setup bridge. With the host's outer-wall proxy (#994) the bridge
+    may open a connection to that proxy's address and port (let through before the drop; the table's
     only `accept`) and nothing else leaves it: every other packet from the bridge is dropped, the
     private ranges and the internet alike, since the proxy is the one way to the internet and does
     the lookup. Without a proxy it is `EGRESS_RULES`, as hosted."""
@@ -636,9 +636,9 @@ class SetupContainer:
         # Not one variable besides the image's own (and the host's proxy on a customer's machine).
         image_config = as_object(self._api.inspect_image(image).get("Config")) or {}
         proxy = self._seams.outer_proxy
-        expected = _variables(image_config.get("Env")) | (
-            set() if proxy is None else set(proxy.tool_environment())
-        )
+        expected: set[str] = _variables(image_config.get("Env"))
+        if proxy is not None:
+            expected |= set(proxy.tool_environment())
         if _variables(config.get("Env")) != expected:
             problems.append("environment")
         if problems:
