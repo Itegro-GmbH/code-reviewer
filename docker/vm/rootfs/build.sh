@@ -117,6 +117,7 @@ ln -sf /proc/self/mounts "$root/etc/mtab"
 echo "code-reviewer-vm" > "$root/etc/hostname"
 printf '127.0.0.1 localhost code-reviewer-vm\n::1 localhost\n' > "$root/etc/hosts"
 mkdir -p "$root/jobdisk" "$root/seed" "$root/var/lib/docker" "$root/var/lib/containerd" "$root/var/lib/sysbox" "$root/var/lib/sysboxfs" \
+  "$root/var/lib/code-reviewer-work" \
   "$root/run" "$root/tmp" "$root/var/log" "$root/var/tmp" "$root/var/cache" "$root/root" "$root/sys/fs/cgroup"
 chmod 1777 "$root/tmp" "$root/var/tmp"
 cleanup

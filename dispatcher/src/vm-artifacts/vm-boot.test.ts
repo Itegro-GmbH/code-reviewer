@@ -54,6 +54,13 @@ describe("the guest init of every boot", () => {
   });
 
   // #978-T14
+  it("finds the work volume's mount point in the read-only root file system: only a directory that exists can be mounted over", () => {
+    expect(BUILD).toMatch(
+      /mkdir -p [^\n]*"\$root\/var\/lib\/code-reviewer-work"/,
+    );
+  });
+
+  // #978-T14
   it("keeps the placeholder only for the build-only boots", () => {
     expect(BUILD_INIT).toMatch(/seed\)/);
     expect(BUILD_INIT).toMatch(/smoke\)/);
