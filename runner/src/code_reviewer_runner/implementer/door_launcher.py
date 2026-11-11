@@ -49,6 +49,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
 )
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import OuterProxy
 from code_reviewer_runner.result import ErrorCode
 
 from .docker_api import AttachedStreams, DockerApi, DockerError
@@ -134,6 +135,32 @@ EGRESS_RULES: Final = "; ".join(
         f"add rule ip {EGRESS_TABLE} output drop",
     ]
 )
+
+
+def egress_rules(outer_proxy: OuterProxy | None = None) -> str:
+    """The door's table. With the host's outer-wall proxy (#994, a VM on a customer's machine) the
+    door has **one** way out, a connection to that proxy's address and port, and nothing else: no
+    DNS (the proxy resolves), no port 443 of the internet, no private range (the proxy's own
+    address is in one, and is let through before anything else is looked at). A door whose proxy
+    refuses it fails; no rule lets it dial the provider directly. Without a proxy the table is
+    `EGRESS_RULES`, as hosted."""
+    if outer_proxy is None:
+        return EGRESS_RULES
+    return "; ".join(
+        [
+            f"add table ip {EGRESS_TABLE}",
+            f"add chain ip {EGRESS_TABLE} output "
+            "{ type filter hook output priority 0 ; policy accept ; }",
+            f'add rule ip {EGRESS_TABLE} output oifname "lo" accept',
+            f"add rule ip {EGRESS_TABLE} output ct state established,related accept",
+            f"add rule ip {EGRESS_TABLE} output ip daddr {MODEL_NETWORK_SUBNET} drop",
+            f"add rule ip {EGRESS_TABLE} output ip daddr {outer_proxy.host} "
+            f"tcp dport {outer_proxy.port} accept",
+            f"add rule ip {EGRESS_TABLE} output drop",
+        ]
+    )
+
+
 RULES_ENTRYPOINT: Final = ["/usr/sbin/nft"]
 RULES_SECONDS: Final = 20.0
 RULES_CONTAINER_NAME: Final = "code-reviewer-model-door-rules"
@@ -193,14 +220,14 @@ def door_document(image: str) -> dict[str, Any]:
     }
 
 
-def rules_document(image: str, door: str) -> dict[str, Any]:
+def rules_document(image: str, door: str, outer_proxy: OuterProxy | None = None) -> dict[str, Any]:
     """The one-shot container that installs the door's network rules: it shares the door's network
     namespace and nothing else, holds `NET_ADMIN` and no other capability, and runs one command that
-    is a constant."""
+    is a constant (of the host's proxy address when there is one: `egress_rules`)."""
     return {
         "Image": image,
         "Entrypoint": RULES_ENTRYPOINT,
-        "Cmd": [EGRESS_RULES],
+        "Cmd": [egress_rules(outer_proxy)],
         "User": "0:0",
         "Env": [],
         "Labels": role_labels("model-door-rules"),
@@ -226,22 +253,21 @@ def start_document(
     deadline_seconds: float,
     port: int,
     environment: Mapping[str, str],
+    outer_proxy: OuterProxy | None = None,
 ) -> bytes:
-    """The line written to the door's stdin (`protocol.py`). Holds the key."""
-    return (
-        json.dumps(
-            {
-                "version": VERSION,
-                "modelAccess": model_access,
-                "capability": capability,
-                "deadlineSeconds": deadline_seconds,
-                "listenPort": port,
-                "environment": dict(environment),
-            },
-            separators=(",", ":"),
-        ).encode()
-        + b"\n"
-    )
+    """The line written to the door's stdin (`protocol.py`). Holds the key. `outerProxy` is the
+    host's proxy (#994), there only when the host has one."""
+    document: dict[str, Any] = {
+        "version": VERSION,
+        "modelAccess": model_access,
+        "capability": capability,
+        "deadlineSeconds": deadline_seconds,
+        "listenPort": port,
+        "environment": dict(environment),
+    }
+    if outer_proxy is not None:
+        document["outerProxy"] = outer_proxy.to_json()
+    return json.dumps(document, separators=(",", ":")).encode() + b"\n"
 
 
 def _unavailable(reason: str) -> JobError:
@@ -259,6 +285,9 @@ class DoorSeams:
     clock: Callable[[], float] = time.monotonic
     ready_seconds: float = READY_SECONDS
     stop_seconds: float = STOP_SECONDS
+    # The host's outer-wall proxy (#994): the door's only way to the provider on a customer's
+    # machine, handed to Control by the host. None: as hosted.
+    outer_proxy: OuterProxy | None = None
 
 
 class RunningDoor:
@@ -405,13 +434,14 @@ def start_door(
         )  # fmt: skip
         running.begin()
         api.start_container(container)
-        _close_the_doors_network(api, image, container)
+        _close_the_doors_network(api, image, container, seams.outer_proxy)
         document = start_document(
             model_access=model_access,
             capability=capability,
             deadline_seconds=deadline_seconds,
             port=port,
             environment=environment,
+            outer_proxy=seams.outer_proxy,
         )
         # A door that is already gone cannot be written to: the reader says how it ended.
         with contextlib.suppress(OSError):
@@ -457,10 +487,12 @@ def start_door(
     return running
 
 
-def _close_the_doors_network(api: DockerApi, image: str, door: str) -> None:
+def _close_the_doors_network(
+    api: DockerApi, image: str, door: str, outer_proxy: OuterProxy | None = None
+) -> None:
     """Install the door's network rules before it is told anything. A door whose rules are not in
     place is not used: this raises, and the caller takes the door away with the key never sent."""
-    helper = api.create_container(rules_document(image, door), RULES_CONTAINER_NAME)
+    helper = api.create_container(rules_document(image, door, outer_proxy), RULES_CONTAINER_NAME)
     try:
         api.start_container(helper)
         code = api.wait_container(helper, timeout=RULES_SECONDS)

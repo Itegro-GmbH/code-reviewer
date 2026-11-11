@@ -30,6 +30,7 @@ from code_reviewer_runner.dynamic_review.passthrough.server import PassthroughSe
 from code_reviewer_runner.dynamic_review.passthrough.upstream import HttpsUpstream
 from code_reviewer_runner.job import JobError, parse_model_access
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import OuterProxy, OuterProxyError
 
 from ..limits import agent_limits
 from .ledger import AnnouncingLedger
@@ -75,12 +76,16 @@ class DoorStart:
         deadline_seconds: float,
         listen_port: int,
         environment: Mapping[str, str],
+        outer_proxy: OuterProxy | None = None,
     ) -> None:
         self.model_access = model_access
         self.capability = capability
         self.deadline_seconds = deadline_seconds
         self.listen_port = listen_port
         self.environment = environment
+        # The host's outer-wall proxy (#994): the door's one way to the provider on a customer's
+        # machine. None: the door dials the provider itself, as hosted.
+        self.outer_proxy = outer_proxy
 
     def __repr__(self) -> str:
         return "DoorStart(...)"
@@ -97,8 +102,16 @@ def parse_start(text: str) -> DoorStart:
         raise DoorRefused(REFUSED_START_INVALID) from None
     given = as_object(document)
     keys = {"version", "modelAccess", "capability", "deadlineSeconds", "listenPort", "environment"}
-    if given is None or given.keys() != keys or given["version"] != VERSION:
+    if given is None or not keys <= given.keys() <= keys | {"outerProxy"}:
         raise DoorRefused(REFUSED_START_INVALID)
+    if given["version"] != VERSION:
+        raise DoorRefused(REFUSED_START_INVALID)
+    outer_proxy: OuterProxy | None = None
+    if "outerProxy" in given:
+        try:
+            outer_proxy = OuterProxy.from_json(given["outerProxy"])
+        except OuterProxyError:
+            raise DoorRefused(REFUSED_START_INVALID) from None
     access = as_object(given["modelAccess"])
     capability: Any = given["capability"]
     deadline: Any = given["deadlineSeconds"]
@@ -125,6 +138,7 @@ def parse_start(text: str) -> DoorStart:
         deadline_seconds=float(deadline),
         listen_port=port,
         environment={name: str(value) for name, value in environment.items()},
+        outer_proxy=outer_proxy,
     )
 
 
@@ -137,12 +151,19 @@ class ModelDoor:
         start: DoorStart,
         *,
         bind: tuple[str, int] | None = None,
-        upstream_for: UpstreamFactory = HttpsUpstream,
+        upstream_for: UpstreamFactory | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._start = start
         self._bind = bind or (MODEL_DOOR_ADDRESS, start.listen_port)
-        self._upstream_for = upstream_for
+        # The provider's connection: the host's outer-wall proxy when the start names one, else the
+        # door's own (hosted). A test brings a double.
+        proxy = start.outer_proxy
+        self._upstream_for: UpstreamFactory = upstream_for or (
+            HttpsUpstream
+            if proxy is None
+            else (lambda base_url: HttpsUpstream(base_url, proxy=proxy))
+        )
         self._clock = clock
         self._native: NativeJob | None = None
         self._server: PassthroughServer | None = None
@@ -312,7 +333,7 @@ def run_door(
     stdout: TextIO,
     *,
     bind: tuple[str, int] | None = None,
-    upstream_for: UpstreamFactory = HttpsUpstream,
+    upstream_for: UpstreamFactory | None = None,
     clock: Callable[[], float] = time.monotonic,
     poll_seconds: float = POLL_SECONDS,
 ) -> int:
