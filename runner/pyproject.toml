@@ -93,10 +93,10 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 "scripts/runner_spikes.py" = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests", "scripts", "../fakes"]
+include = ["src", "tests", "scripts", "release", "../fakes"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
-extraPaths = ["src", "..", "tests/engine", "tests/kvm", "tests/unit"]
+extraPaths = ["src", "..", "tests/engine", "tests/kvm", "tests/unit", "release"]
 venvPath = "."
 venv = ".venv"
 
