@@ -88,7 +88,7 @@ def run_job(machine: Machine, tmp_path: Path, job_id: str, *, with_git: bool) ->
             machine.settings,
             outer_wall=OuterWallMode.PROXY,
             slots=1,
-            job_timeout_seconds=1500,
+            job_timeout_seconds=3900,
             # The Worker image of the lane (the CA) is the one the settings name: its id is the
             # lane disk's, which the workflow gave as KVM_VM_IMAGES.
         )

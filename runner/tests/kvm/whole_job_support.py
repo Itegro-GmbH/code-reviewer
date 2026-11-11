@@ -92,7 +92,9 @@ def job_document(*, setup_script: str = SETUP_SCRIPT) -> dict[str, Any]:
     spec["baseBranch"] = "main"
     spec["branch"] = BRANCH
     spec["instruction"] = INSTRUCTION
-    spec["limits"] = {"timeLimitSeconds": 1200}
+    # The contract's own limit: a setup script has a budget of its own inside it, and a smaller limit
+    # leaves it none (`environment_setup_failed`, the turn does not start).
+    spec["limits"] = {"timeLimitSeconds": 3600}
     spec["cost"] = {"keyMode": "managed", "priceBook": dict(BOOK), "maxTotalTokens": None}
     spec["modelEntry"].update(
         providerId="lane-provider",
