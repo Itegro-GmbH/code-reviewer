@@ -169,6 +169,20 @@ def opener_status(proxy, url, seconds=30):
         return 0
 
 
+def opener_answered(proxy, url, seconds=30):
+    # Whether the origin answered through the proxy, whatever its status (an external host may
+    # redirect or refuse a bare GET): a refusal of the proxy itself says so in `X-Network-Door`.
+    from code_reviewer_runner.job_loop.http import ApiUnavailable, build_opener, send
+
+    try:
+        request = urllib.request.Request(url, method="GET")
+        reply = send(build_opener(proxy.url), request, seconds)
+    except ApiUnavailable:
+        return False
+    refused = any(name.lower() == "x-network-door" for name in reply.headers)
+    return reply.status > 0 and not refused
+
+
 def git_lists(proxy, url):
     from code_reviewer_runner.implementer.git_process import (
         TRUSTED_PATH,
@@ -286,7 +300,7 @@ def main():
         seen["git_before"] = git_lists(proxy, CONFIG["git_url"])
     seen["model_before"] = model_status(proxy) in (400, 401, 403)
     seen["door_before"] = door_status(proxy, CONFIG["door_listed"], CONFIG["door_target"]) == 200
-    seen["other_before"] = opener_status(proxy, CONFIG["other_url"]) == 200
+    seen["other_before"] = opener_answered(proxy, CONFIG["other_url"])
     seen["narrow_acked"] = narrow(job["controlToken"])
     seen["direct_after"] = reachable(direct_host, direct_port)
     seen["app_http_after"] = opener_status(proxy, app + "/") == 200
@@ -294,7 +308,7 @@ def main():
         seen["git_after"] = git_lists(proxy, CONFIG["git_url"])
     seen["model_after"] = model_status(proxy) in (400, 401, 403)
     seen["door_after"] = door_status(proxy, CONFIG["door_listed"], CONFIG["door_target"]) == 200
-    seen["other_after"] = opener_status(proxy, CONFIG["other_url"]) == 200
+    seen["other_after"] = opener_answered(proxy, CONFIG["other_url"])
     seen["door_refused_after"] = (
         door_status(proxy, CONFIG["door_listed"], CONFIG["door_refused_target"]) == 200
     )
