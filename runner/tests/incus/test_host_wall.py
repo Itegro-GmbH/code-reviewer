@@ -101,6 +101,9 @@ class Target:
     # Which phases the probe reaches in: the proxy everywhere, port 53 of host addresses in the
     # phases without our table (that is #1008's gap), everything else only without any wall.
     reaches: tuple[str, ...]
+    # Phases that say nothing about the table and are not asserted: Incus alone answers a forwarded
+    # probe with a reset of its own, which looks like the target's.
+    unasserted: tuple[str, ...] = ()
 
 
 @dataclass
@@ -298,9 +301,9 @@ def _targets(bench: Bench) -> list[Target]:
         Target("incusbr0 decoy", bench.incusbr0, DECOY_PORT, everything_off),
         Target("primary address", bench.primary, DECOY_PORT, everything_off),
         Target("other slot proxy", bench.other.host_address, PROXY_PORT, everything_off),
-        Target("lan", LAB_ADDRESS, 8000, everything_off),
-        Target("metadata", METADATA_ADDRESS, 80, everything_off),
-        Target("internet", INTERNET_ADDRESS, 8000, everything_off),
+        Target("lan", LAB_ADDRESS, 8000, everything_off, ("acl",)),
+        Target("metadata", METADATA_ADDRESS, 80, everything_off, ("acl",)),
+        Target("internet", INTERNET_ADDRESS, 8000, everything_off, ("acl",)),
     ]
     if bench.docker0:
         found.append(Target("docker0 decoy", bench.docker0, DECOY_PORT, everything_off))
@@ -374,6 +377,8 @@ def _expect(rows: list[tuple[str, str, str, str]], bench: Bench) -> None:
     wrong: list[str] = []
     for phase, who, name, verdict in rows:
         target = by_name[name]
+        if phase in target.unasserted:
+            continue
         if verdict == "unreachable":
             wrong.append(f"{phase} {who} {name}: no route, nothing was sent (the lane is wrong)")
         elif reached(verdict) != (phase in target.reaches):
@@ -444,8 +449,14 @@ def test_ipv6_to_the_host_is_dropped_and_reached_without_the_table(bench: Bench)
                     lambda i=instance: ping6_verdict(bench.client, i, host, "eth0")
                 )
         for who in bench.instances:
-            assert verdicts[("control", who)] == "open", verdicts
-            assert verdicts[("table", who)] == "timeout" and verdicts[("full", who)] == "timeout"
+            seen = sh("ip", "-6", "addr", "show", "dev", bench.outer) + sh(
+                "nft", "list", "table", "inet", "incus"
+            )
+            assert verdicts[("control", who)] == "open", (
+                f"{who}: {verdicts[('control', who)]}\nhost: {seen}"
+            )
+            assert verdicts[("table", who)].startswith("timeout"), verdicts
+            assert verdicts[("full", who)].startswith("timeout"), verdicts
         listing = sh("nft", "list", "table", "inet", bench.spec.table)
         assert our_counter(listing, "no IPv6") > 0
     finally:

@@ -274,14 +274,20 @@ async def tcp_verdict(
 
 
 async def ping6_verdict(client: IncusClient, instance: str, address: str, device: str) -> str:
-    """`open` when an ICMPv6 echo to a link-local `address` is answered, else `timeout`."""
+    """`open` when an ICMPv6 echo to a link-local `address` is answered, else `timeout: ` and what
+    `ping` and the instance's IPv6 said (for the message of a failed lane)."""
     result = await run_exec(
         client,
         instance,
-        ("sh", "-c", f"ping -6 -c 1 -W 2 {address}%{device} >/dev/null 2>&1; echo rc=$?"),
+        (
+            "sh",
+            "-c",
+            f"ping -6 -c 1 -W 2 {address}%{device} 2>&1; echo rc=$?; "
+            f"ip -6 addr show dev {device} 2>&1; ip -6 neigh show dev {device} 2>&1",
+        ),
         timeout=30.0,
     )
-    return "open" if "rc=0" in result.stdout else "timeout"
+    return "open" if "rc=0" in result.stdout else f"timeout: {result.stdout}"
 
 
 async def send_udp(client: IncusClient, instance: str, host: str, port: int) -> None:
