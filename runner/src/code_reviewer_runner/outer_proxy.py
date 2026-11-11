@@ -39,8 +39,8 @@ LOOPBACK_NO_PROXY: Final = "localhost,127.0.0.1,::1"
 PROXY_VARIABLES: Final = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 NO_PROXY_VARIABLES: Final = ("NO_PROXY", "no_proxy")
 
-# A name the tunnel is asked for: the lower-case, ASCII form of a host name (the door's `ascii_name`).
-# Never a space or a control character, so a name cannot add a header line to the request.
+# A name the tunnel is asked for: the lower-case, ASCII form of a host name (the door's
+# `ascii_name`). Never a space or a control character, so a name cannot add a header line.
 _TUNNEL_HOST: Final = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
 _STATUS_LINE: Final = re.compile(rb"HTTP/1\.[01] (\d{3})(?: |\r\n)")
 # The head of the proxy's answer to a `CONNECT`: a status line and a few headers.
@@ -101,7 +101,7 @@ class OuterProxy:
 
     @classmethod
     def from_json(cls, value: object) -> "OuterProxy":
-        """The `{"host", "port"}` of the start payload or of Control's stdin, or `OuterProxyError`."""
+        """The `{"host", "port"}` of Control's stdin, or `OuterProxyError`."""
         if not isinstance(value, dict):
             raise OuterProxyError("the outer proxy is not an object")
         given: dict[str, Any] = value  # pyright: ignore[reportUnknownVariableType]

@@ -55,6 +55,7 @@ from code_reviewer_runner.job_loop.resume_download import (
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
+from code_reviewer_runner.outer_proxy import OuterProxy
 from code_reviewer_runner.resume_wire import (
     HEADER_BYTES,
     HEADER_PARTS,
@@ -165,11 +166,20 @@ class WorkerApi(Protocol):
 class HttpWorkerApi:
     """The Worker API over HTTP. Blocking calls run in a thread, so the event loop stays free."""
 
-    def __init__(self, base_url: str, credential: str, *, request_timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        credential: str,
+        *,
+        request_timeout: float = 30.0,
+        proxy: OuterProxy | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
         self._timeout = request_timeout
-        self._opener = build_opener()
+        # A VM on a customer's machine reaches the app through the host's outer-wall proxy only
+        # (#994); hosted and every other Worker dial the app themselves, as before.
+        self._opener = build_opener(None if proxy is None else proxy.url)
         # The features the app listed in the version answer (empty: none or not asked).
         self._features: frozenset[str] = frozenset()
         # The thread of the steps call in flight, if any, and of the snapshot call (`_call_alone`).
