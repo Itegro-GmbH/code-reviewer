@@ -30,9 +30,15 @@ from typing import Any, Final
 
 # The variable Control sets in the environment of the job process (never in a job's document).
 OUTER_PROXY_VARIABLE: Final = "RUNNER_OUTER_PROXY"
-# The network every slot of a local machine lives in (`firecracker/slots.py`, `outer-wall.nft`): the
-# proxy is on one address of it, and nothing outside it is a proxy of the host.
-SLOT_NETWORK: Final = ipaddress.IPv4Network("172.31.0.0/16")
+# What the host's address on a slot's TAP may be: a private IPv4 address. The slots' network is
+# chosen by the installer for each machine (`firecracker/slots.py`, `outer-wall.nft`), and a VM does
+# not know it, so the rule is the one every such network satisfies; the nft table is what lets the
+# VM reach exactly its slot's address.
+PRIVATE_NETWORKS: Final = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
 # How a client says no proxy is needed for a destination inside its own namespace (a local socket of
 # the container): loopback never leaves it, so it is no way out.
 LOOPBACK_NO_PROXY: Final = "localhost,127.0.0.1,::1"
@@ -63,7 +69,7 @@ class TunnelRefused(OSError):
 
 @dataclass(frozen=True)
 class OuterProxy:
-    """The proxy of this VM's slot: an IPv4 address of the slots' network and a port."""
+    """The proxy of this VM's slot: a private IPv4 address (the host's on its TAP) and a port."""
 
     host: str
     port: int
@@ -73,8 +79,8 @@ class OuterProxy:
             address = ipaddress.IPv4Address(self.host)
         except ValueError:
             raise OuterProxyError("the outer proxy's host is not an IPv4 address") from None
-        if str(address) != self.host or address not in SLOT_NETWORK:
-            raise OuterProxyError("the outer proxy's host is not an address of the slots' network")
+        if str(address) != self.host or not any(address in each for each in PRIVATE_NETWORKS):
+            raise OuterProxyError("the outer proxy's host is not a private IPv4 address")
         if isinstance(self.port, bool) or not 1 <= self.port <= 65535:
             raise OuterProxyError("the outer proxy's port is not a port")
 

@@ -18,6 +18,7 @@ The wall clock of a VM is the host's (vm-init keeps no time for the job): the jo
 what Control's container may take to stop plus the preparation. A VM that is still there then is
 killed."""
 
+import ipaddress
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -26,7 +27,7 @@ from typing import Final
 from .control_run import MEMORY_MIB_PER_VCPU, VCPU_SIZES
 from .disks import GIB
 from .outer_wall import OuterWallMode
-from .slots import MAX_SLOTS
+from .slots import DEFAULT_SLOT_NETWORK, MAX_SLOTS, parse_slot_network
 
 STATE_DIR: Final = Path("/var/lib/code-reviewer")
 FIRECRACKER: Final = Path("/usr/local/bin/firecracker")
@@ -60,6 +61,8 @@ class FirecrackerSettings:
     state_dir: Path = STATE_DIR
     firecracker: Path = FIRECRACKER
     slots: int = 1
+    # The network of the slots' /30s, chosen by the installer (`FACTORY_RUNNER_SLOT_NETWORK`).
+    slot_network: ipaddress.IPv4Network = DEFAULT_SLOT_NETWORK
     vcpus: int = 2
     disk_gib: int = DEFAULT_DISK_GIB
     job_timeout_seconds: int = DEFAULT_JOB_TIMEOUT_SECONDS
@@ -103,6 +106,8 @@ class FirecrackerSettings:
     def validated(self) -> "FirecrackerSettings":
         if not 1 <= self.slots <= MAX_SLOTS:
             raise SettingsError(f"slots: 1 to {MAX_SLOTS}")
+        if self.slot_network.num_addresses < self.slots * 4:
+            raise SettingsError("slotNetwork: too small for the number of slots")
         if self.vcpus not in VCPU_SIZES:
             raise SettingsError(f"vcpus: one of {', '.join(map(str, VCPU_SIZES))}")
         if self.disk_gib < 8:
@@ -145,6 +150,15 @@ def settings_from_environment(
         mode = OuterWallMode(wall)
     except ValueError:
         raise SettingsError("FACTORY_RUNNER_OUTER_WALL is proxy, refuse or inner-only") from None
+    network_text = environment.get("FACTORY_RUNNER_SLOT_NETWORK", "").strip()
+    try:
+        slot_network = (
+            parse_slot_network(network_text, parallel_runs)
+            if network_text
+            else DEFAULT_SLOT_NETWORK
+        )
+    except ValueError as error:
+        raise SettingsError(f"FACTORY_RUNNER_SLOT_NETWORK must be {error}") from None
     settings = FirecrackerSettings(
         kernel=path("FACTORY_RUNNER_VM_KERNEL", artifacts / "vmlinux"),
         rootfs=path("FACTORY_RUNNER_VM_ROOTFS", artifacts / "rootfs.ext4"),
@@ -153,6 +167,7 @@ def settings_from_environment(
         state_dir=state,
         firecracker=path("FACTORY_RUNNER_FIRECRACKER", FIRECRACKER),
         slots=parallel_runs,
+        slot_network=slot_network,
         vcpus=_whole(environment, "FACTORY_RUNNER_VM_VCPUS") or 2,
         disk_gib=disk_gb or DEFAULT_DISK_GIB,
         job_timeout_seconds=_whole(job_environment or {}, "RUNNER_JOB_TIMEOUT_SECONDS")

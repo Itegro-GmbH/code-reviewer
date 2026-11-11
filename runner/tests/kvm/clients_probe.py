@@ -278,8 +278,8 @@ def main():
     from code_reviewer_runner import outer_proxy
 
     if CONFIG["slot_network"] is not None:
-        # The unit run's loopback stand-in for the slots' network; the VM has the real one.
-        outer_proxy.SLOT_NETWORK = ipaddress.IPv4Network(CONFIG["slot_network"])
+        # The unit run's loopback stand-in for the private addresses; the VM has the real ones.
+        outer_proxy.PRIVATE_NETWORKS = (ipaddress.IPv4Network(CONFIG["slot_network"]),)
     job = json.loads(sys.stdin.readline())
     seen = {}
     try:

@@ -231,15 +231,20 @@ def _text(value: object, pattern: re.Pattern[str], what: str, *, longest: int) -
     return value
 
 
-# The network the slots of a local machine live in (`firecracker/slots.py`, `outer-wall.nft`): the
-# proxy is on one address of it.
-_SLOT_NETWORK = ipaddress.IPv4Network("172.31.0.0/16")
+# The slots' network is chosen by the installer for each machine (`firecracker/slots.py`) and the VM
+# does not know it: the proxy is on a private address (the nft table lets the VM reach its slot's
+# address and nothing else).
+_PRIVATE_NETWORKS = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
 
 
 def _outer_proxy(value: object) -> OuterProxy:
-    """`outerProxy` of the contract: an IPv4 address of the slots' network, written the way
-    `ipaddress` prints it, and a port. Anything else is refused: the proxy is the one way out of the
-    VM, so an address outside the slots' network is a start that is wrong."""
+    """`outerProxy` of the contract: a private IPv4 address, written the way `ipaddress` prints it,
+    and a port. Anything else is refused: the proxy is the one way out of the VM, so a public,
+    loopback or link-local address is a start that is wrong."""
     given = _record(value, {"host", "port"}, set(), "outerProxy")
     host, port = given["host"], given["port"]
     if not isinstance(host, str):
@@ -248,7 +253,7 @@ def _outer_proxy(value: object) -> OuterProxy:
         address = ipaddress.IPv4Address(host)
     except ValueError:
         raise _invalid("outerProxy.host") from None
-    if str(address) != host or address not in _SLOT_NETWORK:
+    if str(address) != host or not any(address in each for each in _PRIVATE_NETWORKS):
         raise _invalid("outerProxy.host")
     if type(port) is not int or not 1 <= port <= 65535:
         raise _invalid("outerProxy.port")

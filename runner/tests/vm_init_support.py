@@ -128,11 +128,13 @@ BAD_STARTS: dict[str, dict[str, Any]] = {
     "image.id trailing newline": _bad(image={"reference": IMAGE_REFERENCE, "id": IMAGE_ID + "\n"}),
     "workVolume.name trailing newline": _bad(workVolume={"name": "v\n", "reserveGib": 8}),
     "controlToken trailing newline": _bad(controlToken=CONTROL_TOKEN + "\n"),
-    # #994: the proxy is the one way out of the VM, so an address outside the slots' network, a
+    # #994: the proxy is the one way out of the VM, so a public, loopback or link-local address, a
     # spelling `ipaddress` would not print, a missing or wrong port and any other key are refused.
     "outerProxy not an object": _bad(outerProxy="172.31.0.5:3128"),
-    "outerProxy host outside the slots": _bad(outerProxy={**OUTER_PROXY, "host": "10.0.0.1"}),
-    "outerProxy host below the slots": _bad(outerProxy={**OUTER_PROXY, "host": "172.30.0.5"}),
+    "outerProxy host public": _bad(outerProxy={**OUTER_PROXY, "host": "8.8.8.8"}),
+    "outerProxy host below 172.16/12": _bad(outerProxy={**OUTER_PROXY, "host": "172.15.0.5"}),
+    "outerProxy host above 172.16/12": _bad(outerProxy={**OUTER_PROXY, "host": "172.32.0.5"}),
+    "outerProxy host shared address space": _bad(outerProxy={**OUTER_PROXY, "host": "100.64.0.5"}),
     "outerProxy host loopback": _bad(outerProxy={**OUTER_PROXY, "host": "127.0.0.1"}),
     "outerProxy host a name": _bad(outerProxy={**OUTER_PROXY, "host": "proxy.example"}),
     "outerProxy host a leading zero": _bad(outerProxy={**OUTER_PROXY, "host": "172.31.0.05"}),

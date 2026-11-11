@@ -40,6 +40,7 @@ meets `EMFILE` backs off instead of spinning on its readable socket. The service
 import asyncio
 import contextlib
 import errno
+import ipaddress
 import itertools
 import logging
 import socket
@@ -69,7 +70,7 @@ from code_reviewer_runner.implementer.network_rule import NetworkRule
 from .host_addresses import HostAddresses
 from .outer_rule import WIDE, OuterRuleError, narrowed_rule
 from .outer_wall import VmIdentity
-from .slots import Slot
+from .slots import DEFAULT_SLOT_NETWORK, Slot
 from .wire import NarrowMessage, Refusal
 
 _log = logging.getLogger(__name__)
@@ -291,6 +292,7 @@ class ProxyOuterWall:
         self,
         slots: int,
         *,
+        network: ipaddress.IPv4Network = DEFAULT_SLOT_NETWORK,
         port: int = PROXY_PORT,
         addresses: Callable[[Slot], SlotAddresses] = tap_addresses,
         resolver: Resolver = system_resolver,
@@ -300,6 +302,7 @@ class ProxyOuterWall:
         host_addresses: HostAddresses | None = None,
     ) -> None:
         self._count = slots
+        self._network = network
         self._port = port
         self._addresses = addresses
         self._resolver = resolver
@@ -365,7 +368,7 @@ class ProxyOuterWall:
             raise OuterWallUnavailable("host addresses") from None
         try:
             for index in range(self._count):
-                slot = Slot(index)
+                slot = Slot(index, self._network)
                 ends = self._addresses(slot)
                 decider = SlotDecider(self._resolver, self._host_addresses.contains)
                 try:

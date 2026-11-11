@@ -53,8 +53,8 @@ listener on <vsock uds>_5101  ◀──── connect, frame: ExitReport (with t
    is refused (`start_invalid`).
 6. **Runs Control**: `docker` with the start's `control.args` (rendered by the Dispatcher's `renderDockerRunArguments` from the local spec), the job
    document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one: vm-init checks its shape, **Control checks the name against its own allow-list** and refuses any it does not know, #980; and `outerProxy` when the host runs the proxy wall, #994) as one JSON line on stdin, then the pipe is closed. Nothing
-   else carries a credential or the token. **`outerProxy`** is the host's address on the slot's TAP and the proxy's port: vm-init validates it (an IPv4 address of
-   the slots' `172.31.0.0/16` in its canonical spelling, a port; anything else is a refused start), writes it into this document and does nothing else with it.
+   else carries a credential or the token. **`outerProxy`** is the host's address on the slot's TAP and the proxy's port: vm-init validates it (a private IPv4 address, in its canonical spelling, since the slots' network is the
+   installer's choice for the machine; and a port; anything else is a refused start), writes it into this document and does nothing else with it.
    Control configures every client that dials the internet from it ([docs/runner.md](../../docs/runner.md#every-client-in-the-vm-goes-through-the-proxy-994)); it is
    never an argument of `docker run` and never from a job.
 7. **Reports and powers off.** The exit report (`ExitReport`: the container's status and a stable reason) goes to the host's port 5101, tried again every

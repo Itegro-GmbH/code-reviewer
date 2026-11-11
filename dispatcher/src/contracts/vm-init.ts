@@ -88,11 +88,11 @@ export interface WorkVolume {
   reserveGib: number;
 }
 /**
- * The proxy of the host's outer wall for this VM's slot (#994): the host's address on the slot's TAP (the first address of the slot's /30, in 172.31.0.0/16, `firecracker/slots.py`) and the port the proxy listens on there (3128, named by the static nft table). The VM's only way to the internet. vm-init writes it into Control's stdin document as `outerProxy` and does nothing else with it.
+ * The proxy of the host's outer wall for this VM's slot (#994): the host's address on the slot's TAP (the first address of the slot's /30, in the slots' network that the installer chose for the machine, `firecracker/slots.py`) and the port the proxy listens on there (3128, named by the static nft table). The VM's only way to the internet. vm-init writes it into Control's stdin document as `outerProxy` and does nothing else with it.
  */
 export interface OuterProxy {
   /**
-   * An IPv4 address of the slots' network 172.31.0.0/16, without leading zeros.
+   * A private IPv4 address (10.0.0.0/8, 172.16.0.0/12 or 192.168.0.0/16), without leading zeros: the slots' network is chosen by the installer for each machine and the VM does not know it.
    */
   host: string;
   port: number;

@@ -8,7 +8,6 @@ The result is `Prepared`. A runner whose base is not proven announces no OpenCod
 takes no job (the app routes only to a runner that announces OpenCode); the failed check says why.
 """
 
-import json
 import os
 import shutil
 from collections.abc import Callable, Mapping
@@ -64,7 +63,6 @@ from code_reviewer_runner.job import (
 from code_reviewer_runner.job_loop.settings import WorkerSettings, worker_settings_from_environment
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 
-IMAGE_FILE: Final = Path("/opt/code-reviewer/agent-image.json")
 PULL_SECONDS: Final = 900.0
 RUNC: Final = "runc"
 _GOLDEN_REPOSITORY, _GOLDEN_TAG = AGENT_IMAGE_REFERENCE.split(":")
@@ -89,15 +87,6 @@ class Prepared:
     @property
     def ready(self) -> bool:
         return self.selftest.base_ok
-
-
-def baked_agent_image(path: Path = IMAGE_FILE) -> str | None:
-    """The agent image reference the runner image was built with (`agent-image.json`), if any."""
-    try:
-        reference = json.loads(path.read_text(encoding="utf-8")).get("reference")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return reference if isinstance(reference, str) and reference else None
 
 
 def split_reference(reference: str) -> tuple[str, str]:
@@ -258,7 +247,7 @@ def prepare(
     not here, or is not the pinned one, is reported and left alone."""
     settings = worker_settings_from_environment(source)
     settings = implementer_settings(settings)
-    reference = config.agent_image or baked_agent_image()
+    reference = config.agent_image
     try:
         memory = agent_memory_mb(config.limits, machine_mb=machine_mb())
     except LimitsError as error:

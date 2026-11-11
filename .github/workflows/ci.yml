@@ -93,7 +93,7 @@ jobs:
             # and scripts of the pipeline, the two prepare scripts) and their workflow. This is the one job on a KVM runner and takes
             # about half an hour, so nothing else starts it. One brace pattern, because the quantifier "every" would read a list as "and".
             vm:
-              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
+              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/install/**,runner/tests/unit/host_install_support.py,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
 
   # The code-review.com landing page (website/, #696): an Astro site and its own pnpm project, deployed by
   # Cloudflare (Workers Builds, root directory website), not by a workflow. This job only proves that it
@@ -385,7 +385,8 @@ jobs:
     needs: changes
     if: ${{ github.event_name == 'push' || github.base_ref == 'main' || needs.changes.outputs.runner == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # 20: the unit tests alone take 9 minutes since the installer and its fake machine have 130 tests (#982); 15 was reached after them.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: runner
@@ -813,21 +814,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=runner-sandbox
       - name: Smoke test the image
         run: docker/smoke/runner.sh code-reviewer-runner-sandbox:ci
-      # The Factory-Runner image (#854, R1b) is the Worker image with the `factory-runner` command as its entry point. It is
-      # built from the image above, which the default builder (the daemon's own) sees. Built, not pushed.
-      # `registry.example/code-reviewer-agent:ci` is a made-up reference on purpose (`.example` never resolves): the build only bakes
-      # it into /opt/code-reviewer/agent-image.json and the smoke test only reads it back, so nothing is pulled and no registry is
-      # needed. It is a tag, not a digest, which a release must never ship (the Dockerfile warns at build time; the runner's
-      # self-test warns at start). The runner does not start a job here: that is the lane's, on a daemon.
-      - name: Build the Factory-Runner image (no push)
-        run: >-
-          docker buildx build --builder default --load
-          --file runner/Dockerfile.factory-runner
-          --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:ci
-          --build-arg AGENT_IMAGE_REF=registry.example/code-reviewer-agent:ci
-          --tag factory-runner:ci runner
-      - name: Smoke test the Factory-Runner image
-        run: docker/smoke/factory-runner.sh factory-runner:ci
 
   # The Linux VM artifacts of Runner v2 (#976): the guest kernel (built or restored from a cache, its configuration always verified), the
   # root file system made by the golden snapshot's own install scripts, the data disk with the Worker and agent images, a smoke boot on KVM

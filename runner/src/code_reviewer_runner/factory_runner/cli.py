@@ -9,14 +9,18 @@ v2 (#974).
   and the shell history show it).
 - `run`: the service loop. `--once` takes one job and ends; with no job within `--wait` seconds it
   ends with exit code 0 and says so, and with an app that never answered during the wait it ends
-  with exit code 7.
+  with exit code 7. The program (`entry_point`) runs only with `FACTORY_RUNNER_SANDBOX=firecracker`:
+  every job in a Firecracker VM on a machine with KVM, which the installer (#982) arranges. The
+  Worker-as-a-process mode on the host's Docker is gone from the program (it stays reachable
+  through `main()` only for the tests of the service loop).
 - `selftest`: proves the base on this machine; exit code 0 when it holds. It only looks: it pulls
   and names no image, so a machine whose agent image is missing or not the pinned one is reported
   as not ready (a running service pulls it at its own start). It may run beside a service, though
   its throwaway container is one more on the daemon for as long as it takes.
 - `config show`, `config set`: the configuration without its secret, and changing it
   (`cli_manage.py`); `credential show|renew` (the runner's own), `credential add claude|list|remove|
-  retry` (the Claude Code tokens of this device, #980) and `update [--rollback]` are there too.
+  retry` (the Claude Code tokens of this device, #980) are there too. `update`, `rollback`, `status`
+  and `uninstall` belong to the root script the installer puts behind the same command name.
 
 The app address, the credential, the labels and the limits can come from the environment instead of
 the file (`config.py`): a VM that runs one job needs no `register`.
@@ -26,7 +30,7 @@ requires an update, 4 revoked, 5 not ready (the self-test failed), 6 configurati
 the app never answered during the wait, 8 `register`: registered, but the credential could not be
 saved, 9 another runner uses this Docker daemon (the log names the first container or
 network of another runner that was found), 10 the service ended so that its supervisor starts the
-image that `update` staged.
+release that the updater staged (the unit's start switches to it).
 """
 
 import argparse
@@ -61,17 +65,16 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_USAGE,
 )
 from code_reviewer_runner.factory_runner.claude_code_selftest import device_checks
+from code_reviewer_runner.factory_runner.cli_manage import REMOVED_OPTIONS
 from code_reviewer_runner.factory_runner.config import (
     SANDBOX_FIRECRACKER,
     SANDBOX_VARIABLE,
     ConfigError,
     Limits,
     RunnerConfig,
-    check_image,
     check_labels,
     check_limits,
     check_name,
-    check_runtime,
     check_token,
     check_url,
     config_path,
@@ -88,18 +91,16 @@ from code_reviewer_runner.factory_runner.service import (
     RunnerService,
     Seams,
 )
-from code_reviewer_runner.factory_runner.update import (
-    Fetch,
-    ReleaseChannel,
-    fetch_https,
-    load_channel,
-)
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job_loop.service import configure_logging
 from code_reviewer_runner.job_loop.settings import SettingsError
 
 PROGRAM = "factory-runner"
 TOKEN_VARIABLE = "FACTORY_RUNNER_TOKEN"
+NO_SANDBOX_MESSAGE = (
+    "the only sandbox is firecracker (a VM per job, on a machine with KVM): set "
+    "FACTORY_RUNNER_SANDBOX=firecracker; install it with runner/install/install.sh"
+)
 
 
 @dataclass(frozen=True)
@@ -129,9 +130,6 @@ class CliSeams:
     hostname: Callable[[], str] = socket.gethostname
     # The daemon the loop tidies (`housekeeping.py`).
     docker: Callable[[], DockerApi] = DockerApi
-    # The release channel of the image and how its documents are fetched (`update.py`).
-    channel: Callable[[], ReleaseChannel | None] = load_channel
-    fetch: Fetch = fetch_https
 
 
 def _look(config: RunnerConfig, env: Mapping[str, str]) -> Prepared:
@@ -171,8 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--cpus", type=int, help="CPUs the agent's container may use")
     register.add_argument("--memory-mb", type=int, help="memory of the agent's container")
     register.add_argument("--disk-gb", type=int, help="disk the runner may use")
-    register.add_argument("--runtime", default="auto", help="auto, runc or sysbox-runc")
-    register.add_argument("--agent-image", help="the agent image to pull when it is not here")
+    for option, name in REMOVED_OPTIONS.items():
+        register.add_argument(option, dest=name, help=argparse.SUPPRESS)
     register.add_argument("--force", action="store_true", help="replace an existing configuration")
 
     run = commands.add_parser("run", help="take jobs")
@@ -205,8 +203,10 @@ def main(
     out: TextIO | None = None,
     err: TextIO | None = None,
     stdin: TextIO | None = None,
+    require_sandbox: bool = False,
 ) -> int:
-    """Run the command and return the exit code."""
+    """Run the command and return the exit code. `require_sandbox`: `run` needs the Firecracker
+    sandbox (the program's own entry point asks for it; the tests of the loop do not)."""
     stdout: TextIO = out or sys.stdout
     stderr: TextIO = err or sys.stderr
     try:
@@ -235,20 +235,9 @@ def main(
                     env, stdout, stderr, client=seams.client, now=seams.now
                 )
             return cli_manage.credential_show(env, stdout, seams.now)
-        if arguments.command == "update":
-            return cli_manage.update_image(
-                arguments,
-                env,
-                stdout,
-                stderr,
-                docker=seams.docker,
-                hostname=seams.hostname,
-                channel=seams.channel,
-                fetch=seams.fetch,
-            )
         if arguments.command == "selftest":
             return _selftest(arguments, env, seams, stdout, stderr)
-        return _run(arguments, env, seams, stderr)
+        return _run(arguments, env, seams, stderr, require_sandbox=require_sandbox)
     except ConfigError as error:
         stderr.write(f"{PROGRAM}: configuration: {error}\n")
         return EXIT_CONFIG
@@ -268,6 +257,8 @@ def _register(
     err: TextIO,
     stdin: TextIO,
 ) -> int:
+    if cli_manage.refuse_removed_options(arguments, err):
+        return EXIT_USAGE
     path = config_path(env)
     if path.exists() and not arguments.force:
         err.write(f"{PROGRAM}: {path} exists: this machine is registered (--force replaces it)\n")
@@ -298,8 +289,6 @@ def _register(
                 if value is not None
             }
         ),
-        agent_image=check_image(arguments.agent_image) if arguments.agent_image else None,
-        runtime=check_runtime(arguments.runtime),
     )
     # The manifest is empty: what the runner can do is proven by `run`'s self-test, which announces
     # it. A runner that is registered and not yet started takes no job.
@@ -432,8 +421,16 @@ def _claude_code_line(ready: bool, asked: bool) -> str:
 
 
 def _run(
-    arguments: argparse.Namespace, env: Mapping[str, str], seams: CliSeams, err: TextIO
+    arguments: argparse.Namespace,
+    env: Mapping[str, str],
+    seams: CliSeams,
+    err: TextIO,
+    *,
+    require_sandbox: bool = False,
 ) -> int:
+    if require_sandbox and env.get(SANDBOX_VARIABLE, "").strip() != SANDBOX_FIRECRACKER:
+        err.write(f"{PROGRAM}: configuration: {NO_SANDBOX_MESSAGE}\n")
+        return EXIT_CONFIG
     config = load_config(env)
     if config.credential is None:
         err.write(
@@ -461,4 +458,4 @@ def _run(
 
 
 def entry_point() -> None:
-    raise SystemExit(main())
+    raise SystemExit(main(require_sandbox=True))
