@@ -13,6 +13,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
 - [VM artifacts](#vm-artifacts-976): the kernel, root file system and Docker data disk of that microVM, built from the golden snapshot recipe, signed and verified (#976).
 - [The Firecracker launcher](#the-firecracker-launcher-978): how the local Dispatcher starts a job in such a microVM: slots, disks, limits, the host side of the vsock protocol, ending and clean-up (#978).
+- [The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979): the static nft table (printed in full) and the proxy of the local Dispatcher that is the only way out of a job's VM (#979).
 
 ## Registration and routing (R1a, #854)
 
@@ -1977,12 +1978,15 @@ the VMs' files and the app's connections, with room).
 The token's check has a twin in TypeScript (`dispatcher/src/launchers/control-token.ts`); both read `contracts/control-token-vectors.json`.
 The token is in the start, in Control's stdin and in the messages; never in an argument, the environment, a file or a log.
 
-**`narrow` and the outer wall.** #979 builds the proxy and the nft table; the hook is `OuterWall` (`outer_wall.py`: `narrow(vm, message)`
-and `forget(vm)`, the VM identified by its slot and TAP). Until it exists there is no wall to switch, and the answer is the operator's
-**explicit** choice (`FACTORY_RUNNER_OUTER_WALL`), never a silent `ack`: `refuse` (the default) answers `refused` `unavailable`, so the
-Worker ends the job `environment_control_failed` before an agent exists; `inner-only` answers `ack` and logs a warning for every VM that
-nothing was narrowed (the agent's network is then the inner wall, the network door, only). So **a local VM job needs
-`FACTORY_RUNNER_OUTER_WALL=inner-only` until #979**.
+**`narrow` and the outer wall.** The hook is `OuterWall` (`outer_wall.py`: `admit(vm)` before the VMM exists, `narrow(vm, message)`
+and `forget(vm)`, the VM identified by its slot and TAP and the host of its app). `FACTORY_RUNNER_OUTER_WALL` chooses it: **`proxy`
+(the default)** is the real wall, [the outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979), `narrow` answered
+`ack` only once the proxy holds the job's rule; `refuse` answers `refused` `unavailable`, so the Worker ends the job
+`environment_control_failed` before an agent exists; `inner-only` answers `ack` and logs a warning for every VM that nothing was
+narrowed (the agent's network is then the inner wall, the network door, only). The two stand-ins stay as the operator's **explicit**
+choices, never a silent `ack`. **A wall that raises or does not answer** (`narrow` is given 10 s at the wall) is answered `refused`
+`unavailable` and logged with the kind of the error, never by dropping the connection: the Worker would wait for its own 30 s with the
+failure unexplained in the host's log.
 
 ### Ending a VM
 
@@ -2051,14 +2055,166 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
 
 ### Not done here, follow-ups
 
-- The outer wall (#979); the install, the update and the rollback (#982); the `config set --parallel` command still refuses more than one
+- The install, the update and the rollback (#982); the `config set --parallel` command still refuses more than one
   (the installer writes `parallelRuns`); the no-Docker `selftest` (a VM boot as the self-test).
 - A stop that asks the Worker in the VM to give its job back (`runner_shutdown`) before the VM is killed needs a channel to Control that
   vm-init does not have (a `stop` message over the start connection).
-- A lane check of a **real `narrow`** (the Worker's, with the token: the wall is asked; a token-less one from a container: `refused`).
-  No job of the lane gets as far: a job clones its repository before it narrows the network, the Worker clones over https only (the
-  lane has no https git host), and the guest runs only Control's allow-listed `docker run` (vm-init refuses other arguments), so there
-  is no probe container either. The host's side is proved by the unit tests against the fake VM (token, first answer, repeats); the
-  lane proves the exit report with the token over the same vsock. A real `narrow` belongs to #979's lane, with the wall.
 - The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
   the time to vm-init's `ack`).
+
+## The outer wall on a customer's machine (#979)
+
+Hosted, a job's VM sits in Vercel's internet and Vercel's network policy is the outer wall. On a customer's machine the VM sits next to the
+host, its LAN, internal services and the cloud metadata address, and a NAT is no policy (Runner v2, epic #969,
+[ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md), decision 7). So **the VM has no direct internet**: a static nft table lets
+its TAP reach only a proxy of the local Dispatcher, which enforces the rule of the job. The inner wall (the network door inside the VM) is
+unchanged. Code: [`proxy_wall.py`](../runner/src/code_reviewer_runner/factory_runner/firecracker/proxy_wall.py) (the proxy and the wall),
+[`outer_rule.py`](../runner/src/code_reviewer_runner/factory_runner/firecracker/outer_rule.py) (the rule),
+[`docker/vm/host/outer-wall.nft`](../docker/vm/host/outer-wall.nft) (the table).
+
+```
+ VM ──TAP fctapN──▶ [ nft: code_reviewer_wall ] ──only TCP :3128 to the slot's address──▶ proxy (the service, a normal user)
+      everything else (host, LAN, RFC1918,                                                   │ wide rule while the setup runs
+      169.254.0.0/16 and the metadata address,                                               │ the job's rule after an acked `narrow`
+      UDP and DNS, ICMP, the other VMs,                                                      ▼
+      the internet, IPv6) is dropped                                          the internet, to an address that was checked
+```
+
+### The nft table, in full
+
+One table of its own, loaded once at install as root (`nft -f docker/vm/host/outer-wall.nft`; the installer is #982) and never changed
+while VMs come and go: changing a job's rule never touches nft. **Every rule names our TAP devices (`fctap*`), so the host's own traffic
+and every other table of the machine, Docker's included, are untouched**; the file never names another tool's table. It hooks at
+priority -150, before other firewalls' filter hooks at priority 0, and its chains accept what is not ours. Loading it again replaces
+what an earlier load made (`table`, `delete table`, `table`). The file, exactly as it is checked in (a test holds this page to it):
+
+```
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# The outer wall of a customer's machine (#979, Runner v2, ADR 0005, decision 7): a static nft table, loaded once at
+# install as root (`nft -f outer-wall.nft`; the installer, #982) and never changed while VMs come and go. It is a table
+# of its own and every rule of it names our TAP devices (`fctap*`, one per slot), so the host's own traffic and every
+# other table of the machine are untouched. A VM may do exactly one thing: open a TCP connection to the proxy of the
+# local Dispatcher (port 3128) on a slot's address of 172.31.0.0/16 (the proxy listens on those addresses only, and
+# only the slot's own VM is served), and receive the answers. Everything else a VM sends is dropped: the host's other
+# ports, addresses, ICMP and UDP (DNS included: the proxy resolves names), the LAN, RFC1918, link-local and the cloud
+# metadata address (169.254.169.254), the other VMs, the internet, and IPv6 altogether. The VM has no way out but the
+# proxy, which enforces the rule of the job (wide for the setup, narrowed after `narrow`): changing it never touches
+# this table. Priority -150 runs before the filter hooks of other firewalls at priority 0.
+table inet code_reviewer_wall
+delete table inet code_reviewer_wall
+table inet code_reviewer_wall {
+  chain input {
+    type filter hook input priority -150; policy accept;
+    iifname "fctap*" meta nfproto ipv6 counter drop comment "no IPv6"
+    iifname "fctap*" ip saddr != 172.31.0.0/16 counter drop comment "not an address of a slot"
+    iifname "fctap*" ct state established,related counter accept comment "answers"
+    iifname "fctap*" tcp dport 3128 ip daddr 172.31.0.0/16 fib daddr type local counter accept comment "the proxy"
+    iifname "fctap*" counter drop comment "everything else addressed to the host"
+  }
+  chain forward {
+    type filter hook forward priority -150; policy accept;
+    iifname "fctap*" counter drop comment "a VM forwards to nothing"
+    oifname "fctap*" counter drop comment "nothing forwards to a VM"
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    oifname "fctap*" ct state established,related counter accept comment "answers to the VM's connections"
+    oifname "fctap*" counter drop comment "the host opens no connection to a VM (vsock is the channel)"
+  }
+}
+```
+
+What each rule does:
+
+| Chain | Rule | Why |
+|---|---|---|
+| input | from a TAP: IPv6, drop | the guest has no IPv6 and the proxy none; nothing of IPv6 is allowed anywhere |
+| input | from a TAP: source not in `172.31.0.0/16`, drop | a slot's addresses are in that /16 (`slots.py`); anything else is a spoof |
+| input | from a TAP: established or related, accept | the answers of the proxy |
+| input | from a TAP: TCP to port 3128 of a local address in `172.31.0.0/16`, accept | **the one thing a VM may open**: a connection to the proxy, on a slot's address (the proxy binds those and no other) |
+| input | from a TAP: everything else, drop | the host's other ports, ICMP, UDP (a guest's DNS included: the proxy resolves), the host's other addresses |
+| forward | from or to a TAP, drop | a VM forwards to nothing (LAN, RFC1918, 169.254.0.0/16 and `169.254.169.254`, the other VMs, the internet) and nothing forwards to a VM. The host may forward for others; the table, not the absence of routing, is what stops a VM |
+| output | to a TAP: established or related, accept; everything else drop | the host opens no connection to a VM (vsock is the channel) |
+
+The table lets a TAP reach the proxy port of **any** slot's address (the /16), because the table is static and a slot's address is
+derived from its number; the proxy therefore **closes unanswered any connection whose source is not its own slot's guest** (a VM
+that connects to another slot's proxy, or one that spoofs a source and cannot complete the handshake because the answer goes to the real
+owner). Port 3128 is a constant of the code too (`PROXY_PORT`); a test holds the file to it, to `fctap*` and to the /16 of `slots.py`.
+
+### The proxy
+
+Part of the local dispatcher, the service's own user, no root. `ProxyOuterWall` is the `OuterWall` of `FACTORY_RUNNER_OUTER_WALL=proxy`,
+started by the launcher's `setup` (after the lock of the machine) and stopped by its `close`; a proxy that cannot listen ends the start of
+the service and says which TAP and address (the usual cause: the TAP was not made or has no address, #982).
+
+* **It listens on each slot's TAP address and on nothing else** (`172.31.<N*4 div 256>.<N*4 mod 256 + 1>:3128`). The spike (#970)
+  found that a guest could also reach a proxy on the host's other addresses (eth0, loopback); a proxy bound to the host's side of each TAP
+  cannot be reached there whatever a table says, and the listener, not the source address, says which VM a connection is from.
+* **A rule per VM, swapped without touching nft.** `admit` (called before the VMM exists) gives the VM the **wide rule** of the setup: any
+  public name on ports 80 and 443. `narrow` replaces it by the **job's rule** and returns, so the host answers `ack`, only when the proxy
+  holds it; it also ends the connections the setup left open (a tunnel opened under the wide rule must not outlive it). `forget` takes the
+  VM's rule away (it never takes the rule of a newer VM of the same slot). A slot with no VM serves nobody (`no_job`).
+* **The job's rule is the hosted second wall's**: GitHub (`github.com`, `api.github.com`), the model provider's host (`modelHost` of the
+  `narrow`), the host of the app (the job's `appUrl`) and the rule's own hosts, a `*.suffix` as itself (strictly below the suffix, as the
+  door matches); a rule that is `open` is not narrowed, as hosted. It is **`policyFor` of `dispatcher/src/network/rule.ts`** without the
+  Dispatcher's own host (a local machine has none), and a test holds the two to **one examples file**,
+  [`contracts/network-rule-examples.json`](../contracts/network-rule-examples.json): which rule documents are rules
+  (`dispatcher/src/network/network-examples.test.ts` with the hosted schema, `runner/tests/unit/test_firecracker_outer_rule.py` with the
+  runner's), which names the narrowed list holds, and the verdict on a set of names and ports. A model or app host that is not a name a rule
+  can hold (an address, a host of one label) is a **refused `narrow` (`unavailable`) that says so**, not a rule that cannot work.
+* **DNS is the proxy's.** A guest asks for `CONNECT name:443` (or an absolute-form HTTP request) and the proxy looks the name up; the guest has
+  no name server it can reach (UDP is dropped). The decision is **the network door's own code** (`implementer/netdoor/proxy.py`), so the two
+  walls cannot drift: an IP address is never a name (`ip_literal`, in every spelling a resolver reads), only ports 80 and 443, the rule must
+  list the name **before** anything is looked up, **every address of the name must be public** (private, loopback, link-local, the metadata
+  address, shared, special-purpose and reserved ranges are refused, a name with one public and one private address as a whole), and the proxy
+  **connects to an address it checked, never to the name again**, so a resolver that answers differently the second time changes nothing. IPv4
+  only. A refusal is a `403` whose body says `outer wall: <reason>`; a setup tool that fails says why.
+* **No test network.** The door's `NETDOOR_TEST_PUBLIC_CIDR` seam is not used: no setting can open a private range for a VM.
+* **What the host's log keeps** is a count and the kind of an error: at the end of a VM `outer wall: N connections allowed, M refused`; the
+  slot's record (`log_of`: host, port, allowed or refused, reason word, bytes; never a path or a header) is what the lane reads.
+
+The settings: `FACTORY_RUNNER_OUTER_WALL` is `proxy` (the default), `refuse` or `inner-only` (see above); the port is not a setting (the table
+names it).
+
+### What the lane proves (and what it cannot)
+
+`tests/kvm/test_outer_wall.py`, the `Outer wall lane` step of `.github/workflows/vm-artifacts.yml` (a real VM, run twice):
+
+* **T01.** From the VM: the host's TAP address, RFC1918 addresses (10/8, 172.16/12, 192.168/16), a link-local address, **the real cloud
+  metadata address `169.254.169.254:80`**, an address of the internet and an IPv6 address are unreachable with the table loaded, and the host's
+  own listeners saw no connection. **Every probe has a control:** the first run has **no table** and NAT on, and every probe (but IPv6) must
+  *reach* its target and the host's listeners must see the connection arrive; a probe that says "blocked" proves nothing unless the same probe
+  reached its target without the wall (the spike's lesson). The workflow also checks the file with `nft -c -f` and prints the table's counters
+  after the run.
+* **T02.** A setup-only host (`example.com`) is reachable through the proxy before `narrow` and refused after, with a **real `narrow` over
+  vsock carrying the VM's token**: the Worker's own client (`VsockControl`) in the VM, the host's real session and the real wall. A `narrow`
+  without the token from the same container is refused, GitHub stays reachable, and the metadata address is refused even as a name the proxy
+  was asked for.
+
+**What the lane chose, and why.** A job clones its repository over https before it narrows the network and a lane has no https git host, so
+no job of the lane gets as far as `narrow`. Instead of a fake git endpoint, the lane runs **a probe in Control's own container** (the same
+`docker run` flags, the token on stdin, the seccomp profile that allows AF_VSOCK; the Worker image's interpreter as entry point), because the
+`narrow` is then the Worker's own client over the real vsock with the real token, and everything the proxy decides is on the real path.
+vm-init drops a container's output and the exit status holds eight bits, so the probe **reports through the path under test**: a
+`CONNECT r<bits>.report.invalid:443`, which the proxy refuses and logs with the host name it was asked for, where the lane reads it. The probe
+runs in the unit suite too, against loopback stand-ins and the real proxy, session and client
+(`tests/unit/test_firecracker_wall_probe.py`), so a mistake in it does not cost a half-hour run of CI.
+
+**IPv6 has no control.** The VM's containers have IPv6 switched off (Control's flags) and the guest has no IPv6 route, so an IPv6 probe is
+unreachable with or without the table. The table's IPv6 rules are checked as a file (`nft -c`, a unit test of its rules) and not
+exercised by a packet; the lane says no more than that.
+
+### Not done here, follow-ups
+
+* **The software in the VM reaches the internet directly today.** The inner wall and the Worker are unchanged (the issue's scope): the
+  network door, the model door, Control's calls to the app, the Worker's `git` and the setup container dial their targets themselves and do
+  not use an HTTP proxy. With the table loaded **nothing of that gets out of a VM**: before a local VM can run a real job through the
+  `proxy` wall, those clients need to go through `http://<host address of the TAP>:3128` (an upstream proxy for the doors, `HTTPS_PROXY` for
+  Control, git and the setup container; the name resolution moves to the proxy). Until then `FACTORY_RUNNER_OUTER_WALL=inner-only` (and no
+  table) is how a local VM job runs. It is the first thing to do before #982 turns the launcher on.
+* The installer loads the table and makes the TAPs with their addresses (#982); the service cannot read nft state as a normal user, so it
+  cannot check that the table is loaded (a machine without it has no outer wall: the install must fail without it).
+* IPv4 only (the table drops IPv6, the proxy resolves IPv4); a name with only an AAAA record is unreachable.
+* Docker's nftables backend on the host next to this table is not proven (the spike did not either); the table is its own and runs at
+  priority -150.

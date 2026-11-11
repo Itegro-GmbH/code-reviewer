@@ -81,10 +81,13 @@ describe("the examples both implementations answer alike", () => {
   // #979-T03
   it.each(
     EXAMPLES.verdicts.map(
-      (each) => [`${each.list}: ${each.host}:${String(each.port)}`, each] as const,
+      (each) =>
+        [`${each.list}: ${each.host}:${String(each.port)}`, each] as const,
     ),
   )("a name has the verdict of the examples: %s", (_name, example) => {
-    const entry = EXAMPLES.allowLists.find((each) => each.name === example.list);
+    const entry = EXAMPLES.allowLists.find(
+      (each) => each.name === example.list,
+    );
     expect(entry).toBeDefined();
     const list = hostedList(entry as Examples["allowLists"][number]);
     expect(list).not.toBeNull();
