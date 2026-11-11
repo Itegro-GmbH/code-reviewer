@@ -268,7 +268,7 @@ def test_a_report_without_a_token_is_taken_only_while_the_start_has_no_ack() -> 
 
 
 # #978-T08
-def test_narrow_is_refused_until_there_is_an_outer_wall_and_the_log_says_why(
+def test_narrow_is_refused_when_the_operator_chose_no_outer_wall_and_the_log_says_why(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with short_directory() as root:
@@ -281,7 +281,7 @@ def test_narrow_is_refused_until_there_is_an_outer_wall_and_the_log_says_why(
         expected = {"version": 1, "type": "refused", "for": "narrow", "reason": "unavailable"}
         assert control["narrow"] == expected
         assert control["narrow_again"] == expected  # idempotent: the same answer
-        assert "no outer wall yet" in caplog.text
+        assert "has no outer wall" in caplog.text
 
 
 # #978-T08
@@ -310,6 +310,9 @@ def test_the_wall_is_asked_once_with_the_vm_it_is_for_and_told_when_the_vm_is_go
         calls: list[Any] = []
 
         class Wall:
+            async def admit(self, vm: Any) -> None:
+                calls.append(("admit", vm.slot.tap, vm.app_host))
+
             async def narrow(self, vm: Any, message: Any) -> None:
                 calls.append(("narrow", vm.slot.tap, message.rule.mode, message.model_host))
 
@@ -319,6 +322,7 @@ def test_the_wall_is_asked_once_with_the_vm_it_is_for_and_told_when_the_vm_is_go
         go(lambda: run_job(rig, rig.sandbox(wall=Wall())))
 
         assert calls == [
+            ("admit", "fctap0", "172.31.0.1"),
             ("narrow", "fctap0", "list", "api.example.com"),
             ("forget", "fctap0"),
         ]

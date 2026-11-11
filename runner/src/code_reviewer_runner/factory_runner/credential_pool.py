@@ -15,7 +15,7 @@ them. The pool decides:
   (`WorkerExit.SUBSCRIPTION_*`). **Every one of them is a hint that expires**, never a verdict:
   the exit code comes from the job's `result` event, which the agent inside the job's sandbox can
   forge (it runs as the same user as Claude Code and can write to Claude Code's pipes; see
-  ADR 0005 3f). What a forgery can do is therefore bounded to the owner's own credentials and to
+  ADR 0005 3g). What a forgery can do is therefore bounded to the owner's own credentials and to
   hours: a usage limit puts the credential aside for `Cooldowns.limit` (one hour), a 401 for
   `Cooldowns.auth` (six hours), a refused model leaves the list for `Cooldowns.model` (six hours,
   that one id; an alias is never taken off by one refusal, it is set aside once

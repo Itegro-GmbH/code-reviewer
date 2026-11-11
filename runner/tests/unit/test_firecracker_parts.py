@@ -685,6 +685,24 @@ def test_the_environment_moves_the_paths_the_size_the_wall_and_the_timeout() -> 
     assert settings.wall_clock_seconds(150) == 1200 + 150 + 300
 
 
+# #979
+@pytest.mark.parametrize(
+    ("value", "mode"),
+    [
+        ("proxy", OuterWallMode.PROXY),
+        ("refuse", OuterWallMode.REFUSE),
+        ("inner-only", OuterWallMode.INNER_ONLY),
+        ("", OuterWallMode.REFUSE),
+    ],
+)
+def test_no_wall_is_the_default_and_the_proxy_only_when_the_operator_chose_it(
+    value: str, mode: OuterWallMode
+) -> None:
+    settings = settings_from_environment(machine(FACTORY_RUNNER_OUTER_WALL=value))
+
+    assert settings.outer_wall is mode
+
+
 @pytest.mark.parametrize(
     ("environment", "kwargs", "message"),
     [

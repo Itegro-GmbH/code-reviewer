@@ -44,7 +44,8 @@ from .cgroups import CgroupError, CgroupTree, VmLimits, delegated_root
 from .control_run import ControlRunError, ControlTemplate, build_start, load_template
 from .disks import DiskError, make_job_disk, remove_vm_directory
 from .endpoint import HostListeners, StartNotAnswered, StartRefused, send_start
-from .outer_wall import OuterWall, VmIdentity, outer_wall_for
+from .outer_rule import app_endpoint
+from .outer_wall import OuterWall, VmIdentity, WallLifecycle, outer_wall_for
 from .reaper import Reaped, reap_leftovers
 from .session import VmSession
 from .settings import FirecrackerSettings
@@ -138,7 +139,7 @@ class FirecrackerSandbox:
         self.settings = self.settings.validated()
         self._pool = SlotPool(self.settings.slots)
         if self.wall is None:
-            self.wall = outer_wall_for(self.settings.outer_wall)
+            self.wall = outer_wall_for(self.settings.outer_wall, self.settings.slots)
 
     # -- what the service asks ---
 
@@ -161,7 +162,8 @@ class FirecrackerSandbox:
         and remove what an earlier service left (`reaped`). Raises `SandboxInUse` when another
         dispatcher holds the machine (it touches nothing then: what it would remove as a leftover
         is that dispatcher's running VMs), `CgroupError` when the delegated cgroup cannot be
-        used."""
+        used and `OuterWallUnavailable` when the outer wall's proxy cannot listen (the log names
+        the TAP). The wall starts last: it listens only for a service that holds the machine."""
         self.settings.vms_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._take_lock()
         if self.cgroups is None:
@@ -174,6 +176,8 @@ class FirecrackerSandbox:
                 self.settings.vms_dir, tree, firecracker=self.settings.firecracker
             )
         )
+        if isinstance(self.wall, WallLifecycle):
+            await self.wall.start()
 
     def _take_lock(self) -> None:
         """An exclusive `flock` on `<state_dir>/dispatcher.lock`, kept until `close` or the end of
@@ -198,7 +202,10 @@ class FirecrackerSandbox:
         self._lock_fd = descriptor
 
     async def close(self) -> None:
-        """Let go of the lock."""
+        """Stop the wall's listeners and let go of the lock."""
+        if isinstance(self.wall, WallLifecycle):
+            with contextlib.suppress(Exception):
+                await self.wall.close()
         descriptor, self._lock_fd = self._lock_fd, None
         if descriptor is not None:
             with contextlib.suppress(OSError):
@@ -232,15 +239,16 @@ class FirecrackerSandbox:
         vm_id = f"vm-{slot.index}-{secrets.token_hex(4)}"
         directory = settings.vms_dir / vm_id
         directory.mkdir(parents=True, mode=0o700)
-        session = VmSession(
-            VmIdentity(vm_id, slot),
-            self.wall or outer_wall_for(settings.outer_wall),
-            token,
-        )
+        wall = self.wall or outer_wall_for(settings.outer_wall, settings.slots)
+        app_host, app_port = app_endpoint(start.app_url)
+        session = VmSession(VmIdentity(vm_id, slot, app_host, app_port), wall, token)
         listeners = HostListeners(directory / "vsock.sock", session)
         vm = _Vm(vm_id, slot, directory, session, listeners)
         self._vms[vm_id] = vm
         try:
+            # The wall holds the wide rule of the setup for this VM before the VMM exists: nothing
+            # of the VM reaches a proxy that has no rule for it.
+            await wall.admit(session.vm)
             (directory / "vm.json").write_text(
                 json.dumps({"vm": vm_id, "slot": slot.index, "job": start.job_id}), encoding="utf-8"
             )
@@ -392,7 +400,7 @@ class FirecrackerSandbox:
         with contextlib.suppress(Exception):
             await vm.listeners.close()
         with contextlib.suppress(Exception):
-            await (self.wall or outer_wall_for(self.settings.outer_wall)).forget(vm.session.vm)
+            await vm.session.wall.forget(vm.session.vm)
         if vm.pump is not None:
             await self._drain_log(vm)
             vm.pump.cancel()

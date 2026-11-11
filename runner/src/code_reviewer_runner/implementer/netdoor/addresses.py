@@ -106,14 +106,18 @@ def resolve_public(
     port: int,
     resolver: Resolver = system_resolver,
     test_network: ipaddress.IPv4Network | None = None,
+    excluded: Callable[[str], bool] | None = None,
 ) -> Resolution:
-    """Look `name` up and check every address. The addresses are those to connect to."""
+    """Look `name` up and check every address. The addresses are those to connect to. `excluded`
+    names addresses that are not public for this caller whatever their range (the outer wall's
+    proxy: the addresses of the machine it runs on); None, the default, excludes none."""
     try:
         found = resolver(name, port)
     except (OSError, UnicodeError, ValueError):
         return Resolution(reason=REASON_UNRESOLVABLE)
     if not found:
         return Resolution(reason=REASON_UNRESOLVABLE)
-    if not all(is_public(address, test_network) for address in found):
-        return Resolution(reason=REASON_PRIVATE)
+    for address in found:
+        if not is_public(address, test_network) or (excluded is not None and excluded(address)):
+            return Resolution(reason=REASON_PRIVATE)
     return Resolution(addresses=tuple(found))

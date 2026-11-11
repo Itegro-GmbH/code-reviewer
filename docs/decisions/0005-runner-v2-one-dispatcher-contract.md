@@ -135,7 +135,18 @@ App** (the Worker API, `crj_`, everywhere).
   (route files, contract definitions `Runner*`, the app feature `runner_session_snapshot`), and `heartbeat`, `complete` and `steps` for a runner credential (they answer `404 RUNNER_JOB_NOT_FOUND`; the shared token's
   calls of the platform's Dispatcher are unchanged).
 
-## 3f. Details of #980
+## 3f. Details of #979
+
+- **The outer wall on a customer's machine is two parts.** A static nft table (`docker/vm/host/outer-wall.nft`, its own table `inet code_reviewer_wall`, every rule on our TAP devices `fctap*`, never another tool's tables) lets a VM's TAP open a TCP connection to the proxy port of the
+  host (3128) on a slot's address and drops everything else (the host's other ports and addresses, UDP and DNS, ICMP, the LAN, RFC1918, link-local and the metadata address, the other VMs, the internet, IPv6). The proxy is part of the local Dispatcher (a normal user): the network door's own
+  proxy code (an address is never a name, only 80 and 443, every address of a name must be public, the connection goes to an address that was checked) with a rule **per VM**.
+- **The proxy listens on each slot's TAP address and nowhere else** (the spike found that a guest could reach a proxy on the host's other addresses) and serves only the slot's own guest; the table lets a TAP reach any slot's proxy address because it is static, so the proxy closes a connection from another source unanswered.
+- **The rule language is the hosted one.** The narrowed list is `policyFor` of `dispatcher/src/network/rule.ts` (GitHub, the model provider, the app, the rule's hosts) without the Dispatcher's own host; `contracts/network-rule-examples.json` is read by both suites (rule documents, the narrowed list, verdicts on names and ports).
+  The setup runs under the **wide rule** (any public name, 80 and 443), `narrow` swaps in the job's rule, **acknowledged only once the proxy holds it**, and ends the connections of the setup that are still open.
+- **`OuterWall` gained `admit`** (the VM gets the wide rule before the VMM exists) and the proxy wall is a setting (`FACTORY_RUNNER_OUTER_WALL=proxy`), set by the installer (#982) once it has verified the nft table; the default stays `refuse` (the dispatcher cannot see nft state), and `inner-only` is an explicit choice. A wall that raises or does not answer within 10 seconds is answered `refused` `unavailable`, never by dropping the connection.
+- **Not done:** the software in the VM does not use the proxy yet (the doors, Control's calls, git and the setup container dial their targets directly), so a real job needs that wiring before the launcher is turned on; the installer loads the table (#982). See `docs/runner.md`, "The outer wall on a customer's machine".
+
+## 3g. Details of #980
 
 - **One hand-over shape.** The dispatcher hands a job's Worker at most **one** credential of the device, as `localCredential: {name, value}`: on the standard input of a Worker that is a process (`WorkerStart.document`,
   replacing the `localEnvironment` map of §3e) and as the `localCredential` of vm-init's start (`contracts/vm-init.v1.json`, unchanged in shape), which vm-init writes to Control's standard input. There is **one
@@ -163,8 +174,8 @@ App** (the Worker API, `crj_`, everywhere).
   are configurable (`FACTORY_RUNNER_CREDENTIAL_{LIMIT,AUTH,MODEL}_COOLDOWN_SECONDS`) and `credential retry` ends them at once. The list the owner gave is never shrunk (`add --replace` without `--models` keeps it).
   The impact of a forgery is limited to the owner's own credentials on the owner's own device, for hours. The entry is withdrawn from the manifest (a new `PUT /self` before the next claim) while no credential is usable,
   and returns by itself. **A job that hits the limit fails (free) and is not moved to another credential in the middle of its run:** a turn is one Claude Code session on one login.
-- **The agent still gets the token** in its environment, as in R3 (Claude Code needs it there and the tool processes inherit it); what limits its use of it is the outer wall (#979), which does not exist yet.
-- **Not built, on purpose:** running `claude setup-token` in a throwaway VM (#995). It is interactive, and neither vm-init (one start, one report, no terminal) nor the missing outer wall (#979) can carry it; a follow-up of
+- **The agent still gets the token** in its environment, as in R3 (Claude Code needs it there and the tool processes inherit it); what limits its use of it is the outer wall (#979, §3f), once the clients inside the VM go through its proxy (#994).
+- **Not built, on purpose:** running `claude setup-token` in a throwaway VM (#995). It is interactive, and neither vm-init (one start, one report, no terminal) nor the outer wall (#979) before #994 can carry it; a follow-up of
   #978 and #979. Claude Code's answer to a model the subscription does not allow was not measured against the real program (status 404 and its own sentence are read; #996). In Firecracker mode the entry is not
   announced yet: whether the golden image holds Claude Code is #981.
 
