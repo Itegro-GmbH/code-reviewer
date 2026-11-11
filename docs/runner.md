@@ -15,6 +15,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [The Firecracker launcher](#the-firecracker-launcher-978): how the local Dispatcher starts a job in such a microVM: slots, disks, limits, the host side of the vsock protocol, ending and clean-up (#978).
 - [The Incus launcher](#the-incus-launcher-1007): the one local backend (Runner v2, #1007): two unprivileged Incus instances per job, the inner wall in the trusted one, `narrow` as an unplug, the control channel over a unix socket, the quota, the clean-up by mark.
 - [The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979): the static nft table (printed in full) and the proxy of the local Dispatcher that is the only way out of a job's VM (#979).
+- [Spike: Incus (LXD) backend](#spike-incus-lxd-backend-1005): the same job on a machine without `/dev/kvm`, two unprivileged system containers instead of a microVM, measured on the DevBox (#1005).
 
 ## Registration and routing (R1a, #854)
 
@@ -2678,3 +2679,293 @@ machine are not exercised; the model's cost is the scripted usage.
 * IPv4 only (the table drops IPv6, the proxy resolves IPv4); a name with only an AAAA record is unreachable.
 * Docker's nftables backend on the host next to this table is not proven (the spike did not either); the table is its own and runs at
   priority -150.
+
+## Spike: Incus (LXD) backend (#1005)
+
+The owner's own machine is a Hetzner Cloud VM **without `/dev/kvm`**, so the Firecracker launcher ([#978](#the-firecracker-launcher-978)) cannot run there, and the line is: one
+local backend, the same behaviour everywhere. This spike asks whether **Incus** (the LXD fork, from Ubuntu's apt, no snap) can be that backend: the Docker of the VM content
+([Spike: Firecracker sandbox](#spike-firecracker-sandbox-970)) inside unprivileged system containers, the inner wall, the outer wall, limits and clean-up, with numbers. **Everything
+below was measured on the DevBox, as the user `luca`** (a member of `incus-admin`), by commands of [`spike/incus/`](https://github.com/Itegro-GmbH/code-reviewer/tree/spike-1005-incus/spike/incus) on the
+branch `spike-1005-incus` (commit `327f9070eae604c1f01a597d46a5feddf86b765e`, both runs' scripts in one commit; **not product code, not merged**; the machine's own public addresses are placeholders there). Questions 1 to 6 of the issue are answered; **two answers are "does not work as
+asked" (the disk quota, and the outer wall by Incus alone)** and several things need root at install, as the Firecracker backend's do. The recommendation is in the pull request.
+**Re-measured afterwards on Incus 7.6 (Zabbly) with a btrfs pool, see [Re-measured on Incus 7.6 + btrfs](#re-measured-on-incus-76--btrfs): the AppArmor workaround, the `dir` pool's start time and missing disk quota, and the setup-to-agent hand-over below are superseded there; Q1 to Q6 stay as they were measured on 6.0.0 and the `dir` pool.**
+
+**Where it was measured.** Ubuntu 24.04.3, kernel 6.8.0-147-generic, cgroup v2, 4 vCPU and 7.7 GB RAM **shared with other users and agents** (load average 1.4 to 3.3 during the timings, 12 for a while
+during the memory test), **no `/dev/kvm`**, a rootful Docker of other users running on the host (so Docker's iptables rules and `FORWARD` policy are real). Incus **6.0.0-1ubuntu0.3** from the Ubuntu archive
+(liblxc 5.0.3, firewall driver `nftables`), user `luca` not root, no sudo. In the instances: Docker **29.1.3** (the static bundle of the Firecracker spike, containerd image store, overlayfs, runc 1.3.4), compose
+2.40.3, buildx 0.30.1, Ubuntu 24.04 images from `images.linuxcontainers.org`. Storage: a pool of the driver `dir` in `/home/luca` (the user's own volume, never `/`). One job-sized set of instances at a time,
+each limited to 2 CPUs and 2 GiB. Everything it created was removed ("Clean-up of the spike" at the end).
+
+### The answers
+
+| # | Question | Answer | Numbers |
+|---|---|---|---|
+| 1 | dockerd with the containerd store and overlayfs in an unprivileged Incus container; `docker run`, `build`, `compose up` | **Yes, with one workaround:** Ubuntu's Incus 6.0.0 needs the container's AppArmor profile switched off (`raw.lxc: lxc.apparmor.profile=unconfined`), because runc's CVE-2025-52881 patch writes `net.ipv4.ip_unprivileged_port_start` through a reopened `/proc` descriptor that Incus's profile denies; upstream fixed the profile (lxc/incus PR 2624), the archive's 6.0.0 has not | dockerd answers 2.5 to 3.1 s after `incus start` (systemd unit); `docker run hello-world` 0.85 s, build of three layers 1.0 s, `compose up` 3.9 s (3 s of it the service's `sleep`) |
+| 2 | Setup and agent with their own Docker; Sysbox inside Incus?; Postgres by the setup usable and stoppable by the agent | **Sysbox does not run in Incus.** Privileged DinD confined to the Incus container works. Same inner daemon: yes. Through `docker commit`: **no** | privileged `docker:29.1.3-dind` ready 1.30 s after `docker run`; Postgres answers 3.4 s after its `docker run` (pull 7.8 s through the proxy) |
+| 3 | Inner wall: two instances per job, the agent reaches nothing but the doors | **Yes, but the wall is an nft table inside the Control instance**, not an Incus ACL (Incus ACLs do not filter inside a bridge on this host) | B reaches the two door ports; Control's secret endpoint, its Docker API on TCP, ICMP and routing through A are blocked, each with a control that reached before the wall |
+| 4 | Outer wall: only the proxy of the host; coexistence with Docker's firewall | **Almost, with Incus alone:** an ACL plus port isolation plus address filtering leave the proxy as the only reachable service of the host **except port 53 of any host-local address** (Incus's implicit DNS accept). A static nft table of our own (as #979) is needed, and could **not** be loaded here without root | 15 targets from both instances, controls for each; coexistence with the host's Docker shown for the input path; forwarded traffic is dropped on this host whatever Incus does |
+| 5 | Limits and clean-up | CPU, PIDs: enforced. Memory: enforced by throttling (`memory.high`), no quick OOM kill seen. **Disk quota: not enforced on a `dir` pool** (silently accepted). Clean-up and crash: clean, by a mark on the instance | 4.0 to 4.6 s to delete a running set; 169 of 400 forks with `pids.max` 200; a 4 GiB write went through a 3 GiB "quota" |
+| 6 | Operations, start time, memory, speed | Unattended upgrades are on and cover the Incus package; the daemon restart does not stop containers (documented behaviour, not tried); `incus-admin` is root-equivalent. **Start time is the problem on the `dir` pool**: 19 s for each instance of a 1.3 GB image | whole set from nothing to nothing 72.7 s, instance creation 37.9 s of it; idle memory of an instance with Docker 42 to 65 MiB anonymous; CPU speed equals the host |
+
+### Q1: Docker inside an unprivileged Incus container
+
+The profile of every instance (`spike/incus/setup.sh`): `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true`, `limits.cpu=2`, `limits.memory=2GiB`, `limits.processes=4096`, and the AppArmor line below.
+The container's root is **host uid 1065536** (`uid_map  0 1065536 65536`, an own range of 65,536 ids taken from root's 1,000,000,000 in `/etc/subuid`; the next instance got 1131072), `Seccomp: 2` (Incus's default filter), no
+`NoNewPrivs`, capabilities complete **inside** the user namespace. `docker info`: `Storage Driver: overlayfs`, `driver-type: io.containerd.snapshotter.v1`, `Cgroup Version: 2`, `Cgroup Driver: systemd`.
+
+**What failed first, and the workaround.** With the default profile dockerd starts, pulls and builds, but every `docker run` ends with
+`runc create failed: ... open sysctl net.ipv4.ip_unprivileged_port_start file: reopen fd 8: permission denied`: also with `--sysctl`, `--privileged` and `--security-opt apparmor=unconfined` (only `--net=host`, which sets no sysctl, ran).
+Setting the container's `linux.sysctl.net.ipv4.ip_unprivileged_port_start=0` did not help (Docker writes it anyway). With `raw.lxc: lxc.apparmor.profile=unconfined` on the profile everything works. The cause is known upstream: runc and containerd
+reopen the sysctl through a detached procfs handle, which Incus's generated AppArmor profile reads as a `/sys` path and denies; the fix (the profile skips those denials for `security.nesting=true`, lxc/incus PR 2624) is not in the
+archive's 6.0.0. **What the workaround costs:** the Incus container has **no AppArmor profile**; what confines it is the isolated user namespace, the cgroup, Incus's seccomp filter and the capability set of a user namespace.
+A newer Incus (the upstream packages, the owner's choice of source) would keep AppArmor; **the runner must test for the symptom at install** (`docker run` in a probe container) instead of trusting a version number.
+
+The battery (`spike/incus/q1-docker-in-incus.sh`, in the container): `docker run hello-world` prints "Hello from Docker!" in 0.85 s; `docker run busybox` (uid 0, `uid_map 0 1065536 65536`, so the same range) 0.78 s; `docker build` of three layers (a 50 MB file) 0.99 s,
+`docker run` of the result prints its content; `docker compose up --abort-on-container-exit` of one service 3.92 s; `docker pull` through the proxy: hello-world 2.8 s, busybox 2.4 s, `docker:29.1.3-dind` 9.2 s (508 MB), `postgres:17-alpine` 7.8 s.
+
+### Q2: the agent's own Docker
+
+**Sysbox (0.7.1, the pinned package, sha256 `9d6d5484…261c5`)** installs in the container (its post-install script fails on `systemctl restart docker`, as without systemd) but **cannot run**: `sysbox-mgr` ends with
+`ID-mapping check failed: failed to check kernel ID-mapping support: create mapped mount: Failed to set mount attr: operation not permitted` (it needs a mount privilege of the initial namespace) and `sysbox-fs` with
+`Unable to determine the host UUID value`. Sysbox is therefore out in an Incus container; it needs the host.
+
+**Privileged DinD, confined to the Incus container** works: `docker run -d --privileged --entrypoint dockerd docker:29.1.3-dind --host=unix:///var/run/docker.sock` inside the instance, with the proxy variables in its environment. The inner dockerd is ready **1.30 s** after the
+`docker run`, `docker info` shows overlayfs and cgroup v2, and a `postgres:17-alpine` run inside it answers `select 6*7` (42) 3.4 s after its `docker run` (7.8 s to pull it). **What "privileged" reaches:** the instance's own root only. Inside the privileged container the
+agent has all capabilities of the *instance's* user namespace, `/dev` holds only `core fd full fuse mqueue net null ptmx pts random shm stderr stdin stdout tty urandom zero` (no block device), `mount /dev/sda1` answers `permission denied`, and its root is host uid 1131072 (an
+unprivileged id of the host). The Firecracker spike's "rootful DinD, `--privileged`: the agent mounted the host's root disk" does **not** repeat, because the instance, not the host, is the privileged container's host.
+
+**What the setup starts is still there for the agent, with a condition.** With the setup and the agent in **the same inner daemon** (the agent's `docker exec` into the container the setup started its Postgres in): the agent sees the running `pg`,
+creates and reads a table through it (`7`), **stops it** (`pg  Exited (0)`), starts it again and reads the row (`7`). With the **`docker commit` hand-over of today** (setup container, `docker commit`, agent container from the committed image) it does **not** work as
+it stands: a DinD container whose Docker data lives in the container's own file system cannot start an overlayfs inside it (`failed to mount ... overlay ... err: invalid argument`, overlay on overlay), and one whose data is in the image's `VOLUME` is not captured by `commit`.
+This is Docker's behaviour, not Incus's, and the Sysbox variant avoids it by other means (not re-measured). **Incus offers another hand-over: the whole instance** (stop B after the setup, copy it, start the copy: the images, the volume of Postgres and the
+files are on B's disk, the processes are gone); **not tried**, and on the `dir` pool a copy costs as much as an `incus init` (19 s). The contract item "the agent starts from a fresh container" and "what the setup started" must be decided with that in view (see the pull request).
+
+### Q3: the inner wall, two instances per job
+
+```
+ A  (Control stand-in, model door, network door; own dockerd)         B  (setup, then agent; own dockerd, the agent a privileged DinD container)
+   eth0 ── spkout ── host proxy 10.99.0.1:3128 (only)                   eth0 ── spkin ──┐
+   eth1 ── spkin  ◀────────────────── doors 10.98.0.2:8080, :8081 ──────┘                  (eth1 on spkout only during the setup)
+```
+
+`spkin` has **no address on the host** (`ipv4.address=none ipv6.address=none`), so the host is not on it. A holds the fake secrets (`git-token`, `model-key`, served on `0.0.0.0:9000` as the worst case) and its own **Docker API on `tcp://0.0.0.0:2375` without TLS**
+(the worst case: whoever reaches it owns A's Docker, which is where Control's socket would be; a real dockerd in the hand-run test, a listener standing in for it in `jobset.sh`). The doors are the proxy of the spike chained to the host proxy (`:8080`) and a plain server (`:8081`).
+
+| Probe from B (and, last two rows, from inside the agent's privileged DinD container, through B's NAT) | Control: no wall | Wall |
+|---|---|---|
+| A `:9000` (secrets) | REACHED (`curl` returned `FAKE-GIT-TOKEN…` and `FAKE-MODEL-KEY…`) | **BLOCKED** |
+| A `:2375` (Docker API) | REACHED (`DOCKER_HOST=tcp://10.98.0.2:2375 docker info`: "controls A dockerd") | **BLOCKED** |
+| A `:8080` network door, `:8081` model door | REACHED | **REACHED** (the doors work: `model-door-ok`) |
+| A `:22` | REFUSED (reachable host, closed port) | BLOCKED |
+| ICMP to A | answered | lost (100 % loss) |
+| the host proxy `10.99.0.1:3128` and A's outer address `:22`, `:9000`, `1.1.1.1:443` through A as a router (`ip route add default via 10.98.0.2`; A has `ip_forward=1` because Docker set it) | not tried | BLOCKED, `Network is unreachable` or timeout |
+| inside the agent container: `10.98.0.2:8080`, `:8081` | | REACHED |
+| inside the agent container: `:9000`, `:2375`, `10.99.0.1:3128` | | BLOCKED |
+
+**What the wall is.** `spike/incus/inner-wall.nft`, loaded **inside A** (`nft -f`, A's own network namespace, priority -10, table `inet spk_inner`): from `eth1` accept established, accept `ip saddr 10.98.0.3 tcp dport { 8080, 8081 }`, drop everything else; forward from and to `eth1` is dropped.
+B cannot change it (a different container, a different network namespace); A's root can, and A is the trusted side, as Control's VM is today. **Incus's own ACLs do not do this here:** an ACL on `spkin` (egress and ingress, default drop, `spk-inner`) left every probe REACHED, because the ACL of a bridge network is applied by
+nftables' `inet`/`bridge` hooks and traffic between two ports of one bridge needs `br_netfilter`, which this host has not loaded (`/proc/modules`; no root to load it). On a host with the module the ACL might work, which is not the same
+thing as holding it. L2 separation inside a bridge without netfilter: **`security.port_isolation=true`** on a NIC (the kernel's bridge port isolation: an isolated port reaches only non-isolated ports, the host's bridge address included).
+
+**A second path found by the test, closed:** during the setup, B's second NIC is on the **outer** bridge `spkout`, the bridge of A's `eth0`, where A's inner wall (`iifname eth1`) does not apply: B reached A's secrets and Docker API on A's outer address (`10.99.0.240:9000`, `:2375`, `curl` returned the token).
+With `security.port_isolation=true` on both outer NICs it is `BLOCKED`; with the setting off again on B (the control) it is `REACHED`, on again `BLOCKED`, and the host proxy stays reachable from both (the proxy is the bridge's own address, not a port). **Every instance of a job needs
+port isolation on its outer NIC**; A's own firewall should also drop everything that comes in on `eth0`.
+
+### Q4: the outer wall
+
+`spkout`: `ipv4.address=10.99.0.1/24 ipv4.nat=false ipv4.routing=false ipv4.dhcp=false ipv6.address=none dns.mode=none raw.dnsmasq=port=0`, `security.acls=spk-outer`, default egress and ingress action `drop`. The ACL (`spike/incus/acl-outer.yaml`): egress
+`allow tcp 10.99.0.1/32 port 3128`. The instances' NICs on it: **static addresses** (`ipv4.address=`), `security.ipv4_filtering=true`, `security.mac_filtering=true`, `security.port_isolation=true`. The proxy (`spike/incus/proxy.py`, a stand-in for #979's, run as `luca` and listening on `10.99.0.1` only,
+never a wildcard) refuses addresses, ports other than 80 and 443 and names with a non-public address. A decoy (`decoy.py`) listens on `[::]:9999` of the host (dual stack), so that a probe has something to reach on every host address.
+
+| Target (probed from A, and again from B's setup NIC: identical) | Control: no ACL | ACL, isolation, filtering |
+|---|---|---|
+| the proxy `10.99.0.1:3128` | REACHED | **REACHED** (and `curl -x` through it fetched `https://example.com/`: 200) |
+| host `10.99.0.1:22` (sshd), `:9999` (decoy) | REACHED, the decoy logged the instance's address | BLOCKED |
+| host public address `<the host's public IPv4>:22`, `:9999` | REACHED | BLOCKED |
+| host Docker bridge `172.17.0.1:9999` | REACHED | BLOCKED |
+| host `10.99.0.1:53` (Incus's dnsmasq) | REACHED | **REFUSED** (reachable: no listener since `port=0`, the RST came back) |
+| the owner's `incusbr0` address `10.206.108.1:53` (its dnsmasq) | REACHED | **REACHED** |
+| LAN gateway `172.31.1.1:80`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, metadata `169.254.169.254:80`, `1.1.1.1:443` | REFUSED (Incus's `routing=false` rejects) | BLOCKED (timeout) |
+| IPv6 `[<the host's public IPv6>]:9999` | no route | no route |
+| another slot's source address (`10.99.0.202` while declared `10.99.0.201`) | REACHED (filtering off) | **BLOCKED** (filtering on, `security.ipv4_filtering`) |
+
+**Read the table with its limits.** (1) The targets are real: the host itself reached `169.254.169.254:80` and `1.1.1.1:443` and (as expected) not `172.31.1.1:80`. (2) **Forwarded targets have no usable control through Incus.** With `ipv4.routing=false` Incus rejects forwarded
+packets itself, and a **second network with NAT and routing** (`spkctl`, removed again) gave `BLOCKED` for `1.1.1.1:443`, `169.254.169.254:80` and `172.31.1.1` **while the host's own address on that bridge was reached** (`10.97.0.1:9999`): on this host the forward path drops
+Incus's traffic, which is what Docker's `FORWARD` policy `DROP` does (the tables could not be read as a normal user, so this is the observed behaviour, not a read of the rules). **A design that needs no forwarding at all is immune; the outer wall of #979 does not forward.** (3) **IPv6 has no control**: the bridge has no IPv6 address
+and the instances no IPv6 route, with or without the ACL; the same as the Firecracker lane's ("IPv6 has no control"). (4) **Port 53 is open to every host-local address.** An explicit ACL rule `drop tcp/udp 53` ahead of the allow rule changed nothing; `ipv4.firewall=false`, `ipv6.firewall=false` changed nothing; so the accept
+is Incus's own implicit one for DNS/DHCP of an ACL-protected bridge, ahead of the user rules. It matters only because the host has listeners on port 53 on addresses the instance can reach (`10.206.108.1`, and any dnsmasq or resolver on a routable address of the host); it
+would let an instance resolve names, and tunnel through the resolver. **`dns.mode=none` does not stop the bridge's own dnsmasq from answering** (`raw.dnsmasq=port=0` does).
+
+**Coexistence with Docker and Incus's own firewall.** Incus uses nftables (`inet incus`), the host's Docker iptables-nft; both were loaded the whole time and neither disturbed the other for the **input** path (the proxy was reachable, the decoy ports were not; Docker's bridges, `172.17.0.1`, were probed). A design that lets the instances
+reach only an address of the host needs no forwarding, so Docker's `FORWARD` policy never comes into it, and **no Docker setting was touched**. What the spike could **not** do is load a static nft table of our own (as the installer of #979 does): `luca` has no root and Incus rejects the way round it
+(`raw.lxc: lxc.net.0.type=none` is refused, and sharing the host's network namespace by other means would be using the group's root equivalence against the guard, so it was not done). That table is what closes port 53, and it is **not proven here**; the mechanism (a table of our own at priority -150 that names
+the bridge, `iifname "spkout"`) is the Firecracker backend's, proven on its TAP devices.
+
+**Hot-plug as `narrow`.** The setup phase gives B a second NIC on `spkout` (`incus config device add B eth1 nic network=spkout …`, 0.09 s) and `narrow` removes it (`device remove`, **0.12 to 0.17 s**); afterwards B has only `eth0` and the host proxy answers `Network is unreachable`. A NIC change re-creates the interface:
+**the addresses and routes set by hand are gone** (twice the probe said `Network is unreachable` until they were set again), so the launcher must configure the NIC from a file in the image, not by `ip addr` at start.
+
+### Q5: limits and clean-up
+
+| Limit | Setting | Result |
+|---|---|---|
+| CPUs | `limits.cpu=2` (a cpuset of 2 of the 4 host CPUs) | `nproc` 2, cpuset `2-3`; two busy loops for 6 s used **1.91 CPUs**. `limits.cpu.allowance=50%` on top left `cpu.max` at `max 100000`: **a fractional quota needs `limits.cpu` unset** (not tried) |
+| Memory | `limits.memory=1GiB`, `limits.memory.swap=false` | `memory.max` 1073741824, **`memory.high` 966365184 (90 %)**, `memory.swap.max` 0. A process asking for 1.6 GiB was held at **926 MB** resident in state `D` (throttled by `memory.high`), `oom_kill 0` for the minutes it ran before the limit was raised; host load rose to 12 (shared host). **Exhaustion throttles, it does not kill quickly**: the job ends at its wall clock, not by an OOM kill (Firecracker's cgroup killed the VMM). Not tried: `limits.memory.enforce` |
+| PIDs | `limits.processes=200` (`pids.max`) | a loop of 400 forks: **169 started, 231 `EAGAIN`** |
+| Disk | `incus config device set <B> root size=3GiB` on the `dir` pool | **accepted without an error and not enforced:** `dd` of 4,000 MB went through (`df` inside shows the host volume, 67 G, 44 G used afterwards); the file was removed. Incus's `dir` driver enforces a quota only on a file system with project quotas, which `/home/luca` (ext4 on LVM) is not mounted with. **A btrfs, ZFS or LVM pool would; none could be created without root** (a loop file is made by root; `source=<file>` is refused for btrfs) |
+
+**Clean-up.** `incus delete -f A B` of a **running** set (dockerd, containerd, a dind with Postgres, 80 processes) took **4.0 s** (4.57 s in the other run); afterwards `incus list`, the pool's `containers/` directory (4 KiB) and the volume list were empty, no device, no network left over. Everything a job
+owns is one instance each plus a hot-plugged NIC and a `proxy` device, all deleted with the instance; the two bridges, the ACL and the profile are per machine, not per job.
+**After a dispatcher crash** (the host proxy and the control endpoint killed, as a crash would) both instances **kept running** (`incus list`: RUNNING) and the proxy answered nothing; they are found by a **mark on the instance**, `user.cr.job` set at `incus init`
+(`spike/incus/reap.sh`: `incus list --format json`, every instance with that key, `incus delete -f`; instances without the key, the owner's and other users', are never touched), and the next start of the service does what #978's `setup` does for VMs. `boot.autostart` is unset (false): no instance comes
+back after a reboot of the host. The wall clock of a job is the dispatcher's, as with VMs. **Not tried:** a restart of the Incus daemon (root), a reboot, a kill of one instance's dockerd.
+
+### Q6: operations, start time, memory, speed
+
+**Updates.** There is no snap, so no refresh. The host runs **unattended-upgrades** (`APT::Periodic::Unattended-Upgrade "1"`, origins `noble` and `noble-security`; the package `incus 6.0.0-1ubuntu0.3` comes from `noble-updates`/`noble-security`). The package's maintainer script
+restarts `incus.service` and `incus-user.service` on upgrade, not `incus-startup.service`, and the unit has `KillMode=process`: **a daemon restart is documented not to stop running containers** (not tried here: it needs root). The runner's installer should still **hold the package** (`apt-mark hold incus`) and
+update it between jobs, as the Firecracker design updates only between jobs. Packages that Docker's runc depends on (here the bundle: runc 1.3.4) are the image's, not the host's.
+**`incus-admin` is root-equivalent:** a member can create a privileged instance with the host's disks (the documented behaviour; **not shown on this shared server**). The service user of the Incus backend would hold that group, which the Firecracker backend's user (`kvm` only, TAPs it owns) does not. The
+restricted alternative, the per-user `incus-user` socket with a restricted project, cannot set `raw.lxc` (the AppArmor workaround), privileged flags or networks (from the documentation, **not tried**).
+**The image store defaults to `/`** (`/var/lib/incus/images`): the first image of 940 MB moved `/` from 69 % to 72 % until `storage.images_volume=spike/images` pointed it at the pool (a **server-wide** Incus setting; set back at the end). The installer must set it, and the pool, before the first image.
+
+**Start time, whole set (`spike/incus/jobset.sh`, the quiet run, load ≈ 1.4):**
+
+| Step | Time (cumulative) |
+|---|---|
+| two instances created (`incus init` ×2 from the golden image, 802 MiB compressed, 1.3 GB on disk with Docker, dind and Postgres images pre-pulled; devices added) | **37.9 s** (19.5 s and 19.6 s for one, with `security.idmap.isolated` true and false: the idmap is not the cost; 20.7 s for another; 43.5 s for the pair in the first full run at load 3) |
+| started, addresses set, A's wall and doors loaded, A's dockerd answers | 42.7 s (`incus start` itself 0.27 to 0.38 s; dockerd answers **2.5 to 3.1 s** after the start in the three timed starts) |
+| B's dockerd answers | 43.4 s |
+| setup: B's outer NIC, privileged dind started, `postgres:17-alpine` pulled through the proxy, Postgres answers | 56.6 s (13.2 s; 15 s and 21 s in the loaded runs) |
+| `narrow` (NIC removed) | 0.15 s |
+| agent phase (probes, a query through the setup's Postgres, `docker stop pg`) | 68.7 s |
+| both instances deleted | 72.7 s |
+
+**The cost is `incus init`: the image is copied into the pool file by file** (the `dir` driver; an Ubuntu image of 135 MiB takes 3.5 s, the same with Docker's data 19 s), against the Firecracker backend's reflink of the Docker data disk, **34 ms for 752 MiB**. A copy-on-write pool (btrfs, ZFS, LVM thin) makes it a snapshot and also
+brings the quota; **neither was possible without root and none was measured here**. The installer (root) must create such a pool, on a block device or a loop file of its own (on the user's volume: `incus storage create <pool> btrfs size=… source=<loop file or device>`; **not tried**). A real Worker image of 1.5 GB or more in A's Docker would
+add to the copy on a `dir` pool.
+
+**Memory.** Instance with systemd, containerd and dockerd idle, after boot: anonymous **42 MiB (B) to 65 MiB (A)**, kernel 5 to 9 MiB, plus the `lxc monitor` process **6.2 to 6.7 MiB** resident, plus page cache (`memory.current` 123 and 229 MiB). After the whole job set (dind and Postgres run and stopped): A anonymous 74 MiB, B 150 MiB, kernel 11 and 34 MiB, **file cache 286 and 881 MiB**
+(it counts against `limits.memory` and is reclaimable). The Firecracker VM: 123 MiB resident with nothing in it, 344 MiB with dockerd and a runc container, 573 MiB with the dind agent (the fixed cost of the VMM 50 to 56 MiB). An Incus container has **no guest kernel, no VMM**.
+
+**Speed.** `spike/incus/bench.sh` on the host and in an instance (3 runs): SHA-256 of 1 GiB from `/dev/zero` **1.02 to 1.17 s in the instance, 1.10 to 1.18 s on the host** (no difference); a 1 GiB write with `fdatasync` 5.9, 10.9 and 5.9 s in the instance against 4.2 to 4.7 s on the host (the `dir` pool on the shared volume, noisy); `docker build` of three layers
+(150 MB urandom plus gzip, md5, tar) 6.6 s the first time and 1.3 and 0.9 s after in the instance. **The host's own Docker (`luca`'s, rootless) took 39 to 42 s for the same build and is no reference.** The Firecracker section has **no build or test speed figures** (it measured boot, copy and memory), so there is nothing of it to put beside these; boot to a working Docker:
+
+| | Firecracker (CI, nested virtualization) | Incus (`dir` pool) |
+|---|---|---|
+| per-job disk | reflink 34 ms (752 MiB), `resize2fs` 20 ms | `incus init` 19 s (1.3 GB), 3.5 s (a plain Ubuntu image) |
+| start to Docker answering | 1.90 s (`docker_ready`), 2.61 s "Control could start" | 2.5 to 3.1 s after `incus start` (0.3 s) |
+| the agent's own Docker ready | 1.51 s (Sysbox) | 1.30 s (privileged DinD) |
+| fixed memory | 50 to 56 MiB VMM, 123 MiB of an empty guest | 6 MiB monitor + 42 to 65 MiB with systemd and dockerd |
+| the control channel's round trip | vsock 0.63 ms (p50) | `proxy` device, a unix socket host to instance: **0.28 ms (p50), 0.41 ms (p95)**, 200 requests; the socket must be on the user's volume (`incusd` does not see `/tmp`) |
+| stop and clean up | the VMM killed with its cgroup | 4.0 to 4.6 s |
+| a limit by file size (disk) | yes | **no on `dir`** |
+
+### Re-measured on Incus 7.6 + btrfs
+
+The spike's three open gates (a copy-on-write pool, Docker in Incus on the package we would install, the setup-to-agent hand-over) were re-run after the owner changed the DevBox as root: **Incus 7.6 from the Zabbly stable repository** (`1:7.6-ubuntu24.04-202611072126`, liblxc 7.0.0 and lxcfs in `/opt/incus`, firewall driver `nftables`; the Ubuntu 6.0.0 is gone) and **a btrfs pool `crpool`** (a 25 GB loop file on `luca`'s own volume, mounted by Incus at `/var/lib/incus-crpool`). Same user (`luca`, `incus-admin`), same kernel (6.8.0-147), same rules (one set at a time, 2 CPUs and 2 GiB per instance, `crpool` only, nothing of the owner's touched). The scripts are the spike's, changed where this run needed it (`spike/incus/`, `SPIKE_POOL=crpool setup.sh`, and the new `same-instance.sh`; the branch is `spike-1005-incus`).
+**Read every time with the host's load:** the DevBox was busy with other agents, **load average 5 to 20 on 4 vCPUs** (the first spike's quiet runs: about 1.4), so the absolute times of anything that computes are 2 to 5 times worse than a quiet host would give; the times that do not compute (the instance's creation, the NIC hot-plug) are not. Where it matters the load is given.
+
+| # | Question | Answer on Incus 7.6 + btrfs |
+|---|---|---|
+| 1 | Docker in Incus **without** `raw.lxc: lxc.apparmor.profile=unconfined` | **Yes. The workaround is gone.** The default AppArmor profile stays on (`/proc/<pid 1>/attr/current` of the instance, read from the host: `incus-<name>_</var/lib/incus>//&:…:unconfined (enforce)`, the profile enforcing, the instance's own namespace inside it), containerd store and overlayfs as before, and `docker run`, `build`, `compose up`, `--privileged`, a privileged DinD with a pull, a build and a run inside it all work. The `open sysctl net.ipv4.ip_unprivileged_port_start … reopen fd: permission denied` of 6.0.0 does not appear |
+| 2 | Start time on btrfs | **`incus init` 0.14 to 0.46 s** (the first one per image and pool **20.8 s**, once), `incus start` 0.23 to 0.33 s, dockerd answers **1.95 to 2.18 s** later at load 5 (3.8 to 5.0 s at load 10). Nothing to first container run **4.4 to 4.7 s** at load 5. Against the `dir` pool's 19 s + 0.3 + 2.5 to 3.1 s and Firecracker's 34 ms + 1.90 s `docker_ready` / **2.61 s** "Control could start" |
+| 3 | `size` of the root disk | **Enforced on btrfs**: a write past it ends `Disk quota exceeded` (EDQUOT, **not** "No space left"), also from a container of the nested Docker, and with the quota lifted the same write passes. A full quota also stops Docker's own bookkeeping (see below) |
+| 4 | Sysbox in Incus 7.6 (one attempt: `dpkg -i` of the pinned 0.7.1 package in an instance, `sysbox-mgr` read) | **Still fails, with the same message**: `sysbox-mgr` exits with `ID-mapping check failed: failed to check kernel ID-mapping support: create mapped mount: Failed to set mount attr: operation not permitted`. Sysbox stays out |
+| 5 | Inner and outer wall, once more | **No regression**, each probe with a control that reached (tables below). Port 53 of host-local addresses is **still open** (`10.206.108.1:53` REACHED with the ACL): the static nft table is still needed. One new thing about the controls (a live change of `security.*` does not reach a running NIC) |
+| 6 | Setup and agent in the **same instance** | **Works, and the contract problem of the `docker commit` hand-over disappears**: Postgres, a service and a file made by the setup are still there for the agent, which uses and stops them; the inner wall still separates that instance from Control's (tables below) |
+
+#### Docker in the instance, AppArmor on (question 1)
+
+The profile is the spike's without the `raw.lxc` line (`spike/incus/setup.sh`: `SPIKE_APPARMOR_OFF` adds it back). `docker info`: `overlayfs`, `io.containerd.snapshotter.v1`, cgroup v2 with the `systemd` driver, Docker 29.1.3; root of the instance `uid_map 0 1065536 65536`, `Seccomp: 2`. The battery of `q1-docker-in-incus.sh` (images pre-pulled, load 12 to 15): `docker run hello-world` 2.1 s and 2.7 s, `run busybox` 2.4 to 2.6 s, `build` of three layers (a 50 MB file) 9.2 to 9.3 s, `compose up` 6.0 to 6.3 s (3 s of it the service's `sleep`). **These are 2.5 to 9 times the first spike's (0.85, 0.78, 0.99, 3.92 s at load 1.4) and the cause was not isolated**: AppArmor is not it (the same instance with `raw.lxc` unconfined: `docker run busybox true` 1.8 to 2.1 s against 2.0 to 2.7 s with the profile on), nor is Docker's cgroup driver (`cgroupfs`: 1.8 to 2.4 s), nor the options of `docker run` (`--network none`, `--privileged`, seccomp off, host namespaces: 1.6 to 2.0 s each); `docker create` and `rm` take 0.2 s, `start` 0.65 s and `wait` 0.41 s (and each `incus exec` adds its own 0.2 to 0.4 s at this load). A quiet-host re-measure is a follow-up.
+**The bench's three-layer build is not comparable to the first spike's** (6.6, 1.3 and 0.9 s) **and those figures should be treated as doubtful**: it now takes 48 to 61 s in the instance, of which 36 s is Docker exporting the image (gzip of about 700 MB; `gzip` of 300 MB of random data costs 10.8 s in the instance and 14.2 s on the host at that load, so it is CPU, not the storage), and the bench discards the build's output, so a failed build looks like a fast one.
+
+**Privileged DinD** (the agent): ready 8.4 s after `docker run` at load 15 (5.6 to 5.9 s at a load of about 6; 1.30 s at load 1.4 in the first spike), `postgres:17-alpine` pulled through the proxy and run inside it (`select 6*7` = 42), `docker run hello-world` and a `docker build` inside it work. What "privileged" reaches is unchanged: `/dev` holds no block device (`mount /dev/sda1` answers `No such file or directory`; 6.0.0 said `permission denied`), `uid_map 0 1065536 65536`, all capabilities of the instance's user namespace only, and the AppArmor namespace of the instance around it.
+**A mistake of this run, worth knowing:** the first golden image lost its pre-pulled images (`docker run` pulled them again) because the spike's own `containerd.service` and Docker's managed containerd raced at the image build; the instance's `dockerd` used the other one at the next boot. The unit is gone from `build-image.sh` (dockerd manages its containerd); an image recipe must test for the pre-pulled images, not assume them.
+**The package's source matters for updates:** the host's `unattended-upgrades` allows only the Ubuntu origins (`noble`, `noble-security`, ESM), **so the Zabbly package is not updated automatically** (the Ubuntu 6.0.0 was). The installer or the updater owns the Incus version (a pin, an update between jobs).
+
+#### Start time (question 2)
+
+Per instance, one set of timed starts of the 1.3 GB golden image (800 MiB compressed; Docker, dind and Postgres images pre-pulled), `time-start.sh` and the same by hand:
+
+| | `incus init` | `incus start` | dockerd answers (after start) | first `docker run busybox true` (+) | nothing to first container |
+|---|---|---|---|---|---|
+| **cold**, the first instance of an image in the pool (unpacks the image into a btrfs image volume) | **20.8 s** | 0.68 s | 4.3 s | | 25.8 s |
+| warm, load 9 to 12, five instances | 0.18 to 0.46 s | 0.31 to 0.33 s | 3.8 to 5.0 s | | 4.3 to 5.5 s |
+| warm, load 5, five instances | 0.14 to 0.17 s (0.84 s the first) | 0.23 to 0.31 s (0.51 the first) | 1.95 to 2.18 s (4.7 the first) | 1.90 to 2.23 s | **4.35 to 4.68 s** (8.25 s the first) |
+
+Both **cold** (20.8 s and about 22 s) times are the image volume's unpacking: **once per image and pool, at the first instance**, and the volume stays after the instance is gone; the installer must create and delete one instance after importing an image so that no job pays it. Against the first spike's `dir` pool (19 s **per instance** + 0.3 s + 2.5 to 3.1 s) and the Firecracker backend's 34 ms reflink + `docker_ready` 1.90 s (process start, kernel boot included) and "Control could start" 2.61 s: **a job's own disk is now cheap (0.2 s, a snapshot)**, and what remains is the 2 s that dockerd needs to answer plus 2 s for the first container, **about 4.5 s against 2.6 s** at a load of 5. Whole job set with `jobset.sh` as it is (load 12): **70.4 s** (72.7 s before), of which the two instances' creation **0.95 s** (37.9 s before); the rest is the setup's pull of Postgres through the proxy and the probes. `incus delete -f` of a running pair 0.3 to 3.6 s; **btrfs gives the space back after a delay** (the pool showed 2.65 GiB used for about 30 s after everything was deleted, 8.6 MiB after 50 s).
+**Two traps found on the way.** (1) `incus init` and `incus launch` **read an instance config from stdin when it is not a terminal and wait for its end**: a pipe that never closes hangs them forever (twice here, for 9 and 4 minutes, with no operation and no instance on the server; the client was waiting). A dispatcher must start them with stdin closed (`</dev/null`; `lib.sh` does), or use the API. (2) A `proxy` device that listens on `/run/…` makes a socket that systemd's `/run` tmpfs hides in 7.6 (the 6.0.0 run worked): put the control socket elsewhere (`/ctl.sock`; p50 **0.28 to 0.36 ms**, p95 0.53 to 0.59 ms, 200 requests, unchanged).
+
+#### The disk quota on btrfs (question 3)
+
+`incus config device override <i> root size=3GiB` (and `device set … size=` on a running instance, effective at once; no restart). A 3.5 GB `dd` in the instance stopped at **587 MiB** (616 MB) with `dd: error writing '/blob': Disk quota exceeded`: the instance had already used the rest of its 3 GiB (the image's 1.3 GB, the images pulled into Docker, the dind's). The same in a container of the privileged DinD, **and** in a container of the instance's own Docker: `Disk quota exceeded`, each. **Control:** with the quota lifted to 20 GiB the same 3.5 GB write went through (3.4 GiB, 340 MB/s). The quota counts the instance's whole file system, **including the data it shares with the image** (referenced size), so a quota must be at least the image plus the job's room.
+**What a full quota does to Docker:** with the instance at its quota `docker rm` and `docker system prune` fail themselves (`write …/meta.db: disk quota exceeded`, `failed to prune build cache`), the daemon stays up (`docker info` answers) and the dead containers stay until the quota is raised. For a job that is fine (the instance ends at the wall clock or by `end` and is deleted), but a Control that wants to clean up inside an instance at its quota cannot; **Control's reserve is its own instance's quota** (A and B have separate quotas), not a slice of B's. The error is `EDQUOT`; the contract's "No space left" must say "a write fails" and name both. Not measured: the speed of btrfs with quotas (qgroups) under many small files, the loop file's own limit (25 GB here, a pool of several instances at once), a recovery of Docker after the quota was raised again.
+
+#### The walls, once more (question 5, `same-instance.sh`, each probe with a control)
+
+Inner wall, probes from B (a REACHED in the control column proves the probe can reach):
+
+| Probe from B | No wall (A's table not loaded) | Wall (`inner-wall.nft` in A) | After `narrow`, from the **agent container** and from **a container of the agent's own Docker** (NAT through two layers) |
+|---|---|---|---|
+| A `:9000` (secrets), `:2375` (Docker API stand-in) | REACHED, REACHED | **BLOCKED**, **BLOCKED** | BLOCKED, BLOCKED (both) |
+| A `:8080`, `:8081` (the two doors) | REACHED | **REACHED** | REACHED (both); `curl -x 10.98.0.2:8080 https://example.com/` through the network door to the host proxy: HTTP 200, the model door: `model-door-ok` |
+| A `:22`, ICMP to A | REFUSED, answered | BLOCKED, 100 % lost | |
+| through A as a router (`1.1.1.1:443`, the host proxy, A's outer address `:9000`) | | BLOCKED, BLOCKED, BLOCKED | |
+| the host proxy `10.99.0.1:3128` after `narrow` | | `Network is unreachable` | BLOCKED (both) |
+
+Outer wall, the same 15 targets from A and from B's setup NIC (**identical rows for both**); control = the ACL unset on `spkout` and B's NIC **re-plugged** without isolation, address filtering and MAC filtering:
+
+| Target | Control, no wall | Wall (ACL, port isolation, address and MAC filtering) |
+|---|---|---|
+| the proxy `10.99.0.1:3128` | REACHED | **REACHED** |
+| host `10.99.0.1:22`, `:9999` (decoy) | REACHED, REACHED (the decoy logged the instance's address) | **BLOCKED**, BLOCKED |
+| the host's public IPv4 `:22`, `:9999` | REACHED, REACHED | **BLOCKED**, BLOCKED |
+| `10.99.0.1:53` (no listener, `port=0`) | REFUSED | REFUSED |
+| the owner's `incusbr0` address `10.206.108.1:53` (its dnsmasq) | REACHED | **REACHED**: port 53 of a host-local address is still open on 7.6 |
+| `172.17.0.1:9999`, LAN gateway `172.31.1.1:80`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, metadata `169.254.169.254:80`, `1.1.1.1:443` | REFUSED | **REFUSED** (immediately, where 6.0.0 timed out): the wall's answer and the control's are the same, so these rows prove nothing about the ACL: **no usable control for forwarded targets**, as before |
+| IPv6 `[<the host's public IPv6>]:9999` | no route | no route (no control possible) |
+| B to A's outer address `:9000`, `:2375` | REACHED, REACHED | **BLOCKED** (timeout; `No route to host` for the second, port isolation) |
+| another slot's source address `10.99.0.202` while declared `10.99.0.112` | REACHED | **BLOCKED** (timeout) |
+
+**What changed in the host:** `docker0` and the two other Docker bridges are `linkdown` now (no container of the other users runs), so `172.17.0.1` is no longer a host-local address that answers and the Docker-bridge row has lost its control; the **coexistence with the host's Docker was not shown again** (no container runs there now and the rules cannot be read as a normal user); no Docker setting was touched.
+**A control must re-plug the NIC:** `incus config device set <i> eth1 security.port_isolation=false security.ipv4_filtering=false …` on a **running** NIC did **not** take effect on 7.6 (B still could not reach A, the foreign source address stayed blocked; the 6.0.0 run's live toggle did take effect). The wall is applied when the NIC is made, so `narrow` as a hot-**unplug** (0.20 to 0.35 s, unchanged) is fine, and a changed rule is a re-plug. A static address on a bridge without DHCP is refused by Incus unless `security.ipv4_filtering=true`.
+
+#### Setup and agent in the same instance (question 6)
+
+One instance B for both, as the owner decided; A (Control, the doors, the inner wall, the host's proxy through the outer NIC) as before. `same-instance.sh` in order: B gets its outer NIC (wide rule); **the setup** runs in B with **B's own Docker**: `postgres:17-alpine` (`--restart unless-stopped`, ready when it answers on **TCP**: the image's first, temporary server answers `pg_isready` on its socket and is then shut down, which made the first run's `psql` end with `terminating connection due to administrator command`), a table with one row, a service (`systemd-run python3 -m http.server`, a unit of the instance), a file; **`narrow`** (B's outer NIC is hot-unplugged, 0.20 s); then **the agent** starts, in the same instance: a privileged DinD container (own Docker, B's socket mounted).
+
+| Step | Result |
+|---|---|
+| after `narrow`, from B | the host proxy `Network is unreachable`; `pg` still `Up 24 seconds`, the service unit `active`, the file there: **nothing the setup started stops at `narrow`** |
+| the agent's DinD | ready 5.6 to 5.9 s (load of about 6); the images it needs come from B's Docker, **with no network**: `docker save postgres:17-alpine busybox \| docker exec -i agent docker load` 18 to 25 s |
+| the agent uses the setup's Postgres | a container of the **agent's own** Docker (`psql`, `--network host`) reads the row the setup wrote (`7`), inserts one (`8`), counts 2; the setup's service answers on B's `docker0` address |
+| the agent's own Docker | `docker run busybox` and `docker build` + `run` inside it work |
+| the agent stops the setup's Postgres | through B's socket: `docker stop pg` (`Exited (0)`), `docker start pg`, ready, `select string_agg(v::text, ',')` = `7,8`: **stopped and started again, the data is there** |
+| inner wall afterwards, from B, the agent container and a container of the agent's Docker | the table above: the doors reached, the secrets and the Docker API blocked, the proxy blocked |
+
+So **the hand-over is "the same instance"** and it is trivial in Incus: what the setup left (files, images, containers, volumes, **processes**) is what the agent has; nothing of it is reset at `narrow`. **The contract item 9 must say so** (the setup's processes keep running after the hand-over) and hosted, which today hands the setup's result over by image, must match: its setup runs in the same VM as the agent. The agent is root of B and of a privileged container in it, with B's Docker socket in reach if the spec mounts it (this run did, to show stop and start); that is inside the wall, which is between B and A, not inside B. What was **not** tried: what the Worker's real hardening flags do in DinD (read-only root, memory and PID limits of the inner container), the real Worker image, and several sets at once.
+
+#### What changed in the recommendation
+
+**It holds and is firmer: Incus as the one local backend, behind one gate.** Of the three things the first spike said had to be proven as root, **two are now answered, positively**: (1) a **copy-on-write pool**: btrfs on a loop file gives a job's disk in 0.2 s (once per image 21 s) and **an enforced disk quota** (EDQUOT); (3) **Docker in Incus on the package we install**: the Zabbly 7.6 package keeps AppArmor on and needs no workaround; **keep the install-time probe** (`docker run` in a probe instance) as the gate rather than a version check, and decide who updates the package (the host's unattended-upgrades does not cover Zabbly). **The third is still open: the static host nft table** (closes port 53, which 7.6 still leaves open to host-local addresses; per-slot rules; read next to Docker's and Incus's tables): needs root, and a GitHub `ubuntu-24.04` runner is the place to prove it. New or changed: **start is about 4.5 s to the first container instead of 2.6 s** (the budget for #978's successor; most of it is dockerd and the first container, not the disk), **a full quota ends in `Disk quota exceeded` and stops Docker's own bookkeeping**, **a rule change on a NIC is a re-plug**, `incus init` needs stdin closed, and the bench numbers of the first spike for `docker build` are not to be quoted. Sysbox stays out; the agent stays a privileged DinD in an unprivileged instance on the host's kernel (the risk the first spike's recommendation names is unchanged). The same-instance decision removes the `docker commit` redesign from the follow-ups.
+
+#### Clean-up of the re-measure
+
+At the end: no instance, no image (the golden image and the Ubuntu base), no network (`spkin`, `spkout`), no ACL, no profile, **no volume** (the `images` volume), `storage.images_volume` unset again (the server config is `{}`), the host proxy, the decoy and the control endpoint stopped, the downloads and the scratch files deleted; **`crpool` is kept** (empty: 8.6 MiB used) and the `default` pool, `default` profile and `incusbr0` were never touched. `/` is at 71 % as before (27 G; nothing of the spike was on it: `storage.images_volume` pointed the image store at `crpool` before the first image).
+
+### What was not proven
+
+- **A copy-on-write pool, the real start time and the quota:** needs root (btrfs, ZFS or LVM on a device or a loop file the installer makes). The 19 s is the `dir` pool's. **Answered in the re-measure (btrfs on a loop file: 0.2 s, quota enforced).**
+- **The static host nft table** (closing port 53, the per-slot rules) and a read of the host's Docker and Incus tables: no root, and the guard against the way round. **IPv6 refusal** (no control possible here).
+- **A kernel with `br_netfilter` or the nft `bridge` family**, where Incus ACLs might filter inside a bridge. **Incus ≥ the upstream fix** (AppArmor kept on): not installed on the first run; `raw.lxc` unconfined is what ran. **Answered in the re-measure (7.6: AppArmor on, no workaround).**
+- **The real Worker image, the real hardened `docker run` of Control, the doors' real firewalls and `vm-init`**: stand-ins (python servers, `docker:dind`, busybox, a fake secret file). Nothing was called that needs a model, a key or a token; no real secret exists in any instance.
+- **Hand-over of the setup to the agent** other than "the same inner daemon" (an Incus copy of the stopped instance, or an image made from it): not tried; **the same instance was shown in the re-measure** (the owner's decision). **Sysbox-like hardening flags** of the agent's container (read-only root, memory and PID limits of the inner container) were not run in DinD.
+- **Several sets at once** (one set at a time by the rule), **a restart of the Incus daemon, a host reboot, the daemon's own upgrade**, an OOM kill, a CPU quota, `limits.memory.enforce`.
+- **Escape resistance.** The agent is root of a privileged container inside an instance whose only confinement is the user namespace, seccomp and cgroups (AppArmor off on the first run, on in the re-measure). **The kernel is shared with the host**; a kernel flaw is a host flaw, which a microVM does not share. Not assessed beyond what is written under Q2.
+- Other distributions, other kernels, Debian's or the upstream Incus package, ARM.
+
+### Clean-up of the spike
+
+At the end: no instance, no image (the two, `spike-docker` and the Ubuntu base), no network (`spkin`, `spkout`; a third, `spkctl`, was deleted at once), no ACL, no profile, no storage volume, the pool `spike` deleted and its directory removed, `storage.images_volume` unset (the server's config is `{}` again), the
+host proxy, the decoy and the control endpoint stopped, the downloads and the exported image (840 MB) deleted. The owner's `default` pool, the profile `default` and `incusbr0` were never changed. `/` is at 69 % as before. **A mistake of the spike:** a first timing loop that went to the background after its tool call timed out kept starting `incus init` jobs for a quarter of an hour; its two
+extra timings (16.7 and 18.4 s) overlapped another init and are not used for the headline; the quiet runs are.
