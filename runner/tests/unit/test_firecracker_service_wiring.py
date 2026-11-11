@@ -62,7 +62,7 @@ def test_the_slots_of_a_firecracker_runner_are_its_parallel_runs_and_a_docker_ru
     limits = {"parallelRuns": 4}
 
     assert check_limits(limits, max_parallel=64).parallel_runs == 4
-    with pytest.raises(ConfigError, match="Firecracker"):
+    with pytest.raises(ConfigError, match="Incus"):
         check_limits(limits)
     with pytest.raises(ConfigError, match="at most 64"):
         check_limits({"parallelRuns": 65}, max_parallel=64)

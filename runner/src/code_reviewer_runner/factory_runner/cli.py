@@ -9,9 +9,12 @@ v2 (#974).
   and the shell history show it).
 - `run`: the service loop. `--once` takes one job and ends; with no job within `--wait` seconds it
   ends with exit code 0 and says so, and with an app that never answered during the wait it ends
-  with exit code 7. The program (`entry_point`) runs only with `FACTORY_RUNNER_SANDBOX=firecracker`:
-  every job in a Firecracker VM on a machine with KVM, which the installer (#982) arranges. The
-  Worker-as-a-process mode on the host's Docker is gone from the program (it stays reachable
+  with exit code 7. The program (`entry_point`) runs only with `FACTORY_RUNNER_SANDBOX=incus`
+  (#1007):
+  every job in two Incus instances on this machine, or, until the Firecracker code is retired
+  (#1012),
+  `firecracker`: every job in a Firecracker VM on a machine with KVM. The Worker-as-a-process mode
+  on the host's Docker is gone from the program (it stays reachable
   through `main()` only for the tests of the service loop).
 - `selftest`: proves the base on this machine; exit code 0 when it holds. It only looks: it pulls
   and names no image, so a machine whose agent image is missing or not the pinned one is reported
@@ -68,6 +71,7 @@ from code_reviewer_runner.factory_runner.claude_code_selftest import device_chec
 from code_reviewer_runner.factory_runner.cli_manage import REMOVED_OPTIONS
 from code_reviewer_runner.factory_runner.config import (
     SANDBOX_FIRECRACKER,
+    SANDBOX_INCUS,
     SANDBOX_VARIABLE,
     ConfigError,
     Limits,
@@ -83,6 +87,8 @@ from code_reviewer_runner.factory_runner.config import (
 )
 from code_reviewer_runner.factory_runner.firecracker.factory import firecracker_sandbox_factory
 from code_reviewer_runner.factory_runner.firecracker.prepare import prepare_firecracker
+from code_reviewer_runner.factory_runner.incus.factory import incus_sandbox_factory
+from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
 from code_reviewer_runner.factory_runner.prepare import Prepared, prepare
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult, summary
 from code_reviewer_runner.factory_runner.service import (
@@ -98,9 +104,14 @@ from code_reviewer_runner.job_loop.settings import SettingsError
 PROGRAM = "factory-runner"
 TOKEN_VARIABLE = "FACTORY_RUNNER_TOKEN"
 NO_SANDBOX_MESSAGE = (
-    "the only sandbox is firecracker (a VM per job, on a machine with KVM): set "
-    "FACTORY_RUNNER_SANDBOX=firecracker; install it with runner/install/install.sh"
+    "the sandbox is incus (two Incus instances per job): set FACTORY_RUNNER_SANDBOX=incus "
+    "(firecracker, a VM per job on a machine with KVM, is still accepted until it is retired, "
+    "#1012)"
 )
+# The sandboxes `run` knows; the others are the Worker-as-a-process mode, which only the tests of
+# the
+# loop use.
+VM_SANDBOXES = (SANDBOX_INCUS, SANDBOX_FIRECRACKER)
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,8 @@ class CliSeams:
     # What `run` prepares with `FACTORY_RUNNER_SANDBOX=firecracker` (#978): the host's checks, no
     # Docker self-test.
     prepare_vm: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = prepare_firecracker
+    # The same for `FACTORY_RUNNER_SANDBOX=incus` (#1007).
+    prepare_incus: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = prepare_incus
     # What `selftest` runs: the same checks, but nothing is pulled or named in the daemon.
     check: Callable[[RunnerConfig, Mapping[str, str]], Prepared] = lambda config, env: _look(
         config, env
@@ -205,8 +218,9 @@ def main(
     stdin: TextIO | None = None,
     require_sandbox: bool = False,
 ) -> int:
-    """Run the command and return the exit code. `require_sandbox`: `run` needs the Firecracker
-    sandbox (the program's own entry point asks for it; the tests of the loop do not)."""
+    """Run the command and return the exit code. `require_sandbox`: `run` needs a VM
+    sandbox, `incus` or `firecracker` (the program's own entry point asks for it; the tests of the
+    loop do not)."""
     stdout: TextIO = out or sys.stdout
     stderr: TextIO = err or sys.stderr
     try:
@@ -428,7 +442,7 @@ def _run(
     *,
     require_sandbox: bool = False,
 ) -> int:
-    if require_sandbox and env.get(SANDBOX_VARIABLE, "").strip() != SANDBOX_FIRECRACKER:
+    if require_sandbox and env.get(SANDBOX_VARIABLE, "").strip() not in VM_SANDBOXES:
         err.write(f"{PROGRAM}: configuration: {NO_SANDBOX_MESSAGE}\n")
         return EXIT_CONFIG
     config = load_config(env)
@@ -441,8 +455,10 @@ def _run(
         err.write(f"{PROGRAM}: --wait must not be negative\n")
         return EXIT_USAGE
     configure_logging()
-    vm = env.get(SANDBOX_VARIABLE, "").strip() == SANDBOX_FIRECRACKER
-    prepared = (seams.prepare_vm if vm else seams.prepare)(config, env)
+    chosen = env.get(SANDBOX_VARIABLE, "").strip()
+    vm = chosen in VM_SANDBOXES
+    prepare_for = {SANDBOX_INCUS: seams.prepare_incus, SANDBOX_FIRECRACKER: seams.prepare_vm}
+    prepared = prepare_for.get(chosen, seams.prepare)(config, env)
     service = RunnerService(
         config,
         env,
@@ -451,7 +467,13 @@ def _run(
         logger=logging.getLogger(LOGGER_NAME),
         seams=Seams(
             docker=seams.docker,
-            sandbox=firecracker_sandbox_factory(config, env) if vm else None,
+            sandbox=(
+                (incus_sandbox_factory if chosen == SANDBOX_INCUS else firecracker_sandbox_factory)(
+                    config, env
+                )
+                if vm
+                else None
+            ),
         ),
     )
     return asyncio.run(service.run(once=arguments.once, wait_seconds=arguments.wait))

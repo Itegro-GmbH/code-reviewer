@@ -44,7 +44,7 @@ testpaths = ["tests"]
 # Network guard: only loopback is reachable. Unix sockets stay allowed (asyncio needs them).
 # engine tests (the real PR-Agent against loopback fakes), privileged tests (root, the dedicated
 # engine user, nft) and lane tests (a whole Implementer turn on a real Docker daemon) are deselected
-# unless asked for with -m engine / -m privileged / -m lane. kvm tests (a job in a Firecracker VM, #978) need
+# unless asked for with -m engine / -m privileged / -m lane. incus tests (a job in two real Incus instances, #1007) need Incus, a pool and an image and are asked for with -m incus. kvm tests (a job in a Firecracker VM, #978) need
 # /dev/kvm and the VM artifacts: they run only in the KVM lane of .github/workflows/vm-artifacts.yml.
 addopts = [
     "--strict-markers",
@@ -52,7 +52,7 @@ addopts = [
     "--allow-unix-socket",
     "--allow-hosts=127.0.0.1,::1,localhost",
     "-m",
-    "not engine and not privileged and not lane and not kvm",
+    "not engine and not privileged and not lane and not kvm and not incus",
 ]
 filterwarnings = [
     # pytest-socket warns about every blocked connection; the tests assert the block themselves.
@@ -69,6 +69,7 @@ markers = [
     "privileged: root with the production capabilities, the dedicated engine user and nft (deselected by default)",
     "lane: a whole Implementer turn on a real Docker daemon, as root, with the images (deselected by default, #745)",
     "kvm: a job in a real Firecracker VM started by the local Dispatcher's launcher (KVM and the VM artifacts; deselected by default, #978)",
+    "incus: a job in two real Incus instances started by the local Dispatcher's launcher (Incus, a pool and an image; deselected by default, #1007)",
 ]
 
 [tool.ruff]
@@ -96,7 +97,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 include = ["src", "tests", "scripts", "release", "../fakes"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
-extraPaths = ["src", "..", "tests/engine", "tests/kvm", "tests/unit", "release"]
+extraPaths = ["src", "..", "tests/engine", "tests/kvm", "tests/incus", "tests/unit", "release"]
 venvPath = "."
 venv = ".venv"
 

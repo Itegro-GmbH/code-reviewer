@@ -507,7 +507,7 @@ def test_selftest_as_json_carries_the_claude_code_checks_and_whether_the_turn_wa
 
 
 # #982: the Worker-as-a-process mode on the host's Docker is gone from the program.
-def test_the_program_runs_only_with_the_firecracker_sandbox(tmp_path: Path) -> None:
+def test_the_program_runs_only_with_a_vm_sandbox_and_names_incus(tmp_path: Path) -> None:
     err = io.StringIO()
     code = main(
         ["run", "--once"],
@@ -521,7 +521,7 @@ def test_the_program_runs_only_with_the_firecracker_sandbox(tmp_path: Path) -> N
     )
 
     assert code == EXIT_CONFIG
-    assert "the only sandbox is firecracker" in err.getvalue()
+    assert "FACTORY_RUNNER_SANDBOX=incus" in err.getvalue()
     assert CREDENTIAL not in err.getvalue()
 
 

@@ -385,7 +385,8 @@ def report_worker_end(
     token: str | None = None,
     connect: Connect = vsock_connect,
 ) -> None:
-    """The Worker's last act: tell the host over its socket that it ended. Over https and with no control
+    """The Worker's last act: tell the host over its socket that it ended. Over https and with no
+    control
     there is nothing to tell. Never raises: a Worker that cannot say goodbye still ends."""
     if environment.get(ENVIRONMENT_CONTROL_VARIABLE) is None:
         return
