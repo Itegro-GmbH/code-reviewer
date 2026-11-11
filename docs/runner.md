@@ -13,6 +13,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
 - [VM artifacts](#vm-artifacts-976): the kernel, root file system and Docker data disk of that microVM, built from the golden snapshot recipe, signed and verified (#976).
 - [The Firecracker launcher](#the-firecracker-launcher-978): how the local Dispatcher starts a job in such a microVM: slots, disks, limits, the host side of the vsock protocol, ending and clean-up (#978).
+- [The Incus launcher](#the-incus-launcher-1007): the one local backend (Runner v2, #1007): two unprivileged Incus instances per job, the inner wall in the trusted one, `narrow` as an unplug, the control channel over a unix socket, the quota, the clean-up by mark.
 - [The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979): the static nft table (printed in full) and the proxy of the local Dispatcher that is the only way out of a job's VM (#979).
 
 ## Registration and routing (R1a, #854)
@@ -2036,6 +2037,8 @@ On GitHub's `ubuntu-24.04` runners (4 vCPU, nested virtualization; the same kind
 
 ## The Firecracker launcher (#978)
 
+> **Superseded as the local backend by [the Incus launcher](#the-incus-launcher-1007) (#1007)**; this code and the KVM lane stay until #1012 retires them.
+
 The local Dispatcher's `WorkerSandbox` for a machine with KVM (Runner v2, epic #969, [ADR 0005](decisions/0005-runner-v2-one-dispatcher-contract.md)):
 every job runs in a Firecracker microVM of the release ([VM artifacts](#vm-artifacts-976)), started by the dispatcher as a normal user.
 Code: [`runner/src/code_reviewer_runner/factory_runner/firecracker/`](../runner/src/code_reviewer_runner/factory_runner/firecracker). The Worker
@@ -2201,6 +2204,131 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
   vm-init does not have (a `stop` message over the start connection).
 - The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
   the time to vm-init's `ack`).
+
+## The Incus launcher (#1007)
+
+The local Dispatcher's `WorkerSandbox` on **Incus** (Runner v2, epic #969, spike [#1005](https://github.com/Itegro-GmbH/code-reviewer/pull/1006),
+"Spike: Incus (LXD) backend"): the one local backend, the same behaviour on every Linux machine, KVM or not. It **replaces the
+[Firecracker launcher](#the-firecracker-launcher-978)** as the backend of the Linux dispatcher; that code stays until #1012 retires it, and `FACTORY_RUNNER_SANDBOX=firecracker` is still accepted
+until then (the installer of #982 writes it). The program is selected with `FACTORY_RUNNER_SANDBOX=incus`.
+Code: [`runner/src/code_reviewer_runner/factory_runner/incus/`](../runner/src/code_reviewer_runner/factory_runner/incus). **The dispatcher's `WorkerSandbox` interface is unchanged**: the service,
+the claim loop, the reaper and the credential pool do not know which backend they run on.
+
+```
+                      the host (this dispatcher, a user of incus-admin)
+ job socket ctl.sock  ◀──── incusd (proxy device) ◀──── A: Control, model door, network door, inner wall (nft)
+ proxy 10.99.0.<8n+1>:3128 ◀── outer bridge <prefix>-out<n> ◀── A eth0 (.2)       │ eth1 10.98.0.2
+                                              ◀── B eth1 (.3), unplugged at narrow │
+                                                                                   │ inner bridge <prefix>-in<n> (no address on the host)
+                                                                  B: setup, then agent ── eth0 10.98.0.3  ──▶ only A:8080 and A:8081
+```
+
+### What a job does
+
+1. **Slot.** `parallelRuns` slots (1 to 32). Slot *n* has two bridges, made once by `provision.py` (the installer, #1011): the **outer bridge**
+   `<prefix>-out<n>` (a /29 of the slots' network: the host's address first, where the outer wall's proxy listens, A's second, B's third; no DHCP, no NAT, no
+   routing, no IPv6, no DNS from the bridge's dnsmasq, an ACL that lets a TCP connection to the proxy through and drops the rest) and the **inner bridge** `<prefix>-in<n>` (no address at all: the host is not on it).
+   The dispatcher claims only while a slot is free; a job whose instances could not be deleted keeps its slot out of use until the service restarts.
+2. **Token, socket, wall.** The start document is built and **checked first** (by vm-init's own parser: no credential in an argument, a job id and URL of the contract), so a start that would be refused costs
+   no slot and no instance. A random per-job token; the job's directory `<state>/jobs/job-<slot>-<random>/` (0700) and **the listener on its `ctl.sock` before any instance exists**; the outer
+   wall admits the job (the wide rule of the setup).
+3. **Two instances** (`incus init`, **no profile**: the `default` profile and `incusbr0` are never applied), from the golden image on the pool, marked `user.cr.job`, `user.cr.slot`, `user.cr.role`:
+
+   | | A (trusted) | B (untrusted) |
+   |---|---|---|
+   | content | Control (the Worker image in A's own Docker), the model door, the network door | the setup, **then the agent, in the same instance** |
+   | `limits.cpu` / `limits.memory` | 2 / 2 GiB (`a_cpus`, `FACTORY_RUNNER_INCUS_A_MEMORY_MB`) | `vcpus` / `2 GiB × vcpus` (hosted table) |
+   | root disk `size` (the quota) | `FACTORY_RUNNER_INCUS_A_DISK_GB`, default 8 GiB | `diskGb`, default 16 GiB |
+   | `limits.processes` | 4096 | 4096 |
+   | NICs | `eth0` outer, `eth1` inner; the `ctl` proxy device | `eth0` inner; `eth1` outer **until `narrow`** |
+
+   Every instance: `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true` (its own id range), `limits.memory.swap=false`, `boot.autostart=false`.
+   **The quota counts what the instance shares with its image** (referenced size on btrfs), so it must leave the job room; the write that passes it fails with `Disk quota exceeded` (EDQUOT, not "No space left"),
+   and a full quota also stops Docker's own bookkeeping in that instance (it ends at the wall clock or by `end` and is deleted; **A's quota is its own, not a slice of B's**).
+   Outer NICs have a **static address**, `security.ipv4_filtering` and `security.mac_filtering` (a packet must come from the NIC's address and MAC) and **`security.port_isolation`** (an isolated port reaches only the bridge's own address:
+   A and B cannot reach each other there). The addresses come from **files pushed before the instance starts** (`/etc/systemd/network/05-code-reviewer-*.network`, applied by the image's systemd-networkd, no gateway and no
+   route: nothing is routed): a NIC change re-creates the interface, and an address set by hand is gone.
+4. **Start A, load the inner wall, start B**, wait until `docker info` answers in both (`ready_seconds`, 120). The wall is an nft table **inside A**, loaded before B runs
+   (`walls.py`, printed by `inner_wall_ruleset()`): from B's NIC only a TCP connection from B's address to A's two door ports (8080, 8081) and the answers to what A asked; every other packet from B, and anything forwarded to or from B,
+   is dropped; A's outer NIC takes nothing in but answers. Incus's own ACLs do **not** do this between two ports of one bridge (they need `br_netfilter`), which is why the table is ours; B cannot change it (another instance,
+   another network namespace), A's root can, and A is the trusted side.
+5. **Check, volume, Control.** In A: the Worker image's id must be the verified one (`image_missing`, `image_mismatch`), the work volume is made, and **Control runs with `incus exec`**: `docker run …` with the job document
+   (`{appUrl, jobId, credential, controlToken[, localCredential][, outerProxy]}`, the one vm-init wrote) **on its stdin and nowhere else**. The arguments are the renderer's (`local-control.ts`) with three changes held by a test
+   (`control_run.py`): `RUNNER_ENVIRONMENT_CONTROL=unix`, no vsock seccomp profile, `/ctl.sock` bind-mounted. `incus` is started with **stdin closed** (`/dev/null`) for everything that has no input: `incus init` and `launch` wait for the end of a
+   stdin that is not a terminal and hang on a pipe that never closes (found in #1005). Its environment is `PATH` and `HOME` only; no argument holds a secret.
+
+### The environment control: a unix socket through a proxy device
+
+Control connects to the Unix socket **`/ctl.sock`** (not under `/run`, which the instance's init hides under a tmpfs) with the frames, the token and the replies of
+[`contracts/environment-control.v1.json`](../contracts/environment-control.v1.json) (new: `RUNNER_ENVIRONMENT_CONTROL=unix`, `ControlSocketPath`; the Worker's client is the vsock one with another connect). A **`proxy` device on A**
+(`listen=unix:/ctl.sock connect=unix:<job dir>/ctl.sock bind=instance mode=0600`) makes the socket in A and connects every connection to the dispatcher's own socket of that job, so the connection is the job's own
+(the check of the token and the first-wins rules are the vsock transport's: `VmSession`). The socket is on the service user's volume: **`incusd` does not see `/tmp`**. The round trip is 0.3 ms (p50, spike #1005).
+
+**`narrow`** is answered `ack` only after the outer wall holds the job's rule **and B's outer NIC is hot-unplugged** (`JobWall`, 0.1 to 0.35 s): B has no way to the host from then on, and what the setup started in B (files, containers, **processes**) keeps running
+(the same instance). A wall that refuses leaves the NIC in place and the Worker ends the job `environment_control_failed` before an agent exists. A live change of `security.*` on a running NIC does **not** apply on Incus 7.6, which is why
+`narrow` is an unplug and a changed rule would be a re-plug.
+
+### The outer wall
+
+Unchanged in kind: the proxy of this dispatcher (`firecracker/proxy_wall.py`, #979) listens on the host's address of each slot's outer bridge and serves **A's and B's addresses of that slot** (`SlotAddresses.also`) and no other source; `FACTORY_RUNNER_OUTER_WALL=proxy` as before. What the host's static nft
+table adds (port 53 of host-local addresses, which Incus leaves open to an instance; the per-slot rules) is **#1008**; until it is installed an instance can still reach port 53 of an address of the host.
+
+### Ending a job, clean-up
+
+A job ends with the **first** of: the end of Control's `docker run` (its exit status is the Worker's, as vm-init's exit report was; **`EXIT_DISK_QUOTA` (122, EDQUOT) when it failed with the disk's quota**, the log tail starting `disk_quota_exceeded:`) or the **wall clock** (the job's timeout + Control's stop timeout + the
+preparation, exit code −9). `stop()` kills Control's `exec` at once. Whatever ends it, **both instances are deleted** (`incus delete --force`, 0.3 to 4 s), the listener closed, the wall told (`forget`), the directory deleted and the slot given back before `wait()` returns.
+**After a crash** the next service finds the instances **by their mark**: `user.cr.job` **and** a name `<prefix>-a-…` or `<prefix>-b-…`; an instance without the mark, with another prefix, or the owner's is never touched.
+`setup` also takes the **lock** of the state directory (one dispatcher per machine) and **checks** that the pool, the image and both bridges of every slot exist (`IncusNotReady` names what is missing).
+
+### Settings (`FACTORY_RUNNER_*`) and what the machine needs
+
+| Variable | Meaning |
+|---|---|
+| `INCUS_POOL` (required) | the btrfs storage pool of the jobs (a copy-on-write pool: a job's disk is a snapshot, **0.2 s**, and the quota is enforced) |
+| `INCUS_IMAGE` | the golden image's alias (default `code-reviewer-golden`) |
+| `VM_IMAGE_ID` (required) | the Worker image's id the launcher checks in A |
+| `INCUS_PREFIX` | the prefix of every object (default `cr`) |
+| `SLOT_NETWORK` | the slots' network, a /24 for up to 32 slots, chosen at install |
+| `OUTER_WALL`, `VM_VCPUS`, `VM_STATE_DIR` | as for the Firecracker launcher |
+| `INCUS_A_DISK_GB`, `INCUS_A_MEMORY_MB`, `INCUS` | A's quota, A's memory, the path of the `incus` program |
+
+The service user is a member of **`incus-admin`, which is root-equivalent** (a member can create a privileged instance with the host's disks): the installer (#1011) creates a user that owns nothing else, and the service's unit is sandboxed as the
+Firecracker service's is. The restricted per-user `incus-user` socket cannot set the options the instances need. **Root is needed at install only** (the group, the pool, the image and one throwaway instance so that
+the first job does not pay the ≈ 21 s unpack of the image, the bridges and ACLs of `provision.py`, the host's nft table of #1008); `provision.py` creates only objects of the prefix, idempotently, and never touches the `default` pool or profile, `incusbr0`, or the host's Docker.
+
+### Start budget
+
+Nothing to the first container ≈ **4.5 s** at a moderate load (spike #1005 on btrfs: `incus init` 0.14 to 0.46 s, `start` 0.3 s, dockerd answers 2 s later, the first container 2 s), against the Firecracker launcher's 2.6 s.
+
+### Tests
+
+- **Unit** (`runner/tests/unit/test_incus_*.py`, **no Incus**): the launcher against a fake Incus (`incus_support.py`: instances, devices, files, `exec` from a table), the client against a stand-in `incus` program (`fake_incus.py`: its command lines, **stdin closed**, a bare environment,
+  the limits of time), slots, settings, the walls, Control's arguments, the objects and the checks.
+- **The Incus lane** (`runner/tests/incus`, `-m incus --force-enable-socket`, deselected by default): a real Incus, the launcher's real client, **stand-ins for the Worker image and Docker** (the host's `nft` and a `docker` that is Control, `fake_docker.py`), the proxy wall on the real bridge.
+  Variables: `CR_INCUS_LANE_POOL`, `CR_INCUS_LANE_IMAGE` (an alias of an Ubuntu 24.04 image), `CR_INCUS_LANE_STATE` (a directory `incusd` can see), `CR_INCUS_LANE_PREFIX`, `CR_INCUS_LANE_NETWORK`.
+
+**What the lane showed on the DevBox** (2026-11-11, Incus 7.6 Zabbly, btrfs pool `crpool`, kernel 6.8, as `luca`, a shared host at a load of 8 to 30; a stock Ubuntu 24.04 image plus the stand-ins; one job set of two instances of 2 CPUs and 2 GiB at a time; everything made carried the prefix `cr1007` and was removed again):
+
+| Case | Observed |
+|---|---|
+| T01 limits | in both instances `nproc` 2, `/sys/fs/cgroup/memory.max` 2147483648, `pids.max` 4096; the root of an instance is a host id ≥ 65536 (`uid_map`), the mark `user.cr.job` on both; both deleted at the end, and the job directory gone |
+| T01 crash | a job left running by a "crashed" dispatcher (its lock released): the next `setup` deleted exactly its two instances by their mark |
+| T02 `narrow` | before: from B the proxy of the host `:3128` reached, the host's `:22` did not, `eth1` there; the unix-socket `narrow` from Control returned `ack`; after: `eth1` gone, no route to the host, `:3128` unreachable from B |
+| T03 inner wall | from B with the wall: A's doors `:8080` and `:8081` reached; `:9000` (secrets), `:2375` (a "Docker API"), ICMP and `1.1.1.1:443` through A **not**; with the table deleted (the control) all four reached and ICMP answered; reloaded: as before |
+| T04 quota | a write in B past its 3 GiB quota (the image counts: 633 MiB) failed with `Disk quota exceeded` after 2.6 GB; a 10 MB write (the control) worked; Control's own write past A's quota ended the job with `EXIT_DISK_QUOTA` (122) and the log tail `disk_quota_exceeded:` |
+| start budget | `start()` (both instances, boot, addresses, wall, readiness, image check, Control launched; the stand-in `docker` answers at once): **4.6 s and 6.8 s** at a load of 13 to 30 |
+
+The lane found two defects the unit tests could not: **`incus config device add` takes the device type as a word of its own** (`… eth0 nic network=…`), not as `type=nic`; and **Docker (or any readiness command) can answer before systemd-networkd has applied the pushed addresses**, so the launcher now also
+waits until both instances show their addresses (`ip -4 -o addr show`; the golden image needs `iproute2`), which turned two flaky lane failures into none.
+**What the lane does not prove**: Docker inside B and the agent's own containers (so "from the agent's Docker" of the walls is the spike's measurement, not this lane's), the real Worker image and the golden image, the host's static nft table (#1008), AppArmor and the real hardening flags.
+
+### Not done here, follow-ups
+
+- **The Worker's use of the two instances.** Control runs in A with **A's** Docker; the setup and the agent must run in **B's** Docker and the doors in A's, reachable on A's inner address, and the agent must see what the setup left (the owner's "same environment" decision, **#1009**, hosted too).
+  Until that change a real Worker image would run its containers in A. The launcher gives it the environment (instances, wall, control socket, quota); it does not yet make it use it.
+- **The golden Incus image** (Docker, the Worker image pre-loaded, systemd-networkd, `nft`) and its release artifact (#1012, #1011); the first start of an image in a pool unpacks it (≈ 21 s), which the installer pays once.
+- **A CI lane with Incus** on `ubuntu-24.04` (needs the image above and root for Incus's own install); the lane here runs on the DevBox.
+- **The host's nft table** (#1008), the installer and updater (#1011), conformance suite (#1010), removal of the Firecracker code, the kernel/rootfs release artifacts, the KVM lane and vm-init's vsock side (#1012).
 
 ## The outer wall on a customer's machine (#979)
 

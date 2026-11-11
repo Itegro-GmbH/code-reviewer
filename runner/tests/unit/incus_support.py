@@ -193,9 +193,25 @@ class FakeIncus:
             answer = self.responder(name, argv)
             if answer is not None:
                 return _Done(answer)
+        if argv[:3] == ("ip", "-4", "-o"):
+            # What systemd-networkd would have applied from the files pushed before the start.
+            return _Done(ExecResult(0, _addresses_of(self.instances[name])))
         if argv[:3] == ("docker", "image", "inspect"):
             return _Done(ExecResult(0, IMAGE_ID + "\n"))
         return _Done(ExecResult(0))
+
+
+def _addresses_of(instance: FakeInstance) -> str:
+    lines: list[str] = []
+    for path, content in instance.files.items():
+        if path.startswith("/etc/systemd/network/"):
+            address = next(
+                line.removeprefix("Address=")
+                for line in content.decode().splitlines()
+                if line.startswith("Address=")
+            )
+            lines.append(f"2: eth: inet {address} scope global eth")
+    return "\n".join(lines) + "\n"
 
 
 class _Done:

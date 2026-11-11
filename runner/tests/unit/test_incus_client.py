@@ -187,10 +187,18 @@ def test_a_file_is_pushed_through_stdin_with_the_mode_and_the_instance_path() ->
 
         (call,) = rig.calls()
         assert call["stdin"] == "content\n"
-        assert call["argv"] == ["file", "push", "--create-dirs", "--mode", "0644", "-", "cr-a-0-aa/etc/x.conf"]
+        assert call["argv"] == [
+            "file",
+            "push",
+            "--create-dirs",
+            "--mode",
+            "0644",
+            "-",
+            "cr-a-0-aa/etc/x.conf",
+        ]
 
 
-def test_a_device_is_added_with_its_keys() -> None:
+def test_a_device_is_added_with_its_type_as_a_word_and_its_keys() -> None:
     with short_directory() as root:
         rig = Rig(root)
 
@@ -207,7 +215,7 @@ def test_a_device_is_added_with_its_keys() -> None:
             "add",
             "cr-a-0-aa",
             "eth0",
-            "type=nic",
+            "nic",
             "network=cr-out0",
         ]
 
@@ -319,3 +327,13 @@ def test_an_acl_is_created_and_its_rules_added() -> None:
                 "destination_port=3128",
             ],
         ]
+
+
+def test_a_device_without_a_type_is_an_error_before_any_call() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        with pytest.raises(IncusError, match="no type"):
+            go(lambda: rig.client.add_device("x", "eth0", {"network": "n"}))
+
+        assert not rig.record.exists()

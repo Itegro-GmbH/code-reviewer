@@ -320,14 +320,19 @@ class CliIncusClient:
 
     async def push_file(self, name: str, path: str, content: bytes, *, mode: str = "0644") -> None:
         await self._run(
-            "file push", ["file", "push", "--create-dirs", "--mode", mode, "-", f"{name}{path}"], stdin=content
+            "file push",
+            ["file", "push", "--create-dirs", "--mode", mode, "-", f"{name}{path}"],
+            stdin=content,
         )
 
     async def add_device(self, name: str, device: str, config: Mapping[str, str]) -> None:
-        await self._run(
-            "config device add",
-            ["config", "device", "add", name, device, *(f"{k}={v}" for k, v in config.items())],
-        )
+        # `incus config device add <instance> <device> <type> [key=value...]`: the type is a word of
+        # its own, not a key.
+        kind = config.get("type")
+        if kind is None:
+            raise IncusError("config device add", "the device has no type")
+        keys = (f"{k}={v}" for k, v in config.items() if k != "type")
+        await self._run("config device add", ["config", "device", "add", name, device, kind, *keys])
 
     async def remove_device(self, name: str, device: str) -> None:
         await self._run("config device remove", ["config", "device", "remove", name, device])

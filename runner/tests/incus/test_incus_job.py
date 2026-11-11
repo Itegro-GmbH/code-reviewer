@@ -6,15 +6,16 @@ probe with a control that reached without the wall), `narrow` as the unplug of B
 write past the quota, and the clean-up after a crash. The Worker image and Docker are stand-ins
 (`fake_docker.py`, the host's `nft`): the real image is the golden image's smoke test, not this.
 
-Run it with `-m incus --force-enable-socket` and the variables of `incus_support.py`."""
+Run it with `-m incus --force-enable-socket` and the variables of `lane_support.py`."""
 
 import asyncio
 import json
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
-from incus_support import StandInClient, probe, reaches
+from lane_support import StandInClient, probe, reaches
 
 from code_reviewer_runner.factory_runner.incus.launcher import (
     EXIT_DISK_QUOTA,
@@ -64,7 +65,10 @@ async def running_job(
 ) -> tuple[IncusSandbox, IncusWorker, str, str]:
     sandbox = IncusSandbox(settings, client)
     await sandbox.setup()
+    began = time.monotonic()
     worker = await sandbox.start(start())
+    # The start budget: nothing to Control running, two instances, the doors listening or not yet.
+    print(f"lane: start() took {time.monotonic() - began:.1f} s", flush=True)
     a, b = await names(client, settings)
     await until(client, a, "test -e /tmp/ready")
     return sandbox, worker, a, b
@@ -115,7 +119,7 @@ def test_a_job_that_crashes_the_dispatcher_is_cleaned_up_by_its_mark(
     client: StandInClient, settings: IncusSettings
 ) -> None:
     async def scenario() -> Any:
-        crashed, _, a, b = await running_job(client, settings)
+        crashed, _, _a, _b = await running_job(client, settings)
         before = await names(client, settings)
         # The dispatcher "crashes": its lock goes with the process, its instances stay.
         await crashed.close()
@@ -216,7 +220,10 @@ def test_a_write_past_the_quota_fails_with_edquot_and_the_job_ends_with_a_stable
         try:
             # B's quota, from inside B.
             quota = await probe(
-                client, b, "dd if=/dev/zero of=/blob bs=1M count=100000 2>&1 | tail -1", seconds=120
+                client,
+                b,
+                "dd if=/dev/zero of=/blob bs=1M count=100000 2>&1 | grep -i quota",
+                seconds=120,
             )
             # A write that does not pass the quota still works (the control).
             small = await probe(

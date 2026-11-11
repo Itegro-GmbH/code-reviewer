@@ -3,9 +3,9 @@
 """Shared pytest setup.
 
 The level of a test is decided by its directory (tests/unit, tests/integration, tests/contract,
-tests/engine, tests/privileged, tests/lane, tests/kvm, tests/incus), so the marker can never drift from where the
-file lives. A test outside those directories is a collection error: it would otherwise run
-unmarked and escape every level.
+tests/engine, tests/privileged, tests/lane, tests/kvm, tests/incus), so the marker can never
+drift from where the file lives. A test outside those directories is a collection error: it would
+otherwise run unmarked and escape every level.
 """
 
 import os

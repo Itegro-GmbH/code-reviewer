@@ -625,3 +625,52 @@ def test_the_sandbox_does_not_use_the_hosts_docker() -> None:
 def test_the_fake_is_what_the_tests_say_it_is() -> None:
     assert isinstance(FakeIncus(), FakeIncus) and isinstance(RecordingWall(), RecordingWall)
     assert isinstance(Path(__file__), Path)
+
+
+# #1007-T01
+def test_an_instance_is_ready_only_once_it_has_its_addresses_not_when_docker_answers() -> None:
+    """The lane found it: Docker answers before systemd-networkd has applied the pushed files, and a
+    probe that ran at once found no way to the doors."""
+    with short_directory() as root:
+        rig = Rig(root, ready_seconds=2.0)
+        answers = {"count": 0}
+
+        def responder(name: str, argv: tuple[str, ...]) -> ExecResult | None:
+            if argv[:3] != ("ip", "-4", "-o") or "-b-" not in name:
+                return None
+            answers["count"] += 1
+            if answers["count"] < 3:
+                return ExecResult(0, "2: eth0: inet 10.98.0.3/24 scope global eth0\n")
+            return ExecResult(0, "inet 10.98.0.3/24\ninet 10.99.0.3/29\n")
+
+        rig.incus.responder = responder
+
+        async def scenario() -> Any:
+            worker = await started(rig)
+            calls = rig.incus.calls
+            asked = [c for c in calls if c[0] == "exec" and "-b-" in c[1] and c[2] == "ip"]
+            finish_control(rig)
+            await worker.wait()
+            return asked
+
+        asked = go(scenario)
+
+        assert answers["count"] == 3 and len(asked) == 3
+
+
+# #1007-T01
+def test_an_instance_that_never_gets_its_addresses_fails_the_start_and_leaves_nothing() -> None:
+    with short_directory() as root:
+        rig = Rig(root, ready_seconds=0.3)
+        rig.incus.responder = lambda name, argv: (
+            ExecResult(0, "lo: inet 127.0.0.1/8\n") if argv[:3] == ("ip", "-4", "-o") else None
+        )
+
+        async def scenario() -> Any:
+            sandbox = rig.sandbox()
+            with pytest.raises(StartFailed, match="did not get its addresses"):
+                await sandbox.start(start_for())
+            return sandbox.free
+
+        assert go(scenario) == 1
+        assert rig.incus.instances == {}

@@ -28,7 +28,7 @@ from code_reviewer_runner.factory_runner.incus.client import (
 IMAGE_ID = "sha256:" + "ab" * 32
 NFT = Path("/usr/sbin/nft")
 HERE = Path(__file__).parent
-# The libraries of `nft` that a stock Ubuntu 24.04 image does not have (the host is the same release).
+# The libraries of `nft` that a stock Ubuntu 24.04 image lacks (the host is the same release).
 LIBRARIES = ("libnftables.so.1", "libnftnl.so.11", "libjansson.so.4")
 LIBRARY_DIRECTORY = Path("/lib/x86_64-linux-gnu")
 
@@ -71,7 +71,9 @@ class StandInClient(CliIncusClient):
         await self.push_file(name, "/usr/local/sbin/nft", NFT.read_bytes(), mode="0755")
         for library in LIBRARIES:
             await self.push_file(
-                name, f"/usr/lib/x86_64-linux-gnu/{library}", (LIBRARY_DIRECTORY / library).read_bytes()
+                name,
+                f"/usr/lib/x86_64-linux-gnu/{library}",
+                (LIBRARY_DIRECTORY / library).read_bytes(),
             )
         await self.push_file(
             name, "/usr/local/bin/docker", (HERE / "fake_docker.py").read_bytes(), mode="0755"

@@ -74,13 +74,13 @@ from code_reviewer_runner.factory_runner.firecracker.tokens import generate_cont
 from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutcome, WorkerStart
 from code_reviewer_runner.implementer.environment_control import UNIX_SOCKET_PATH
 
-from .client import ExecProcess, IncusClient, IncusError, InstanceSpec, run_exec
+from .client import ExecProcess, ExecResult, IncusClient, IncusError, InstanceSpec, run_exec
 from .control_run import ControlLaunch, build_control
 from .endpoint import ControlListener
 from .provision import missing_objects
 from .reaper import MARK, ROLE_MARK, SLOT_MARK, Reaped, reap_leftovers
 from .settings import IncusSettings
-from .slots import IncusSlot, SlotPool
+from .slots import INNER_A_ADDRESS, INNER_B_ADDRESS, IncusSlot, SlotPool
 from .walls import (
     DEVICE_INNER,
     DEVICE_OUTER,
@@ -115,6 +115,8 @@ DEVICE_CONTROL: Final = "ctl"
 # How often the readiness probes are tried.
 PROBE_SECONDS: Final = 0.25
 PROBE_CALL_SECONDS: Final = 15.0
+# What shows an instance its addresses: one `inet <address>/<prefix>` per address.
+ADDRESS_COMMAND: Final = ("ip", "-4", "-o", "addr", "show")
 IMAGE_CHECK_SECONDS: Final = 30.0
 VOLUME_SECONDS: Final = 30.0
 
@@ -411,26 +413,49 @@ class IncusSandbox:
 
     async def _boot(self, job: _Job) -> None:
         """Start A, load the inner wall in it **before B exists as a running instance**, start B and
-        wait until Docker answers in both."""
-        settings = self.settings
+        wait until both have their addresses and Docker answers."""
+        slot = job.slot
         await self._client.start(job.instance_a)
         await self._until_ok(
             job.instance_a, ("nft", "-f", INNER_WALL_PATH), "the inner wall could not be loaded"
         )
         await self._client.start(job.instance_b)
-        if settings.ready_command:
-            await asyncio.gather(
-                self._until_ok(job.instance_a, settings.ready_command, "A did not become ready"),
-                self._until_ok(job.instance_b, settings.ready_command, "B did not become ready"),
+        await asyncio.gather(
+            self._ready(job.instance_a, (slot.guest_address, INNER_A_ADDRESS), "A"),
+            self._ready(job.instance_b, (INNER_B_ADDRESS, slot.b_address), "B"),
+        )
+
+    async def _ready(self, instance: str, addresses: tuple[str, ...], role: str) -> None:
+        """An instance is ready when systemd-networkd has applied its addresses (they come from the
+        files pushed before the start, a moment after boot) and the readiness command succeeds
+        (Docker answers)."""
+        await self._until(
+            instance,
+            ADDRESS_COMMAND,
+            lambda result: all(f"inet {address}/" in result.stdout for address in addresses),
+            f"{role} did not get its addresses",
+        )
+        if self.settings.ready_command:
+            await self._until_ok(
+                instance, self.settings.ready_command, f"{role} did not become ready"
             )
 
     async def _until_ok(self, instance: str, argv: tuple[str, ...], why: str) -> None:
         """Run a command in an instance until it succeeds, for at most `ready_seconds`."""
+        await self._until(instance, argv, lambda result: result.exit_code == 0, why)
+
+    async def _until(
+        self,
+        instance: str,
+        argv: tuple[str, ...],
+        done: Callable[[ExecResult], bool],
+        why: str,
+    ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.ready_seconds
         while True:
             result = await run_exec(self._client, instance, argv, timeout=PROBE_CALL_SECONDS)
-            if result.exit_code == 0:
+            if result.exit_code == 0 and done(result):
                 return
             if loop.time() >= deadline:
                 raise StartFailed(why)
