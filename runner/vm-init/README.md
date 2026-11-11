@@ -52,8 +52,11 @@ listener on <vsock uds>_5101  ◀──── connect, frame: ExitReport (with t
    `image.id` or `image.reference`; a reference is replaced by the id before `docker run`, so what runs is what the check printed the id of, and any other image
    is refused (`start_invalid`).
 6. **Runs Control**: `docker` with the start's `control.args` (rendered by the Dispatcher's `renderDockerRunArguments` from the local spec), the job
-   document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one) as one JSON line on stdin, then the pipe is closed. Nothing
-   else carries a credential or the token.
+   document `{appUrl, jobId, credential, controlToken}` (plus `localCredential` when there is one, and `outerProxy` when the host runs the proxy wall, #994)
+   as one JSON line on stdin, then the pipe is closed. Nothing else carries a credential or the token. **`outerProxy`** is the host's address on the slot's TAP
+   and the proxy's port: vm-init validates it (an IPv4 address of the slots' `172.31.0.0/16` in its canonical spelling, a port; anything else is a refused
+   start), writes it into this document and does nothing else with it. Control configures every client that dials the internet from it
+   ([docs/runner.md](../../docs/runner.md#every-client-in-the-vm-goes-through-the-proxy-994)); it is never an argument of `docker run` and never from a job.
 7. **Reports and powers off.** The exit report (`ExitReport`: the container's status and a stable reason) goes to the host's port 5101, tried again every
    0.5 s for at most 10 s in all, then the VM is ended whatever came back (the power off is in a `finally`: a failure of the report, of a close or a bug of ours
    cannot leave the VM running). The report carries the token once a start was read. The host takes **the first report of a VM** and answers a repeated one

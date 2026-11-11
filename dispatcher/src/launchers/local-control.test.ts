@@ -118,6 +118,32 @@ describe("the local Control container's spec", () => {
     expect(local).toContain(`${ENVIRONMENT_CONTROL_VARIABLE}=vsock`);
   });
 
+  // #994-T03
+  it("has no proxy anywhere in the hosted container specs, the hosted environment or any golden file", async () => {
+    // The proxy of a local VM travels in the start (vm-init's contract), never in a container spec: hosted has none.
+    for (const name of [
+      "docker-run.golden.json",
+      "docker-run.sandbox.golden.json",
+      "docker-run.local-control.golden.json",
+      "vm-steps.golden.json",
+    ]) {
+      const text = readFileSync(
+        new URL(`./testdata/${name}`, import.meta.url),
+        "utf8",
+      );
+      expect(text, name).not.toMatch(/proxy|172\.31\./i);
+    }
+    for (const spec of [
+      IMPLEMENTER_CONTAINER_SPEC,
+      LOCAL_IMPLEMENTER_CONTAINER_SPEC,
+      WORKER_CONTAINER_SPEC,
+    ]) {
+      expect(JSON.stringify(spec.allowedEnvironment)).not.toMatch(/proxy/i);
+    }
+    const hosted = await hostedInvocation();
+    expect(JSON.stringify(hosted.args)).not.toMatch(/proxy/i);
+  });
+
   // #977-T01
   it("keeps every hardening flag of the hosted container", async () => {
     const { args } = await renderLocalControl(options);
