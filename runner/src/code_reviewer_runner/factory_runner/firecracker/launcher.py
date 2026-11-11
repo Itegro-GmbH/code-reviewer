@@ -221,6 +221,7 @@ class FirecrackerSandbox:
         # Checked with the address of the first slot: the document does not depend on which slot
         # the job gets, and the slot's own address is put in below, once there is one.
         self._start_document(start, token, Slot(0, self.settings.slot_network))
+        self._refuse_an_app_the_proxy_cannot_reach(start)
         slot = self._pool.acquire()
         if slot is None:
             raise NoFreeSlot
@@ -238,6 +239,21 @@ class FirecrackerSandbox:
             raise
         return FirecrackerWorker(self, vm)
 
+    def _refuse_an_app_the_proxy_cannot_reach(self, start: WorkerStart) -> None:
+        """With the proxy wall the Worker's own calls to the app go through the proxy, which dials
+        80 and 443 only, and its `narrow` is refused for any other port: a VM would boot, run the
+        setup's clone and end at its first call to the app. So the job is refused here, before a
+        slot, a disk or a VMM exists (the claim is given back, as for any start that fails)."""
+        if self.settings.outer_wall is not OuterWallMode.PROXY:
+            return
+        _, port = app_endpoint(start.app_url)
+        if port is None or port in WEB_PORTS:
+            return
+        raise StartFailed(
+            f"the app is on port {port}, which the outer wall's proxy does not dial (only "
+            f"{WEB_PORTS[0]} and {WEB_PORTS[1]}): the job cannot reach it"
+        )
+
     # -- one VM ---
 
     async def _create(self, slot: Slot, start: WorkerStart, token: str) -> _Vm:
@@ -247,16 +263,6 @@ class FirecrackerSandbox:
         directory.mkdir(parents=True, mode=0o700)
         wall = self.wall or outer_wall_for(settings.outer_wall, settings.slots)
         app_host, app_port = app_endpoint(start.app_url)
-        if settings.outer_wall is OuterWallMode.PROXY and app_port not in (None, *WEB_PORTS):
-            # The Worker's own calls go through the proxy, which dials 80 and 443 only: this job
-            # ends at its first call to the app, and its `narrow` is refused.
-            self.logger.warning(
-                "%s: the app is on port %s, which the outer wall's proxy does not dial (only "
-                "%d and %d): the job cannot reach it",
-                vm_id,
-                app_port,
-                *WEB_PORTS,
-            )
         session = VmSession(VmIdentity(vm_id, slot, app_host, app_port), wall, token)
         listeners = HostListeners(directory / "vsock.sock", session)
         vm = _Vm(vm_id, slot, directory, session, listeners)

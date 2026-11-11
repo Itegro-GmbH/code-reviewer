@@ -117,9 +117,13 @@ def egress_rules(test_cidr: str | None = None, outer_proxy: OuterProxy | None = 
     """The door's table. `test_cidr` is the seam's network, accepted before the private ranges are
     dropped; production passes none. With the host's outer-wall proxy (#994, a VM on a customer's
     machine) the door has **one** way out, a connection to that proxy's address and port: no DNS
-    (the proxy resolves), no ports 80 and 443 of the internet, no private range (the proxy's own
-    address is in one and is let through first), and the seam's network is not accepted. A door
-    whose proxy refuses it fails; no rule lets it dial a host directly."""
+    (the proxy resolves), no ports 80 and 443 of the internet, no list of private ranges (the
+    proxy's own address is in one, so nothing is dropped by range: the last rule drops all that is
+    not accepted), and the seam's network is not accepted. The order is: loopback, replies to what
+    the door started, a drop of the model network, then the proxy's accept, then the drop of
+    everything else; the proxy's accept is not first, and it does not need to be, since the model
+    network is not the proxy's range. A door whose proxy refuses it fails; no rule lets it dial a
+    host directly."""
     if outer_proxy is not None:
         return "; ".join(
             [
