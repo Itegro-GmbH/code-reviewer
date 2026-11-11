@@ -22,11 +22,13 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Final
 
-from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
+from code_reviewer_runner.job_loop.local_credential import (
+    LOCAL_CREDENTIAL_NAMES,
+    LOCAL_CREDENTIAL_VALUE,
+    LocalCredential,
+)
 
 TEMPLATE_RESOURCE: Final = "control-run.template.json"
-# The one local credential the host hands a VM (`LocalCredential` of vm-init.v1.json; #980 may add).
-LOCAL_CREDENTIAL_NAMES: Final = frozenset({OAUTH_VARIABLE})
 # The hosted size table: 2 GB of memory per vCPU (`SANDBOX_MEMORY_PER_VCPU_MB`).
 MEMORY_MIB_PER_VCPU: Final = 2048
 # The sizes that leave an Implementer's agent room to start (1 vCPU does not).
@@ -85,18 +87,17 @@ def load_template() -> ControlTemplate:
     )
 
 
-def local_credential(environment: Mapping[str, str]) -> dict[str, str] | None:
-    """The `localCredential` of the start for the variables a job needs from this device, or None.
-    Only the names of `LOCAL_CREDENTIAL_NAMES`, and at most one: anything else is a bug of the
-    caller, never passed on."""
-    if not environment:
+def local_credential_document(local: LocalCredential | None) -> dict[str, str] | None:
+    """The `localCredential` of the start for the credential a job needs from this device, or None.
+    Only a name of the allow-list (`LOCAL_CREDENTIAL_NAMES`, which Control checks again) and a value
+    of the shape of a token: anything else is a bug of the caller, never passed on."""
+    if local is None:
         return None
-    if len(environment) != 1:
-        raise ControlRunError("a VM takes one local credential")
-    ((name, value),) = environment.items()
-    if name not in LOCAL_CREDENTIAL_NAMES:
+    if local.name not in LOCAL_CREDENTIAL_NAMES:
         raise ControlRunError("that variable is not a credential a VM may be given")
-    return {"name": name, "value": value}
+    if not LOCAL_CREDENTIAL_VALUE.fullmatch(local.value):
+        raise ControlRunError("the local credential is not one token")
+    return {"name": local.name, "value": local.value}
 
 
 def build_start(
@@ -110,13 +111,13 @@ def build_start(
     timeout_seconds: int,
     vcpus: int,
     reserve_gib: int,
-    local: Mapping[str, str] | None = None,
+    local: LocalCredential | None = None,
 ) -> dict[str, Any]:
     """The `StartRequest` of vm-init for a job."""
     arguments = template.fill(
         job_id=job_id, image=image_id, timeout_seconds=timeout_seconds, vcpus=vcpus
     )
-    extra = local_credential(local or {})
+    extra = local_credential_document(local)
     secrets = [credential, token] + ([extra["value"]] if extra else [])
     if any(secret in argument for argument in arguments for secret in secrets):
         raise ControlRunError("an argument would hold a credential")

@@ -19,6 +19,7 @@ from code_reviewer_runner.factory_runner.firecracker.launcher import Firecracker
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
 from code_reviewer_runner.factory_runner.firecracker.settings import FirecrackerSettings
 from code_reviewer_runner.factory_runner.sandbox import WorkerStart
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 
 CREDENTIAL = "crj_credential-that-must-never-leak-0123456789"
 LOCAL_CREDENTIAL = "local-credential-that-must-never-leak-0123456789"
@@ -31,7 +32,7 @@ def start_for(number: int = 1, *, local: bool = False) -> WorkerStart:
         "http://172.31.0.1:8080",
         f"00000000-0000-4000-8000-{number:012d}",
         CREDENTIAL,
-        {"CLAUDE_CODE_OAUTH_TOKEN": LOCAL_CREDENTIAL} if local else {},
+        LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", LOCAL_CREDENTIAL) if local else None,
     )
 
 

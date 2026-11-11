@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from .credentials import store_login
+
 TOKEN_FILE_VARIABLE: Final = "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"
 TOKEN_FILE_NAME: Final = "claude-code-token"
 OAUTH_VARIABLE: Final = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -109,7 +111,23 @@ def _read_file(path: Path) -> ClaudeLogin | LoginProblem:
 
 
 def load_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin | LoginProblem:
-    """The subscription login of this device, or why there is none."""
+    """The subscription login of this device, or why there is none: the file the operator named,
+    else the first usable credential of the store (`credentials.py`, #980), else the older sources
+    of `load_legacy_login`. A job process has no home to look in and finds its credential in its
+    own environment."""
+    named = environment.get(TOKEN_FILE_VARIABLE, "").strip()
+    if named:
+        return _read_file(Path(named))
+    stored = store_login(home)
+    if stored is not None:
+        return stored
+    return load_legacy_login(environment, home)
+
+
+def load_legacy_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin | LoginProblem:
+    """The login of the sources that came before the store (R3): the file `claude-code-token` in the
+    runner's home, else `CLAUDE_CODE_OAUTH_TOKEN` in the runner's own environment (the file named by
+    `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE` is taken first by `load_login`; here too)."""
     named = environment.get(TOKEN_FILE_VARIABLE, "").strip()
     if named:
         return _read_file(Path(named))

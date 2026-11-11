@@ -24,11 +24,12 @@ from code_reviewer_runner.factory_runner.firecracker.cgroups import (
     VmLimits,
     delegated_root,
 )
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.factory_runner.firecracker.control_run import (
     ControlRunError,
     build_start,
     load_template,
-    local_credential,
+    local_credential_document,
 )
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
 from code_reviewer_runner.factory_runner.firecracker.reaper import processes_of, reap_leftovers
@@ -523,7 +524,7 @@ def test_the_start_is_valid_under_the_contract_and_holds_the_credential_only_in_
         timeout_seconds=1800,
         vcpus=4,
         reserve_gib=2,
-        local={"CLAUDE_CODE_OAUTH_TOKEN": LOCAL_CREDENTIAL},
+        local=LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", LOCAL_CREDENTIAL),
     )
 
     assert Draft202012Validator({"$ref": "#/$defs/StartRequest", **contract}).is_valid(start)  # pyright: ignore[reportUnknownMemberType]
@@ -542,14 +543,14 @@ def test_a_start_whose_arguments_would_hold_a_secret_is_refused(secret: str) -> 
         "credential": CREDENTIAL,
         "token": TOKEN,
         "image_id": IMAGE_ID,
-        "local": {"CLAUDE_CODE_OAUTH_TOKEN": LOCAL_CREDENTIAL},
+        "local": LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", LOCAL_CREDENTIAL),
     }
     if secret == "credential":
         values["credential"] = "worker-once"
     elif secret == "token":
         values["token"] = "bridge"
     else:
-        values["local"] = {"CLAUDE_CODE_OAUTH_TOKEN": "worker-once"}
+        values["local"] = LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", "worker-once")
 
     with pytest.raises(ControlRunError, match="credential"):
         build_start(
@@ -563,16 +564,20 @@ def test_a_start_whose_arguments_would_hold_a_secret_is_refused(secret: str) -> 
         )
 
 
-# #974-review, #978-T05
-def test_only_the_claude_code_login_may_be_given_to_a_vm() -> None:
-    assert local_credential({}) is None
-    assert local_credential({"CLAUDE_CODE_OAUTH_TOKEN": "t"}) == {
+# #974-review, #978-T05, #980-T07
+def test_only_a_name_of_the_allow_list_may_be_given_to_a_vm() -> None:
+    assert local_credential_document(None) is None
+    assert local_credential_document(LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", "t")) == {
         "name": "CLAUDE_CODE_OAUTH_TOKEN",
         "value": "t",
     }
-    for refused in ({"PATH": "/evil"}, {"A": "1", "B": "2"}, {"RUNNER_JOB_TIMEOUT_SECONDS": "1"}):
+    for refused in (
+        LocalCredential("PATH", "/evil"),
+        LocalCredential("RUNNER_JOB_TIMEOUT_SECONDS", "1"),
+        LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", "two words"),
+    ):
         with pytest.raises(ControlRunError):
-            local_credential(refused)
+            local_credential_document(refused)
 
 
 # -- the VM's configuration ---

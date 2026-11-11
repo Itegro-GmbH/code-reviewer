@@ -12,9 +12,9 @@ what the hosted container's start-up decides and a runner's machine decides diff
   base on this machine, so there is no engine user or rule set of a hosted Worker to check here;
 - the disk budget of the machine (`FACTORY_RUNNER_DISK_BUDGET_BYTES`, #855) ends a job that fills
   the disk, as it did when the loop ran the job itself;
-- a credential that exists only on this device (a Claude Code subscription, `localEnvironment` of
-  the start document) goes into the environment of the job process and into the masker, and nowhere
-  else.
+- the credential that exists only on this device (a Claude Code subscription, `localCredential` of
+  the start document, the same shape Control reads in a VM) goes into the environment of the job
+  process and into the masker, and nowhere else.
 
 The Worker's exit code is the Worker's (`WorkerExit`): 0 the job was run to its end (or given back,
 superseded, cancelled), 1 it failed or could not be delivered, 2 it could not start. The dispatcher
@@ -35,6 +35,7 @@ from code_reviewer_runner.factory_runner.prepare import implementer_settings
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.role_labels import RUNNER_ID_VARIABLE
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.job_loop.service import LOGGER_NAME, configure_logging
 from code_reviewer_runner.job_loop.settings import (
     SettingsError,
@@ -44,7 +45,7 @@ from code_reviewer_runner.job_loop.settings import (
 from code_reviewer_runner.job_loop.worker import (
     MAX_START_DOCUMENT_BYTES,
     WorkerRequest,
-    parse_local_environment,
+    parse_local_credential,
     parse_request,
     run_worker,
 )
@@ -83,7 +84,7 @@ def main(
     raw = (stdin if stdin is not None else sys.stdin).read(MAX_START_DOCUMENT_BYTES + 1)
     try:
         request = parse_request(raw)
-        local = parse_local_environment(raw)
+        local = parse_local_credential(raw)
     except WorkerSetupError as error:
         log.error("worker cannot start: %s", error)
         return WorkerExit.SETUP_ERROR
@@ -94,18 +95,18 @@ def _run(
     request: WorkerRequest,
     settings: WorkerSettings,
     env: Mapping[str, str],
-    local: Mapping[str, str],
+    local: LocalCredential | None,
     *,
     guard: Callable[[], Awaitable[str]] | None,
 ) -> WorkerExit:
-    secrets: Sequence[str] = tuple(local.values())
-    # The job process gets the credentials of the device in its environment; the Worker's own
-    # environment holds none (they came on stdin).
+    secrets: Sequence[str] = (local.value,) if local else ()
+    # The job process gets the credential of the device in its environment; the Worker's own
+    # environment holds none (it came on stdin).
     return asyncio.run(
         run_worker(
             request,
             settings,
-            {**env, **local},
+            {**env, **(local.environment() if local else {})},
             install_signals=True,
             guard=guard,
             extra_secrets=secrets,
