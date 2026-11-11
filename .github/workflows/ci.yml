@@ -42,6 +42,7 @@ jobs:
       licenses: ${{ steps.filter.outputs.licenses }}
       website: ${{ steps.filter.outputs.website }}
       vm: ${{ steps.filter.outputs.vm }}
+      program: ${{ steps.filter.outputs.program }}
     steps:
       - name: Filter changed paths
         id: filter
@@ -94,6 +95,11 @@ jobs:
             # about half an hour, so nothing else starts it. One brace pattern, because the quantifier "every" would read a list as "and".
             vm:
               - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/install/**,runner/tests/unit/host_install_support.py,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,runner/tests/git_support.py,runner/tests/runner_app.py,fakes/wire/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
+            # What the program tarball of the Factory-Runner (#1002) is made of: the release tooling and its pins, the installer it carries as
+            # `libexec/host.sh`, the Firecracker pin and the nft table, the one dependency of the host program (the lock), the package's own
+            # command, and its workflow. A KVM-free job of about ten minutes (real systemd, no VM). One brace pattern, as above.
+            program:
+              - '{runner/release/**,runner/install/**,runner/pyproject.toml,runner/uv.lock,runner/tests/unit/host_install_support.py,docker/vm/pins.env,docker/vm/host/outer-wall.nft,runner/src/code_reviewer_runner/factory_runner/**,.github/workflows/runner-program.yml}'
 
   # The code-review.com landing page (website/, #696): an Astro site and its own pnpm project, deployed by
   # Cloudflare (Workers Builds, root directory website), not by a workflow. This job only proves that it
@@ -411,10 +417,10 @@ jobs:
         run: uv run ruff format --check . ../fakes
       - name: Typecheck
         run: uv run pyright
-      # The installer of the Factory-Runner (#855). The runner image of GitHub's ubuntu-24.04 has shellcheck. Its
+      # The installer of the Factory-Runner (#855) and the scripts of its program release (#1002). The runner image of GitHub's ubuntu-24.04 has shellcheck. Its
       # behaviour is tested by tests/unit/test_install_script.py against stand-ins for docker and systemd.
       - name: Shellcheck the installer
-        run: shellcheck install/install.sh
+        run: shellcheck install/install.sh release/verify-release.sh release/lane.sh
       - name: Unit tests
         run: uv run pytest -m unit
       - name: Integration and contract tests on the host
@@ -830,6 +836,19 @@ jobs:
     with:
       release: ${{ fromJSON(github.run_number) }}
 
+  # The program tarball of the Factory-Runner (#1002): built twice (the bytes must be equal) and installed, updated, rolled back and uninstalled by the
+  # real installer on a real systemd, signed with a key made for the run. Only for a pull request that changes what the program is made of (the
+  # `program` filter); signing for real and publishing are runner-program-release.yml, on a tag. No secret, the read-only token.
+  runner-program:
+    name: "Runner program: tarball and installer lane"
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.program == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/runner-program.yml
+    with:
+      release: ${{ fromJSON(github.run_number) }}
+
   actionlint:
     name: Lint workflow files
     needs: changes
@@ -846,7 +865,7 @@ jobs:
   # fails on any failed or cancelled job and accepts skipped jobs (path filter).
   ci-passed:
     name: All checks passed?
-    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, actionlint]
+    needs: [changes, website, app-fast, app-int, dispatcher-fast, runner-fast, implementer-lane, engine, e2e, e2e-hosted, e2e-dynamic, licenses, image-runner-sandbox, sandbox-local, vm-artifacts, runner-program, actionlint]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

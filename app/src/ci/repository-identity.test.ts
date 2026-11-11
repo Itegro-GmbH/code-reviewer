@@ -47,6 +47,7 @@ describe("the identity of the repository", () => {
       ".github/workflows/golden-snapshot.yml",
       ".github/workflows/nightly.yml",
       ".github/workflows/rollback-production.yml",
+      ".github/workflows/runner-program-release.yml",
       ".github/workflows/vercel-stage.yml",
       ".github/workflows/vm-artifacts-release.yml",
     ]);
