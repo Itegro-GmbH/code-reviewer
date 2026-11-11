@@ -536,15 +536,22 @@ named in "Copyleft and distribution" below, and the images are proprietary code.
 
 The program of the local Dispatcher (Runner v2, epic #969, issue #1002) is delivered to a customer's machine as a tarball `factory-runner-<N>-x86_64.tar.zst` built by
 `runner/release/build_program.py` and published only by the owner (a draft release, `docs/runner.md`, "The program release"). Unlike the VM artifacts it has no copyleft
-component: the licence texts and notices that the licences below ask for travel inside the tarball (`share/licenses/`, and the `.dist-info` directories of the packages), and
+component: the licence texts and notices that the licences below ask for travel inside the tarball (`share/licenses/`, with the third-party texts in `share/licenses/third-party/`, and the `.dist-info` directories of the packages), and
 `share/licenses/NOTICE.txt` says where each one is. Nothing of this is built into the app, the Dispatcher bundle or the Worker image.
 
-- **Python** (CPython 3.13.14, PSF-2.0): a standalone build by python-build-standalone (`install_only_stripped`, pinned by release tag and sha256 in `runner/release/pins.env`), unmodified,
-  with the libraries it is built with (OpenSSL and the others, all permissive: Apache-2.0, BSD, MIT, zlib) as that project's release notes list them. The licence text is `python/lib/python3.13/LICENSE.txt`.
+- **Python** (CPython 3.13.14, PSF-2.0): a standalone build by python-build-standalone (`install_only_stripped`, pinned by release tag and sha256 in `runner/release/pins.env`), unmodified.
+  Its licence text is `python/lib/python3.13/LICENSE.txt`. That archive holds no licence files of the libraries the interpreter is built with, so their texts were copied from the same release's full
+  archive of the same build (`pgo+lto-full`, sha256 `1c4e8ac4d6a039ca7bf0942819578f31ba3528be84d5c3c47f1bf8e638e8086a`, `python/licenses/`, chosen by the build's own `PYTHON.json`) into
+  `runner/release/licenses/python/` and ship in `share/licenses/third-party/python/`: OpenSSL (Apache-2.0; the older OpenSSL licence as well, which the build's metadata names), libffi (MIT), zlib (zlib),
+  bzip2 (bzip2-1.0.6), xz / liblzma (0BSD), SQLite (public domain), expat (MIT), mpdecimal (BSD-2-Clause), libedit (BSD-3-Clause), ncurses (X11), libuuid (BSD-3-Clause), Berkeley DB (Sleepycat) and CPython itself.
+  The Tcl/Tk and X11 libraries belong to `_tkinter`, which the build takes out, and their texts are not shipped. `runner/release/licenses/SOURCES.md` says where each text came from; the build refuses a text
+  that is not the pinned copy (`SHA256SUMS`).
 - **Firecracker** (1.17.0, Apache-2.0): the release binary of `docker/vm/pins.env`, unmodified, with its `LICENSE`, `NOTICE` and `THIRD-PARTY` files in `share/licenses/firecracker/`.
   The jailer and the tools of its archive are not shipped.
-- **cryptography** (50.0.2, Apache-2.0 OR BSD-3-Clause; its wheel links OpenSSL, Apache-2.0), **cffi** (2.1.1, MIT) and **pycparser** (3.11, BSD-3-Clause): the wheels of `runner/uv.lock`, unmodified, with their licence files in
-  their `.dist-info` directories. They are the same packages the dependency review above covers; the host program needs only these three of the Worker's dependencies.
+- **cryptography** (50.0.2, Apache-2.0 OR BSD-3-Clause), **cffi** (2.1.1, MIT) and **pycparser** (3.11, BSD-3-Clause): the wheels of `runner/uv.lock`, unmodified, with their licence files in their
+  `.dist-info` directories. The `cryptography` wheel links **OpenSSL 4.0.3** (Apache-2.0) statically and ships no text of it; its own SBOM names the version and the source archive, and the licence text
+  was copied from that archive (`openssl-4.0.3.tar.gz`, sha256 `325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9`, `LICENSE.txt`) into `runner/release/licenses/openssl-4.0.3/`, shipped in
+  `share/licenses/third-party/openssl-4.0.3/`. They are the same packages the dependency review above covers; the host program needs only these three of the Worker's dependencies.
 - **The package** (`code_reviewer_runner`, proprietary, source-visible): its own `licenses/` directory (this file, `NOTICE`, `LICENSE`) travels with it.
 
 ## Copyleft and distribution

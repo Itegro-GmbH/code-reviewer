@@ -267,7 +267,7 @@ jobs:
           standalone Python with the package and \`cryptography\`, as one tarball. The machine needs no Python and no Docker.
 
           Verify it with the signed manifest (\`runner-manifest.json\`, \`runner-manifest.sig\`) before use: docs/runner.md, "The program release".
-          \`sudo sh install.sh\` and \`sudo factory-runner update\` do it. The tarball is reproducible: its build is \`runner/release/build_program.py\` at this commit.
+          \`sudo sh install.sh\` and \`sudo factory-runner update\` do it. Its tar is reproducible (the build is \`runner/release/build_program.py\` at this commit): compare \`zstd -dc <tarball> | sha256sum\` with a rebuild; the tarball's own bytes depend on the zstd version.
 
           **Needs the VM artifacts release ${VM_RELEASE}** (tag \`vm-artifacts-v${VM_RELEASE}\`): the installer stages the two as a pair.
 

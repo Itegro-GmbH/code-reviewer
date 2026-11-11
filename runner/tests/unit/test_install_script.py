@@ -714,7 +714,8 @@ def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(
     assert not (installed.state_dir / "staging").exists()
 
 
-# #1002-T21: the pair is the program's own statement (`share/release.json`, `vmArtifacts`), not "the newest of both".
+# #1002-T21: the pair is the program's own statement (`share/release.json`, `vmArtifacts`), not
+# "the newest of both".
 @pytest.fixture
 def paired(tmp_path: Path) -> Machine:
     """Installed with release 1 and VM artifacts 10, on a channel with an address per VM release."""
@@ -789,7 +790,8 @@ def test_a_program_whose_vm_artifacts_do_not_verify_is_not_taken(paired: Machine
 
 
 def test_a_vm_release_alone_is_never_taken(paired: Machine) -> None:
-    # Exact pairing: the current program names VM release 10 and no other, so a newer VM release changes nothing until a program names it.
+    # Exact pairing: the current program names VM release 10 and no other, so a newer VM release
+    # changes nothing until a program names it.
     publish(paired, program=1, vm=11)
     paired.log.write_text("")
 
@@ -811,13 +813,17 @@ def test_a_program_that_names_the_installed_vm_artifacts_is_staged_alone(paired:
     assert "staged the program release 2" in done.stdout
     assert "staged the VM artifacts" not in done.stdout
     assert (paired.state_dir / "pending").read_text().splitlines() == ["program=2"]
-    assert "vm/10/" not in " ".join(paired.calls("curl")), "VM artifacts in place were fetched again"
+    assert "vm/10/" not in " ".join(paired.calls("curl")), (
+        "VM artifacts in place were fetched again"
+    )
 
 
 def test_a_newer_program_replaces_a_staged_pair_with_its_own(paired: Machine) -> None:
     publish(paired, program=2, vm=11)
     assert paired.host("update").returncode == 0
-    publish(paired, program=3, vm=10)  # needs the VM artifacts that are installed: the staged VM 11 goes
+    publish(
+        paired, program=3, vm=10
+    )  # needs the VM artifacts that are installed: the staged VM 11 goes
 
     done = paired.host("update")
 
@@ -881,7 +887,8 @@ def test_a_program_that_needs_rolled_back_vm_artifacts_waits_for_a_higher_one(
 
 
 def test_a_channel_with_one_directory_serves_only_the_release_it_holds(tmp_path: Path) -> None:
-    # No `{release}` in the address: the directory holds one VM release (the newest), and the program names an older one.
+    # No `{release}` in the address: the directory holds one VM release (the newest), and the
+    # program names an older one.
     machine = new_machine(tmp_path, Release(program=1, vm=10, needs_vm=9))
 
     done = machine.install()

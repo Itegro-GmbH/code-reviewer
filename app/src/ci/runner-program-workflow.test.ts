@@ -267,7 +267,9 @@ describe("the release workflow", () => {
     expect(check?.env?.RELEASE).toBe("${{ needs.number.outputs.release }}");
     expect(check?.env?.VM_RELEASE).toBe("${{ steps.pair.outputs.vm }}");
     const run = String(check?.run);
-    expect(run).toContain('"$(/usr/bin/jq -r .release "$manifest")" = "$RELEASE"');
+    expect(run).toContain(
+      '"$(/usr/bin/jq -r .release "$manifest")" = "$RELEASE"',
+    );
     expect(run).toContain("share/release.json");
     expect(run).toContain('-r .commit)" = "$GITHUB_SHA"');
     expect(run).toContain('-r .release)" = "$RELEASE"');
@@ -295,8 +297,12 @@ describe("the release workflow", () => {
     );
     expect(check?.env?.PATH).toBe("/usr/bin:/bin");
     // One restore in the job, into `<work>/release`: the work directory is made fresh by the job and is nowhere on PATH.
-    const restores = steps.filter((step) => step.uses?.startsWith("actions/cache"));
-    expect(restores.map((step) => step.uses)).toEqual(["actions/cache/restore@v4"]);
+    const restores = steps.filter((step) =>
+      step.uses?.startsWith("actions/cache"),
+    );
+    expect(restores.map((step) => step.uses)).toEqual([
+      "actions/cache/restore@v4",
+    ]);
     expect(restores[0]?.with?.path).toBe("${{ env.PROGRAM_WORK }}/release");
     expect(signing.env?.PROGRAM_WORK).toBe("/mnt/program");
     const volume = steps.find((step) => step.name === "Work volume");

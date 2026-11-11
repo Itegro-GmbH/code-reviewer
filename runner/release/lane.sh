@@ -5,7 +5,7 @@
 # throwaway key the way the release job signs (`openssl dgst`), verified with the verifier the release job runs (verify-release.sh), and taken
 # by the real `runner/install/install.sh`, as root on a GitHub runner with a real systemd and a real `nft`: install, update, switch, rollback,
 # uninstall. What the installer lane (`runner/tests/kvm/installer`, a stand-in program) cannot prove and this does:
-#   - the build is reproducible (the same commit and number give the same bytes);
+#   - the build is reproducible (the same commit and number give the same bytes, on one machine with one `zstd`);
 #   - the tarball passes the installer's checks for real (names, links, `nft -c -f` of the rendered table on this kernel);
 #   - the REAL program runs as the service user with an empty environment, from a tree that user cannot write: the bundled Python, the wheels
 #     (`cryptography` is a compiled extension), the package and Firecracker (`--version` of both is the installer's smoke test at every switch);
@@ -43,7 +43,9 @@ cleanup() {
 trap cleanup EXIT
 
 build() { # build N OUT [VM]: the VM artifacts release the program names (default: runner/release/pair.json)
-  python3 "$here/build_program.py" --release "$1" --commit "$commit" --out "$2" --cache "$cache" --root "$repo" ${3:+--vm-artifacts "$3"}
+  local extra=()
+  [ -z "${3:-}" ] || extra=(--vm-artifacts "$3")
+  python3 "$here/build_program.py" --release "$1" --commit "$commit" --out "$2" --cache "$cache" --root "$repo" "${extra[@]}"
 }
 
 echo "== tools"

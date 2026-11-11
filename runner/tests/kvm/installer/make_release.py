@@ -8,9 +8,10 @@ one's key).
     make_release.py --served DIR --keyfile PEM --program N --vm M [--tamper NAME]...
         [--also-vm K]... [--without-vm] [--channels DIR --base URL]
 
-The program names the VM artifacts release M it needs (`share/release.json`) and the installer takes exactly that
-release with it. The VM artifacts go to `DIR/vm/<release>/`, the address per release of the VM channel (`<base>vm/{release}/`):
-`--also-vm K` publishes another VM release beside it (a newer one the program does not name), `--without-vm` publishes the
+The program names the VM artifacts release M it needs (`share/release.json`) and the installer
+takes exactly that release with it. The VM artifacts go to `DIR/vm/<release>/`, the address per
+release of the VM channel (`<base>vm/{release}/`): `--also-vm K` publishes another VM release
+beside it (a newer one the program does not name), `--without-vm` publishes the
 program only (the owner has not published its VM artifacts yet).
 """
 

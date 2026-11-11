@@ -1,7 +1,7 @@
 name: Runner program
 
 # The program of the Factory-Runner (#1002, epic #969): `bin/factory-runner`, Firecracker, the outer wall's nft table, `libexec/host.sh` (the installer) and a
-# standalone Python with the package and its one third-party dependency, as one reproducible tarball (runner/release/build_program.py; the format is
+# standalone Python with the package and its one third-party dependency, as one tarball with a reproducible tar (runner/release/build_program.py; the format is
 # docs/runner.md, "Updates"). One definition for the two callers: ci.yml (a pull request that changes what the program is made of: the lane below,
 # with a throwaway key) and runner-program-release.yml (a tag, which signs and publishes). This workflow never signs for real and never publishes: it
 # holds no secret and has the read-only token, and the one key lives only in the release job, in the environment `runner-program-release`

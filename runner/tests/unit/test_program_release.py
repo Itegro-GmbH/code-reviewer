@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -152,6 +153,10 @@ def pins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def make_release(pins: Path, out: Path, number: int = 1, commit: str = COMMIT) -> Path:
     return bp.build(REPOSITORY_ROOT, out, release=number, commit=commit, epoch=EPOCH, cache=pins)
+
+
+def plain_tar(tarball: Path) -> bytes:
+    return subprocess.run(["zstd", "-dcq", str(tarball)], capture_output=True, check=True).stdout
 
 
 def listing(tarball: Path) -> list[str]:
@@ -419,6 +424,9 @@ def test_the_build_is_reproducible_and_a_new_release_number_or_commit_is_a_new_t
     other_commit = make_release(pins, tmp_path / "d", commit="c" * 40)
 
     assert first.read_bytes() == second.read_bytes()
+    # The tar is what is reproducible, whatever `zstd` encodes it with: a rebuild is compared by it.
+    assert plain_tar(first) == plain_tar(second)
+    assert plain_tar(other_number) != plain_tar(first)
     assert (tmp_path / "a/manifest.json").read_bytes() == (
         tmp_path / "b/manifest.json"
     ).read_bytes()
@@ -688,7 +696,8 @@ def program_release(
 def test_the_installer_installs_updates_and_rolls_back_the_programs_the_build_made(
     pins: Path, tmp_path: Path
 ) -> None:
-    # Both builds name the VM artifacts release of runner/release/pair.json: the installer takes exactly that one with them.
+    # Both builds name the VM artifacts release of runner/release/pair.json: the installer takes
+    # exactly that one with them.
     vm = json.loads((RELEASE_DIR / "pair.json").read_text())["vmArtifactsRelease"]
     first = program_release(pins, tmp_path, 1, vm)
     machine: Machine = new_machine(tmp_path / "machine", first)
@@ -721,6 +730,113 @@ def test_the_installer_installs_updates_and_rolls_back_the_programs_the_build_ma
     assert machine.host("switch").returncode == 0
     assert machine.release_of("current", parent=machine.opt) == "1"
     assert "was rolled back" in machine.host("update").stdout
+
+
+# -- the licence texts of what the program bundles ------------------------------------------------
+
+LICENSES = REPOSITORY_ROOT / "runner" / "release" / "licenses"
+# The libraries of the pinned standalone CPython that stay in the tarball (the Tcl/Tk and X11 ones
+# left with `_tkinter`), as that build's own PYTHON.json names them, and the OpenSSL its
+# `cryptography` wheel links (the wheel's SBOM: 4.0.3).
+PYTHON_LICENCES = {
+    "bdb": "Berkeley DB",
+    "bzip2": "bzip2",
+    "cpython": "CPython",
+    "expat": "expat",
+    "libedit": "libedit",
+    "libffi": "libffi",
+    "liblzma": "xz",
+    "libuuid": "libuuid",
+    "mpdecimal": "mpdecimal",
+    "ncurses": "ncurses",
+    "openssl-1.1": "OpenSSL",
+    "openssl-3": "OpenSSL",
+    "sqlite": "SQLite",
+    "zlib": "zlib",
+}
+LICENCE_FILES = {f"python/LICENSE.{name}.txt" for name in PYTHON_LICENCES} | {
+    "openssl-4.0.3/LICENSE.txt"
+}
+
+
+def licence_sums() -> dict[str, str]:
+    lines = (LICENSES / "SHA256SUMS").read_text().splitlines()
+    return {name: digest for digest, name in (line.split("  ", 1) for line in lines if line)}
+
+
+# #1002-T22
+def test_the_licence_texts_are_the_copies_the_pins_name_and_nothing_else_is_there() -> None:
+    sums = licence_sums()
+
+    assert set(sums) == LICENCE_FILES
+    for name, digest in sums.items():
+        assert hashlib.sha256((LICENSES / name).read_bytes()).hexdigest() == digest, name
+    present = {
+        str(path.relative_to(LICENSES))
+        for path in LICENSES.rglob("*")
+        if path.is_file() and path.name not in ("SHA256SUMS", "SOURCES.md")
+    }
+    assert present == LICENCE_FILES
+    sources = (LICENSES / "SOURCES.md").read_text()
+    for needle in ("python-build-standalone", "pgo+lto-full", "openssl-4.0.3.tar.gz", "sbom.json"):
+        assert needle in sources
+
+
+# #1002-T22
+def test_the_program_ships_the_licence_texts_of_its_libraries_unchanged(
+    built: tuple[Path, Signing],
+) -> None:
+    out, _ = built
+    tarball = next(out.glob("*.tar.zst"))
+    plain = subprocess.run(["zstd", "-dcq", str(tarball)], capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
+        for name in sorted(LICENCE_FILES):
+            member = archive.extractfile(f"share/licenses/third-party/{name}")
+            assert member is not None, name
+            assert member.read() == (LICENSES / name).read_bytes(), name
+        notice = archive.extractfile("share/licenses/NOTICE.txt")
+        assert notice is not None
+        assert "share/licenses/third-party/" in notice.read().decode()
+
+
+# #1002-T22
+def test_a_licence_text_that_is_not_the_pinned_one_or_is_not_pinned_stops_the_build(
+    tmp_path: Path,
+) -> None:
+    copy = tmp_path / "licenses"
+    shutil.copytree(LICENSES, copy)
+    bp.copy_licenses(copy, tmp_path / "ok")  # the copy as it is: fine
+    assert (tmp_path / "ok/share/licenses/third-party/python/LICENSE.zlib.txt").is_file()
+
+    (copy / "python/LICENSE.zlib.txt").write_text("changed")
+    with pytest.raises(bp.BuildError, match=r"LICENSE\.zlib\.txt does not match"):
+        bp.copy_licenses(copy, tmp_path / "bad")
+    shutil.copy(LICENSES / "python/LICENSE.zlib.txt", copy / "python/LICENSE.zlib.txt")
+    (copy / "python/LICENSE.extra.txt").write_text("not pinned")
+    with pytest.raises(bp.BuildError, match=r"LICENSE\.extra\.txt is not pinned"):
+        bp.copy_licenses(copy, tmp_path / "worse")
+
+
+# #1002-T22
+def test_the_third_party_list_names_every_bundled_library_and_both_copies_are_equal() -> None:
+    root = (REPOSITORY_ROOT / "THIRD_PARTY_LICENSES.md").read_text()
+    packaged = (
+        REPOSITORY_ROOT / "runner/src/code_reviewer_runner/licenses/THIRD_PARTY_LICENSES.md"
+    ).read_text()
+
+    assert root == packaged
+    section = root.split("## Factory-Runner program release", 1)[1].split("\n## ", 1)[0]
+    assert "share/licenses/third-party/" in section
+    for label in set(PYTHON_LICENCES.values()) | {"OpenSSL 4.0.3"}:
+        assert label in section, label
+
+
+# #1002-T22
+def test_the_firecracker_pin_says_the_program_ships_it() -> None:
+    pins = (REPOSITORY_ROOT / "docker/vm/pins.env").read_text()
+
+    assert "the release does not ship it" not in pins
+    assert "the program release" in pins
 
 
 # -- what the program may import -------------------------------------------------------------------

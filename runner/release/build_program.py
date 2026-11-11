@@ -23,10 +23,13 @@ What goes in, and why:
   plus these three;
 * the pinned Firecracker of `docker/vm/pins.env` with its licence texts.
 
-The tarball is reproducible: the same commit, release number and pins give the same bytes (sorted
-names, owner root, one fixed mtime, normalised modes, byte code compiled with a fixed hash seed into
-hash-checked `.pyc` files, a fixed `zstd` level on one thread). Only the standard library runs here,
-besides `zstd` and the bundled Python itself.
+The tar inside is reproducible: the same commit, release number and pins give the same bytes
+(sorted names, owner root, one fixed mtime, normalised modes, byte code compiled with a fixed hash
+seed into hash-checked `.pyc` files). The tarball is that tar in `zstd -19` on one thread, which
+gives the same bytes for the same `zstd` version only (another version may encode it differently):
+compare the uncompressed tar (`zstd -dc <tarball> | sha256sum`) to check a rebuild against a
+release.
+Only the standard library runs here, besides `zstd` and the bundled Python itself.
 """
 
 from __future__ import annotations
@@ -411,15 +414,42 @@ def notice_text(python_version: str) -> str:
         'repository, "Factory-Runner program release"):\n\n'
         f"- CPython {python_version} (PSF-2.0), a standalone build by\n"
         "  astral-sh/python-build-standalone. Its licence text is lib/python3.13/LICENSE.txt in\n"
-        "  the bundled Python; the licences of the libraries it is linked with are listed in\n"
-        "  that project's release notes (https://github.com/astral-sh/python-build-standalone).\n"
+        "  the bundled Python; the texts of the libraries it is built with (OpenSSL, libffi,\n"
+        "  zlib, bzip2, xz, SQLite, expat, mpdecimal, libedit, ncurses, libuuid, Berkeley DB)\n"
+        "  are in share/licenses/third-party/python/, copied from the publisher's full archive\n"
+        "  of this build.\n"
         "- Firecracker (Apache-2.0): share/licenses/firecracker/LICENSE, NOTICE and THIRD-PARTY.\n"
-        "- cryptography (Apache-2.0 OR BSD-3-Clause; OpenSSL, Apache-2.0, is linked into its\n"
-        "  wheel), cffi (MIT) and pycparser (BSD-3-Clause): the licence files are in the\n"
-        "  .dist-info directories under python/lib/python3.13/site-packages.\n"
+        "- cryptography (Apache-2.0 OR BSD-3-Clause), cffi (MIT) and pycparser (BSD-3-Clause):\n"
+        "  the licence files are in the .dist-info directories under\n"
+        "  python/lib/python3.13/site-packages. OpenSSL 4.0.3 (Apache-2.0) is linked into the\n"
+        "  cryptography wheel: its licence text is\n"
+        "  share/licenses/third-party/openssl-4.0.3/LICENSE.txt (the wheel's SBOM names it).\n"
         "- code_reviewer_runner (proprietary, source-visible): the files in\n"
         "  python/lib/python3.13/site-packages/code_reviewer_runner/licenses/.\n"
     )
+
+
+def copy_licenses(source: Path, tree: Path) -> None:
+    """The licence texts of the libraries the Python and the `cryptography` wheel are built with,
+    copied out of the archives they came from (`source/SOURCES.md` says which): into
+    `share/licenses/third-party/`, each checked against `SHA256SUMS`; an unlisted or changed file
+    stops the build."""
+    pinned: dict[str, str] = {}
+    for line in (source / "SHA256SUMS").read_text().splitlines():
+        if line.strip():
+            digest, name = line.split("  ", 1)
+            pinned[name] = digest
+    for path in sorted(p for p in source.rglob("*") if p.is_file()):
+        name = str(path.relative_to(source))
+        if name not in pinned and name not in ("SHA256SUMS", "SOURCES.md"):
+            raise BuildError(f"the licence text {name} is not pinned in {source}/SHA256SUMS")
+    for name, digest in sorted(pinned.items()):
+        text = source / name
+        if not text.is_file() or sha256_file(text) != digest:
+            raise BuildError(
+                f"the licence text {name} does not match its pin in {source}/SHA256SUMS"
+            )
+        copy_file(text, tree / "share/licenses/third-party" / name, 0o644)
 
 
 def assemble_tree(
@@ -479,6 +509,8 @@ def assemble_tree(
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(source.read())
             destination.chmod(mode)
+
+    copy_licenses(root / "runner/release/licenses", tree)
 
     write_text(tree / "bin/factory-runner", LAUNCHER, 0o755)
     copy_file(root / "docker/vm/host/outer-wall.nft", tree / "share/outer-wall.nft", 0o644)
@@ -627,14 +659,19 @@ def build(
         raise BuildError("the release number is a whole number from 1")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise BuildError("the commit is a full 40-character SHA")
-    # The VM artifacts release the program needs, exactly: the installer takes this release with it. The file is the truth; only a lane that
-    # builds a second program for the same commit names another (`--vm-artifacts`), never a release.
+    # The VM artifacts release the program needs, exactly: the installer takes this release with
+    # it. The file is the truth; only a lane that builds a second program for the same commit
+    # names another (`--vm-artifacts`), never a release.
     if vm_artifacts is not None:
         vm_release = vm_artifacts
     else:
-        vm_release = json.loads((root / "runner/release/pair.json").read_text())["vmArtifactsRelease"]
+        vm_release = json.loads((root / "runner/release/pair.json").read_text())[
+            "vmArtifactsRelease"
+        ]
     if not isinstance(vm_release, int) or vm_release < 1:
-        raise BuildError("the VM artifacts release (runner/release/pair.json) is a whole number from 1")
+        raise BuildError(
+            "the VM artifacts release (runner/release/pair.json) is a whole number from 1"
+        )
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="program-build-") as work_name:
         work = Path(work_name)
@@ -680,7 +717,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--vm-artifacts",
         type=int,
-        help="the VM artifacts release to name instead of runner/release/pair.json (for the lane that builds a second program; the release workflow never passes it)",
+        help=(
+            "the VM artifacts release to name instead of runner/release/pair.json (for the lane "
+            "that builds a second program; the release workflow never passes it)"
+        ),
     )
     parser.add_argument(
         "--epoch",
