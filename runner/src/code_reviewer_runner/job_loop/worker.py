@@ -54,6 +54,7 @@ from code_reviewer_runner.job_loop.worker_errors import (
     WorkerFailure,
     WorkerSetupError,
 )
+from code_reviewer_runner.outer_proxy import OuterProxy, OuterProxyError
 from code_reviewer_runner.result import ErrorCode
 
 LOGGER_NAME = "code_reviewer_runner.loop"
@@ -80,6 +81,10 @@ class WorkerRequest:
     # The host's per-VM token (vm-init puts it on this stdin with the credential, #977): the
     # environment control sends it in every request. None for a Worker that no vm-init started.
     control_token: str | None = field(default=None, repr=False)
+    # The outer wall's proxy of this VM's slot (vm-init puts it on this stdin from the host's start,
+    # #994): every client of this Worker that dials the internet goes through it. None: no outer
+    # wall (hosted, or a machine without the proxy wall), the clients dial as before.
+    outer_proxy: OuterProxy | None = None
 
 
 def _invalid(detail: str) -> WorkerSetupError:
@@ -103,8 +108,9 @@ def _app_url(raw: object) -> str:
 
 
 def parse_request(raw: str) -> WorkerRequest:
-    """The start document: `{"appUrl", "jobId", "credential"}` and, from vm-init, `"controlToken"`.
-    Other keys are ignored, so a newer Dispatcher can add one without breaking an older Worker."""
+    """The start document: `{"appUrl", "jobId", "credential"}` and, from vm-init, `"controlToken"`
+    and `"outerProxy"`. Other keys are ignored, so a newer Dispatcher can add one without breaking
+    an older Worker."""
     if len(raw.encode("utf-8", errors="replace")) > MAX_START_DOCUMENT_BYTES:
         raise _invalid("the start document is too large")
     try:
@@ -126,11 +132,20 @@ def parse_request(raw: str) -> WorkerRequest:
         if not isinstance(given, str) or not _CONTROL_TOKEN.fullmatch(given):
             raise _invalid("controlToken must be a control token")
         control_token = given
+    outer_proxy: OuterProxy | None = None
+    if "outerProxy" in fields:
+        # A proxy that is given and is not one the host could have given is an input error: the
+        # Worker never dials directly because it could not read where its way out is.
+        try:
+            outer_proxy = OuterProxy.from_json(fields["outerProxy"])
+        except OuterProxyError as error:
+            raise _invalid(f"outerProxy: {error}") from None
     return WorkerRequest(
         app_url=_app_url(fields.get("appUrl")),
         job_id=job_id,
         credential=credential,
         control_token=control_token,
+        outer_proxy=outer_proxy,
     )
 
 
@@ -245,7 +260,10 @@ async def run_worker(
     )
     log = SafeLog(logger, masker)
     api = api or HttpWorkerApi(
-        request.app_url, request.credential, request_timeout=settings.request_timeout
+        request.app_url,
+        request.credential,
+        request_timeout=settings.request_timeout,
+        proxy=request.outer_proxy,
     )
     host = JobHost(
         settings,
@@ -259,6 +277,7 @@ async def run_worker(
         refuse_unadvertised_engine=True,
         guard=guard,
         control_token=request.control_token,
+        outer_proxy=request.outer_proxy,
     )
     stopping = asyncio.Event()
 

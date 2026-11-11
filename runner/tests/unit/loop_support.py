@@ -253,6 +253,8 @@ class Harness:
         environment: Mapping[str, str] = settings.pop("environment", {})
         # The disk budget's guard of a customer's runner (#855); None: as hosted.
         guard = settings.pop("guard", None)
+        # The outer wall's proxy the host gave this Worker (#994); None: as hosted.
+        outer_proxy = settings.pop("outer_proxy", None)
         # The kill of the engine user's leftovers: calls are recorded, the answer is `sweeps_ok`.
         self.sweeps: list[tuple[int, int]] = []
         self.sweeps_ok = True
@@ -277,6 +279,7 @@ class Harness:
                 **environment,
             },
             guard=guard,
+            outer_proxy=outer_proxy,
         )
         self.loop = _Control(self.host)
         self.end: JobEnd | None = None

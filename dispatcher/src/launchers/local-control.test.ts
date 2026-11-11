@@ -118,6 +118,32 @@ describe("the local Control container's spec", () => {
     expect(local).toContain(`${ENVIRONMENT_CONTROL_VARIABLE}=vsock`);
   });
 
+  // #994-T03
+  it("has no proxy anywhere in the hosted container specs, the hosted environment or any golden file", async () => {
+    // The proxy of a local VM travels in the start (vm-init's contract), never in a container spec: hosted has none.
+    for (const name of [
+      "docker-run.golden.json",
+      "docker-run.sandbox.golden.json",
+      "docker-run.local-control.golden.json",
+      "vm-steps.golden.json",
+    ]) {
+      const text = readFileSync(
+        new URL(`./testdata/${name}`, import.meta.url),
+        "utf8",
+      );
+      expect(text, name).not.toMatch(/proxy|172\.31\./i);
+    }
+    for (const spec of [
+      IMPLEMENTER_CONTAINER_SPEC,
+      LOCAL_IMPLEMENTER_CONTAINER_SPEC,
+      WORKER_CONTAINER_SPEC,
+    ]) {
+      expect(JSON.stringify(spec.allowedEnvironment)).not.toMatch(/proxy/i);
+    }
+    const hosted = await hostedInvocation();
+    expect(JSON.stringify(hosted.args)).not.toMatch(/proxy/i);
+  });
+
   // #977-T01
   it("keeps every hardening flag of the hosted container", async () => {
     const { args } = await renderLocalControl(options);
@@ -246,6 +272,63 @@ describe("the start request of vm-init", () => {
     expect(start.localCredential?.value).toBe(LOCAL_CREDENTIAL);
     expect(JSON.stringify(start.control)).not.toContain(LOCAL_CREDENTIAL);
     expect(JSON.stringify(start.control)).not.toContain(CREDENTIAL);
+  });
+
+  // #994-T03
+  it("carries no proxy when the host has none, and the rendered arguments never hold one", async () => {
+    const start = await buildStartRequest({
+      ...options,
+      image: IMAGE_ID,
+      reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
+    });
+
+    expect(start).not.toHaveProperty("outerProxy");
+    expect(JSON.stringify(start.control)).not.toMatch(/proxy/i);
+  });
+
+  // #994-T01
+  it("carries the slot's outer proxy beside the job, valid under the contract, never in an argument", async () => {
+    const start = await buildStartRequest({
+      ...options,
+      image: IMAGE_ID,
+      reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
+      outerProxy: { host: "172.31.0.5", port: 3128 },
+    });
+
+    expect(valid("StartRequest", start)).toBe(true);
+    expect(start.outerProxy).toEqual({ host: "172.31.0.5", port: 3128 });
+    // The local Control spec is the same with and without the wall: the address is per slot, so it
+    // travels with the start (as the token does) and not in the rendered flags.
+    expect(start.control.args).toEqual(
+      (await renderLocalControl({ ...options, image: IMAGE_ID })).args,
+    );
+    expect(JSON.stringify(start.control)).not.toContain("172.31.");
+  });
+
+  // #994-T04
+  it("is refused by the contract for a proxy outside the slots' network or of the wrong shape", async () => {
+    const start = await buildStartRequest({
+      ...options,
+      image: IMAGE_ID,
+      reserveGib: 8,
+      controlToken: CONTROL_TOKEN,
+      outerProxy: { host: "172.31.0.5", port: 3128 },
+    });
+
+    for (const outerProxy of [
+      { host: "10.0.0.1", port: 3128 },
+      { host: "172.30.0.1", port: 3128 },
+      { host: "172.31.0.01", port: 3128 },
+      { host: "example.com", port: 3128 },
+      { host: "172.31.0.5", port: 0 },
+      { host: "172.31.0.5", port: 65536 },
+      { host: "172.31.0.5" },
+      { host: "172.31.0.5", port: 3128, extra: 1 },
+    ]) {
+      expect(valid("StartRequest", { ...start, outerProxy })).toBe(false);
+    }
   });
 
   // #977-T04

@@ -72,6 +72,8 @@ def _with_args(args: list[Any]) -> dict[str, Any]:
 
 _ARGS = start_document()["control"]["args"]
 
+OUTER_PROXY = {"host": "172.31.0.5", "port": 3128}
+
 # One entry per way the start can be wrong; the id names the field. The value is a start that
 # vm-init refuses. `SCHEMA_ALLOWS` are the ones the contract's schema cannot say (the parser is
 # stricter there); every other one is invalid under the schema as well.
@@ -126,6 +128,22 @@ BAD_STARTS: dict[str, dict[str, Any]] = {
     "image.id trailing newline": _bad(image={"reference": IMAGE_REFERENCE, "id": IMAGE_ID + "\n"}),
     "workVolume.name trailing newline": _bad(workVolume={"name": "v\n", "reserveGib": 8}),
     "controlToken trailing newline": _bad(controlToken=CONTROL_TOKEN + "\n"),
+    # #994: the proxy is the one way out of the VM, so an address outside the slots' network, a
+    # spelling `ipaddress` would not print, a missing or wrong port and any other key are refused.
+    "outerProxy not an object": _bad(outerProxy="172.31.0.5:3128"),
+    "outerProxy host outside the slots": _bad(outerProxy={**OUTER_PROXY, "host": "10.0.0.1"}),
+    "outerProxy host below the slots": _bad(outerProxy={**OUTER_PROXY, "host": "172.30.0.5"}),
+    "outerProxy host loopback": _bad(outerProxy={**OUTER_PROXY, "host": "127.0.0.1"}),
+    "outerProxy host a name": _bad(outerProxy={**OUTER_PROXY, "host": "proxy.example"}),
+    "outerProxy host a leading zero": _bad(outerProxy={**OUTER_PROXY, "host": "172.31.0.05"}),
+    "outerProxy host a number": _bad(outerProxy={**OUTER_PROXY, "host": 1}),
+    "outerProxy host trailing newline": _bad(outerProxy={**OUTER_PROXY, "host": "172.31.0.5\n"}),
+    "outerProxy no port": _bad(outerProxy={"host": "172.31.0.5"}),
+    "outerProxy port 0": _bad(outerProxy={**OUTER_PROXY, "port": 0}),
+    "outerProxy port 65536": _bad(outerProxy={**OUTER_PROXY, "port": 65536}),
+    "outerProxy port true": _bad(outerProxy={**OUTER_PROXY, "port": True}),
+    "outerProxy port a string": _bad(outerProxy={**OUTER_PROXY, "port": "3128"}),
+    "outerProxy unknown key": _bad(outerProxy={**OUTER_PROXY, "scheme": "http"}),
     # What the schema cannot say: the image that runs is the image that was checked, and the
     # arguments hold no option that takes the VM's walls away (`wire.check_control_args`).
     "args image is not the checked one": _with_args([*_ARGS[:-2], "other:tag", _ARGS[-1]]),

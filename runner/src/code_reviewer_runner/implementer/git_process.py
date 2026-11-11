@@ -40,20 +40,39 @@ def basic_authorization(token: str) -> str:
     return "Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
 
 
-def token_environment(token: str) -> dict[str, str]:
-    """The token for one git process, as `GIT_CONFIG_*` environment variables: never in argv, a
-    config file or a URL. Redirects are not followed (a header must not follow a redirect), and no
-    credential helper is consulted."""
-    settings = (
-        ("http.extraHeader", f"Authorization: {basic_authorization(token)}"),
-        ("http.followRedirects", "false"),
-        ("credential.helper", ""),
-    )
+def config_environment(settings: Sequence[tuple[str, str]]) -> dict[str, str]:
+    """`settings` as `GIT_CONFIG_*` environment variables, for one git process."""
     environment = {"GIT_CONFIG_COUNT": str(len(settings))}
     for number, (key, value) in enumerate(settings):
         environment[f"GIT_CONFIG_KEY_{number}"] = key
         environment[f"GIT_CONFIG_VALUE_{number}"] = value
     return environment
+
+
+def proxy_settings(proxy: str) -> list[tuple[str, str]]:
+    """git's own setting for the outer wall's proxy (`http://host:port`): it asks the proxy for a
+    tunnel (`CONNECT host:443`) and speaks TLS to the provider through it. The closed environment
+    holds no `no_proxy` and no other proxy variable, so nothing takes a request around it."""
+    return [("http.proxy", proxy)]
+
+
+def token_environment(token: str, *, proxy: str | None = None) -> dict[str, str]:
+    """The token for one git process, as `GIT_CONFIG_*` environment variables: never in argv, a
+    config file or a URL. Redirects are not followed (a header must not follow a redirect), and no
+    credential helper is consulted.
+
+    `proxy` (`http://host:port`) is the outer wall's proxy of a VM on a customer's machine (#994,
+    `outer_proxy.py`), the VM's only way out: git goes through it (`proxy_settings`), so the proxy
+    sees the name and never the token, and a proxy that refuses ends the command: git does not
+    retry a refused tunnel directly. None: git dials the provider itself, as hosted."""
+    settings = [
+        ("http.extraHeader", f"Authorization: {basic_authorization(token)}"),
+        ("http.followRedirects", "false"),
+        ("credential.helper", ""),
+    ]
+    if proxy is not None:
+        settings.extend(proxy_settings(proxy))
+    return config_environment(settings)
 
 
 def spawn_options(uid: int, gid: int) -> dict[str, Any]:

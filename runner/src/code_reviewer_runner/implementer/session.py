@@ -128,6 +128,7 @@ from .result_channel import (
     redacted_value,
 )
 from .resume_session import ResumeInput
+from .runner_profile import door_seams, netdoor_seams
 from .session_export import ExportFailed
 from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
@@ -794,7 +795,9 @@ class ImplementerSession:
         rule = self.rule
         if rule.mode != MODE_OFF:
             self._netdoor = start_network_door(
-                rule, deadline_seconds=self._deadline_seconds(), seams=self.seams.netdoor
+                rule,
+                deadline_seconds=self._deadline_seconds(),
+                seams=netdoor_seams(self.environment, self.seams.netdoor),
             )
         # The environment control (#975) is the one way to the second wall: https for the hosted
         # Dispatcher, vsock for a VM on a customer's machine, none for a runner without one.
@@ -901,7 +904,7 @@ class ImplementerSession:
                     for name, value in self.environment.items()
                     if name == "RUNNER_DYNAMIC_MAX_COST_USD"
                 },
-                seams=self.seams.door,
+                seams=door_seams(self.environment, self.seams.door),
             )
         finally:
             # The door has the key (or the turn ends without one): Control's copy of the hand-off,
