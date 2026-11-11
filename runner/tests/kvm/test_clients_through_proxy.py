@@ -14,14 +14,12 @@ The targets are public hosts of the internet (the lane runs on a runner that has
 wall's own lane does): `example.com` is the app, `github.com` the git host, `api.anthropic.com`
 the model provider.
 
-**What this lane does not do** (a follow-up of #994, listed in the pull request): it does not run a
-whole job. A job clones its repository over https, runs a Setup container and an agent in
-Sysbox containers whose doors have their own firewalls in the guest, and calls an app that has to
-be on a public name and port 80 or 443; a lane that does all of that needs a git host over https
-that the Worker image trusts and an app on a public-looking name, which the lane does not have
-(`docs/runner.md`, "The outer wall", "Not done here"). What is proved here is the part that was
-missing: the clients, in the image, with the table loaded, reach what the wide rule and then the
-job's rule let through, through the proxy and nothing else, and fail when it refuses."""
+**What this lane does not do:** it does not run a whole job (that is `test_whole_job.py`, #999): a
+job clones its repository over https, runs a Setup container and an agent in Sysbox containers
+whose doors have their own firewalls in the guest, and calls an app that has to be on a public
+name and port 80 or 443. What is proved here is the part the whole job stands on: the clients, in
+the image, with the table loaded, reach what the wide rule and then the job's rule let through,
+through the proxy and nothing else, and fail when it refuses."""
 
 import asyncio
 import dataclasses
