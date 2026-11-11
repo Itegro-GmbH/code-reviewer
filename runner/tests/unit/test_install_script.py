@@ -81,13 +81,15 @@ def changed_nothing(machine: Machine) -> None:
 
 
 def publish(machine: Machine, **changes: object) -> Release:
+    needs_vm = changes.pop("needs_vm", None)
     release = Release(
         program=int(str(changes.pop("program", 1))),
         vm=int(str(changes.pop("vm", 10))),
+        needs_vm=None if needs_vm is None else int(str(needs_vm)),
         key=machine.release.key,
         tamper=set(changes.pop("tamper", ())),  # type: ignore[call-overload]
     )
-    release.publish(machine.served)
+    machine.publish(release)
     return release
 
 
@@ -712,6 +714,203 @@ def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(
     assert not (installed.state_dir / "staging").exists()
 
 
+# #1002-T21: the pair is the program's own statement (`share/release.json`, `vmArtifacts`), not
+# "the newest of both".
+@pytest.fixture
+def paired(tmp_path: Path) -> Machine:
+    """Installed with release 1 and VM artifacts 10, on a channel with an address per VM release."""
+    machine = new_machine(tmp_path, per_release_vm=True)
+    done = machine.install()
+    assert done.returncode == 0, done.stderr
+    return machine
+
+
+def test_a_program_is_staged_with_the_vm_artifacts_it_names_not_the_newest_ones(
+    paired: Machine,
+) -> None:
+    # Release 12 exists and is the newest; program 2 was made for 11.
+    publish(paired, program=1, vm=12)
+    publish(paired, program=2, vm=11)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "staged the program release 2" in done.stdout
+    assert "staged the VM artifacts release 11" in done.stdout
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
+    assert not (paired.state_dir / "artifact-releases/12").exists()
+    assert "vm/12/" not in " ".join(paired.calls("curl")), "the newest VM release was downloaded"
+    assert paired.host("switch").returncode == 0
+    assert paired.release_of("artifacts", parent=paired.state_dir) == "11"
+
+
+def test_a_fresh_install_takes_the_vm_artifacts_the_program_names(tmp_path: Path) -> None:
+    machine = new_machine(tmp_path, Release(program=3, vm=2), per_release_vm=True)
+    # A newer VM release exists, a program for it does not.
+    machine.publish_vm(Release(vm=5, key=machine.release.key))
+
+    done = machine.install()
+
+    assert done.returncode == 0, done.stderr
+    assert machine.release_of("artifacts", parent=machine.state_dir) == "2"
+    assert machine.release_of("current") == "3"
+    assert not (machine.state_dir / "artifact-releases/5").exists()
+
+
+def test_a_program_published_before_its_vm_artifacts_is_not_taken(paired: Machine) -> None:
+    before = tree_without_locks(paired)
+    publish(paired, program=2, vm=11)
+    for name in (paired.served / "vm/11").iterdir():
+        name.unlink()  # the owner published the program first: its VM release is not there yet
+
+    done = paired.host("update")
+
+    assert done.returncode == 1
+    assert "VM artifacts release 11" in done.stderr and "program release 2" in done.stderr
+    assert "not taken" in done.stderr
+    assert tree_without_locks(paired) == before
+    assert not (paired.state_dir / "pending").exists()
+
+
+def test_a_program_whose_vm_artifacts_do_not_verify_is_not_taken(paired: Machine) -> None:
+    before = tree_without_locks(paired)
+    publish(paired, program=2, vm=11, tamper={"vm-bad-signature"})
+
+    done = paired.host("update")
+
+    assert done.returncode == 1
+    assert "signature of the vm release manifest is not valid" in done.stderr
+    assert tree_without_locks(paired) == before
+    assert not (paired.opt / "releases/2").exists()
+
+
+def test_a_vm_release_alone_is_never_taken(paired: Machine) -> None:
+    # Exact pairing: the current program names VM release 10 and no other, so a newer VM release
+    # changes nothing until a program names it.
+    publish(paired, program=1, vm=11)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert not (paired.state_dir / "pending").exists()
+    assert not (paired.state_dir / "artifact-releases/11").exists()
+    assert "vm/11/" not in " ".join(paired.calls("curl"))
+
+
+def test_a_program_that_names_the_installed_vm_artifacts_is_staged_alone(paired: Machine) -> None:
+    publish(paired, program=2, vm=10)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "staged the program release 2" in done.stdout
+    assert "staged the VM artifacts" not in done.stdout
+    assert (paired.state_dir / "pending").read_text().splitlines() == ["program=2"]
+    assert "vm/10/" not in " ".join(paired.calls("curl")), (
+        "VM artifacts in place were fetched again"
+    )
+
+
+def test_a_newer_program_replaces_a_staged_pair_with_its_own(paired: Machine) -> None:
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    publish(
+        paired, program=3, vm=10
+    )  # needs the VM artifacts that are installed: the staged VM 11 goes
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert (paired.state_dir / "pending").read_text().splitlines() == ["program=3"]
+    assert paired.host("switch").returncode == 0
+    assert paired.release_of("current") == "3"
+    assert paired.release_of("artifacts", parent=paired.state_dir) == "10"
+
+
+def test_a_program_that_names_the_staged_vm_artifacts_keeps_them_as_a_pair(paired: Machine) -> None:
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    publish(paired, program=3, vm=11)
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=11",
+        "pair=1",
+    ]
+
+
+def test_a_program_that_would_take_the_vm_artifacts_back_is_not_taken(tmp_path: Path) -> None:
+    machine = new_machine(tmp_path, Release(program=1, vm=10), per_release_vm=True)
+    assert machine.install().returncode == 0
+    publish(machine, program=2, vm=9)
+
+    done = machine.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "VM artifacts release 9" in done.stdout and "release 10" in done.stdout
+    assert not (machine.state_dir / "pending").exists()
+    assert not (machine.opt / "releases/2").exists()
+
+
+def test_a_program_that_needs_rolled_back_vm_artifacts_waits_for_a_higher_one(
+    paired: Machine,
+) -> None:
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    assert paired.host("switch").returncode == 0
+    assert paired.host("rollback").returncode == 0
+    assert paired.host("prestart").returncode == 0
+    publish(paired, program=3, vm=11)  # a new program for the VM release that was rolled back
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "rolled back" in done.stdout
+    assert not (paired.state_dir / "pending").exists()
+    publish(paired, program=3, vm=12)
+    assert paired.host("update").returncode == 0
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=12",
+        "pair=1",
+    ]
+
+
+def test_a_channel_with_one_directory_serves_only_the_release_it_holds(tmp_path: Path) -> None:
+    # No `{release}` in the address: the directory holds one VM release (the newest), and the
+    # program names an older one.
+    machine = new_machine(tmp_path, Release(program=1, vm=10, needs_vm=9))
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert "release 10" in done.stderr and "needs release 9" in done.stderr
+    changed_nothing(machine)
+
+
+@pytest.mark.parametrize("tamper", ["bundle-drop:share/release.json", "bundle-vm-not-a-number"])
+def test_a_program_that_does_not_name_a_vm_release_is_not_taken(
+    tmp_path: Path, tamper: str
+) -> None:
+    machine = new_machine(tmp_path, Release(tamper={tamper}))
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert "VM artifacts release" in done.stderr or "not a runner release" in done.stderr
+    changed_nothing(machine)
+
+
 # #982-T03
 def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays(
     installed: Machine,
@@ -730,7 +929,7 @@ def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays
         and not (installed.opt / "releases/2").exists()
     )
     # And through a signature of the other release: the VM artifacts.
-    publish(installed, program=1, vm=11, tamper={"vm-bad-signature"})
+    publish(installed, program=2, vm=11, tamper={"vm-bad-signature"})
     done = installed.host("update")
     assert (
         done.returncode == 1 and "signature of the vm release manifest is not valid" in done.stderr
@@ -752,7 +951,7 @@ def test_an_update_to_the_same_release_downloads_no_file(installed: Machine) -> 
     done = installed.host("update")
 
     assert done.returncode == 0, done.stderr
-    assert done.stdout.count("nothing to do") == 2
+    assert done.stdout.count("nothing to do") == 1
     downloaded = " ".join(installed.calls("curl")[-4:])
     assert ".tar.zst" not in downloaded and "vmlinux" not in downloaded
 

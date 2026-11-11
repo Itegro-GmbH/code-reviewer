@@ -19,7 +19,10 @@
 #      overlaps no address and no route of this machine), free space;
 #   2. the two release channels (runner/release-channel.json and docker/vm/release-channel.json, or the files you
 #      name): the program and the VM artifacts, each a signed manifest that is verified with `openssl`; the program is
-#      downloaded, verified and unpacked, and its nft table is checked on this kernel (`nft -c`);
+#      downloaded, verified and unpacked, and its nft table is checked on this kernel (`nft -c`). The program names the
+#      VM artifacts release it needs (`share/release.json`, `vmArtifacts`, an exact number, signed with the program): that
+#      release is the one that is installed with it, not the newest one, and a program whose VM release is not there or does
+#      not verify is not taken;
 #   3. the service user (a member of `kvm`), the directories, the VM artifacts downloaded by their digest and verified
 #      (the artifacts are owned by root and read-only for the service), the TAP devices of `--parallel-runs` slots
 #      owned by the user, the static nft table rendered for the slots' network, loaded AND listed again, the units;
@@ -31,7 +34,8 @@
 # `rollback` and `uninstall` and the units run it, so an update of the program also updates the updater, and all of it
 # is signed. Commands (the installed one is `/usr/local/bin/factory-runner update|rollback|status|uninstall`):
 #   install (the default)  --refresh runs it again over an install that exists (nothing is restarted)
-#   update [--scheduled]   stage the newest signed release; the service switches to it between two jobs
+#   update [--scheduled]   stage the newest signed program with the VM artifacts release it names; the service switches to
+#                          it between two jobs (VM artifacts alone are never taken: only a program that names them brings them)
 #   rollback [--now]       go back to the release before, or cancel a staged one; the release left is never taken again
 #   status                 the releases that are current, previous and waiting
 #   uninstall              remove everything this installer made, and nothing else
@@ -118,6 +122,10 @@ PROGRAM_RELEASE=""
 PROGRAM_BASE_URL=""
 VM_RELEASE=""
 VM_BASE_URL=""
+# The VM artifacts release the staged program names (the pair), and the one of it that has to be fetched (empty: the one installed or
+# staged already is it).
+PAIR_NEED=""
+VM_WANTED=""
 # The directories of what was staged and verified, waiting to be moved into place.
 STAGED_program=""
 STAGED_vm=""
@@ -644,25 +652,36 @@ channel_file() { # channel_file program|vm: the channel of this component (the s
     CHANNEL_FILE_USED="$CONF/channel-$1.json"
   else
     CHANNEL_FILE_USED="$WORK/channel-$1.json"
-    fetch "$url" "$CHANNEL_FILE_USED" 65536 || fail "the release channel of the $1 could not be downloaded"
+    [ -f "$CHANNEL_FILE_USED" ] || fetch "$url" "$CHANNEL_FILE_USED" 65536 || fail "the release channel of the $1 could not be downloaded"
   fi
   [ -r "$CHANNEL_FILE_USED" ] || fail "the release channel file of the $1 cannot be read"
 }
 
 # Fetches the signed manifest of a component and proves it: WORK/COMP.manifest.json, PROGRAM_RELEASE or VM_RELEASE and the address
-# the files are under. Returns 1 for a channel that is empty (nothing is published yet).
-fetch_manifest() { # fetch_manifest program|vm
+# the files are under. Returns 1 for a channel that is empty (nothing is published yet). The program's is the channel's newest; the VM
+# artifacts' is the release the program names (RELEASE): a channel whose baseUrl holds `{release}` has an address per release, one
+# without holds a single release (the newest) and serves the program only if that is the one it names.
+fetch_manifest() { # fetch_manifest program|vm [RELEASE]
   COMP="$1"
   channel_file "$1"
   read_channel "$CHANNEL_FILE_USED" || return 1
   case "$1" in program) max=$MAX_PROGRAM_MANIFEST ;; vm) max=$MAX_VM_MANIFEST ;; esac
   base="$CH_BASE"
-  fetch "$base$CH_MANIFEST" "$WORK/$1.manifest.json" "$max" || fail "the release manifest of the $1 could not be downloaded"
+  case "$1" in
+    vm) base="$(printf '%s' "$base" | sed "s/{release}/$2/g")"; what="the VM artifacts release $2 (named by the program release $PROGRAM_RELEASE)" ;;
+    program)
+      case "$base" in *'{'*) fail "the program release channel has a placeholder in its address: only the VM artifacts' has one" ;; esac
+      what="the program" ;;
+  esac
+  fetch "$base$CH_MANIFEST" "$WORK/$1.manifest.json" "$max" || fail "the release manifest of $what could not be downloaded: the program is not taken, nothing was installed"
   fetch "$base$CH_SIGNATURE" "$WORK/$1.manifest.sig" 4096 || fail "the signature of the $1 manifest could not be downloaded"
   verify_signature "$WORK/$1.manifest.json" "$WORK/$1.manifest.sig" "$CH_KEY" "$WORK"
   M_RELEASE="$(jq -r 'if (.release|type)=="number" and .release>=1 and .release==(.release|floor) then .release else empty end' "$WORK/$1.manifest.json" 2>/dev/null)"
   is_uint "$M_RELEASE" || fail "the $1 manifest has no release number"
   [ "$(jq -r '.arch // ""' "$WORK/$1.manifest.json")" = "x86_64" ] || fail "the $1 manifest is not for x86_64"
+  if [ "$1" = vm ] && [ "$M_RELEASE" != "$2" ]; then
+    fail "the VM artifacts at $base are release $M_RELEASE, and the program release $PROGRAM_RELEASE needs release $2 (an address without {release} holds one release at a time): the program is not taken, nothing was installed"
+  fi
   case "$1" in
     program) PROGRAM_RELEASE="$M_RELEASE"; PROGRAM_BASE_URL="$base" ;;
     vm) VM_RELEASE="$M_RELEASE"; VM_BASE_URL="$base" ;;
@@ -768,7 +787,7 @@ stage_program() {
     esac
   done <"$stage/links"
   rm -f "$stage/links"
-  for part in bin/factory-runner bin/firecracker libexec/host.sh share/outer-wall.nft; do
+  for part in bin/factory-runner bin/firecracker libexec/host.sh share/outer-wall.nft share/release.json; do
     [ -f "$stage/tree/$part" ] || fail "the program has no $part: it is not a runner release"
   done
   chmod -R go-w "$stage/tree"
@@ -780,7 +799,6 @@ stage_program() {
   nft -c -f "$stage/rendered.nft" >/dev/null 2>&1 \
     || fail "the nft table of this release does not load on this kernel (nft -c -f failed: are the nft_fib modules there?)"
   rm -f "$stage/rendered.nft"
-  chown -R root:root "$stage/tree"
   STAGED_program="$stage/tree"
 }
 
@@ -849,32 +867,32 @@ stage_vm() {
   STAGED_vm="$stage"
 }
 
-# Whether the channel's release of a component is one to take: newer than what is installed, staged and the release a rollback left.
+# Whether the channel's release of the program is one to take: newer than what is installed, staged and the release a rollback left.
 # Says why not when it is not. Reads the state without the lock: the commit asks again under it.
-wanted() { # wanted program|vm
-  case "$1" in program) release="$PROGRAM_RELEASE" ;; vm) release="$VM_RELEASE" ;; esac
+wanted() { # wanted program
+  release="$PROGRAM_RELEASE"
   if [ -z "$release" ]; then
-    say "the $1 release channel is empty: nothing is published yet"
+    say "the program release channel is empty: nothing is published yet"
     return 1
   fi
-  installed="$(installed_release "$1")"
-  waiting="$(pending_release "$1")"
-  rejected="$(rejected_release "$1")"
+  installed="$(installed_release program)"
+  waiting="$(pending_release program)"
+  rejected="$(rejected_release program)"
   newest="$installed"
   if [ -n "$waiting" ] && [ "$waiting" -gt "$newest" ]; then newest="$waiting"; fi
   if [ "$release" -le "$newest" ]; then
-    say "the $1 is at release $installed${waiting:+ (release $waiting is staged)}; the channel announces $release: nothing to do"
+    say "the program is at release $installed${waiting:+ (release $waiting is staged)}; the channel announces $release: nothing to do"
     return 1
   fi
   if [ "$release" -le "$rejected" ]; then
-    say "the $1 release $release was rolled back on this machine: waiting for a higher one"
+    say "the program release $release was rolled back on this machine: waiting for a higher one"
     return 1
   fi
   return 0
 }
 
 # The same question under the lock, once the download is over: a rollback or another start may have happened meanwhile.
-still_wanted() { # still_wanted program|vm RELEASE
+still_wanted() { # still_wanted program RELEASE
   installed="$(installed_release "$1")"
   waiting="$(pending_release "$1")"
   [ "$2" -gt "$installed" ] || return 1
@@ -884,18 +902,71 @@ still_wanted() { # still_wanted program|vm RELEASE
   return 0
 }
 
-# Moves what was staged and verified into place and says so in `pending`, as one pair, in one short step under the switch lock. Nothing is
-# switched to before both parts are there: a failed download of the VM artifacts never leaves a new program waiting.
+# The VM artifacts release a program names: `share/release.json`, `vmArtifacts`, a whole number (empty without one).
+program_vm_release() { # program_vm_release DIR
+  jq -r 'if (.vmArtifacts|type)=="number" and .vmArtifacts>=1 and .vmArtifacts==(.vmArtifacts|floor) then .vmArtifacts else empty end' "$1/share/release.json" 2>/dev/null || true
+}
+
+# How a program gets the VM artifacts release it names (the exact release, not the newest): `installed` (they are the current ones),
+# `pending` (they are staged already), `stage` (they have to be fetched) or why it cannot: `back` (older than the installed ones: that is
+# a rollback, which an update never does) or `rejected` (a rollback left that release or a higher one). Reads the state: ask under the
+# lock to commit.
+pair_mode() { # pair_mode RELEASE
+  have="$(installed_release vm)"
+  waiting="$(pending_release vm)"
+  if [ "$1" = "$have" ]; then printf installed
+  elif [ -n "$waiting" ] && [ "$1" = "$waiting" ]; then printf pending
+  elif [ "$1" -lt "$have" ]; then printf back
+  elif [ "$1" -le "$(rejected_release vm)" ]; then printf rejected
+  else printf stage
+  fi
+}
+
+# The staged program becomes root's once the VM artifacts it names have passed too (the machine's users and files are not touched before
+# every manifest has been proven).
+seal_program() {
+  chown -R root:root "$STAGED_program"
+}
+
+# The staged program (STAGED_program) and the VM artifacts it names: reads its `share/release.json`, and fetches and proves the manifest of
+# that VM release when it is not in place (an address that does not answer, a signature that is wrong, another release there: the program is
+# not taken, with nothing changed). Returns 1, after saying why, for a program that cannot be taken now; STAGED_program is then empty.
+choose_pair() {
+  VM_WANTED=""
+  PAIR_NEED="$(program_vm_release "$STAGED_program")"
+  [ -n "$PAIR_NEED" ] || fail "the program release $PROGRAM_RELEASE does not name the VM artifacts release it needs (share/release.json): it is not taken"
+  case "$(pair_mode "$PAIR_NEED")" in
+    installed|pending) return 0 ;;
+    stage)
+      fetch_manifest vm "$PAIR_NEED" || no_release_yet vm
+      VM_WANTED="$PAIR_NEED"
+      return 0 ;;
+    back) say "the program release $PROGRAM_RELEASE needs the VM artifacts release $PAIR_NEED, and release $(installed_release vm) is installed: an update does not go back (that is 'factory-runner rollback'), so the program is not taken" ;;
+    *) say "the program release $PROGRAM_RELEASE needs the VM artifacts release $PAIR_NEED, which was rolled back on this machine: waiting for a program that needs a higher one" ;;
+  esac
+  STAGED_program=""
+  return 1
+}
+
+# Moves what was staged and verified into place and says so in `pending`, in one short step under the switch lock: the program, and the VM
+# artifacts it names as a pair (`pair=1`: switched together, and a program that does not run takes them with it). Nothing is switched to
+# before both parts are there: a failed download of the VM artifacts never leaves a new program waiting.
 commit_staged() {
-  [ -n "$STAGED_program$STAGED_vm" ] || return 0
+  [ -n "$STAGED_program" ] || return 0
   lock_switch
   program_to=""
   vm_to=""
-  if [ -n "$STAGED_program" ]; then
-    if still_wanted program "$PROGRAM_RELEASE"; then program_to="$PROGRAM_RELEASE"; else say "the program release $PROGRAM_RELEASE is not taken any more (a rollback or another update came first)"; fi
-  fi
-  if [ -n "$STAGED_vm" ]; then
-    if still_wanted vm "$VM_RELEASE"; then vm_to="$VM_RELEASE"; else say "the VM artifacts release $VM_RELEASE are not taken any more (a rollback or another update came first)"; fi
+  vm_kept=""
+  if ! still_wanted program "$PROGRAM_RELEASE"; then
+    say "the program release $PROGRAM_RELEASE is not taken any more (a rollback or another update came first)"
+  else
+    case "$(pair_mode "$PAIR_NEED")" in
+      installed) program_to="$PROGRAM_RELEASE" ;;
+      pending) program_to="$PROGRAM_RELEASE"; vm_kept="$PAIR_NEED" ;;
+      stage)
+        if [ -n "$STAGED_vm" ] && [ "$VM_WANTED" = "$PAIR_NEED" ]; then program_to="$PROGRAM_RELEASE"; vm_to="$PAIR_NEED"; fi ;;
+    esac
+    [ -n "$program_to" ] || say "the program release $PROGRAM_RELEASE is not taken any more: the VM artifacts release $PAIR_NEED it names cannot be taken now (a rollback or another update came first)"
   fi
   if [ -n "$program_to" ]; then
     mkdir -p "$OPT/releases"
@@ -911,24 +982,32 @@ commit_staged() {
     rm -rf "$STATE/artifact-releases/$vm_to"
     mv "$STAGED_vm" "$STATE/artifact-releases/$vm_to"
   fi
-  if [ -n "$program_to" ] && [ -n "$vm_to" ]; then
+  if [ -n "$vm_to" ]; then
     write_pending "program=$program_to" "vm=$vm_to" "pair=1"
+  elif [ -n "$vm_kept" ]; then
+    write_pending "program=$program_to" "vm=$vm_kept" "pair=1"
   elif [ -n "$program_to" ]; then
+    # The VM artifacts it names are the installed ones: a pair staged before for another program is no longer wanted.
+    drop_pending vm
     write_pending "program=$program_to"
-  elif [ -n "$vm_to" ]; then
-    write_pending "vm=$vm_to"
   fi
-  [ -z "$program_to$vm_to" ] || STAGED_ANY=1
+  [ -z "$program_to" ] || STAGED_ANY=1
   [ -z "$program_to" ] || say "staged the program release $program_to (verified)"
-  [ -z "$vm_to" ] || say "staged the VM artifacts release $vm_to (verified)"
+  [ -z "$vm_to" ] || say "staged the VM artifacts release $vm_to it names (verified)"
 }
 
-# The newest release of both components, downloaded and verified with no lock held (the manifests are fetched already), then committed.
+# The newest program and the VM artifacts it names, downloaded and verified with no lock held (the program's manifest is fetched already),
+# then committed.
 stage_releases() {
   STAGED_ANY=0
-  if wanted program; then stage_program; fi
-  if wanted vm; then stage_vm; fi
-  commit_staged
+  if wanted program; then
+    stage_program
+    if choose_pair; then
+      seal_program
+      if [ -n "$VM_WANTED" ]; then stage_vm; fi
+      commit_staged
+    fi
+  fi
 }
 
 # -- the switch: current <- pending, between two starts of the service ------------------------------------------
@@ -1419,11 +1498,15 @@ do_install() {
   # Before the first change: the two manifests are fetched and proven, the program is downloaded, verified and unpacked and its nft
   # table is checked on this kernel, and the space for the VM artifacts is counted. Only the work directory is touched.
   if ! fetch_manifest program; then no_release_yet program; fi
-  if ! fetch_manifest vm; then no_release_yet vm; fi
+  channel_file vm
   PROGRAM_STAGE_BASE="$WORK/stage"
   make_stage_root "$PROGRAM_STAGE_BASE"
-  if wanted program; then stage_program; fi
-  check_space
+  if wanted program; then
+    stage_program
+    choose_pair || fail "the program release $PROGRAM_RELEASE cannot be taken with the VM artifacts on this machine (nothing was changed)"
+    seal_program
+    if [ -n "$VM_WANTED" ]; then check_space; fi
+  fi
   if [ "$REFRESH" != 1 ]; then FRESH=1; fi
   set_state version 1
   [ -n "$(state_value slot_network)" ] || set_state slot_network "$SLOT_NETWORK"
@@ -1443,8 +1526,10 @@ do_install() {
   total="${PARALLEL:-1}"
   write_runner_env "$total"
   STAGED_ANY=0
-  if wanted vm; then stage_vm; fi
-  commit_staged
+  if [ -n "$STAGED_program" ]; then
+    if [ -n "$VM_WANTED" ]; then stage_vm; fi
+    commit_staged
+  fi
   rm -rf "$STATE/staging"
   running=0
   if [ "$REFRESH" = 1 ] && systemctl is-active --quiet "$SERVICE" </dev/null 2>/dev/null; then running=1; fi
@@ -1528,7 +1613,6 @@ do_update() {
   make_stage_root "$PROGRAM_STAGE_BASE"
   make_stage_root "$VM_STAGE_BASE"
   fetch_manifest program || true
-  fetch_manifest vm || true
   # The manifests were proven by this configuration: it is the one kept for the next update.
   store_curl_config
   stage_releases
