@@ -80,6 +80,11 @@ class Prepared:
     selftest: SelfTestResult
     # What the runner found out about the harnesses it adds to the base (#856), for its log.
     harness_notes: tuple[str, ...] = ()
+    # The version of Claude Code when this device can run it (the layer is there; no login is
+    # needed at the start), else None. The dispatcher keeps the entry's `models` up to date from its
+    # credentials before every claim and leaves the entry out while none is usable (#980); the rest
+    # of the manifest is fixed here.
+    claude_version: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -186,10 +191,15 @@ HarnessChecks = Callable[[DockerApi, Mapping[str, str], bool], dict[str, Harness
 def harness_checks(
     api: DockerApi, source: Mapping[str, str], build: bool
 ) -> dict[str, HarnessStatus]:
-    """What this device adds to the base: Claude Code when it has a login for it (#856). `build`
-    False only looks."""
+    """What this device adds to the base: Claude Code when its layer is there (#856); the
+    credentials are the dispatcher's pool's to look at, before every claim (#980). `build` False
+    only looks."""
     found = claude_code_status(api, source, home_directory(source), build=build)
-    return {} if found is None else {HARNESS_CLAUDE_CODE: found}
+    return {HARNESS_CLAUDE_CODE: found}
+
+
+def _ready_version(status: HarnessStatus | None) -> str | None:
+    return status.version if status is not None and status.ready else None
 
 
 def announcement_for(
@@ -275,6 +285,7 @@ def prepare(
         announcement_for(config, result, memory, added),
         result,
         tuple(f"{name}: {note}" for name, status in sorted(added.items()) for note in status.notes),
+        claude_version=_ready_version(added.get(HARNESS_CLAUDE_CODE)),
     )
 
 

@@ -289,6 +289,11 @@ export const RUNNER_ERROR_CODES = [
   "environment_setup_failed",
   // #975: the sandbox's environment control did not narrow the outer network wall (no answer in time, a refusal, no host) before the agent started.
   "environment_control_failed",
+  // #980: a turn on Claude Code with a subscription token of the runner's own device: the token was refused (401), the subscription's usage limit
+  // ended the call, or the subscription does not allow the model. Free: nothing of ours was used.
+  "subscription_auth",
+  "subscription_limit",
+  "subscription_model_refused",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 

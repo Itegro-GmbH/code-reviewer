@@ -25,14 +25,19 @@ import re
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Final
 from urllib.parse import urlsplit
 
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
-from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiError, ApiRejected, ApiUnavailable, ClaimedJob
 from code_reviewer_runner.job_loop.clock import Clock, RealClock
 from code_reviewer_runner.job_loop.host import JobEnd, JobHost
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.job_loop.local_credential import (
+    LOCAL_CREDENTIAL_NAMES,
+    LOCAL_CREDENTIAL_VALUE,
+    LocalCredential,
+)
 from code_reviewer_runner.job_loop.masking import SafeLog, SecretMasker
 from code_reviewer_runner.job_loop.process import ProcessLauncher, SubprocessLauncher
 from code_reviewer_runner.job_loop.settings import WorkerSettings
@@ -50,6 +55,7 @@ from code_reviewer_runner.job_loop.worker_errors import (
     WorkerSetupError,
 )
 from code_reviewer_runner.outer_proxy import OuterProxy, OuterProxyError
+from code_reviewer_runner.result import ErrorCode
 
 LOGGER_NAME = "code_reviewer_runner.loop"
 # The start document is small; anything larger is not one.
@@ -143,40 +149,42 @@ def parse_request(raw: str) -> WorkerRequest:
     )
 
 
-# The one variable the dispatcher of this device may hand a Worker (`localEnvironment` of the start
-# document, #974): the Claude Code login. The job process gets `{**env, **local}`, so any other name
-# would let the start document override what the machine decided (PATH, LD_PRELOAD, RUNNER_*).
-LOCAL_ENVIRONMENT_NAMES = frozenset({OAUTH_VARIABLE})
-# What a local credential may be: one printable token, like the login of Claude Code.
-_LOCAL_VALUE = re.compile(r"[\x21-\x7e]{1,4096}")
-MAX_LOCAL_VARIABLES = len(LOCAL_ENVIRONMENT_NAMES)
-
-
-def parse_local_environment(raw: str) -> dict[str, str]:
-    """The credentials of the dispatcher's own device in the start document (`localEnvironment`,
-    #974), as the variables the job reads: a Claude Code subscription token that exists only on
-    that device. They come from the dispatcher, never from the app. A hosted Worker never reads
-    them. A bad name or value is an input error that names the field and never the value."""
+def parse_local_credential(raw: str) -> LocalCredential | None:
+    """The credential of the dispatcher's own device in the start document (`localCredential`,
+    #980): a Claude Code subscription token that exists only on that device, as `{"name", "value"}`.
+    One shape for the Worker of a process and for Control in a VM (`local_credential.py`). It comes
+    from the dispatcher, never from the app. An unknown name, an odd value or an extra field is an
+    input error that names the field and never the value."""
     fields = as_object(json.loads(raw))
-    local = fields.get("localEnvironment") if fields is not None else None
-    if local is None:
-        return {}
-    given = as_object(local)
-    if given is None or len(given) > MAX_LOCAL_VARIABLES:
-        raise _invalid("localEnvironment must be an object of a few variables")
-    result: dict[str, str] = {}
-    for name, value in given.items():
-        if name not in LOCAL_ENVIRONMENT_NAMES:
-            raise _invalid("localEnvironment names a variable that is not a credential of a device")
-        if not isinstance(value, str) or not _LOCAL_VALUE.fullmatch(value):
-            raise _invalid("localEnvironment holds a value that is not one token")
-        result[name] = value
-    return result
+    given = fields.get("localCredential") if fields is not None else None
+    if given is None:
+        return None
+    record = as_object(given)
+    if record is None or set(record) != {"name", "value"}:
+        raise _invalid("localCredential must be an object with a name and a value")
+    name, value = record["name"], record["value"]
+    if not isinstance(name, str) or name not in LOCAL_CREDENTIAL_NAMES:
+        raise _invalid("localCredential names a variable that is not a credential of a device")
+    if not isinstance(value, str) or not LOCAL_CREDENTIAL_VALUE.fullmatch(value):
+        raise _invalid("localCredential holds a value that is not one token")
+    return LocalCredential(name, value)
 
 
-def _exit_for(end: JobEnd) -> WorkerExit:
+# #980: a job the subscription of the device refused ends with the code the app stores and, for the
+# dispatcher of that device, an exit code of its own: the exit code is what reaches it through a
+# process and through a VM alike (vm-init passes any status on). Under 125 (Docker's own statuses).
+_VERDICT_EXITS: Final = {
+    ErrorCode.SUBSCRIPTION_AUTH.value: WorkerExit.SUBSCRIPTION_AUTH,
+    ErrorCode.SUBSCRIPTION_LIMIT.value: WorkerExit.SUBSCRIPTION_LIMIT,
+    ErrorCode.SUBSCRIPTION_MODEL_REFUSED.value: WorkerExit.SUBSCRIPTION_MODEL_REFUSED,
+}
+
+
+def _exit_for(end: JobEnd, error_code: str | None = None) -> WorkerExit:
     if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED):
         return WorkerExit.OK
+    if end in (JobEnd.FAILED, JobEnd.NOT_DELIVERED) and error_code in _VERDICT_EXITS:
+        return _VERDICT_EXITS[error_code]
     return WorkerExit.FAILED
 
 
@@ -314,7 +322,7 @@ async def _run(
         await asyncio.gather(stop, fetching, return_exceptions=True)
     end = await host.run_job(claimed)
     log.info("worker done: %s", end.value)
-    return _exit_for(end)
+    return _exit_for(end, host.last_error_code)
 
 
 async def _prepare(

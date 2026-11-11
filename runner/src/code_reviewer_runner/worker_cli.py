@@ -4,8 +4,9 @@
 
 Runs exactly one job and exits (0 ok, 1 failed, 2 setup error; see `job_loop/worker.py`). The start
 document `{"appUrl", "jobId", "credential"}` comes on stdin (a Worker that vm-init started also gets
-`"controlToken"`, the host's per-VM token for the environment control, #977): the per-job credential
-is a secret and has no way in through the arguments or the environment. The other settings are the
+`"controlToken"`, the host's per-VM token for the environment control, #977, and
+`"localCredential"`, the one credential of the device a job needs, #980): the per-job credential is
+a secret and has no way in through the arguments or the environment. The other settings are the
 environment variables the runner reads (`RUNNER_JOB_TIMEOUT_SECONDS` and the Dynamic slot's
 variables).
 """
@@ -26,6 +27,7 @@ from code_reviewer_runner.job_loop.service import LOGGER_NAME, configure_logging
 from code_reviewer_runner.job_loop.settings import SettingsError, worker_settings_from_environment
 from code_reviewer_runner.job_loop.worker import (
     MAX_START_DOCUMENT_BYTES,
+    parse_local_credential,
     parse_request,
     run_worker,
 )
@@ -110,12 +112,25 @@ def _run(env: dict[str, str], source: TextIO) -> Ended:
     except IsolationError as error:
         log.error("worker cannot start: %s", error)
         return Ended(WorkerExit.SETUP_ERROR)
+    raw = source.read(MAX_START_DOCUMENT_BYTES + 1)
     try:
-        request = parse_request(source.read(MAX_START_DOCUMENT_BYTES + 1))
+        request = parse_request(raw)
+        # #980: the one credential of the device (a Claude Code subscription), when the job needs
+        # it. Control refuses every name outside the allow-list before it puts a value anywhere.
+        local = parse_local_credential(raw)
     except WorkerSetupError as error:
         log.error("worker cannot start: %s", error)
         return Ended(WorkerExit.SETUP_ERROR)
-    code = asyncio.run(run_worker(request, settings, env, install_signals=True))
+    job_environment = {**env, **(local.environment() if local else {})}
+    code = asyncio.run(
+        run_worker(
+            request,
+            settings,
+            job_environment,
+            install_signals=True,
+            extra_secrets=(local.value,) if local else (),
+        )
+    )
     return Ended(code, request.control_token)
 
 

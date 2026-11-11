@@ -124,6 +124,44 @@ describe("the manifest of a runner and the claim", () => {
     expect(((await taken.json()) as ClaimResponse).job.id).toBe(turn.job.id);
   });
 
+  // #980-T08 (the review of #988)
+  it("hands a turn that names an id to a runner announcing the alias the id stands for, and one that names an alias to a runner announcing an id", async () => {
+    const h = await start();
+    const sonnet = await h.registerRunner({
+      labels: ["box"],
+      manifest: manifestOf(claude(["sonnet", "haiku"])),
+    });
+    const opusAlias = await h.registerRunner({
+      labels: ["box"],
+      manifest: manifestOf(claude(["opus"])),
+    });
+    const opusId = await h.registerRunner({
+      labels: ["box"],
+      manifest: manifestOf(claude(["claude-opus-5-5"])),
+    });
+    const byId = await h.enqueueTurn({
+      modelChoice: { provider: "claude-code", model: "claude-opus-5-5" },
+      runnerEnvironment: ENV,
+      profile: { ...PROFILE, harness: "claude-code" },
+    });
+
+    expect((await h.claim(claimOf(sonnet.credential))).status).toBe(204);
+    const taken = await h.claim(claimOf(opusAlias.credential));
+    expect(taken.status).toBe(200);
+    expect(((await taken.json()) as ClaimResponse).job.id).toBe(byId.job.id);
+
+    const byAlias = await h.enqueueTurn({
+      modelChoice: OPUS,
+      runnerEnvironment: ENV,
+      profile: { ...PROFILE, harness: "claude-code" },
+    });
+    const second = await h.claim(claimOf(opusId.credential));
+    expect(second.status).toBe(200);
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(
+      byAlias.job.id,
+    );
+  });
+
   // #973-T01
   it("hands a turn on the workspace's own key to a runner that announces OpenCode on a key of the app, whatever else it announces", async () => {
     const h = await start();

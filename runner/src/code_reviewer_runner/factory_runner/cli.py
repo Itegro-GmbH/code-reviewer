@@ -15,7 +15,8 @@ v2 (#974).
   as not ready (a running service pulls it at its own start). It may run beside a service, though
   its throwaway container is one more on the daemon for as long as it takes.
 - `config show`, `config set`: the configuration without its secret, and changing it
-  (`cli_manage.py`); `credential show|renew` and `update [--rollback]` are there too.
+  (`cli_manage.py`); `credential show|renew` (the runner's own), `credential add claude|list|remove|
+  retry` (the Claude Code tokens of this device, #980) and `update [--rollback]` are there too.
 
 The app address, the credential, the labels and the limits can come from the environment instead of
 the file (`config.py`): a VM that runs one job needs no `register`.
@@ -221,6 +222,14 @@ def main(
                 return cli_manage.config_set(arguments, env, stdout, stderr)
             return cli_manage.config_show(env, stdout)
         if arguments.command == "credential":
+            if arguments.action == "add":
+                return cli_manage.credential_add(arguments, env, stdout, stderr, stdin or sys.stdin)
+            if arguments.action == "list":
+                return cli_manage.credential_list(env, stdout, seams.now)
+            if arguments.action == "remove":
+                return cli_manage.credential_remove(arguments.name, env, stdout, stderr)
+            if arguments.action == "retry":
+                return cli_manage.credential_retry(arguments.name, env, stdout, stderr)
             if arguments.action == "renew":
                 return cli_manage.credential_renew(
                     env, stdout, stderr, client=seams.client, now=seams.now

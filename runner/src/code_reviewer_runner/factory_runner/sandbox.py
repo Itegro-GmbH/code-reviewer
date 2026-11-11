@@ -5,7 +5,8 @@
 The dispatcher claims a job and gets the id and the credential of its Worker, nothing else. It hands
 the Worker `{appUrl, jobId, credential}` on its standard input (`WorkerStart`) and, when the job
 asks for a credential that exists only on this device (a Claude Code subscription), that one
-credential too (`localEnvironment`): never through the app, never in an argument or in the
+credential too (`localCredential`: `{name, value}`, the shape vm-init's start carries as well,
+`job_loop/local_credential.py`): never through the app, never in an argument or in the
 environment of the dispatcher. The Worker fetches the job itself over the Worker API
 (`/api/workers/v1`), so the git token and the key of the workspace are only ever in the Worker and
 the containers it starts.
@@ -23,6 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Protocol
 
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.job_loop.process import (
     ProcessLauncher,
     ProcessSpec,
@@ -38,24 +40,27 @@ _STDOUT_KEEP_BYTES: Final = 4 * 1024
 @dataclass(frozen=True)
 class WorkerStart:
     """The hand-over to a Worker: where the app is, which job, the credential of its claim and, for
-    a job that needs one, the credential of this device (`localEnvironment`, as the variables the
-    job reads). Nothing here is printed: `repr` shows the job."""
+    a job that needs one, the credential of this device (`localCredential`, a variable of the
+    allow-list and its value). Nothing here is printed: `repr` shows the job."""
 
     app_url: str
     job_id: str
     credential: str = field(repr=False)
-    local_environment: Mapping[str, str] = field(default_factory=dict[str, str], repr=False)
+    local_credential: LocalCredential | None = field(default=None, repr=False)
 
     def document(self) -> bytes:
-        """The start document of the Worker (`worker.parse_request`; `localEnvironment` is read by
-        `local_worker` and ignored by a hosted Worker)."""
+        """The start document of the Worker (`worker.parse_request`; `localCredential` is read by
+        `local_worker` and by Control in a VM, and ignored by a hosted Worker)."""
         document: dict[str, object] = {
             "appUrl": self.app_url,
             "jobId": self.job_id,
             "credential": self.credential,
         }
-        if self.local_environment:
-            document["localEnvironment"] = dict(self.local_environment)
+        if self.local_credential is not None:
+            document["localCredential"] = {
+                "name": self.local_credential.name,
+                "value": self.local_credential.value,
+            }
         return json.dumps(document, separators=(",", ":")).encode("ascii")
 
 

@@ -36,6 +36,7 @@ from code_reviewer_runner.factory_runner.sandbox import (
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import RunnerService, Seams
 from code_reviewer_runner.job_loop.http import ApiRejected, ApiUnavailable
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.job_loop.settings import worker_settings_from_environment
 from code_reviewer_runner.job_loop.worker import parse_request
 from secret_walk import holds
@@ -288,7 +289,9 @@ def test_a_state_answer_for_another_job_is_not_the_contract() -> None:
 
 
 def test_the_start_document_is_the_one_a_worker_reads_and_shows_no_secret_in_its_repr() -> None:
-    start = WorkerStart("https://app.test", JOB, CREDENTIAL, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
+    start = WorkerStart(
+        "https://app.test", JOB, CREDENTIAL, LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    )
 
     document = json.loads(start.document())
 
@@ -296,7 +299,7 @@ def test_the_start_document_is_the_one_a_worker_reads_and_shows_no_secret_in_its
         "appUrl": "https://app.test",
         "jobId": JOB,
         "credential": CREDENTIAL,
-        "localEnvironment": {"CLAUDE_CODE_OAUTH_TOKEN": "tok"},
+        "localCredential": {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": "tok"},
     }
     # The hosted Worker's reader takes it (the local variables are for the local Worker).
     request = parse_request(start.document().decode())
