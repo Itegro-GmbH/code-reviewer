@@ -52,7 +52,22 @@ MEASURE_SECONDS: Final = 20.0
 SIZE_TIMEOUT_SECONDS: Final = 60.0
 # The inner Docker's data in a Sysbox container, measured by one fixed command.
 INNER_DOCKER_DATA: Final = "/var/lib/docker"
-INNER_SIZE_COMMAND: Final = ["/usr/bin/du", "-sx", "-B1", INNER_DOCKER_DATA]
+# The `du` is ended in the container below the exec's own timeout, so that a slow one does not go on
+# running beside the next measure's.
+INNER_DU_SECONDS: Final = 50
+INNER_SIZE_COMMAND: Final = [
+    "/usr/bin/timeout",
+    "-s",
+    "KILL",
+    str(INNER_DU_SECONDS),
+    "/usr/bin/du",
+    "-sx",
+    "-B1",
+    INNER_DOCKER_DATA,
+]
+# The last inner size measured per container: a `du` that does not answer in time (a huge store is
+# where it is slowest) keeps it, so the budget is not blind when the store is largest.
+_last_inner_bytes: dict[str, int] = {}
 
 
 def budget_bytes(limits: Limits) -> int | None:
@@ -93,7 +108,8 @@ def inner_docker_bytes(api: DockerApi, container: str) -> int:
     """What the Docker inside a Sysbox container holds (`INNER_DOCKER_DATA`), 0 for a container of
     another runtime (its `/var/lib/docker` is in its layer, counted already) and for a size the
     daemon cannot say: a container that is frozen takes no exec, and a part that cannot be
-    measured counts as nothing, as the rest of the measure."""
+    measured counts as nothing, as the rest of the measure. Once a size was measured, an answer
+    that does not come counts as that size until a new one is measured."""
     try:
         host = as_object(api.inspect_container(container).get("HostConfig")) or {}
     except DockerError:
@@ -108,9 +124,10 @@ def inner_docker_bytes(api: DockerApi, container: str) -> int:
         name="the inner Docker's size",
     )
     first = done.stdout.split(maxsplit=1)[:1]
-    if done.unanswered or not first or not first[0].isdigit():
-        return 0
-    return int(first[0])
+    if done.returncode != 0 or done.unanswered or not first or not first[0].isdigit():
+        return _last_inner_bytes.get(container, 0)
+    _last_inner_bytes[container] = int(first[0])
+    return _last_inner_bytes[container]
 
 
 def used_bytes(api: DockerApi, work_dir: Path, runner_id: str) -> int:
@@ -122,16 +139,22 @@ def used_bytes(api: DockerApi, work_dir: Path, runner_id: str) -> int:
         listed = api.request("GET", f"/containers/json?all=1&filters={selector}")
     except DockerError:
         listed = []
+    present: set[str] = set()
     for item in listed if isinstance(listed, list) else []:  # pyright: ignore[reportUnknownVariableType]
         entry = as_object(item)  # pyright: ignore[reportUnknownArgumentType]
         identifier = None if entry is None else entry.get("Id")
         if not isinstance(identifier, str):
             continue
+        present.add(identifier)
         try:
             total += api.container_rw_bytes(identifier, timeout=SIZE_TIMEOUT_SECONDS) or 0
         except DockerError:
             continue
         total += inner_docker_bytes(api, identifier)
+    # A container that is gone has no last size to keep (one the daemon could not list keeps all).
+    if isinstance(listed, list):
+        for gone in set(_last_inner_bytes) - present:
+            del _last_inner_bytes[gone]
     return total
 
 

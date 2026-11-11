@@ -490,6 +490,22 @@ def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_netw
     assert 'rm -f "$1" "$2"' in sc.CLEAN_SCRIPT
 
 
+# #1009-T49: a daemon the script left may still hold its output file; removing the name alone would
+# leave the daemon writing into an unlinked file that no measure of the disk budget sees. The file
+# is emptied before it is removed, so what was written so far is freed.
+def test_the_clean_up_empties_the_output_file_a_daemon_still_holds(tmp_path: Path) -> None:
+    script = tmp_path / "script"
+    output = tmp_path / "output"
+    script.write_text("true\n")
+    output.write_bytes(b"x" * 100_000)
+    with output.open("ab") as held:
+        subprocess.run(
+            ["/bin/sh", "-c", sc.CLEAN_SCRIPT, "clean", str(script), str(output)], check=True
+        )
+        assert not output.exists() and not script.exists()
+        assert os.fstat(held.fileno()).st_size == 0
+
+
 # #1009-T07
 def test_a_container_that_cannot_be_frozen_is_not_handed_over_and_is_removed(rig: Rig) -> None:
     """A refused freeze is a failure, not a note: the script's root processes would go on writing

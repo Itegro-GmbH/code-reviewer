@@ -135,7 +135,9 @@ SCRIPT_OUTPUT: Final = "/tmp/code-reviewer-setup.out"
 # SIGPIPE when the stream was closed. The shell sends the file's new bytes on its own standard
 # output while the script's own process runs, and the rest once it has exited (`$2.done` tells the
 # reader), so that the output reaches Control as it is written and the exec ends with the script.
-# Its status is the script's. The script has no input.
+# Its status is the script's. The script has no input. The script is root in the container and can
+# tamper with the file, `$2.done` or the tools the shell uses: that hides its own output or keeps
+# the step waiting until its time limit, never a status of 0 it did not exit with.
 RUN_SCRIPT: Final = r"""
 rm -f "$2.done"
 : > "$2"
@@ -166,8 +168,10 @@ exit "$status"
 """
 
 # What happens after a script that ended well: its file and its output are removed (the hand-over
-# keeps the container, and the agent must not find the script lying around in it).
-CLEAN_SCRIPT: Final = 'rm -f "$1" "$2" "$2.done"'
+# keeps the container, and the agent must not find the script lying around in it). The output is
+# emptied first: a daemon the script left may still hold it open, and a removed name alone would
+# leave it writing into an unlinked file that no measure of the disk budget sees.
+CLEAN_SCRIPT: Final = ': > "$2"; rm -f "$1" "$2" "$2.done"'
 
 # The VM's firewall for the Setup container's bridge (see the module text). An `ip` table in the
 # host's namespace, hooked before Docker's own rules (priority -10), whose only verdicts are drops:

@@ -36,6 +36,11 @@ from code_reviewer_runner.implementer.role_labels import ROLE_LABEL
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _no_inner_size_from_another_test() -> None:
+    disk_budget._last_inner_bytes.clear()  # pyright: ignore[reportPrivateUsage]
+
+
 def test_the_budget_is_the_disk_limit_in_bytes_or_none() -> None:
     assert budget_bytes(Limits(disk_gb=40)) == 40 * GIB
     assert budget_bytes(Limits()) is None
@@ -154,7 +159,21 @@ def test_the_inner_docker_of_a_sysbox_container_is_counted_beside_its_layer(
     assert used_bytes(daemon, tmp_path, "r1") == 700_000 + 3 * GIB  # type: ignore[arg-type]
     # One fixed command, a constant path, one file system (the inner containers' own mounts are
     # other file systems and counted once, as the data they come from).
-    assert asked == [(agent, ["/usr/bin/du", "-sx", "-B1", "/var/lib/docker"])]
+    assert asked == [
+        (
+            agent,
+            [
+                "/usr/bin/timeout",
+                "-s",
+                "KILL",
+                "50",
+                "/usr/bin/du",
+                "-sx",
+                "-B1",
+                "/var/lib/docker",
+            ],
+        )
+    ]
 
 
 # #1009-T37
@@ -197,6 +216,34 @@ def test_an_inner_size_the_daemon_cannot_say_counts_for_nothing_and_the_layer_st
     assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
+# #1009-T50: a `du` that does not answer in time (a huge inner store is where it is slowest)
+# must not make the budget blind when the store is largest: the last size that was measured
+# counts until a new one is, and the `du` is bounded in the container below the exec's own
+# timeout, so slow ones do not pile up from one measure to the next.
+def test_an_inner_size_that_times_out_keeps_the_last_measured_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = "b" * 64
+    daemon = Daemon(sizes={agent: 700_000})
+    daemon.runtimes[agent] = "sysbox-runc"
+    answers = [
+        Outcome(0, f"{3 * GIB}\t/var/lib/docker\n", ""),
+        Outcome(255, "", "timed out", unanswered=True),
+        Outcome(137, "", ""),
+    ]
+    budgets: list[float] = []
+
+    def run_exec(*args: Any, **options: Any) -> Outcome:
+        budgets.append(options["timeout"])
+        return answers.pop(0)
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
+
+    for _ in range(3):
+        assert used_bytes(daemon, tmp_path, "r1") == 700_000 + 3 * GIB  # type: ignore[arg-type]
+    assert all(budget > 50 for budget in budgets)
+
+
 # #1009-T39
 def test_the_inner_size_is_asked_of_a_real_daemon_by_an_exec_in_the_container(
     tmp_path: Path,
@@ -222,7 +269,9 @@ def test_the_inner_size_is_asked_of_a_real_daemon_by_an_exec_in_the_container(
         assert disk_budget.inner_docker_bytes(api, identifier) == 123456789
     finally:
         engine.stop()
-    assert seen == [["/usr/bin/du", "-sx", "-B1", "/var/lib/docker"]]
+    assert seen == [
+        ["/usr/bin/timeout", "-s", "KILL", "50", "/usr/bin/du", "-sx", "-B1", "/var/lib/docker"]
+    ]
 
 
 def test_a_daemon_that_cannot_answer_counts_for_nothing_and_ends_no_job(tmp_path: Path) -> None:

@@ -673,7 +673,8 @@ between two looks (the job is ended at the next one, and what it wrote is remove
 `/var/lib/docker` of their container (a bind of the repository is the repository's, measured above), and anything outside the folders, layers and
 inner data above. (Until #1009 the inner Docker's data was not measured at all; the measure is a `du` of the data directory in the
 container, **not yet proven against a real Sysbox container** in a lane: CI has Sysbox only in the KVM lane, which does not run the process mode
-this budget belongs to.) The budget stops a job that fills the disk; it does not
+this budget belongs to. The `du` is ended in the container after 50 s, and a measure that does not answer keeps the last size measured;
+it runs in a container the job is root of, so a job can make it lie: measuring from the host side is a follow-up.) The budget stops a job that fills the disk; it does not
 promise that a job stays below the number, and it is no replacement for keeping free space on the machine.
 
 Without `diskGb` there is no budget and the machine's disk is the limit; the app still shows the free space of `/work` as the disk of the
