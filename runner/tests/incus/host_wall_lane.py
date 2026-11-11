@@ -274,7 +274,7 @@ async def tcp_verdict(
 
 
 async def ping6_verdict(
-    client: IncusClient, instance: str, address: str, host_mac: str, device: str
+    client: IncusClient, instance: str, address: str, host_mac: str, device: str, bridge: str
 ) -> tuple[str, str]:
     """An ICMPv6 echo from `instance` to the host's link-local `address`. Neighbour discovery is
     taken out of the picture (the instance and the host get a permanent entry for each other), so
@@ -295,7 +295,7 @@ async def ping6_verdict(
     lines = setup.stdout.split()
     own_address = lines[lines.index("inet6") + 1].split("/")[0]
     own_mac = lines[-1]
-    sh("ip", "-6", "neigh", "replace", own_address, "lladdr", own_mac, "dev", HOST_BRIDGE[0],
+    sh("ip", "-6", "neigh", "replace", own_address, "lladdr", own_mac, "dev", bridge,
        "nud", "permanent")  # fmt: skip
     result = await run_exec(
         client,
@@ -304,10 +304,6 @@ async def ping6_verdict(
         timeout=30.0,
     )
     return ("open" if "rc=0" in result.stdout else "timeout"), result.stdout
-
-
-# The host bridge the IPv6 probe talks to (set by the lane before it probes).
-HOST_BRIDGE: list[str] = ["unset"]
 
 
 async def send_udp(client: IncusClient, instance: str, host: str, port: int) -> None:

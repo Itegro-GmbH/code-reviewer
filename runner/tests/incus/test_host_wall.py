@@ -33,7 +33,6 @@ from typing import Any
 
 import pytest
 from host_wall_lane import (
-    HOST_BRIDGE,
     INTERNET_ADDRESS,
     LAB_ADDRESS,
     METADATA_ADDRESS,
@@ -426,45 +425,44 @@ def test_dns_over_udp_reaches_without_our_table_and_is_dropped_with_it(bench: Be
     assert results["full"] == [0, 0], results
 
 
+def _enable_ipv6(bench: Bench) -> tuple[str, str]:
+    """IPv6 on the host's bridge (`ipv6.address=none` disables it, and Incus disables it again
+    whenever it applies a change to the network, so this is done after each phase's changes):
+    its link-local address and MAC."""
+    sh("sysctl", "-qw", f"net.ipv6.conf.{bench.outer}.disable_ipv6=0")
+    _wait_until(
+        lambda: bool(sh("ip", "-6", "addr", "show", "dev", bench.outer, "scope", "link").strip()),
+        10,
+        "a link-local address on the bridge",
+    )
+    local = sh("ip", "-6", "-o", "addr", "show", "dev", bench.outer, "scope", "link").split()
+    return (
+        local[local.index("inet6") + 1].split("/")[0],
+        sh("cat", f"/sys/class/net/{bench.outer}/address").strip(),
+    )
+
+
 # #1008-T01
 def test_ipv6_to_the_host_is_dropped_and_reached_without_the_table(bench: Bench) -> None:
-    # The bridge has no IPv6 (`ipv6.address=none` disables it): the control turns it on.
-    sysctl = f"net.ipv6.conf.{bench.outer}.disable_ipv6"
-    before = sh("sysctl", "-n", sysctl).strip()
-    sh("sysctl", "-qw", f"{sysctl}=0")
-    try:
-        _wait_until(
-            lambda: bool(
-                sh("ip", "-6", "addr", "show", "dev", bench.outer, "scope", "link").strip()
-            ),
-            10,
-            "a link-local address on the bridge",
-        )
-        local = sh("ip", "-6", "-o", "addr", "show", "dev", bench.outer, "scope", "link").split()
-        host = local[local.index("inet6") + 1].split("/")[0]
-        host_mac = sh("cat", f"/sys/class/net/{bench.outer}/address").strip()
-        HOST_BRIDGE[0] = bench.outer
-        verdicts: dict[tuple[str, str], str] = {}
-        for phase in ("control", "table", "full"):
-            set_phase(bench, phase)
-            for who, instance in bench.instances.items():
-                verdict, text = go(
-                    lambda i=instance: ping6_verdict(bench.client, i, host, host_mac, "eth0")
+    verdicts: dict[tuple[str, str], str] = {}
+    for phase in ("control", "table", "full"):
+        set_phase(bench, phase)
+        host, host_mac = _enable_ipv6(bench)
+        for who, instance in bench.instances.items():
+            verdict, text = go(
+                lambda i=instance, h=host, m=host_mac: ping6_verdict(
+                    bench.client, i, h, m, "eth0", bench.outer
                 )
-                verdicts[(phase, who)] = verdict if verdict == "open" else f"timeout: {text}"
-        for who in bench.instances:
-            seen = sh("ip", "-6", "addr", "show", "dev", bench.outer) + sh(
-                "nft", "list", "table", "inet", "incus"
             )
-            assert verdicts[("control", who)] == "open", (
-                f"{who}: {verdicts[('control', who)]}\nhost: {seen}"
-            )
-            assert verdicts[("table", who)].startswith("timeout"), verdicts
-            assert verdicts[("full", who)].startswith("timeout"), verdicts
-        listing = sh("nft", "list", "table", "inet", bench.spec.table)
-        assert our_counter(listing, "no IPv6") > 0
-    finally:
-        sh("sysctl", "-qw", f"{sysctl}={before}")
+            verdicts[(phase, who)] = verdict if verdict == "open" else f"timeout: {text}"
+    for who in bench.instances:
+        assert verdicts[("control", who)] == "open", f"{who}: {verdicts[('control', who)]}"
+        assert verdicts[("table", who)].startswith("timeout"), verdicts
+        assert verdicts[("full", who)].startswith("timeout"), verdicts
+    listing = sh("nft", "list", "table", "inet", bench.spec.table)
+    assert our_counter(listing, "no IPv6") > 0
+    # Incus's own reconfiguration turns IPv6 off on the bridge again; nothing is left on.
+    set_phase(bench, "full")
 
 
 # #1008-T01
