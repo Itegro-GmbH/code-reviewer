@@ -285,6 +285,7 @@ def setup_document(
     nano_cpus: int = 0,
     outer_proxy: OuterProxy | None = None,
     result: bool = False,
+    no_new_privileges: bool = False,
 ) -> dict[str, Any]:
     """The container of the setup, which is the agent's: the agent's definition (its image, limits,
     name, labels and mounts, so that nothing has to change when it takes over) on the setup network
@@ -300,6 +301,7 @@ def setup_document(
         entrypoint=entrypoint,
         result=result,
         nano_cpus=nano_cpus,
+        no_new_privileges=no_new_privileges,
     )
     document["Env"] = [] if outer_proxy is None else outer_proxy.tool_environment()
     document["NetworkingConfig"] = {
@@ -386,6 +388,10 @@ class SetupSeams:
     outer_proxy: OuterProxy | None = None
     # The file the VM's memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
+    # The agent's container of a turn on Claude Code is made with `no-new-privileges` (#856); the
+    # setup's is the agent's container, so it takes the same seam (`subscription_setup_script`
+    # refuses that harness with a script today).
+    no_new_privileges: bool = False
 
 
 def _variables(listed: object) -> set[str]:
@@ -483,6 +489,7 @@ class SetupContainer:
                     setup_environment=() if proxy is None else tuple(proxy.tool_environment()),
                     paused=True,
                     setup_network=SETUP_NETWORK_NAME,
+                    dns=SETUP_DNS,
                 ),
                 notes=tuple(self._notes),
             )
@@ -543,6 +550,7 @@ class SetupContainer:
                 nano_cpus=self._seams.nano_cpus,
                 outer_proxy=self._seams.outer_proxy,
                 result=self._seams.result,
+                no_new_privileges=self._seams.no_new_privileges,
             ),
             self._seams.container_name,
         )
@@ -627,6 +635,14 @@ class SetupContainer:
             problems.append("host access")
         if set(networks) != {SETUP_NETWORK_NAME}:
             problems.append("networks")
+        if host.get("NetworkMode") != SETUP_NETWORK_NAME:
+            problems.append("network mode")
+        if tuple(cast("list[Any]", host.get("Dns") or [])) != SETUP_DNS:
+            problems.append("resolvers")
+        if ("no-new-privileges" in cast("list[Any]", host.get("SecurityOpt") or [])) != (
+            self._seams.no_new_privileges
+        ):
+            problems.append("no-new-privileges")
         destinations: set[object] = set()
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)

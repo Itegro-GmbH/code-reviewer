@@ -1460,7 +1460,8 @@ the inner Docker's images, **once** (before #1009 they were also in a committed 
 environment cost about 2.9 GB twice, and the commit had a room check of its own, which is gone with the commit). **Control's reserve disk is
 untouched** by any of it: the mirror is on its own 8 GiB file system, and a script that fills the work volume or the VM's disk fails with
 "No space left on device" (the lane proves it with a small stand-in disk), the step reads how much of the disk is left after the script and
-says so when it is under 1 GiB. A runner's disk budget (#855) counts the container's writable layer, which now holds what the script left.
+says so when it is under 1 GiB. A runner's disk budget (#855) counts the container's writable layer **and**, under Sysbox, the data of its inner Docker (`du` in the container):
+the images the script pulled are in that data, which Sysbox mounts in and which is not part of the layer the daemon sizes (`docs/runner.md`, "The disk budget").
 
 **Measured on a real VM, round of #818 (2026-11-03, **before #1009: the table's "saving the result", "removing the Setup container" and "committed image" rows are the hand-over by `docker commit`, which no longer exists; the script, the container's start and the agent's turn are as measured**, 2 vCPU, 4 GB, a `spike-` VM from a snapshot built from the branch; its images are from commit
 `1bfda743`, the Dockerfile and the boot scripts have not changed since, the code under test is the head, run on the VM with `uv`; `sysbox: proven`).**

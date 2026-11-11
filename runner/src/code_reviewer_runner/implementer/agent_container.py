@@ -421,8 +421,11 @@ class Adopted:
     setup_environment: tuple[str, ...] = ()
     paused: bool = False
     # The network the script's phase was on, which `create()` removes once the container is on the
-    # model network (the daemon refuses to connect a container whose network mode is gone).
+    # model network (the daemon refuses to connect a container whose network mode is gone). The
+    # container keeps that name as its network mode for good, and the resolvers it was made with:
+    # the seal check expects exactly those of an adopted container.
     setup_network: str | None = None
+    dns: tuple[str, ...] = ()
 
 
 def docker_environment_file(environment: Mapping[str, str]) -> str:
@@ -657,6 +660,24 @@ class AgentContainer:
             problems.append("host access")
         if set(networks) != {MODEL_NETWORK_NAME}:
             problems.append("networks")
+        # What the daemon keeps of the first definition: the mode and resolvers the container was
+        # made with. A container made for the agent has the model network and no resolver of its
+        # own; an adopted one still has the setup's (a network that is removed by now, and the
+        # public resolvers it was given), and nothing else.
+        adopted = self._adopted
+        mode = MODEL_NETWORK_NAME
+        resolvers: tuple[str, ...] = ()
+        if adopted is not None:
+            mode = adopted.setup_network or MODEL_NETWORK_NAME
+            resolvers = adopted.dns
+        if host.get("NetworkMode") != mode:
+            problems.append("network mode")
+        if tuple(cast("list[Any]", host.get("Dns") or [])) != resolvers:
+            problems.append("resolvers")
+        if ("no-new-privileges" in cast("list[Any]", host.get("SecurityOpt") or [])) != (
+            self._seams.no_new_privileges
+        ):
+            problems.append("no-new-privileges")
         destinations: set[object] = set()
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)

@@ -12,6 +12,7 @@ makes git run runs there."""
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1262,6 +1263,7 @@ def script_container(
         setup_environment=() if outer_proxy is None else tuple(outer_proxy.tool_environment()),
         paused=paused,
         setup_network=sc.SETUP_NETWORK_NAME,
+        dns=sc.SETUP_DNS,
     )
 
 
@@ -1396,9 +1398,172 @@ def test_the_environment_file_is_quoted_assignments_for_the_inits_shell() -> Non
 
 
 # #1009-A09
-def test_the_restart_script_asks_the_daemon_to_end_and_the_init_to_start_it_again() -> None:
-    script = ac.RESTART_DOCKER_SCRIPT
-    assert ac.NO_DOCKER in script, "a container with no daemon has nothing to restart"
-    assert script.index(ac.DOCKER_PID_FILE) < script.index("cat >") < script.index("kill -TERM")
-    assert f"touch {ac.DOCKER_RESTART_FILE}" in script and f"rm -f {ac.READY_FILE}" in script
-    assert script.index(f"touch {ac.DOCKER_RESTART_FILE}") < script.index("kill -TERM")
+def test_the_restart_script_asks_the_daemon_to_end_and_the_init_to_start_it_again(
+    tmp_path: Path,
+) -> None:
+    """The script run by a real shell with the files it names moved under a directory of the test
+    and a stand-in daemon process: it writes the environment, takes the ready file away, leaves the
+    restart marker and ends the daemon (`kill -TERM`), in that order of effect."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    pid_file = run_dir / "docker.pid"
+    environment_file = run_dir / "agent-docker-env"
+    restart_file = run_dir / "agent-docker-restart"
+    ready_file = run_dir / "agent-ready"
+    ready_file.write_text("")
+    # The daemon: a shell that notes the signal it gets in a file.
+    daemon = subprocess.Popen(
+        ["/bin/sh", "-c", f'trap \'echo term > {run_dir}/signal; exit 0\' TERM; echo up > '
+         f'{run_dir}/alive; while :; do sleep 0.05; done']
+    )  # fmt: skip
+    pid_file.write_text(f"{daemon.pid}\n")
+    for _ in range(100):
+        if (run_dir / "alive").exists():
+            break
+        time.sleep(0.05)
+    script = (
+        ac.RESTART_DOCKER_SCRIPT.replace(ac.DOCKER_PID_FILE, str(pid_file))
+        .replace(ac.READY_FILE, str(ready_file))
+        .replace(ac.DOCKER_RESTART_FILE, str(restart_file))
+    )
+    try:
+        done = subprocess.run(
+            ["/bin/sh", "-c", script, "restart", str(environment_file)],
+            input=docker_environment_file({"HTTPS_PROXY": "http://door:3128"}).encode(),
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        daemon.wait(timeout=10)
+    finally:
+        daemon.kill()
+    assert done.returncode == 0 and done.stdout.decode().strip() == "restarting"
+    assert environment_file.read_text() == "HTTPS_PROXY=http://door:3128\n"
+    assert oct(environment_file.stat().st_mode & 0o777) == "0o600", "umask 077: only root reads it"
+    assert not ready_file.exists() and restart_file.exists()
+    assert (run_dir / "signal").read_text().strip() == "term", "the daemon was asked to end"
+    # The marker was there before the signal reached the daemon: the init that sees the daemon end
+    # finds it and starts the daemon again (a stand-in cannot prove the init, which
+    # `test_agent_init_script.py` runs for real).
+    assert ac.RESTART_DOCKER_SCRIPT.index(ac.DOCKER_RESTART_FILE) < ac.RESTART_DOCKER_SCRIPT.index(
+        "kill -TERM"
+    )
+
+
+# #1009-A09b
+def test_the_restart_script_of_a_container_with_no_daemon_says_so_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    environment_file = tmp_path / "agent-docker-env"
+    script = ac.RESTART_DOCKER_SCRIPT.replace(ac.DOCKER_PID_FILE, str(tmp_path / "no-such-pid"))
+    done = subprocess.run(
+        ["/bin/sh", "-c", script, "restart", str(environment_file)],
+        input=b"A=b\n",
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 0 and done.stdout.decode().strip() == ac.NO_DOCKER
+    assert not environment_file.exists()
+
+
+# -- what the seal check holds the adopted container to (#1009) -----------------------------------
+
+
+# #1009-A10
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"Dns": ["1.1.1.1", "8.8.8.8", "9.9.9.9"]}, "resolvers"),
+        ({"Dns": ["10.0.0.2"]}, "resolvers"),
+        ({"Dns": []}, "resolvers"),
+        ({"NetworkMode": "bridge"}, "network mode"),
+        ({"NetworkMode": "host"}, "network mode"),
+        ({"NetworkMode": MODEL_NETWORK_NAME}, "network mode"),
+    ],
+)
+def test_an_adopted_container_is_held_to_the_setups_resolvers_and_network_mode(
+    rig: Rig, changes: dict[str, Any], word: str
+) -> None:
+    """The container keeps the definition of its first phase for good: the setup's resolvers and
+    its network mode (a network that is removed once the model network is joined). A container that
+    reads back with anything else is not the one the setup made."""
+    adopted = script_container(rig)
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+        **a,
+        "HostConfig": {**a["HostConfig"], **changes},
+    }
+    with pytest.raises(JobError) as refused:
+        adopted_container(rig, adopted).create()
+    assert refused.value.code is ErrorCode.SETUP_FAILED and word in refused.value.detail
+
+
+# #1009-A11
+def test_an_adopted_container_that_reads_back_as_the_setup_made_it_is_accepted(rig: Rig) -> None:
+    adopted = script_container(rig)
+    host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+    assert host["Dns"] == list(sc.SETUP_DNS) and host["NetworkMode"] == sc.SETUP_NETWORK_NAME
+    assert adopted.dns == sc.SETUP_DNS
+    adopted_container(rig, adopted).create()
+
+
+# #1009-A12
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"Dns": ["1.1.1.1"]}, "resolvers"),
+        ({"NetworkMode": "bridge"}, "network mode"),
+        ({"SecurityOpt": ["no-new-privileges"]}, "no-new-privileges"),
+    ],
+)
+def test_a_container_made_for_the_agent_with_no_script_is_held_to_its_own_definition(
+    rig: Rig, changes: dict[str, Any], word: str
+) -> None:
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+        **a,
+        "HostConfig": {**a["HostConfig"], **changes},
+    }
+    with pytest.raises(JobError) as refused:
+        container(rig).create()
+    assert word in refused.value.detail
+
+
+# #1009-A13
+def test_an_adopted_container_must_be_as_sealed_as_the_seams_say(rig: Rig) -> None:
+    """The Claude Code harness is refused with a setup script (`subscription_setup_script`) because
+    its agent runs with `no-new-privileges` and the setup's container is made without. Whoever lifts
+    that refusal has to make the setup container sealed too: an agent whose seams say sealed over a
+    container that was made without is refused here, not run."""
+    adopted = script_container(rig)
+    sealed = AgentContainer(2560, rig.seams(no_new_privileges=True), OFF, adopted=adopted)
+    with pytest.raises(JobError) as refused:
+        sealed.create()
+    assert "no-new-privileges" in refused.value.detail
+
+
+# #1009-A14
+def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_seams_say_so(
+    rig: Rig,
+) -> None:
+    api = rig.api()
+    api.create_network(sc.network_document())
+    identifier = api.create_container(
+        sc.setup_document(
+            AGENT_IMAGE_ID,
+            WORK_VOLUME,
+            2560 * 1024 * 1024,
+            runtime="sysbox-runc",
+            no_new_privileges=True,
+        ),
+        AGENT_CONTAINER_NAME,
+    )
+    api.start_container(identifier)
+    api.disconnect_network(sc.SETUP_NETWORK_NAME, identifier)
+    adopted = Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME, dns=sc.SETUP_DNS)
+    AgentContainer(2560, rig.seams(no_new_privileges=True), OFF, adopted=adopted).create()
+    # ... and a container that is sealed when the seams say it is not is as wrong the other way.
+    with pytest.raises(JobError):
+        AgentContainer(
+            2560, rig.seams(), OFF, adopted=Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME,
+                                                   dns=sc.SETUP_DNS)
+        ).create()

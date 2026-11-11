@@ -595,6 +595,29 @@ def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_
     assert all(c.removed for c in rig.engine.containers.values())
 
 
+# #1009-S06
+def test_the_setup_container_can_be_made_with_no_new_privileges_like_the_agents_container() -> None:
+    """The Claude Code agent's container is sealed (`no-new-privileges`); the setup container is the
+    agent's container, so it takes the same flag. `subscription_setup_script` refuses that harness
+    with a script today; the day it does not, the setup's definition already has the one change it
+    needs, and the agent's seal check refuses an adopted container that lacks it."""
+    plain = setup_document("sha256:aa", "volume-1", 1_000_000)["HostConfig"]
+    sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)["HostConfig"]
+    assert "SecurityOpt" not in plain
+    assert sealed["SecurityOpt"] == ["no-new-privileges"] and sealed["Privileged"] is False
+    agent = agent_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)["HostConfig"]
+    assert sealed["SecurityOpt"] == agent["SecurityOpt"]
+
+
+# #1009-S07
+def test_the_seams_make_the_setup_container_without_new_privileges(rig: Rig) -> None:
+    done = run(rig, no_new_privileges=True)
+    assert done.outcome == OUTCOME_OK
+    host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+    assert host["SecurityOpt"] == ["no-new-privileges"]
+    assert done.adopted is not None and done.adopted.dns == sc.SETUP_DNS
+
+
 # #1009-S05
 def test_the_proxy_variables_of_a_customers_machine_are_the_setups_and_the_agent_is_told(
     rig: Rig,
@@ -775,6 +798,9 @@ CHANGES: list[tuple[Callable[[dict[str, Any]], dict[str, Any]], str]] = [
     (_host(Privileged=True), "privileged"),
     (_host(Runtime="runc"), "runtime"),
     (_host(Binds=["/:/host"]), "host access"),
+    (_host(Dns=["10.0.0.2"]), "resolvers"),
+    (_host(NetworkMode="bridge"), "network mode"),
+    (_host(SecurityOpt=["no-new-privileges"]), "no-new-privileges"),
     (_networks, "networks"),
     (_mounts, "mounts"),
     (_environment, "environment"),

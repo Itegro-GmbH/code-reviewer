@@ -650,9 +650,13 @@ Enforced through the host's Docker (`limits.py`, `disk_budget.py`):
 
 **The disk budget** (#855). `diskGb` is what one job may hold on the machine's disk. While a job runs (every 20 seconds) the runner measures
 what the job made: the folders of the turn in `/work` (`reserve`, `repo`, `result`, by the allocated blocks of their files, a file with
-several links once, links not followed) and the **writable layer of every container of this runner** (the agent's, which since #1009 is also
-the container the environment's setup script ran in and holds what the script installed and the images of its own Docker, and the door's: this
-is where what an agent writes into its container, its session files among it, is). Before #1009 the setup result was committed as an image
+several links once, links not followed), the **writable layer of every container of this runner** (the agent's, which since #1009 is also
+the container the environment's setup script ran in and holds what the script installed outside its own Docker, and the door's: this
+is where what an agent writes into its container, its session files among it, is) and, for a container under **Sysbox**, the **data of its inner
+Docker** (`/var/lib/docker` in it: the images the script pulled or built, the containers and volumes of that Docker), measured by `du -sx` in the
+container. That data is **not** in the writable layer: Sysbox backs the directory with one of its own on the host (`/var/lib/sysbox`) and mounts it
+in, and the daemon's size figure for the container is the size of its own layer. A container that takes no exec (frozen for the moment, between the setup
+script and the agent) counts for its layer alone at that look. Before #1009 the setup result was committed as an image
 (`code-reviewer-agent:environment`) and its added layer was counted instead of the setup container's; nothing is committed any more. The
 Docker images of the runner itself and the images and containers of other things on the daemon are not the job's and not counted. When the measure passes the budget:
 
@@ -664,10 +668,12 @@ Docker images of the runner itself and the images and containers of other things
    commit, so the daemon frees its layers). A hosted VM loses all of this with the VM; a machine would keep it.
 
 **The budget is an emergency brake, not a quota.** The measure is taken every 20 seconds, so a job can write more than the budget
-between two looks (the job is ended at the next one, and what it wrote is removed); and some things are **not measured**: what a job's
-Docker inside **Sysbox** writes (the inner Docker's images and containers live under `/var/lib/sysbox` on the host, which is not walked and
-which the daemon's size figure for the outer container does not include), **container logs** (the unit rotates its own; the logs of the
-job's containers are not counted), and anything outside the folders and layers above. The budget stops a job that fills the disk; it does not
+between two looks (the job is ended at the next one, and what it wrote is removed); and some things are **not measured**: **container logs**
+(the unit rotates its own; the logs of the job's containers are not counted), what the inner Docker's containers hold in **volumes outside**
+`/var/lib/docker` of their container (a bind of the repository is the repository's, measured above), and anything outside the folders, layers and
+inner data above. (Until #1009 the inner Docker's data was not measured at all; the measure is a `du` of the data directory in the
+container, **not yet proven against a real Sysbox container** in a lane: CI has Sysbox only in the KVM lane, which does not run the process mode
+this budget belongs to.) The budget stops a job that fills the disk; it does not
 promise that a job stays below the number, and it is no replacement for keeping free space on the machine.
 
 Without `diskGb` there is no budget and the machine's disk is the limit; the app still shows the free space of `/work` as the disk of the
@@ -907,7 +913,7 @@ What the unit tests cannot know and the first install must check (the installer 
 - **The installed script is the release's.** `libexec/host.sh` runs as root and comes from the signed program; the installer that is run first (`curl | sh`) is the only unsigned step (see the security notes).
 - **No resume of a half download.** A download that fails starts the file again at the next run; the staging directory is removed. Two releases of the VM artifacts (current and previous) take about twice their size on disk.
 - **`--parallel-runs` is fixed at install** (`--refresh` changes it; `factory-runner config set --parallel` still refuses more than one). A change takes effect when the service next starts (`prestart` makes the TAP devices).
-- **The disk budget is an emergency brake** (measured every 20 seconds; not the inner Docker of Sysbox, not container logs; see "Limits").
+- **The disk budget is an emergency brake** (measured every 20 seconds; the inner Docker of Sysbox is counted by a `du` in the container, container logs are not; see "Limits").
 - **One dispatcher per machine.** The launcher takes a lock on `/var/lib/code-reviewer/dispatcher.lock` (a second dispatcher, `run --once` included, ends with exit code 9) and the installer refuses a second install. The
   host has no Docker for the runner, so there is no daemon to share (the fixed container names and the one-runner-per-daemon rule of R2 belong to the process mode of the tests).
 - **Snapshot and stored session.** Resume works on customer runners (#879, #974, "Resume on customer runners"): the Worker sends `PUT .../session` and `GET .../resume-session` to the Worker API when
