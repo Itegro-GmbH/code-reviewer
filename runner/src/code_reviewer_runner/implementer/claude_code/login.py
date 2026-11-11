@@ -8,8 +8,11 @@ it is printed once and stored nowhere by Claude Code, and it is **never stored i
 database, never sent to the app, never logged**. The runner reads it from
 
 1. the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else
-2. `claude-code-token` in the runner's home directory (`FACTORY_RUNNER_HOME`), else
-3. `CLAUDE_CODE_OAUTH_TOKEN` in the runner's own environment,
+2. the credential store of the runner's home (`credentials.py`, #980: `factory-runner credential
+   add claude`; the first usable credential serves the self-test and the readiness, while the
+   dispatcher's pool chooses one for each job), else
+3. `claude-code-token` in the runner's home directory (`FACTORY_RUNNER_HOME`), else
+4. `CLAUDE_CODE_OAUTH_TOKEN` in the runner's own environment,
 
 and hands it to the agent's container as `CLAUDE_CODE_OAUTH_TOKEN` for the turn (`command.py`). A
 file must be a plain file (not a link), owned by the user the runner runs as, that only its owner
@@ -36,7 +39,10 @@ OAUTH_VARIABLE: Final = "CLAUDE_CODE_OAUTH_TOKEN"
 API_KEY_VARIABLE: Final = "ANTHROPIC_API_KEY"
 MAX_TOKEN_CHARS: Final = 4096
 _TOKEN: Final = re.compile(rf"[\x21-\x7e]{{1,{MAX_TOKEN_CHARS}}}")
-_HOW: Final = "make one with `claude setup-token` and save it (mode 0600)"
+_HOW: Final = (
+    "make one with `claude setup-token` and add it with "
+    "`factory-runner credential add claude --name NAME`"
+)
 
 
 @dataclass(frozen=True)
