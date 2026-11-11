@@ -153,7 +153,9 @@ def settings_from_environment(
     network_text = environment.get("FACTORY_RUNNER_SLOT_NETWORK", "").strip()
     try:
         slot_network = (
-            parse_slot_network(network_text, parallel_runs) if network_text else DEFAULT_SLOT_NETWORK
+            parse_slot_network(network_text, parallel_runs)
+            if network_text
+            else DEFAULT_SLOT_NETWORK
         )
     except ValueError as error:
         raise SettingsError(f"FACTORY_RUNNER_SLOT_NETWORK must be {error}") from None

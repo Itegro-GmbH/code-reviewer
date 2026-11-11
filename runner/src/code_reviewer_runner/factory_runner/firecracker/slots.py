@@ -4,14 +4,14 @@
 
 A TAP device is root's to create and the service user's to attach to (spike #970, Q4), so the
 installer (#982) makes one per slot and the number of slots is the number of concurrent jobs
-(`parallelRuns`). A slot's TAP is `fctap<N>`; its /30 network is derived from the number and from the
-slots' network, so the installer (the nft table, #979), the proxy and this launcher agree on it
-without a file: slot N owns the /30 at offset `N*4` of the slots' network, the host side is the first
-address of it and the guest's is the second.
+(`parallelRuns`). A slot's TAP is `fctap<N>`; its /30 network is derived from the number and from
+the slots' network, so the installer (the nft table, #979), the proxy and this launcher agree on it
+without a file: slot N owns the /30 at offset `N*4` of the slots' network, the host side is the
+first address of it and the guest's is the second.
 
 The slots' network is a setting of the machine, chosen by the installer so that it overlaps no
 address or route the machine has (`FACTORY_RUNNER_SLOT_NETWORK`, a /24: 64 slots of 4 addresses).
-`DEFAULT_SLOT_NETWORK` is for the tests and the KVM lane; an installed machine always has its own."""
+`DEFAULT_SLOT_NETWORK` is for the tests and the KVM lane; an installed machine has its own."""
 
 import ipaddress
 from dataclasses import dataclass, field

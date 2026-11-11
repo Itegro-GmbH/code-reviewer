@@ -88,8 +88,8 @@ def test_an_update_with_a_slow_vm_download_does_not_stop_the_service_from_starti
     publish(installed, program=2, vm=11)
     free, switched = installed.state / "lock-free", installed.state / "switch-ran"
     nothing_yet = installed.state / "no-pending-yet"
-    # While the kernel of the new VM release downloads, a start of the service (`switch`) and a rollback
-    # must get the lock at once, and nothing may be staged for a switch yet.
+    # While the kernel of the new VM release downloads, a start of the service (`switch`) and a
+    # rollback must get the lock at once, and nothing may be staged for a switch yet.
     hook = (
         f'flock -n "{lock_path(installed)}" true && echo free >"{free}"; '
         f'[ ! -e "{installed.state_dir / "pending"}" ] && echo yes >"{nothing_yet}"; '
@@ -97,9 +97,7 @@ def test_an_update_with_a_slow_vm_download_does_not_stop_the_service_from_starti
         f'timeout 20 sh "{installed.host_script}" rollback >/dev/null 2>&1; true'
     )
 
-    done = installed.host(
-        "update", env={"STUB_CURL_HOOK_ON": "vmlinux", "STUB_CURL_HOOK": hook}
-    )
+    done = installed.host("update", env={"STUB_CURL_HOOK_ON": "vmlinux", "STUB_CURL_HOOK": hook})
 
     assert done.returncode == 0, done.stderr
     assert free.exists(), "the switch lock was held while the VM artifacts downloaded"
@@ -119,9 +117,7 @@ def test_a_rollback_during_the_download_is_respected_by_the_commit(installed: Ma
     rejected = installed.conf / "rejected-program"
     hook = f'echo 2 >"{rejected}"'
 
-    done = installed.host(
-        "update", env={"STUB_CURL_HOOK_ON": "vmlinux", "STUB_CURL_HOOK": hook}
-    )
+    done = installed.host("update", env={"STUB_CURL_HOOK_ON": "vmlinux", "STUB_CURL_HOOK": hook})
 
     assert done.returncode == 0, done.stderr
     assert "is not taken any more" in done.stdout
@@ -142,7 +138,9 @@ def test_a_failed_vm_stage_does_not_switch_or_stage_the_program(installed: Machi
     assert not (installed.state_dir / "pending").exists()
     assert not (installed.opt / "releases/2").exists(), "a program of a pair that failed is staged"
     assert not (installed.state_dir / "artifact-releases/11").exists()
-    assert not (installed.opt / "staging").exists() and not (installed.state_dir / "staging").exists()
+    assert (
+        not (installed.opt / "staging").exists() and not (installed.state_dir / "staging").exists()
+    )
 
 
 # #982-T51
@@ -156,9 +154,10 @@ def test_a_pair_whose_program_does_not_run_is_dropped_whole(installed: Machine) 
     assert "does not run on this machine" in done.stderr
     assert "came with the program release that was dropped" in done.stderr
     assert installed.release_of("current") == "1"
-    assert installed.release_of("artifacts", parent=installed.state_dir) == "artifact-releases/10"[
-        len("artifact-releases/") :
-    ]
+    assert (
+        installed.release_of("artifacts", parent=installed.state_dir)
+        == "artifact-releases/10"[len("artifact-releases/") :]
+    )
     assert not (installed.state_dir / "pending").exists()
     assert (installed.conf / "rejected-program").read_text() == "2\n"
     assert (installed.conf / "rejected-vm").read_text() == "11\n"
@@ -190,9 +189,8 @@ def test_the_check_restarts_a_running_service_whose_table_is_gone(installed: Mac
     (installed.state / "nft-table").unlink()
     loud = installed.host("check-wall")
 
-    assert quiet.returncode == 0 and installed.calls("systemctl restart") == before + [
-        "systemctl restart factory-runner"
-    ]
+    restarts = installed.calls("systemctl restart")
+    assert quiet.returncode == 0 and restarts == [*before, "systemctl restart factory-runner"]
     assert "gone while the service runs" in loud.stderr
 
 
@@ -303,7 +301,9 @@ def test_a_refresh_keeps_the_network_even_when_a_route_has_appeared_in_it_since(
 
     assert done.returncode == 0, done.stderr
     assert "slot_network=10.250.0.0/24" in (installed.conf / "install.state").read_text()
-    assert "FACTORY_RUNNER_SLOT_NETWORK=10.250.0.0/24" in (installed.conf / "runner.env").read_text()
+    assert (
+        "FACTORY_RUNNER_SLOT_NETWORK=10.250.0.0/24" in (installed.conf / "runner.env").read_text()
+    )
 
 
 # #982-T53
@@ -417,7 +417,9 @@ def test_a_signal_in_the_middle_of_the_taps_undoes_the_install_and_removes_the_w
 
 
 # #982-T55
-def test_the_number_of_taps_is_in_the_state_before_the_first_one_is_made(installed: Machine) -> None:
+def test_the_number_of_taps_is_in_the_state_before_the_first_one_is_made(
+    installed: Machine,
+) -> None:
     script = SCRIPT.read_text()
 
     body = script[script.index("ensure_taps() {") :]
@@ -579,4 +581,3 @@ def test_a_signal_handler_is_installed_for_interrupt_hangup_and_terminate() -> N
         assert f"trap 'on_signal {status}' {name}" in script
     # The prompt for the token sets its own traps and must give these back.
     assert "  set_signal_traps\n" in script[script.index("ask_for_token() {") :]
-

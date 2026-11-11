@@ -139,6 +139,22 @@ def test_more_than_one_job_at_a_time_is_refused_with_the_reason(tmp_path: Path) 
     assert "one job at a time" in err
 
 
+# #982-T59
+@pytest.mark.parametrize("option", ["--runtime", "--agent-image"])
+def test_the_options_of_the_docker_runner_are_refused_not_accepted_and_ignored(
+    tmp_path: Path, option: str
+) -> None:
+    register(tmp_path)
+    path = tmp_path / "home" / "config.json"
+    before = path.read_text()
+
+    code, _, err = invoke(tmp_path, "config", "set", option, "x")
+
+    assert code == EXIT_USAGE
+    assert f"{option} is not a setting any more" in err and "Firecracker VM" in err
+    assert path.read_text() == before
+
+
 def test_auto_update_is_a_switch_and_config_show_has_it(tmp_path: Path) -> None:
     register(tmp_path)
 

@@ -126,9 +126,7 @@ def test_a_process_with_no_variable_has_no_proxy_and_dials_as_hosted() -> None:
 
 
 # #994-T04
-@pytest.mark.parametrize(
-    "value", ["", "172.31.0.1", "172.31.0.1:", "172.31.0.1:x", "8.8.8.8:3128"]
-)
+@pytest.mark.parametrize("value", ["", "172.31.0.1", "172.31.0.1:", "172.31.0.1:x", "8.8.8.8:3128"])
 def test_a_variable_that_is_set_and_wrong_is_an_error_not_a_direct_connection(value: str) -> None:
     with pytest.raises(OuterProxyError):
         outer_proxy_of({OUTER_PROXY_VARIABLE: value})

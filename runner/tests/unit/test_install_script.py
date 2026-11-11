@@ -917,7 +917,11 @@ def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it
     assert "was rolled back" in again.stdout and not (installed.state_dir / "pending").exists()
     publish(installed, program=3, vm=12)
     assert installed.host("update").returncode == 0
-    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=3", "vm=12", "pair=1"]
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=12",
+        "pair=1",
+    ]
 
 
 def test_a_rollback_with_a_staged_release_cancels_it_instead_of_going_back(

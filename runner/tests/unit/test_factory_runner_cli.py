@@ -104,6 +104,18 @@ def test_register_exchanges_the_token_and_writes_a_private_file(tmp_path: Path) 
     assert CREDENTIAL not in out + err and TOKEN not in out + err
 
 
+# #982-T59
+@pytest.mark.parametrize("option", ["--runtime", "--agent-image"])
+def test_register_refuses_the_options_of_the_docker_runner(tmp_path: Path, option: str) -> None:
+    app = FakeApp()
+
+    code, _, err = invoke(tmp_path, "register", "--token", TOKEN, option, "x", app=app)
+
+    assert code == EXIT_USAGE
+    assert f"{option} is not a setting any more" in err
+    assert app.registered == [] and not (tmp_path / "home" / "config.json").exists()
+
+
 # #854-N1
 def test_register_takes_the_token_from_a_file_from_stdin_or_the_environment(
     tmp_path: Path,

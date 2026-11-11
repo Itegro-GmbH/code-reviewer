@@ -94,7 +94,10 @@ def test_a_network_that_is_not_a_private_network_is_refused_naming_the_setting(v
 def test_a_network_without_room_for_the_slots_is_refused() -> None:
     with pytest.raises(SettingsError, match="room for 5 slots"):
         settings_from_environment(
-            {"FACTORY_RUNNER_VM_IMAGE_ID": IMAGE_ID, "FACTORY_RUNNER_SLOT_NETWORK": "10.250.0.0/28"},
+            {
+                "FACTORY_RUNNER_VM_IMAGE_ID": IMAGE_ID,
+                "FACTORY_RUNNER_SLOT_NETWORK": "10.250.0.0/28",
+            },
             parallel_runs=5,
         )
     assert parse_slot_network("10.250.0.0/28", 4).num_addresses == 16

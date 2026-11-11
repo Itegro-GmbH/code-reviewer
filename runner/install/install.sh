@@ -134,6 +134,7 @@ trap cleanup EXIT
 
 # A signal ends the script like a failure does: what an install made is removed, the work directory goes (`exit` runs the EXIT trap;
 # dash runs none on a signal itself).
+# shellcheck disable=SC2317 # run by the traps below
 on_signal() { # on_signal STATUS
   trap '' INT HUP TERM
   printf 'install: interrupted\n' >&2
@@ -299,6 +300,7 @@ nearest_dir() {
 capped() { # capped BYTES COMMAND...
   limit="$1"
   shift
+  # shellcheck disable=SC3045 # dash, bash and busybox all take -S: a limit the process cannot raise (curl, zstd and tar do not try)
   ( ulimit -S -f $(( limit / 512 + 2 )) || exit 1; "$@" )
 }
 
@@ -320,6 +322,7 @@ fetch() { # fetch URL FILE MAXBYTES
   fi
 }
 
+# shellcheck disable=SC2317 # run by `capped`, which only sees its name
 fetch_same_host() { # fetch_same_host CONFIG URL FILE MAXBYTES
   url="$2"
   origin="${url#https://}"
@@ -469,7 +472,7 @@ check_given_network() { # check_given_network A.B.C.0/24
     10.*.*.0/24|192.168.*.0/24) ;;
     *) fail "$usage_hint" ;;
   esac
-  IFS=. read -r a b c d <<EOF
+  IFS=. read -r a b c _ <<EOF
 ${1%/24}
 EOF
   unset IFS
@@ -557,7 +560,7 @@ preflight() {
     user_exists && fail "the user $SVC_USER exists and was not made by this installer: the service user must own nothing else (nothing was changed)"
     # What an install makes is removed again by the uninstall and by a failed install: so none of it may exist before. The state
     # directory may be an empty directory (a volume of its own, with a lost+found); it stays, its contents go.
-    if [ -d "$STATE" ] && [ -n "$(ls -A "$STATE" 2>/dev/null | grep -v '^lost+found$' || true)" ]; then
+    if [ -d "$STATE" ] && [ -n "$(find "$STATE" -mindepth 1 -maxdepth 1 ! -name 'lost+found' 2>/dev/null | head -n 1)" ]; then
       fail "$STATE_PATH exists and is not empty: it is the state directory of the runner (nothing was changed)"
     fi
     { [ ! -e "$OPT" ] && [ ! -L "$OPT" ]; } || fail "$OPT_PATH exists and was not made by this installer (nothing was changed)"
@@ -749,6 +752,7 @@ stage_program() {
   if grep -Eq '(^/|(^|/)\.\.(/|$)|[^A-Za-z0-9._+/@=-])' "$stage/names"; then
     fail "the program holds a path outside its own tree or an odd name: nothing was installed"
   fi
+  # shellcheck disable=SC2016 # the quotes are for the shell that `capped` starts
   capped "$MAX_PROGRAM_FILE" sh -c 'zstd -dcq "$1" | tar -xf - -C "$2" --no-same-owner --no-same-permissions' sh "$stage/bundle.tar.zst" "$stage/tree" 2>/dev/null \
     || fail "the program could not be unpacked"
   rm -f "$stage/bundle.tar.zst" "$stage/names"

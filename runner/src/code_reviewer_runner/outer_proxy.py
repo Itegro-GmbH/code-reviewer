@@ -69,7 +69,7 @@ class TunnelRefused(OSError):
 
 @dataclass(frozen=True)
 class OuterProxy:
-    """The proxy of this VM's slot: a private IPv4 address (the host's on the slot's TAP) and a port."""
+    """The proxy of this VM's slot: a private IPv4 address (the host's on its TAP) and a port."""
 
     host: str
     port: int

@@ -3,7 +3,6 @@
 """What a runner decides about its machine (#854, R1b): the runtime to try, the memory, the
 environment of the job processes, the announcement, and the limits it puts on the containers."""
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ from code_reviewer_runner.factory_runner.limits import (
 )
 from code_reviewer_runner.factory_runner.prepare import (
     announcement_for,
-    baked_agent_image,
     candidate_runtimes,
     job_environment,
     prepare,
@@ -119,15 +117,6 @@ def test_an_image_reference_splits_into_repository_and_tag_or_digest(
     reference: str, split: tuple[str, str]
 ) -> None:
     assert split_reference(reference) == split
-
-
-def test_the_agent_image_baked_into_the_runner_image_is_read_from_its_file(tmp_path: Path) -> None:
-    file = tmp_path / "agent-image.json"
-    file.write_text(json.dumps({"reference": "ghcr.io/x/agent:1"}))
-    assert baked_agent_image(file) == "ghcr.io/x/agent:1"
-    file.write_text(json.dumps({"reference": ""}))
-    assert baked_agent_image(file) is None
-    assert baked_agent_image(tmp_path / "missing.json") is None
 
 
 # -- the environment of the job processes ------------------------------------------------------

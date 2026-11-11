@@ -58,10 +58,27 @@ SETTING_OPTIONS = (
     ("memoryMb", "--memory-mb", "memory of the agent's container, or none"),
     ("diskGb", "--disk-gb", "the disk budget of a job in GB (/work and its containers), or none"),
     ("parallelRuns", "--parallel", "jobs at a time (this runner takes one)"),
-    ("runtime", "--runtime", "auto, runc or sysbox-runc"),
-    ("agentImage", "--agent-image", "the agent image to pull, or none for the built-in one"),
     ("autoUpdate", "--auto-update", "on or off: the scheduled look for a signed release"),
 )
+# Options of the Docker-based runner that did nothing once every job ran in a Firecracker VM, whose
+# container runtime and agent image are part of the signed VM artifacts: refused with this message
+# instead of being accepted and ignored.
+REMOVED_OPTIONS = {"--runtime": "runtime", "--agent-image": "agent_image"}
+REMOVED_MESSAGE = (
+    "{option} is not a setting any more: every job runs in a Firecracker VM, and its container "
+    'runtime and agent image are part of the signed VM artifacts (docs/runner.md, "Install")'
+)
+
+
+def refuse_removed_options(arguments: argparse.Namespace, err: TextIO) -> bool:
+    """Whether a removed option was given (and said so)."""
+    for option, name in REMOVED_OPTIONS.items():
+        if getattr(arguments, name, None) is not None:
+            err.write(f"{PROGRAM}: {REMOVED_MESSAGE.format(option=option)}\n")
+            return True
+    return False
+
+
 # What the environment of a VM can override, and so what `config set` may change without effect.
 OVERRIDING_VARIABLES = {
     "name": "FACTORY_RUNNER_NAME",
@@ -69,8 +86,6 @@ OVERRIDING_VARIABLES = {
     "cpus": "FACTORY_RUNNER_CPUS",
     "memoryMb": "FACTORY_RUNNER_MEMORY_MB",
     "diskGb": "FACTORY_RUNNER_DISK_GB",
-    "runtime": "FACTORY_RUNNER_RUNTIME",
-    "agentImage": "FACTORY_RUNNER_AGENT_IMAGE",
     "autoUpdate": "FACTORY_RUNNER_AUTO_UPDATE",
 }
 DAY_SECONDS = 86400.0
@@ -83,6 +98,8 @@ def add_parsers(commands: "argparse._SubParsersAction[Any]") -> None:  # pyright
     change = actions.add_parser("set", help="change settings in the configuration file")
     for _key, option, help_text in SETTING_OPTIONS:
         change.add_argument(option, help=help_text)
+    for option, name in REMOVED_OPTIONS.items():
+        change.add_argument(option, dest=name, help=argparse.SUPPRESS)
 
     credential = commands.add_parser(
         "credential", help="the runner's credential, and the Claude Code credentials of this device"
@@ -134,12 +151,14 @@ def config_show(env: Mapping[str, str], out: TextIO) -> int:
 def config_set(
     arguments: argparse.Namespace, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> int:
+    if refuse_removed_options(arguments, err):
+        return EXIT_USAGE
     changes: dict[str, object] = {}
     for key, option, _help in SETTING_OPTIONS:
         raw = getattr(arguments, option.lstrip("-").replace("-", "_"))
         if raw is None:
             continue
-        removable = key not in ("name", "labels", "runtime", "autoUpdate", "parallelRuns")
+        removable = key not in ("name", "labels", "autoUpdate", "parallelRuns")
         changes[key] = None if removable and raw.strip().lower() in UNSET_WORDS else raw
     if not changes:
         err.write(f"{PROGRAM}: config set needs at least one setting (see --help)\n")

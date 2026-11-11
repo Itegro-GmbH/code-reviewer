@@ -65,17 +65,16 @@ from code_reviewer_runner.factory_runner.base import (
     EXIT_USAGE,
 )
 from code_reviewer_runner.factory_runner.claude_code_selftest import device_checks
+from code_reviewer_runner.factory_runner.cli_manage import REMOVED_OPTIONS
 from code_reviewer_runner.factory_runner.config import (
     SANDBOX_FIRECRACKER,
     SANDBOX_VARIABLE,
     ConfigError,
     Limits,
     RunnerConfig,
-    check_image,
     check_labels,
     check_limits,
     check_name,
-    check_runtime,
     check_token,
     check_url,
     config_path,
@@ -170,8 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--cpus", type=int, help="CPUs the agent's container may use")
     register.add_argument("--memory-mb", type=int, help="memory of the agent's container")
     register.add_argument("--disk-gb", type=int, help="disk the runner may use")
-    register.add_argument("--runtime", default="auto", help="auto, runc or sysbox-runc")
-    register.add_argument("--agent-image", help="the agent image to pull when it is not here")
+    for option, name in REMOVED_OPTIONS.items():
+        register.add_argument(option, dest=name, help=argparse.SUPPRESS)
     register.add_argument("--force", action="store_true", help="replace an existing configuration")
 
     run = commands.add_parser("run", help="take jobs")
@@ -258,6 +257,8 @@ def _register(
     err: TextIO,
     stdin: TextIO,
 ) -> int:
+    if cli_manage.refuse_removed_options(arguments, err):
+        return EXIT_USAGE
     path = config_path(env)
     if path.exists() and not arguments.force:
         err.write(f"{PROGRAM}: {path} exists: this machine is registered (--force replaces it)\n")
@@ -288,8 +289,6 @@ def _register(
                 if value is not None
             }
         ),
-        agent_image=check_image(arguments.agent_image) if arguments.agent_image else None,
-        runtime=check_runtime(arguments.runtime),
     )
     # The manifest is empty: what the runner can do is proven by `run`'s self-test, which announces
     # it. A runner that is registered and not yet started takes no job.
