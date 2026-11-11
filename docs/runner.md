@@ -730,7 +730,7 @@ switches now and gives the running jobs back to the queue).
 (`Restart=always`, `RestartSec=10`; exit code 5 waits five minutes first) and **there is no automatic watchdog** that rolls it back (a follow-up): `sudo factory-runner rollback --now`. If the service
 is in a restart loop the next start switches at once, because `rollback` wrote `pending`.
 
-**What is not in this repository, for the owner.** The release pipeline of the **program** does not exist yet, and the places the files go are the owner's decisions (below). What a release must make:
+**What is not in this repository, for the owner.** The release pipeline of the **program** does not exist yet (follow-up #1002), and the places the files go are the owner's decisions (below). What a release must make:
 
 1. **The program tarball** `factory-runner-<N>-x86_64.tar.zst`, a tar in zstd of a relocatable tree: `bin/factory-runner` (a script that finds its own directory with `readlink -f` and starts the
    bundled Python from there), `bin/firecracker` (the pinned Firecracker of `docker/vm/pins.env`, Apache-2.0: its licence goes into `THIRD_PARTY_LICENSES.md`), `share/outer-wall.nft` (the file of the repository),
