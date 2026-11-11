@@ -39,6 +39,22 @@ env:
   VM_WORK: /mnt/vm
 
 jobs:
+  # The installer (#982, runner/install/install.sh) on a real systemd, nft and `ip tuntap`, with a stand-in program and small signed releases served over
+  # https on the loopback: install, the unit's sandbox probed from inside the unit, update between jobs, rollback, a bad signature, uninstall.
+  # No VM boots here (the build job below has the artifacts and runs the launcher lane). Not part of a release build.
+  installer:
+    name: "Installer lane: install, update, rollback, uninstall (real systemd)"
+    if: ${{ !inputs.for_release }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Installer lane
+        run: runner/tests/kvm/installer/lane.sh
+
   kernel:
     name: "VM artifacts: guest kernel"
     runs-on: ubuntu-24.04

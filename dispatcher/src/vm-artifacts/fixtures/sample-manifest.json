@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "release": 10,
+  "arch": "x86_64",
+  "builtAt": "2026-11-10T12:00:00.000Z",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "files": {
+    "kernel": {
+      "name": "vmlinux",
+      "size": 1100,
+      "sha256": "bb8dbdece60584ee7fa646cd1621eca42fd9389d8053c49641ba50158d00dc5c"
+    },
+    "rootfs": {
+      "name": "rootfs.ext4.zst",
+      "size": 42,
+      "sha256": "b0bf025ef70b3897bbb87e3b2e7c578f1fd1c0301e89b08b8d0b96d7937bd98d",
+      "uncompressed": {
+        "size": 10500,
+        "sha256": "5fcbd060770c9abd65ae1269ad4d50fd2123067d6b3616d627ad6aaecd7a4716"
+      }
+    },
+    "dockerData": {
+      "name": "dockerdata.ext4.zst",
+      "size": 45,
+      "sha256": "b27ced821475e060ef9d93ac6af62ecc98a046498d77b93e8885767c2b5ea533",
+      "uncompressed": {
+        "size": 19200,
+        "sha256": "73e7553745f3f11c3303175b87cc70d82f42503f01de487a616c5dfeab5ec3bb"
+      }
+    },
+    "kernelSource": {
+      "name": "linux-6.18.62.tar.xz",
+      "size": 6,
+      "sha256": "41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d"
+    },
+    "kernelConfig": {
+      "name": "kernel.config",
+      "size": 6,
+      "sha256": "b79606fb3afea5bd1609ed40b622142f1c98125abcfe89a76a661b0e8e343910"
+    },
+    "kernelBaseConfig": {
+      "name": "fc-base.config",
+      "size": 4,
+      "sha256": "cae662172fd450bb0cd710a769079c05bfc5d8e35efa6576edc7d0377afdd4a2"
+    },
+    "kernelFragment": {
+      "name": "config.fragment",
+      "size": 8,
+      "sha256": "7587669ca42e19e8a9aa89df1c2d901970d2966ddddfc30b86120f3c933a9f5e"
+    },
+    "packages": {
+      "name": "packages.txt",
+      "size": 8,
+      "sha256": "b28b1ed9821f38c64524ea13e19264bb0772f8376afffd5d8a1f8277621833eb"
+    }
+  },
+  "kernel": {
+    "version": "6.18.62",
+    "sourceSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "baseConfigSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "fragmentSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "configSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "bootArgs": "reboot=k panic=1 8250.nr_uarts=0 quiet loglevel=0",
+    "initCommand": "/usr/bin/docker-init -- /usr/local/sbin/vm-boot"
+  },
+  "firecracker": {
+    "version": "1.17.0"
+  },
+  "components": {
+    "ubuntuBase": "26.04.1",
+    "dockerd": "29.0.0",
+    "buildx": "0.30.0",
+    "sysbox": "0.7.1",
+    "sysboxSha256": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "images": {
+    "worker": {
+      "tag": "code-reviewer-worker:golden",
+      "id": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "agent": {
+      "tag": "code-reviewer-agent:golden",
+      "id": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  }
+}

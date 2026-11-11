@@ -21,6 +21,7 @@ import termios
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from host_install_support import (
@@ -1146,3 +1147,21 @@ def test_the_nft_table_the_program_carries_is_the_one_of_the_repository(installe
 
     assert loaded == (REPOSITORY_ROOT / "docker/vm/host/outer-wall.nft").read_text()
     assert "table inet code_reviewer_wall" in loaded
+
+
+def shape(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: shape(item) for key, item in sorted(cast("dict[str, object]", value).items())}
+    return type(value).__name__
+
+
+# #982: the sample is also parsed by the verifier's own schema (dispatcher channel.test.ts).
+def test_the_manifest_of_these_tests_has_the_shape_the_typescript_verifier_parses(
+    machine: Machine,
+) -> None:
+    sample = json.loads(
+        (REPOSITORY_ROOT / "dispatcher/src/vm-artifacts/fixtures/sample-manifest.json").read_text()
+    )
+    served = json.loads((machine.served / "vm-artifacts-manifest.json").read_text())
+
+    assert shape(served) == shape(sample)

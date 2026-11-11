@@ -56,6 +56,11 @@ class Release:
         default_factory=lambda: ec.generate_private_key(ec.SECP256R1())
     )
     image_id: str = "sha256:" + "5" * 64
+    # The lane's own program (tests/kvm/installer): `bin/factory-runner` and more files for the bundle.
+    runner_script: str | None = None
+    extra_files: dict[str, tuple[bytes, int]] = field(
+        default_factory=lambda: dict[str, tuple[bytes, int]]()
+    )
     # Changes the tests make to what is published, by name.
     tamper: set[str] = field(default_factory=lambda: set[str]())
 
@@ -93,7 +98,7 @@ class Release:
     def bundle(self) -> bytes:
         """The program tarball: `bin/factory-runner`, `bin/firecracker`, `share/outer-wall.nft`
         and `libexec/host.sh` (this very script, as a release carries it)."""
-        runner = FACTORY_RUNNER.replace("@RELEASE@", str(self.program))
+        runner = (self.runner_script or FACTORY_RUNNER).replace("@RELEASE@", str(self.program))
         if "program-broken" in self.tamper:
             runner = "#!/bin/sh\nexit 3\n"
         files: dict[str, tuple[bytes, int]] = {
@@ -101,6 +106,7 @@ class Release:
             "bin/firecracker": (b'#!/bin/sh\necho "Firecracker v1.17.0"\n', 0o755),
             "share/outer-wall.nft": (NFT_FILE.read_bytes(), 0o644),
             "libexec/host.sh": (SCRIPT.read_bytes(), 0o755),
+            **self.extra_files,
         }
         for name in self.tamper:
             if name.startswith("bundle-drop:"):
@@ -234,11 +240,11 @@ class Release:
             data_bytes[-1] ^= 1
             (served / name).write_bytes(bytes(data_bytes))
 
-    def write_channels(self, folder: Path) -> tuple[Path, Path]:
+    def write_channels(self, folder: Path, base: str | None = None) -> tuple[Path, Path]:
         folder.mkdir(parents=True, exist_ok=True)
         program, vm = folder / "program-channel.json", folder / "vm-channel.json"
-        program.write_text(json.dumps(self.program_channel(), indent=2))
-        vm.write_text(json.dumps(self.vm_channel(), indent=2))
+        program.write_text(json.dumps(self.program_channel(base or PROGRAM_BASE), indent=2))
+        vm.write_text(json.dumps(self.vm_channel(base or VM_BASE), indent=2))
         return program, vm
 
 

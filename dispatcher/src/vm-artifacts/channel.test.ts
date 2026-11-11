@@ -4,6 +4,7 @@ import { createPublicKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parseManifest } from "./verify.ts";
 
 const REPO = join(import.meta.dirname, "..", "..", "..");
 const channel = JSON.parse(
@@ -59,5 +60,22 @@ describe("the address the installer downloads from (#982)", () => {
     }
     expect(String(base)).toMatch(/^https:\/\//);
     expect(channel.publicKey).not.toBe("");
+  });
+});
+
+describe("the manifest the installer reads (#982)", () => {
+  // The shell installer reads the manifest with jq, and its tests build releases of this shape in Python
+  // (runner/tests/unit/host_install_support.py, which compares its manifest to this file by shape). The same file
+  // must parse here, so a change of the schema breaks one of the two sides loudly and is made in both.
+  it("is parsed by the verifier's own schema", () => {
+    const sample = readFileSync(
+      join(import.meta.dirname, "fixtures", "sample-manifest.json"),
+    );
+    const manifest = parseManifest(sample);
+    expect(manifest.release).toBeGreaterThanOrEqual(1);
+    expect(manifest.files.rootfs.name).toBe("rootfs.ext4.zst");
+    expect(manifest.files.dockerData.name).toBe("dockerdata.ext4.zst");
+    expect(manifest.files.kernel.name).toBe("vmlinux");
+    expect(manifest.images.worker.id).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 });

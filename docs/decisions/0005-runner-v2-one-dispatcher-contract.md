@@ -200,3 +200,15 @@ subscription login through a door.
 ## 7. Out of scope
 
 Everything of M2 and M3 (the Firecracker launcher and the rest): each is its own issue of epic #969.
+
+## 3h. Details of #982
+
+- **No Docker on the host, and the old mode is gone.** The installer (`runner/install/install.sh`, root once) makes the service user (a member of `kvm`), the TAP devices of `parallelRuns` slots owned by it, the static nft table of #979, a systemd unit with `Delegate=yes` and a sandbox,
+  the program and the VM artifacts (kernel, root file system, Docker data disk), each downloaded by the digests of a **signed manifest** and verified with `openssl`, `jq`, `zstd` and `sha256sum` (the same checks as `dispatcher/src/vm-artifacts/verify.ts`; a customer's machine has no Node). The runner image
+  (`Dockerfile.factory-runner`), the Docker socket unit, the Sysbox opt-in step and the image-based update are deleted; `factory-runner run` ends with exit code 6 unless `FACTORY_RUNNER_SANDBOX=firecracker`. No runner was published, so there is no migration window.
+- **The artifacts are root's.** `artifacts/` is root-owned and read-only for the service (a VMM that escaped must not overwrite the kernel or the root file system every later VM boots from); the service owns `vms/`, `dispatcher.lock` and its home. Updates therefore cannot be done by the dispatcher:
+  **a root timer stages** a release (`update`, signed manifest, download by digest, verify, move into `releases/<N>`, write the marker `pending`) and **the service's own restart switches** (`ExecStartPre=+ … prestart`: a smoke test, one atomic link per part, the previous release kept for `factory-runner rollback`). The dispatcher
+  only looks for `pending` between two jobs and ends with exit code 10; it downloads nothing and knows no channel. Never triggered from the app.
+- **`proxy` is verified at every start.** The unit sets `FACTORY_RUNNER_OUTER_WALL=proxy` only because `nft list table inet code_reviewer_wall` succeeded at install, and `prestart` (root) loads the table and fails the start unless it lists again. The dispatcher still cannot read nft state; the root step is the check.
+- **Two release channels, an address that is the owner's.** The program (`runner/release-channel.json`, version 2) and the VM artifacts (`docker/vm/release-channel.json`) each have `baseUrl`, `manifestAsset`, `signatureAsset` and `publicKey`; where the files are (a GitHub release or protected storage, with `--curl-config` for a login) is the owner's decision (#969 checklist).
+- **Not done:** the program tarball and its pipeline (a relocatable Python with the wheel, Firecracker, the table and `libexec/host.sh`; format in `docs/runner.md`, "Updates"), an expiry in the manifest, a watchdog that rolls a failing release back, a signed channel file inside the release for key rotation.

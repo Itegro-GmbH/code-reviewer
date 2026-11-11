@@ -280,19 +280,22 @@ Worker and the containers it starts. The code is
 `factory-runner`.
 
 ```
-machine (Linux, Docker)
-├─ factory-runner  (container of the runner image, root, the host's Docker socket, a volume at /work): the local dispatcher
+machine (Linux, KVM, systemd; no Docker)
+├─ factory-runner.service  (the service user, Delegate=yes; the program is root's and read-only): the local dispatcher
 │    ├─ announce (PUT /self): labels, base version, manifest {harness entries, capabilities}, limits
 │    ├─ claim (POST /claim, every 30 s or so; it is also the heartbeat of the runner): the job id and the credential of its Worker (crj_), nothing secret
-│    ├─ start the Worker (a process of this container; or, with FACTORY_RUNNER_SANDBOX=firecracker, in a microVM: see "The Firecracker launcher") with {appUrl, jobId, credential} on its stdin
-│    │    and, if the job asks for it, the one credential of this device (a Claude Code subscription), read from the token file of R3: never through the app
-│    ├─ watch it: the local reaper (GET /jobs/{id} with the runner's credential), the claim given back when the Worker could not start or ended without a result (POST /jobs/{id}/release)
-│    └─ the Worker (`code-reviewer-runner`'s `local_worker`): fetch the job over /api/workers/v1 with crj_, job host (job process with the job on stdin, heartbeats, steps, result), delivery
-│         └─ through the host's Docker, per turn:  model door · agent container (the pinned OpenCode) · reader · git mirror
-└─ volumes: factory-runner-home (the configuration), factory-runner-work (/work: mirror, repository, result)
+│    ├─ per claim, in a free slot: a TAP device (fctapN) and a job disk (a copy-on-write copy of the base disk), a cgroup, a Firecracker microVM (the launcher below)
+│    │    with {appUrl, jobId, credential} (and, if the job asks for it, the one credential of this device) on vsock: never through the app
+│    ├─ watch it: the local reaper (GET /jobs/{id} with the runner's credential), the claim given back when the VM could not start or ended without a result (POST /jobs/{id}/release)
+│    └─ in the VM (the hosted VM's content): vm-init → Control (the Worker image): the job host, the model door, the agent in its own Docker with Sysbox, delivery
+├─ the outer wall: a static nft table on the TAP devices and the dispatcher's proxy (the VM reaches the proxy and nothing else)
+└─ factory-runner-update.timer (root): stages a signed release; the service switches to it between two jobs
 ```
 
+
 ### What is the same as hosted, and what is not
+
+*(The table describes the Worker as the loop's tests run it, a process on a Docker daemon. On an installed machine, since #982, the same code runs in a VM whose content is the hosted VM's: the agent is a container of the VM's own Docker under Sysbox, `agent-docker` is always there, and the sizing is the VM's, see "The Firecracker launcher".)*
 
 | Part                                     | On a runner                                                                                                                                           |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -304,15 +307,16 @@ machine (Linux, Docker)
 | Session snapshot and stored session      | As hosted: `PUT /api/workers/v1/jobs/{id}/session` and `GET .../resume-session` (see "Resume on customer runners"). |
 | Sizing                                   | The configured memory and CPUs, not the VM size the Dispatcher computes. One run at a time.                                                           |
 
-### Install (one line, R2)
+### Install (a machine with KVM, #982)
 
-For a Linux machine with **Docker** (the engine, not rootless), **systemd** and x86_64. Create a registration token in the app
-(Owner or Admin: Runners, "Add a runner"; it is valid for an hour and works once), then, as root. **The installer asks for the token on
-the terminal** (the input is hidden; nothing of it is in the process list, the shell history or the log of `sudo`):
+For a Linux machine with **KVM** (`/dev/kvm`), **systemd 247 or newer** with cgroup v2, and x86_64. **Docker is not needed and is never touched**: the
+runner starts every job in a Firecracker microVM ([the launcher](#the-firecracker-launcher-978)) and the VM has the Docker. Create a
+registration token in the app (Owner or Admin: Runners, "Add a runner"; it is valid for an hour and works once), then, as root. **The installer
+asks for the token on the terminal** (the input is hidden; nothing of it is in the process list, the shell history or the log of `sudo`):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Itegro-GmbH/code-reviewer/main/runner/install/install.sh | sudo sh
-# settings go behind `-s --`:   ... | sudo sh -s -- --labels linux,gpu --disk-gb 50
+# settings go behind `-s --`:   ... | sudo sh -s -- --labels linux,gpu --parallel-runs 2 --disk-gb 50
 ```
 
 or from a file that only root can read (save the script first: under `curl | sh` the standard input *is* the script, so `--token-file -`
@@ -325,131 +329,109 @@ sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
 
 `FACTORY_RUNNER_TOKEN=crt_... sudo sh install.sh` also works, but **only use it on a machine where that does not matter**: the token is
 then in your shell history, in the log of `sudo` and, while the command starts, in the process list. The installer prints that warning when
-the token came from the environment. (The token is valid for one hour and works once, which limits what a leak costs, not whether to avoid it.)
+the token came from the environment. A token is never an argument (`--token` is refused).
 
-[`runner/install/install.sh`](../runner/install/install.sh) is one POSIX shell file. In this order it:
+**The old mode is gone.** There is no install on the host's Docker socket, no runner image (`runner/Dockerfile.factory-runner` and its CI
+build are deleted), no Sysbox step on the host (Sysbox is in the VM), no image-based update and no Worker-as-a-process fallback in the program
+(`factory-runner run` ends with exit code 6 unless `FACTORY_RUNNER_SANDBOX=firecracker`, which the unit sets). No runner was ever published, so
+there is **no migration window**: an older, Docker-based install is not recognised, and the installer stops when it finds its unit.
 
-1. **checks** Linux, x86_64, root, Docker (the daemon answers, not rootless), systemd, `curl`, `openssl`, `base64` and `sha256sum`;
-2. reads the **release channel** (`runner/release-channel.json`: the image repository, the addresses of the signed release manifest and its
-   signature, and the public key that proves them; or the file you name with `--channel-file`). **Empty until the owner fills it: then the
-   installer stops with "no runner image is published yet"** and installs nothing;
-3. fetches the **manifest and its signature**, **verifies the signature with `openssl`** (ECDSA P-256, SHA-256; see "Updates"), **pulls the image
-   by the digest the manifest names**, checks that the image carries the release number the manifest names, and names it `factory-runner:current`.
-   A manifest that does not verify, or an image that is not the release it names, installs nothing (the image is removed again). **The installer
-   never goes back**: it reads the release of the installed `current`, and when the announced release is the same, older, or one a
-   `factory-runner update --rollback` rejected (see "Updates"), it pulls nothing and changes no tag. `previous` is set only when `current` changes;
-4. writes the **command** `/usr/local/bin/factory-runner` (a throwaway container of `factory-runner:current` with the socket, the
-   configuration volume and `/work`) and the **systemd unit** `/etc/systemd/system/factory-runner.service`: the container `run --rm
-   --stop-timeout 150` with the host's Docker socket (for the runner only: the agent never gets it), the volumes `factory-runner-home`
-   (the configuration, the credential) and `factory-runner-work` (`/work`), `FACTORY_RUNNER_IMAGE_TAG=factory-runner:current`,
-   `Restart=always` (but not after exit codes 4 revoked, 6 configuration, 9 shared daemon), `TimeoutStopSec=170` and a rotated log of the
-   container (`--log-opt max-size=10m --log-opt max-file=3`);
-5. **registers** the machine with the token and applies `--name --labels --url --cpus --memory-mb --disk-gb`;
-6. enables and **starts** the service.
+**What it checks first, and where it stops.** Nothing is changed until all of this has passed (every stop says "nothing was changed"):
 
-The token is **never an argument** (`--token` is refused, it would be in the process list and the shell history): it comes from
-`--token-file FILE` (`-`: standard input; a file that is named and cannot be read is an error, not a silent skip), from
-`FACTORY_RUNNER_TOKEN` (with the warning above), or is asked for on the terminal without echo. It reaches the registration on the
-standard input of a container, in no argument and no environment of it. With no token the service is installed and not started, and the
-script prints the command to register by hand: `factory-runner register --token-file - < /path/to/token-file` (your shell opens the
-file, the command passes it on as the container's standard input; a path the container cannot see is not needed) and then
-`systemctl enable --now factory-runner`.
+| Check | When it fails |
+|---|---|
+| Linux, x86_64, root | stops (macOS and arm64 come with their own backends) |
+| **`/dev/kvm` exists** | stops and explains: a physical machine needs virtualization enabled in the firmware and the `kvm` modules; **a cloud VM needs nested virtualization** (a bare-metal type or a VM family that exposes `/dev/kvm`); a container has none |
+| `/dev/kvm` can be opened by root; the group `kvm` exists | stops (the service user opens the device through the group; a device owned by another group gets a warning and the proof after the user is made: a try as that user) |
+| systemd ≥ 247, `/run/systemd/system`, cgroup v2 at `/sys/fs/cgroup` | stops (delegation and the sandboxing options of the unit; the VM limits are cgroup v2) |
+| `nft`, `ip`, `curl`, `openssl`, `jq`, `zstd`, `tar`, `flock`, `runuser`, `useradd`, `userdel`, `resize2fs`, `e2fsck`, `sha256sum`, `base64` | stops and names the package |
+| **an install exists** (`/etc/code-reviewer/install.state`) | stops: update it with `sudo factory-runner update`, or run the installer over it with `--refresh`. **A second dispatcher on one machine is refused**: the launcher takes a lock on its state directory (a second one ends with exit code 9), and the installer reuses nothing it did not make |
+| a unit `factory-runner.service`, the user `factory-runner`, a non-empty `/var/lib/code-reviewer`, `/opt/code-reviewer`, the table `code_reviewer_wall` or a TAP device `fctapN` that this installer did not make | stops |
+| the state directory is not on a file system with **reflinks** (XFS with `reflink=1`, btrfs) | **warns, goes on**: the job's disk is a copy-on-write copy of the 6 GiB base disk (34 ms); without reflinks it is a full copy for every job. Put `/var/lib/code-reviewer` on such a volume (a probe `cp --reflink=always` decides, not the file system's name) |
+| the **two release channels** are filled in, the manifests download and **verify**, the disk has room | stops ("no program release is published yet" while a channel is empty: the owner fills it) |
 
-**A download that is cut off changes nothing.** Under `curl | sh` the shell runs the file while it receives it. All of the script is
-functions; the last line, `{ main "$@"; }`, is the only command that does anything, and the script ends with the line `install: done`. A cut
-anywhere, also inside that last line, defines a few functions at most or is a syntax error; a run that does not print `install: done` did not finish.
+**Then, in this order** (the first failure removes what a fresh install made, so nothing is left behind):
 
-**Safe to run again.** A registered machine is not registered twice (the token is not used); a setting you pass is applied with
-`config set`; the unit is rewritten only when it differs and a running service is **never restarted** (it switches to a newer image by
-itself between two jobs, and reads a changed configuration when it next starts: `systemctl restart factory-runner` after its job). A second
-run also finds the newer release and stages it, as `factory-runner update` does, and **never installs an older or a rolled-back one**.
-`--purge` is only valid with `--uninstall`.
+1. the user `factory-runner` (a system user, no shell, no login) as a member of `kvm`, and a **try**: the user opens `/dev/kvm` for reading and writing;
+2. the directories (below) and the **program** and the **VM artifacts**, each downloaded by the names and **digests of its signed manifest**, verified and
+   unpacked into a staging directory and moved into place in one step; the artifacts end up **owned by root and read-only for the service**;
+3. **one TAP device per slot** (`--parallel-runs`, 1 to 64, default 1: the number of jobs at once), owned by the service user, with the `/30` of the slot;
+4. the **static nft table** of [the outer wall](#the-outer-wall-on-a-customers-machine-979): checked with `nft -c -f` (a kernel without the `nft_fib` modules is found here, before anything is
+   loaded), loaded, and **listed again with `nft list table inet code_reviewer_wall`**; if that fails the install fails;
+5. only then the units (`FACTORY_RUNNER_OUTER_WALL=proxy` is in the unit **only because the table was listed**; the service checks again before every start, below) and the command;
+6. the **registration** with the token (a token that is refused leaves the install in place and says how to register by hand);
+7. the update timer, the service enabled and **started**.
 
-**The memory of a rollback is read with the installed image, and fails open.** The installer reads `rejected-release` (see "Updates") with
-`factory-runner:current`, the only thing on the machine that can read the volume. A file that exists but cannot be read, or holds no whole
-number, does not stop the install: it is ignored with a warning on the standard error, and a release that was rolled back may then be
-installed again. No file is the normal case and says nothing. **After `--uninstall` without `--purge` and a new install** there is no image
-yet when the installer decides, so it cannot read the file even though the volume still has it: it may install the release that was rolled
-back (the uninstall says so). To keep the block, write the number into the file again after the install (see "Updates", "the way back by
-hand") or `--purge` and start over; the running service reads the file and takes no release up to that number from then on.
+**Where things are.** Nothing the service can write is code, and nothing it can read of the kernel and the root file system can be changed by it:
 
-**A fresh pull can lose its digest reference.** The service removes the digest references of old releases when it starts (see "Updates"),
-and so a pull by digest that is not named yet (`tag`) is one of them. Both the installer and `factory-runner update` pull a second time
-when the reference is gone before the tag (the pull is by digest: the same image) and fail with "could not be named" after the second
-one; the next run succeeds.
+| Path | Owner, mode | Content |
+|---|---|---|
+| `/opt/code-reviewer/releases/<N>/`, `current`, `previous` | root, read-only | the program: `bin/factory-runner`, `bin/firecracker`, `share/outer-wall.nft`, `libexec/host.sh` (this script) and the Python runtime |
+| `/var/lib/code-reviewer/artifact-releases/<R>/`, `artifacts`, `artifacts-previous` | root, files `0644`, directory `0755` | `vmlinux`, `rootfs.ext4`, `dockerdata.ext4`, a copy of the manifest and its signature, `vm.env` (the Worker image's id); `artifacts` is the link the launcher reads |
+| `/var/lib/code-reviewer/vms/`, `dispatcher.lock` | the service user | the VMs' directories, the lock of the one dispatcher |
+| `/var/lib/code-reviewer/pending`, `update.lock`, `switch.lock`, `staging/` | root | the marker of a staged release, the locks, the downloads in progress |
+| `/var/lib/factory-runner/` | the service user, `0700` | `config.json` (with the credential), the Claude Code credentials of the device |
+| `/etc/code-reviewer/` | root | `install.state` (what the installer made, for the uninstall), `channel-program.json`, `channel-vm.json`, `runner.env` (settings, no secret), `rejected-program`, `rejected-vm`, `download.curlrc` |
+| `/etc/systemd/system/factory-runner.service`, `factory-runner-update.service`, `factory-runner-update.timer`, `/usr/local/bin/factory-runner` | root | the units and the command |
 
-`--dry-run` says what it would do and changes nothing. `--uninstall` removes the service, the command and the images and keeps the
-configuration and `/work`; `--uninstall --purge` removes those too (revoke the runner in the app: its credential keeps working
-until then). Afterwards the firewall tables Control left in the machine's network namespace (the security notes below) are deleted
-by `nft delete table ...` or at the next restart of the machine.
+**The unit** (`factory-runner.service`) runs as `User=factory-runner` with `SupplementaryGroups=kvm` and `Delegate=yes`. The options and why:
 
-**Sysbox is a separate step, `--sysbox`, never part of the base install.** It prints what it does and asks you to type `yes` on the
-terminal (`--yes` accepts the warnings when there is none). **The question comes before the first change** (the image, the unit, the
-registration), with the checks it needs and the download of the package and its SHA-256 check; with no terminal and no `--yes` the
-installer stops there with "nothing was changed". Any answer but `yes` is not a failure: the base installation goes on without Sysbox.
-Only then does the package go in, after `/etc/docker/daemon.json` was copied to `daemon.json.factory-runner-backup` (a backup that exists
-already, from an earlier `--sysbox` run, is **kept**: a second copy would be the file the package rewrote, not the original):
+| Option | Why |
+|---|---|
+| `ExecStartPre=+…/libexec/host.sh prestart` | as root (the `+`): switches to a staged release, makes the TAP devices a restart of the machine took, loads the table and **fails the start unless `nft list table inet code_reviewer_wall` answers**. The service is a normal user and cannot read nft state, so this is the only check, and it runs at every start, not only at install |
+| `Environment=FACTORY_RUNNER_SANDBOX=firecracker`, `FACTORY_RUNNER_OUTER_WALL=proxy` | `proxy` is written only after the table was listed; the program's own default stays `refuse` |
+| `LimitNOFILE=8192 + 64 × slots` | the vsock listeners (2 per VM, 4 connections each), the VMs' files, the proxy's 256 connections of two descriptors each and the app's connections, with room |
+| `TasksMax=300 × slots + 256` | Firecracker's threads: every VM's cgroup has `pids.max` 256, and the unit's limit covers all of them |
+| `Restart=always`, `RestartPreventExitStatus=4 6 9` | exit code 10 (a staged release) restarts it; revoked (4), configuration (6) and "another dispatcher" (9) are not made better by a restart |
+| `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=` (`vms/`, `dispatcher.lock`, the home), `ProtectHome`, `PrivateTmp` | the service writes only its own files; the program and the artifacts are read-only for it |
+| `CapabilityBoundingSet=`, `AmbientCapabilities=` (empty) | Firecracker has no capability (measured in the spike); KVM and the TAP are opened through group and owner |
+| `DevicePolicy=closed`, `DeviceAllow=/dev/kvm rw`, `/dev/net/tun rw` | the only devices a VM needs |
+| `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallArchitectures=native`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `ProtectHostname`, `UMask=0077` | what a dispatcher and its VMM never need. vsock is Firecracker's Unix socket, so no `AF_VSOCK` |
 
-- it installs the package `sysbox-ce 0.7.1` (the version of the golden snapshot, checked against its SHA-256);
-- the package **rewrites `/etc/docker/daemon.json`** (a copy is kept next to it first): the `sysbox-runc` runtime, `bip` 172.20.0.1/16 and
-  `default-address-pools` 172.25.0.0/16, so the network ranges of your other containers can change;
-- it **restarts Docker** when no container is running (so none may be: the step refuses otherwise, stop the runner first);
-- it needs `jq` and `systemctl`, runs `sysbox-mgr` and `sysbox-fs` as services, and is officially supported on Ubuntu 22.04 and 24.04
-  (26.04 was tested, not supported; see "Spikes R0");
-- what you get is the capability `agent-docker`: the agent may run its own Docker. Without Sysbox the runner works and the agent has none.
+**Deliberately not set** (each would stop something this service does, or has not been tried): `PrivateDevices` (hides `/dev/kvm` and `/dev/net/tun`),
+`ProtectControlGroups` and `ProtectKernelTunables` (make `/sys/fs/cgroup`, where the service makes one cgroup per VM, read-only; to try on a real host, see the checklist),
+`SystemCallFilter` (Firecracker has its own seccomp filter; a unit filter has to be built from a measured list), `MemoryDenyWriteExecute` (the Python runtime),
+and **one unit or one user per VM** (decided against in the launcher: it needs a root helper at runtime). A VMM that escaped lands in the service user, which owns the other
+VMs' disks: the user owns nothing else on the machine, and cannot change the kernel or the root file system every later VM boots from.
 
-Restart the service afterwards so that the runtime `auto` finds Sysbox.
+**The command.** `/usr/local/bin/factory-runner` hands `update`, `rollback`, `status` and `uninstall` to the root script and everything else
+(`register`, `config`, `credential`, `selftest`) to the service user (`sudo factory-runner config show`): the configuration and the credential belong to that user.
 
-What the script cannot know: whether a real systemd and a real daemon behave as its tests assume. The first install on a machine is the
-test of that; `factory-runner selftest` is the proof of the base (below).
+**Two release channels, no host in the script.** The program and the VM artifacts are each a **signed manifest** at an address the channel names:
+[`runner/release-channel.json`](../runner/release-channel.json) (the program) and [`docker/vm/release-channel.json`](../docker/vm/release-channel.json) (the VM artifacts, the file the release workflow
+also reads):
 
-### Install from source (developer, one machine)
-
-Needs Docker (the engine, not rootless) and a Linux machine; Sysbox is optional (it only adds `agent-docker`).
-
-```sh
-# the images: the runner (the Worker image with the command) and the agent. A release publishes both;
-# a developer builds them from a checkout of the repository:
-docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox:local .
-docker build -f runner/Dockerfile --target agent -t code-reviewer-agent:golden .
-docker build -f runner/Dockerfile.factory-runner --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:local -t factory-runner:local runner
-
-alias factory-runner='docker run --rm -i --name factory-runner-cli \
-  -v factory-runner-home:/var/lib/factory-runner factory-runner:local'
-
-# in the app (Owner or Admin): Runners, "Add a runner", copy the token. Then, the safest way first: the token
-# is read from standard input, so it is in no argument list and in no shell history.
-printf '%s' 'crt_...' | factory-runner register --token-file - --name build-box --labels linux,gpu
-factory-runner selftest        # the base on this machine, see below; needs the socket and /work, so run it like the service:
-
-docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 \
-  -v /var/run/docker.sock:/run/docker.sock \
-  -v factory-runner-home:/var/lib/factory-runner \
-  -v factory-runner-work:/work \
-  factory-runner:local run
+```json
+{ "version": 2, "baseUrl": "", "manifestAsset": "runner-manifest.json", "signatureAsset": "runner-manifest.sig", "publicKey": "" }
 ```
 
-- **Where the token can come from** (in this order of safety): `--token-file FILE` (`-` reads standard input), the environment
-  variable `FACTORY_RUNNER_TOKEN`, and `--token crt_...`, **the least safe**: an argument is visible in the process list of the machine
-  and stays in the shell history. The token is valid for one hour and works once, which limits what a leak costs, not whether to avoid it.
-  `--token` and `--token-file` together are a usage error. A wrong token is refused without printing it.
-- **`--stop-timeout 150`.** `docker stop` sends SIGTERM and kills the container after 10 seconds unless told otherwise. The runner answers
-  SIGTERM by giving the running job back to the queue (`runner_shutdown`): the job process gets up to 120 seconds to wind down
-  (`IMPLEMENTER_TERMINATE_GRACE_SECONDS`), then the runner reports the shutdown for up to 10 more. With the default of 10 seconds the
-  runner would be killed in the middle of that, the job would stay with the runner until its lease ran out, and its containers (the
-  model door among them, which holds the workspace's key) would stay on the machine. 150 is those 130 seconds with a margin. A
-  runner that is killed anyway (`SIGKILL`, a power cut) leaves its containers and `/work` behind; the next start removes them (below).
-- A job needs the **whole `/work` volume to itself**: before a claim, and right after every job, the runner removes the folders of a turn from
-  it (`reserve`, `repo`, `result`; nothing else, links are not followed; a folder a job made unreadable, mode 000, gets its rights back first)
-  and every container and network that carries the label `code-reviewer.role` and this runner's id. Do not put anything of yours into those names, and do not share the work volume between runners.
-- **No `--hostname`, no `--network host`, no `--privileged`.** The runner finds the name of its `/work` volume by reading its own
-  container from the daemon (the hostname is the container id), and the agent mounts that volume by name.
-- **The Docker socket is root of the machine.** The runner needs it (it starts the containers of a turn); the agent never gets it.
-  Run the runner on a machine you are willing to give that to, which is what a self-hosted runner of any CI system asks too.
-- **The model network is fixed** (`10.213.77.0/29`, `code-reviewer-model`) and the containers have fixed names, so one daemon runs
-  one turn at a time and the address must be free on the machine.
-- With the image pinned to a **digest** in a release, the runner pulls the agent image itself when the daemon does not have it
-  (`/opt/code-reviewer/agent-image.json`, or `FACTORY_RUNNER_AGENT_IMAGE`).
+`baseUrl` is an `https` directory: the manifest, its signature and every file the manifest names are at `<baseUrl><name>`. **Where that is is the owner's decision**
+(a public GitHub release, or protected storage; see "What is not in this repository, for the owner" under "Updates"); the installer hard-codes only where the channel files
+are (the repository's `main`) and `--program-channel-file` / `--vm-channel-file` read another file. Both stay **empty** until the owner fills them: then the installer stops with
+"no program release is published yet" and changes nothing. A release address that needs a login (protected storage) takes a curl configuration, `--curl-config FILE`
+(`header = "Authorization: Bearer …"`, or a client certificate), which the installer keeps for the updates in `/etc/code-reviewer/download.curlrc`, readable by root only.
+`publicKey` is the base64 of the DER of an ECDSA P-256 public key; the manifest's signature (ECDSA, SHA-256, DER) is checked with `openssl` over exactly its bytes
+before one field of it is read. The installer stores a copy of each channel in `/etc/code-reviewer/`, so **a setting on the device cannot redirect an update**; a new key is a new channel file
+and the installer run again (`--refresh`).
+
+**A download that is cut off changes nothing.** Under `curl | sh` the shell runs the file while it receives it. All of the script is functions; the last line, `{ main "$@"; }`, is the
+only command that does anything, and a run that does not print `install: done` did not finish.
+
+**Safe to run again (`--refresh`).** The install steps are idempotent: the user, the directories, the TAP devices and the table are kept or made again, the settings are applied (`config set`),
+the units are rewritten, and a release newer than the one installed is **staged** (never taken by the installer itself while the service runs). A running service is **never restarted**. `--parallel-runs` changes the number of TAP devices
+(a smaller number removes the ones above). The installer never installs an older or a rolled-back release.
+
+`--dry-run` says what it would do and changes nothing.
+
+What the script cannot know: whether a real systemd, a real `nft` and a real kernel behave as its tests assume. The first install on a machine is the test of that
+([First install on a real host](#first-install-on-a-real-host-the-live-test)), and the installer lane of CI installs it on a real systemd with a stand-in program.
+
+### Developer, one machine
+
+The program is Python (`uv`): `uv --directory runner run factory-runner --help`, `uv --directory runner run pytest -m unit`. A job in a VM needs KVM and the release's artifacts: the **KVM lane**
+(`runner/tests/kvm`, `.github/workflows/vm-artifacts.yml`) runs on GitHub's runners, and a developer machine with `/dev/kvm` installs like any other, with channel files of its own
+(`--program-channel-file`, `--vm-channel-file`, `--curl-config`). The installer's tests run it against a fake root: `FACTORY_RUNNER_ROOT=<dir>` puts every path below that directory (for the tests, not for a real machine).
+There is no image to build: the runner image and the Docker socket install of R2 are gone (#982).
 
 ### The command
 
@@ -463,7 +445,7 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
 | `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
 | `credential renew`             | Asks the app for a new credential and saves it **before** anything uses it (the app keeps the old one valid until the new one was used once, so a failed write loses nothing). Not for a credential from the environment. Exit code 4 when the runner was revoked. |
-| `update [--rollback]`          | Fetches the newest release, **verifies it** and stages it (see "Updates"). Never touches a running job. `--rollback` points `current` back at the image before the last update **and remembers the release it left**: no update, by the service or by this command, takes that release or an older one again until a higher one is announced. |
+| `update`, `rollback [--now]`, `status`, `uninstall` | **The root script's, not the program's** (#982): `/usr/local/bin/factory-runner` hands them to `libexec/host.sh` of the current release. See "Updates" and "Uninstall". |
 
 **Exit codes** (the same list is in `factory_runner/base.py`):
 
@@ -478,12 +460,12 @@ docker run -d --name factory-runner --restart unless-stopped --stop-timeout 150 
 | 6    | Configuration: a value is missing or wrong; a file with a credential and no `runnerId` (`register --force`, or add the runnerId); a runner with no identity |
 | 7    | `run --once` only: **the app never answered a claim** during the whole wait. Not the same as 0: the runner does not know whether a job waited. An app that answered once and was lost later is "no job", exit 0 |
 | 8    | `register` only: the app registered the runner, but its credential could not be saved (revoke the runner in the app and register again)        |
-| 9    | Another factory-runner uses this Docker daemon (see "One runner per daemon"); the log names the first container or network found; the runner announced nothing and claimed nothing |
-| 10   | The service switched to an updated image between two jobs and ended so that its supervisor (systemd, `Restart=always`) starts it again from `factory-runner:current` (see "Updates") |
+| 9    | Another dispatcher holds the lock of this machine (`dispatcher.lock` in the state directory, "One dispatcher per machine"); the runner announced nothing and claimed nothing |
+| 10   | The service ended between two jobs because a release is staged (`pending`); systemd (`Restart=always`) starts it again and the start switches to the new release (see "Updates") |
 
 ### Configuration
 
-The file is `$FACTORY_RUNNER_HOME/config.json` (`~/.factory-runner`; `/var/lib/factory-runner` in the image). **Every value can come
+The file is `$FACTORY_RUNNER_HOME/config.json` (`~/.factory-runner`; `/var/lib/factory-runner` on an installed machine). **Every value can come
 from the environment instead, and the environment wins**, which is how a VM that runs one job gets its credential without a file:
 
 | Variable                                 | Meaning                                                                                      |
@@ -493,7 +475,7 @@ from the environment instead, and the environment wins**, which is how a VM that
 | `FACTORY_RUNNER_NAME`, `FACTORY_RUNNER_LABELS` | The name, and the labels (comma separated, lower case)                                 |
 | `FACTORY_RUNNER_CPUS`, `_MEMORY_MB`, `_DISK_GB` | The limits (below)                                                                    |
 | `FACTORY_RUNNER_AGENT_IMAGE`, `FACTORY_RUNNER_RUNTIME` | The agent image to pull; `auto` (default), `runc` or `sysbox-runc`                |
-| `FACTORY_RUNNER_AUTO_UPDATE`             | `1` (default) or `0`: the service updates itself between jobs (see "Updates"); `factory-runner update` works either way |
+| `FACTORY_RUNNER_AUTO_UPDATE`             | `1` (default) or `0`: the update timer looks for a release (see "Updates"); `sudo factory-runner update` works either way |
 | `FACTORY_RUNNER_TOKEN`                   | `register` only: the registration token, an alternative to `--token-file` (not read by `run`) |
 
 A wrong value is refused with the name of the field and never its value (the file holds a secret). The credential is **renewed**
@@ -504,6 +486,10 @@ the file as it is on disk: what the environment overrides (address, name, labels
 older credential exists. A renewal whose file cannot be written is dropped: the old credential stays in use and the next job asks again.
 
 ### The service loop
+
+*(#982: this section describes the loop as its tests run it, with the Worker as a process on a Docker daemon (`ProcessSandbox`: the lock container, the tidy, the disk budget). **An installed machine does not run
+that mode:** the program refuses it, the sandbox is the Firecracker launcher (one VM per slot, no Docker on the host, nothing to tidy), and exit code 9 means another dispatcher holds the machine's lock. The
+code of the process mode is kept for the tests of the loop and is a follow-up to delete.)*
 
 0. **One runner per daemon.** The runner first takes a lock: a container `code-reviewer-runner-lock` (created, never started) that
    carries its id and no role label. If it exists and carries another id, the runner ends with exit code 9. Then it looks at every
@@ -599,6 +585,8 @@ cannot know whether a job waited, so whoever started the VM can tell "nothing to
 
 ### The self-test
 
+*(#982: this section is about the process mode on a Docker daemon, which an installed machine does not run; see "The Firecracker launcher": the VM's quota is the size of its disk file, and `prepare_firecracker` checks the host.)*
+
 `factory-runner selftest` is the proof of the base (decision 3) and runs at the start of every `run`. In order, each with a stable
 name: `docker` (the daemon answers and has the chosen runtime), `work-volume` (`/work` is a Docker volume of this container),
 `memory` (the agent gets at least 1024 MB: 60% of the machine up to 16 GiB unless `memoryMb` is set), `agent-image` (below),
@@ -639,6 +627,8 @@ start with `claude-code`, and `base_ok` and the exit code leave them out).
 
 ### Limits
 
+*(#982: this section is about the process mode on a Docker daemon, which an installed machine does not run; see "The Firecracker launcher": the VM's quota is the size of its disk file, and `prepare_firecracker` checks the host.)*
+
 Enforced through the host's Docker (`limits.py`, `disk_budget.py`):
 
 | Limit                | Setting                  | What is enforced                                                                                                                                                                                                                         |
@@ -678,206 +668,172 @@ runner. Choose the budget for the largest job you accept, and keep the rest of t
 What is **still not limited** (a follow-up): the CPU of the model door, the reader, the rule helpers and the runner's own git processes (they
 have a memory limit and are small and short), and more than one run at a time.
 
-### Updates (R2)
+### Updates (#982)
 
-A runner updates itself between jobs, or on the device (`factory-runner update`); **never from the app** (decision 9). The app may require a
-minimum base version: a runner below it gets no job, says "update needed" (claim answer `426`) and, if it can, updates at once.
+A runner updates **between two jobs**, never during one, and **never from the app** (decision 9): the app may require a minimum base version
+(the claim's `426`; the service says so in its log and switches at once if a release is staged), and that is all it says. Two things are
+separate, because the program and the VM artifacts are **root's and read-only for the service** (a VMM that escaped must not be able to change what
+every later VM boots from): a **root script stages** a release, and the **service's own restart switches** to it.
 
-**Where the release comes from, and what proves it.** A release is announced by a small **manifest** `{"repository": "...", "digest":
-"sha256:...", "release": N}` and a **detached signature** over exactly its bytes (ECDSA over P-256 with SHA-256, DER). Where they are
-and the public key are the **release channel**, [`runner/release-channel.json`](../runner/release-channel.json):
-
-```json
-{ "version": 1, "repository": "", "manifestUrl": "", "signatureUrl": "", "publicKey": "" }
+```
+timer (root, every 6 h) or `sudo factory-runner update`
+   └─ stage: signed manifest ─▶ download by name and digest ─▶ verify ─▶ unpack ─▶ move into releases/<N>      writes  pending
+service (between two jobs: no job runs, `pending` exists)  ─▶ ends with exit code 10
+systemd restarts it ─▶ ExecStartPre=+ host.sh prestart: smoke test ─▶ atomic switch of the links ─▶ table, TAPs ─▶ service starts on the new release
 ```
 
-`publicKey` is the base64 of the DER of the SubjectPublicKeyInfo. The file is **copied into the runner image**
-(`/opt/code-reviewer/release-channel.json`), so a setting on the device cannot redirect an update; the installer reads the same file from
-the repository. **No extra program is needed to check it**: the runner uses the `cryptography` library it already has, the installer
-`openssl`. **It is empty in this repository.** A runner with an empty channel does not look for updates (it says so once),
-`factory-runner update` says "no release channel" (exit code 1), and the installer stops with "no runner image is published yet".
+**What is checked** (`runner/install/install.sh`, `update`; the same steps as the installer's):
 
-**What is checked** (`factory_runner/update.py`; the installer does the same steps with `openssl`):
+1. the manifest and its signature are fetched (https only, at most 64 KiB for the program and 256 KiB for the VM artifacts); the signature must verify with the channel's key,
+   which must be an ECDSA P-256 key, **before one field of the manifest is read**;
+2. the release number must be **higher** than the installed one, than a staged one, **and than the release a rollback left** (`/etc/code-reviewer/rejected-*`): a signed older
+   manifest that somebody serves again is no way back, and **nothing is downloaded for it**;
+3. every file is downloaded by the name the manifest gives (a name with a separator, a leading dot or an odd character is refused), its **size and sha256** checked, and a packed file's
+   **unpacked size and sha256** too: what `dispatcher/src/vm-artifacts/verify.ts` checks, including that the staging directory holds **exactly** what the manifest names (`--exact-dir`);
+   the program tarball is listed before it is unpacked (no absolute path, no `..`, no odd character), and a device, a socket or a link out of its tree is refused;
+4. the new table must pass `nft -c -f` on this kernel; the program must carry `bin/factory-runner`, `bin/firecracker`, `libexec/host.sh` and `share/outer-wall.nft`;
+5. only then is the release moved into place (`releases/<N>`, `artifact-releases/<R>`) and `pending` written. A failure at any step removes the staging directory and changes nothing that runs.
 
-1. the manifest and the signature are fetched (https only, at most 64 KiB) and the signature must verify with the channel's key, which
-   must be an ECDSA P-256 key; the manifest must name the channel's repository, a `sha256:` digest and a release number of 1 or more;
-2. the release number must be **higher** than the running one's (the label `code-reviewer.runner.release` of the running image) **and
-   higher than the release a rollback left** (below): a signed older manifest that somebody serves again is no way back, and nothing is
-   pulled for it;
-3. only then is the image pulled **by the digest the manifest names** (the daemon checks the content against it); its label must carry the
-   manifest's release number, otherwise it is removed again and nothing changes;
-4. the digest is named `factory-runner:current` (the one before it `factory-runner:previous`, for `update --rollback`).
+**The switch** is the start of the service (`prestart`, as root): for the program, `bin/factory-runner --version` and `bin/firecracker --version` must run as the service user (a release that does not run is
+**dropped and rejected**, the current one stays); then `current` and `artifacts` are repointed in one atomic step each (`ln -s` and `mv -T`), the release before becomes `previous`, and releases other than current,
+previous and a waiting one are deleted. The unit starts the service through `libexec/host.sh run-service`, which resolves `current` **once** and runs from that directory, so a link that moves later never
+changes what a running process imports. Because the script runs from the release, **an update of the program also updates the updater**, and all of it is signed.
 
-After a switch the service removes the **digest references** of the releases before `current` and `previous` (each pull by digest leaves
-one, and while it stays the daemon cannot free the old image); `--uninstall` removes the images by name and by their digest references.
+**Between jobs.** The service ends with exit code **10** before its next claim when `pending` exists and no job runs (a job in `--once` mode never ends it); the unit restarts it
+(`Restart=always`; the app sees a runner that was away for the seconds of a restart). A job that is running is never touched. `factory-runner config set --auto-update off` stops the **timer's** look
+(`update --scheduled` reads the setting); `sudo factory-runner update` works either way. Under constant load the service is never between jobs: the release waits (and `systemctl restart factory-runner`
+switches now and gives the running jobs back to the queue).
 
-**Between jobs.** The unit starts the container from `factory-runner:current` and restarts it when it ends. The service looks for a release
-ten minutes after its start and then every six hours, **only between two jobs**; and when the image behind `current` is another one than the
-one the container runs (staged by the service or by `factory-runner update`), it ends with exit code **10** before its next claim and the unit
-starts it again from the new image. A job that is running is never touched. Both only apply when the unit says so
-(`FACTORY_RUNNER_IMAGE_TAG`): a runner somebody started by hand with `docker run` never ends itself for an update, and `run --once` never
-updates. `factory-runner config set --auto-update off` stops the looking by itself; an update the app requires is looked for anyway.
+**On the device.**
 
-**On the device.** `factory-runner update` stages the newest verified release and says so; the service switches to it after the job it is
-running. `factory-runner update --rollback` and a restart of the service go back one release, and the rollback **writes the release it
-left into the file `rejected-release` of the configuration volume**. From then on neither the service (every six hours) nor `factory-runner
-update` nor the installer takes that release or an older one again; the first release **above** it is taken as usual. (Without that, the
-service would take the same release back ten minutes after the operator had rolled it back.) The command says so; a rollback whose memory
-cannot be written changes nothing.
+| Command | What it does |
+|---|---|
+| `sudo factory-runner update` | stages the newest verified release (both parts) and says so |
+| `sudo factory-runner rollback [--now]` | goes back to the release before; the release it leaves is written to `rejected-program` / `rejected-vm`, so neither the timer nor `update` nor the installer takes it or an older one again, and the next **higher** one is taken as usual. It goes back between two jobs; `--now` restarts the service. **With a release staged and not taken yet it cancels that one instead** (and rejects it). After a rollback there is no `previous`: a second rollback says so and does not go forward |
+| `sudo factory-runner status` | the current, the previous, the staged and the rejected release of both parts |
 
-**A new image that does not run: the way back by hand.** A new image that does not pass its own self-test is not ready (exit code 5): the
-service waits five minutes, ends, and the unit starts it again, so a bad update is tried every few minutes, not every ten seconds, and takes
-no job. To go back when `factory-runner update --rollback` is not possible (the new image does not start at all):
+**A new release that does not run: the way back.** The smoke test at the switch stops a program that cannot even say its version. A program that starts and then fails is tried again by systemd
+(`Restart=always`, `RestartSec=10`; exit code 5 waits five minutes first) and **there is no automatic watchdog** that rolls it back (a follow-up): `sudo factory-runner rollback --now`. If the service
+is in a restart loop the next start switches at once, because `rollback` wrote `pending`.
 
-```sh
-docker tag factory-runner:previous factory-runner:current && sudo systemctl restart factory-runner
-```
+**What is not in this repository, for the owner.** The release pipeline of the **program** does not exist yet, and the places the files go are the owner's decisions (below). What a release must make:
 
-Then write the bad release into `rejected-release` so that the service does not take it again (the file holds the number and a newline):
-`docker run --rm --entrypoint sh -v factory-runner-home:/var/lib/factory-runner factory-runner:current -c 'echo N > /var/lib/factory-runner/rejected-release'`. Do not leave this to `factory-runner update --rollback`
-after the handmade tag: `current` and `previous` then both are the old release, so the rollback would remember that one and not the bad one.
-Deleting the file lifts the block; a higher release than the one in the file is taken anyway. **There is no automatic watchdog** that rolls back a new image that exits with an error within
-a few minutes: a check that works when the new image cannot even start has to live outside the image (a host-side script in the unit), which
-is more than this step; it is a follow-up (see "Known limits").
-
-**What is not in this repository, for the owner.** The release pipeline: nothing publishes a runner image today, and the tests of the images
-pipeline hold that no workflow logs in to a registry, pushes an image or asks for `packages: write` (#677: the source is visible but not
-licensed, and a public image would let anybody run the service; publishing the runner image would also hand the Worker image's copyleft
-packages to customers, which `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution", says must be reviewed first). So, **until the owner
-decides to publish and adds such a pipeline, no runner can install or update itself from a release**; the code, the installer and the tests
-are ready for it. The pipeline has to make, from `main` or by a manual dispatch and never in a run a pull request starts:
-
-1. the agent image and the runner image (`runner/Dockerfile.factory-runner` on the Worker image, with `AGENT_IMAGE_REF` the agent image's
-   **digest** and `RUNNER_RELEASE` a number that grows with every release, for instance the run number), pushed to a registry the customers can
-   pull from without a login;
-2. the manifest, signed with a key that only the pipeline holds:
+1. **The program tarball** `factory-runner-<N>-x86_64.tar.zst`, a tar in zstd of a relocatable tree: `bin/factory-runner` (a script that finds its own directory with `readlink -f` and starts the
+   bundled Python from there), `bin/firecracker` (the pinned Firecracker of `docker/vm/pins.env`, Apache-2.0: its licence goes into `THIRD_PARTY_LICENSES.md`), `share/outer-wall.nft` (the file of the repository),
+   `libexec/host.sh` (`runner/install/install.sh` of the same commit) and the Python runtime with the `code-reviewer-runner` wheel and its pinned dependencies (a standalone Python, so the machine needs none);
+2. **the program manifest**, `{"version": 1, "release": N, "arch": "x86_64", "file": {"name": "...", "size": S, "sha256": "..."}}`, signed with the key of the channel:
 
    ```sh
    openssl ecparam -genkey -name prime256v1 -noout -out release-key.pem          # once; keep it secret
    openssl pkey -in release-key.pem -pubout -outform DER | base64 -w0            # the publicKey of the channel
-   printf '{"repository": "REGISTRY/IMAGE", "digest": "sha256:...", "release": N}' > manifest.json
-   openssl dgst -sha256 -sign release-key.pem -out manifest.sig manifest.json     # DER, what the runner reads
+   openssl dgst -sha256 -sign release-key.pem -out runner-manifest.sig runner-manifest.json     # DER, what the installer reads
    ```
 
-3. the manifest and the signature at the two addresses the channel names (a GitHub release asset or a static address will do), moved **last**,
-   after the image is pushed and its label was checked;
-4. the channel file filled in this repository (`repository`, `manifestUrl`, `signatureUrl`, `publicKey`): a change of the key is a change of
-   this file and a new image.
+3. **the VM artifacts**, made and signed by the existing release workflow (`vm-artifacts-release.yml`, "VM artifacts" above), whose files go to the same kind of directory;
+4. both put at `baseUrl` of their channel, the manifest **last**, and the channel files filled in this repository (`baseUrl`, `publicKey`; `repository` for the VM channel). A release number only grows.
 
-The signing key is the one new secret this needs. Losing it stops updates (a runner keeps working); leaking it lets whoever holds it
-announce an image, so keep it where the other release secrets are. The tests sign with a throwaway key (`tests/unit/release_support.py`).
+**Decisions only the owner can make:** **where the files are published** (the data disk holds the Worker image: a public GitHub release makes it downloadable by anybody; the lead recommends protected storage,
+which the installer supports through `--curl-config` and `baseUrl`), **the signing key** (one key for both channels or two), and whether the Worker image's copyleft packages may be handed to customers
+(`THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"). Until the channels are filled, **no runner can install or update itself**; the code, the installer and the tests are ready for it.
+The signing key is the one new secret: losing it stops updates (a runner keeps working); leaking it lets whoever holds it announce a release, so keep it where the other release secrets are.
 
 ### Uninstall
 
-`sudo sh install.sh --uninstall` (see "Install"), then revoke the runner in the app. By hand: `systemctl disable --now factory-runner`, remove
-the unit and `/usr/local/bin/factory-runner`, `docker rm -f factory-runner`, `docker rmi factory-runner:current factory-runner:previous` (and the digest references, `docker images --digests`),
-and with the configuration and the work volume gone, `docker volume rm factory-runner-home factory-runner-work`. The firewall tables of
-the security notes (`nft delete table ip setup_egress`, and so on) go with the next restart of the machine.
+`sudo factory-runner uninstall` (or `sudo sh install.sh --uninstall`, and `--dry-run` to read what it would remove), then revoke the runner in the app (its credential keeps working until then). It removes
+**everything the installer made and nothing else**, in this order: the service and its update timer (a stop gives a running job back to the queue and kills its VM), the nft table
+`code_reviewer_wall`, the TAP devices `fctap0`… of the recorded number, the units and the command, `/opt/code-reviewer`, `/var/lib/code-reviewer` (the VM artifacts), `/var/lib/factory-runner` (**the
+configuration and the credential**), `/etc/code-reviewer`, and the user `factory-runner` **only if the installer made it** (`install.state`). A directory that is a mount point keeps its mount and loses its contents.
+Another directory in `/opt`, another user, another nft table and the group `kvm` are not touched.
 
 ### Tests
 
-Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`, `test_install_script.py`): configuration, command, the dispatcher with doubles (the Worker it starts, the claim it gives back, the reaper, the credential of the device, no secret of a job in its state or its log: `test_factory_runner_dispatcher.py`), the Worker's entry (`test_factory_runner_local_worker.py`), once mode, self-test
-with a double daemon (also: a stale agent image), limits, the cleaning between jobs (two turns in a row over the service, with the
-code of a turn's own directory set-up), the credential's source and the Dockerfile's promises. Contract (`tests/contract/test_factory_runner_contract.py`): the runner's real client against
-a fake App (`tests/runner_app.py`) that holds every body to `runner-registration.v1.json`, `runner-api.v1.json` and `worker-api.v1.json` (the split claim, the Worker's calls, the release, the
-state of a job). Integration (`tests/integration/test_factory_runner_loopback.py`): register, announce, claim, start a real Worker that fetches the job over the Worker API and runs a turn through the
-real job host with a stand-in job process, heartbeat, report; a subscription turn that gets the login of the device from the dispatcher (and a turn that asks for none, which does not); no job in time; the once mode with the environment alone; a revoked runner (before a claim
-and during a turn); an app that requires an update. Lane (`tests/lane/test_runner_selftest.py`): the self-test on a real
-daemon with the real agent image, and the removal of what a killed run left (a labelled container and network; an unlabelled container
-stays), and the disk budget (`tests/lane/test_runner_disk_budget.py`: what a container writes into its layer is
-measured, a budget that is passed is noticed, the tidy frees the layer and the environment image). The whole turn with a model and a
-repository is the Implementer's lane (`test_implementer_turn.py`), whose code the runner runs unchanged.
+Unit (`tests/unit/test_factory_runner_*.py`, `test_runner_profile.py`, `test_install_script.py`): configuration, command, the dispatcher with doubles (the Worker it starts, the claim it gives back, the reaper, the credential of the
+device, no secret of a job in its state or its log: `test_factory_runner_dispatcher.py`), the Worker's entry (`test_factory_runner_local_worker.py`), once mode, the loop with a double sandbox (`test_factory_runner_service.py`; its
+update cases cover the marker of a staged release: switch between jobs only, never during one, never in `--once`, never for a runner the unit did not start), the self-test with a double daemon, limits, the cleaning between jobs,
+and the credential's source. Contract (`tests/contract/test_factory_runner_contract.py`): the runner's real client against a fake App. Integration (`tests/integration/test_factory_runner_loopback.py`): register, announce,
+claim, start a real Worker, report. Lane (`tests/lane/…`): the Worker-as-a-process mode on a real daemon (the tests' sandbox of the loop, not an installable mode).
 
-R2 (#855): `tests/unit/test_factory_runner_manage.py` (`config set`, `credential`, `update`, the proof), `test_factory_runner_disk_budget.py`
-(the measure, the guard, the host ending a job), the update cases in `test_factory_runner_service.py` (switch between jobs only, never during
-one, never in `--once`, update needed looks at once), and `test_install_script.py`, which runs `install.sh` against stand-ins for `docker`,
-`systemctl` and `curl` in a directory that plays the root of the machine, with the real `openssl` checking a manifest that `cryptography` signed: the verified digest, the unit, the token only on
-standard input, idempotence, no restart of a running service, a signature that does not verify, the dry run, the Sysbox warnings and its
-refusal without a terminal, uninstall, and that the installer, `update.py`, the Dockerfile and the golden snapshot agree on the channel file and
-the versions. CI also runs `shellcheck` on the installer. **No test starts a real systemd unit or installs a package:**
-nothing runs on a machine of ours; the first install on a real machine is the test of that.
+**The installer** (#982, `tests/unit/test_install_script.py` with `host_install_support.py`): `install.sh` runs against stand-ins for every command that needs root (`useradd`, `userdel`, `ip`, `nft`, `systemctl`,
+`runuser`, `chown`, `curl`) in a directory that plays the machine's root, with the real `openssl`, `jq`, `zstd`, `tar` and `sha256sum` verifying releases that the test signs with a real ECDSA P-256 key. The cases:
+T01 a preflight without `/dev/kvm` stops with the documented message and changes nothing (the tree of the machine is equal, no command ran), and the other stops (no `nft`, systemd 245, cgroup v1, not root, no group `kvm`,
+a second dispatcher's unit, user, directory, table or TAP); T02 install, then uninstall, leaves no table, no TAP, no user and no file (the tree equals the one before, other things in `/opt`, `/etc` and other users survive);
+T03 an update with a bad signature (program or VM) is refused and the running release stays; T04 a rollback returns to the previous release and the one it left is not taken again, a staged release is cancelled by it, a
+rollback without a predecessor says so. Also: the order of the install (check, load, **list**, then the unit and the start), a failed listing fails the install and leaves nothing, the unit's options, `LimitNOFILE` and
+`TasksMax` by slots, the artifacts' owner and mode, the token only on standard input, a manifest or file that does not match, a tarball with a path out of its tree or a link out of it, an empty channel, a channel that is not
+https, `--refresh` (never restarts a running service, never registers twice, fewer slots remove TAPs), the switch with its smoke test, the pruning of old releases, `prestart` failing without the table and making missing
+TAPs, `run-service` with the artifacts' image id, the command's split of root and service user, the scheduled update that honours `--auto-update off`, a script cut off anywhere, and the hidden prompt on a pseudo-terminal.
+A sample manifest (`dispatcher/src/vm-artifacts/fixtures/sample-manifest.json`) is parsed by the TypeScript verifier's own schema (`channel.test.ts`) and compared by shape to the manifest of the tests, so the two sides
+cannot drift. CI also runs `shellcheck` on the installer.
 
-Fix round 1 of the review of R2 added: a rollback that survives the auto-updater (`test_factory_runner_manage.py`, and the service test
-that runs the policy after a rollback), a script that is cut off anywhere and one that runs from its standard input
-(`test_install_script.py`, with a stand-in that consumes the standard input and a pseudo-terminal for the prompts), the installer that
-never goes back, the disk budget with a big base image under a small commit (`test_factory_runner_disk_budget.py`, lane L02 against the
-size the commit really added), and the event loop that stays free while a call waits for the one before it.
+**The installer lane** (`runner/tests/kvm/installer/lane.sh`, the job `installer` of `.github/workflows/vm-artifacts.yml`, only for a change to the installer or what the VM artifacts are made from): the
+real `install.sh`, as root on a GitHub runner, with a **real systemd, a real `nft` and real `ip tuntap`**, a stand-in program (`lane-runner.sh`) and small releases signed with a throwaway key and served over
+https on the loopback (`serve.py`; the throwaway certificate reaches the installer's `curl` through `--curl-config`, as a protected release address would). It proves: T01 on the real machine
+(a copy of the installer that looks for a device that is not there stops with the nested-virtualization message and changes nothing); that systemd accepts the unit (`systemd-analyze verify`); that **inside the
+unit's sandbox, as the service user, the stand-in opens `/dev/kvm`, attaches to its TAP device, makes a cgroup per VM with `cpu.max`, `memory.max` and `pids.max` under its own delegated subtree, writes `vms/` and its home,
+cannot write the artifacts, the state directory, the program or `/etc`, has no capability and `NoNewPrivs`, has the file-descriptor limit, and sees the environment the unit sets** (`lane_service.py`: the
+result is read from `vms/lane-probe.json`); that a deleted table and a missing TAP device are made again at the next start; an update staged by root (`pending`), the service ending with exit code 10 between jobs and the
+start switching to release 2; a rollback with `--now`; a refusal of a bad signature with the release left running; and the uninstall, after which no table, TAP device, user, unit or file is left. No VM boots
+there: the launcher lane (the `build` job) has the artifacts and boots them; the first install on a machine of ours remains the proof of the two together.
 
 ### First install on a real host (the live test)
 
-What the tests cannot know and the first install must check (nothing of this runs in CI):
+What the unit tests cannot know and the first install must check (the installer lane of CI covers what a stand-in program can show; a real VM needs the released artifacts):
 
-1. **The image store.** With Docker's **containerd image store** (`docker info` lists `io.containerd.snapshotter.v1` as the storage driver
-   status) the id of the image a container reports and the id of the tag may differ. The service compares them
-   (`docker inspect <container> --format '{{.Image}}'` against `docker image inspect factory-runner:current --format '{{.Id}}'`): if
-   they differ for a freshly started service, it ends with exit code 10 at its first look, again and again. Check that the two are **equal**
-   after the first start; if not, the comparison has to use the image's digest instead and this is a bug to fix before the next runner.
-2. **The size figures** under that store: `docker image inspect --format '{{.Size}}'` of the agent image and of an image committed from it
-   (the lane test L02 asserts that the difference is what the commit added) and `SizeRw` of a container (lane test L01).
-3. **A real update and rollback:** publish two releases, let the service switch, `factory-runner update --rollback`, restart, and wait
-   past the first look (ten minutes): `current` must stay on the earlier release; announce a third and watch it taken.
-4. **A new image that does not run** (for instance an image whose self-test fails): the service must retry every few minutes, not every
-   ten seconds (`journalctl -u factory-runner`), and `docker tag factory-runner:previous factory-runner:current && systemctl restart
-   factory-runner` must bring the runner back.
-5. **The installer on a terminal:** `curl ... | sudo sh` asks for the token with the input hidden; with `--sysbox` the question comes before
-   anything is pulled, "no" continues, and `daemon.json.factory-runner-backup` exists after "yes".
+1. **Preflight on a machine without KVM** (a cloud VM without nested virtualization): the installer stops with the message about nested virtualization and `ls /etc/code-reviewer` is empty.
+2. **The install on a terminal:** `curl … | sudo sh` asks for the token with the input hidden. Afterwards `systemctl status factory-runner`, `nft list table inet code_reviewer_wall`, `ip -br link show type tun`
+   (one `fctapN` per slot, in state UP with the `/30` address), `ls -l /var/lib/code-reviewer/artifacts/` (`root root`, `-rw-r--r--`), `id factory-runner` (group `kvm`).
+3. **The unit's sandbox with real Firecracker.** `journalctl -u factory-runner` shows the service ready (the host checks of `prepare_firecracker`: kernel, root file system, base disk, `firecracker`, `/dev/kvm`, the
+   delegated cgroup with `cpu memory pids`, the TAP devices). Then one real job: a VM boots (the launcher opens `/dev/kvm` and `/dev/net/tun` under `DevicePolicy=closed`, makes `vm-<slot>-<id>` cgroups
+   under the unit's own subtree with `ProtectSystem=strict`, writes `vms/`) and ends, and `systemd-cgls` shows nothing of it left. **If a sandboxing option is wrong the service fails at the first VM, and the log says
+   which write was denied**: remove the option from `write_units` and say so. Try `ProtectControlGroups=yes` and `ProtectKernelTunables=yes` on the real host and report whether the delegated subtree stays writable.
+4. **The outer wall at every start:** `sudo nft delete table inet code_reviewer_wall && sudo systemctl restart factory-runner` loads it again; with `nft` removed from the path the start fails with "is not loaded" and the
+   service does not run. After a restart of the machine the TAP devices and the table are back before the service (`prestart`).
+5. **Limits:** `systemctl show factory-runner -p LimitNOFILE -p TasksMax` and, with the slots busy, `ls /proc/$(pidof -s python3)/fd | wc -l` stays well below the limit.
+6. **A real update and rollback:** publish two releases, `sudo factory-runner update`, check `pending`, let the service end between jobs (or `systemctl restart`), `factory-runner status` shows the new current and the old
+   previous; `sudo factory-runner rollback --now`, wait past the first timer run: `current` stays on the earlier release; announce a third and watch it taken. A bad signature (sign with another key) must be refused with `current` unchanged.
+7. **A program that does not start** (a release whose `bin/factory-runner` fails): `status` after the switch shows it dropped and rejected, the old one still current.
+8. **`reflink`:** on an XFS volume with `reflink=1` no warning, and `cp --reflink=always` of the base disk takes tens of milliseconds; on ext4 the warning appears.
+9. **Uninstall:** afterwards `nft list tables`, `ip link`, `getent passwd factory-runner`, `ls /opt /var/lib /etc/code-reviewer` hold nothing of the runner.
 
 ### Security notes
 
-- **Without Sysbox (`runc`) the agent is root with ordinary Docker isolation.** The agent's container runs as root inside the
-  container, as it does under Sysbox, but under `runc` that root is the machine's root user in a container of the daemon, kept in by
-  namespaces, Docker's default capabilities and seccomp profile and the cgroup, and nothing else; under Sysbox the same root is an unprivileged user on the host
-  (a user namespace of its own) and the agent can also run its own Docker (`agent-docker`). A container escape of the kind that
-  hits Docker now and then is therefore **root on the machine** under `runc`, reachable from whatever the agent runs: the model, the
-  code of the repository it works on, a prompt injected through it. The agent has no network except the model door, no mount of the host,
-  no socket, no key (the door holds it), no added capability, no swap and a memory limit, which is what closes the ordinary ways out;
-  it does not make `runc` a sandbox for hostile code. Run a `runc` runner on a machine that holds nothing you cannot lose
-  and that is no stepping stone to anything (a VM, not a workstation), or install Sysbox and let `auto` choose it. The announcement
-  says nothing about it yet; the runner's runtime is in the self-test line `agent-container: runtime ...`.
-- **Firewall tables in the host's network namespace stay behind (S5).** To close what a container that owns its network namespace could
-  open, Control installs `nft` tables in the **machine's** namespace, from a one-shot helper container with `NET_ADMIN` and nothing else
-  (`implementer/host_rules.py`, `implementer/setup_container.py`): `setup_egress` (an `ip` table that drops what the Setup container
-  may not reach: the machine itself, private ranges, the other bridges), and `implementer_ipv6_agent` and `implementer_ipv6_setup`
-  (`inet` tables that drop IPv6 from the agent's and the Setup container's bridge; only on a kernel that has the `inet` family). They
-  only drop, they only name the interface of Control's own bridges, and they hook before Docker's own rules, so they cannot block
-  anything else on the machine. On a hosted VM they go with the VM. On a runner **nothing removes them**: they stay after a job and
-  after the service is stopped, until the machine restarts (nft tables are not persistent) or you delete them
-  (`nft delete table ip setup_egress`, `nft delete table inet implementer_ipv6_agent`, and so on). The `inet` tables are flushed
-  when a job installs them again, so they stay one table of the same rules. `setup_egress` is not: each job that runs a Setup
-  container appends the same rules once more, which blocks nothing new and accumulates until the table is deleted or the machine
-  restarts (a follow-up of R2). (The tables of the model door and the network door, `door_egress` and `netdoor_egress`,
-  live in the door container's own network namespace and go with the container.) Removing the host tables with the leftovers of a
-  job is a follow-up.
+- **Every job runs in its own Firecracker microVM** with its own kernel; the agent's Docker, Sysbox and the setup container are inside it. The host has **no Docker** for the runner: no socket to hand out, nothing for a container escape to reach on
+  the machine's own daemon. The VM's network is the **outer wall**: its TAP can reach only the dispatcher's proxy ([The outer wall on a customer's machine](#the-outer-wall-on-a-customers-machine-979)); the host's other ports, the LAN,
+  the metadata address and IPv6 are dropped by a static table the installer loads and the service re-checks before every start.
+- **Without the jailer a VMM that escaped lands in the service user.** What is done is Firecracker's own seccomp filter and no capability (measured), a directory per VM made `0700`, an empty environment, one cgroup per VM that kills its whole tree,
+  and the unit's sandbox (above). The service user owns the other jobs' disks and the credentials of the device: **run the runner on a machine that holds nothing you cannot lose**, and keep the user for the runner alone (the installer refuses an
+  existing one). **The kernel and the root file system every later VM boots from are root's and read-only for that user**, as is the program: an escaped VMM cannot plant itself in the next VM.
+- **What the root script trusts.** The installer and the updater verify a **signature over the exact bytes of a manifest with the channel's key (ECDSA P-256), then every file's size and sha256** before anything is unpacked or made current; the channel files are
+  copied into root-owned `/etc/code-reviewer/` so a setting on the device cannot redirect an update; the tarball is checked for paths and links out of its tree. The first run trusts the installer script and the two channel files fetched from the repository over
+  https (as any `curl | sh` does): **read it first, or save it and read it** (it is one POSIX file). Everything after that is signed: the script that runs as root later is the one in the signed program release. A stolen signing key lets its holder announce a release; the
+  rollback memory and the "never an older release" rule limit a replayed manifest to a freeze (a manifest has no expiry yet: a follow-up).
+- **The token** is never an argument and never in a file of the installer; the credential of the runner is in `/var/lib/factory-runner` (`0700`, the service user's): revoke the runner in the app if the machine is lost. A download login (`--curl-config`) is in `/etc/code-reviewer/download.curlrc`, `0600`, root's.
+- **The download credentials of a protected release address** are used by root only (the timer's update), never by the service.
+- **The host's firewall.** Only our table `inet code_reviewer_wall` is added, and only rules on `fctap*`: no other table of the machine, no `ip_forward` change and no Docker rule is made, and the uninstall deletes the table.
 
 ### Known limits
 
-- **No watchdog for a bad update.** A new image that fails is tried again every few minutes and the operator rolls back by hand (see
-  "Updates"); rolling back by itself and rejecting the release when the new image ends with an error within N minutes is a follow-up.
+- **No watchdog for a bad update.** A release that passes the smoke test at the switch and then fails is tried again by systemd every few minutes, and the operator rolls back by hand
+  (`sudo factory-runner rollback --now`, see "Updates"); rolling back by itself and rejecting the release when the new program ends with an error within N minutes is a follow-up.
 - **The manifest has no expiry (freeze attack).** The signature proves that a manifest is ours, not that it is the newest: whoever controls the
-  address can keep serving an older signed manifest (a runner never goes below the running release, so this only *freezes* it, and the
-  app's minimum base version still forces an update where it matters). A signed `expires` date in the manifest, checked by the runner and the
-  installer, would close it; it is a follow-up.
-- **Rotating the release key** is a new `release-channel.json` in a new image: a runner that runs an image with the old key cannot
-  verify a manifest signed with the new one, and so does not update. Plan a release signed with the old key that carries the new channel
-  file before the old key is retired.
+  address can keep serving an older signed manifest (a runner never goes below the installed release, so this only *freezes* it, and the
+  app's minimum base version still forces an update where it matters). A signed `expires` date in the manifest, checked by the installer, would close it; it is a follow-up.
+- **Rotating the release key** is a new channel file and the installer run again (`--refresh`): a runner whose stored channel has the old key cannot verify a manifest signed with the new one, and so does not
+  update until its operator runs the installer (the channel lives in `/etc/code-reviewer/`, outside the release, so that a release cannot redirect its own updates). A fleet needs a channel file inside the
+  signed release that the switch takes over: a follow-up.
+- **The installed script is the release's.** `libexec/host.sh` runs as root and comes from the signed program; the installer that is run first (`curl | sh`) is the only unsigned step (see the security notes).
+- **No resume of a half download.** A download that fails starts the file again at the next run; the staging directory is removed. Two releases of the VM artifacts (current and previous) take about twice their size on disk.
+- **`--parallel-runs` is fixed at install** (`--refresh` changes it; `factory-runner config set --parallel` still refuses more than one). A change takes effect when the service next starts (`prestart` makes the TAP devices).
 - **The disk budget is an emergency brake** (measured every 20 seconds; not the inner Docker of Sysbox, not container logs; see "Limits").
-- **One runner per Docker daemon.** The containers have fixed names (`code-reviewer-agent` ...) and the model network a fixed address, so a
-  second runner on the same daemon would fail every turn with a 409. Every container and network a runner's job creates carries
-  `code-reviewer.runner=<runnerId>` (a runner without an id from the file, one with a credential from the environment, uses a digest of
-  the credential), so a runner removes only its own and refuses to start beside another (exit 9). **The operator must run one runner per
-  daemon.** Another runner is recognised only while it has a container or a network on the daemon, or holds the lock; two runners with the
-  same id (one configuration copied to two machines on one daemon) are not told apart. The lock closes the window of two different runners
-  that start in the same moment. Unique names, and with them more runners on one daemon, are a later step. The hosted version sets no id and is
-  unchanged.
+- **One dispatcher per machine.** The launcher takes a lock on `/var/lib/code-reviewer/dispatcher.lock` (a second dispatcher, `run --once` included, ends with exit code 9) and the installer refuses a second install. The
+  host has no Docker for the runner, so there is no daemon to share (the fixed container names and the one-runner-per-daemon rule of R2 belong to the process mode of the tests).
 - **Snapshot and stored session.** Resume works on customer runners (#879, #974, "Resume on customer runners"): the Worker sends `PUT .../session` and `GET .../resume-session` to the Worker API when
   the app lists `implementer_snapshot`. Against an app that does not list it a turn on a runner takes **no snapshot** and a follow-up turn continues from the summary of the earlier ones
   (the fallback of the plan).
 - **SIGTERM during the self-test** (N4) comes before the signal handlers are installed and ends the process at once; nothing is claimed.
 - **No warning for a `config.json` that is too open** (N5): the file is written 0600 in a 0700 folder, but a mode changed later is not noticed.
-- **`proven` under `runc`** (N6): the name of the sandbox proof says only that the self-test passed; under `runc` there is no Sysbox wall (see the security notes).
-- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read). The release documents of an update
-  (manifest, signature) are fetched through the proxy of the environment (`https_proxy`, `no_proxy`) as the installer's `curl` does; the pull of
-  the image is the daemon's, with the daemon's own proxy settings.
+- **`proven` under `runc`** (N6, the process mode of the tests only): on an installed machine the agent is in a VM with Sysbox, and the self-test is the host checks of `prepare_firecracker`.
+- **No proxy for the app client** (N7): the runner talks to the app directly (`HTTPS_PROXY` is not read). The installer and the updater's `curl` use the proxy of the environment (`https_proxy`, `no_proxy`; `sudo` may drop them: `sudo -E`).
 - **`register --force`** (N8) replaces the local file and leaves the old runner in the app's list: revoke it there.
 - **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
@@ -1844,7 +1800,7 @@ root (`host/setup.sh`) and runs the tests as `fcuser` through `host/as-fcuser.sh
   jobs. A unit hardening per VM (instead of the jailer) is **to be decided**; only seccomp and zero capabilities are proven.
 - **#979 (outer wall).** `host/wall.nft` and `host/open.nft` plus `rootfs/probe.py` are the acceptance test as built: every blocked probe needs a control that reached the same target with the
   table removed; the proxy listens on the TAP addresses only and tells jobs apart by TAP; the install generates the per-TAP source-address rule.
-- **#982 (install).** The root steps are exactly the table in Q4. The installer checks `/dev/kvm`, `reflink=1` on the work volume (XFS), `e2fsprogs` and a delegating systemd. No Docker is needed on the
+- **#982 (install), as built:** see "Install (a machine with KVM, #982)". As the spike planned it: The root steps are exactly the table in Q4. The installer checks `/dev/kvm`, `reflink=1` on the work volume (XFS), `e2fsprogs` and a delegating systemd. No Docker is needed on the
   customer's host: nothing of the runtime used one (the spike's base-disk builder ran a second dockerd on the **build** machine, which is the release pipeline's job).
 
 ## VM artifacts (#976)
@@ -1926,7 +1882,8 @@ the root file system reports as installed (`dockerd`, `buildx`, `sysbox`, the Sy
 P-256 with SHA-256, a DER signature, the public key as base64 of the DER SubjectPublicKeyInfo. The key is in the channel file `docker/vm/release-channel.json` (empty in this repository until the owner sets it, like `runner/release-channel.json`); the private key is
 never in the repository.
 
-**The verifier** (`dispatcher/src/vm-artifacts/verify.ts`, used by the build, the release and, later, the install and update of the local Dispatcher, #982) needs nothing but `node:crypto`. Its order: the key must be ECDSA P-256 (`key_invalid` otherwise); the signature must verify over the manifest bytes
+**The verifier** (`dispatcher/src/vm-artifacts/verify.ts`, used by the build and the release; the host's install and update (#982) do the same checks in the shell with `openssl`, `jq`, `zstd` and `sha256sum`, because a customer's machine has no Node: the
+signature format, the order of the checks and the manifest's schema are the same, and `fixtures/sample-manifest.json` is parsed by this verifier and compared by shape with the manifest of the installer's tests) needs nothing but `node:crypto`. Its order: the key must be ECDSA P-256 (`key_invalid` otherwise); the signature must verify over the manifest bytes
 (`signature_invalid`); only then is the manifest read (`manifest_invalid`, `manifest_too_large`: 256 KiB); the release must be higher than the one in use or left by a rollback (`release_not_newer`, the rule of the runner's channel); then each file: present, size, sha256
 (`file_missing`, `size_mismatch`, `digest_mismatch`). `--min-release N` (`minRelease`) must be a whole number from 0 and the manifest's release must be **higher** than it: anything else, `abc` or `NaN` included, is an error (`min_release_invalid`, exit status 2 on
 the command line), never "no limit". `--exact-dir` (`exactDir`) also refuses a directory that holds anything the manifest does not name (`unexpected_file`; the manifest and the signature file are allowed when they are in it): what was verified is all there is. No file is read before the signature has verified. `node dispatcher/src/vm-artifacts/verify-main.ts --dir <dir> --manifest ... --signature ... --channel docker/vm/release-channel.json` does it from a shell.
@@ -1962,6 +1919,9 @@ pipeline and is a follow-up (`--require-images` turns the check on). Whether to 
 4. Put the public half and the repository in `docker/vm/release-channel.json` (`publicKey`, `repository`, by a reviewed pull request that reaches `main`): the release job refuses a channel without a key or with another repository, and a change of the key is a change of this file.
 5. **Decide whether the data disk may be published** (it holds the Worker image: `THIRD_PARTY_LICENSES.md`, "Copyleft and distribution"), then publish the draft. The release is a draft until you do.
 6. **Decide whether the image ids must equal the hosted ones.** Today they are reported and do not fail the comparison (above); enforcing them (`compare-main.ts --require-images`) needs both outputs to load one build of the images, which changes the hosted pipeline (a follow-up). Nothing is enforced until you say so.
+7. **Decide where the files are published, and put the address in `baseUrl` of the channel** (#982: `docker/vm/release-channel.json` for these files, `runner/release-channel.json` for the program). The installer downloads
+   `<baseUrl><name>` for the manifest, its signature and every file it names, over https only, and verifies each by the signed manifest and its digests; **it hard-codes no host**. A public GitHub release is downloadable by anybody (the data
+   disk holds the Worker image); protected storage needs a login that the installer takes as a curl configuration (`--curl-config`, kept for updates in a root-only file). Without a `baseUrl` and a `publicKey` the installer stops with "no release is published yet".
 
 ### Measured
 
@@ -1995,10 +1955,10 @@ The local Dispatcher's `WorkerSandbox` for a machine with KVM (Runner v2, epic #
 every job runs in a Firecracker microVM of the release ([VM artifacts](#vm-artifacts-976)), started by the dispatcher as a normal user.
 Code: [`runner/src/code_reviewer_runner/factory_runner/firecracker/`](../runner/src/code_reviewer_runner/factory_runner/firecracker). The Worker
 in the VM is the hosted one, started by [vm-init](../runner/vm-init/README.md); this section is the **host** side. The old mode (the Worker as
-a process of the runner's container, on the host's Docker) stays as the fallback until #982 removes it. Choose the launcher with
-`FACTORY_RUNNER_SANDBOX=firecracker`; `run` then prepares with the host's checks (`prepare_firecracker`: kernel, root file system, base
+a process of the runner's container, on the host's Docker) is **removed from the program since #982**: `factory-runner run` ends with exit code 6 unless
+`FACTORY_RUNNER_SANDBOX=firecracker`, which the installer's unit sets (the process sandbox stays in the code only for the tests of the loop). `run` prepares with the host's checks (`prepare_firecracker`: kernel, root file system, base
 disk, `firecracker`, `/dev/kvm`, the delegated cgroup, one TAP device per slot) instead of the Docker self-test, and touches the host's
-Docker never (no lock, no tidying). **Until #982 nothing installs the machine**: the root steps below are by hand.
+Docker never (no lock, no tidying). **The installer (#982) does the root steps below**; see "Install (a machine with KVM, #982)".
 
 ### What a job does
 
@@ -2058,7 +2018,7 @@ Every connection is one request and one reply (a frame: four bytes of length, on
 a field the contract does not have, a version other than 1 is a protocol error and the connection is closed, a frame not whole in 10 s
 is closed). **Each listener serves at most 4 connections at a time** and closes every other one the moment it is accepted, so whatever
 opens connections in a loop holds a few file descriptors of the service, not all of them, and never those of another VM's listeners.
-The service's unit still needs a `LimitNOFILE` that covers its slots (the installer sets it, #982: 2 listeners × 4 connections × slots,
+The service's unit has a `LimitNOFILE` that covers its slots (the installer sets it, #982: 2 listeners × 4 connections × slots,
 the VMs' files and the app's connections, and the outer wall's proxy: a budget of 256 connections of two descriptors each, with room; 8192).
 
 | Port | Message | The host |
@@ -2076,7 +2036,7 @@ exists; **`proxy`** is the real wall, [the outer wall on a customer's machine](#
 answered `ack` only once the proxy holds the job's rule; `inner-only` answers `ack` and logs a warning for every VM that nothing was
 narrowed (the agent's network is then the inner wall, the network door, only). **`proxy` is never the default:** the dispatcher is a
 normal user and cannot read nft state, so it cannot know that the table is loaded, and a machine without the table has no outer wall.
-The installer (#982) sets `proxy` explicitly, and only after `nft list table inet code_reviewer_wall` succeeds; in `proxy` mode the
+The installer (#982) writes `proxy` into the unit explicitly, and only after `nft list table inet code_reviewer_wall` succeeds; in `proxy` mode the
 dispatcher logs a warning at startup that it cannot verify the table itself. The two other modes are the operator's **explicit**
 choices, never a silent `ack`. **A wall that raises or does not answer** (`narrow` is given 10 s at the wall) is answered `refused`
 `unavailable` and logged with the kind of the error, never by dropping the connection: the Worker would wait for its own 30 s with the
@@ -2113,26 +2073,25 @@ as a `tail -f` on its log; killed with its cgroup, the directory and its disk de
 
 | Path | Content |
 |---|---|
-| `artifacts/vmlinux`, `rootfs.ext4`, `dockerdata.ext4` | the release's kernel, read-only root file system and base disk (the installer, #982; `FACTORY_RUNNER_VM_KERNEL`, `_ROOTFS`, `_BASE_DISK` move them) |
+| `artifacts/vmlinux`, `rootfs.ext4`, `dockerdata.ext4` | the release's kernel, read-only root file system and base disk (the installer makes `artifacts` a link to the release's directory, #982; `FACTORY_RUNNER_VM_KERNEL`, `_ROOTFS`, `_BASE_DISK` move them) |
 | `vms/vm-<slot>-<random>/` | one directory per running VM (0700), made before it starts and deleted when it is gone: `disk.ext4` (the job disk), `vsock.sock`, `vsock.sock_5100`, `vsock.sock_5101`, `firecracker.json`, `firecracker.log`, `vm.json` (VM, slot, job id: no secret) |
 
 `FACTORY_RUNNER_VM_STATE_DIR` moves the state directory; keep it on XFS with `reflink=1` (the installer checks) for the 34 ms copy.
 
-### What the machine needs (the installer's, #982)
+### What the machine needs (what the installer makes, #982)
 
 Root, once: the group `kvm` and `/dev/kvm` for it; the service user in it; **one TAP device per slot** owned by that user
-(`ip tuntap add dev fctapN mode tap user <user>`, with the /30 address above); the static nft table of #979; a systemd unit with
-`Delegate=yes` and `User=`; `e2fsprogs` (`resize2fs`), `cp`. At runtime nothing needs root (spike #970). `FACTORY_RUNNER_VM_CGROUP_ROOT` names a
+(`ip tuntap add dev fctapN mode tap user <user> group <user>`, with the /30 address above); the static nft table of #979; a systemd unit with
+`Delegate=yes` and `User=`; `e2fsprogs` (`resize2fs`), `cp`. At runtime nothing needs root (spike #970): only the start of the service, `ExecStartPre=+`, runs as root, to switch releases, make the TAP devices
+a restart took and check the table. `FACTORY_RUNNER_VM_CGROUP_ROOT` names a
 delegated cgroup that is not the service's own (tests).
 
-**Hardening without the jailer** (the open point of the spike): what is done is Firecracker's own seccomp filter and no capability
-(measured in #970), a directory per VM made 0700, an empty environment, one cgroup per VM that kills the whole tree, and no Docker or
-other service on the host. What is **not** done and is an open decision: systemd's sandboxing for the unit (`ProtectSystem=strict`,
-`PrivateTmp`, `NoNewPrivileges`, `CapabilityBoundingSet=`, `ReadWritePaths=/var/lib/code-reviewer`, `LimitNOFILE=`) belongs to the installer's unit (#982),
-which holds every VM; **one unit per VM** (so that an escaped VMM does not see the other jobs' files) is not tried and costs a root-owned
-helper that starts transient units, which the "nothing needs root at runtime" decision rules out; a user per slot would need root at
-install and a TAP owner per user. Until decided, a VMM escape lands in the service user, which also owns the other VMs' disks: run the
-service as a user that owns nothing else.
+**Hardening without the jailer** (the open point of the spike; decided in #982): what is done is Firecracker's own seccomp filter and no capability (measured in #970), a directory per VM made 0700, an empty environment, one cgroup per VM that
+kills the whole tree, no Docker or other service on the host, and **the unit's sandbox** (`ProtectSystem=strict` with only `vms/`, `dispatcher.lock` and the home writable, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges`, an empty
+`CapabilityBoundingSet=`, `DevicePolicy=closed` with `/dev/kvm` and `/dev/net/tun`, the address families and the other restrictions listed under "Install", `LimitNOFILE`, `TasksMax`), and **the kernel, the root file system and the base disk
+owned by root and read-only for the service**. **One unit per VM** (so that an escaped VMM does not see the other jobs' files) is not tried and costs a root-owned helper that starts transient units, which the "nothing needs root at runtime"
+decision rules out; a user per slot would need root at install and a TAP owner per user. A VMM escape lands in the service user, which also owns the other VMs' disks: the installer makes a user that owns nothing else and refuses an existing one.
+The options are checked against a real systemd by the installer lane and against real Firecracker by the first install (the checklist).
 
 ### Tests
 
@@ -2149,8 +2108,8 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
 
 ### Not done here, follow-ups
 
-- The install, the update and the rollback (#982); the `config set --parallel` command still refuses more than one
-  (the installer writes `parallelRuns`); the no-Docker `selftest` (a VM boot as the self-test).
+- ~~The install, the update and the rollback~~ (done in #982: "Install", "Updates"); the `config set --parallel` command still refuses more than one (the installer writes `parallelRuns` through
+  `--parallel-runs`); the no-Docker `selftest` (a VM boot as the self-test).
 - A stop that asks the Worker in the VM to give its job back (`runner_shutdown`) before the VM is killed needs a channel to Control that
   vm-init does not have (a `stop` message over the start connection).
 - The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
@@ -2342,12 +2301,12 @@ exercised by a packet; the lane says no more than that.
   network door, the model door, Control's calls to the app, the Worker's `git` and the setup container dial their targets themselves and do
   not use an HTTP proxy. With the table loaded **nothing of that gets out of a VM**: before a local VM can run a real job through the
   `proxy` wall, those clients need to go through `http://<host address of the TAP>:3128` (an upstream proxy for the doors, `HTTPS_PROXY` for
-  Control, git and the setup container; the name resolution moves to the proxy). Until then `FACTORY_RUNNER_OUTER_WALL=inner-only` (and no
-  table) is how a local VM job runs. It is the first thing to do before #982 turns the launcher on.
+  Control, git and the setup container; the name resolution moves to the proxy). (That wiring is #994, which lands beside #982; the installer sets `proxy` and loads the table, so a machine installed before #994 runs
+  no real job through the wall.)
 * The installer loads the table and makes the TAPs with their addresses (#982); the service cannot read nft state as a normal user, so it
-  cannot check that the table is loaded (a machine without it has no outer wall: the install must fail without it). That is why
-  `refuse` is the default: **the installer sets `FACTORY_RUNNER_OUTER_WALL=proxy` only after `nft list table inet code_reviewer_wall`
-  succeeds**, and sets `LimitNOFILE` (8192) in the unit.
+  cannot check that the table is loaded (a machine without it has no outer wall: the install **fails** without it, and the unit's `ExecStartPre=+` fails the start of the service at every start without it). That is why
+  `refuse` is the default: **the installer writes `FACTORY_RUNNER_OUTER_WALL=proxy` into the unit only after `nft list table inet code_reviewer_wall`
+  succeeds**, and sets `LimitNOFILE` (8192 and 64 per slot) in the unit.
 * IPv4 only (the table drops IPv6, the proxy resolves IPv4); a name with only an AAAA record is unreachable.
 * Docker's nftables backend on the host next to this table is not proven (the spike did not either); the table is its own and runs at
   priority -150.
