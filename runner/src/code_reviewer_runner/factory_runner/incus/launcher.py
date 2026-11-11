@@ -365,9 +365,9 @@ class IncusSandbox:
             "limits.memory.swap": "false",
             "limits.processes": str(settings.processes),
             "boot.autostart": "false",
-            # The guest's devlxd socket (the host's API for an instance) is nothing the launcher
-            # or the jobs use: not offered to the setup or the agent.
-            "security.devlxd": "false",
+            # The guest API (`/dev/incus`, formerly devlxd: the host's API for an instance) is
+            # nothing the launcher or the jobs use: not offered to the setup or the agent.
+            "security.guestapi": "false",
             MARK: job.start.job_id,
             SLOT_MARK: str(job.slot.index),
             ROLE_MARK: role,

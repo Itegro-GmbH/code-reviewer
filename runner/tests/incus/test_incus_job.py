@@ -74,13 +74,18 @@ async def running_job(
     client: StandInClient, settings: IncusSettings
 ) -> tuple[IncusSandbox, IncusWorker, str, str]:
     sandbox = IncusSandbox(settings, client)
-    await sandbox.setup()
-    began = time.monotonic()
-    worker = await sandbox.start(start())
-    # The start budget: nothing to Control running, two instances, the doors listening or not yet.
-    print(f"lane: start() took {time.monotonic() - began:.1f} s", flush=True)
-    a, b = await names(client, settings)
-    await until(client, a, "test -e /tmp/ready")
+    try:
+        await sandbox.setup()
+        began = time.monotonic()
+        worker = await sandbox.start(start())
+        # The start budget: nothing to Control running, two instances, the doors maybe not yet.
+        print(f"lane: start() took {time.monotonic() - began:.1f} s", flush=True)
+        a, b = await names(client, settings)
+        await until(client, a, "test -e /tmp/ready")
+    except BaseException:
+        # Let go of the lock: the next test of the session needs it.
+        await sandbox.close()
+        raise
     return sandbox, worker, a, b
 
 

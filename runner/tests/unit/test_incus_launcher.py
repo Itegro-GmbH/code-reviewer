@@ -104,7 +104,7 @@ def test_a_job_gets_two_instances_with_the_configured_limits_and_quota_and_both_
             assert spec.config["boot.autostart"] == "false"
             assert spec.config["user.cr.job"] == "00000000-0000-4000-8000-000000000001"
             assert spec.config["user.cr.owner"] == owner
-            assert spec.config["security.devlxd"] == "false"
+            assert spec.config["security.guestapi"] == "false"
         assert outcome.exit_code == 0
         # Both are gone, and so is the job's directory; the slot is free again.
         assert rig.incus.instances == {}

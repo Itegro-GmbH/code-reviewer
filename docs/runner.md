@@ -2245,7 +2245,7 @@ the claim loop, the reaper and the credential pool do not know which backend the
    | `limits.processes` | 4096 | 4096 |
    | NICs | `eth0` outer, `eth1` inner; the `ctl` proxy device | `eth0` inner; `eth1` outer **until `narrow`** |
 
-   Every instance: `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true` (its own id range), `limits.memory.swap=false`, `boot.autostart=false`, `security.devlxd=false` (the guest's `devlxd` socket, the host's API for an instance, is nothing the setup or the agent needs: the launcher uses `incus exec` and a `proxy` device, not it).
+   Every instance: `security.privileged=false`, `security.nesting=true`, `security.idmap.isolated=true` (its own id range), `limits.memory.swap=false`, `boot.autostart=false`, `security.guestapi=false` (the guest API `/dev/incus`, once devlxd: the host's API for an instance, is nothing the setup or the agent needs: the launcher uses `incus exec` and a `proxy` device, not it).
    **The quota counts what the instance shares with its image** (referenced size on btrfs), so it must leave the job room; the write that passes it fails with `Disk quota exceeded` (EDQUOT, not "No space left"),
    and a full quota also stops Docker's own bookkeeping in that instance (it ends at the wall clock or by `end` and is deleted; **A's quota is its own, not a slice of B's**).
    Outer NICs have a **static address**, `security.ipv4_filtering` and `security.mac_filtering` (a packet must come from the NIC's address and MAC) and **`security.port_isolation`** (an isolated port reaches only the bridge's own address:
