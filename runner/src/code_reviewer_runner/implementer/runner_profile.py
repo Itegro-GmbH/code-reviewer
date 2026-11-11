@@ -129,13 +129,19 @@ def setup_seams(environment: Mapping[str, str], base: SetupSeams = SetupSeams())
 def door_seams(environment: Mapping[str, str], base: DoorSeams) -> DoorSeams:
     """The model door's seams with the host's proxy, when this job process has one."""
     proxy = outer_proxy_for_job(environment)
-    return replace(base, outer_proxy=proxy or base.outer_proxy, placement=placement_of(environment))
+    placement = placement_of(environment)
+    if proxy is None and placement == base.placement:
+        return base
+    return replace(base, outer_proxy=proxy or base.outer_proxy, placement=placement)
 
 
 def netdoor_seams(environment: Mapping[str, str], base: NetDoorSeams) -> NetDoorSeams:
     """The network door's seams with the host's proxy, when this job process has one."""
     proxy = outer_proxy_for_job(environment)
-    return replace(base, outer_proxy=proxy or base.outer_proxy, placement=placement_of(environment))
+    placement = placement_of(environment)
+    if proxy is None and placement == base.placement:
+        return base
+    return replace(base, outer_proxy=proxy or base.outer_proxy, placement=placement)
 
 
 def reader_seams(environment: Mapping[str, str], base: ReaderSeams = ReaderSeams()) -> ReaderSeams:  # noqa: B008

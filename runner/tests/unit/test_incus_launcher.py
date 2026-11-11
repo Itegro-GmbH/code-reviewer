@@ -912,7 +912,7 @@ def test_a_start_whose_b_docker_does_not_answer_in_a_is_refused_and_leaves_nothi
     with short_directory() as root:
         rig = Rig(root, ready_seconds=0.3)
         rig.incus.responder = lambda name, argv: (
-            ExecResult(1, "", "Cannot connect") if "-H" in argv and "docker" == argv[0] else None
+            ExecResult(1, "", "Cannot connect") if "-H" in argv and argv[0] == "docker" else None
         )
 
         async def scenario() -> Any:
