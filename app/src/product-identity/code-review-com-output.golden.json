@@ -341,6 +341,9 @@
         "sandbox_size_unsupported": "The chosen size leaves too little memory for the agent's own container, so the task did not start and was not billed. Choose a larger size.",
         "environment_setup_failed": "The setup script of this task's environment did not finish successfully, so the task was stopped before the AI model was called and nothing was charged. The end of the script's output is shown below. Fix the script in Environments, then start the task again.",
         "environment_control_failed": "The machine that runs this task did not confirm the network rule of its environment, so the task was stopped before the AI model was called and nothing was charged. Start the task again; if it keeps failing, check that the machine's runner is up to date and running.",
+        "subscription_auth": "The Claude login on the machine that runs this task was refused (it has expired or was revoked), so the task stopped and nothing was charged. The owner of that machine makes a new token with claude setup-token and replaces the old one there; until then the machine takes no task for Claude Code.",
+        "subscription_limit": "The usage limit of the Claude subscription on the machine that runs this task is reached, so the task stopped and nothing was charged. The machine takes tasks for Claude Code again when the limit has reset; start the task again later.",
+        "subscription_model_refused": "The Claude subscription on the machine that runs this task does not allow the AI model this task asks for, so the task stopped and nothing was charged. Choose a model the subscription includes.",
         "no_result": "The agent finished without handing in the result this task asks for, also after a reminder. Anything it committed is on its branch. Read its summary, then try again.",
         "unknown": "The run failed for a reason this version does not know."
       },
