@@ -304,17 +304,27 @@ host_variant() { # host_variant <name> <battery 0|1>: the same series with Docke
   fact "loadavg after $1: $(cut -d' ' -f1-3 /proc/loadavg)"
 }
 
-# The hypothesis of the DevBox runs: the host was busy (load 5 to 20 on 4 vCPUs). The same series with K busy loops on the runner, Docker on the host and Docker in
-# an instance, fewer repetitions.
+# The hypothesis of the DevBox runs: the host was busy (load 5 to 20 on 4 vCPUs, other agents' builds and tests). The same series while the runner is kept busy with
+# CPU (busy loops) and/or disk (writers that fsync on the disk the pool's loop file lives on), Docker on the host and Docker in an instance, fewer repetitions.
 HOGS=()
-start_hogs() { local _; for _ in $(seq 1 "$1"); do bash -c 'while :; do :; done' & HOGS+=("$!"); done; sleep 20; }
-stop_hogs() { [ "${#HOGS[@]}" -gt 0 ] && kill "${HOGS[@]}" 2>/dev/null; wait "${HOGS[@]}" 2>/dev/null; HOGS=(); }
-loaded() { # loaded <busy loops>
+start_hogs() { # start_hogs <busy loops> <fsync writers>
+  local _
+  for _ in $(seq 1 "$1"); do bash -c 'while :; do :; done' & HOGS+=("$!"); done
+  for _ in $(seq 1 "$2"); do bash -c 'while :; do dd if=/dev/zero of=/mnt/incus-bench/hog.$$ bs=1M count=256 conv=fsync status=none; done' & HOGS+=("$!"); done
+  sleep 20
+}
+stop_hogs() {
+  [ "${#HOGS[@]}" -gt 0 ] && kill "${HOGS[@]}" 2>/dev/null
+  wait "${HOGS[@]}" 2>/dev/null
+  HOGS=()
+  find /mnt/incus-bench -maxdepth 1 -name 'hog.*' -delete
+}
+loaded() { # loaded <name> <busy loops> <fsync writers>
   local saved=$N
   N=6
-  start_hogs "$1"
-  host_variant "host-docker-load$1" 0
-  variant "btrfs-default-load$1" 0 1 - 'apparmor-on userns containerd-store limits' "${base[@]}"
+  start_hogs "$2" "$3"
+  host_variant "host-docker-$1" 0
+  variant "btrfs-default-$1" 0 1 - 'apparmor-on userns containerd-store limits' "${base[@]}"
   stop_hogs
   N=$saved
 }
@@ -334,6 +344,8 @@ variant tmpfs-root 0 0 "$HOOK_TMPFS" 'apparmor-on userns containerd-store limits
 variant btrfs-default-again 0 0 - 'apparmor-on userns containerd-store limits' "${base[@]}"
 startup_series startup-dir "$BOOTS_DIR" -s dirpool
 variant dir-pool 1 0 - 'apparmor-on userns containerd-store limits' "${base[@]}" -s dirpool
-loaded 8
-loaded 16
+loaded load8 8 0
+loaded load16 16 0
+loaded io4 0 4
+loaded mixed 8 4
 fact "loadavg at the end: $(cut -d' ' -f1-3 /proc/loadavg)"
