@@ -2043,10 +2043,8 @@ it over the real Unix sockets, framing, session and token checks), slots, disks,
 template against the golden file, the settings, the service with a sandbox that has slots. The **KVM lane** (`runner/tests/kvm`,
 the `Launcher lane` step of `.github/workflows/vm-artifacts.yml`, only for a change to its paths): T05 a real job (the Worker image
 fetches a job from the fake App through the TAP, delivers its result) with the VM's cgroup limits read while it runs, nothing left
-after it, the wall clock killing a real VM, **the Worker's own `narrow` arriving over the vsock with the VM's token and getting the
-operator's answer** (`refuse`: the job ends `environment_control_failed`; `inner-only`: it goes on), **two jobs at once in two slots**,
-and **a VM left by a dispatcher that "crashed" found and removed by the next one** (the real VMM killed by its command line, its
-directory and cgroup gone). The smoke boot of the same workflow proves that a container of the agent **cannot open a
+after it, the wall clock killing a real VM, **two jobs at once in two slots**, and **a VM left by a dispatcher that "crashed" found and
+removed by the next one** (the real VMM killed by its command line, its directory and cgroup gone). The smoke boot of the same workflow proves that a container of the agent **cannot open a
 vsock socket**: `vsock_denied_agent` (Docker's default profile, under Sysbox), its control `vsock_allowed_control` (Control's profile
 allows it: the probe can see a socket), and `ia32_unavailable` (a 32-bit `int 0x80` / `socketcall`, which would bypass the profile's
 argument filter, does not work on the guest kernel; on a kernel with IA32 emulation the same probe sees `EINVAL`).
@@ -2057,8 +2055,10 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
   (the installer writes `parallelRuns`); the no-Docker `selftest` (a VM boot as the self-test).
 - A stop that asks the Worker in the VM to give its job back (`runner_shutdown`) before the VM is killed needs a channel to Control that
   vm-init does not have (a `stop` message over the start connection).
-- A lane check that a **token-less `narrow` from a container** is refused by a real host: the guest can run only Control's allow-listed
-  `docker run` (vm-init refuses other arguments), so a probe container needs a lane-only start with another command; the refusal is
-  proved today by the unit tests against the fake VM, and the lane proves the other half (a `narrow` with the token reaches the wall).
+- A lane check of a **real `narrow`** (the Worker's, with the token: the wall is asked; a token-less one from a container: `refused`).
+  No job of the lane gets as far: a job clones its repository before it narrows the network, the Worker clones over https only (the
+  lane has no https git host), and the guest runs only Control's allow-listed `docker run` (vm-init refuses other arguments), so there
+  is no probe container either. The host's side is proved by the unit tests against the fake VM (token, first answer, repeats); the
+  lane proves the exit report with the token over the same vsock. A real `narrow` belongs to #979's lane, with the wall.
 - The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
   the time to vm-init's `ack`).

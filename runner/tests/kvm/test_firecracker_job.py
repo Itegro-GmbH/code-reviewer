@@ -9,10 +9,13 @@ the TAP, the cgroup, the job disk. What is a double: the App (`runner_app.py`), 
 GitHub, which the job never reaches. (The probe that a container cannot open a vsock socket is in
 the smoke boot of the same workflow: `vsock_denied_agent`, its control and `ia32_unavailable`.)
 
-Besides the one job and the wall clock: the Worker's `narrow` arrives over the vsock with the VM's
-token and gets the answer the operator chose (refuse or inner wall only), two jobs run at once in
-two slots, and a VM that a dispatcher that crashed left behind is found and removed by the next
-one."""
+Besides the one job and the wall clock: two jobs run at once in two slots, and a VM that a
+dispatcher that crashed left behind is found and removed by the next one. (Not here: the Worker's
+own `narrow`. A job clones its repository before it narrows the network, the Worker clones over
+https only, and Control's `docker run` is fixed by vm-init's allow-list, so no job of this lane
+gets as far as the narrowing; the host's side of `narrow` is proved by the unit tests against the
+fake VM, and the exit report with the token, which is vm-init's own message over the same vsock, is
+what ends the job here.)"""
 
 import asyncio
 import copy
@@ -52,7 +55,7 @@ RUNNER_CREDENTIAL = "crc_" + "K" * 43
 
 class RecordingWall:
     """The wall the operator chose (`inner-only` unless told otherwise), and a note of every
-    `narrow` that reached it: it is only asked once the VM's token was checked."""
+    `narrow` that reached it."""
 
     def __init__(self, mode: OuterWallMode = OuterWallMode.INNER_ONLY) -> None:
         self.inner: OuterWall = outer_wall_for(mode)
@@ -225,42 +228,6 @@ def test_a_vm_that_outlives_its_wall_clock_is_killed_for_real(
     assert ran(machine) == []
     assert sandbox.free == sandbox.capacity
     assert delegated_tree(sandbox).vm_cgroups() == []
-
-
-# #978-T07
-@pytest.mark.parametrize("mode", [OuterWallMode.REFUSE, OuterWallMode.INNER_ONLY])
-def test_the_workers_narrow_arrives_over_the_vsock_with_the_token_and_gets_the_chosen_answer(
-    machine: Machine, app: FakeRunnerApp, mode: OuterWallMode
-) -> None:
-    # The host asks its wall only for a `narrow` that carries the VM's token (the session refuses
-    # the rest before it), so a note in the wall is a real request of the Worker in the VM, over
-    # the vsock, with the token vm-init was given.
-    wall = RecordingWall(mode)
-    sandbox = sandbox_for(machine, wall, outer_wall=mode)
-    start = claimed(app)
-
-    async def scenario() -> WorkerOutcome:
-        await sandbox.setup()
-        try:
-            worker = await sandbox.start(start)
-            return await worker.wait()
-        finally:
-            await sandbox.close()
-
-    outcome = asyncio.run(scenario())
-    delivered = what_the_job_delivered(app)
-    print(f"\n{mode.value}: {wall.narrows=} delivered: {delivered}\n{outcome.log_tail}")
-
-    # The job had no environment: its rule is `off`; the model host is the entry's.
-    assert wall.narrows == ["off model=openrouter.ai"], delivered
-    errors = [done.get("errorCode") for done in app.completions]
-    if mode is OuterWallMode.REFUSE:
-        # `refused` (`unavailable`): the Worker ended the job before an agent existed.
-        assert errors == ["environment_control_failed"], delivered
-    else:
-        # `ack`: the job went on past the narrowing (and ended later for what the lane lacks).
-        assert errors and "environment_control_failed" not in errors, delivered
-    assert ran(machine) == [] and sandbox.free == sandbox.capacity
 
 
 # #978-T10
