@@ -331,8 +331,8 @@ sudo sh install.sh --token-file /root/runner-token --labels linux,gpu
 then in your shell history, in the log of `sudo` and, while the command starts, in the process list. The installer prints that warning when
 the token came from the environment. A token is never an argument (`--token` is refused).
 
-**The old mode is gone.** There is no install on the host's Docker socket, no runner image (`runner/Dockerfile.factory-runner` and its CI
-build are deleted), no Sysbox step on the host (Sysbox is in the VM), no image-based update and no Worker-as-a-process fallback in the program
+**The old mode is gone.** There is no install on the host's Docker socket, no runner image (its Dockerfile and its CI
+build are deleted, and so is the file with the agent image's reference it carried), no Sysbox step on the host (Sysbox is in the VM), no image-based update and no Worker-as-a-process fallback in the program
 (`factory-runner run` ends with exit code 6 unless `FACTORY_RUNNER_SANDBOX=firecracker`, which the unit sets). No runner was ever published, so
 there is **no migration window**: an older, Docker-based install is not recognised, and the installer stops when it finds its unit.
 
@@ -343,24 +343,29 @@ there is **no migration window**: an older, Docker-based install is not recognis
 | Linux, x86_64, root | stops (macOS and arm64 come with their own backends) |
 | **`/dev/kvm` exists** | stops and explains: a physical machine needs virtualization enabled in the firmware and the `kvm` modules; **a cloud VM needs nested virtualization** (a bare-metal type or a VM family that exposes `/dev/kvm`); a container has none |
 | `/dev/kvm` can be opened by root; the group `kvm` exists | stops (the service user opens the device through the group; a device owned by another group gets a warning and the proof after the user is made: a try as that user) |
+| `/dev/net/tun` exists | stops (`modprobe tun`): the TAP devices of the VMs need it |
 | systemd ≥ 247, `/run/systemd/system`, cgroup v2 at `/sys/fs/cgroup` | stops (delegation and the sandboxing options of the unit; the VM limits are cgroup v2) |
 | `nft`, `ip`, `curl`, `openssl`, `jq`, `zstd`, `tar`, `flock`, `runuser`, `useradd`, `userdel`, `resize2fs`, `e2fsck`, `sha256sum`, `base64` | stops and names the package |
 | **an install exists** (`/etc/code-reviewer/install.state`) | stops: update it with `sudo factory-runner update`, or run the installer over it with `--refresh`. **A second dispatcher on one machine is refused**: the launcher takes a lock on its state directory (a second one ends with exit code 9), and the installer reuses nothing it did not make |
-| a unit `factory-runner.service`, the user `factory-runner`, a non-empty `/var/lib/code-reviewer`, `/opt/code-reviewer`, the table `code_reviewer_wall` or a TAP device `fctapN` that this installer did not make | stops |
+| a unit `factory-runner.service` (or its `-update` / `-wall` units), the command `/usr/local/bin/factory-runner`, the user `factory-runner`, a non-empty `/var/lib/code-reviewer` (an empty one, with or without `lost+found`, is a volume of the operator's: it stays), `/opt/code-reviewer`, **`/etc/code-reviewer`, `/var/lib/factory-runner`**, the table `code_reviewer_wall` or a TAP device `fctapN` that this installer did not make | stops: **what the install makes is what the uninstall (and a failed install) removes, so nothing of it may exist before; `install.state` is the record, and a machine without it is never touched by an uninstall** |
+| **the network of the slots**: the first of a list of `/24` networks (`10.250.0.0` to `10.255.0.0`, `10.240.0.0` to `10.249.0.0`, `192.168.250.0` to `192.168.254.0`) that overlaps **no address and no route** of the machine (`ip -4 -o addr show`, `ip -4 route show table all`, so a VPN's or Docker's routes count) | stops when none is free and says how to name one (`--slot-network 10.77.5.0/24`, a `/24` inside `10.0.0.0/8` or `192.168.0.0/16`, which is checked the same way). Never `172.16.0.0/12` (Docker's address pools; the default VPC of AWS is `172.31.0.0/16`, whose Amazon DNS is `172.31.0.2`) and never `100.64.0.0/10` (Tailscale). The choice is kept in `install.state` and in `runner.env` (`FACTORY_RUNNER_SLOT_NETWORK`); a `--refresh` keeps it |
 | the state directory is not on a file system with **reflinks** (XFS with `reflink=1`, btrfs) | **warns, goes on**: the job's disk is a copy-on-write copy of the 6 GiB base disk (34 ms); without reflinks it is a full copy for every job. Put `/var/lib/code-reviewer` on such a volume (a probe `cp --reflink=always` decides, not the file system's name) |
-| the **two release channels** are filled in, the manifests download and **verify**, the disk has room | stops ("no program release is published yet" while a channel is empty: the owner fills it) |
+| the **two release channels** are filled in, the manifests download and **verify**, the **program** is downloaded, verified and unpacked **in the work directory** and its **table passes `nft -c -f` on this kernel** (rendered for the chosen network), the disk has room | stops ("no program release is published yet" while a channel is empty: the owner fills it) |
 
 **Then, in this order** (the first failure removes what a fresh install made, so nothing is left behind):
 
 1. the user `factory-runner` (a system user, no shell, no login) as a member of `kvm`, and a **try**: the user opens `/dev/kvm` for reading and writing;
-2. the directories (below) and the **program** and the **VM artifacts**, each downloaded by the names and **digests of its signed manifest**, verified and
-   unpacked into a staging directory and moved into place in one step; the artifacts end up **owned by root and read-only for the service**;
-3. **one TAP device per slot** (`--parallel-runs`, 1 to 64, default 1: the number of jobs at once), owned by the service user, with the `/30` of the slot;
-4. the **static nft table** of [the outer wall](#the-outer-wall-on-a-customers-machine-979): checked with `nft -c -f` (a kernel without the `nft_fib` modules is found here, before anything is
-   loaded), loaded, and **listed again with `nft list table inet code_reviewer_wall`**; if that fails the install fails;
+2. the directories (below), the **VM artifacts** (the program was staged before step 1) downloaded by the names and **digests of the signed manifest**, verified
+   and unpacked into a staging directory and moved into place in a short step under the switch lock together with the program; the artifacts end up **owned by root and read-only for the service**;
+3. **one TAP device per slot** (`--parallel-runs`, 1 to 64, default 1: the number of jobs at once), owned by the service user, with the `/30` of the slot in the chosen network. The number of devices is written to
+   `install.state` **before the first one is made**, so an install that is interrupted or fails half way removes exactly what it made;
+4. the **static nft table** of [the outer wall](#the-outer-wall-on-a-customers-machine-979), rendered for the network of the slots, loaded, and **listed again with `nft list table inet code_reviewer_wall`**; if that fails the install fails;
 5. only then the units (`FACTORY_RUNNER_OUTER_WALL=proxy` is in the unit **only because the table was listed**; the service checks again before every start, below) and the command;
 6. the **registration** with the token (a token that is refused leaves the install in place and says how to register by hand);
-7. the update timer, the service enabled and **started**.
+7. the update timer and the wall timer, the service enabled and **started**.
+
+**Interrupted.** A signal (Ctrl-C, hang-up, `kill`) ends the script like a failure: what a fresh install made is removed and the work directory goes. A `kill -9` cannot be caught: run
+`sudo sh install.sh --uninstall` (it reads `install.state`, which is written before the first change).
 
 **Where things are.** Nothing the service can write is code, and nothing it can read of the kernel and the root file system can be changed by it:
 
@@ -369,16 +374,17 @@ there is **no migration window**: an older, Docker-based install is not recognis
 | `/opt/code-reviewer/releases/<N>/`, `current`, `previous` | root, read-only | the program: `bin/factory-runner`, `bin/firecracker`, `share/outer-wall.nft`, `libexec/host.sh` (this script) and the Python runtime |
 | `/var/lib/code-reviewer/artifact-releases/<R>/`, `artifacts`, `artifacts-previous` | root, files `0644`, directory `0755` | `vmlinux`, `rootfs.ext4`, `dockerdata.ext4`, a copy of the manifest and its signature, `vm.env` (the Worker image's id); `artifacts` is the link the launcher reads |
 | `/var/lib/code-reviewer/vms/`, `dispatcher.lock` | the service user | the VMs' directories, the lock of the one dispatcher |
-| `/var/lib/code-reviewer/pending`, `update.lock`, `switch.lock`, `staging/` | root | the marker of a staged release, the locks, the downloads in progress |
+| `/var/lib/code-reviewer/pending`, `update.lock`, `switch.lock`, `staging/`, `outer-wall.nft` | root | the marker of a staged release (`program=N`, `vm=M`, `pair=1`), the locks, the downloads in progress, the table as it was loaded (rendered for the slots' network) |
 | `/var/lib/factory-runner/` | the service user, `0700` | `config.json` (with the credential), the Claude Code credentials of the device |
-| `/etc/code-reviewer/` | root | `install.state` (what the installer made, for the uninstall), `channel-program.json`, `channel-vm.json`, `runner.env` (settings, no secret), `rejected-program`, `rejected-vm`, `download.curlrc` |
-| `/etc/systemd/system/factory-runner.service`, `factory-runner-update.service`, `factory-runner-update.timer`, `/usr/local/bin/factory-runner` | root | the units and the command |
+| `/etc/code-reviewer/` | root | `install.state` (what the installer made, for the uninstall: the user, the number of TAP devices, the slots' network, whether the state directory was there), `channel-program.json`, `channel-vm.json`, `runner.env` (settings, no secret), `rejected-program`, `rejected-vm`, `download.curlrc` |
+| `/etc/systemd/system/factory-runner.service`, `factory-runner-update.service` and `.timer`, `factory-runner-wall.service` and `.timer`, `/usr/local/bin/factory-runner` | root | the units and the command |
 
 **The unit** (`factory-runner.service`) runs as `User=factory-runner` with `SupplementaryGroups=kvm` and `Delegate=yes`. The options and why:
 
 | Option | Why |
 |---|---|
 | `ExecStartPre=+…/libexec/host.sh prestart` | as root (the `+`): switches to a staged release, makes the TAP devices a restart of the machine took, loads the table and **fails the start unless `nft list table inet code_reviewer_wall` answers**. The service is a normal user and cannot read nft state, so this is the only check, and it runs at every start, not only at install |
+| `After=` and `PartOf=nftables.service` | a reload of the machine's rules (`nftables.service`) flushes our table with the rest: a restart of that service restarts this one, and the start loads the table again. A machine without that unit ignores both lines. A flush by anything else is what the wall timer catches ([below](#the-outer-wall-is-checked-while-the-service-runs)) |
 | `Environment=FACTORY_RUNNER_SANDBOX=firecracker`, `FACTORY_RUNNER_OUTER_WALL=proxy` | `proxy` is written only after the table was listed; the program's own default stays `refuse` |
 | `LimitNOFILE=8192 + 64 × slots` | the vsock listeners (2 per VM, 4 connections each), the VMs' files, the proxy's 256 connections of two descriptors each and the app's connections, with room |
 | `TasksMax=300 × slots + 256` | Firecracker's threads: every VM's cgroup has `pids.max` 256, and the unit's limit covers all of them |
@@ -409,10 +415,12 @@ also reads):
 (a public GitHub release, or protected storage; see "What is not in this repository, for the owner" under "Updates"); the installer hard-codes only where the channel files
 are (the repository's `main`) and `--program-channel-file` / `--vm-channel-file` read another file. Both stay **empty** until the owner fills them: then the installer stops with
 "no program release is published yet" and changes nothing. A release address that needs a login (protected storage) takes a curl configuration, `--curl-config FILE`
-(`header = "Authorization: Bearer …"`, or a client certificate), which the installer keeps for the updates in `/etc/code-reviewer/download.curlrc`, readable by root only.
+(`header = "Authorization: Bearer …"`, or a client certificate), which the installer keeps for the updates in `/etc/code-reviewer/download.curlrc`, readable by root only (written under `umask 077`, so it is never readable by others, not even for an instant). **A configuration given on the command line wins over the one kept**, for the first fetches too, and replaces it once the manifests have verified with it. **While one is in use a redirect is followed only within the same host**: curl sends custom headers to wherever a redirect points, so a redirect to another host is refused (and says so) rather than followed; without a configuration redirects (a release asset on a CDN) are followed, https only.
 `publicKey` is the base64 of the DER of an ECDSA P-256 public key; the manifest's signature (ECDSA, SHA-256, DER) is checked with `openssl` over exactly its bytes
 before one field of it is read. The installer stores a copy of each channel in `/etc/code-reviewer/`, so **a setting on the device cannot redirect an update**; a new key is a new channel file
 and the installer run again (`--refresh`).
+
+**A download is bounded by what its manifest says.** Every download and every unpacking runs under a limit on the size of any file the process writes (`ulimit -f`, the size of the manifest plus a block), so a server that sends more than it said (no `Content-Length`, an endless body) or a compressed file that expands to more cannot fill the disk; `curl --max-filesize` only trusts a header. The size and the digest are checked afterwards as before.
 
 **A download that is cut off changes nothing.** Under `curl | sh` the shell runs the file while it receives it. All of the script is functions; the last line, `{ main "$@"; }`, is the
 only command that does anything, and a run that does not print `install: done` did not finish.
@@ -437,12 +445,12 @@ There is no image to build: the runner image and the Docker socket install of R2
 
 | Command                        | What it does                                                                                                                               |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--runtime] [--agent-image] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 8: the credential is shown once and is lost. Refuses to replace a registration without `--force`. Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
+| `register [--token-file F \| --token T] [--name N] [--labels a,b] [--url U] [--cpus] [--memory-mb] [--disk-gb] [--force]` | Exchanges the token for the runner's credential (read from `--token-file`, `-`, `FACTORY_RUNNER_TOKEN` or `--token`, see above) and writes the configuration (file mode 0600, directory 0700). If the app accepted the token but the file cannot be written, it says `runner registered, but its credential could not be saved: revoke it in the app and register again` and ends with exit code 8: the credential is shown once and is lost. Refuses to replace a registration without `--force`. `--runtime` and `--agent-image` of the Docker-based runner are **refused** with a message (every job runs in a Firecracker VM, whose runtime and agent image are part of the signed VM artifacts). Without `--url` it goes to `https://code-review.com`. The manifest of the registration is empty: `run` announces what the self-test proved. |
 | `run`                          | The service loop (below).                                                                                                                  |
 | `run --once [--wait SECONDS]`  | Takes **one** job and ends with its exit code. With no job within `--wait` (default 600) it ends with **exit code 0** and the line `no job for the labels of this runner within Ns: nothing to do`. |
 | `selftest [--json] [--with-claude-code]` | Proves the base (below). On a device with a Claude Code login it also looks at Claude Code (no model call); with `--with-claude-code`, by hand, it runs one tiny real turn on that login (a few cents of your subscription, see "Claude Code with your subscription"). Exit code 0 when it holds, 5 when it does not. Needs no registration. It only looks: it pulls and names no image, so a missing or not pinned agent image is reported as not ready (a starting `run` pulls it). It may run beside a service; its throwaway container is one more on the daemon for the seconds it takes. |
 | `config show`                  | The configuration as the runner sees it (file and environment), the credential only as `set` / `not set`.                                  |
-| `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--runtime R] [--agent-image I\|none] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, runtime, image, automatic updates). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
+| `config set [--name N] [--labels a,b] [--cpus N\|none] [--memory-mb N\|none] [--disk-gb N\|none] [--parallel N] [--auto-update on\|off]` | Changes the file **on the device** (labels, limits, parallelism, name, automatic updates; `--runtime` and `--agent-image` are refused with a message, as for `register`). Every value goes through the check of `register`; one wrong value changes nothing. `none` removes a limit. The credential and everything not named stay as they are, and the environment is never written into the file; when a variable overrides a setting that was changed, it says so. A running service reads the file when it starts: restart it after its job. `--parallel` accepts 1: this runner takes one job at a time. |
 | `credential show`              | `credential: set (from the file)` or `not set`, and how old it is. Never the value.                                                         |
 | `credential renew`             | Asks the app for a new credential and saves it **before** anything uses it (the app keeps the old one valid until the new one was used once, so a failed write loses nothing). Not for a credential from the environment. Exit code 4 when the runner was revoked. |
 | `update`, `rollback [--now]`, `status`, `uninstall` | **The root script's, not the program's** (#982): `/usr/local/bin/factory-runner` hands them to `libexec/host.sh` of the current release. See "Updates" and "Uninstall". |
@@ -474,7 +482,7 @@ from the environment instead, and the environment wins**, which is how a VM that
 | `FACTORY_RUNNER_CREDENTIAL`              | The runner's credential (`crc_...`), a secret                                                |
 | `FACTORY_RUNNER_NAME`, `FACTORY_RUNNER_LABELS` | The name, and the labels (comma separated, lower case)                                 |
 | `FACTORY_RUNNER_CPUS`, `_MEMORY_MB`, `_DISK_GB` | The limits (below)                                                                    |
-| `FACTORY_RUNNER_AGENT_IMAGE`, `FACTORY_RUNNER_RUNTIME` | The agent image to pull; `auto` (default), `runc` or `sysbox-runc`                |
+| `FACTORY_RUNNER_AGENT_IMAGE`, `FACTORY_RUNNER_RUNTIME` | Process mode of the tests only (the Docker self-test): the agent image to pull; `auto` (default), `runc` or `sysbox-runc`. Not settings of an installed machine |
 | `FACTORY_RUNNER_AUTO_UPDATE`             | `1` (default) or `0`: the update timer looks for a release (see "Updates"); `sudo factory-runner update` works either way |
 | `FACTORY_RUNNER_TOKEN`                   | `register` only: the registration token, an alternative to `--token-file` (not read by `run`) |
 
@@ -594,13 +602,12 @@ name: `docker` (the daemon answers and has the chosen runtime), `work-volume` (`
 the pinned version), `canned-turn` and, as a capability that may fail without costing the base, `agent-docker`.
 
 **The agent image is held to the pin.** The runner names the image it starts agents from `code-reviewer-agent:golden`, and a daemon
-may already have an image of that name from an earlier version. When the reference the runner was given (`AGENT_IMAGE_REF` baked in,
-or `FACTORY_RUNNER_AGENT_IMAGE`) names its image **by digest**, the digest is compared with the ones the daemon knows the image by; a
+may already have an image of that name from an earlier version. When the reference the runner was given (`FACTORY_RUNNER_AGENT_IMAGE`; on an installed machine the agent
+image is part of the VM artifacts and its id is in the signed manifest) names its image **by digest**, the digest is compared with the ones the daemon knows the image by; a
 different one is replaced (pulled and named again) and the check says `replaced`. With a **tag** nothing can be compared, so the check
 passes with a **warning** (`the image behind a tag can change`) and the engine decides: if `opencode --version` in the container is not
 the version this runner pins, the image is pulled once and the check repeated; if it is still wrong, the runner is **not ready** and
-the log says which version was found, which is pinned and what to set. A release pins both the runner image's base and the agent image
-by digest (`runner/Dockerfile.factory-runner` says so, and warns at build time when `AGENT_IMAGE_REF` is a tag).
+the log says which version was found, which is pinned and what to set. The VM artifacts pin the agent image by its id in the signed manifest.
 
 The **canned turn** is a whole turn of the pinned OpenCode inside that container against a canned model
 (`canned_provider.py`, an OpenAI-style completion with a stream, run beside the engine): the engine starts, calls a provider,
@@ -677,7 +684,8 @@ every later VM boots from): a **root script stages** a release, and the **servic
 
 ```
 timer (root, every 6 h) or `sudo factory-runner update`
-   └─ stage: signed manifest ─▶ download by name and digest ─▶ verify ─▶ unpack ─▶ move into releases/<N>      writes  pending
+   └─ both manifests ─▶ download program AND VM artifacts by name and digest ─▶ verify ─▶ unpack     (no lock held: minutes)
+      then, under the switch lock for a few renames: move into releases/<N> and artifact-releases/<R>, ONE write of  pending  (the pair)
 service (between two jobs: no job runs, `pending` exists)  ─▶ ends with exit code 10
 systemd restarts it ─▶ ExecStartPre=+ host.sh prestart: smoke test ─▶ atomic switch of the links ─▶ table, TAPs ─▶ service starts on the new release
 ```
@@ -692,7 +700,13 @@ systemd restarts it ─▶ ExecStartPre=+ host.sh prestart: smoke test ─▶ at
    **unpacked size and sha256** too: what `dispatcher/src/vm-artifacts/verify.ts` checks, including that the staging directory holds **exactly** what the manifest names (`--exact-dir`);
    the program tarball is listed before it is unpacked (no absolute path, no `..`, no odd character), and a device, a socket or a link out of its tree is refused;
 4. the new table must pass `nft -c -f` on this kernel; the program must carry `bin/factory-runner`, `bin/firecracker`, `libexec/host.sh` and `share/outer-wall.nft`;
-5. only then is the release moved into place (`releases/<N>`, `artifact-releases/<R>`) and `pending` written. A failure at any step removes the staging directory and changes nothing that runs.
+5. only when **both** parts are downloaded and verified are they moved into place (`releases/<N>`, `artifact-releases/<R>`) and `pending` written, **as a pair** (`program=N`, `vm=M`, `pair=1`) in one write.
+   A failed stage of the VM artifacts leaves no program staged, and the other way round. A pair is switched together: **a program that fails its smoke test takes the VM artifacts that came with it along** (both are dropped and
+   rejected). When only one part is newer, only that one is staged.
+
+**The locks.** `update.lock` keeps two updaters from staging at once (the timer's and one by hand: the second says "another update is running"). The **switch lock** guards the files that say what is current, previous and
+pending; it is held **only for the renames and the one write of `pending`, never for a download**, so a start of the service, `factory-runner rollback` and `factory-runner status` never wait behind a slow or large download of the VM
+artifacts, and the service goes on taking jobs meanwhile. The commit asks again, under the lock, whether the release is still one to take (a rollback may have come in during the download: its rejected release is not staged).
 
 **The switch** is the start of the service (`prestart`, as root): for the program, `bin/factory-runner --version` and `bin/firecracker --version` must run as the service user (a release that does not run is
 **dropped and rejected**, the current one stays); then `current` and `artifacts` are repointed in one atomic step each (`ln -s` and `mv -T`), the release before becomes `previous`, and releases other than current,
@@ -813,6 +827,11 @@ What the unit tests cannot know and the first install must check (the installer 
 
 ### Known limits
 
+- **The network of the slots is chosen from what the machine knows.** The installer sees the addresses and routes the machine has; a `/24` inside a larger range that the machine reaches only through its default route
+  (an AWS VPC whose subnets are not in the route table, a LAN behind a gateway) cannot be seen, and the candidates are ranges such networks rarely use. If a VM's traffic to the proxy fails or a host in the chosen range
+  is unreachable from the machine, name another network with `--slot-network` on an `--uninstall` and a new install (the network is part of the install, not a setting to change later).
+- **The outer wall is gone between two checks.** The wall timer looks every 10 seconds; between a flush of the rules and the restart a VM that is running has no table between it and the host's network for up to those 10 seconds
+  and the time of a stop. A missing **rule** never opens the wall (the last rule of each chain drops what is ours and the file loads in one transaction); only a missing **table** does.
 - **No watchdog for a bad update.** A release that passes the smoke test at the switch and then fails is tried again by systemd every few minutes, and the operator rolls back by hand
   (`sudo factory-runner rollback --now`, see "Updates"); rolling back by itself and rejecting the release when the new program ends with an error within N minutes is a follow-up.
 - **The manifest has no expiry (freeze attack).** The signature proves that a manifest is ours, not that it is the newest: whoever controls the
@@ -1976,7 +1995,7 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
    starts over after one that works. The app counts an attempt for every claim that is given back and has no release that does not
    (three attempts, then the job fails): without the pause, a machine that cannot start any VM would spend an attempt of every job of the
    queue within a minute. A TAP device per slot was made at install (root);
-   slot *N* is `fctapN` with the /30 network `172.31.<N*4 div 256>.<N*4 mod 256>`: the host's side is its first address, the guest's the
+   slot *N* is `fctapN` with the /30 network at offset *N*×4 of the slots' network (`FACTORY_RUNNER_SLOT_NETWORK`, a /24 the installer chose; the tests use `172.31.0.0/16`): the host's side is its first address, the guest's the
    second (given to the guest on the kernel command line, `vm.ip` and `vm.gw`).
 2. **Job disk.** The base disk (`dockerdata.ext4`, the Worker and agent images in the guest's own Docker) is copied to `disk.ext4`: a
    reflink (`FICLONE`, XFS with `reflink=1` or btrfs, 34 ms for 752 MiB in the spike) or a plain sparse `cp` where the file system has none,
@@ -2192,20 +2211,40 @@ What each rule does:
 | Chain | Rule | Why |
 |---|---|---|
 | input | from a TAP: IPv6, drop | the guest has no IPv6 and the proxy none; nothing of IPv6 is allowed anywhere |
-| input | from a TAP: source not in `172.31.0.0/16`, drop | a slot's addresses are in that /16 (`slots.py`); anything else is a spoof |
-| input | from a TAP: IPv4 whose source is not routed back to this TAP (`fib saddr . iif oif missing`), drop | the reverse-path check: the table lets any address of the /16 in, so without it a VM could send **another slot's source address** (and the answers of the proxy to it would go to the real owner); with it a packet is accepted only from the address of the slot whose TAP it arrives on |
+| input | from a TAP: source not in the slots' network (`@SLOT_NETWORK@`, rendered by the installer), drop | a slot's addresses are in that network (`slots.py`); anything else is a spoof |
+| input | from a TAP: IPv4 whose source is not routed back to this TAP (`fib saddr . iif oif missing`), drop | the reverse-path check: the table lets any address of the slots' network in, so without it a VM could send **another slot's source address** (and the answers of the proxy to it would go to the real owner); with it a packet is accepted only from the address of the slot whose TAP it arrives on |
 | input | from a TAP: established or related, accept | the answers of the proxy |
-| input | from a TAP: TCP to port 3128 of a local address in `172.31.0.0/16`, accept | **the one thing a VM may open**: a connection to the proxy, on a slot's address (the proxy binds those and no other) |
+| input | from a TAP: TCP to port 3128 of a local address in the slots' network, accept | **the one thing a VM may open**: a connection to the proxy, on a slot's address (the proxy binds those and no other) |
 | input | from a TAP: everything else, drop | the host's other ports, ICMP, UDP (a guest's DNS included: the proxy resolves), the host's other addresses |
 | forward | from or to a TAP, drop | a VM forwards to nothing (LAN, RFC1918, 169.254.0.0/16 and `169.254.169.254`, the other VMs, the internet) and nothing forwards to a VM. The host may forward for others; the table, not the absence of routing, is what stops a VM |
 | output | to a TAP: established or related, accept; everything else drop | the host opens no connection to a VM (vsock is the channel) |
 
-The table lets a TAP reach the proxy port of **any** slot's address (the /16), because the table is static and a slot's address is
+The table lets a TAP reach the proxy port of **any** slot's address (the slots' network), because the table is static and a slot's address is
 derived from its number; the proxy therefore **closes unanswered any connection whose source is not its own slot's guest** (a VM
 that connects to another slot's proxy). **The reverse-path rule** (`fib saddr . iif oif missing`) is what stops a VM from sending
 another slot's source address in the first place: a packet is accepted only when the route back to its source leaves by the TAP it
 arrived on, which is the case for the source of the slot that TAP belongs to and for no other (the proxy's own check stays, the two
-are independent). The lane checks the file with `nft -c -f` and then loads it. Port 3128 is a constant of the code too (`PROXY_PORT`); a test holds the file to it, to `fctap*` and to the /16 of `slots.py`.
+are independent). The lane checks the file with `nft -c -f` and then loads it. Port 3128 is a constant of the code too (`PROXY_PORT`); a test holds the file to it, to `fctap*` and to the slots' network (`@SLOT_NETWORK@`, the placeholder the installer fills in).
+
+### The outer wall is checked while the service runs
+
+The table is loaded at install and again by `prestart` at every start of the service, which fails the start unless `nft list table inet code_reviewer_wall` answers. That is a check **at the start**: a
+flush of the machine's rules afterwards (a reload of `nftables.service`, a firewall tool, a person) would leave a running service without its wall. So two things more, neither of which needs the service to read nft (the service user cannot):
+
+- the unit is `After=` and `PartOf=nftables.service`: a restart of `nftables.service` restarts the service, whose `prestart` loads the table again;
+- **`factory-runner-wall.timer`** (root, every 10 seconds) runs `libexec/host.sh check-wall`: when the service is active and the table is gone it **restarts the service**. The stop kills the VMs (their jobs go back to the queue), and the
+  start loads the table again or, when it cannot, **does not start the service**. The installer lane flushes the whole ruleset while the service runs and requires the table back and the service restarted within 40 seconds.
+
+A **missing rule** never opens the wall: the last rule of each chain drops what is ours, and `nft -f` loads the file in one transaction. Only the table being gone opens it; that window (up to the timer's period and the time of
+a stop) is in "Known limits".
+
+### The slots' network
+
+The table, the TAP devices, the proxy, the launcher and vm-init no longer share a built-in `172.31.0.0/16` (the default VPC of AWS, with the Amazon DNS at `172.31.0.2`, and Docker's address pools overlap it). The network is **chosen at install**
+([Install](#install-a-machine-with-kvm-982): the first `/24` that overlaps nothing the machine has), kept in `install.state`, and passed on as `FACTORY_RUNNER_SLOT_NETWORK` in `runner.env`. The table in the program is a template
+(`@SLOT_NETWORK@`, the one thing the installer fills in; the file above is printed as the program carries it) and the installer renders it, checks it with `nft -c -f`, loads it and lists it again. The launcher (`slots.py`: slot *N*
+owns the `/30` at offset *N*×4 of that network) and the proxy read the same setting, and vm-init accepts any **private** IPv4 address (`10/8`, `172.16/12`, `192.168/16`) for `outerProxy`, since a VM does not know the
+network and the table is what lets it reach exactly its slot's address. `DEFAULT_SLOT_NETWORK` (`172.31.0.0/16`) is for the tests and the KVM lanes.
 
 ### The proxy
 
@@ -2215,7 +2254,7 @@ the service and says which TAP and address (the usual cause: the TAP was not mad
 that it cannot verify the nft table** (it has no way to read nft state as a normal user): `proxy` is set by the installer after it has
 verified the table, never assumed.
 
-* **It listens on each slot's TAP address and on nothing else** (`172.31.<N*4 div 256>.<N*4 mod 256 + 1>:3128`). The spike (#970)
+* **It listens on each slot's TAP address and on nothing else** (the first address of slot *N*'s /30 in the slots' network, port 3128). The spike (#970)
   found that a guest could also reach a proxy on the host's other addresses (eth0, loopback); a proxy bound to the host's side of each TAP
   cannot be reached there whatever a table says, and the listener, not the source address, says which VM a connection is from.
 * **A rule per VM, swapped without touching nft.** `admit` (called before the VMM exists) gives the VM the **wide rule** of the setup: any
@@ -2278,8 +2317,8 @@ The settings: `FACTORY_RUNNER_OUTER_WALL` is `refuse` (the default), `proxy` (se
 
 With the table loaded nothing leaves a VM but a connection to the proxy of its slot, so every client in the VM that dials the internet has
 to use it. The proxy's address is **the host's, never the job's**: the launcher puts it in the start (`outerProxy`, the host's address on
-the slot's TAP and the port 3128; only with `FACTORY_RUNNER_OUTER_WALL=proxy`), vm-init validates it (an IPv4 address of the slots'
-`172.31.0.0/16` in its canonical spelling, a port; a start with anything else is refused) and writes it into Control's stdin document, and
+the slot's TAP and the port 3128; only with `FACTORY_RUNNER_OUTER_WALL=proxy`), vm-init validates it (a private IPv4 address in its
+canonical spelling, since the slots' network is the installer's choice for each machine, and a port; a start with anything else is refused) and writes it into Control's stdin document, and
 Control hands it on. No job document, no container environment and no flag of a rendered `docker run` carries it (the local Control spec,
 its template and its golden file are the same with and without the wall; the hosted specs and goldens never mention a proxy, and a test
 holds that). Code: [`outer_proxy.py`](../runner/src/code_reviewer_runner/outer_proxy.py) (the address, the variable, the tunnel).
