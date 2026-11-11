@@ -252,7 +252,9 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y -qq nftables > /dev/null
           sudo nft --version
-          sudo nft -c -f docker/vm/host/outer-wall.nft
+          # The table is a template: the installer fills in the network of the slots; these lanes use the launcher's default one.
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -c -f "$RUNNER_TEMP/outer-wall.nft"
           sudo sysctl -w net.ipv4.ip_forward=1
           # The runner's Docker sets the policy of the FORWARD chain to DROP: the control's forwarded packets (and the wall run's, which the table must be
           # the one to drop) need an explicit accept for our TAP devices.
@@ -287,7 +289,7 @@ jobs:
               "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_outer_wall.py -k "$2" --force-enable-socket -v -s -p no:cacheprovider
           }
           lane control control
-          sudo nft -f docker/vm/host/outer-wall.nft
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
           lane wall "not control"
       # T01 and T02 (#994): every client in the VM goes through the proxy. The table is loaded again (a no-op after the step above, and the one
       # thing that stops a direct connection), the launcher runs with the proxy wall (the start carries the slot's `outerProxy`, vm-init writes it
@@ -300,7 +302,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq nftables > /dev/null
-          sudo nft -f docker/vm/host/outer-wall.nft
+          # The table is a template: the installer fills in the network of the slots; these lanes use the launcher's default one.
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
           sudo nft list table inet code_reviewer_wall > /dev/null
           sudo sysctl -w net.ipv4.ip_forward=1
           sudo iptables -C FORWARD -i 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
