@@ -47,6 +47,13 @@ API_ERROR_AUTH: Final = "authentication_failed"
 API_ERRORS_LIMIT: Final = ("rate_limit", "billing_error")
 STATUSES_AUTH: Final = (401,)
 STATUSES_LIMIT: Final = (402, 429)
+# The model is unknown to the account, or the subscription does not include it (#980): Anthropic
+# answers 404 for a model the caller may not use. `invalid_request` alone (a 400) is any bad
+# request and says nothing of the model.
+STATUSES_MODEL: Final = (404,)
+# What Claude Code itself prints in `errors` when the selected model is refused. Only its own
+# `errors` field is read for it, as for the other sentences; never the agent's text.
+_MODEL_REFUSED: Final = "issue with the selected model"
 
 
 class LineSplitter:
@@ -341,6 +348,15 @@ class ClaudeResult:
             self.api_error == API_ERROR_AUTH
             or self.api_error_status in STATUSES_AUTH
             or self._says(_NOT_LOGGED_IN)
+        )
+
+    @property
+    def model_refused(self) -> bool:
+        """The call was refused because of the model: it does not exist for this login, or the
+        subscription does not include it (#980). Not measured against the real program yet (the
+        spike did not provoke it): the structured status 404 and Claude Code's own sentence."""
+        return self.is_error and (
+            self.api_error_status in STATUSES_MODEL or self._says(_MODEL_REFUSED)
         )
 
     @property

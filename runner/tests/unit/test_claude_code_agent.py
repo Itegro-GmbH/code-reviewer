@@ -442,7 +442,7 @@ def test_a_device_that_is_not_logged_in_is_an_auth_error_that_says_so() -> None:
     with pytest.raises(EngineError) as failed:
         agent_of(place).turn("go")
 
-    assert failed.value.code is ErrorCode.LLM_AUTH
+    assert failed.value.code is ErrorCode.SUBSCRIPTION_AUTH
     assert TOKEN not in str(failed.value)
 
 
@@ -465,7 +465,7 @@ def test_an_expired_or_revoked_token_is_the_auth_error_not_an_engine_failure() -
         with pytest.raises(EngineError) as failed:
             agent_of(place).turn("go")
 
-        assert failed.value.code is ErrorCode.LLM_AUTH
+        assert failed.value.code is ErrorCode.SUBSCRIPTION_AUTH
         assert "run /login" not in str(failed.value), "what Claude Code printed is not passed on"
 
 
@@ -479,7 +479,7 @@ def test_a_rejected_status_alone_is_the_auth_error_too() -> None:
     with pytest.raises(EngineError) as failed:
         agent_of(place).turn("go")
 
-    assert failed.value.code is ErrorCode.LLM_AUTH
+    assert failed.value.code is ErrorCode.SUBSCRIPTION_AUTH
 
 
 # #856-T23
@@ -501,8 +501,58 @@ def test_the_usage_limit_of_a_subscription_is_a_clean_limit_code() -> None:
         with pytest.raises(LimitError) as stopped:
             agent_of(place).turn("go")
 
-        assert stopped.value.code is ErrorCode.LLM_QUOTA
+        assert stopped.value.code is ErrorCode.SUBSCRIPTION_LIMIT
         assert "resets" not in str(stopped.value) and TOKEN not in str(stopped.value)
+
+
+# #980-T04
+def test_an_api_key_login_keeps_the_provider_codes() -> None:
+    """The codes of a subscription say what the owner of the device does about a token; a key
+    behind the model door (or the fake provider) is the provider's own refusal."""
+    refused = Place(
+        outputs=[stream("x", api_error="authentication_failed", is_error=True)], returncode=1
+    )
+    with pytest.raises(EngineError) as auth:
+        agent_of(refused, login=ClaudeLogin.api_key("k-" + "0" * 20)).turn("go")
+    assert auth.value.code is ErrorCode.LLM_AUTH
+
+    limited = Place(outputs=[stream("x", api_error="rate_limit", is_error=True)], returncode=1)
+    with pytest.raises(LimitError) as quota:
+        agent_of(limited, login=ClaudeLogin.api_key("k-" + "0" * 20)).turn("go")
+    assert quota.value.code is ErrorCode.LLM_QUOTA
+
+
+# #980-T05
+def test_a_model_the_subscription_does_not_allow_is_its_own_code() -> None:
+    for fields in (
+        {"api_error": "invalid_request", "api_error_status": 404},
+        {"api_error_status": 404},
+        {"errors": ["There's an issue with the selected model (claude-opus-9). It may not exist."]},
+    ):
+        api_error = fields.pop("api_error", None)
+        place = Place(
+            outputs=[stream("x", api_error=api_error, is_error=True, **fields)],
+            returncode=1,
+        )
+
+        with pytest.raises(EngineError) as refused:
+            agent_of(place).turn("go")
+
+        assert refused.value.code is ErrorCode.SUBSCRIPTION_MODEL_REFUSED
+        assert TOKEN not in str(refused.value) and "claude-opus-9" not in str(refused.value)
+
+
+# #980-T05
+def test_a_bad_request_that_is_not_about_the_model_is_not_a_refused_model() -> None:
+    place = Place(
+        outputs=[stream("x", api_error="invalid_request", api_error_status=400, is_error=True)],
+        returncode=1,
+    )
+
+    with pytest.raises(EngineError) as failed:
+        agent_of(place).turn("go")
+
+    assert failed.value.code is ErrorCode.IMPLEMENTER_ENGINE_UNAVAILABLE
 
 
 # #856-T23
