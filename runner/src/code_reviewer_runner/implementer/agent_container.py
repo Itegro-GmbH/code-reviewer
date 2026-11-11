@@ -420,6 +420,9 @@ class Adopted:
     container: str
     setup_environment: tuple[str, ...] = ()
     paused: bool = False
+    # The network the script's phase was on, which `create()` removes once the container is on the
+    # model network (the daemon refuses to connect a container whose network mode is gone).
+    setup_network: str | None = None
 
 
 def docker_environment_file(environment: Mapping[str, str]) -> str:
@@ -587,6 +590,11 @@ class AgentContainer:
                 "EndpointConfig": {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}},
             },
         )
+        if adopted.setup_network is not None:
+            try:
+                api.remove_network(adopted.setup_network)
+            except DockerError as error:
+                _log.warning("the setup network could not be removed (%s)", error.status)
         self._wait_ready(container)
         self._seal_check(container)
         wanted = proxy_environment(self._rule)

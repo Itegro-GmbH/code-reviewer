@@ -1261,6 +1261,7 @@ def script_container(
         identifier,
         setup_environment=() if outer_proxy is None else tuple(outer_proxy.tool_environment()),
         paused=paused,
+        setup_network=sc.SETUP_NETWORK_NAME,
     )
 
 
@@ -1290,6 +1291,12 @@ def test_an_adopted_container_is_put_on_the_model_network_and_is_the_same_contai
     assert agent.networks[MODEL_NETWORK_NAME] == {
         "IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}
     }
+    # The setup network goes after the model network is joined, never before (the daemon refuses
+    # to connect a container whose network mode is gone).
+    names = calls_of(rig)
+    connected = names.index(f"POST /networks/{MODEL_NETWORK_NAME}/connect")
+    assert names.index(f"DELETE /networks/{sc.SETUP_NETWORK_NAME}") > connected
+    assert sc.SETUP_NETWORK_NAME not in {n["Name"] for n in rig.engine.networks.values()}
     # Nothing was made, stopped, killed, committed or removed for it: only the IPv6 helpers.
     made = set(rig.engine.containers) - before
     assert {rig.engine.containers[i].name for i in made} == {host_rules.HELPER_NAME}

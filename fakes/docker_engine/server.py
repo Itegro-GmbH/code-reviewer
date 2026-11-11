@@ -101,6 +101,8 @@ class FakeContainer:
     oom_killed: bool = False
     removed: bool = False
     paused: bool = False
+    # Taken off a network by a `disconnect`: it is listed with none rather than with its mode.
+    detached: bool = False
     stdin_read: int = -1
     stdin_write: int = -1
     stdout_read: int = -1
@@ -348,7 +350,10 @@ class FakeDockerEngine:
             "OOMKilled": container.oom_killed,
         }
         host = container.document.get("HostConfig", {})
+        host_mode: str = host.get("NetworkMode", "bridge")
         networks: dict[str, dict[str, Any]] = {name: {} for name in container.networks}
+        if not networks and not container.detached:
+            networks = {host_mode: {}}
         mounts = [
             {"Type": m.get("Type"), "Destination": m.get("Target"), "Name": m.get("Source")}
             for m in host.get("Mounts", [])
@@ -383,6 +388,25 @@ class FakeDockerEngine:
             return
         member = body["Container"]
         if action == "connect":
+            # The daemon refuses to connect a container whose network mode names a network that is
+            # gone (measured on the KVM lane of #1009: "could not find a network matching network
+            # mode ...").
+            made = self.containers.get(member)
+            made_host: dict[str, Any] = (
+                {} if made is None else made.document.get("HostConfig") or {}
+            )
+            mode: str = made_host.get("NetworkMode") or ""
+            if (
+                mode
+                and mode not in ("bridge", "host", "none", "default")
+                and not any(n["Name"] == mode for n in self.networks.values())
+            ):
+                self._reply(
+                    connection,
+                    404,
+                    {"message": f"could not find a network matching network mode {mode}"},
+                )
+                return
             entry["members"][member] = body.get("EndpointConfig", {})
             container = self.containers.get(member)
             if container is not None:
@@ -392,6 +416,7 @@ class FakeDockerEngine:
             container = self.containers.get(member)
             if container is not None:
                 container.networks.pop(network, None)
+                container.detached = True
         self._reply(connection, 200)
 
     def _create(self, connection: socket.socket, target: str, body: Any) -> None:
@@ -401,9 +426,12 @@ class FakeDockerEngine:
             return
         identifier = self._next()
         container = FakeContainer(identifier, name, body)
-        # The network a container is made on is one it is a member of, as with the daemon.
-        host: dict[str, Any] = body.get("HostConfig") or {}
-        container.networks[host.get("NetworkMode", "bridge")] = {}
+        # A container made with an endpoint on a network is a member of it, as with the daemon (one
+        # made with only a network mode keeps being listed under that mode, see `_inspect`).
+        networking: dict[str, Any] = body.get("NetworkingConfig") or {}
+        endpoints: dict[str, dict[str, Any]] = networking.get("EndpointsConfig") or {}
+        for network, endpoint in endpoints.items():
+            container.networks[network] = endpoint
         container.stdin_read, container.stdin_write = os.pipe()
         container.stdout_read, container.stdout_write = os.pipe()
         self.containers[identifier] = container

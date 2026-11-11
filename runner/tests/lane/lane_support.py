@@ -213,13 +213,19 @@ def preflight(config: LaneConfig) -> None:
         raise AssertionError(f"the daemon has no {config.runtime} runtime")
 
 
-def remove_fixed() -> None:
+def remove_fixed(*, agent: bool = True) -> None:
     """The containers of the turn's model side that the turn names by constants, and the network.
-    Not the readers: they are made when the workspace is prepared, before the network is."""
+    Not the readers: they are made when the workspace is prepared, before the network is. `agent`
+    False leaves the agent's container, which a turn with a setup script made before the network
+    (#1009) and which the agent's container object takes over."""
     for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER, HELPER_NAME):
-        docker("rm", "-f", name, check=False)
+        if agent or name != AGENT_CONTAINER_NAME:
+            docker("rm", "-f", name, check=False)
     docker("network", "rm", MODEL_NETWORK_NAME, check=False)
-    docker("network", "rm", SETUP_NETWORK_NAME, check=False)
+    if agent:
+        # The agent's container made for a script names this network, and the agent's container
+        # object removes it once it has joined the model network.
+        docker("network", "rm", SETUP_NETWORK_NAME, check=False)
 
 
 def host_nft(config: LaneConfig, command: str) -> subprocess.CompletedProcess[str]:
@@ -266,11 +272,12 @@ def bridge_gateway() -> str:
 
 
 @contextmanager
-def model_network(config: LaneConfig, port: int) -> Generator[None]:
+def model_network(config: LaneConfig, port: int, *, keep_agent: bool = False) -> Generator[None]:
     """The model network of the turn and the relay container that stands at the door's address on
     it. Under Sysbox the network is the production one (`--internal`, isolated gateway), so the
-    agent reaches nothing but the relay; under runc it is a plain bridge."""
-    remove_fixed()
+    agent reaches nothing but the relay; under runc it is a plain bridge. `keep_agent`: the agent's
+    container exists already (the container the setup script ran in)."""
+    remove_fixed(agent=not keep_agent)
     options = (
         ["--internal", "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"]
         if config.under_sysbox
@@ -687,6 +694,7 @@ def lane_environment(
             if step.adopted is not None:
                 docker("unpause", step.adopted.container, check=False)
                 docker("rm", "-f", step.adopted.container, check=False)
+                docker("network", "rm", SETUP_NETWORK_NAME, check=False)
 
 
 @contextmanager
@@ -763,7 +771,7 @@ def lane_turn(
             prepared = environment_step(lane, setup_script, memory_mb=memory_mb, result=with_result)
             if prepared.error is not None:
                 raise AssertionError(f"the setup failed: {prepared.error.detail}")
-        stack.enter_context(model_network(config, port))
+        stack.enter_context(model_network(config, port, keep_agent=prepared is not None))
         upstream = stack.enter_context(
             ScriptedUpstream(
                 family, script(REPO_IN_AGENT), entry["model"], real_key=REAL_KEY, judge=judge

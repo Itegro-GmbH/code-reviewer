@@ -98,51 +98,27 @@ class Daemon:
         self.removed.append(reference)
 
 
-def test_what_the_job_holds_is_its_work_folders_its_containers_and_its_environment_image(
-    tmp_path: Path,
-) -> None:
+def test_what_the_job_holds_is_its_work_folders_and_its_containers(tmp_path: Path) -> None:
     (tmp_path / "repo").mkdir()
     (tmp_path / "repo" / "f").write_bytes(b"x" * 50_000)
     (tmp_path / "unrelated").mkdir()
     (tmp_path / "unrelated" / "f").write_bytes(b"x" * 9_000_000)  # not the job's
-    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None}, image=500_000, base=0)
+    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None})
 
     total = used_bytes(daemon, tmp_path, "r1")  # type: ignore[arg-type]
 
-    assert 553_000 <= total < 600_000
+    assert 53_000 <= total < 100_000
 
 
-# #855-F1 (S5)
-def test_a_big_agent_image_under_a_small_commit_counts_only_what_the_commit_added(
+# #855-F1 (S5), #1009: nothing is committed any more, so the one container the script and the agent
+# share is measured by its own layer, once, whatever images an earlier version left on the daemon
+def test_the_container_the_script_ran_in_is_counted_by_its_layer_and_no_image_is_added(
     tmp_path: Path,
 ) -> None:
-    for name in ("reserve", "repo", "result"):
-        (tmp_path / name).mkdir()
-    base = 4 * GIB  # the agent image: the runner's, there before the job
-    daemon = Daemon(sizes={}, image=base + 300_000, base=base)
+    agent = "a" * 64
+    daemon = Daemon(sizes={agent: 700_000}, image=GIB + 700_000, base=GIB)
 
-    assert used_bytes(daemon, tmp_path, "r1") == 300_000  # type: ignore[arg-type]
-
-    # An agent image the daemon cannot size: the part counts as nothing, never as the whole image.
-    unknown = Daemon(sizes={}, image=base + 300_000, base=None)
-    assert used_bytes(unknown, tmp_path, "r1") == 0  # type: ignore[arg-type]
-
-
-# #855-F1 (S5)
-def test_the_setup_containers_layer_is_counted_once_not_again_in_its_committed_image(
-    tmp_path: Path,
-) -> None:
-    setup, agent = "s" * 64, "a" * 64
-    sizes: dict[str, int | None] = {setup: 700_000, agent: 1_000}
-    roles = {setup: "setup", agent: "agent"}
-
-    committed = Daemon(sizes=sizes, image=GIB + 700_000, base=GIB, roles=roles)
-    # The image holds the setup container's 700 000; its own layer is not added a second time.
-    assert used_bytes(committed, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
-
-    # Before the commit there is no image: the container's own layer is the measure.
-    running = Daemon(sizes=sizes, image=None, base=GIB, roles=roles)
-    assert used_bytes(running, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
+    assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
 def test_a_daemon_that_cannot_answer_counts_for_nothing_and_ends_no_job(tmp_path: Path) -> None:

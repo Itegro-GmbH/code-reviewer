@@ -465,16 +465,19 @@ def test_a_script_that_ended_well_leaves_the_container_alive_and_nothing_is_comm
 
 
 # #1009-S02
-def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_network_goes(
+def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_network_stays(
     rig: Rig,
 ) -> None:
+    """The daemon refuses to connect a container whose network mode names a removed network (KVM
+    lane, #1009), so whoever connects the model network removes the setup network afterwards."""
     done = run(rig)
     assert done.outcome == OUTCOME_OK
     names = posted(rig.engine)
     left = names.index("POST networks/disconnect")
     assert left < names.index("POST containers/pause")
-    assert len(names) - 1 - names[::-1].index("DELETE networks") > left
-    assert rig.engine.networks == {}, "the setup network is removed"
+    assert len(names) - 1 - names[::-1].index("DELETE networks") < left, "only the early clean-up"
+    assert len(rig.engine.networks) == 1, "the setup network is left for the agent's step"
+    assert done.adopted is not None and done.adopted.setup_network == sc.SETUP_NETWORK_NAME
     setup = rig.engine.container(AGENT_CONTAINER_NAME)
     assert set(setup.networks) == set(), "it has no network at all until the agent takes it over"
     # The one thing the agent's tools must not find: the script's file.

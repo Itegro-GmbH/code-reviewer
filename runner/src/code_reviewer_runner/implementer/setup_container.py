@@ -9,7 +9,8 @@ setup network. The script from the environment runs in it as an exec: `bash -e` 
 of its `#!` line), working directory the repository, root, all of the image's tools. When it ends
 with status 0 the container is **not** stopped and nothing is saved: Control takes it off the setup
 network (the one change of the hand-over that stops something: a process of the script that still
-holds a connection to the internet loses it) and freezes it (`docker pause`) while it reads the
+holds a connection to the internet loses it; the network itself is removed by whoever connects the
+container to the model network next) and freezes it (`docker pause`) while it reads the
 repository, and the agent's container object (`AgentContainer`, `adopted=`) takes it over: it
 puts it on the model network, which is what `narrow` is for the container, and starts the agent in
 it. What the script left is what the agent has: files, the images, containers and volumes of the
@@ -370,7 +371,8 @@ class SetupContainer:
     """One run of the container the script runs in. `run` does everything. A script that failed
     ends with the container and the network removed (it does not raise); one that ended well ends
     with the container alive, off the setup network, frozen when that could be done, and the
-    network removed: the caller reads the repository and the agent takes the container over.
+    network still there (the agent's container object removes it): the caller reads the repository
+    and the agent takes the container over.
     `discard` removes it when nothing takes it."""
 
     def __init__(self, memory_mb: int, seams: SetupSeams = SetupSeams()) -> None:  # noqa: B008
@@ -446,6 +448,7 @@ class SetupContainer:
                     container,
                     setup_environment=() if proxy is None else tuple(proxy.tool_environment()),
                     paused=paused,
+                    setup_network=SETUP_NETWORK_NAME,
                 ),
                 notes=tuple(self._notes),
             )
@@ -725,10 +728,11 @@ class SetupContainer:
     def _hand_over(self, container: str) -> bool:
         """The script ended well; the container goes on. The memory guard stops (the agent's
         container object starts its own). The script's file is removed. The container leaves the
-        setup network and the network is removed: from here on nothing of it has the internet, and
-        a process of the script that held a connection loses it before the outer wall narrows and
-        before any door exists. Then the container is frozen (`docker pause`), so that Control
-        reads the repository while nothing in it changes; a freeze that is refused is a note, not a
+        setup network (which stays until the agent's container object has joined the model
+        network): from here on nothing of it has the internet, and a process of the script that
+        held a connection loses it before the outer wall narrows and before any door exists. Then
+        the container is frozen (`docker pause`), so that Control reads the repository while
+        nothing in it changes; a freeze that is refused is a note, not a
         failure. True when it is frozen. Raises `_Unavailable` or `DockerError` when the container
         could not be taken off the network, which is the one step that must hold."""
         api = self._api
@@ -743,10 +747,11 @@ class SetupContainer:
         )
         if removed.returncode != 0 or removed.unanswered:
             self._notes.append("the script's file could not be removed from the container")
-        network, self._network = self._network, None
         api.disconnect_network(SETUP_NETWORK_NAME, container)
-        if network is not None:
-            api.remove_network(network)
+        # The network stays until the agent's container object has put the container on the model
+        # network: the daemon refuses a `connect` of a container whose network mode names a
+        # network that is gone ("could not find a network matching network mode", measured on the
+        # KVM lane), so the one who connects removes it (`Adopted.setup_network`).
         try:
             api.pause_container(container, timeout=HANDOVER_SECONDS)
         except DockerError as error:
