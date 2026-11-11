@@ -34,6 +34,7 @@ BENCH_VARIANT=setup
 
 say() { printf '\n=== %s\n' "$*"; }
 die() { echo "bench: $*" >&2; exit 1; }
+must() { "$@" >/dev/null || die "failed: $*"; }
 
 [ "${GITHUB_ACTIONS:-}" = true ] || [ "${BENCH_I_KNOW_THIS_INSTALLS_INCUS:-}" = yes ] || die "refusing to run outside GitHub Actions: this installs Incus and changes the firewall"
 [ "$(id -u)" = 0 ] || die "run as root"
@@ -119,10 +120,13 @@ profiles:
 YAML
   incus storage create dirpool dir source=/mnt/incus-dirpool || die "dir pool"
   # the spike's profile, split in two so that a variant can leave the limits out
-  incus profile create bench-base && incus profile set bench-base security.nesting=true security.privileged=false security.idmap.isolated=true || die "profile"
-  incus profile create bench-limits && incus profile set bench-limits limits.cpu=2 limits.memory=2GiB limits.processes=4096 || die "profile"
+  must incus profile create bench-base
+  must incus profile set bench-base security.nesting=true security.privileged=false security.idmap.isolated=true
+  must incus profile create bench-limits
+  must incus profile set bench-limits limits.cpu=2 limits.memory=2GiB limits.processes=4096
   # Docker (preinstalled on the runner) sets the FORWARD policy to DROP; its own chains do not know the bridge. This is what Incus' documentation says to do.
-  iptables -I FORWARD -i incusbr0 -j ACCEPT && iptables -I FORWARD -o incusbr0 -j ACCEPT || die "firewall"
+  must iptables -I FORWARD -i incusbr0 -j ACCEPT
+  must iptables -I FORWARD -o incusbr0 -j ACCEPT
   fact "incus: $(incus --version) ($(dpkg-query -W -f '${Version}' incus)); firewall driver: $(incus info | awk '/firewall:/ { print $2 }')"
   fact "kernel: $(uname -r); cpu: $(awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo) x$(nproc); mem: $(awk '/MemTotal/ { print int($2 / 1024) " MiB" }' /proc/meminfo)"
   fact "host docker: $(docker --version); storage: $(docker info --format '{{.Driver}} {{.DriverStatus}}')"
@@ -156,7 +160,9 @@ build_golden() {
   fi
   incus file push "$dl/docker.tgz" "$dl/docker-buildx" "$dl/docker-compose" "$HERE/prep-golden.sh" bench-gold/root/ || die "push"
   incus exec bench-gold --env BUSYBOX_REF="$BUSYBOX_REF" --env HELLO_REF="$HELLO_REF" -- bash /root/prep-golden.sh </dev/null || die "prep-golden.sh failed"
-  incus stop bench-gold && incus publish bench-gold --alias bench-docker </dev/null && incus delete bench-gold || die "publish"
+  must incus stop bench-gold
+  must incus publish bench-gold --alias bench-docker </dev/null
+  must incus delete bench-gold
   rm -rf "$dl"
   incus image list bench-docker -c lfsd | tee -a "$FACTS"
 }
@@ -208,6 +214,7 @@ facts_of() { # facts_of <instance>: what the variant really is
   pid=$(incus info "$n" | awk '/^PID:/ { print $2 }')
   fact "--- $BENCH_VARIANT"
   fact "instance init, as the host sees its AppArmor profile: $(cat "/proc/$pid/attr/current" 2>&1)"
+  # shellcheck disable=SC2016 # the script is for the instance's shell, not this one
   in_instance "$n" 'docker info --format "docker {{.ServerVersion}}; driver {{.Driver}} {{.DriverStatus}}; cgroup {{.CgroupDriver}} v{{.CgroupVersion}}; security {{.SecurityOptions}}; root {{.DockerRootDir}}"; echo "uid_map: $(head -1 /proc/self/uid_map | tr -s " ")"; echo "pids.max: $(cat /sys/fs/cgroup/pids.max 2>&1); memory.max: $(cat /sys/fs/cgroup/memory.max 2>&1); cpus: $(nproc); docker root fs: $(findmnt -no FSTYPE -T "$(docker info --format "{{.DockerRootDir}}")")"' | sed 's/^/  /' | tee -a "$FACTS"
 }
 
@@ -233,11 +240,13 @@ assert_variant() { # assert_variant <variant> <instance> <kind...>: the variant 
   if [ -n "$bad" ]; then record "assert.$v" 0 FAILED "the variant is not what it claims:$bad"; return 1; fi
 }
 
+# shellcheck disable=SC2016 # the hooks are scripts for the instance's shell
 HOOK_CLASSIC='set -e; systemctl stop docker
 printf "{\"features\":{\"containerd-snapshotter\":false}}\n" >/etc/docker/daemon.json
 systemctl start docker; for _ in $(seq 1 150); do docker info >/dev/null 2>&1 && break; sleep 0.2; done
 docker pull -q '"$BUSYBOX_REF"' >/dev/null; docker tag '"$BUSYBOX_REF"' busybox
 docker pull -q '"$HELLO_REF"' >/dev/null; docker tag '"$HELLO_REF"' hello-world'
+# shellcheck disable=SC2016
 HOOK_TMPFS='set -e; systemctl stop docker
 mkdir -p /mnt/dd; mount -t tmpfs -o size=768m tmpfs /mnt/dd; cp -a /var/lib/docker/. /mnt/dd/
 printf "{\"features\":{\"containerd-snapshotter\":true},\"data-root\":\"/mnt/dd\"}\n" >/etc/docker/daemon.json
@@ -283,8 +292,10 @@ variant() { # variant <name> <battery 0|1> <exec series 0|1> <hook|-> <asserts, 
 host_variant() { # the same series with Docker on the runner itself, no Incus
   BENCH_VARIANT=host-docker
   say "variant host-docker"
-  docker pull -q "$BUSYBOX_REF" >/dev/null && docker tag "$BUSYBOX_REF" busybox || die "host pull"
-  docker pull -q "$HELLO_REF" >/dev/null && docker tag "$HELLO_REF" hello-world || die "host pull"
+  must docker pull -q "$BUSYBOX_REF"
+  must docker tag "$BUSYBOX_REF" busybox
+  must docker pull -q "$HELLO_REF"
+  must docker tag "$HELLO_REF" hello-world
   fact "--- host-docker"
   fact "$(docker info --format 'docker {{.ServerVersion}}; driver {{.Driver}} {{.DriverStatus}}; cgroup {{.CgroupDriver}} v{{.CgroupVersion}}; security {{.SecurityOptions}}; root {{.DockerRootDir}}')"
   BENCH_N=$N BENCH_BATTERY=1 CTR_SOCK=/run/containerd/containerd.sock bash "$HERE/guest.sh" host-docker "$DIR/out-host.tsv" || record guest.host-docker 0 FAILED "guest.sh failed"
