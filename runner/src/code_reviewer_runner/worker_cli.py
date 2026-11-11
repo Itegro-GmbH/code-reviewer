@@ -4,9 +4,9 @@
 
 Runs exactly one job and exits (0 ok, 1 failed, 2 setup error; see `job_loop/worker.py`). The start
 document `{"appUrl", "jobId", "credential"}` comes on stdin (a Worker that vm-init started also gets
-`"controlToken"`, the host's per-VM token for the environment control, #977, and `"localCredential"`,
-the one credential of the device a job needs, #980): the per-job credential
-is a secret and has no way in through the arguments or the environment. The other settings are the
+`"controlToken"`, the host's per-VM token for the environment control, #977, and
+`"localCredential"`, the one credential of the device a job needs, #980): the per-job credential is
+a secret and has no way in through the arguments or the environment. The other settings are the
 environment variables the runner reads (`RUNNER_JOB_TIMEOUT_SECONDS` and the Dynamic slot's
 variables).
 """

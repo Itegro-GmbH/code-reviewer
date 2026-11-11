@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The dispatcher's choice of a credential for a job and what it withdraws (#980): which credential a
-job gets, when the manifest stops offering Claude Code and when it offers it again. The store is the
-real one (in a temporary directory, plain files); only the clock is a double."""
+"""The dispatcher's choice of a credential for a job and what it withdraws (#980): which credential
+a job gets, when the manifest stops offering Claude Code and when it offers it again. The store is
+the real one (in a temporary directory, plain files); only the clock is a double."""
 
 from pathlib import Path
 
@@ -42,7 +42,7 @@ class Rig:
         self.legacy = legacy or LoginProblem("none", configured=False)
         self.pool = CredentialPool(self.store, lambda: self.legacy, self.clock)
 
-    def models(self) -> tuple[str, ...] | None | str:
+    def models(self) -> tuple[str, ...] | str | None:
         offer = self.pool.offer()
         return "withdrawn" if offer is None else offer.models
 
@@ -64,7 +64,7 @@ def test_usable_credentials_take_turns_the_one_unused_longest_first(tmp_path: Pa
     rig.store.add("a", ONE)
     rig.store.add("b", TWO)
 
-    names = []
+    names: list[str] = []
     for _ in range(4):
         chosen = rig.pool.choose(None)
         assert chosen is not None

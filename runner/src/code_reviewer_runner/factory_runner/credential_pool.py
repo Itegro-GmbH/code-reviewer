@@ -12,9 +12,9 @@ them. The pool decides:
 - **What the manifest offers**: the models of every usable credential, or nothing (the entry is
   withdrawn) while none is usable. The app never learns a name, a count or a reason.
 - **What a job's end teaches**: the Worker's exit code says why a subscription refused a job
-  (`WorkerExit.SUBSCRIPTION_*`). A usage limit puts the credential aside for `LIMIT_COOLDOWN_SECONDS`
-  and then tries it again; a 401 keeps it out until the owner replaces it; a refused model leaves its
-  list (and the credential has no use once its list is empty).
+  (`WorkerExit.SUBSCRIPTION_*`). A usage limit puts the credential aside for
+  `LIMIT_COOLDOWN_SECONDS` and then tries it again; a 401 keeps it out until the owner replaces it;
+  a refused model leaves its list (and the credential has no use once its list is empty).
 
 The login of an older device (the token file or the environment variable of R3) is used only while
 the store is empty. It has no list of models (it allows any, as before) and its state is not kept
@@ -157,9 +157,7 @@ class CredentialPool:
         if not records:
             return self._choose_legacy(now)
         candidates = [
-            record
-            for record in records
-            if record.usable(now) and allows(record.models, model)
+            record for record in records if record.usable(now) and allows(record.models, model)
         ]
         candidates.sort(key=lambda record: (self._last_used.get(record.name, 0.0), record.name))
         for record in candidates:

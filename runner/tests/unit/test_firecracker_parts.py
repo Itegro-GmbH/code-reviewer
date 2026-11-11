@@ -24,7 +24,6 @@ from code_reviewer_runner.factory_runner.firecracker.cgroups import (
     VmLimits,
     delegated_root,
 )
-from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.factory_runner.firecracker.control_run import (
     ControlRunError,
     build_start,
@@ -41,6 +40,7 @@ from code_reviewer_runner.factory_runner.firecracker.settings import (
     settings_from_environment,
 )
 from code_reviewer_runner.factory_runner.firecracker.slots import MAX_SLOTS, Slot, SlotPool
+from code_reviewer_runner.job_loop.local_credential import LocalCredential
 
 pytestmark = pytest.mark.unit
 

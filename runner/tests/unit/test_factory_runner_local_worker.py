@@ -15,11 +15,11 @@ import pytest
 
 from code_reviewer_runner.factory_runner import local_worker
 from code_reviewer_runner.factory_runner.base import DISK_BUDGET_VARIABLE
-from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.job_loop.local_credential import (
     LOCAL_CREDENTIAL_NAMES,
     LocalCredential,
 )
+from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.job_loop.worker import (
     WorkerRequest,
     parse_local_credential,
@@ -42,7 +42,9 @@ def document(**extra: Any) -> str:
 # -- the credential of the device in the start document (one shape, #980) -------------------------
 
 
-def credential_of(name: str = "CLAUDE_CODE_OAUTH_TOKEN", value: object = LOGIN) -> dict[str, object]:
+def credential_of(
+    name: str = "CLAUDE_CODE_OAUTH_TOKEN", value: object = LOGIN
+) -> dict[str, object]:
     return {"name": name, "value": value}
 
 
@@ -84,7 +86,10 @@ def test_a_local_credential_that_does_not_fit_is_an_input_error(local: object) -
 
 
 def test_the_old_map_form_is_not_read_as_a_credential() -> None:
-    assert parse_local_credential(document(localEnvironment={"CLAUDE_CODE_OAUTH_TOKEN": LOGIN})) is None
+    assert (
+        parse_local_credential(document(localEnvironment={"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}))
+        is None
+    )
 
 
 # #974 review, #978-T11, #980-T07
@@ -113,7 +118,7 @@ def test_a_start_document_cannot_set_any_variable_but_a_name_of_the_allow_list(n
 
 
 def test_the_allow_list_is_the_claude_code_login_and_nothing_else() -> None:
-    assert LOCAL_CREDENTIAL_NAMES == {"CLAUDE_CODE_OAUTH_TOKEN"}
+    assert {"CLAUDE_CODE_OAUTH_TOKEN"} == LOCAL_CREDENTIAL_NAMES
 
 
 def test_the_error_of_a_bad_local_credential_never_shows_its_value() -> None:

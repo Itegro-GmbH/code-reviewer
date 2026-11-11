@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The local credential in Control, the Worker of a VM (#980): the same shape and the same allow-list
-as the Worker of a process (`test_factory_runner_local_worker.py`), and the way the Worker tells the
-dispatcher of the device why a subscription refused a job (its exit code)."""
+"""The local credential in Control, the Worker of a VM (#980): the same shape and the same
+allow-list as the Worker of a process (`test_factory_runner_local_worker.py`), and the way the
+Worker tells the dispatcher of the device why a subscription refused a job (its exit code)."""
 
 import asyncio
 import io
@@ -63,7 +63,11 @@ def seen(monkeypatch: pytest.MonkeyPatch) -> Seen:
     found = Seen()
     monkeypatch.setattr(worker_cli, "run_worker", found.run_worker)
     monkeypatch.setattr(worker_cli, "configure_logging", lambda: None)
-    monkeypatch.setattr(worker_cli, "run_startup", lambda settings, **_: (settings, None))
+
+    def startup(settings: WorkerSettings, **_: object) -> tuple[WorkerSettings, None]:
+        return settings, None
+
+    monkeypatch.setattr(worker_cli, "run_startup", startup)
     return found
 
 
@@ -157,7 +161,13 @@ def worker_ends(code: str | None) -> WorkerExit:
     request = WorkerRequest(app_url="https://app.test", job_id=JOB, credential=CREDENTIAL)
     settings = WorkerSettings(job_command=("fake-job",))
     return asyncio.run(
-        run_worker(request, settings, {"PATH": "/usr/bin"}, api=FakeApi(), launcher=Finishing(stdout, 1 if code else 0))  # type: ignore[arg-type]
+        run_worker(
+            request,
+            settings,
+            {"PATH": "/usr/bin"},
+            api=FakeApi(),
+            launcher=Finishing(stdout, 1 if code else 0),
+        )  # type: ignore[arg-type]
     )
 
 
@@ -187,5 +197,3 @@ def test_the_verdict_exit_codes_stay_clear_of_the_ones_docker_and_vm_init_use() 
     }
     assert len(verdicts) == 3 and verdicts.isdisjoint({0, 1, 2, 125, 126, 127, 137, 143})
     assert all(0 < code < 125 for code in verdicts)
-
-

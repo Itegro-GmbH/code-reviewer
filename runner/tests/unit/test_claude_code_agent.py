@@ -524,12 +524,19 @@ def test_an_api_key_login_keeps_the_provider_codes() -> None:
 
 # #980-T05
 def test_a_model_the_subscription_does_not_allow_is_its_own_code() -> None:
-    for fields in (
-        {"api_error": "invalid_request", "api_error_status": 404},
-        {"api_error_status": 404},
-        {"errors": ["There's an issue with the selected model (claude-opus-9). It may not exist."]},
-    ):
-        api_error = fields.pop("api_error", None)
+    refusals: list[tuple[str | None, dict[str, Any]]] = [
+        ("invalid_request", {"api_error_status": 404}),
+        (None, {"api_error_status": 404}),
+        (
+            None,
+            {
+                "errors": [
+                    "There's an issue with the selected model (claude-opus-9). It may not exist."
+                ]
+            },
+        ),
+    ]
+    for api_error, fields in refusals:
         place = Place(
             outputs=[stream("x", api_error=api_error, is_error=True, **fields)],
             returncode=1,

@@ -21,7 +21,9 @@ CONTRACT = json.loads(
 
 
 def test_the_runners_map_is_the_contracts() -> None:
-    assert ALIAS_ID_PATTERNS == {entry["alias"]: entry["idPattern"] for entry in CONTRACT["aliases"]}
+    assert {
+        entry["alias"]: entry["idPattern"] for entry in CONTRACT["aliases"]
+    } == ALIAS_ID_PATTERNS
 
 
 @pytest.mark.parametrize(

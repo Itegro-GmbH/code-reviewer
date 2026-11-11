@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""Which model names are the same model for Claude Code (#980): an alias such as `opus` and the ids it
-stands for (`claude-opus-5-5`).
+"""Which model names are the same model for Claude Code (#980): an alias such as `opus` and the ids
+it stands for (`claude-opus-5-5`).
 
-A runner announces the models of its subscription as the owner gave them (the aliases by default) and
-a turn carries the model its profile names, an alias or an id. The app matches the two with the same
-map (`app/src/runner-identity/model-aliases.ts`); this is the runner's copy, and
+A runner announces the models of its subscription as the owner gave them (the aliases by default)
+and a turn carries the model its profile names, an alias or an id. The app matches the two with the
+same map (`app/src/runner-identity/model-aliases.ts`); this is the runner's copy, and
 `contracts/claude-model-aliases.v1.json` holds the map and the test vectors that both sides' tests
 run. The dispatcher uses it to pick the credential whose list allows a job's model.
 """
@@ -34,7 +34,9 @@ def alias_of(model: str) -> str | None:
 def models_match(announced: str, demanded: str) -> bool:
     """Whether a model a device allows is the model a job asks for: equal, or an alias and an id it
     stands for. Never two different ids, never two different aliases."""
-    return announced == demanded or alias_of(announced) == demanded or alias_of(demanded) == announced
+    return (
+        announced == demanded or alias_of(announced) == demanded or alias_of(demanded) == announced
+    )
 
 
 def allows(models: Sequence[str] | None, demanded: str | None) -> bool:

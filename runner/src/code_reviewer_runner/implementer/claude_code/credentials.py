@@ -11,14 +11,16 @@ only its owner may enter:
 - `index.json` (0600): names, creation times, models, how each token is stored, the state. **No
   value.** The dispatcher and `credential list` read this.
 - `<name>.secret` (0600): the token. With `systemd-creds` available it is sealed (the file holds
-  `systemd-creds --user encrypt` output); without it, or with `FACTORY_RUNNER_CREDENTIAL_STORAGE=plain`,
-  it is the token itself in a file that only the owner can read, like an SSH key (the same rule as the
-  token file of R3). `auto` (the default) seals when it works and falls back to the plain file;
-  `systemd-creds` refuses to fall back; `plain` never asks `systemd-creds`.
+  `systemd-creds --user encrypt` output); without it, or with
+  `FACTORY_RUNNER_CREDENTIAL_STORAGE=plain`, it is the token itself in a file that only the owner
+  can read, like an SSH key (the same rule as the token file of R3). `auto` (the default) seals when
+  it works and falls back to the plain file; `systemd-creds` refuses to fall back; `plain` never
+  asks `systemd-creds`.
 
-The token is **never sent to the app, never logged, never in an argument** (`systemd-creds` gets it on
-its standard input) and is **never mirrored from `~/.claude/.credentials.json`**: that file refreshes
-itself against Anthropic's endpoint, and the host and a VM would invalidate each other's copy.
+The token is **never sent to the app, never logged, never in an argument** (`systemd-creds` gets it
+on its standard input) and is **never mirrored from `~/.claude/.credentials.json`**: that file
+refreshes itself against Anthropic's endpoint, and the host and a VM would invalidate each other's
+copy.
 
 A problem is described in words and never with the value.
 """
@@ -32,7 +34,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import replace as with_changes
 from pathlib import Path
@@ -328,9 +330,7 @@ class CredentialStore:
 
     # -- internals -------------------------------------------------------------------------------
 
-    def _update(
-        self, name: str, change: Callable[[CredentialRecord], CredentialRecord]
-    ) -> None:
+    def _update(self, name: str, change: Callable[[CredentialRecord], CredentialRecord]) -> None:
         with self._locked():
             records = self._read_index() if os.path.lexists(self._directory / INDEX_NAME) else []
             record = self._find(records, name)
@@ -379,7 +379,7 @@ class CredentialStore:
         _owned_private(info, "the credentials directory", directory=True)
 
     @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self) -> Generator[None]:
         self._directory_exists()
         self._check_directory()
         descriptor = os.open(self._directory / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
@@ -480,7 +480,7 @@ def store_for(environment: Mapping[str, str], home: Path) -> CredentialStore:
 def store_login(home: Path) -> "ClaudeLogin | LoginProblem | None":
     """The login of the first usable credential in the store at `home`, `None` when the store has
     none, a `LoginProblem` when it has credentials and none can be used. The credentials of a store
-    are read only here and by the dispatcher's own pool: a job process never has a home to look in."""
+    are read only here and by the dispatcher's own pool: a job process has no home to look in."""
     from .login import ClaudeLogin, LoginProblem  # a cycle otherwise: login.py reads the store
 
     store = CredentialStore(home)

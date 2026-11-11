@@ -49,6 +49,7 @@ from code_reviewer_runner.factory_runner.base import (
 )
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
+    home_directory,
     load_config,
     save_config,
 )
@@ -73,6 +74,7 @@ from code_reviewer_runner.factory_runner.update import (
     RELEASE_LABEL,
     rollback,
 )
+from code_reviewer_runner.implementer.claude_code.credentials import CredentialStore, store_for
 from code_reviewer_runner.implementer.docker_api import DockerError
 from code_reviewer_runner.implementer.result_channel import make_result_directory
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
@@ -272,12 +274,22 @@ class TurnLauncher(AutoLauncher):
         return await super().start(spec)
 
 
-def prepared(*, ready: bool = True, work: Path | None = None) -> Prepared:
+def prepared(
+    *, ready: bool = True, work: Path | None = None, claude: str | None = None
+) -> Prepared:
     result = SelfTestResult(
         (Check("docker", True), Check("agent-container", ready, "" if ready else "did not start")),
         "runc",
         "1.19.0",
     )
+    manifest: dict[str, object] = {}
+    if claude is not None:
+        manifest = {
+            "harnesses": [
+                {"harness": "opencode", "version": "1.19.0", "auth": "app-key"},
+                {"harness": "claude-code", "version": claude, "auth": "subscription"},
+            ]
+        }
     return Prepared(
         make_settings(engines=("implementer",), job_command=("job",)),
         {
@@ -285,8 +297,9 @@ def prepared(*, ready: bool = True, work: Path | None = None) -> Prepared:
             "RUNNER_IMPLEMENTER_SANDBOX_PROOF": "proven",
             **({} if work is None else {IMPLEMENTER_WORK_DIR_VARIABLE: str(work)}),
         },
-        Announcement(("linux",), "1.0.0", {}, {}),
+        Announcement(("linux",), "1.0.0", manifest, {}),
         result,
+        claude_version=claude,
     )
 
 
@@ -303,6 +316,7 @@ class Rig:
         channel: Any = None,
         fetch: Any = None,
         reap_check_seconds: float | None = None,
+        claude: str | None = None,
     ) -> None:
         extra: dict[str, Any] = {} if channel is None else {"channel": channel, "fetch": fetch}
         if reap_check_seconds is not None:
@@ -323,7 +337,7 @@ class Rig:
         self.service = RunnerService(
             self.config,
             self.environment,
-            prepared(ready=ready, work=self.work),
+            prepared(ready=ready, work=self.work, claude=claude),
             self.client,  # type: ignore[arg-type]
             seams=Seams(
                 clock=self.clock,
@@ -405,7 +419,7 @@ def test_a_job_that_asks_for_nothing_of_the_device_gets_no_local_credential(
 
     assert rig.go(once=True) == EXIT_OK
 
-    assert "localEnvironment" not in json.loads(rig.launcher.processes[0].spec.stdin)
+    assert "localCredential" not in json.loads(rig.launcher.processes[0].spec.stdin)
 
 
 def test_a_worker_that_ends_with_an_error_is_exit_code_one_and_the_claim_is_given_back(
@@ -715,7 +729,10 @@ def test_a_job_that_asks_for_a_subscription_gets_the_login_of_the_device_on_the_
 
     spec = rig.launcher.processes[0].spec
     # The dispatcher read the token file and handed that one credential over, on stdin.
-    assert json.loads(spec.stdin)["localEnvironment"] == {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}
+    assert json.loads(spec.stdin)["localCredential"] == {
+        "name": "CLAUDE_CODE_OAUTH_TOKEN",
+        "value": LOGIN,
+    }
     # Not in the Worker's environment, not in an argument, not in the log; masked if it ever were.
     assert LOGIN not in "".join(spec.env.values()) + " ".join(spec.argv)
     assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in spec.env
@@ -738,19 +755,22 @@ def test_a_job_that_does_not_ask_for_the_subscription_never_gets_the_login(
         assert LOGIN.encode() not in process.spec.stdin
 
 
-# #974-T05
-def test_a_login_that_cannot_be_used_is_said_in_words_and_no_credential_is_handed(
+# #974-T05, #980-T06
+def test_a_login_that_cannot_be_used_is_said_in_words_and_the_job_goes_back_unstarted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rig = Rig(tmp_path)
     with_token_file(rig, tmp_path, mode=0o644)  # readable by others: refused, root or not
-    rig.client.claims = [claim(access=SUBSCRIPTION)]
+    claimed = claim(access=SUBSCRIPTION)
+    rig.client.claims = [claimed]
 
     with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
-        rig.go(once=True)
+        assert rig.go(once=True) == EXIT_FAILED
 
-    assert "localEnvironment" not in json.loads(rig.launcher.processes[0].spec.stdin)
-    assert "no usable login" in caplog.text and "can be read by others" in caplog.text
+    # No Worker is started for a job no credential of the device can serve: it would only fail.
+    assert rig.launcher.processes == []
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "launch_failed")]
+    assert "no credential of this device" in caplog.text
     assert LOGIN not in caplog.text
 
 
@@ -1797,3 +1817,210 @@ def test_the_sandbox_is_closed_when_the_run_ends(tmp_path: Path) -> None:
     run(scenario)
 
     assert sandbox.events[-1] == "close"
+
+
+# -- the credentials of the device (#980) ---------------------------------------------------------
+
+SECOND = "sk-" + "ant-" + "oat01-second-made-up-token-not-real-0000000000"
+PLAIN_STORAGE = {"FACTORY_RUNNER_CREDENTIAL_STORAGE": "plain"}
+COOLDOWN = 3600.0
+
+
+def credentials_of(rig: Rig) -> CredentialStore:
+    return store_for(rig.environment, home_directory(rig.environment))
+
+
+def claude_entry(announcement: Announcement) -> dict[str, Any] | None:
+    entries: list[dict[str, Any]] = announcement.manifest["harnesses"]  # type: ignore[assignment]
+    return next((entry for entry in entries if entry["harness"] == "claude-code"), None)
+
+
+def verdict_launcher(exit_code: int) -> AutoLauncher:
+    return AutoLauncher(outcome(exit_code=exit_code, stdout=b""))
+
+
+def credential_rig(tmp_path: Path, exit_code: int = 0, **tokens: str) -> Rig:
+    rig = Rig(
+        tmp_path,
+        launcher=verdict_launcher(exit_code),
+        claude="2.1.311",
+        environment=PLAIN_STORAGE,
+    )
+    store = credentials_of(rig)
+    for name, token in tokens.items():
+        store.add(name, token)
+    return rig
+
+
+# #980-T02
+def test_with_two_credentials_one_rate_limited_the_worker_gets_only_the_other(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path, a=LOGIN, b=SECOND)
+    credentials_of(rig).set_limited("a", rig.clock.wall() + COOLDOWN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
+
+    assert rig.go(once=True) == EXIT_OK
+
+    stdin = json.loads(rig.launcher.processes[0].spec.stdin)
+    assert stdin["localCredential"] == {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": SECOND}
+    assert LOGIN.encode() not in rig.launcher.processes[0].spec.stdin
+
+
+# #980-T01
+def test_neither_a_token_nor_a_name_reaches_the_app_or_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig = credential_rig(tmp_path, exit_code=21, secretname=LOGIN)
+    claimed = claim(access=SUBSCRIPTION)
+    rig.client.claims = [claimed]
+
+    with caplog.at_level(logging.DEBUG, logger="code_reviewer_runner.loop"):
+        rig.go(once=True)
+
+    sent = json.dumps([announcement.body() for announcement in rig.client.announced]) + json.dumps(
+        rig.client.releases
+    )
+    assert rig.client.announced and "claude-code" in sent
+    assert LOGIN not in sent and "secretname" not in sent
+    assert LOGIN not in caplog.text
+
+
+# #980-T03
+def test_the_entry_is_offered_with_the_models_and_withdrawn_while_every_credential_is_limited(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path, exit_code=21, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 2)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    first, withdrawn = rig.client.announced[0], rig.client.announced[1]
+    assert claude_entry(first) == {
+        "harness": "claude-code",
+        "version": "2.1.311",
+        "auth": "subscription",
+        "models": ["sonnet", "opus", "haiku"],
+    }
+    assert claude_entry(withdrawn) is None
+    # OpenCode is untouched by it.
+    assert [e["harness"] for e in withdrawn.manifest["harnesses"]] == ["opencode"]  # type: ignore[index]
+
+
+# #980-T03
+def test_the_entry_comes_back_when_a_credential_is_usable_again(tmp_path: Path) -> None:
+    rig = credential_rig(tmp_path, exit_code=21, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        # The limit holds for an hour of the dispatcher's own clock; the loop's pauses add it up.
+        await until(lambda: len(rig.client.announced) >= 3, seconds=10.0)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert [claude_entry(a) is not None for a in rig.client.announced[:3]] == [True, False, True]
+
+
+# #980-T04
+def test_a_401_withdraws_the_entry_for_good_until_the_credential_is_replaced(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path, exit_code=20, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 2)
+        # Hours pass: a refused token is not tried again.
+        rig.clock.now += 10 * COOLDOWN
+        await asyncio.sleep(0.2)
+        assert len(rig.client.announced) == 2
+        credentials_of(rig).add("only", SECOND, replace=True)
+        await until(lambda: len(rig.client.announced) >= 3)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert [claude_entry(a) is not None for a in rig.client.announced[:3]] == [True, False, True]
+
+
+# #980-T05
+def test_a_model_the_subscription_refused_leaves_the_entry(tmp_path: Path) -> None:
+    rig = credential_rig(tmp_path, exit_code=22, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]  # asks for claude-sonnet-5-5
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 2)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    entry = claude_entry(rig.client.announced[1])
+    assert entry is not None and entry["models"] == ["opus", "haiku"]
+
+
+# #980-T04, #980-T05
+def test_a_job_the_subscription_refused_is_over_for_the_job_and_not_given_back_as_a_start_fault(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path, exit_code=20, only=LOGIN)
+    claimed = claim(access=SUBSCRIPTION)
+    rig.client.claims = [claimed]
+
+    assert rig.go(once=True) == EXIT_FAILED
+
+    # The Worker delivered `subscription_auth` itself; the app answers "ended" to the release.
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "worker_exited")]
+
+
+def test_a_changed_manifest_is_the_only_reason_to_announce_again(tmp_path: Path) -> None:
+    rig = credential_rig(tmp_path, exit_code=0, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION), claim(2, access=SUBSCRIPTION)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: rig.client.claim_calls >= 4)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert len(rig.client.announced) == 1
+
+
+# #980-T06
+def test_a_job_that_names_a_model_no_credential_allows_goes_back_unstarted(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, claude="2.1.311", environment=PLAIN_STORAGE)
+    credentials_of(rig).add("small", LOGIN, models=("haiku",))
+    claimed = claim(access=SUBSCRIPTION)  # claude-sonnet-5-5
+    rig.client.claims = [claimed]
+
+    assert rig.go(once=True) == EXIT_FAILED
+
+    assert rig.launcher.processes == []
+    assert rig.client.releases == [(claimed.job_id, claimed.credential, "launch_failed")]
+
+
+def test_a_job_that_asks_for_no_subscription_leaves_the_credentials_alone(tmp_path: Path) -> None:
+    rig = credential_rig(tmp_path, exit_code=21, only=LOGIN)
+    rig.client.claims = [claim(access=JobAccess("opencode", "app-key"))]
+
+    rig.go(once=True)
+
+    assert b"localCredential" not in rig.launcher.processes[0].spec.stdin
+    record = credentials_of(rig).records()[0]
+    assert record.limited_until == 0.0 and not record.refused, "no verdict is read for it"

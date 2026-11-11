@@ -58,7 +58,9 @@ class FakeSealer:
         return reversed_secret[::-1]
 
 
-def store_in(tmp_path: Path, *, sealer: FakeSealer | None = None, choice: str = "auto") -> CredentialStore:
+def store_in(
+    tmp_path: Path, *, sealer: FakeSealer | None = None, choice: str = "auto"
+) -> CredentialStore:
     return CredentialStore(
         tmp_path / "home",
         choice=choice,
@@ -167,7 +169,11 @@ def test_a_credential_is_removed_with_its_secret(tmp_path: Path) -> None:
     store.remove("a")
 
     assert [record.name for record in store.records()] == ["b"]
-    assert not any(TOKEN in path.read_text() for path in (tmp_path / "home" / "credentials").iterdir() if path.is_file())
+    assert not any(
+        TOKEN in path.read_text()
+        for path in (tmp_path / "home" / "credentials").iterdir()
+        if path.is_file()
+    )
     with pytest.raises(CredentialError):
         store.remove("a")
     with pytest.raises(CredentialError):
@@ -361,7 +367,9 @@ class Run:
         if "encrypt" in argv:
             return subprocess.CompletedProcess(argv, 0, "SEAL(" + str(options["input"]) + ")", "")
         text = str(options["input"])
-        return subprocess.CompletedProcess(argv, 0, text.removeprefix("SEAL(").removesuffix(")"), "")
+        return subprocess.CompletedProcess(
+            argv, 0, text.removeprefix("SEAL(").removesuffix(")"), ""
+        )
 
 
 def test_systemd_creds_gets_the_token_on_stdin_and_never_in_an_argument() -> None:

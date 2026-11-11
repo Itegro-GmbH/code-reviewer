@@ -80,6 +80,10 @@ class Prepared:
     selftest: SelfTestResult
     # What the runner found out about the harnesses it adds to the base (#856), for its log.
     harness_notes: tuple[str, ...] = ()
+    # The version of Claude Code when this device can run it (the layer is there and a login
+    # exists), else None. The dispatcher keeps the entry's `models` up to date from its credentials
+    # and withdraws the entry while none is usable (#980); the rest of the manifest is fixed here.
+    claude_version: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -192,6 +196,10 @@ def harness_checks(
     return {} if found is None else {HARNESS_CLAUDE_CODE: found}
 
 
+def _ready_version(status: HarnessStatus | None) -> str | None:
+    return status.version if status is not None and status.ready else None
+
+
 def announcement_for(
     config: RunnerConfig,
     result: SelfTestResult,
@@ -275,6 +283,7 @@ def prepare(
         announcement_for(config, result, memory, added),
         result,
         tuple(f"{name}: {note}" for name, status in sorted(added.items()) for note in status.notes),
+        claude_version=_ready_version(added.get(HARNESS_CLAUDE_CODE)),
     )
 
 

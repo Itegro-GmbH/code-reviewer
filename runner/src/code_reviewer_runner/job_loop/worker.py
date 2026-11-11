@@ -49,12 +49,12 @@ from code_reviewer_runner.job_loop.worker_api import (
     WorkerApi,
     WorkerJob,
 )
-from code_reviewer_runner.result import ErrorCode
 from code_reviewer_runner.job_loop.worker_errors import (
     WorkerExit,
     WorkerFailure,
     WorkerSetupError,
 )
+from code_reviewer_runner.result import ErrorCode
 
 LOGGER_NAME = "code_reviewer_runner.loop"
 # The start document is small; anything larger is not one.
@@ -135,11 +135,11 @@ def parse_request(raw: str) -> WorkerRequest:
 
 
 def parse_local_credential(raw: str) -> LocalCredential | None:
-    """The credential of the dispatcher's own device in the start document (`localCredential`, #980):
-    a Claude Code subscription token that exists only on that device, as `{"name", "value"}`. One
-    shape for the Worker of a process and for Control in a VM (`local_credential.py`). It comes from
-    the dispatcher, never from the app. An unknown name, an odd value or an extra field is an input
-    error that names the field and never the value."""
+    """The credential of the dispatcher's own device in the start document (`localCredential`,
+    #980): a Claude Code subscription token that exists only on that device, as `{"name", "value"}`.
+    One shape for the Worker of a process and for Control in a VM (`local_credential.py`). It comes
+    from the dispatcher, never from the app. An unknown name, an odd value or an extra field is an
+    input error that names the field and never the value."""
     fields = as_object(json.loads(raw))
     given = fields.get("localCredential") if fields is not None else None
     if given is None:
