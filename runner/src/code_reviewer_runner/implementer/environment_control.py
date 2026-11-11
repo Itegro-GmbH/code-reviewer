@@ -17,6 +17,10 @@ Two transports implement it and the environment the Worker is started with choos
   frame (four bytes of length, one JSON object) and reads one frame back. The messages and their
   limits are `contracts/environment-control.v1.json`; the real AF_VSOCK socket is the lane of #977
   and #978, every test here uses a socket of its own (`Connect`).
+* **unix** (`RUNNER_ENVIRONMENT_CONTROL=unix`, #1007): an instance of the Incus backend on a
+  customer's own machine. The same frames, over the Unix socket `/ctl.sock` that the launcher's
+  `proxy` device makes in the Control instance (a socket under `/run` would be hidden by the
+  instance's own tmpfs).
 * **none**: the Worker runs with the inner wall (the network door) only, and the session says so
   once. This is the R1b runner's behaviour.
 
@@ -48,15 +52,18 @@ from .network_switch import NetworkSwitch, Post, narrow_policy, parse_switch, ur
 
 _log = logging.getLogger(__name__)
 
-# The environment variable that chooses the vsock transport. Its one value is `vsock`; the port is
-# not configurable, it is the contract's.
+# The environment variable that chooses the socket transport. Its values are `vsock` (a Firecracker
+# VM) and `unix` (an Incus instance); the port and the path are not configurable, they are the
+# contract's.
 ENVIRONMENT_CONTROL_VARIABLE: Final = "RUNNER_ENVIRONMENT_CONTROL"
 TRANSPORT_VSOCK: Final = "vsock"
+TRANSPORT_UNIX: Final = "unix"
 
 # `contracts/environment-control.v1.json` (a contract test holds them equal).
 PROTOCOL_VERSION: Final = 1
 VSOCK_HOST_CID: Final = 2
 VSOCK_PORT: Final = 5100
+UNIX_SOCKET_PATH: Final = "/ctl.sock"
 MAX_FRAME_BYTES: Final = 65536
 NARROW_SECONDS: Final = 30.0
 END_SECONDS: Final = 5.0
@@ -109,6 +116,26 @@ def vsock_connect(timeout: float) -> StreamSocket:
         sock.close()
         raise
     return sock
+
+
+def unix_connect(timeout: float, path: str = UNIX_SOCKET_PATH) -> StreamSocket:
+    """The real connection of the unix transport: the contract's socket in the Control instance."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        sock.connect(path)
+    except BaseException:
+        sock.close()
+        raise
+    return sock
+
+
+def _connect_for(transport: str, connect: Connect) -> Connect:
+    """The connection of a transport: `connect` is a test's own, and the default one stands for the
+    real socket of whichever transport was chosen."""
+    if transport == TRANSPORT_UNIX and connect is vsock_connect:
+        return unix_connect
+    return connect
 
 
 # -- the messages and the framing ---
@@ -249,7 +276,8 @@ class HttpsControl:
 
 @dataclass(frozen=True)
 class VsockControl:
-    """The host's environment control over AF_VSOCK (`contracts/environment-control.v1.json`)."""
+    """The host's environment control over a stream socket, AF_VSOCK or the unix socket of an Incus
+    instance (`contracts/environment-control.v1.json`): the frames are the same."""
 
     connect: Connect = vsock_connect
     narrow_seconds: float = NARROW_SECONDS
@@ -330,17 +358,20 @@ def control_from_environment(
     switch_text = environment.get(IMPLEMENTER_NETWORK_SWITCH_VARIABLE)
     has_switch = switch_text is not None and bool(switch_text.strip())
     if chosen is not None:
-        if chosen != TRANSPORT_VSOCK:
+        if chosen not in (TRANSPORT_VSOCK, TRANSPORT_UNIX):
             raise JobError(
                 ErrorCode.IMPLEMENTER_CONFIG_INVALID,
-                f"{ENVIRONMENT_CONTROL_VARIABLE} must be {TRANSPORT_VSOCK} when it is set",
+                f"{ENVIRONMENT_CONTROL_VARIABLE} must be {TRANSPORT_VSOCK} or {TRANSPORT_UNIX} "
+                "when it is set",
             )
         if has_switch:
             raise JobError(
                 ErrorCode.IMPLEMENTER_CONFIG_INVALID,
-                "this container names two environment controls, the network switch and vsock",
+                "this container names two environment controls, the network switch and a socket",
             )
-        return VsockControl(connect=connect, narrow_seconds=narrow_seconds, token=token)
+        return VsockControl(
+            connect=_connect_for(chosen, connect), narrow_seconds=narrow_seconds, token=token
+        )
     switch = parse_switch(switch_text)
     if switch is None:
         return None
@@ -354,7 +385,7 @@ def report_worker_end(
     token: str | None = None,
     connect: Connect = vsock_connect,
 ) -> None:
-    """The Worker's last act: tell the host over vsock that it ended. Over https and with no control
+    """The Worker's last act: tell the host over its socket that it ended. Over https and with no control
     there is nothing to tell. Never raises: a Worker that cannot say goodbye still ends."""
     if environment.get(ENVIRONMENT_CONTROL_VARIABLE) is None:
         return
