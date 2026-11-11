@@ -492,3 +492,41 @@ def test_selftest_as_json_carries_the_claude_code_checks_and_whether_the_turn_wa
     assert got == EXIT_OK
     assert report["claudeCode"] == {"ready": True, "turnAsked": True}
     assert [c["name"] for c in report["checks"]][-3:] == [c.name for c in READY_CLAUDE]
+
+
+# #982: the Worker-as-a-process mode on the host's Docker is gone from the program.
+def test_the_program_runs_only_with_the_firecracker_sandbox(tmp_path: Path) -> None:
+    err = io.StringIO()
+    code = main(
+        ["run", "--once"],
+        environment={
+            "FACTORY_RUNNER_HOME": str(tmp_path / "home"),
+            "FACTORY_RUNNER_URL": "https://app.example",
+            "FACTORY_RUNNER_CREDENTIAL": CREDENTIAL,
+        },
+        err=err,
+        require_sandbox=True,
+    )
+
+    assert code == EXIT_CONFIG
+    assert "the only sandbox is firecracker" in err.getvalue()
+    assert CREDENTIAL not in err.getvalue()
+
+
+def test_the_entry_point_of_the_program_asks_for_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_reviewer_runner.factory_runner import cli
+
+    asked: list[bool] = []
+
+    def fake_main(*_args: Any, require_sandbox: bool = False, **_kwargs: Any) -> int:
+        asked.append(require_sandbox)
+        return 0
+
+    monkeypatch.setattr(cli, "main", fake_main)
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.entry_point()
+
+    assert stopped.value.code == 0 and asked == [True]

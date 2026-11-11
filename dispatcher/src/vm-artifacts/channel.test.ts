@@ -11,9 +11,10 @@ const channel = JSON.parse(
 ) as Record<string, unknown>;
 
 describe("the release channel of the VM artifacts", () => {
-  // #976-T01
+  // #976-T01, #982
   it("has the shape of the runner's channel, with the public key and nothing secret", () => {
     expect(Object.keys(channel).sort()).toEqual([
+      "baseUrl",
       "manifestAsset",
       "publicKey",
       "repository",
@@ -44,5 +45,19 @@ describe("the release channel of the VM artifacts", () => {
       return;
     }
     expect(channel.repository).toBe("Itegro-GmbH/code-reviewer");
+  });
+});
+
+describe("the address the installer downloads from (#982)", () => {
+  // #982: the owner decides where the files are (a GitHub release or protected storage); nothing is hard-coded.
+  it("is either empty (nothing is published) together with the key, or an https directory", () => {
+    const base = channel.baseUrl;
+    expect(typeof base).toBe("string");
+    if (base === "") {
+      expect(channel.publicKey).toBe("");
+      return;
+    }
+    expect(String(base)).toMatch(/^https:\/\//);
+    expect(channel.publicKey).not.toBe("");
   });
 });

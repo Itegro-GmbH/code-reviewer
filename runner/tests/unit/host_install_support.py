@@ -57,7 +57,7 @@ class Release:
     )
     image_id: str = "sha256:" + "5" * 64
     # Changes the tests make to what is published, by name.
-    tamper: set[str] = field(default_factory=set)
+    tamper: set[str] = field(default_factory=lambda: set[str]())
 
     @property
     def public_key(self) -> str:
@@ -211,7 +211,11 @@ class Release:
 
         kernel, rootfs, data = self.kernel(), self.rootfs(), self.data_disk()
         manifest = self.vm_manifest(kernel, rootfs, data)
-        files = {"vmlinux": kernel, "rootfs.ext4.zst": zstd(rootfs), "dockerdata.ext4.zst": zstd(data)}
+        files = {
+            "vmlinux": kernel,
+            "rootfs.ext4.zst": zstd(rootfs),
+            "dockerdata.ext4.zst": zstd(data),
+        }
         if "vm-flip-kernel" in self.tamper:
             files["vmlinux"] = b"X" + kernel[1:]
         if "vm-flip-rootfs" in self.tamper:
@@ -330,8 +334,8 @@ name="${url##*/}"
 [ -f "$STUB_SERVED/$name" ] || exit 22
 cp "$STUB_SERVED/$name" "$out"
 """,
-    "resize2fs": 'exit 0',
-    "e2fsck": 'exit 0',
+    "resize2fs": "exit 0",
+    "e2fsck": "exit 0",
     "cp": r"""
 case "$*" in
   *--reflink=always*)
@@ -357,7 +361,7 @@ class Machine:
     vm_channel: Path
     release: Release
     # The directory tree of a machine that has nothing of ours, for "nothing is left behind".
-    baseline: dict[str, str] = field(default_factory=dict)
+    baseline: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
     # -- paths ----------------------------------------------------------------------------------
 
@@ -425,7 +429,12 @@ class Machine:
         stdin: str = "",
     ) -> subprocess.CompletedProcess[str]:
         channel_args = (
-            ["--program-channel-file", str(self.program_channel), "--vm-channel-file", str(self.vm_channel)]
+            [
+                "--program-channel-file",
+                str(self.program_channel),
+                "--vm-channel-file",
+                str(self.vm_channel),
+            ]
             if channels
             else []
         )
@@ -511,4 +520,3 @@ def new_machine(tmp_path: Path, release: Release | None = None) -> Machine:
     machine = Machine(root, bin_dir, state, log, served, program_channel, vm_channel, published)
     machine.baseline = machine.tree()
     return machine
-

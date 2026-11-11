@@ -219,9 +219,8 @@ guard of git and bakes in no git configuration (git is free in the agent's works
 `docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox .` (`make test-images` builds it and
 runs its smoke test).
 
-`runner/Dockerfile.factory-runner` (#854) is the second Dockerfile: the Factory-Runner image, `FROM` the Worker image with the
-`factory-runner` command as its entry point (`docs/runner.md`). It is a file of its own so that `runner/Dockerfile`, which the golden
-snapshot hashes and whose last stage is pinned to `sandbox`, does not change. CI builds it from the image above, without a push.
+The Factory-Runner has no image of its own since #982: the local Dispatcher is a program the installer puts on a machine with KVM
+(`runner/install/install.sh`, `docs/runner.md`), and the Worker image above is what runs in the VM it starts.
 
 The sizing of a container (memory per process) is in `docs/spike/cr-13-measurements.md`.
 

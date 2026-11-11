@@ -813,21 +813,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=runner-sandbox
       - name: Smoke test the image
         run: docker/smoke/runner.sh code-reviewer-runner-sandbox:ci
-      # The Factory-Runner image (#854, R1b) is the Worker image with the `factory-runner` command as its entry point. It is
-      # built from the image above, which the default builder (the daemon's own) sees. Built, not pushed.
-      # `registry.example/code-reviewer-agent:ci` is a made-up reference on purpose (`.example` never resolves): the build only bakes
-      # it into /opt/code-reviewer/agent-image.json and the smoke test only reads it back, so nothing is pulled and no registry is
-      # needed. It is a tag, not a digest, which a release must never ship (the Dockerfile warns at build time; the runner's
-      # self-test warns at start). The runner does not start a job here: that is the lane's, on a daemon.
-      - name: Build the Factory-Runner image (no push)
-        run: >-
-          docker buildx build --builder default --load
-          --file runner/Dockerfile.factory-runner
-          --build-arg WORKER_IMAGE=code-reviewer-runner-sandbox:ci
-          --build-arg AGENT_IMAGE_REF=registry.example/code-reviewer-agent:ci
-          --tag factory-runner:ci runner
-      - name: Smoke test the Factory-Runner image
-        run: docker/smoke/factory-runner.sh factory-runner:ci
 
   # The Linux VM artifacts of Runner v2 (#976): the guest kernel (built or restored from a cache, its configuration always verified), the
   # root file system made by the golden snapshot's own install scripts, the data disk with the Worker and agent images, a smoke boot on KVM

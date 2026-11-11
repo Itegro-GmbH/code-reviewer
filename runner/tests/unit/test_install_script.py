@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The installer, updater and uninstaller of the Factory-Runner on a machine with KVM (#982): `runner/install/install.sh`
-against stand-ins for every command that needs root, in a directory that plays the machine's root
-(`host_install_support.py`). The signatures, digests and unpacking are checked by the real `openssl`,
-`jq`, `zstd`, `tar` and `sha256sum` against releases that are signed with a real key. Nothing of the machine that runs the
-test is touched. What a real systemd, a real `nft` and a real kernel do with the files is the job of the first install on a
-machine (docs/runner.md, "First install on a real host") and of the installer lane of CI.
+"""The installer, updater and uninstaller of the Factory-Runner on a machine with KVM (#982):
+`runner/install/install.sh` against stand-ins for every command that needs root, in a directory
+that plays the machine's root (`host_install_support.py`). The signatures, digests and unpacking
+are checked by the real `openssl`, `jq`, `zstd`, `tar` and `sha256sum` against releases that are
+signed with a real key. Nothing of the machine that runs the test is touched. What a real systemd,
+a real `nft` and a real kernel do with the files is the job of the first install on a machine
+(docs/runner.md, "First install on a real host") and of the installer lane of CI.
 
-#982-T01 preflight without /dev/kvm; #982-T02 install then uninstall; #982-T03 an update with a bad signature; #982-T04 rollback."""
+#982-T01 preflight without /dev/kvm; #982-T02 install, then uninstall; #982-T03 an update with a
+bad signature; #982-T04 rollback."""
 
 import fcntl
 import json
@@ -17,6 +19,7 @@ import stat
 import subprocess
 import termios
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -33,7 +36,7 @@ from host_install_support import (
 
 pytestmark = pytest.mark.unit
 
-# What changes the machine: the reads (`nft list`, `ip link show`, the two small manifests of curl) are not in it.
+# What changes the machine; the reads (`nft list`, `ip link show`, the manifests) are not in it.
 MUTATORS = (
     "useradd",
     "userdel",
@@ -85,7 +88,7 @@ def publish(machine: Machine, **changes: object) -> Release:
     return release
 
 
-# -- preflight --------------------------------------------------------------------------------------------------
+# -- preflight --
 
 
 # #982-T01
@@ -98,24 +101,45 @@ def test_preflight_without_kvm_stops_with_the_documented_message_and_changes_not
     done = machine.install()
 
     assert done.returncode == 1
-    for text in ("no /dev/kvm", "NESTED VIRTUALIZATION", "Intel VT-x / AMD-V", "Nothing was changed"):
+    for text in (
+        "no /dev/kvm",
+        "NESTED VIRTUALIZATION",
+        "Intel VT-x / AMD-V",
+        "Nothing was changed",
+    ):
         assert text in done.stderr
     assert machine.tree() == machine.baseline
     # Not one command ran: the check comes first.
     assert machine.calls() == []
 
 
+def without_nft(m: Machine) -> None:
+    (m.bin / "nft").unlink()
+
+
+def without_resize2fs(m: Machine) -> None:
+    (m.bin / "resize2fs").unlink()
+
+
+def without_cgroup2(m: Machine) -> None:
+    (m.root / "sys/fs/cgroup/cgroup.controllers").unlink()
+
+
+def without_systemd(m: Machine) -> None:
+    (m.root / "run/systemd/system").rmdir()
+
+
 @pytest.mark.parametrize(
     ("break_it", "message"),
     [
-        (lambda m: (m.bin / "nft").unlink(), "nft is not installed"),
-        (lambda m: (m.bin / "resize2fs").unlink(), "resize2fs is not installed"),
-        (lambda m: (m.root / "sys/fs/cgroup/cgroup.controllers").unlink(), "cgroup v2"),
-        (lambda m: (m.root / "run/systemd/system").rmdir(), "systemd is not the init"),
+        (without_nft, "nft is not installed"),
+        (without_resize2fs, "resize2fs is not installed"),
+        (without_cgroup2, "cgroup v2"),
+        (without_systemd, "systemd is not the init"),
     ],
 )
 def test_preflight_stops_for_a_missing_part_and_changes_nothing(
-    machine: Machine, break_it, message: str  # noqa: ANN001
+    machine: Machine, break_it: Callable[[Machine], None], message: str
 ) -> None:
     break_it(machine)
     machine.baseline = machine.tree()
@@ -160,19 +184,46 @@ def test_a_filesystem_with_reflinks_is_not_warned_about(machine: Machine) -> Non
     assert "reflinks" not in done.stderr
 
 
+def with_foreign_unit(m: Machine) -> None:
+    m.unit.write_text("[Unit]\n")
+
+
+def with_foreign_user(m: Machine) -> None:
+    (m.state / "users").mkdir()
+    (m.state / "users" / "factory-runner").write_text("x")
+
+
+def with_foreign_table(m: Machine) -> None:
+    (m.state / "nft-table").write_text("x")
+
+
+def with_foreign_tap(m: Machine) -> None:
+    (m.state / "taps").mkdir()
+    (m.state / "taps" / "fctap0").write_text("x")
+
+
+def with_foreign_opt(m: Machine) -> None:
+    (m.root / "opt/code-reviewer").mkdir()
+
+
+def with_foreign_state_dir(m: Machine) -> None:
+    (m.root / "var/lib/code-reviewer").mkdir()
+    (m.root / "var/lib/code-reviewer/x").write_text("")
+
+
 @pytest.mark.parametrize(
     ("make", "message"),
     [
-        (lambda m: m.unit.write_text("[Unit]\n"), "this installer did not make"),
-        (lambda m: (m.state / "users").mkdir() or (m.state / "users" / "factory-runner").write_text("x"), "must own nothing else"),
-        (lambda m: (m.state / "nft-table").write_text("x"), "nft table code_reviewer_wall is loaded"),
-        (lambda m: (m.state / "taps").mkdir() or (m.state / "taps" / "fctap0").write_text("x"), "TAP devices named fctapN"),
-        (lambda m: (m.root / "opt/code-reviewer").mkdir(), "was not made by this installer"),
-        (lambda m: ((m.root / "var/lib/code-reviewer").mkdir(), (m.root / "var/lib/code-reviewer/x").write_text("")), "is not empty"),
+        (with_foreign_unit, "this installer did not make"),
+        (with_foreign_user, "must own nothing else"),
+        (with_foreign_table, "nft table code_reviewer_wall is loaded"),
+        (with_foreign_tap, "TAP devices named fctapN"),
+        (with_foreign_opt, "was not made by this installer"),
+        (with_foreign_state_dir, "is not empty"),
     ],
 )
 def test_a_second_dispatcher_is_refused_and_what_is_not_ours_is_never_reused(
-    machine: Machine, make, message: str  # noqa: ANN001
+    machine: Machine, make: Callable[[Machine], None], message: str
 ) -> None:
     make(machine)
     before = machine.tree()
@@ -195,7 +246,7 @@ def test_an_install_over_an_install_is_refused_without_refresh(installed: Machin
     assert installed.tree() == before
 
 
-# -- install ----------------------------------------------------------------------------------------------------
+# -- install --
 
 
 def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_units(
@@ -217,10 +268,13 @@ def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_uni
         assert stat.S_IMODE((artifacts / name).stat().st_mode) == 0o644
     assert stat.S_IMODE(artifacts.stat().st_mode) == 0o755
     assert "chown -R root:root" in " ".join(calls)
-    assert (artifacts / "vm.env").read_text() == f"FACTORY_RUNNER_VM_IMAGE_ID={machine.release.image_id}\n"
+    assert (
+        artifacts / "vm.env"
+    ).read_text() == f"FACTORY_RUNNER_VM_IMAGE_ID={machine.release.image_id}\n"
     # The service owns vms/ and its lock and nothing else of the state directory.
     assert any(
-        call.startswith("chown factory-runner:factory-runner") and str(machine.state_dir / "vms") in call
+        call.startswith("chown factory-runner:factory-runner")
+        and str(machine.state_dir / "vms") in call
         for call in calls
     )
     assert stat.S_IMODE((machine.state_dir / "vms").stat().st_mode) == 0o700
@@ -243,7 +297,9 @@ def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_uni
     assert "taps=1" in (machine.conf / "install.state").read_text()
 
 
-def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on(installed: Machine) -> None:
+def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on(
+    installed: Machine,
+) -> None:
     unit = installed.unit.read_text()
 
     for line in (
@@ -263,17 +319,23 @@ def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on
         "DevicePolicy=closed",
         "DeviceAllow=/dev/kvm rw",
         "DeviceAllow=/dev/net/tun rw",
-        "ReadWritePaths=/var/lib/code-reviewer/vms /var/lib/code-reviewer/dispatcher.lock /var/lib/factory-runner",
+        "ReadWritePaths=/var/lib/code-reviewer/vms /var/lib/code-reviewer/dispatcher.lock "
+        "/var/lib/factory-runner",
     ):
         assert line in unit.splitlines(), line
     limit = next(line for line in unit.splitlines() if line.startswith("LimitNOFILE="))
-    # The vsock listeners (2 x 4 connections per VM) and the proxy's 256 connections of two descriptors each.
+    # The vsock listeners (2 x 4 connections per VM) and the proxy's 256 connections (two each).
     assert int(limit.split("=")[1]) >= 8192
     assert "docker" not in unit.lower()
     assert "--privileged" not in unit and "PrivateDevices" not in unit
-    assert "ProtectControlGroups" not in unit.replace("# ", "")  # cgroup writes are the service's job
+    assert "ProtectControlGroups" not in unit.replace(
+        "# ", ""
+    )  # cgroup writes are the service's job
     env = (installed.conf / "runner.env").read_text()
-    assert "FACTORY_RUNNER_PARALLEL_RUNS=1" in env and "FACTORY_RUNNER_HOME=/var/lib/factory-runner" in env
+    assert (
+        "FACTORY_RUNNER_PARALLEL_RUNS=1" in env
+        and "FACTORY_RUNNER_HOME=/var/lib/factory-runner" in env
+    )
     assert "OUTER_WALL" not in env and "TOKEN" not in env and "crc_" not in env
     timer = (installed.unit.parent / "factory-runner-update.timer").read_text()
     assert "OnUnitActiveSec=6h" in timer
@@ -281,7 +343,7 @@ def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on
     assert "host.sh update --scheduled" in service and "Type=oneshot" in service
 
 
-def test_the_outer_wall_is_only_in_the_unit_because_the_table_was_listed_and_a_failed_listing_fails_the_install(
+def test_the_wall_is_in_the_unit_only_after_the_table_was_listed_and_a_failed_listing_fails(
     machine: Machine,
 ) -> None:
     done = machine.install(env={"STUB_NFT_LIST_FAIL": "1"})
@@ -289,14 +351,17 @@ def test_the_outer_wall_is_only_in_the_unit_because_the_table_was_listed_and_a_f
     assert done.returncode == 1
     assert "is not loaded" in done.stderr
     calls = machine.calls()
-    # The unit was never written, so never `proxy`; the service was never enabled or started; what was made is gone.
+    # The unit was never written, so never `proxy`; the service never enabled or started.
     assert not machine.unit.exists()
-    assert "systemctl enable factory-runner" not in calls and "systemctl start factory-runner" not in calls
+    assert (
+        "systemctl enable factory-runner" not in calls
+        and "systemctl start factory-runner" not in calls
+    )
     assert machine.tree() == machine.baseline
     assert not machine.table_loaded and not machine.user_exists and not machine.taps
 
 
-def test_a_table_that_does_not_check_on_this_kernel_stops_the_install_before_any_change_to_the_network(
+def test_a_table_that_does_not_check_on_this_kernel_stops_before_the_network_is_touched(
     machine: Machine,
 ) -> None:
     done = machine.install(env={"STUB_NFT_CHECK_FAIL": "1"})
@@ -307,15 +372,22 @@ def test_a_table_that_does_not_check_on_this_kernel_stops_the_install_before_any
     assert machine.tree() == machine.baseline
 
 
-def test_the_token_is_never_in_an_argument_or_a_file_only_on_standard_input(machine: Machine) -> None:
+def test_the_token_is_never_in_an_argument_or_a_file_only_on_standard_input(
+    machine: Machine,
+) -> None:
     done = machine.install("--labels", "linux")
 
     assert done.returncode == 0, done.stderr
     assert (machine.state / "register-stdin").read_text() == TOKEN
     assert not [call for call in machine.calls() if TOKEN in call]
     assert not [path for path in machine.tree() if TOKEN in path]
-    assert TOKEN not in machine.unit.read_text() and TOKEN not in (machine.conf / "runner.env").read_text()
-    register = next(line for line in (machine.state / "cli.log").read_text().splitlines() if "register" in line)
+    assert (
+        TOKEN not in machine.unit.read_text()
+        and TOKEN not in (machine.conf / "runner.env").read_text()
+    )
+    register = next(
+        line for line in (machine.state / "cli.log").read_text().splitlines() if "register" in line
+    )
     assert "register --token-file - --labels linux" in register
     assert "FACTORY_RUNNER_TOKEN" not in done.stdout
 
@@ -336,7 +408,9 @@ def test_the_token_can_come_from_a_file_or_standard_input(machine: Machine, tmp_
     assert (machine.state / "register-stdin").read_text() == TOKEN
 
 
-def test_without_a_token_the_machine_is_installed_and_the_service_is_not_started(machine: Machine) -> None:
+def test_without_a_token_the_machine_is_installed_and_the_service_is_not_started(
+    machine: Machine,
+) -> None:
     done = machine.install(token=False)
 
     assert done.returncode == 0, done.stderr
@@ -345,7 +419,9 @@ def test_without_a_token_the_machine_is_installed_and_the_service_is_not_started
     assert machine.unit.exists() and machine.table_loaded
 
 
-def test_a_token_that_does_not_register_leaves_the_install_in_place_and_says_so(machine: Machine) -> None:
+def test_a_token_that_does_not_register_leaves_the_install_in_place_and_says_so(
+    machine: Machine,
+) -> None:
     done = machine.install(env={"FACTORY_RUNNER_TOKEN": "not-a-token"})
 
     assert done.returncode == 1
@@ -355,7 +431,9 @@ def test_a_token_that_does_not_register_leaves_the_install_in_place_and_says_so(
     assert "systemctl start factory-runner" not in machine.calls()
 
 
-def test_parallel_runs_make_a_tap_device_and_an_address_per_slot_and_scale_the_limits(machine: Machine) -> None:
+def test_parallel_runs_make_a_tap_device_and_an_address_per_slot_and_scale_the_limits(
+    machine: Machine,
+) -> None:
     done = machine.install("--parallel-runs", "3")
 
     assert done.returncode == 0, done.stderr
@@ -376,7 +454,7 @@ def test_a_hundred_slots_are_refused(machine: Machine) -> None:
 
 
 def test_the_slot_addresses_are_the_ones_the_launcher_derives() -> None:
-    from code_reviewer_runner.factory_runner.firecracker.slots import Slot  # noqa: PLC0415
+    from code_reviewer_runner.factory_runner.firecracker.slots import Slot
 
     script = SCRIPT.read_text()
     assert "172.31." in script and "* 4 + 1" in script
@@ -426,7 +504,9 @@ def test_a_file_that_does_not_match_its_manifest_is_never_installed_and_nothing_
     assert not machine.table_loaded and not machine.user_exists and not machine.taps
 
 
-def test_an_empty_channel_stops_with_no_release_published_and_changes_nothing(machine: Machine) -> None:
+def test_an_empty_channel_stops_with_no_release_published_and_changes_nothing(
+    machine: Machine,
+) -> None:
     channel = json.loads(machine.vm_channel.read_text())
     channel.update(baseUrl="", publicKey="")
     machine.vm_channel.write_text(json.dumps(channel))
@@ -449,16 +529,23 @@ def test_a_channel_that_is_not_https_is_refused(machine: Machine) -> None:
     changed_nothing(machine)
 
 
-def test_every_download_is_https_from_the_channel_and_nothing_names_the_app_or_docker(installed: Machine) -> None:
-    urls = [word for call in installed.calls("curl") for word in call.split() if word.startswith("http")]
+def test_every_download_is_https_from_the_channel_and_nothing_names_the_app_or_docker(
+    installed: Machine,
+) -> None:
+    urls = [
+        word for call in installed.calls("curl") for word in call.split() if word.startswith("http")
+    ]
 
     assert urls
     assert all(url.startswith((PROGRAM_BASE, VM_BASE)) for url in urls)
-    assert all("--proto =https" in call and "--proto-redir =https" in call for call in installed.calls("curl"))
+    assert all(
+        "--proto =https" in call and "--proto-redir =https" in call
+        for call in installed.calls("curl")
+    )
     assert not [call for call in installed.calls() if call.startswith("docker")]
 
 
-def test_a_curl_configuration_for_a_protected_release_address_is_kept_for_updates_in_a_root_only_file(
+def test_a_curl_configuration_for_a_protected_address_is_kept_for_updates_for_root_only(
     machine: Machine, tmp_path: Path
 ) -> None:
     rc = tmp_path / "login.curlrc"
@@ -505,7 +592,7 @@ def test_a_script_that_is_cut_off_anywhere_changes_nothing(machine: Machine) -> 
     changed_nothing(machine)
 
 
-# -- T02: install, then uninstall -------------------------------------------------------------------------------
+# -- T02: install, then uninstall --
 
 
 # #982-T02
@@ -538,7 +625,13 @@ def test_install_then_uninstall_leaves_no_table_tap_user_or_file_behind(machine:
 
 def test_uninstall_removes_the_user_only_when_the_installer_made_it(installed: Machine) -> None:
     state = installed.conf / "install.state"
-    state.write_text("".join(line for line in state.read_text().splitlines(keepends=True) if not line.startswith("user_created")))
+    state.write_text(
+        "".join(
+            line
+            for line in state.read_text().splitlines(keepends=True)
+            if not line.startswith("user_created")
+        )
+    )
 
     gone = installed.host("uninstall")
 
@@ -575,7 +668,7 @@ def test_uninstall_dry_run_changes_nothing(installed: Machine) -> None:
     assert installed.tree() == before and installed.table_loaded and installed.user_exists
 
 
-# -- updates ----------------------------------------------------------------------------------------------------
+# -- updates --
 
 
 def stage_release_two(machine: Machine) -> None:
@@ -584,14 +677,18 @@ def stage_release_two(machine: Machine) -> None:
     assert done.returncode == 0, done.stderr
 
 
-def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(installed: Machine) -> None:
+def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(
+    installed: Machine,
+) -> None:
     publish(installed, program=2, vm=11)
     restarts = len(installed.calls("systemctl"))
 
     done = installed.host("update")
 
     assert done.returncode == 0, done.stderr
-    assert "staged the program release 2" in done.stdout and "staged the vm release 11" in done.stdout
+    assert (
+        "staged the program release 2" in done.stdout and "staged the vm release 11" in done.stdout
+    )
     # What runs is untouched: only the marker says there is something to switch to.
     assert os.readlink(installed.opt / "current") == "releases/1"
     assert os.readlink(installed.state_dir / "artifacts") == "artifact-releases/10"
@@ -603,7 +700,9 @@ def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(instal
 
 
 # #982-T03
-def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays(installed: Machine) -> None:
+def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays(
+    installed: Machine,
+) -> None:
     before = tree_without_locks(installed)
     publish(installed, program=2, vm=11, tamper={"program-bad-signature"})
 
@@ -613,11 +712,16 @@ def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays
     assert "signature of the program release manifest is not valid" in done.stderr
     assert tree_without_locks(installed) == before
     assert os.readlink(installed.opt / "current") == "releases/1"
-    assert not (installed.state_dir / "pending").exists() and not (installed.opt / "releases/2").exists()
+    assert (
+        not (installed.state_dir / "pending").exists()
+        and not (installed.opt / "releases/2").exists()
+    )
     # And through a signature of the other release: the VM artifacts.
     publish(installed, program=1, vm=11, tamper={"vm-bad-signature"})
     done = installed.host("update")
-    assert done.returncode == 1 and "signature of the vm release manifest is not valid" in done.stderr
+    assert (
+        done.returncode == 1 and "signature of the vm release manifest is not valid" in done.stderr
+    )
     assert tree_without_locks(installed) == before
 
 
@@ -649,7 +753,9 @@ def test_an_update_never_takes_an_older_release_than_the_installed_one(installed
     assert not (installed.state_dir / "pending").exists()
 
 
-def test_a_scheduled_update_does_not_look_when_the_operator_turned_updates_off(installed: Machine) -> None:
+def test_a_scheduled_update_does_not_look_when_the_operator_turned_updates_off(
+    installed: Machine,
+) -> None:
     (installed.root / "var/lib/factory-runner/config.json").write_text('{"autoUpdate": false}')
     calls = len(installed.calls("curl"))
 
@@ -676,7 +782,9 @@ def test_an_update_needs_an_installed_runner(tmp_path: Path) -> None:
     assert done.returncode == 1 and "not installed" in done.stderr
 
 
-def test_the_start_switches_to_the_staged_release_and_keeps_the_one_before(installed: Machine) -> None:
+def test_the_start_switches_to_the_staged_release_and_keeps_the_one_before(
+    installed: Machine,
+) -> None:
     stage_release_two(installed)
 
     done = installed.host("prestart")
@@ -702,10 +810,15 @@ def test_only_the_current_the_previous_and_the_waiting_release_are_kept(installe
     assert installed.host("switch").returncode == 0
 
     assert sorted(path.name for path in (installed.opt / "releases").iterdir()) == ["2", "3"]
-    assert sorted(path.name for path in (installed.state_dir / "artifact-releases").iterdir()) == ["11", "12"]
+    assert sorted(path.name for path in (installed.state_dir / "artifact-releases").iterdir()) == [
+        "11",
+        "12",
+    ]
 
 
-def test_a_program_that_does_not_run_is_not_switched_to_and_is_not_taken_again(installed: Machine) -> None:
+def test_a_program_that_does_not_run_is_not_switched_to_and_is_not_taken_again(
+    installed: Machine,
+) -> None:
     publish(installed, program=2, vm=10, tamper={"program-broken"})
     assert installed.host("update").returncode == 0
 
@@ -717,10 +830,15 @@ def test_a_program_that_does_not_run_is_not_switched_to_and_is_not_taken_again(i
     assert (installed.conf / "rejected-program").read_text() == "2\n"
     again = installed.host("update")
     assert "was rolled back" in again.stdout
-    assert not (installed.opt / "releases/2").exists() or not (installed.state_dir / "pending").exists()
+    assert (
+        not (installed.opt / "releases/2").exists()
+        or not (installed.state_dir / "pending").exists()
+    )
 
 
-def test_the_start_fails_when_the_table_is_not_loaded_so_the_service_never_runs_without_its_wall(installed: Machine) -> None:
+def test_the_start_fails_when_the_table_is_not_loaded_so_the_service_never_runs_without_its_wall(
+    installed: Machine,
+) -> None:
     done = installed.host("prestart", env={"STUB_NFT_LIST_FAIL": "1"})
 
     assert done.returncode == 1
@@ -736,7 +854,9 @@ def test_the_start_makes_the_tap_devices_a_restart_of_the_machine_took(installed
     assert installed.taps == ["fctap0"]
 
 
-def test_the_service_is_started_with_the_vm_settings_of_the_current_artifacts(installed: Machine) -> None:
+def test_the_service_is_started_with_the_vm_settings_of_the_current_artifacts(
+    installed: Machine,
+) -> None:
     done = installed.host("run-service")
 
     assert done.returncode == 0, done.stderr
@@ -744,7 +864,9 @@ def test_the_service_is_started_with_the_vm_settings_of_the_current_artifacts(in
     assert last == f"factory-runner run image={installed.release.image_id} release=1"
 
 
-def test_the_service_without_vm_artifacts_ends_with_the_configuration_exit_code(installed: Machine) -> None:
+def test_the_service_without_vm_artifacts_ends_with_the_configuration_exit_code(
+    installed: Machine,
+) -> None:
     (installed.state_dir / "artifacts").unlink()
 
     done = installed.host("run-service")
@@ -752,11 +874,13 @@ def test_the_service_without_vm_artifacts_ends_with_the_configuration_exit_code(
     assert done.returncode == 6
 
 
-# -- T04: rollback ----------------------------------------------------------------------------------------------
+# -- T04: rollback --
 
 
 # #982-T04
-def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it_left(installed: Machine) -> None:
+def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it_left(
+    installed: Machine,
+) -> None:
     stage_release_two(installed)
     assert installed.host("switch").returncode == 0
     assert installed.release_of("current") == "2"
@@ -772,7 +896,7 @@ def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it
     assert installed.host("prestart").returncode == 0
     assert installed.release_of("current") == "1"
     assert installed.release_of("artifacts", parent=installed.state_dir) == "10"
-    # The release that was left is gone and is not the `previous` (a second rollback does not go forward).
+    # The release left is gone and is not `previous`: a second rollback does not go forward.
     assert not (installed.opt / "previous").exists() and not (installed.opt / "releases/2").exists()
     assert installed.host("rollback").returncode == 1
     # The channel still announces release 2: it is not taken. A higher one is.
@@ -783,14 +907,19 @@ def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it
     assert (installed.state_dir / "pending").read_text().splitlines() == ["program=3", "vm=12"]
 
 
-def test_a_rollback_with_a_staged_release_cancels_it_instead_of_going_back(installed: Machine) -> None:
+def test_a_rollback_with_a_staged_release_cancels_it_instead_of_going_back(
+    installed: Machine,
+) -> None:
     stage_release_two(installed)
 
     done = installed.host("rollback")
 
     assert done.returncode == 0, done.stderr
     assert "cancelled" in done.stdout
-    assert not (installed.state_dir / "pending").exists() and not (installed.opt / "releases/2").exists()
+    assert (
+        not (installed.state_dir / "pending").exists()
+        and not (installed.opt / "releases/2").exists()
+    )
     assert installed.release_of("current") == "1"
     assert "was rolled back" in installed.host("update").stdout
 
@@ -801,7 +930,9 @@ def test_a_rollback_without_an_earlier_release_says_so(installed: Machine) -> No
     assert done.returncode == 1 and "no earlier release" in done.stderr
 
 
-def test_a_rollback_now_restarts_the_service_and_one_without_it_does_not(installed: Machine) -> None:
+def test_a_rollback_now_restarts_the_service_and_one_without_it_does_not(
+    installed: Machine,
+) -> None:
     stage_release_two(installed)
     assert installed.host("switch").returncode == 0
     before = installed.calls("systemctl restart")
@@ -827,17 +958,24 @@ def test_status_names_the_current_the_previous_and_the_staged_release(installed:
     assert "vm: current 10, previous none, staged 11, rejected up to 0" in done.stdout
 
 
-# -- the command and a refreshed install ---------------------------------------------------------------------------
+# -- the command and a refreshed install --
 
 
-def test_the_command_hands_update_to_the_root_script_and_everything_else_to_the_service_user(installed: Machine) -> None:
+def test_the_command_hands_update_to_the_root_script_and_everything_else_to_the_service_user(
+    installed: Machine,
+) -> None:
     command = installed.root / "usr/local/bin/factory-runner"
     assert command.stat().st_mode & stat.S_IXUSR
 
     config = installed.run_script(command, "config", "show")
     assert config.returncode == 0, config.stderr
     assert "runuser -u factory-runner -- " in " ".join(installed.calls("runuser"))
-    assert (installed.state / "cli.log").read_text().splitlines()[-1].startswith("factory-runner config show")
+    assert (
+        (installed.state / "cli.log")
+        .read_text()
+        .splitlines()[-1]
+        .startswith("factory-runner config show")
+    )
 
     status = installed.run_script(command, "status")
     assert status.returncode == 0 and "program: current 1" in status.stdout
@@ -846,19 +984,34 @@ def test_the_command_hands_update_to_the_root_script_and_everything_else_to_the_
     assert someone.returncode == 1 and "run it with sudo" in someone.stderr
 
 
-def test_an_install_run_again_with_refresh_is_idempotent_and_never_restarts_a_running_service(installed: Machine) -> None:
+def test_an_install_run_again_with_refresh_is_idempotent_and_never_restarts_a_running_service(
+    installed: Machine,
+) -> None:
     calls_before = installed.calls()
-    registers = [line for line in (installed.state / "cli.log").read_text().splitlines() if " register " in line]
+    registers = [
+        line
+        for line in (installed.state / "cli.log").read_text().splitlines()
+        if " register " in line
+    ]
     publish(installed, program=2, vm=11)
 
-    done = installed.install("--refresh", "--labels", "linux,fast", token=False, env={"STUB_REFLINK": "1"})
+    done = installed.install(
+        "--refresh", "--labels", "linux,fast", token=False, env={"STUB_REFLINK": "1"}
+    )
 
     assert done.returncode == 0, done.stderr
     assert "this machine is registered already" in done.stdout
     assert "it is not restarted" in done.stdout
-    new_calls = installed.calls()[len(calls_before):]
-    assert "systemctl restart factory-runner" not in new_calls and "systemctl start factory-runner" not in new_calls
-    assert [line for line in (installed.state / "cli.log").read_text().splitlines() if " register " in line] == registers
+    new_calls = installed.calls()[len(calls_before) :]
+    assert (
+        "systemctl restart factory-runner" not in new_calls
+        and "systemctl start factory-runner" not in new_calls
+    )
+    assert [
+        line
+        for line in (installed.state / "cli.log").read_text().splitlines()
+        if " register " in line
+    ] == registers
     assert "config set --labels linux,fast" in (installed.state / "cli.log").read_text()
     # The running service keeps its release: the new one waits for its start.
     assert installed.release_of("current") == "1"
@@ -881,7 +1034,7 @@ def test_a_refresh_with_fewer_slots_removes_the_taps_above(installed: Machine) -
     assert installed.taps == ["fctap0"]
 
 
-# -- the interactive prompt (unchanged by this issue; kept proven) --------------------------------------------------
+# -- the interactive prompt (unchanged by this issue; kept proven) --
 
 
 def run_on_terminal(machine: Machine, *args: str, answers: dict[str, str]) -> tuple[int, str, bool]:
@@ -942,7 +1095,7 @@ def test_the_token_is_asked_for_on_the_terminal_without_echo(machine: Machine) -
     assert echo
 
 
-# -- what the repository holds -------------------------------------------------------------------------------------------
+# -- what the repository holds --
 
 
 def test_the_release_channels_have_the_shape_the_installer_reads_and_hold_no_secret() -> None:
@@ -950,14 +1103,25 @@ def test_the_release_channels_have_the_shape_the_installer_reads_and_hold_no_sec
     vm = json.loads((REPOSITORY_ROOT / "docker/vm/release-channel.json").read_text())
 
     assert sorted(program) == ["baseUrl", "manifestAsset", "publicKey", "signatureAsset", "version"]
-    assert sorted(vm) == ["baseUrl", "manifestAsset", "publicKey", "repository", "signatureAsset", "version"]
+    assert sorted(vm) == [
+        "baseUrl",
+        "manifestAsset",
+        "publicKey",
+        "repository",
+        "signatureAsset",
+        "version",
+    ]
     for channel in (program, vm):
         assert channel["baseUrl"] == "" or str(channel["baseUrl"]).startswith("https://")
-        assert (channel["baseUrl"] == "") == (channel["publicKey"] == "")  # nothing is published without a key
+        assert (channel["baseUrl"] == "") == (
+            channel["publicKey"] == ""
+        )  # nothing is published without a key
 
 
-def test_the_file_names_the_installer_expects_are_the_ones_the_release_makes_and_the_launcher_boots() -> None:
-    from code_reviewer_runner.factory_runner.firecracker.settings import (  # noqa: PLC0415
+def test_the_file_names_the_installer_expects_are_the_ones_of_the_release_and_the_launcher() -> (
+    None
+):
+    from code_reviewer_runner.factory_runner.firecracker.settings import (
         settings_from_environment,
     )
 
@@ -965,8 +1129,10 @@ def test_the_file_names_the_installer_expects_are_the_ones_the_release_makes_and
     assemble = (REPOSITORY_ROOT / "docker/vm/assemble.sh").read_text()
     for name in ("rootfs.ext4.zst", "dockerdata.ext4.zst"):
         assert name in script and name in assemble
-    settings = settings_from_environment({"FACTORY_RUNNER_VM_IMAGE_ID": "x", "FACTORY_RUNNER_VM_STATE_DIR": "/s"})
-    # The directory the launcher reads (<state>/artifacts) is the link the installer makes; the files in it are its names.
+    settings = settings_from_environment(
+        {"FACTORY_RUNNER_VM_IMAGE_ID": "x", "FACTORY_RUNNER_VM_STATE_DIR": "/s"}
+    )
+    # The launcher reads <state>/artifacts: the link the installer makes; the files are its names.
     assert (settings.kernel, settings.rootfs, settings.base_disk) == (
         Path("/s/artifacts/vmlinux"),
         Path("/s/artifacts/rootfs.ext4"),

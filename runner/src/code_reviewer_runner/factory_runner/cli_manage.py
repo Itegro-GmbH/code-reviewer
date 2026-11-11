@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """The commands of `factory-runner` that manage an installed runner (#855, R2): `config set`,
-`credential` and `update`. They run on the device, as the other commands do: a runner is
-configured, its credential renewed and its image updated there, never from the app (plan decisions
-8 and 9).
+and `credential`. They run on the device, as the other commands do: a runner is configured and
+its credential renewed there, never from the app (plan decision 8). `update`, `rollback`,
+`status` and `uninstall` are the root script's (`runner/install/install.sh`, #982), reached
+through the command the installer writes.
 """
 
 import argparse
@@ -37,18 +38,6 @@ from code_reviewer_runner.factory_runner.config import (
     redacted,
     update_credential,
 )
-from code_reviewer_runner.factory_runner.update import (
-    Fetch,
-    Outcome,
-    ReleaseChannel,
-    UpdateError,
-    fetch_https,
-    own_image,
-    rejected_release,
-    release_of,
-    rollback,
-    stage,
-)
 from code_reviewer_runner.implementer.claude_code.credentials import (
     DEFAULT_MODELS,
     STATE_LIMITED,
@@ -57,7 +46,6 @@ from code_reviewer_runner.implementer.claude_code.credentials import (
     CredentialError,
     store_for,
 )
-from code_reviewer_runner.implementer.docker_api import DockerApi
 
 PROGRAM = "factory-runner"
 # What a limit is set to in order to remove it.
@@ -72,7 +60,7 @@ SETTING_OPTIONS = (
     ("parallelRuns", "--parallel", "jobs at a time (this runner takes one)"),
     ("runtime", "--runtime", "auto, runc or sysbox-runc"),
     ("agentImage", "--agent-image", "the agent image to pull, or none for the built-in one"),
-    ("autoUpdate", "--auto-update", "on or off: update between jobs"),
+    ("autoUpdate", "--auto-update", "on or off: the scheduled look for a signed release"),
 )
 # What the environment of a VM can override, and so what `config set` may change without effect.
 OVERRIDING_VARIABLES = {
@@ -129,13 +117,6 @@ def add_parsers(commands: "argparse._SubParsersAction[Any]") -> None:  # pyright
         "models set aside) and use it again now; the models you gave are never changed",
     )
     retry.add_argument("name")
-
-    update = commands.add_parser("update", help="fetch and verify the newest runner image")
-    update.add_argument(
-        "--rollback",
-        action="store_true",
-        help="go back to the image before the last update; no update takes that release again",
-    )
 
 
 # -- config -------------------------------------------------------------------------------------
@@ -217,7 +198,7 @@ def credential_renew(
         err.write(f"{PROGRAM}: the app does not know this runner any more (revoked)\n")
         return EXIT_REVOKED
     except UpdateNeeded:
-        err.write(f"{PROGRAM}: the app requires a newer runner (factory-runner update)\n")
+        err.write(f"{PROGRAM}: the app requires a newer runner (sudo factory-runner update)\n")
         return EXIT_UPDATE_NEEDED
     except ApiError as error:
         err.write(f"{PROGRAM}: the app could not be reached ({error})\n")
@@ -233,68 +214,6 @@ def credential_renew(
         )
         return EXIT_FAILED
     out.write("credential renewed; the running service uses it from its next start\n")
-    return EXIT_OK
-
-
-# -- update -------------------------------------------------------------------------------------
-
-
-def update_image(
-    arguments: argparse.Namespace,
-    env: Mapping[str, str],
-    out: TextIO,
-    err: TextIO,
-    *,
-    docker: Callable[[], DockerApi],
-    hostname: Callable[[], str],
-    channel: Callable[[], ReleaseChannel | None],
-    fetch: Fetch = fetch_https,
-) -> int:
-    """Stage the newest verified image; the service switches to it after its running job. Nothing
-    is pulled by the service's hand and nothing is ended here."""
-    api = docker()
-    try:
-        home = home_directory(env)
-        if arguments.rollback:
-            left = rollback(api, home)
-            out.write("the earlier image is `current` again; restart the service to use it\n")
-            if left > 0:
-                out.write(
-                    f"release {left} is rejected: no update, by the service or by this command, "
-                    "takes it or an older one again; the next higher release is taken\n"
-                )
-            return EXIT_OK
-        release_channel = channel()
-        if release_channel is None:
-            err.write(
-                f"{PROGRAM}: no update: this image has no release channel yet "
-                "(runner/release-channel.json is empty until the owner fills it)\n"
-            )
-            return EXIT_FAILED
-        running = own_image(api, hostname())
-        staged = stage(
-            api,
-            release_channel,
-            running_release=release_of(running),
-            rejected=rejected_release(home),
-            fetch=fetch,
-        )
-    except UpdateError as error:
-        err.write(f"{PROGRAM}: no update: {error}\n")
-        return EXIT_FAILED
-    if staged.outcome is Outcome.UP_TO_DATE:
-        out.write(f"up to date (release {staged.release})\n")
-        return EXIT_OK
-    if staged.outcome is Outcome.REJECTED:
-        out.write(
-            f"release {staged.release} is announced, but a rollback rejected it: waiting for a "
-            "higher release\n"
-        )
-        return EXIT_OK
-    out.write(
-        f"release {staged.release} is verified and staged ({staged.digest}); the service "
-        "switches to it after the job it is running\n"
-    )
     return EXIT_OK
 
 

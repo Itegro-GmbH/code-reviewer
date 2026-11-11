@@ -110,13 +110,7 @@ from code_reviewer_runner.factory_runner.sandbox import (
     WorkerStart,
 )
 from code_reviewer_runner.factory_runner.selftest import summary
-from code_reviewer_runner.factory_runner.update import (
-    Fetch,
-    ReleaseChannel,
-    UpdatePolicy,
-    fetch_https,
-    load_channel,
-)
+from code_reviewer_runner.factory_runner.update import UpdatePolicy
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
 from code_reviewer_runner.implementer.claude_code.credentials import store_for
 from code_reviewer_runner.implementer.claude_code.login import load_legacy_login
@@ -184,9 +178,6 @@ class Seams:
     sandbox: Callable[[Mapping[str, str], float], WorkerSandbox] | None = None
     reap_check_seconds: float = REAP_CHECK_SECONDS
     reap_grace_seconds: float = REAP_GRACE_SECONDS
-    # The release channel of the image and how its documents are fetched (`update.py`).
-    channel: Callable[[], ReleaseChannel | None] = load_channel
-    fetch: Fetch = fetch_https
     # The credentials of this device and the choice among them (#980); the default reads the store
     # in the runner's home and, while it is empty, the older sources of R3.
     pool: Callable[[Mapping[str, str], Callable[[], float]], CredentialPool] | None = None
@@ -253,17 +244,7 @@ class RunnerService:
             work_dir=Path(environment_work_dir(prepared.environment)),
             runner_id=runner_identity(config),
         )
-        self._updates = UpdatePolicy(
-            seams.docker,
-            environment,
-            auto_update=config.auto_update,
-            hostname=seams.hostname,
-            now=seams.wall,
-            jitter=seams.jitter,
-            channel=seams.channel,
-            fetch=seams.fetch,
-            logger=self._logger,
-        )
+        self._updates = UpdatePolicy(environment, logger=self._logger)
 
     # -- the run ---------------------------------------------------------------------------------
 
@@ -321,8 +302,6 @@ class RunnerService:
             if not once:
                 await self._wait(NOT_READY_WAIT_SECONDS)
             return EXIT_NOT_READY
-        if host_docker:
-            await asyncio.to_thread(self._updates.tidy_references)
         try:
             await sandbox.setup()
         except SandboxInUse as error:
@@ -386,7 +365,7 @@ class RunnerService:
                 continue
             await self._renew_if_due()
             await self._sync_announcement()
-            # Between jobs, never during one: a staged image is switched to here (`update.py`).
+            # Between jobs, never during one: a staged release is switched to here (`update.py`).
             if not once and not jobs and await asyncio.to_thread(self._updates.switch_due):
                 return EXIT_UPDATED
             try:
@@ -403,8 +382,8 @@ class RunnerService:
                 )
                 if once:
                     return EXIT_UPDATE_NEEDED
-                # The minimum version is the app's: look for the release at once, whatever the
-                # setting for automatic updates says.
+                # The minimum version is the app's: a release that is staged is taken at once;
+                # with none staged it is said, and the updater (a root script) is what stages.
                 if await asyncio.to_thread(self._updates.switch_due, needed=True):
                     return EXIT_UPDATED
                 await self._wait(UPDATE_NEEDED_WAIT_SECONDS)
