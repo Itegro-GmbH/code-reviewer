@@ -19,6 +19,15 @@ given up on after the budget: `getaddrinfo` has no timeout of its own), each con
 left after the connection) and then each read of the answer. A call with no budget makes no
 lookup and no connection.
 
+**Through the outer wall's proxy** (#994, a model door in a VM on a customer's machine, `proxy`):
+the VM has no direct internet and no name server, so the door does not resolve the name or connect
+to an address itself. It asks the host's proxy for `CONNECT <name>:443` and speaks TLS to the name
+through the tunnel (certificate and name verified as ever); the proxy looks the name up, judges
+every address and connects to one it checked, which is this module's own check done by the same
+decision (`implementer/netdoor/proxy.py`). A proxy that refuses, or cannot be reached, is a call
+that never left (`address_refused` for a refusal, `unreachable` otherwise): nothing falls back to a
+direct connection.
+
 The seam (`Upstream`) is what the proxy sees; tests put a loopback double behind it. The
 resolver, the TCP connect, the TLS wrap and the clock are injectable for the same reason, and the
 defaults are the real ones.
@@ -39,6 +48,7 @@ from code_reviewer_runner.dynamic_review.passthrough.address import (
     check_base_url,
     is_public_address,
 )
+from code_reviewer_runner.outer_proxy import OuterProxy, TunnelRefused, open_tunnel
 
 
 class UpstreamFailure(StrEnum):
@@ -144,7 +154,9 @@ def _checked_addresses(host: str, resolve: Resolver, budget: float) -> list[str]
 
 
 class _PinnedConnection(http.client.HTTPSConnection):
-    """An HTTPS connection that connects to an address it judged itself, not to the name."""
+    """An HTTPS connection that connects to an address it judged itself, not to the name. Through
+    the outer wall's proxy (`proxy`) it connects to a tunnel the proxy made to the name, and judges
+    nothing itself: the proxy does."""
 
     def __init__(
         self,
@@ -154,9 +166,11 @@ class _PinnedConnection(http.client.HTTPSConnection):
         connect: Connector,
         tls: TlsWrapper,
         clock: Callable[[], float],
+        proxy: OuterProxy | None = None,
     ) -> None:
         super().__init__(host, 443, timeout=timeout)
         self._resolve, self._connect, self._tls, self._clock = resolve, connect, tls, clock
+        self._proxy = proxy
 
     def connect(self) -> None:
         budget = float(self.timeout or 0)
@@ -168,6 +182,9 @@ class _PinnedConnection(http.client.HTTPSConnection):
                 raise UpstreamError(UpstreamFailure.TIMEOUT)
             return remaining
 
+        if self._proxy is not None:
+            self._secure(self._tunnel(self._proxy, left()), left, budget)
+            return
         failure = UpstreamError(UpstreamFailure.UNREACHABLE)
         for address in _checked_addresses(self.host, self._resolve, left()):
             try:
@@ -177,22 +194,38 @@ class _PinnedConnection(http.client.HTTPSConnection):
                 continue
             except OSError:
                 continue
-            try:
-                # What is left of the budget bounds the handshake; then each read gets the budget.
-                raw.settimeout(left())
-                self.sock = self._tls(raw, self.host)
-                self.sock.settimeout(budget)
-            except UpstreamError:
-                raw.close()
-                raise
-            except TimeoutError:
-                raw.close()
-                raise UpstreamError(UpstreamFailure.TIMEOUT) from None
-            except OSError:
-                raw.close()
-                raise UpstreamError(UpstreamFailure.UNREACHABLE) from None
+            self._secure(raw, left, budget)
             return
         raise failure
+
+    def _tunnel(self, proxy: OuterProxy, seconds: float) -> Any:
+        """A tunnel to the name through the proxy. The name is the proxy's to look up and to judge;
+        a refusal is a call that never left."""
+        try:
+            return open_tunnel(proxy, self.host, 443, seconds, connect=self._connect)
+        except TunnelRefused as refused:
+            kind = UpstreamFailure.ADDRESS_REFUSED if refused.status == 403 else None
+            raise UpstreamError(kind or UpstreamFailure.UNREACHABLE) from None
+        except TimeoutError:
+            raise UpstreamError(UpstreamFailure.TIMEOUT) from None
+        except (OSError, ValueError):
+            raise UpstreamError(UpstreamFailure.UNREACHABLE) from None
+
+    def _secure(self, raw: Any, left: Callable[[], float], budget: float) -> None:
+        try:
+            # What is left of the budget bounds the handshake; then each read gets the budget.
+            raw.settimeout(left())
+            self.sock = self._tls(raw, self.host)
+            self.sock.settimeout(budget)
+        except UpstreamError:
+            raw.close()
+            raise
+        except TimeoutError:
+            raw.close()
+            raise UpstreamError(UpstreamFailure.TIMEOUT) from None
+        except OSError:
+            raw.close()
+            raise UpstreamError(UpstreamFailure.UNREACHABLE) from None
 
 
 class HttpUpstreamResponse:
@@ -244,11 +277,13 @@ class HttpsUpstream:
         connect: Connector = _tcp_connect,
         tls: TlsWrapper | None = None,
         clock: Callable[[], float] = time.monotonic,
+        proxy: OuterProxy | None = None,
     ) -> None:
         parts = urlsplit(check_base_url(base_url))
         self._host = parts.netloc
         self._base_path = parts.path
         self._resolve, self._connect, self._clock = resolve, connect, clock
+        self._proxy = proxy
         context = ssl.create_default_context()
         self._tls: TlsWrapper = tls or (
             lambda raw, hostname: context.wrap_socket(raw, server_hostname=hostname)
@@ -259,7 +294,7 @@ class HttpsUpstream:
             # No budget is no wait at all (a falsy timeout once fell back to 120 seconds).
             raise UpstreamError(UpstreamFailure.TIMEOUT)
         connection = _PinnedConnection(
-            self._host, timeout, self._resolve, self._connect, self._tls, self._clock
+            self._host, timeout, self._resolve, self._connect, self._tls, self._clock, self._proxy
         )
         try:
             # Connecting first, apart from sending, tells a call that never left from one that did.

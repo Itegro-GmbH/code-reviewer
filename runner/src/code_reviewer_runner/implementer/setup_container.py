@@ -34,6 +34,16 @@ which includes the inner containers of its own Docker (their traffic is routed t
 container's address). DNS goes to public resolvers named in the container's definition, because the
 VM's own resolver is on a private address. A Setup whose rules did not go in is never started.
 
+**On a customer's machine** (#994, a VM with no direct internet whose only way out is the host's
+outer-wall proxy, `outer_proxy.py`) the container gets the usual proxy variables (`HTTP_PROXY`,
+`HTTPS_PROXY` and their lower-case twins, `NO_PROXY` for loopback) from the host's address, so the
+script's package managers, `git`, `curl` and the Docker daemon inside it (which reads them for
+image pulls) go through the proxy, which does the name lookup and applies the wide rule of the
+setup. The VM's own table then lets the bridge reach that proxy's address and port and nothing
+else (`egress_rules`): no DNS, no other port, no other address. A tool that ignores the variables
+finds no way out, and says so; none falls back to a direct connection. This container's one
+variable that is not the image's own is those, and the seal check knows them.
+
 **The result.** The end of the script's output (stdout and stderr together, bounded to the last
 `OUTPUT_KEEP_BYTES`), its exit status, whether it ran out of time and the image id. A script that
 exits non-zero, runs past its time limit, or leaves a disk that cannot hold the commit, ends the
@@ -50,6 +60,7 @@ from dataclasses import dataclass
 from typing import Any, Final, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import OuterProxy
 
 from .agent_container import (
     AGENT_ENTRYPOINT,
@@ -148,6 +159,34 @@ EGRESS_RULES: Final = "; ".join(
         f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
     ]
 )
+
+
+def egress_rules(outer_proxy: OuterProxy | None = None) -> str:
+    """The VM's firewall for the Setup bridge. With the host's outer-wall proxy (#994) the bridge
+    may open a connection to that proxy's address and port (let through before the drop; the table's
+    only `accept`) and nothing else leaves it: every other packet from the bridge is dropped, the
+    private ranges and the internet alike, since the proxy is the one way to the internet and does
+    the lookup. Without a proxy it is `EGRESS_RULES`, as hosted."""
+    if outer_proxy is None:
+        return EGRESS_RULES
+    bridge = f'iifname "{SETUP_BRIDGE}"'
+    return "; ".join(
+        [
+            f"add table ip {EGRESS_TABLE}",
+            f"add chain ip {EGRESS_TABLE} input "
+            "{ type filter hook input priority -10 ; policy accept ; }",
+            f'add rule ip {EGRESS_TABLE} input iifname "{SETUP_BRIDGE}" drop',
+            f"add chain ip {EGRESS_TABLE} forward "
+            "{ type filter hook forward priority -10 ; policy accept ; }",
+            f"add rule ip {EGRESS_TABLE} forward {bridge} ip daddr {outer_proxy.host} "
+            f"tcp dport {outer_proxy.port} accept",
+            f"add rule ip {EGRESS_TABLE} forward {bridge} drop",
+            f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "docker0" drop',
+            f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
+        ]
+    )
+
+
 CHECK_RULES: Final = f"list table ip {EGRESS_TABLE}"
 RULES_SECONDS: Final = 20.0
 
@@ -234,16 +273,18 @@ def setup_document(
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
     nano_cpus: int = 0,
+    outer_proxy: OuterProxy | None = None,
 ) -> dict[str, Any]:
     """The Setup container: the agent's image, the agent's limits, the repository and nothing else.
     Constants, the image id, the volume name the daemon gave and the memory the Dispatcher computed.
-    No environment variable, no secret, no job."""
+    No secret, no job, and no environment variable of its own but the proxy's (#994, only on a
+    customer's machine: the host's address, never a job's)."""
     return {
         "Image": image,
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
-        "Env": [],
+        "Env": [] if outer_proxy is None else outer_proxy.tool_environment(),
         "Hostname": SETUP_HOSTNAME,
         "WorkingDir": AGENT_REPO,
         "Labels": role_labels("setup"),
@@ -341,6 +382,9 @@ class SetupSeams:
     docker_stop_seconds: float = DOCKER_STOP_SECONDS
     # False only in a test that has no host namespace to put rules in (never in production).
     install_rules: bool = True
+    # The host's outer-wall proxy (#994): the Setup's way to the internet on a customer's machine,
+    # handed to Control by the host. None: as hosted.
+    outer_proxy: OuterProxy | None = None
     # The file the VM's memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
 
@@ -498,6 +542,7 @@ class SetupContainer:
                 runtime=self._seams.runtime,
                 entrypoint=self._seams.entrypoint,
                 nano_cpus=self._seams.nano_cpus,
+                outer_proxy=self._seams.outer_proxy,
             ),
             SETUP_CONTAINER_NAME,
         )
@@ -524,7 +569,12 @@ class SetupContainer:
         try:
             close_bridge_ipv6(api, self._seams.helper_image, SETUP_NETWORK_NAME)
             run_helper(
-                api, worker_image, [NFT], [EGRESS_RULES], "setup-rules", seconds=RULES_SECONDS
+                api,
+                worker_image,
+                [NFT],
+                [egress_rules(self._seams.outer_proxy)],
+                "setup-rules",
+                seconds=RULES_SECONDS,
             )
             run_helper(
                 api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS
@@ -583,9 +633,13 @@ class SetupContainer:
             destinations.add(None if given is None else given.get("Destination"))
         if destinations - {AGENT_REPO}:
             problems.append("mounts")
-        # Not one variable besides the image's own.
+        # Not one variable besides the image's own (and the host's proxy on a customer's machine).
         image_config = as_object(self._api.inspect_image(image).get("Config")) or {}
-        if _variables(config.get("Env")) != _variables(image_config.get("Env")):
+        proxy = self._seams.outer_proxy
+        expected: set[str] = _variables(image_config.get("Env"))
+        if proxy is not None:
+            expected |= set(proxy.tool_environment())
+        if _variables(config.get("Env")) != expected:
             problems.append("environment")
         if problems:
             self._kill()

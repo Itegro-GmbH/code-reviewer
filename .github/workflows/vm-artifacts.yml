@@ -223,7 +223,7 @@ jobs:
             --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
             --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
             --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
-            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm --ignore=tests/kvm/test_outer_wall.py -v -s -p no:cacheprovider
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm --ignore=tests/kvm/test_outer_wall.py --ignore=tests/kvm/test_clients_through_proxy.py -v -s -p no:cacheprovider
       # T01 and T02 (#979): the outer wall. The static nft table (docker/vm/host/outer-wall.nft) is checked as a file (`nft -c`), then a real VM runs the
       # lane's probe in Control's own container (tests/kvm/wall_probe.py: a job clones over https before it narrows, and no lane has a git host) twice.
       # First a CONTROL: no table, NAT on, so every target of T01 must be REACHED from the VM and the host's listeners must see the connection arrive.
@@ -273,6 +273,41 @@ jobs:
           lane control control
           sudo nft -f docker/vm/host/outer-wall.nft
           lane wall "not control"
+      # T01 and T02 (#994): every client in the VM goes through the proxy. The table is loaded again (a no-op after the step above, and the one
+      # thing that stops a direct connection), the launcher runs with the proxy wall (the start carries the slot's `outerProxy`, vm-init writes it
+      # into Control's stdin), and a real VM runs tests/kvm/clients_probe.py in Control's own container: the product's own clients from the image
+      # (Control's calls to the app, git as the Implementer runs it, the model door's upstream, the network door chained to the proxy) before and
+      # after a real `narrow`. NAT and forwarding are on, as in the step above, so that the table is the only thing between the VM and the
+      # internet. The targets are public hosts (the runner has the internet; `--force-enable-socket` as above). The follow-up of #994 is a whole job
+      # in this lane (an https git host the Worker image trusts, an app on a public-looking name): see docs/runner.md.
+      - name: Clients lane (T01 and T02 of #994, every client through the proxy, the nft table loaded)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          sudo nft -f docker/vm/host/outer-wall.nft
+          sudo nft list table inet code_reviewer_wall > /dev/null
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo iptables -C FORWARD -i 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -C FORWARD -o 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
+          sudo nft -f - <<'NAT'
+          table ip lanenat
+          delete table ip lanenat
+          table ip lanenat {
+            chain post {
+              type nat hook postrouting priority 100; policy accept;
+              ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+            }
+          }
+          NAT
+          sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+            -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+            --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+            --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+            --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+            --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
+            --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
+            --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_clients_through_proxy.py --force-enable-socket -v -s -p no:cacheprovider
       # What the table did, for the log of a run (and of a failed one): the counters of each rule.
       - name: The outer wall's counters
         if: ${{ always() }}

@@ -2,8 +2,9 @@
 
 """The HTTP pieces the runner API client and the Worker API client share.
 
-One blocking request without proxy and without redirects (a redirect or a proxy would carry the
-token to wherever it points), the answer reduced to status, headers and a bounded body, and the
+One blocking request without redirects (a redirect would carry the token to wherever it points) and
+without a proxy, but for the one the host gave this VM (#994: the outer wall's proxy of a local
+machine, the VM's only way out), the answer reduced to status, headers and a bounded body, and the
 readers for the parts of an answer both clients look at. No error here carries a value of the
 request or the response: they hold secrets.
 """
@@ -13,6 +14,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -66,9 +68,29 @@ class Reply:
     body: bytes
 
 
-def build_opener() -> urllib.request.OpenerDirector:
-    # No proxy: the token must only go to the app, and the app is reached directly.
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
+class _OnlyThroughProxy(urllib.request.ProxyHandler):
+    """Every request goes through one proxy and none is exempt: urllib's own handler skips the proxy
+    for a host the environment's `no_proxy` names (and for `localhost`), which would be a direct
+    connection the host's outer wall never meant to allow. A name the proxy refuses fails the call;
+    nothing falls back to dialling the app. `https` is a `CONNECT` tunnel to the app (the proxy sees
+    the name and the port, never the token), `http` an absolute-form request."""
+
+    def __init__(self, proxy: str) -> None:
+        super().__init__({"http": proxy, "https": proxy})
+        self._hostport = urllib.parse.urlsplit(proxy).netloc
+
+    def proxy_open(self, req: urllib.request.Request, proxy: str, type: str) -> None:
+        req.set_proxy(self._hostport, "http")
+        # Let the other handlers take care of it (they speak to the proxy's address now).
+
+
+def build_opener(proxy: str | None = None) -> urllib.request.OpenerDirector:
+    """No proxy by default: the token must only go to the app, and the app is reached directly.
+    `proxy` (`http://host:port`) is the outer wall's proxy of a VM on a customer's machine, given by
+    the host and never by a job: every call goes through it and none around it."""
+    if proxy is None:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
+    return urllib.request.build_opener(_OnlyThroughProxy(proxy), NoRedirects)
 
 
 def retry_after(headers: Mapping[str, str]) -> float | None:

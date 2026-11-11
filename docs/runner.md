@@ -2041,7 +2041,9 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
    and the id from the verified manifest, `FACTORY_RUNNER_VM_IMAGE_ID`), Control's `docker run` and the work volume, and for a job that
    asks for it the one local credential (`localCredential`: **only `CLAUDE_CODE_OAUTH_TOKEN`**, the allow-list `LOCAL_CREDENTIAL_NAMES` that the Worker's own check in Control shares, #980: vm-init
    checks the shape of the object and not the name, so Control is the one that refuses a name it does not know before it puts the value into an environment; the host's per-VM `controlToken`
-   in the same document is for the environment control and is never given to the agent). The host waits for vm-init's `ack`
+   in the same document is for the environment control and is never given to the agent) and, with `FACTORY_RUNNER_OUTER_WALL=proxy`, the slot's proxy
+   (`outerProxy`: the host's address on the slot's TAP and the port 3128; the VM's clients dial through it,
+   [every client in the VM goes through the proxy](#every-client-in-the-vm-goes-through-the-proxy-994)). The host waits for vm-init's `ack`
    (up to 120 s: the daemon's start comes before it). A refused or unanswered start, a VMM that ends first or a report before the `ack`
    fails the start: the claim is given back (`launch_failed`) and nothing is left.
 
@@ -2293,7 +2295,8 @@ verified the table, never assumed.
   dials 80 and 443 for every name and the wall does not make an exception to the port rule for one name (a second decision the hosted rule
   code does not make), so the `narrow` of such a job is refused with the port in the log (`OuterRuleError`), not acknowledged with a rule
   the Worker cannot use. The port comes from the job's `appUrl` (the URL's own, else the scheme's); a customer whose app is not on a web
-  port needs a decision of its own (#994 wires the software in the VM to the proxy and meets the app's URL there).
+  port needs a decision of its own, not a silent widening of the port rule (#994 wired the software in the VM to the proxy: the app's
+  calls now go through it, so the app must be on a web port; the launcher says so in its log at the start of such a job).
 * **DNS is the proxy's.** A guest asks for `CONNECT name:443` (or an absolute-form HTTP request) and the proxy looks the name up; the guest has
   no name server it can reach (UDP is dropped). The decision is **the network door's own code** (`implementer/netdoor/proxy.py`), so the two
   walls cannot drift: an IP address is never a name (`ip_literal`, in every spelling a resolver reads), only ports 80 and 443, the rule must
@@ -2307,6 +2310,45 @@ verified the table, never assumed.
 
 The settings: `FACTORY_RUNNER_OUTER_WALL` is `refuse` (the default), `proxy` (set by the installer after it verified the table) or
 `inner-only` (see above); the port is not a setting (the table names it).
+
+### Every client in the VM goes through the proxy (#994)
+
+With the table loaded nothing leaves a VM but a connection to the proxy of its slot, so every client in the VM that dials the internet has
+to use it. The proxy's address is **the host's, never the job's**: the launcher puts it in the start (`outerProxy`, the host's address on
+the slot's TAP and the port 3128; only with `FACTORY_RUNNER_OUTER_WALL=proxy`), vm-init validates it (an IPv4 address of the slots'
+`172.31.0.0/16` in its canonical spelling, a port; a start with anything else is refused) and writes it into Control's stdin document, and
+Control hands it on. No job document, no container environment and no flag of a rendered `docker run` carries it (the local Control spec,
+its template and its golden file are the same with and without the wall; the hosted specs and goldens never mention a proxy, and a test
+holds that). Code: [`outer_proxy.py`](../runner/src/code_reviewer_runner/outer_proxy.py) (the address, the variable, the tunnel).
+
+```
+ start (launcher) ──outerProxy──▶ vm-init ──Control's stdin──▶ Control ──RUNNER_OUTER_PROXY (the job process only, set by Control)──▶ job process
+ Control's Worker API calls ───────────────────────────────────────────────┐                                                       │
+ git (clone, fetch, push; https only) ◀────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ model door (upstream CONNECT name:443, TLS through it) ◀──────────────────┼── its start document carries outerProxy ◀─────────────┤
+ agent ─▶ network door ─(CONNECT name:port)─▶ ... ─────────────────────────┼── its start document carries outerProxy ◀─────────────┤
+ Setup container (HTTP(S)_PROXY, its dockerd too) ◀────────────────────────┴── the container's own Env, its table lets only the proxy out
+                                              └──────────────────▶ the outer wall's proxy on the slot's address ──▶ the internet
+```
+
+| Client | How it uses the proxy | Fails closed because |
+|---|---|---|
+| Control's calls to the app (`HttpWorkerApi`) | the opener's one handler is the proxy (`job_loop/http.py`): `http` as an absolute-form request, `https` as `CONNECT`, **no bypass** (urllib's own handler skips a host the environment's `no_proxy` names, this one never does) | a refusal is a status the Worker API reads as a refusal, an `https` refusal and a proxy that is not there are `ApiUnavailable`; nothing dials the app |
+| `git` (the mirror's clone and fetch, the final push) | `http.proxy` in the one process's `GIT_CONFIG_*` (`git_process.token_environment`), beside the token header; `GIT_ALLOW_PROTOCOL` stays `https`; the closed environment has no `no_proxy` and no other proxy variable | git does not retry a refused tunnel directly; the proxy sees `CONNECT host:443` and never the token |
+| the model door's upstream (`HttpsUpstream`) | `CONNECT <name>:443` to the proxy, then TLS to the name through the tunnel (certificate and name verified as before); the door does no lookup and connects to no address of its own (the proxy decides every address with the same code) | a refusal is `address_refused` (403) or `unreachable`, a call that never left and sent no key; the door's **firewall** (`door_launcher.egress_rules`) lets it dial the proxy's address and port and nothing else (no DNS, no port 443, the model network shut) |
+| the network door (agent → door → proxy) | after the door's rule and port decision it asks the proxy for `CONNECT <name>:<port>` and relays (plain `http://` too: a tunnel to port 80 and the request in origin form); an IP literal, a port other than 80 and 443 and a name outside the rule are refused by the door before the proxy is asked | a refusal or a missing proxy is the `502 upstream_failed` the agent gets for a host that does not answer; the door's firewall (`netdoor_launcher.egress_rules`) allows the proxy and drops the rest, the test network's seam included |
+| the Setup container (wide phase) | `HTTP_PROXY`, `HTTPS_PROXY` (and lower case) and a loopback `NO_PROXY` in its definition, so the script's package managers, `git`, `curl` and its Docker daemon (which reads them for pulls) go through the proxy, which applies the wide rule; the seal check allows exactly those variables | the VM's table for the Setup bridge (`setup_container.egress_rules`) lets it reach the proxy's address and port and **drops everything else** (no DNS, no other address, no other port): a tool that ignores the variables finds no way out |
+
+The **inner wall is unchanged**: the agent still reaches only its doors, and the doors are the only things that dial for it. The network
+door's decision (rule, port, IP literal) is the same code in both walls, so the outer wall repeats it with the proxy's own lookup and
+public-address check; a name that the door's rule lists and the job's outer rule does not is refused at the proxy and reaches the agent as a
+`502`. Hosted is unchanged: no proxy is set, every client dials as before, and each of the code paths above keeps its hosted behaviour when
+`outerProxy` is absent (tests hold the hosted rules, documents and goldens byte for byte).
+
+**What a job on a local machine needs to know.** The app must be on port 80 or 443 and a name (see the rule bullet above): the Worker's first
+call goes through the proxy under the wide rule, and the proxy dials 80 and 443 only. A setup script's tool that does not read the proxy
+variables (a raw socket, a tool that sets its own) cannot reach the internet; that is the wall working. A model provider or app host that
+the proxy cannot resolve (it is the proxy's lookup, IPv4 only) fails the same way a host that does not answer does.
 
 ### What the lane proves (and what it cannot)
 
@@ -2323,6 +2365,19 @@ The settings: `FACTORY_RUNNER_OUTER_WALL` is `refuse` (the default), `proxy` (se
   without the token from the same container is refused, GitHub stays reachable, and the metadata address is refused even as a name the proxy
   was asked for.
 
+* **The clients (#994, `tests/kvm/test_clients_through_proxy.py`, the `Clients lane` step, the table loaded).** A real VM runs
+  `tests/kvm/clients_probe.py` in Control's own container with the proxy wall (`FACTORY_RUNNER_OUTER_WALL=proxy`): the start carries the
+  slot's `outerProxy`, vm-init writes it into Control's stdin, and the probe **reads it from there** and uses the product's own clients from
+  the Worker image: the Worker API's opener (a call to `http://example.com` and `https://example.com`, certificate verified through the
+  tunnel), `git ls-remote https://github.com/octocat/Hello-World.git` as the workspace runs git, the model door's `HttpsUpstream` to
+  `api.anthropic.com`, and a network door (the real `ProxyServer` with a chained `Decider`) in front of the same proxy. It runs them before
+  and after a real `narrow` (the Worker's own client, over vsock, with the VM's token): before, the wide rule lets them all through and
+  `example.org` too; after, the app, GitHub and the provider still go through, `example.org` is refused (at the proxy for the opener,
+  through the chained door as a `502`), a direct connection to `1.1.1.1:443` is unreachable both times, and a client whose proxy is not
+  there fails. The host's own record of the proxy (`log_of`: name, port, allowed or refused, reason) is checked too. The probe runs here
+  first against loopback stand-ins and the real proxy wall (`tests/unit/test_firecracker_clients_probe.py`: everything but TLS to a real
+  host and git against GitHub).
+
 **What the lane chose, and why.** A job clones its repository over https before it narrows the network and a lane has no https git host, so
 no job of the lane gets as far as `narrow`. Instead of a fake git endpoint, the lane runs **a probe in Control's own container** (the same
 `docker run` flags, the token on stdin, the seccomp profile that allows AF_VSOCK; the Worker image's interpreter as entry point), because the
@@ -2336,14 +2391,15 @@ runs in the unit suite too, against loopback stand-ins and the real proxy, sessi
 unreachable with or without the table. The table's IPv6 rules are checked as a file (`nft -c`, a unit test of its rules) and not
 exercised by a packet; the lane says no more than that.
 
+**What the clients lane does not do.** It does not run a whole job: the outer wall's `narrow` is still the probe's, the clone is a
+`git ls-remote` of a public repository and not the Worker's clone of a customer's repository, and the Setup container and the agent are not
+started in Sysbox with the table loaded (their rules are held by unit tests against the fake daemon). A whole job needs an https git
+endpoint the Worker image trusts (a test CA in the lane's copy of the image or a public repository the lane may clone with a token it
+cannot have) and an app on a public name the proxy may dial; that is the follow-up #999.
+
 ### Not done here, follow-ups
 
-* **The software in the VM reaches the internet directly today.** The inner wall and the Worker are unchanged (the issue's scope): the
-  network door, the model door, Control's calls to the app, the Worker's `git` and the setup container dial their targets themselves and do
-  not use an HTTP proxy. With the table loaded **nothing of that gets out of a VM**: before a local VM can run a real job through the
-  `proxy` wall, those clients need to go through `http://<host address of the TAP>:3128` (an upstream proxy for the doors, `HTTPS_PROXY` for
-  Control, git and the setup container; the name resolution moves to the proxy). Until then `FACTORY_RUNNER_OUTER_WALL=inner-only` (and no
-  table) is how a local VM job runs. It is the first thing to do before #982 turns the launcher on.
+* **The software in the VM goes through the proxy** (#994, above). A whole job with the table loaded in the lane is #999.
 * The installer loads the table and makes the TAPs with their addresses (#982); the service cannot read nft state as a normal user, so it
   cannot check that the table is loaded (a machine without it has no outer wall: the install must fail without it). That is why
   `refuse` is the default: **the installer sets `FACTORY_RUNNER_OUTER_WALL=proxy` only after `nft list table inet code_reviewer_wall`

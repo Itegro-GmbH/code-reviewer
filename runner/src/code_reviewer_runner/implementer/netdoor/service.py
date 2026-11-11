@@ -20,6 +20,7 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
     NETWORK_DOOR_ADDRESS,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import OuterProxy, OuterProxyError
 
 from ..network_rule import MODE_OFF, NetworkRule, RuleError, parse_door_rule
 from .addresses import Resolver, ci_public_network, system_resolver
@@ -38,7 +39,7 @@ from .protocol import (
     REFUSED_START_INVALID,
     VERSION,
 )
-from .proxy import Connector, Decider, ProxyServer, tcp_connector
+from .proxy import Connector, Decider, ProxyServer, chained_connector, tcp_connector
 from .registries import rule_has_registries
 
 _log = logging.getLogger(__name__)
@@ -62,10 +63,19 @@ class StartRefused(Exception):
 
 
 class NetStart:
-    def __init__(self, rule: NetworkRule, port: int, deadline_seconds: float) -> None:
+    def __init__(
+        self,
+        rule: NetworkRule,
+        port: int,
+        deadline_seconds: float,
+        outer_proxy: OuterProxy | None = None,
+    ) -> None:
         self.rule = rule
         self.port = port
         self.deadline_seconds = deadline_seconds
+        # The host's outer-wall proxy (#994): the door's only way out on a customer's machine, and
+        # the door is chained to it (agent, network door, outer-wall proxy). None: as hosted.
+        self.outer_proxy = outer_proxy
 
 
 def parse_start(text: str) -> NetStart:
@@ -76,12 +86,17 @@ def parse_start(text: str) -> NetStart:
     except (ValueError, RecursionError):
         raise StartRefused(REFUSED_START_INVALID) from None
     given = as_object(document)
-    if (
-        given is None
-        or given.keys() != {"version", "rule", "listenPort", "deadlineSeconds"}
-        or given["version"] != VERSION
-    ):
+    keys = {"version", "rule", "listenPort", "deadlineSeconds"}
+    if given is None or not keys <= given.keys() <= keys | {"outerProxy"}:
         raise StartRefused(REFUSED_START_INVALID)
+    if given["version"] != VERSION:
+        raise StartRefused(REFUSED_START_INVALID)
+    outer_proxy: OuterProxy | None = None
+    if "outerProxy" in given:
+        try:
+            outer_proxy = OuterProxy.from_json(given["outerProxy"])
+        except OuterProxyError:
+            raise StartRefused(REFUSED_START_INVALID) from None
     port: Any = given["listenPort"]
     deadline: Any = given["deadlineSeconds"]
     if (
@@ -100,7 +115,7 @@ def parse_start(text: str) -> NetStart:
     if rule.mode == MODE_OFF:
         # `off` has no door: Control does not start one, and one that was asked for is a mistake.
         raise StartRefused(REFUSED_RULE_INVALID)
-    return NetStart(rule, port, float(deadline))
+    return NetStart(rule, port, float(deadline), outer_proxy)
 
 
 def _emit(stdout: TextIO, document: dict[str, Any]) -> None:
@@ -184,7 +199,7 @@ def run_netdoor(
     *,
     bind: tuple[str, int] | None = None,
     resolver: Resolver = system_resolver,
-    connector: Connector = tcp_connector,
+    connector: Connector | None = None,
     upstream_tls: UpstreamTls = system_upstream_tls,
     clock: Callable[[], float] = time.monotonic,
     poll_seconds: float = POLL_SECONDS,
@@ -195,7 +210,18 @@ def run_netdoor(
     log = ConnectionLog()
     try:
         start = parse_start(stdin.readline(MAX_START_BYTES + 1))
-        decider = Decider(start.rule, log, resolver=resolver, test_network=ci_public_network())
+        proxy = start.outer_proxy
+        decider = Decider(
+            start.rule,
+            log,
+            resolver=resolver,
+            test_network=ci_public_network(),
+            chained=proxy is not None,
+        )
+        # Chained to the host's proxy when the start names one: no lookup and no connection of the
+        # door's own. A test brings a connector of its own.
+        if connector is None:
+            connector = tcp_connector if proxy is None else chained_connector(proxy)
         gate = make_gate(start, log, upstream_tls)
         try:
             server = ProxyServer(

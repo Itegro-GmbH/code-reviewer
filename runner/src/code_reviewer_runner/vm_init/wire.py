@@ -9,6 +9,7 @@ one of `implementer/environment_control.py` (four bytes of length, one JSON obje
 again here, a few lines, instead of importing the Worker's module and everything that module needs.
 """
 
+import ipaddress
 import json
 import re
 import struct
@@ -149,6 +150,16 @@ class LocalCredential:
 
 
 @dataclass(frozen=True)
+class OuterProxy:
+    """The proxy of the host's outer wall for this VM's slot (#994): the host's address on the
+    slot's TAP and the proxy's port. Everything in the VM that dials the internet goes through it;
+    it is the host's to name and never a job's."""
+
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
 class ImageCheck:
     reference: str
     image_id: str
@@ -165,12 +176,15 @@ class StartRequest:
     # The host's per-VM token: in every message the VM's processes send to the host, so that the
     # host can tell them from a forged one (`contracts/vm-init.v1.json`, "THE TOKEN").
     control_token: str = field(repr=False)
+    # The outer wall's proxy of this slot (#994), set when the host runs the proxy wall: None means
+    # the VM dials as it did before (the inner wall only, or hosted).
+    outer_proxy: OuterProxy | None = None
 
     def stdin_document(self) -> bytes:
         """The bytes written to Control's stdin: the job document as one JSON line, plus the token
-        of the environment control under `controlToken` and the local credential under
-        `localCredential` when there is one. Other keys are ignored by a Worker that does not know
-        them."""
+        of the environment control under `controlToken`, the local credential under
+        `localCredential` when there is one and the outer wall's proxy under `outerProxy` when the
+        host has one. Other keys are ignored by a Worker that does not know them."""
         document: dict[str, Any] = {
             "appUrl": self.job.app_url,
             "jobId": self.job.job_id,
@@ -182,6 +196,8 @@ class StartRequest:
                 "name": self.local_credential.name,
                 "value": self.local_credential.value,
             }
+        if self.outer_proxy is not None:
+            document["outerProxy"] = {"host": self.outer_proxy.host, "port": self.outer_proxy.port}
         return (
             json.dumps(document, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
         )
@@ -215,13 +231,37 @@ def _text(value: object, pattern: re.Pattern[str], what: str, *, longest: int) -
     return value
 
 
+# The network the slots of a local machine live in (`firecracker/slots.py`, `outer-wall.nft`): the
+# proxy is on one address of it.
+_SLOT_NETWORK = ipaddress.IPv4Network("172.31.0.0/16")
+
+
+def _outer_proxy(value: object) -> OuterProxy:
+    """`outerProxy` of the contract: an IPv4 address of the slots' network, written the way
+    `ipaddress` prints it, and a port. Anything else is refused: the proxy is the one way out of the
+    VM, so an address outside the slots' network is a start that is wrong."""
+    given = _record(value, {"host", "port"}, set(), "outerProxy")
+    host, port = given["host"], given["port"]
+    if not isinstance(host, str):
+        raise _invalid("outerProxy.host")
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ValueError:
+        raise _invalid("outerProxy.host") from None
+    if str(address) != host or address not in _SLOT_NETWORK:
+        raise _invalid("outerProxy.host")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise _invalid("outerProxy.port")
+    return OuterProxy(host=host, port=port)
+
+
 def parse_start(document: object) -> StartRequest:
     """The `StartRequest` of the contract, or `InvalidStart` naming the field that is wrong. Refuses
     a start that would put a credential in an argument of `docker run`."""
     top = _record(
         document,
         {"version", "type", "job", "controlToken", "image", "control", "workVolume"},
-        {"localCredential"},
+        {"localCredential", "outerProxy"},
         "the document",
     )
     version = top["version"]
@@ -248,6 +288,7 @@ def parse_start(document: object) -> StartRequest:
         )
 
     token = _text(top["controlToken"], _CONTROL_TOKEN, "controlToken", longest=128)
+    proxy = _outer_proxy(top["outerProxy"]) if "outerProxy" in top else None
 
     image = _record(top["image"], {"reference", "id"}, set(), "image")
     check = ImageCheck(
@@ -287,6 +328,7 @@ def parse_start(document: object) -> StartRequest:
         volume_name=volume_name,
         reserve_gib=reserve,
         control_token=token,
+        outer_proxy=proxy,
     )
     for secret in request.secrets():
         if any(secret in argument for argument in request.args):

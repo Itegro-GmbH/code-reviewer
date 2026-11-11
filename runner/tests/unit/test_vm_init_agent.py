@@ -25,6 +25,7 @@ from vm_init_support import (
     CREDENTIAL,
     IMAGE_ID,
     LOCAL_CREDENTIAL,
+    OUTER_PROXY,
     FakeControl,
     FakePower,
     FakeRunner,
@@ -572,6 +573,44 @@ def test_the_local_credential_reaches_controls_stdin_and_nowhere_else(
     assert CREDENTIAL not in json.dumps(report) and LOCAL_CREDENTIAL not in json.dumps(report)
     # No file was written anywhere the guest works.
     assert [p for p in tmp_path.rglob("*")] == []
+
+
+# #994-T01
+def test_the_proxy_of_the_start_reaches_controls_stdin_and_no_command_or_argument() -> None:
+    guest = Guest()
+    guest.start(start_document(outerProxy=OUTER_PROXY))
+
+    guest.run()
+
+    ((args, stdin),) = guest.control.calls
+    assert json.loads(stdin)["outerProxy"] == OUTER_PROXY
+    assert not [
+        text
+        for text in [*[" ".join(c) for c in guest.runner.commands], " ".join(args)]
+        if "172.31." in text
+    ]
+
+
+# #994-T03
+def test_a_start_without_a_proxy_gives_control_no_proxy() -> None:
+    guest = Guest()
+    guest.start()
+
+    guest.run()
+
+    ((_, stdin),) = guest.control.calls
+    assert "outerProxy" not in json.loads(stdin)
+
+
+# #994-T04
+def test_a_proxy_outside_the_slots_network_refuses_the_start_and_runs_nothing() -> None:
+    guest = Guest()
+    guest.start(start_document(outerProxy={"host": "10.0.0.1", "port": 3128}))
+
+    guest.run()
+
+    assert guest.report()["reason"] == "start_invalid"
+    assert guest.control.calls == []
 
 
 # #977-T04

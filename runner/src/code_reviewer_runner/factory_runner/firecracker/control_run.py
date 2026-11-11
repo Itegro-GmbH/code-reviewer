@@ -112,8 +112,11 @@ def build_start(
     vcpus: int,
     reserve_gib: int,
     local: LocalCredential | None = None,
+    outer_proxy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The `StartRequest` of vm-init for a job."""
+    """The `StartRequest` of vm-init for a job. `outer_proxy` is the `outerProxy` of the contract
+    (#994): the slot's proxy, given by the host when it runs the proxy wall and never by the job; it
+    is data of the start, like the token, and not part of the rendered arguments."""
     arguments = template.fill(
         job_id=job_id, image=image_id, timeout_seconds=timeout_seconds, vcpus=vcpus
     )
@@ -132,4 +135,6 @@ def build_start(
     }
     if extra is not None:
         start["localCredential"] = extra
+    if outer_proxy is not None:
+        start["outerProxy"] = dict(outer_proxy)
     return start

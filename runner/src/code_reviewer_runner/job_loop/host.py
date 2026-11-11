@@ -109,6 +109,7 @@ from code_reviewer_runner.job_loop.resume_download import (
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
+from code_reviewer_runner.outer_proxy import OUTER_PROXY_VARIABLE, OuterProxy
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 from code_reviewer_runner.result import DISK_BUDGET_REASON, ErrorCode
 from code_reviewer_runner.resume_wire import (
@@ -363,6 +364,7 @@ class JobHost:
         refuse_unadvertised_engine: bool = False,
         guard: Callable[[], Awaitable[str]] | None = None,
         control_token: str | None = None,
+        outer_proxy: OuterProxy | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
@@ -390,6 +392,10 @@ class JobHost:
         # The host's per-VM token for the environment control (#977): only an Implementer's job
         # process gets it, on its stdin like the job's other secrets, never in its environment.
         self._control_token = control_token
+        # The outer wall's proxy of this VM (#994): the host's, from vm-init's start. An Implementer
+        # job process gets it in its environment (never in its stdin: the job document comes from
+        # the app) so that its clients dial through it.
+        self._outer_proxy = outer_proxy
 
     def request_hard_stop(self) -> None:
         """End the running process now and report `runner_shutdown` (the grace period is over)."""
@@ -451,6 +457,10 @@ class JobHost:
             env[OPENCODE_COMMAND_VARIABLE] = shlex.join(self._settings.dynamic_command)
             if self._settings.dynamic_ripgrep:
                 env[RIPGREP_PATH_VARIABLE] = self._settings.dynamic_ripgrep
+        # Only what the host handed this Worker, whatever the container's own environment says.
+        env.pop(OUTER_PROXY_VARIABLE, None)
+        if self._outer_proxy is not None:
+            env[OUTER_PROXY_VARIABLE] = self._outer_proxy.address
         return env
 
     def _dynamic_environment(self) -> dict[str, str]:
