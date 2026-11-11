@@ -53,7 +53,6 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
     native_model_reference,
     native_provider_config,
 )
-from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDRESS
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.job import (
@@ -116,6 +115,7 @@ from .network_report import (
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, urllib_post
+from .placement import placement_of
 from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
@@ -898,7 +898,9 @@ class ImplementerSession:
                 model_access=access,
                 capability=capability,
                 deadline_seconds=self._deadline_seconds(),
-                port=slot_ports(self.environment).proxy,
+                port=placement_of(self.environment).model_door_port(
+                    slot_ports(self.environment).proxy
+                ),
                 environment={
                     name: value
                     for name, value in self.environment.items()
@@ -921,7 +923,7 @@ class ImplementerSession:
             entry,
             base_url=spec_of(family).proxy_base_url(proxy_url),
             api_key=model.capability,
-            door_host=MODEL_DOOR_ADDRESS,
+            door_host=placement_of(self.environment).model_door_address,
         )
 
         def make_config(instructions_path: str) -> dict[str, Any]:
@@ -932,7 +934,7 @@ class ImplementerSession:
                 proxy_url=proxy_url,
                 capability=model.capability,
                 instructions_path=instructions_path,
-                door_host=MODEL_DOOR_ADDRESS,
+                door_host=placement_of(self.environment).model_door_address,
                 finish_command=None if self._schema is None else finish_server_command(),
             )
 

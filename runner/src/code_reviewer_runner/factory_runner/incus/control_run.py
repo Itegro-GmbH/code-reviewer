@@ -13,6 +13,14 @@ fails when the renderer's output no longer has the shape this expects):
 * the socket the launcher's `proxy` device makes in A (`/ctl.sock`) is bind-mounted at the same
 path.
 
+and, since #1017, **three more** that tell Control that the setup and the agent live in **B's**
+Docker (`implementer/placement.py`): the socket the launcher makes in A from B's own
+(`/b-docker.sock`, one more `proxy` device, A dials B and B has no connection to A) is bind-mounted
+at the same path, and `RUNNER_ENVIRONMENT_DOCKER=split`, `RUNNER_ENVIRONMENT_DOCKER_SOCKET`
+and `RUNNER_ENVIRONMENT_DOOR_ADDRESS` (A's address on the inner bridge: where the doors listen and B
+reaches them) are set. The Docker socket of A that the renderer mounts stays: the doors and
+Control's own image are A's.
+
 The stdin document is the one vm-init wrote (`StartRequest.stdin_document`): the job, the host's
 token, the one local credential if the job needs it, the outer proxy. It is made by the parser of
 vm-init itself, so a start the guest would have refused is refused here, before an instance exists,
@@ -34,6 +42,13 @@ from code_reviewer_runner.implementer.environment_control import (
     TRANSPORT_VSOCK,
     UNIX_SOCKET_PATH,
 )
+from code_reviewer_runner.implementer.placement import (
+    B_DOCKER_SOCKET,
+    DOOR_ADDRESS_VARIABLE,
+    PLACEMENT_VARIABLE,
+    SOCKET_VARIABLE,
+    SPLIT,
+)
 from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.vm_init.wire import InvalidStart, parse_start
 
@@ -53,17 +68,29 @@ class ControlLaunch:
     image_reference: str
 
 
-def unix_arguments(arguments: Sequence[str]) -> list[str]:
-    """The Firecracker backend's arguments for the unix transport. Raises `ControlRunError` when
-    they do not have the shape the three changes expect."""
+def unix_arguments(arguments: Sequence[str], *, door_address: str) -> list[str]:
+    """The Firecracker backend's arguments for the unix transport and the split Docker of the
+    Incus backend. `door_address` is A's address on the inner bridge. Raises `ControlRunError` when
+    they do not have the shape the changes expect."""
     changed: list[str] = []
     seccomp = False
     vsock = False
     mounted = False
+    placed = False
     items = list(arguments)
     index = 0
     while index < len(items):
         argument = items[index]
+        if argument == "--env" and not placed:
+            changed += [
+                "--env",
+                f"{PLACEMENT_VARIABLE}={SPLIT}",
+                "--env",
+                f"{SOCKET_VARIABLE}={B_DOCKER_SOCKET}",
+                "--env",
+                f"{DOOR_ADDRESS_VARIABLE}={door_address}",
+            ]
+            placed = True
         if (
             argument == "--security-opt"
             and index + 1 < len(items)
@@ -86,10 +113,12 @@ def unix_arguments(arguments: Sequence[str]) -> list[str]:
             changed += [
                 "--mount",
                 f"type=bind,source={UNIX_SOCKET_PATH},target={UNIX_SOCKET_PATH}",
+                "--mount",
+                f"type=bind,source={B_DOCKER_SOCKET},target={B_DOCKER_SOCKET}",
             ]
             mounted = True
         index += 1
-    if not (seccomp and vsock and mounted):
+    if not (seccomp and vsock and mounted and placed):
         raise ControlRunError("the rendered Control arguments do not have the expected shape")
     return changed
 
@@ -105,6 +134,7 @@ def build_control(
     timeout_seconds: int,
     vcpus: int,
     reserve_gib: int,
+    door_address: str,
     local: LocalCredential | None = None,
     outer_proxy: Mapping[str, Any] | None = None,
 ) -> ControlLaunch:
@@ -127,7 +157,7 @@ def build_control(
     except InvalidStart as error:
         raise ControlRunError(str(error)) from None
     return ControlLaunch(
-        arguments=tuple(unix_arguments(request.args)),
+        arguments=tuple(unix_arguments(request.args, door_address=door_address)),
         stdin=request.stdin_document(),
         volume_name=request.volume_name,
         image_reference=request.image.reference,

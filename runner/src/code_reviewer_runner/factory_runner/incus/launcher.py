@@ -73,6 +73,7 @@ from code_reviewer_runner.factory_runner.firecracker.session import VmSession
 from code_reviewer_runner.factory_runner.firecracker.tokens import generate_control_token
 from code_reviewer_runner.factory_runner.sandbox import SandboxInUse, WorkerOutcome, WorkerStart
 from code_reviewer_runner.implementer.environment_control import UNIX_SOCKET_PATH
+from code_reviewer_runner.implementer.placement import B_DOCKER_SOCKET
 
 from .client import ExecProcess, ExecResult, IncusClient, IncusError, InstanceSpec, run_exec
 from .control_run import ControlLaunch, build_control
@@ -114,6 +115,14 @@ QUOTA_TEXT: Final = "disk quota exceeded"
 DEVICE_B_OUTER: Final = OUTER_NIC_B
 # The name of the proxy device that makes the control socket in A.
 DEVICE_CONTROL: Final = "ctl"
+# B's Docker for Control (#1017): two `proxy` devices chain B's own socket to a socket in A. The one
+# in B listens on the host (`bind=host`: a file in the job's directory that nothing but `incusd`
+# reaches) and connects to B's `docker.sock`; the one in A listens at `/b-docker.sock` and connects
+# to that file. A dials B; B has no connection of any kind to A through it.
+DEVICE_B_DOCKER_A: Final = "bdocker"
+DEVICE_B_DOCKER_B: Final = "bdocker"
+B_DOCKER_SOCKET_IN_B: Final = "/var/run/docker.sock"
+B_DOCKER_FILE: Final = "bdocker.sock"
 # How often the readiness probes are tried.
 PROBE_SECONDS: Final = 0.25
 PROBE_CALL_SECONDS: Final = 15.0
@@ -162,6 +171,11 @@ class _Job:
     @property
     def socket(self) -> Path:
         return self.directory / "ctl.sock"
+
+    @property
+    def b_docker_socket(self) -> Path:
+        """The file `incusd` makes for B's proxy device; A's device connects to it."""
+        return self.directory / B_DOCKER_FILE
 
 
 class IncusSandbox:
@@ -297,6 +311,7 @@ class IncusSandbox:
                 timeout_seconds=settings.job_timeout_seconds,
                 vcpus=settings.vcpus,
                 reserve_gib=settings.reserve_gib,
+                door_address=INNER_A_ADDRESS,
                 local=start.local_credential,
                 outer_proxy=(
                     {"host": slot.host_address, "port": PROXY_PORT}
@@ -410,7 +425,29 @@ class IncusSandbox:
         )
         await client.add_device(spec_a.name, DEVICE_INNER, inner_nic(inner, INNER_NIC_A))
         await client.add_device(spec_a.name, DEVICE_CONTROL, control)
+        await client.add_device(
+            spec_a.name,
+            DEVICE_B_DOCKER_A,
+            {
+                "type": "proxy",
+                "listen": f"unix:{B_DOCKER_SOCKET}",
+                "connect": f"unix:{job.b_docker_socket}",
+                "bind": "instance",
+                "mode": "0600",
+            },
+        )
         await client.add_device(spec_b.name, INNER_NIC_B, inner_nic(inner, INNER_NIC_B))
+        await client.add_device(
+            spec_b.name,
+            DEVICE_B_DOCKER_B,
+            {
+                "type": "proxy",
+                "listen": f"unix:{job.b_docker_socket}",
+                "connect": f"unix:{B_DOCKER_SOCKET_IN_B}",
+                "bind": "host",
+                "mode": "0600",
+            },
+        )
         await client.add_device(
             spec_b.name, DEVICE_B_OUTER, outer_nic(outer, slot.b_address, OUTER_NIC_B)
         )
@@ -438,6 +475,19 @@ class IncusSandbox:
             self._ready(job.instance_b, (INNER_B_ADDRESS, slot.b_address), "B"),
         )
         await self._read_back_the_inner_wall(job)
+        # Control drives B's Docker through the socket in A: it answers before Control starts.
+        await self._until_ok(
+            job.instance_a,
+            (
+                "docker",
+                "-H",
+                f"unix://{B_DOCKER_SOCKET}",
+                "version",
+                "--format",
+                "{{.Server.Version}}",
+            ),
+            "B's Docker does not answer in A",
+        )
 
     async def _read_back_the_inner_wall(self, job: _Job) -> None:
         """`nft -f` ending well is not the wall: read the table back from A, now that both

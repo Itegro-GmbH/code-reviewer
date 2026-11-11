@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
+from urllib.parse import unquote
 
 # The roles of the helpers that run once and end (door rules, Setup rules, a bridge's IPv6).
 ONE_SHOT_ROLES = frozenset(
@@ -117,6 +118,8 @@ class FakeDockerEngine:
         self.socket_path = socket_path
         self.behaviour = behaviour
         self.calls: list[tuple[str, str, Any]] = []
+        # What `PUT /containers/<c>/archive` was given: (the container's name, the path, the tar).
+        self.archives: list[tuple[str, str, bytes]] = []
         self.containers: dict[str, FakeContainer] = {}
         self.networks: dict[str, dict[str, Any]] = {}
         # A request whose path contains the key is answered with the status (and no effect).
@@ -318,6 +321,14 @@ class FakeDockerEngine:
                 )
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "start":
             self._start(connection, parts[1])
+        elif method == "PUT" and parts[0] == "containers" and parts[-1] == "archive":
+            held = self.containers.get(parts[1])
+            if held is None:
+                self._reply(connection, 404, {"message": "no such container"})
+            else:
+                where = unquote(target.split("path=", 1)[1]) if "path=" in target else ""
+                self.archives.append((held.name, where, body if isinstance(body, bytes) else b""))
+                self._reply(connection, 200)
         elif method == "DELETE" and parts[0] == "containers":
             container = self.containers.get(parts[1])
             if container is not None:
