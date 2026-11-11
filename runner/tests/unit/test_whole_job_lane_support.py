@@ -414,6 +414,27 @@ def test_a_plain_host_is_reached_through_the_proxy_and_a_setup_only_host_stops_a
     assert lane.wall.narrowed_at is not None
 
 
+def test_the_fetch_the_setup_and_the_agent_use_reaches_a_plain_host_through_the_proxy_variable(
+    lane: Lane,
+) -> None:
+    # The agent image has no curl: the lane's scripts fetch with the interpreter, which reads
+    # `http_proxy` as the Setup container and the agent's container have it.
+    done = subprocess.run(
+        ["bash", "-c", f"{job.FETCH} http://{FILES_HOST}/setup"],
+        env={"PATH": os.environ["PATH"], "http_proxy": f"http://{HOST}:{lane.port}"},
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == FilesHost.SETUP_BODY
+    assert (FILES_HOST, 80, "allowed", None) in {
+        (each["host"], each["port"], each["outcome"], each["reason"])
+        for each in lane.wall.log_of(Slot(0))["connections"]
+    }
+
+
 def test_the_lanes_scripted_model_is_the_one_script_the_job_needs() -> None:
     script = job.agent_script()
 

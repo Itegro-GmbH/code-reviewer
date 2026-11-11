@@ -61,10 +61,17 @@ SETUP_COPY: Final = "from-setup.txt"
 AGENT_COPY: Final = "from-agent.txt"
 CLOSING: Final = "I added what the setup and the network door fetched, and committed it."
 
+# The agent image has no curl (Python is its HTTP client here): urllib reads `http_proxy`, which
+# the Setup container gets from the host's proxy and the agent's container from its network door.
+FETCH: Final = (
+    "python3 -c 'import sys, urllib.request as u; "
+    "sys.stdout.buffer.write(u.urlopen(sys.argv[1], timeout=40).read())'"
+)
+
 SETUP_SCRIPT: Final = f"""\
 echo "proxy variables: http_proxy=$http_proxy HTTP_PROXY=$HTTP_PROXY"
-curl -fsSv --max-time 40 http://{FILES_HOST}/setup -o /opt/setup-fetched.txt
-curl -fsSv --max-time 40 http://{SETUP_ONLY_HOST}/setup -o /opt/mirror-fetched.txt
+{FETCH} http://{FILES_HOST}/setup > /opt/setup-fetched.txt
+{FETCH} http://{SETUP_ONLY_HOST}/setup > /opt/mirror-fetched.txt
 cp /opt/setup-fetched.txt setup-fetched.txt
 echo "the lane's setup is done"
 """
@@ -139,7 +146,7 @@ def agent_script() -> list[Turn]:
     """What the model does: use the setup's file, fetch one through the door, commit, say so."""
     command = (
         f"cp /opt/setup-fetched.txt {SETUP_COPY} && "
-        f"curl -fsS http://{FILES_HOST}/agent -o {AGENT_COPY} && "
+        f"{FETCH} http://{FILES_HOST}/agent > {AGENT_COPY} && "
         f"git add {SETUP_COPY} {AGENT_COPY} && git commit -qm 'Add what the lane fetched'"
     )
     return [

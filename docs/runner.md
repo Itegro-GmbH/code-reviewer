@@ -2405,7 +2405,7 @@ One real Implementer job, from the claim to the push:
 ```
  fake App ◀──claim (runner API, loopback)── the lane's dispatcher side ──start {http://app.lane.example.com, jobId, crj_}──▶ launcher ──▶ VM
  fake App ◀──Worker API ◀─proxy◀── Control (Worker image) ── clone / push ──▶ proxy ──▶ https://git.lane.example.com/acme/widgets.git   (a git endpoint, TLS)
-                                    Setup container (curl, HTTP_PROXY) ───────▶ proxy ──▶ http://files.lane.example.com, http://mirror.lane.example.com
+                                    Setup container (python3, http_proxy) ─────▶ proxy ──▶ http://files.lane.example.com, http://mirror.lane.example.com
                                     real `narrow` over vsock (VM's token): the job's rule replaces the wide rule
                                     agent ─▶ network door ─▶ proxy ──▶ http://files.lane.example.com/agent          (after the narrowing)
                                     model door ─(CONNECT)─▶ proxy ──▶ https://models.lane.example.com/v1            (a fake provider, TLS, scripted)
