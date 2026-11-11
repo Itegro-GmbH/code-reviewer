@@ -5,7 +5,8 @@ fakes, and the two seams that make the real outer-wall proxy reach them.
 
 The proxy refuses every private address by design and has no test network
 (`NETDOOR_TEST_PUBLIC_CIDR` is not used), and the lane's fakes are on the host's loopback.
-`ProxyOuterWall` takes a resolver and a connector (the seams its unit tests use): **the decision stays real** (the rule lists the name
+`ProxyOuterWall` takes a resolver and a connector (the seams its unit tests use): **the
+decision stays real** (the rule lists the name
 before anything is looked up, the address must be public, the connection goes to the address that
 was checked, ports 80 and 443 only), and only the last step is the lane's: the name resolves to a
 public-looking address (`151.101.1.x`, in no refused range), and a connection to that address and
