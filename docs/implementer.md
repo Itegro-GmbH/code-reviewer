@@ -1333,8 +1333,8 @@ driven by `job_run.py` before the session exists.
 and the agent's container was made from that image: the files and the inner Docker's images survived, **every process died** (a Postgres the
 script started was gone, and its container in the inner Docker was stopped). Now the container is made once, from the agent's image, **on the
 setup network**; the script runs in it; when the script ends well the container **leaves the setup network** (its processes that held a
-connection to the internet lose it), is **frozen** (`docker pause`) while Control reads the repository (`settle_after_setup`), and is taken
-over by the agent's container object (`AgentContainer(adopted=...)`), which **puts it on the model network** (this is the narrowing of the
+connection to the internet lose it), is **frozen** (`docker pause`, confirmed by `State.Paused`) while Control reads the repository
+(`settle_after_setup`), and is taken over by the agent's container object (`AgentContainer(adopted=...)`), which **puts it on the model network** (this is the narrowing of the
 container: from here on only the doors are reachable), unfreezes it and seals it. Nothing in it is stopped, committed or reset: the processes the
 script started keep running, the agent can use and stop them (behaviour contract item 9, ADR 0005). The one process that is started again
 is the container's own `dockerd`, when its proxy has to change (below), under `--live-restore`, so the containers it started keep running.
@@ -1383,7 +1383,7 @@ installs inside, its script can flush (and one `nft flush ruleset` in it changes
 agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it. Around the script the step may
 take, at its ceilings, 20 s for each of the four host helpers (the bridge's IPv6, the `ip` table, its read back and the `inet` table), 60 s until the container's Docker is ready, 30 s to write the script,
 45 s for the kill of a script that has to be stopped (the kill, the wait for its exec, the kill of the clean-up: 15 s each) and 30 s for each of
-the four calls of the hand-over (the script's file removed, off the setup network, the network removed, frozen), 365 s together
+the four calls of the hand-over (the script's file removed, off the setup network, frozen, the freeze read back), 365 s together
 (`SETUP_OVERHEAD_SECONDS`; before #1009 it was 855 s, of which the stop of the inner Docker, the commit and the removal were 535 s); a test holds the
 sum. The script is held to what the limit leaves after the grace for the end of the turn (270 s), those 365 s and **at least 10 minutes for the
 agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
@@ -1400,8 +1400,14 @@ and the last 1,200 characters of it. The page renders it as text.
 the script's file is removed (the agent must not find it), the container is **taken off the setup network and the network is removed**
 (this one must hold: a container that cannot leave it is killed and removed and the turn ends `environment_setup_failed`, because it would carry
 the internet into the agent's turn), the memory guard of the first phase stops (the agent's container object starts its own), and the
-container is **frozen** (`docker pause`, the cgroup freezer), so that Control reads the repository while no process of the script changes it; a
-freeze the runtime refuses is a note in the report ("its processes ran while the repository was read"), not a failure. The files the script left
+container is **frozen** (`docker pause`, the cgroup freezer), so that Control reads the repository while no process of the script changes it: a
+root process the script left would otherwise go on writing the repository (a link into the work volume) while `settle_after_setup` resets and cleans
+it. **This one must hold too**: a freeze the daemon refuses (a status, a conflict), one it answers but does not report (`State.Paused`, read back after
+every answer) and a client timeout after which the daemon does not report the container frozen (the daemon is asked, nothing is guessed; a freeze it did
+complete is taken) all end like the network step: the container is killed and removed and the turn ends `environment_setup_failed` (`not_handed_over`,
+"the container could not be kept"), free. The memory guard of the first phase keeps watching until the freeze is confirmed. **What is proven:** a process in an
+**inner container** of the setup's own Docker, under Sysbox on a real VM, writes nothing to the repository while Control reads it and writes again after the
+unfreeze (`runner/tests/kvm/test_whole_job.py`, the freeze job, #1009-T48); under `runc` the same for a plain process (`test_implementer_environment.py`, #1009-T47). The files the script left
 in `/work/repo` are in the work volume, which the agent mounts as before; the files it left anywhere else, and the images, containers and
 volumes of the container's own Docker, are in the container itself. There is no cache of the result: every turn runs its script.
 

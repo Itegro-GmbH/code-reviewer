@@ -10,14 +10,17 @@ of its `#!` line), working directory the repository, root, all of the image's to
 with status 0 the container is **not** stopped and nothing is saved: Control takes it off the setup
 network (the one change of the hand-over that stops something: a process of the script that still
 holds a connection to the internet loses it; the network itself is removed by whoever connects the
-container to the model network next) and freezes it (`docker pause`) while it reads the
-repository, and the agent's container object (`AgentContainer`, `adopted=`) takes it over: it
-puts it on the model network, which is what `narrow` is for the container, and starts the agent in
-it. What the script left is what the agent has: files, the images, containers and volumes of the
-container's own Docker, and the processes that are still running (a Postgres the script started
-keeps serving). The agent can use them and stop them. Nothing is reset at the narrowing. (Before
-#1009 the container was stopped and committed as an image, which kept the files and images and lost
-every process.)
+container to the model network next) and freezes it (`docker pause`, and asks the daemon whether it
+is frozen) while it reads the repository: a root process the script left would otherwise go on
+writing the repository, a link into the work volume among it, while Control resets and cleans it.
+Both steps must hold: a container that cannot leave the network or be confirmed frozen is killed
+and removed and the turn ends. The agent's container object (`AgentContainer`, `adopted=`) takes it
+over: it puts it on the model network, which is what `narrow` is for the container, and starts the
+agent in it. What the script left is what the agent has: files, the images, containers and
+volumes of the container's own Docker, and the processes that are still running (a Postgres the
+script started keeps serving). The agent can use them and stop them. Nothing is reset at the
+narrowing. (Before #1009 the container was stopped and committed as an image, which kept the files
+and images and lost every process.)
 
 **What it has: nothing of ours.** No git token, no model key, no job token, no environment variable
 of its own, no mount but the repository (and the result directory of a turn with a result schema),
@@ -54,6 +57,12 @@ finds no way out, and says so; none falls back to a direct connection. This cont
 variable that is not the image's own is those, and the seal check knows them. The agent's tools get
 them emptied and the door's instead (`AgentContainer`), and the inner daemon is started again with
 the door's (`AgentContainer.restart_docker`).
+
+**The script's output** goes to a file in the container (`SCRIPT_OUTPUT`), which the shell around
+the script sends on as it grows and until the script's own process has exited (`RUN_SCRIPT`), never
+the exec's stream itself: a daemon the script leaves behind (`nohup postgres &`) inherits the
+script's standard output, and one that held the exec's pipe kept the stream open after the script
+had exited and got SIGPIPE when it was closed.
 
 **The result.** The end of the script's output (stdout and stderr together, bounded to the last
 `OUTPUT_KEEP_BYTES`), its exit status, whether it ran out of time and the container's id. A script
@@ -347,11 +356,12 @@ class SetupRun:
     detail: str
     start_seconds: float
     script_seconds: float
-    # The seconds the hand-over took (off the network, frozen).
+    # The seconds the hand-over took (off the network, frozen and confirmed).
     handover_seconds: float
     # What the agent's container object takes over (None unless the script ended well).
     adopted: Adopted | None = None
-    # Facts for the log: a step that could not be done and is no failure (the freeze).
+    # Facts for the log: a step that could not be done and is no failure (the script's file that
+    # could not be removed, a freeze the daemon answered late).
     notes: tuple[str, ...] = ()
 
     @property
@@ -823,7 +833,9 @@ class SetupContainer:
                     "the container could not be frozen (the daemon did not answer in time and "
                     "does not report it frozen)"
                 ) from None
-            self._notes.append("the daemon answered the freeze late; it reports the container frozen")
+            self._notes.append(
+                "the daemon answered the freeze late; it reports the container frozen"
+            )
             return
         if not self._is_frozen(container):
             raise _Unavailable("the daemon did not report the container frozen after the freeze")

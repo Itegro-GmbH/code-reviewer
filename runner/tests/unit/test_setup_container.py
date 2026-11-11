@@ -450,7 +450,7 @@ def posted(engine: FakeDockerEngine) -> list[str]:
     return seen
 
 
-# #1009-S01
+# #1009-T03
 def test_a_script_that_ended_well_leaves_the_container_alive_and_nothing_is_committed_or_stopped(
     rig: Rig,
 ) -> None:
@@ -469,7 +469,7 @@ def test_a_script_that_ended_well_leaves_the_container_alive_and_nothing_is_comm
     assert done.adopted.paused is True and done.adopted.setup_environment == ()
 
 
-# #1009-S02
+# #1009-T05
 def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_network_stays(
     rig: Rig,
 ) -> None:
@@ -490,7 +490,7 @@ def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_netw
     assert 'rm -f "$1" "$2"' in sc.CLEAN_SCRIPT
 
 
-# #1009-S03
+# #1009-T07
 def test_a_container_that_cannot_be_frozen_is_not_handed_over_and_is_removed(rig: Rig) -> None:
     """A refused freeze is a failure, not a note: the script's root processes would go on writing
     the repository (a link into the work volume) while Control reads it."""
@@ -502,7 +502,7 @@ def test_a_container_that_cannot_be_frozen_is_not_handed_over_and_is_removed(rig
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #1009-S03b
+# #1009-T08
 def test_a_freeze_the_daemon_answers_with_a_conflict_is_not_handed_over_either(rig: Rig) -> None:
     rig.engine.pause_refused = 409
     done = run(rig)
@@ -510,7 +510,7 @@ def test_a_freeze_the_daemon_answers_with_a_conflict_is_not_handed_over_either(r
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #1009-S03c
+# #1009-T09
 def test_a_freeze_that_was_answered_but_that_the_daemon_does_not_report_is_not_trusted(
     rig: Rig,
 ) -> None:
@@ -522,7 +522,7 @@ def test_a_freeze_that_was_answered_but_that_the_daemon_does_not_report_is_not_t
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #1009-S03d
+# #1009-T10
 def test_a_freeze_the_client_gave_up_on_is_looked_at_and_taken_when_the_daemon_did_it(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -535,7 +535,7 @@ def test_a_freeze_the_client_gave_up_on_is_looked_at_and_taken_when_the_daemon_d
     assert rig.engine.container(AGENT_CONTAINER_NAME).paused
 
 
-# #1009-S03e
+# #1009-T11
 def test_a_freeze_the_client_gave_up_on_and_the_daemon_did_not_do_is_not_handed_over(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -547,7 +547,7 @@ def test_a_freeze_the_client_gave_up_on_and_the_daemon_did_not_do_is_not_handed_
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #1009-S03f
+# #1009-T12
 def test_the_memory_guard_keeps_watching_until_the_freeze_is_confirmed(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -569,7 +569,7 @@ def test_the_memory_guard_keeps_watching_until_the_freeze_is_confirmed(
     assert any(n.endswith("/kill") for n in posted(rig.engine))
 
 
-# #1009-S03g
+# #1009-T13
 def test_a_container_the_script_left_frozen_is_not_one_the_turn_can_exec_into(rig: Rig) -> None:
     """The fake daemon refuses an exec in a frozen container as the real one does, so a step that
     ran a command after the freeze would fail here and not only on a VM."""
@@ -581,7 +581,7 @@ def test_a_container_the_script_left_frozen_is_not_one_the_turn_can_exec_into(ri
     assert refused.value.status == 409
 
 
-# #1009-S04
+# #1009-T06
 def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_is_removed(
     rig: Rig,
 ) -> None:
@@ -595,21 +595,22 @@ def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #1009-S06
+# #1009-T15
 def test_the_setup_container_can_be_made_with_no_new_privileges_like_the_agents_container() -> None:
     """The Claude Code agent's container is sealed (`no-new-privileges`); the setup container is the
     agent's container, so it takes the same flag. `subscription_setup_script` refuses that harness
     with a script today; the day it does not, the setup's definition already has the one change it
     needs, and the agent's seal check refuses an adopted container that lacks it."""
     plain = setup_document("sha256:aa", "volume-1", 1_000_000)["HostConfig"]
-    sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)["HostConfig"]
+    sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)
+    sealed = sealed["HostConfig"]
     assert "SecurityOpt" not in plain
     assert sealed["SecurityOpt"] == ["no-new-privileges"] and sealed["Privileged"] is False
     agent = agent_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)["HostConfig"]
     assert sealed["SecurityOpt"] == agent["SecurityOpt"]
 
 
-# #1009-S07
+# #1009-T16
 def test_the_seams_make_the_setup_container_without_new_privileges(rig: Rig) -> None:
     done = run(rig, no_new_privileges=True)
     assert done.outcome == OUTCOME_OK
@@ -618,7 +619,7 @@ def test_the_seams_make_the_setup_container_without_new_privileges(rig: Rig) -> 
     assert done.adopted is not None and done.adopted.dns == sc.SETUP_DNS
 
 
-# #1009-S05
+# #1009-T14
 def test_the_proxy_variables_of_a_customers_machine_are_the_setups_and_the_agent_is_told(
     rig: Rig,
 ) -> None:
@@ -640,7 +641,7 @@ def test_the_guard_is_closed_at_the_hand_over(rig: Rig) -> None:
     assert rig.engine.container(AGENT_CONTAINER_NAME).running, "the guard did not kill it"
 
 
-# #1009-OVERHEAD-01
+# #1009-T17
 def test_the_overhead_counts_the_rules_the_ready_wait_the_kill_steps_and_the_hand_over() -> None:
     parts = (
         sc.RULES_SECONDS * 4 + sc.READY_SECONDS + sc.SCRIPT_WRITE_SECONDS + sc.HANDOVER_SECONDS * 4
@@ -707,7 +708,7 @@ def shell(tmp_path: Path) -> Iterator[Callable[[str], Shell]]:
         each.process.kill()
 
 
-# #1009-D01
+# #1009-T40
 def test_a_daemon_that_inherits_the_scripts_output_does_not_keep_the_exec_stream_open(
     shell: Callable[[str], Shell], tmp_path: Path
 ) -> None:
@@ -734,7 +735,7 @@ def test_a_daemon_that_inherits_the_scripts_output_does_not_keep_the_exec_stream
     assert os.readlink(f"/proc/{pid}/fd/2") == str(run_it.output_file)
 
 
-# #1009-D02
+# #1009-T41
 def test_the_exit_status_is_the_scripts_and_both_its_streams_are_in_the_output_in_order(
     shell: Callable[[str], Shell],
 ) -> None:
@@ -744,7 +745,7 @@ def test_the_exit_status_is_the_scripts_and_both_its_streams_are_in_the_output_i
     assert bytes(run_it.seen) == b"first\nsecond\nthird\n"
 
 
-# #1009-D03
+# #1009-T42
 def test_a_script_without_a_shebang_runs_under_bash_dash_e(shell: Callable[[str], Shell]) -> None:
     run_it = shell("false\necho not-reached\n")
     run_it.finish()
@@ -752,19 +753,23 @@ def test_a_script_without_a_shebang_runs_under_bash_dash_e(shell: Callable[[str]
     assert bytes(run_it.seen) == b""
 
 
-# #1009-D04
+# #1009-T43
 def test_a_long_output_arrives_whole_and_in_order(shell: Callable[[str], Shell]) -> None:
-    run_it = shell("i=0; while [ $i -lt 20000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; "
-                   "i=$((i+1)); done\n")
+    run_it = shell(
+        "i=0; while [ $i -lt 20000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; "
+        "i=$((i+1)); done\n"
+    )
     run_it.finish(60.0)
     lines = bytes(run_it.seen).decode().splitlines()
     assert run_it.status == 0
-    assert len(lines) == 20000 and lines[0].startswith("line-0-") and lines[-1].startswith(
-        "line-19999-"
+    assert (
+        len(lines) == 20000
+        and lines[0].startswith("line-0-")
+        and lines[-1].startswith("line-19999-")
     )
 
 
-# #1009-D05
+# #1009-T44
 def test_the_script_has_no_input(shell: Callable[[str], Shell]) -> None:
     run_it = shell("read -r line || echo no-input\n")
     run_it.finish()

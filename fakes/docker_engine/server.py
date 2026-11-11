@@ -356,7 +356,11 @@ class FakeDockerEngine:
         state = {
             "Running": container.running,
             "Paused": container.paused,
-            "Status": "paused" if container.paused else "running" if container.running else "exited",
+            "Status": "paused"
+            if container.paused
+            else "running"
+            if container.running
+            else "exited",
             "ExitCode": container.exit_code if container.exit_code is not None else 0,
             "OOMKilled": container.oom_killed,
         }
@@ -631,8 +635,10 @@ class FakeDockerEngine:
             self._reply(
                 connection,
                 409,
-                {"message": f"Container {container.identifier} is paused, unpause the container "
-                 "before exec"},
+                {
+                    "message": f"Container {container.identifier} is paused, unpause the container "
+                    "before exec"
+                },
             )
             return
         identifier = self._next()

@@ -13,7 +13,9 @@ platform's network proves (the internet is reachable, the VM's control port is n
 
 import socket
 import threading
+import time
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -23,18 +25,22 @@ from lane_support import (
     bridge_gateway,
     commit,
     docker,
+    environment_step,
     host_nft,
     inet_family_supported,
     lane_config,
     lane_environment,
     lane_turn,
+    lane_workspace,
     says,
+    wait_for,
     write_file,
 )
 from opencode_native import REAL_KEY
 
 from code_reviewer_runner.implementer import environment_setup as es
 from code_reviewer_runner.implementer.agent_container import AGENT_CONTAINER_NAME
+from code_reviewer_runner.implementer.git_workspace import GitWorkspace
 from code_reviewer_runner.implementer.session import ShutdownRequested
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_ADDRESS,
@@ -178,7 +184,7 @@ def test_a_script_that_fills_the_disk_fails_and_the_reserve_is_untouched(tmp_pat
     nothing_of_the_setup_is_left()
 
 
-# #1009-L09
+# #1009-T45
 def test_a_script_that_fills_the_containers_root_keeps_the_container_whole_for_the_agent(
     tmp_path: Path,
 ) -> None:
@@ -370,7 +376,7 @@ TALK = (
 )
 
 
-# #1009-L10 (T01 of the issue, in the lane's stand-in, T03: the process runs after the narrowing)
+# #1009-T01 (T01 of the issue, in the lane's stand-in, T03: the process runs after the narrowing)
 def test_a_process_the_script_started_is_still_running_for_the_agent_and_its_data_persists(
     tmp_path: Path,
 ) -> None:
@@ -420,3 +426,100 @@ echo "started $(cat /opt/db.pid)"
         assert shown("after-stop.txt") == "stopped"
         assert shown("rows-after.txt") == "7,8,"
     nothing_of_the_setup_is_left()
+
+
+# #1009-T46 (T01/T03 of the issue, the way a real setup starts a database: `nohup postgres &`,
+# `pg_ctl start`, `./server &` with the output of the script as it is)
+def test_a_daemon_that_keeps_the_scripts_output_does_not_end_the_step_and_runs_for_the_agent(
+    tmp_path: Path,
+) -> None:
+    """The daemon is not redirected: it inherits what the script's standard output is, and it prints
+    on it every tenth of a second. Before the output went through a file the daemon held the exec's
+    stream open, the step waited for its time limit though the script had exited 0, and the daemon
+    got SIGPIPE when the stream was closed: it was dead for the agent."""
+    setup = """
+nohup sh -c 'echo $$ > /opt/beat.pid; while :; do echo beat; date +%s%N >> /opt/beat.log; \
+sleep 0.1; done' &
+for i in $(seq 1 50); do [ -s /opt/beat.pid ] && break; sleep 0.1; done
+echo "started $(cat /opt/beat.pid)"
+"""
+
+    def script(repo: Path) -> list[Turn]:
+        return [
+            bash(
+                "a=$(wc -l < /opt/beat.log); sleep 1; b=$(wc -l < /opt/beat.log); "
+                'echo "$a $b" > beats.txt; '
+                "(kill -0 $(cat /opt/beat.pid) 2>/dev/null && echo alive || echo dead) "
+                "> daemon.txt; "
+                "git add beats.txt daemon.txt && git commit -qm 'Use the daemon'"
+            ),
+            says("Used the daemon the setup left."),
+        ]
+
+    with lane_turn(tmp_path, script, setup_script=setup) as turned:
+        result = turned.result
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        prepared = turned.setup
+        assert prepared is not None and prepared.block is not None and prepared.block["ok"] is True
+        assert prepared.block["timedOut"] is False
+        assert "started " in prepared.block["output"] and "beat" in prepared.block["output"]
+        # The step did not wait for anything but the script (its limit is 15 minutes).
+        assert prepared.block["durationSeconds"] < 120, prepared.block
+        tip = result.head_commit or ""
+
+        def shown(name: str) -> str:
+            return raw(
+                "show", f"{tip}:{name}", cwd=turned.origin.path, git=turned.origin.git
+            ).strip()
+
+        before, after = (int(n) for n in shown("beats.txt").split())
+        assert after > before, "the daemon went on running while the agent used the container"
+        assert shown("daemon.txt") == "alive"
+    nothing_of_the_setup_is_left()
+
+
+# #1009-T47 (the freeze: a root process of the script must not write the repository while Control
+# reads it; the Sysbox variant, a process in an inner container, is `tests/kvm/test_whole_job.py`
+# #1009-T48)
+def test_the_container_is_frozen_while_control_reads_the_repository_and_runs_after_the_unfreeze(
+    tmp_path: Path,
+) -> None:
+    setup = """
+nohup sh -c 'while :; do date +%s%N >> /work/repo/ticks.log; sleep 0.01; done' > /dev/null 2>&1 &
+for i in $(seq 1 50); do [ -s /work/repo/ticks.log ] && break; sleep 0.1; done
+echo started
+"""
+    seen: list[tuple[int, int]] = []
+    original = GitWorkspace.settle_after_setup
+
+    with lane_workspace(tmp_path) as lane:
+        ticks = tmp_path / "work" / "repo" / "ticks.log"
+
+        def watched(self: GitWorkspace, *args: Any, **options: Any) -> list[str]:
+            # Control's read, as the step makes it: the file is looked at before, a second goes by,
+            # and it is looked at again; a writer that is not frozen has made a hundred more ticks.
+            first = ticks.stat().st_size
+            time.sleep(1.0)
+            seen.append((first, ticks.stat().st_size))
+            return original(self, *args, **options)
+
+        with mock.patch.object(GitWorkspace, "settle_after_setup", watched):
+            step = environment_step(lane, setup)
+        try:
+            assert step.error is None and step.adopted is not None, step.notes
+            assert step.adopted.paused is True
+            assert (
+                docker("inspect", "-f", "{{.State.Paused}}", step.adopted.container).stdout.strip()
+                == "true"
+            )
+            [(first, second)] = seen
+            assert first > 0, "the writer had not started"
+            assert second == first, "the file grew while the container was frozen"
+            # Unfrozen, as the agent's container object does it, the same process writes again.
+            docker("unpause", step.adopted.container)
+            assert wait_for(lambda: ticks.stat().st_size > second, 20.0), "it never ran again"
+        finally:
+            if step.adopted is not None:
+                docker("unpause", step.adopted.container, check=False)
+                docker("rm", "-f", step.adopted.container, check=False)
+                docker("network", "rm", SETUP_NETWORK_NAME, check=False)

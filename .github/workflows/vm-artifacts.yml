@@ -380,8 +380,9 @@ jobs:
       # door reaches a fake provider through it, and the job pushes to the lane's git endpoint. The fakes are on this runner's loopback behind names
       # below lane.example.com (the proxy gets a resolver and a connector of the lane: runner/tests/kvm/lane_internet.py); the Worker image is the
       # lane's own copy with a test CA (built above, a data disk of its own). The table's drop counters are read before and after: a client that went
-      # round the proxy would be dropped and counted (the control is the outer wall lane above).
-      - name: Whole-job lane (T01 to T05 of #999: a whole job through the proxy, the table loaded)
+      # round the proxy would be dropped and counted (the control is the outer wall lane above). A third job (#1009-T48) proves the freeze under Sysbox:
+      # a process in an inner container of the setup's Docker writes nothing to the repository while Control reads it, and writes again after.
+      - name: Whole-job lane (T01 to T05 of #999: a whole job through the proxy, the table loaded; #1009-T48: the freeze)
         # The run takes about two minutes; a Worker that hangs would otherwise hold the job until its own limit. The step is stopped here, and the
         # next step (always) still reads and prints the counters.
         timeout-minutes: 20

@@ -109,7 +109,7 @@ def test_the_script_is_valid_shell() -> None:
     assert subprocess.run(["/bin/sh", "-n", str(SCRIPT)], check=False).returncode == 0
 
 
-# #1009-I01
+# #1009-T32
 def test_the_daemon_starts_once_with_live_restore_and_the_containers_own_environment(
     init: Callable[..., Init],
 ) -> None:
@@ -123,7 +123,7 @@ def test_the_daemon_starts_once_with_live_restore_and_the_containers_own_environ
     )
 
 
-# #1009-I02
+# #1009-T33
 def test_a_requested_restart_starts_the_daemon_again_with_the_new_variables_only(
     init: Callable[..., Init],
 ) -> None:
@@ -145,7 +145,7 @@ def test_a_requested_restart_starts_the_daemon_again_with_the_new_variables_only
     assert not (running.root / "run" / "agent-docker-restart").exists()
 
 
-# #1009-I03
+# #1009-T34
 def test_a_daemon_that_ends_without_a_request_ends_the_container(init: Callable[..., Init]) -> None:
     running = init()
     running.wait_for(running.ready.exists, "the ready file")

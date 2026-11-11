@@ -1275,7 +1275,7 @@ def calls_of(made: Rig) -> list[str]:
     return [f"{m} {t.split('?')[0]}" for m, t, _ in made.engine.calls]
 
 
-# #1009-A01
+# #1009-T04
 def test_an_adopted_container_is_put_on_the_model_network_and_is_the_same_container(
     rig: Rig,
 ) -> None:
@@ -1307,7 +1307,7 @@ def test_an_adopted_container_is_put_on_the_model_network_and_is_the_same_contai
     assert not any("create?name=code-reviewer-agent" in n for n in names)
 
 
-# #1009-A02
+# #1009-T18
 def test_a_hosted_container_with_no_door_keeps_its_inner_docker_as_it_is(rig: Rig) -> None:
     place = adopted_container(rig, script_container(rig))
     place.create()
@@ -1315,7 +1315,7 @@ def test_a_hosted_container_with_no_door_keeps_its_inner_docker_as_it_is(rig: Ri
     assert not any(e[0][:3] == ["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT] for e in rig.execs)
 
 
-# #1009-A03
+# #1009-T19
 def test_with_a_door_the_inner_docker_is_started_again_with_the_doors_proxy(rig: Rig) -> None:
     place = adopted_container(rig, script_container(rig), LIST_RULE)
     place.create()
@@ -1330,7 +1330,7 @@ def test_with_a_door_the_inner_docker_is_started_again_with_the_doors_proxy(rig:
     # (`runner/docker/agent-init.sh`, pinned by `test_agent_init_script.py`).
 
 
-# #1009-A04
+# #1009-T20
 def test_a_customers_machine_has_the_setups_proxy_in_the_daemon_until_it_is_started_again(
     rig: Rig,
 ) -> None:
@@ -1342,7 +1342,7 @@ def test_a_customers_machine_has_the_setups_proxy_in_the_daemon_until_it_is_star
     assert rig.written[ac.DOCKER_ENV_FILE] == b""
 
 
-# #1009-A05
+# #1009-T21
 def test_the_tools_of_an_adopted_container_get_the_doors_variables_and_the_setups_are_emptied(
     rig: Rig,
 ) -> None:
@@ -1364,7 +1364,7 @@ def test_the_tools_of_an_adopted_container_get_the_doors_variables_and_the_setup
     assert imported["HTTPS_PROXY"] == ac.NETWORK_DOOR_URL
 
 
-# #1009-A06
+# #1009-T22
 def test_a_container_that_is_not_a_container_made_for_the_agent_is_refused_even_when_adopted(
     rig: Rig,
 ) -> None:
@@ -1379,7 +1379,7 @@ def test_a_container_that_is_not_a_container_made_for_the_agent_is_refused_even_
     assert refused.value.code is ErrorCode.SETUP_FAILED and "privileged" in refused.value.detail
 
 
-# #1009-A07
+# #1009-T23
 def test_a_container_without_an_inner_docker_is_not_waited_for_after_the_restart_request(
     rig: Rig,
 ) -> None:
@@ -1390,14 +1390,14 @@ def test_a_container_without_an_inner_docker_is_not_waited_for_after_the_restart
     assert len(tests) == 1, "the ready check before the seal, and none after the restart request"
 
 
-# #1009-A08
+# #1009-T24
 def test_the_environment_file_is_quoted_assignments_for_the_inits_shell() -> None:
     text = docker_environment_file({"HTTP_PROXY": "http://10.0.0.1:3128", "NO_PROXY": "a,b c"})
     assert text == "HTTP_PROXY=http://10.0.0.1:3128\nNO_PROXY='a,b c'\n"
     assert docker_environment_file({}) == ""
 
 
-# #1009-A09
+# #1009-T25
 def test_the_restart_script_asks_the_daemon_to_end_and_the_init_to_start_it_again(
     tmp_path: Path,
 ) -> None:
@@ -1450,7 +1450,7 @@ def test_the_restart_script_asks_the_daemon_to_end_and_the_init_to_start_it_agai
     )
 
 
-# #1009-A09b
+# #1009-T26
 def test_the_restart_script_of_a_container_with_no_daemon_says_so_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -1470,7 +1470,7 @@ def test_the_restart_script_of_a_container_with_no_daemon_says_so_and_writes_not
 # -- what the seal check holds the adopted container to (#1009) -----------------------------------
 
 
-# #1009-A10
+# #1009-T27
 @pytest.mark.parametrize(
     ("changes", "word"),
     [
@@ -1498,7 +1498,7 @@ def test_an_adopted_container_is_held_to_the_setups_resolvers_and_network_mode(
     assert refused.value.code is ErrorCode.SETUP_FAILED and word in refused.value.detail
 
 
-# #1009-A11
+# #1009-T28
 def test_an_adopted_container_that_reads_back_as_the_setup_made_it_is_accepted(rig: Rig) -> None:
     adopted = script_container(rig)
     host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
@@ -1507,7 +1507,7 @@ def test_an_adopted_container_that_reads_back_as_the_setup_made_it_is_accepted(r
     adopted_container(rig, adopted).create()
 
 
-# #1009-A12
+# #1009-T29
 @pytest.mark.parametrize(
     ("changes", "word"),
     [
@@ -1528,7 +1528,7 @@ def test_a_container_made_for_the_agent_with_no_script_is_held_to_its_own_defini
     assert word in refused.value.detail
 
 
-# #1009-A13
+# #1009-T30
 def test_an_adopted_container_must_be_as_sealed_as_the_seams_say(rig: Rig) -> None:
     """The Claude Code harness is refused with a setup script (`subscription_setup_script`) because
     its agent runs with `no-new-privileges` and the setup's container is made without. Whoever lifts
@@ -1541,7 +1541,7 @@ def test_an_adopted_container_must_be_as_sealed_as_the_seams_say(rig: Rig) -> No
     assert "no-new-privileges" in refused.value.detail
 
 
-# #1009-A14
+# #1009-T31
 def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_seams_say_so(
     rig: Rig,
 ) -> None:
@@ -1564,6 +1564,8 @@ def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_se
     # ... and a container that is sealed when the seams say it is not is as wrong the other way.
     with pytest.raises(JobError):
         AgentContainer(
-            2560, rig.seams(), OFF, adopted=Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME,
-                                                   dns=sc.SETUP_DNS)
+            2560,
+            rig.seams(),
+            OFF,
+            adopted=Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME, dns=sc.SETUP_DNS),
         ).create()

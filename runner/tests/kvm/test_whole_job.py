@@ -32,6 +32,7 @@ client that went round the proxy and was dropped would still pass here, and show
 
 import asyncio
 import dataclasses
+import itertools
 import json
 from pathlib import Path
 from typing import Any
@@ -46,10 +47,18 @@ from whole_job_support import (
     CLOSED,
     CLOSED_NOTE,
     CLOSING,
+    CONTROL_WRITES,
+    FREEZE_SETUP_SCRIPT,
+    INNER_CONTAINERS,
     MODEL_KEY,
     SETUP_COPY,
+    SETUP_SCRIPT,
+    TICK_COPY,
+    TICKER,
     LaneFakes,
     RecordingProxyWall,
+    Turn,
+    freeze_script,
     job_document,
     lane_fakes,
 )
@@ -65,6 +74,7 @@ pytestmark = pytest.mark.kvm
 
 JOB = "00000000-0000-4000-8000-0000000000e1"
 REFUSED_JOB = "00000000-0000-4000-8000-0000000000e2"
+FREEZE_JOB = "00000000-0000-4000-8000-0000000000e3"
 RUNNER_CREDENTIAL = "crc_" + "K" * 43
 
 
@@ -77,12 +87,21 @@ class Ran:
     seconds: float
 
 
-def run_job(machine: Machine, tmp_path: Path, job_id: str, *, with_git: bool) -> Ran:
+def run_job(
+    machine: Machine,
+    tmp_path: Path,
+    job_id: str,
+    *,
+    with_git: bool,
+    setup_script: str = SETUP_SCRIPT,
+    script: list[Turn] | None = None,
+) -> Ran:
     """One job, claimed from the fake App over the runner API as the local dispatcher claims it and
     started in a VM by the launcher with the proxy wall; the proxy's own record of what it decided
-    is read before the sandbox is closed (it is kept until then)."""
+    is read before the sandbox is closed (it is kept until then). `setup_script` and `script` (what
+    the model does) are the lane's own unless a test says others."""
     ca = load_ca(Path(need("KVM_LANE_PKI")))
-    with lane_fakes(tmp_path, ca, with_git=with_git) as fakes:
+    with lane_fakes(tmp_path, ca, with_git=with_git, script=script) as fakes:
         wall = RecordingProxyWall(
             1, resolver=fakes.internet.resolve, connector=fakes.internet.connect
         )
@@ -96,7 +115,7 @@ def run_job(machine: Machine, tmp_path: Path, job_id: str, *, with_git: bool) ->
         )
         sandbox = FirecrackerSandbox(settings, wall=wall)
         fakes.app.credentials[RUNNER_CREDENTIAL] = "runner-kvm"
-        fakes.app.queue_job(job_id, job_document())
+        fakes.app.queue_job(job_id, job_document(setup_script=setup_script))
         claim = AppClient(fakes.app.url, credential=RUNNER_CREDENTIAL).claim()
         assert claim is not None and claim.job_id == job_id
         # The Worker's address of the App is a name on port 80: the proxy dials nothing else.
@@ -250,3 +269,66 @@ def test_when_the_proxy_cannot_clone_for_the_job_it_ends_with_a_stable_code_and_
     assert GIT_HOST not in {
         host for host, _, outcome, _ in decided(refused) if outcome == "allowed"
     }
+
+
+# -- the freeze (#1009) -------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def frozen(machine: Machine, tmp_path_factory: pytest.TempPathFactory) -> Ran:
+    return run_job(
+        machine,
+        tmp_path_factory.mktemp("frozen"),
+        FREEZE_JOB,
+        with_git=True,
+        setup_script=FREEZE_SETUP_SCRIPT,
+        script=freeze_script(),
+    )
+
+
+def evidence(ran: Ran, name: str) -> str:
+    return raw("show", f"{BRANCH}:{name}", cwd=ran.fakes.origin.path, git="git")
+
+
+# #1009-T48
+def test_a_process_in_an_inner_container_does_not_write_the_repository_while_control_reads_it(
+    frozen: Ran,
+) -> None:
+    """`docker pause` of the Sysbox container freezes the processes of the inner containers of its
+    own Docker too: the setup left a container whose process appends the time to a file under the
+    repository every few milliseconds, Control read the repository (`settle_after_setup`, which
+    puts back the tracked file the setup changed and lists the file the setup added) and the file
+    did not grow while it did; it grows again after the unfreeze."""
+    assert frozen.outcome.exit_code == 0, explain(frozen)
+    [result] = frozen.fakes.app.completions
+    assert result["ok"] is True, explain(frozen)
+    ticks = [int(line) for line in evidence(frozen, TICK_COPY).split("\n")[:-1] if line.isdigit()]
+    written = {
+        line.split()[0]: int(line.split()[1])
+        for line in evidence(frozen, CONTROL_WRITES).splitlines()
+    }
+    assert len(ticks) > 20, f"the ticker wrote only {len(ticks)} ticks"
+    # Control's two writes into the repository: the tracked file put back, then the exclude list.
+    # Both are inside the freeze, so the ticker has a gap that contains them.
+    first, last = min(written.values()), max(written.values())
+    assert first <= last
+    before = [t for t in ticks if t < first]
+    inside = [t for t in ticks if first <= t <= last]
+    after = [t for t in ticks if t > last]
+    assert before, "the ticker did not run before Control read the repository"
+    assert not inside, (
+        f"the ticker wrote {len(inside)} times while Control wrote the repository: the inner "
+        "container was not frozen"
+    )
+    assert after, "the ticker did not run again after the unfreeze"
+    steps = sorted(b - a for a, b in itertools.pairwise(ticks))
+    typical = steps[len(steps) // 2]
+    gap = after[0] - before[-1]
+    print(
+        f"ticks: {len(ticks)}, typical step {typical / 1e6:.1f} ms, gap {gap / 1e6:.1f} ms, "
+        f"Control's writes {(last - first) / 1e6:.1f} ms apart"
+    )
+    assert gap >= last - first and gap > 3 * typical, (gap, typical)
+    # The inner container is the one the setup started, running for the agent after the narrowing.
+    inner = evidence(frozen, INNER_CONTAINERS)
+    assert TICKER in inner and "Up" in inner, inner

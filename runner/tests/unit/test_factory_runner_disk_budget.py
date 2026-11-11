@@ -134,9 +134,9 @@ def test_the_container_the_script_ran_in_is_counted_by_its_layer_and_no_image_is
     assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
-# #1009-B01: under Sysbox the inner Docker's data (`/var/lib/docker` of the container) is a mount the
-# runtime manages, not the container's writable layer, so the layer says nothing of what the script
-# pulled or built there: the inner data directory is measured by an exec and counted besides
+# #1009-T36: under Sysbox the inner Docker's data (`/var/lib/docker` of the container) is a mount
+# the runtime manages, not the container's writable layer, so the layer says nothing of what the
+# script pulled or built there: the inner data directory is measured by an exec and counted besides
 def test_the_inner_docker_of_a_sysbox_container_is_counted_beside_its_layer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -157,7 +157,7 @@ def test_the_inner_docker_of_a_sysbox_container_is_counted_beside_its_layer(
     assert asked == [(agent, ["/usr/bin/du", "-sx", "-B1", "/var/lib/docker"])]
 
 
-# #1009-B02
+# #1009-T37
 def test_a_container_of_another_runtime_has_no_inner_docker_to_measure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -172,7 +172,7 @@ def test_a_container_of_another_runtime_has_no_inner_docker_to_measure(
     assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
-# #1009-B03
+# #1009-T38
 @pytest.mark.parametrize(
     "answer",
     [
@@ -188,12 +188,16 @@ def test_an_inner_size_the_daemon_cannot_say_counts_for_nothing_and_the_layer_st
     agent = "a" * 64
     daemon = Daemon(sizes={agent: 700_000})
     daemon.runtimes[agent] = "sysbox-runc"
-    monkeypatch.setattr(disk_budget, "run_exec", lambda *args, **options: answer)
+
+    def run_exec(*args: Any, **options: Any) -> Outcome:
+        return answer
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
 
     assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
-# #1009-B04
+# #1009-T39
 def test_the_inner_size_is_asked_of_a_real_daemon_by_an_exec_in_the_container(
     tmp_path: Path,
 ) -> None:
