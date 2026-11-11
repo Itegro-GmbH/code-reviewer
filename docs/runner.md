@@ -2186,7 +2186,7 @@ verified the table, never assumed.
   host gains later is refused after the next read; a read that fails keeps the last list. **The in-VM network door has the same gap**
   (a name that resolves to the machine the door runs on; a VM has only private addresses, but the door also runs as a process of a
   machine): the shared decision has the hook (`Decider(excluded=...)`, off by default so the door and hosted decide as before), and the
-  door's use of it is a follow-up issue.
+  door's use of it is a follow-up (#998).
 * **The job's rule is the hosted second wall's**: GitHub (`github.com`, `api.github.com`), the model provider's host (`modelHost` of the
   `narrow`), the host of the app (the job's `appUrl`) and the rule's own hosts, a `*.suffix` as itself (strictly below the suffix, as the
   door matches); a rule that is `open` is not narrowed, as hosted. It is **`policyFor` of `dispatcher/src/network/rule.ts`** without the
