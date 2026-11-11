@@ -215,6 +215,11 @@ export const ERROR_CODE_CLASSES = {
   // #975: the sandbox's environment control did not narrow the outer network wall. It happens after the setup and before the agent
   // exists, so the model was never used: free.
   environment_control_failed: "free",
+  // #980: the subscription of a runner's own machine refused the turn (login, usage limit, model). Nothing of ours was used and nothing is
+  // billed for a subscription: free.
+  subscription_auth: "free",
+  subscription_limit: "free",
+  subscription_model_refused: "free",
   agent_gave_up: AI_COST_FAILURE_CLASS,
   no_result: AI_COST_FAILURE_CLASS,
   push_rejected: AI_COST_FAILURE_CLASS,

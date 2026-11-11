@@ -43,7 +43,7 @@ from code_reviewer_runner.resume_wire import ResumeReason
 
 from .command import AGENT_PATH, AGENT_USER, ClaudeCommand, SessionChoice, claude_environment
 from .events import ClaudeEvents, ClaudeResult, LineSplitter, parse_result
-from .login import ClaudeLogin
+from .login import OAUTH_VARIABLE, ClaudeLogin
 
 AGENT_REPO: Final = "/work/repo"
 WATCH_INTERVAL_SECONDS: Final = 0.05
@@ -320,13 +320,25 @@ class ClaudeCodeAgent:
             self._cost += result.estimated_cost_usd
         if result.budget_exhausted:
             raise LimitError(ErrorCode.COST_LIMIT_REACHED, "the turn reached its budget")
+        # A subscription token of the device has codes of its own (#980): the dispatcher of the
+        # device withdraws the credential or the model on them. A key behind the model door (and
+        # the fake provider of the tests) is the provider's refusal.
+        subscription = self._login.kind == OAUTH_VARIABLE
         if result.not_logged_in:
             raise EngineError(
-                ErrorCode.LLM_AUTH,
+                ErrorCode.SUBSCRIPTION_AUTH if subscription else ErrorCode.LLM_AUTH,
                 "Claude Code has no valid login on this device (none, expired, revoked: login.py)",
             )
         if result.usage_limit:
-            raise LimitError(ErrorCode.LLM_QUOTA, "the subscription's usage limit is reached")
+            raise LimitError(
+                ErrorCode.SUBSCRIPTION_LIMIT if subscription else ErrorCode.LLM_QUOTA,
+                "the subscription's usage limit is reached",
+            )
+        if subscription and result.model_refused:
+            raise EngineError(
+                ErrorCode.SUBSCRIPTION_MODEL_REFUSED,
+                "the subscription of this device does not allow the model of the turn",
+            )
         if not result.ok:
             reason = result.terminal_reason or result.subtype or "unknown"
             raise EngineError(

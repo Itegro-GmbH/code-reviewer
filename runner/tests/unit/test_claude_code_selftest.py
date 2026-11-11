@@ -451,7 +451,7 @@ def test_a_login_the_api_refuses_fails_the_turn_with_the_code_and_cleans_up(rig:
     checks = rig.run(with_turn=True)
 
     assert outcome(checks)[-1] == (CHECK_TURN, False)
-    assert ErrorCode.LLM_AUTH.value in checks[-1].detail
+    assert ErrorCode.SUBSCRIPTION_AUTH.value in checks[-1].detail
     no_token_anywhere(checks)
     assert rig.doors[0].stopped and rig.place.stopped and rig.place.removed
 

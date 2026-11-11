@@ -17,6 +17,14 @@ class WorkerExit(IntEnum):
     # The Worker could not start the job: its start document, its configuration, an app that cannot
     # serve it, or a job it could not fetch.
     SETUP_ERROR = 2
+    # #980: the job failed because the subscription of the device refused it. The result carries
+    # the code the app stores; the exit code carries the reason to the dispatcher of the device,
+    # which cannot read the result. A device's dispatcher withdraws the credential (the login was
+    # refused: 20), puts it aside (the usage limit: 21) or drops the model (22). Any other
+    # dispatcher reads them as a failed job.
+    SUBSCRIPTION_AUTH = 20
+    SUBSCRIPTION_LIMIT = 21
+    SUBSCRIPTION_MODEL_REFUSED = 22
 
 
 class WorkerFailure(StrEnum):

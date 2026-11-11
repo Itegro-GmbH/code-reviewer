@@ -7,7 +7,9 @@ configured, its credential renewed and its image updated there, never from the a
 """
 
 import argparse
+import getpass
 import json
+import time
 from collections.abc import Callable, Mapping
 from typing import Any, TextIO
 
@@ -46,6 +48,14 @@ from code_reviewer_runner.factory_runner.update import (
     release_of,
     rollback,
     stage,
+)
+from code_reviewer_runner.implementer.claude_code.credentials import (
+    DEFAULT_MODELS,
+    STATE_LIMITED,
+    STATE_REFUSED,
+    STORAGE_SYSTEMD,
+    CredentialError,
+    store_for,
 )
 from code_reviewer_runner.implementer.docker_api import DockerApi
 
@@ -86,10 +96,39 @@ def add_parsers(commands: "argparse._SubParsersAction[Any]") -> None:  # pyright
     for _key, option, help_text in SETTING_OPTIONS:
         change.add_argument(option, help=help_text)
 
-    credential = commands.add_parser("credential", help="the runner's credential")
+    credential = commands.add_parser(
+        "credential", help="the runner's credential, and the Claude Code credentials of this device"
+    )
     steps = credential.add_subparsers(dest="action", required=True, parser_class=type(credential))
-    steps.add_parser("show", help="whether there is one, and how old it is (never the value)")
-    steps.add_parser("renew", help="ask the app for a new credential and save it")
+    steps.add_parser(
+        "show", help="the runner's own credential: whether there is one, and how old it is"
+    )
+    steps.add_parser("renew", help="ask the app for a new runner credential and save it")
+    add = steps.add_parser(
+        "add",
+        help="add a Claude Code token (made with `claude setup-token`) to this device; the token "
+        "is read from the standard input, never from an argument",
+    )
+    add.add_argument("kind", choices=("claude",), help="what kind of credential")
+    add.add_argument("--name", required=True, help="a name for it, visible only on this device")
+    add.add_argument(
+        "--models",
+        help="the models its subscription allows, comma separated (default: sonnet,opus,haiku)",
+    )
+    add.add_argument(
+        "--replace", action="store_true", help="exchange the token of a name that exists"
+    )
+    steps.add_parser(
+        "list", help="the Claude Code credentials: name, created, models, state (never the value)"
+    )
+    remove = steps.add_parser("remove", help="remove a Claude Code credential")
+    remove.add_argument("name")
+    retry = steps.add_parser(
+        "retry",
+        help="let go of everything held against a Claude Code credential (rate limited, refused, "
+        "models set aside) and use it again now; the models you gave are never changed",
+    )
+    retry.add_argument("name")
 
     update = commands.add_parser("update", help="fetch and verify the newest runner image")
     update.add_argument(
@@ -256,4 +295,132 @@ def update_image(
         f"release {staged.release} is verified and staged ({staged.digest}); the service "
         "switches to it after the job it is running\n"
     )
+    return EXIT_OK
+
+
+# -- the Claude Code credentials of this device (#980) -------------------------------------------
+
+# What a pasted token may be at most: one line of a token, with room for the line's end.
+MAX_PASTED_BYTES = 8 * 1024
+DEFAULT_MODELS_TEXT = ", ".join(DEFAULT_MODELS)
+
+
+def _read_token(stdin: TextIO) -> str:
+    """The token from the standard input: a person at a terminal is asked without an echo, a pipe
+    or a file is read whole (up to `MAX_PASTED_BYTES`). Never from an argument."""
+    if stdin.isatty():
+        return getpass.getpass("Claude Code token (input is hidden): ")
+    return stdin.read(MAX_PASTED_BYTES + 1)
+
+
+def _how_stored(storage: str) -> str:
+    if storage == STORAGE_SYSTEMD:
+        return "sealed with systemd-creds"
+    return "kept as a plain file that only its owner can read (mode 0600)"
+
+
+def credential_add(
+    arguments: argparse.Namespace,
+    env: Mapping[str, str],
+    out: TextIO,
+    err: TextIO,
+    stdin: TextIO,
+) -> int:
+    store = store_for(env, home_directory(env))
+    models = (
+        [model.strip() for model in str(arguments.models).split(",") if model.strip()]
+        if arguments.models is not None
+        else None
+    )
+    try:
+        existed = any(record.name == arguments.name for record in store.records())
+        record = store.add(
+            arguments.name, _read_token(stdin), models=models, replace=arguments.replace
+        )
+    except CredentialError as error:
+        err.write(f"{PROGRAM}: credential: {error}\n")
+        return EXIT_FAILED
+    verb = "replaced" if existed else "added"
+    out.write(
+        f"{verb} credential {record.name} (models: {', '.join(record.models)}); "
+        f"the token is {_how_stored(record.storage)}\n"
+    )
+    out.write(
+        "a running service reads its credentials before each claim: no restart is needed, even "
+        "when it started before the first credential; it offers Claude Code to the app (the "
+        "layer with Claude Code is built when the service starts) as soon as one can be used\n"
+    )
+    return EXIT_OK
+
+
+def credential_list(env: Mapping[str, str], out: TextIO, now: Callable[[], float]) -> int:
+    try:
+        records = store_for(env, home_directory(env)).records()
+    except CredentialError as error:
+        out.write(f"credentials: {error}\n")
+        return EXIT_FAILED
+    if not records:
+        out.write(
+            "no Claude Code credential in the store of this device "
+            f"(factory-runner credential add claude --name NAME; models default to "
+            f"{DEFAULT_MODELS_TEXT})\n"
+        )
+        return EXIT_OK
+    current = now()
+    rows = [("NAME", "CREATED", "MODELS", "STATE", "STORAGE")]
+    for record in records:
+        state = record.state(current)
+        if state == STATE_LIMITED:
+            state += " until " + _clock_time(record.limited_until)
+        elif state == STATE_REFUSED:
+            state += " until " + _clock_time(record.refused_until)
+        created = time.strftime("%Y-%m-%d", time.gmtime(record.created))
+        rows.append((record.name, created, ",".join(record.models), state, record.storage))
+    widths = [max(len(row[column]) for row in rows) for column in range(5)]
+    for row in rows:
+        out.write(
+            "  ".join(cell.ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip()
+            + "\n"
+        )
+    for record in records:
+        if record.refused_until > current:
+            out.write(
+                f"{record.name} was reported as refused by Anthropic (a 401). It is tried again "
+                f"after that time: for good, make a new token with `claude setup-token` and run "
+                f"`factory-runner credential add claude --name {record.name} --replace`; to try "
+                f"it now, `factory-runner credential retry {record.name}`\n"
+            )
+        for model, until in record.models_aside:
+            if until > current:
+                out.write(
+                    f"{record.name}: model {model} is set aside until {_clock_time(until)} "
+                    f"(a job on it was reported refused); `factory-runner credential retry "
+                    f"{record.name}` lets it go now\n"
+                )
+    return EXIT_OK
+
+
+def _clock_time(moment: float) -> str:
+    """`moment` in the device's own time, with its date: hints last hours, and a bare HH:MM would
+    not say which day."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(moment))
+
+
+def credential_remove(name: str, env: Mapping[str, str], out: TextIO, err: TextIO) -> int:
+    try:
+        store_for(env, home_directory(env)).remove(name)
+    except CredentialError as error:
+        err.write(f"{PROGRAM}: credential: {error}\n")
+        return EXIT_FAILED
+    out.write(f"removed credential {name}\n")
+    return EXIT_OK
+
+
+def credential_retry(name: str, env: Mapping[str, str], out: TextIO, err: TextIO) -> int:
+    try:
+        store_for(env, home_directory(env)).clear_hints(name)
+    except CredentialError as error:
+        err.write(f"{PROGRAM}: credential: {error}\n")
+        return EXIT_FAILED
+    out.write(f"credential {name} is usable again (nothing is held against it any more)\n")
     return EXIT_OK

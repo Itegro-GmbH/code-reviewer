@@ -108,6 +108,13 @@ null), the **auth** (a harness that runs on a login, `claude-code`, asks for `su
 for `app-key`) and, for a subscription, the **model** the turn was started with. A dispatcher takes the job when an entry has the harness, the auth and, when the turn names a model, a model
 the entry allows (an entry without `models` allows any). A job with no turn (a review) asks for no harness here.
 
+**Aliases and ids (#980).** A runner announces the models of its subscription as its owner gave them when adding the credential (`sonnet`, `opus`, `haiku` by default, or ids such as
+`claude-opus-5-5`), and a turn carries the model its profile names, an alias or an id. They match when they are equal, or when one is an alias and the other an id it stands for
+(`claude-opus-5-5` is `opus`; `claude-opus-5-4` is not `claude-opus-5-5`; `sonnet[1m]` is nobody's alias). The map is the contract `contracts/claude-model-aliases.v1.json`, which holds the
+patterns and the test vectors; the app keeps a typed copy (`app/src/runner-identity/model-aliases.ts`; `accessRule` writes the same rule for the database from those patterns), the runner another
+(`implementer/claude_code/model_names.py`, used to pick the credential that allows a job's model), and a test on each side compares its copy with the file and runs the vectors (the
+database runs them in `access.integration.test.ts`). The alternative, announcing ids, would have meant a list that changes with every release of a model; the alias is what a person types.
+
 There is **one rule**: `accessRule` (`app/src/runner-identity/access.ts`) is the SQL condition both the claim (`jobs-claim.ts`) and the pairing of the rings
 (`runner-dispatches-repository.ts`) use, and `accessMatches` is the same rule in memory, for the validator; `access.integration.test.ts` runs every manifest against every turn through both
 and demands the same answer.
@@ -526,9 +533,12 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
    of the workspace, no lease token. The dispatcher never holds any of them; an answer that carries a job input is refused and never read further.
 5. **Start the Worker** (`sandbox.py`) with `{appUrl, jobId, credential}` on its standard input. Today the Worker is a process of this container, started with an environment of its own (the plain
    variables and the ones that say how its containers are made, never the runner's credential): `python -m code_reviewer_runner.factory_runner.local_worker`. The sandbox is a seam: the Firecracker
-   launcher (#978) will start the same Worker in a VM. **The one credential of this device a job needs** (a Claude Code subscription, when `access.auth` is `subscription`; `local-key` follows
-   with #980) is read by the dispatcher from the token file of R3 (`FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else `claude-code-token` in the runner's home, else `CLAUDE_CODE_OAUTH_TOKEN`) and handed
-   over in the same start document (`localEnvironment`), never through the app and never to a Worker whose job does not ask for it. The Worker puts it into the environment of the job process
+   launcher (#978) will start the same Worker in a VM. **The one credential of this device a job needs** (a Claude Code subscription, when `access.auth` is `subscription`; `local-key` is not built) is **chosen
+   for this job** by the dispatcher among the credentials of the device ("Claude Code with your subscription" below: not rate limited, not refused, a list of models that allows the job's model) and handed
+   over in the same start document as `localCredential: {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": ...}` (#980: **one shape** for a Worker that is a process, as here, and for Control in a VM, where
+   vm-init writes the same object to Control's standard input; **one allow-list of names**, `LOCAL_CREDENTIAL_NAMES` in `job_loop/local_credential.py`, which the host checks before the start and the
+   Worker checks again before it puts a value anywhere, so a name such as `PATH` or `LD_PRELOAD` is refused with an input error that names the field and never the value). It never goes through the app
+   and never to a Worker whose job does not ask for it, and only that one credential goes: a Worker never sees the others. The Worker puts it into the environment of the job process
    and into its masker; it is not in an argument or in the Worker's own environment. The Worker is the hosted one: it fetches the job over the Worker API with its credential (`GET /api/workers/v1/jobs/{id}`:
    the git token and the key of the workspace are made here and reach only the Worker), runs it through the job host (the job process gets the job on its stdin and a minimal environment, never a
    credential), keeps the heartbeat, sends the steps and the snapshot and delivers the result. The disk budget (below) ends a job from inside the Worker, as it did when the loop ran the job.
@@ -537,6 +547,27 @@ older credential exists. A renewal whose file cannot be written is dropped: the 
    `POST /api/runners/v1/jobs/{id}/release` with the credential of the job in the body and its own credential in `Authorization`. The app answers `ended` for a job that already has its result (nothing
    changes) and counts a lost attempt otherwise. **The local reaper:** while a Worker runs, the dispatcher asks the app every minute for the job's state (`GET /api/runners/v1/jobs/{id}` with the runner's
    credential, for a job of its own workspace; `404` for any other) and ends a Worker that is still there 45 s after the job stopped being `running` (a hung Worker no heartbeat reaches).
+   **What the end of the job says about the credential (#980).** A job that the subscription refused ends with a stable code in the app (`subscription_auth`: the token was refused, a 401;
+   `subscription_limit`: the usage limit; `subscription_model_refused`: the subscription does not allow the model; all three **free**, with a sentence of their own in the app) and, for the dispatcher,
+   with an exit code of the Worker that says the same (`WorkerExit` 20, 21, 22: the dispatcher cannot read the result, and the exit code is what reaches it through a process and through a VM alike).
+   **All three are hints that expire, never verdicts.** The exit code is derived from the job's `result` event on Claude Code's standard output, and the agent inside the job's sandbox can forge it: it runs as the
+   same user (`agent`, uid 10201) as Claude Code and so, as far as we can tell (not tried), can open `/proc/<pid>/fd/1` of Claude Code and write a `result` line into the pipe, or ptrace it (what the host's kernel allows).
+   So a forged "401" must not withdraw the device for good. On 21 the
+   credential is put aside for **one hour** (`LIMIT_COOLDOWN_SECONDS`), on 20 for **six hours** (`AUTH_COOLDOWN_SECONDS`), and on 22 **that one model** leaves the credential's offer for **six hours**
+   (`MODEL_COOLDOWN_SECONDS`); then they are tried again, and a credential that is really expired or limited simply fails the next job once more. `FACTORY_RUNNER_CREDENTIAL_LIMIT_COOLDOWN_SECONDS`,
+   `..._AUTH_COOLDOWN_SECONDS` and `..._MODEL_COOLDOWN_SECONDS` change them (a positive number of seconds; a bad value keeps the default and is said in the log). `factory-runner credential retry NAME` ends all
+   three at once. The list of models you gave is **never shrunk** by a refusal: only an entry equal to the refused id is left out for its time; an alias such as `opus` is not left out by one refusal (other
+   `opus` ids may be allowed) and only once two different ids it covers are set aside at the same time. The impact of a forgery is limited to **your own credentials on your own device, for hours**; nothing is
+   lost and nothing leaves the device. The state is kept in the credential store, so a restart remembers it.
+   **A job that hits the limit fails (free); it does not move to another credential in the middle of its run.** A turn is Claude Code's session on one login: the next job gets another credential, this one ends
+   `subscription_limit` and may be run again (the app's retry), then on a credential that is not limited.
+   **The entry in the manifest follows (#980).** Before each claim the dispatcher compares what it would announce with what it announced, and announces again (`PUT /self`) when the entry of Claude Code changed:
+   its `models` are those of the credentials that can be used now, and **the entry is left out while none can** (all rate limited, all refused, none with a model, **or none whose secret can be read**: a file
+   that others can read, a failed `systemd-creds` decrypt), so the app stops offering it jobs; it comes back, with the models, as soon as one credential is usable again (a hint ran out, a credential was
+   added or replaced). The readiness of the start looks at the **layer alone**: a service that started before the first `credential add` offers Claude Code as soon as the credential is there, with no restart.
+   A claim that still returns a job that no credential can serve (the app picked it before the new announcement) is given back unstarted (`launch_failed`) **and backs the next claim off** like a Worker that cannot
+   start (10 s, doubled to five minutes; the app counts an attempt for every release, so a store that cannot serve must not spend one of every queued job); no Worker is started for a job it could only fail. Nothing but the harness, `auth: subscription` and
+   the models goes to the app: not a name, not a count, not a reason. A device without Claude Code (no layer) announces once, as before.
 6. What a claim's failure means: `401` the runner is **revoked**, stop for good (exit 4); `426` **update needed**, say so, wait five
    minutes (`--once`: exit 3); the app unreachable, wait 5 s, 10 s, ... up to five minutes.
 
@@ -866,16 +897,70 @@ parts are in "Claude Code, R3" below.
 - **At code-review.com:** the job (which repository and branch, the instruction, the profile), the live view of the steps, the result, the usage
   numbers and the cost estimate. The app learns that your runner has Claude Code ready (a word in the runner's manifest); it never learns the
   login.
-- **Your login** is a token you make with `claude setup-token` and keep on the device: in a file `claude-code-token` in the runner's home
-  (`$FACTORY_RUNNER_HOME`), or the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, or in `CLAUDE_CODE_OAUTH_TOKEN` of the runner's
-  environment. **Only the dispatcher reads these places**, once per job that asks for the login; the Worker and the job process never get
-  `FACTORY_RUNNER_HOME` or the file's name (their environment is made by `prepare.job_environment`, a test holds it), so there is no
-  second token file to take precedence: the one credential travels on the Worker's standard input (`localEnvironment`; with a VM,
-  `localCredential` of the start), and the Worker takes **only** `CLAUDE_CODE_OAUTH_TOKEN` from it. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
+- **Your login** is a token you make with `claude setup-token` and keep on the device, in the **credential store** of the runner (below). Older ways
+  still work **only while the store is empty** (one source for the self-test, the readiness and the jobs: once the store holds a credential the others are not read): a file `claude-code-token` in the runner's home (`$FACTORY_RUNNER_HOME`), or the file named by
+  `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, or `CLAUDE_CODE_OAUTH_TOKEN` in the runner's environment. **Only the dispatcher reads these places**, once per job
+  that asks for the login; the Worker and the job process never get `FACTORY_RUNNER_HOME` or the file's name (their environment is made by
+  `prepare.job_environment`, a test holds it), so there is no second token file to take precedence: the one credential travels on the Worker's standard input
+  (`localCredential`, the same shape in a process and in a VM), and the Worker takes **only** `CLAUDE_CODE_OAUTH_TOKEN` from it. A file must be a plain file (no link) that only its owner can read (mode 0600). The token **is never stored in our app or
   database, never sent to the app and never written to a log** (the runner's log masks it). It is handed to Claude Code's process in the job's
   container for the length of the job, and to nothing else.
-- Set it up, then look: `factory-runner selftest` shows the login, the layer and the version without calling a model;
+- Add it, then look: `factory-runner selftest` shows the login, the layer and the version without calling a model;
   `factory-runner selftest --with-claude-code` runs one tiny real turn on your subscription (a few cents) so that you know the login works.
+
+### Credentials (#980)
+
+Make a token on any machine where you are signed in to Claude, with `claude setup-token`, and give it to the runner **from the standard input** (there is no option that takes it as an argument, so it is
+in no process list and no shell history):
+
+```sh
+claude setup-token                                            # prints the token once; copy it
+factory-runner credential add claude --name work              # paste it, then Enter (the input is hidden at a terminal)
+factory-runner credential add claude --name spare --models opus,sonnet < token-file    # or from a file or a pipe
+factory-runner credential list
+factory-runner credential remove spare
+factory-runner credential add claude --name work --replace    # exchange the token of a name (after a 401, or a new one); the models stay as you gave them
+factory-runner credential retry work                          # let go of everything held against it (limited, refused, models set aside) and use it now
+```
+
+| What | How it is |
+|---|---|
+| Name | Only on this device (log, `credential list`). Never in the app, never in an announcement. |
+| Models | The models its subscription allows, given with `--models` when you add it (`sonnet`, `opus`, `haiku` by default; ids such as `claude-opus-5-5` too). An alias covers the ids it stands for. Announced to the app so that a job asks only for what you can run. |
+| Several | Add as many as you have. A job gets **one**, the one that is not rate limited, not refused and allows the job's model, the one unused longest first; the others never leave the store. |
+| Where | `<runner home>/credentials/` (mode 0700): `index.json` (names, creation time, the models as you gave them, the hints; **no value**) and one `<name>.secret` file each (mode 0600, owned by the service user; a file that others can read, or a link, is refused). A reader takes a shared lock on `.lock` (a link in its place is refused) so that a `credential add --replace` in the middle of a read is seen whole. |
+| At rest | **Sealed with `systemd-creds`** (`systemd-creds --user encrypt`, the token on its standard input, bound to its name) **when that works for this user**; otherwise the token is a **plain file that only its owner can read**, like an SSH key, and `credential list` says `plain`. `FACTORY_RUNNER_CREDENTIAL_STORAGE` is `auto` (the default: seal when possible), `systemd-creds` (refuse to fall back to a plain file) or `plain` (never ask `systemd-creds`). The key of the user's own `systemd-creds` is systemd 256 and later; on an older systemd (Ubuntu 24.04 ships 255) every credential is a plain file today. **What the seal is, and is not:** it protects the file **at rest** (a copied disk, a backup, a stray read of the file by another account). The dispatcher decrypts without a passphrase, so **any code that runs as the service user can decrypt it too**; it is not a defence against that user, and the sealed path has **never been run against a real systemd 256 or later** (only against a fake: follow-up #997). |
+| Never | Sent to the app, written to a log (the dispatcher's masker knows it from the moment it is chosen), put in an argument, or copied from `~/.claude/.credentials.json`: that file refreshes itself against Anthropic's endpoint, and the host and a VM would invalidate each other's copy. |
+
+**What the dispatcher does with them** (it reads the store before every claim, so adding, replacing or removing needs no restart):
+
+- **The app learns only the entry**: `claude-code`, `auth: subscription`, the models of the credentials that can be used now. Never a name.
+- **What a job's end says is a hint that expires** (below, why): none of the three is held for good, `credential retry NAME` lets go of all of them, and your list of models is never changed by them.
+- **Rate limited** (the subscription's usage limit ended a job): that credential is put aside for **one hour** and tried again after it; the job that met the limit ends `subscription_limit` (**it fails, free; it
+  does not move to another credential in the middle of its run**). With another credential the next job simply gets that one. **When every credential is rate limited the entry is withdrawn from the manifest**,
+  so the app stops offering the device Claude Code jobs, and **it comes back by itself** when one credential is usable again. `credential list` shows `rate limited until <date> HH:MM`.
+- **Refused** (a 401: the token expired or was revoked): the job ends `subscription_auth`, that credential is put aside for **six hours** and then tried again (a token that is really dead fails one more job and
+  is put aside again). To end it for good, replace the token (`credential add claude --name NAME --replace`: the hints are forgotten and the models stay as you gave them); to try it now,
+  `credential retry NAME`. The entry is withdrawn while no other credential is usable.
+- **A model the subscription does not allow**: the job ends `subscription_model_refused` and **that model id** is left out of the credential's offer and of the announcement for **six hours**, then comes back.
+  The list you gave stays as it is: an entry is left out only when it equals the refused id; an alias such as `opus` is not left out by one refusal of `claude-opus-5-5` (other ids of the family may be allowed),
+  but is once two different ids it covers are refused at the same time. The listing says which models are set aside and until when. A job for a set-aside id that still reaches the device is given back
+  unstarted (and backs the claims off, above). *How Claude Code reports it has not been measured against the real program* (the status 404 and the sentence "issue with the selected model" in Claude Code's own
+  `errors` are what is read; a different answer ends the job as an engine failure and nothing is set aside; follow-up #996).
+- All three are **free** for you: nothing of ours was used and nothing is billed for a subscription.
+- **Why hints and not verdicts.** The verdict reaches the dispatcher as the Worker's exit code, which comes from the `result` event on Claude Code's standard output. The agent's commands run as the same user
+  as Claude Code inside the container, so they can, as far as we can tell (not tried), write a `result` line into its pipe or ptrace it: **the verdict can be forged from inside the sandbox.** Nothing cheap prevents it. What holds: the forged
+  exit code can only be 20, 21 or 22 (the Worker maps nothing else), it never carries a value, and the dispatcher's reaction is bounded as above. What does not hold: a different user for the tool processes
+  than for Claude Code (the tools are Claude Code's children), `no-new-privileges` (it does not stop a same-user ptrace) and a read-only `/proc` (the same user still opens its own process' descriptors). So the damage a
+  forgery does is to put **your own** credential aside for hours; it cannot reach another credential, the app or another user.
+- **The agent still gets the token in its environment**, as in R3 (Claude Code needs it there, and its tool processes inherit it and can read `/proc/<pid>/environ`). What limits what it can do with it is the
+  outer wall (#979: the sandbox's one connection goes through the host proxy); until that wall is in, a job on this device can send the token anywhere the sandbox can reach. The token is an inference-only token
+  of your own subscription (`claude setup-token`), not a login with account rights.
+
+**Running `claude setup-token` in a throwaway sandbox** (so that the host needs no Claude installation; follow-up #995) is **not built here, on purpose**: the command is interactive (it prints an address, you sign in with
+Anthropic in a browser and paste a code back), and the VM of #978 has no interactive channel (vm-init takes one start and reports one end over vsock; there is no terminal and no way to type the code into
+it) and no outer wall yet (#979) to give it the one connection it would need. Doing it properly means a new request type of vm-init (a pseudo-terminal over vsock) and a wide-for-the-sign-in rule of the
+proxy; that is a follow-up of #979 and #978. Until then: run `claude setup-token` anywhere you are signed in (your laptop is fine) and paste the token into `credential add`.
 
 ### What the guards do, and what they do not
 
@@ -897,7 +982,7 @@ let an agent act on, and a revoked or rotated token (`claude setup-token` again)
 Claude Code reports a price at API list prices for each turn. The app shows it as **"≈ $0.42 through a subscription"** (or "no estimate,
 through a subscription" when Claude Code could not price every model): an estimate, **never billed by us, never added to a total** of
 the usage. A workflow's budget counts the estimate (so a run can still stop at its limit). What the subscription itself costs, and its usage
-limits, are between you and Anthropic: when the subscription's limit is reached the job ends with `llm_quota`. The minutes of a run on your
+limits, are between you and Anthropic: when the subscription's limit is reached the job ends with `subscription_limit` and the dispatcher puts that credential aside (see "Credentials"). The minutes of a run on your
 runner are counted as for any other run today; whether runs on your own subscription and device should be free of them is not decided,
 and this page will say when it is.
 
@@ -908,7 +993,11 @@ Service** (for Free, Pro and Max accounts, https://www.anthropic.com/legal/consu
 Enterprise and API use, https://www.anthropic.com/legal/commercial-terms), the **Usage Policy** (https://www.anthropic.com/legal/aup) and
 Claude Code's own "Legal and compliance" page in Anthropic's documentation. They decide, among other things, what you may do with a
 subscription token and how automated use is counted. **We do not claim that Anthropic has approved unattended or automated runs on a
-subscription**; that question is open with Anthropic, and until it is answered you use your subscription this way on your own responsibility.
+subscription** (plan question S3, "ordinary use": a runner that takes jobs by itself, day and night, is unattended use); that question is open with Anthropic, and until it is answered you
+use your subscription this way on your own responsibility. What the design does hold to: the token lives only on your device (sealed with `systemd-creds` where possible), is made by Anthropic's own
+`claude setup-token` flow, is never collected, stored or passed on by our app or its database (the terms forbid developers to "collect, store, or intermediate Claude.ai credentials or session
+tokens"; that is why subscriptions are only for a runner on your own machine and never for the hosted dispatcher), and several credentials are for the **same person's** subscriptions, spread
+so that one does not hit its limit first: sharing one login among people, or reselling one, is against the terms and is not what this is for.
 Use of your own credentials on your own device is the design (we never hold or resell a login), but it does not replace reading the terms.
 
 ## Claude Code, R3 (#856)
@@ -942,11 +1031,11 @@ The code is [`runner/src/code_reviewer_runner/implementer/claude_code/`](../runn
 | ---- | ---- | ------------ |
 | Events | `events.py` | `LineSplitter` (whole JSON lines out of chunks, bounded), `ClaudeEvents` (each `stream-json` event becomes the engine-shaped event the unchanged `StepConverter` reads, so the bounds, the redaction and "a tool's output is never recorded" stay where they are: a failing tool is recorded as the word `failed`, only the finish tool's refusal keeps its text; a finished tool, message and block is forgotten), `parse_result` (the `result` event: how the turn ended, the text, the session, the estimate: only a finite, non-negative, list-priced figure, otherwise unknown). Failures are told from structured fields only (`errors`, `subtype`, the `error` of the assistant message, `api_error_status`), never from the text of a result. |
 | Command | `command.py` | `claude -p --output-format stream-json --verbose --include-partial-messages --permission-mode bypassPermissions --setting-sources user --strict-mcp-config [--model m] (--session-id id \| --resume id) [--max-budget-usd n] [--append-system-prompt text] [--mcp-config json]`. The prompt is the standard input, the login is in the environment, never in the argument list. `--setting-sources user` and `--strict-mcp-config` keep the repository's settings (hooks, permissions) and `.mcp.json` out: what the repository holds is data. `ENABLE_TOOL_SEARCH=false` puts the finish tool's schema in the first request; telemetry, updates and error reports are off. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is **not** set: it exists in 2.1.311 but forces the permission mode to `default` and wants bubblewrap (see "What is left", 7). |
-| Login | `login.py` | The token from `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else `claude-code-token` in the runner's home, else `CLAUDE_CODE_OAUTH_TOKEN` in the runner's environment. A file must be a plain file, not a link, readable only by its owner (0600), one token on one line. A problem is described in words, never with the value. |
+| Login | `login.py` | The first usable credential of the store (`credentials.py`, #980) as soon as the store holds one, and then no other source; while it is empty: the token from `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else `claude-code-token` in the runner's home, else `CLAUDE_CODE_OAUTH_TOKEN` in the runner's environment. A file must be a plain file, not a link, readable only by its owner (0600), one token on one line. A problem is described in words, never with the value. |
 | Layer | `layer.py` | The install layer, **built on the device** on top of the agent image through the Engine API (`DockerApi.build_image`) and cached under `code-reviewer-agent-claude-code:<version>-sha512-<digest prefix>-<base id>` (verified) or `...:<version>-unverified-<base id>`; the tag **and** the labels (`com.code-reviewer.claude-code`, `.integrity`) say which, and `find_layer` compares both, so an unverified layer is never taken for the pinned one. The pinned version (2.1.311, the npm `stable` of the R0 spike): its **npm package, which is only a stub**, and the **platform package that holds the program** (`@anthropic-ai/claude-code-linux-x64` or `-arm64`, the glibc builds; the agent image is Debian) are each fetched as a tarball by `npm pack` and **accepted only with their own pinned SHA-512** (`CLAUDE_CODE_INTEGRITY`, `PLATFORM_INTEGRITY`), checked with `sha512sum -c` under `set -e` so a changed digest fails the build; then both are installed from the two files with `npm install --offline`, so npm resolves nothing from the registry on its own. The architecture is the one of the daemon's machine (`uname -m`); a machine of another architecture or libc has no pinned program and cannot build the pinned layer. The layer's labels carry a fingerprint of the platform digests (`com.code-reviewer.claude-code.platform`) and the tag a short form of it, so a layer built when only the stub was pinned is not taken for the pinned one and is built again. The program must report the version, and the user `agent` is made. The device may choose another exact version (`FACTORY_RUNNER_CLAUDE_CODE_VERSION`; no digest to compare then, for neither package; the pinned version named there keeps its digest checks). We never publish or ship Claude Code. |
 | Agent | `agent.py` | `ClaudeCodeAgent`: the surface of `ImplementerAgent` (`start`, `turn`, `stop`, `steps`, `session_id`, `resume`, `step_notes`) for a process-per-message engine. A turn is `claude -p` as an exec in the agent's container (`AgentContainer.run_streaming`), the lines go to the step feeder as they come, the end is the `result` event. A second message is `--resume <id>` in the same container. An empty session volume ("No conversation found", said in `errors`, with no model call) starts a fresh session under the same id and reports `summary_only`. Failures: budget exhausted = `cost_limit_reached`, no login or an expired or revoked token (the `authentication_failed` error, status 401) = `llm_auth`, the subscription's usage limit (`rate_limit`, `billing_error`, status 429 or 402) = `llm_quota`, no result = `implementer_engine_unavailable` with the exit code. |
 | Finish tool | `agent.py`, `result_channel.py` | The same stdio shim as OpenCode's (`factory-submit mcp`), written into the container with the schema, named to Claude Code as the MCP server `finish` (tool `mcp__finish__submit_result`). The server validates; Claude Code does not. |
-| Manifest | `readiness.py`, `factory_runner/prepare.py` | `claude-code` is announced, with `auth: subscription`, when the device has a login for it and the token is usable and the layer is on the daemon (a start builds a missing one, the `selftest` command only looks); when not it is left out of the announcement, with a note in the log (#973: an entry exists only while it can run). A device with no login says nothing. It is added beside OpenCode (`auth: app-key`), never instead, and only on a machine whose base holds. |
+| Manifest | `readiness.py`, `factory_runner/prepare.py` | `claude-code` is announced, with `auth: subscription`, when the layer is on the daemon (a start builds a missing one, the `selftest` command only looks) **and** the dispatcher's pool finds a credential that can be used (#980: readiness is decided from the layer alone, the pool decides the entry before every claim, so a credential added after the start is offered with no restart); when not it is left out of the announcement, with a note in the log (#973: an entry exists only while it can run). A device with no credential yet is ready by its layer, builds it at its start and says in its log that it has no login. It is added beside OpenCode (`auth: app-key`), never instead, and only on a machine whose base holds. |
 
 ### Verified
 
@@ -1032,7 +1121,7 @@ copies its labels only); the combination can only come from a hand-made job.
 3. **The self-test for Claude Code** (done in the fourth slice, "Claude Code in the self-test" above: readiness by default, one real tiny
    turn only with `--with-claude-code`). Left: a canned Anthropic provider inside the container, so that "ready" could mean "ran a turn" without
    the user's login and without a cent, and a lane test that builds the layer and runs a turn as the user `agent` behind the door.
-4. **Docs for customers, including Anthropic's terms** (done: "Claude Code with your subscription" above). **Open with the owner**: plan S3, the
+4. **Docs for customers, including Anthropic's terms** (done: "Claude Code with your subscription" above; credentials in #980). **Open with the owner**: plan S3, the
    written question to Anthropic whether unattended runs with a subscription token are allowed; the docs say plainly that we do not claim they are.
 5. **The login is in the environment of the agent's tools** (decided for now: accept it and guard the exits, above). Claude Code needs it
    there, and a command the agent runs (`env`) can print it; the output is not recorded in the step records, but it is in the agent's own
@@ -1950,7 +2039,9 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
    URL against the contract's patterns, no credential in an argument): a job the VM would refuse costs no slot, no disk copy and no VMM.
    The start of `contracts/vm-init.v1.json`: `{appUrl, jobId, credential}`, the token, the image check (`code-reviewer-worker:golden`
    and the id from the verified manifest, `FACTORY_RUNNER_VM_IMAGE_ID`), Control's `docker run` and the work volume, and for a job that
-   asks for it the one local credential (`localCredential`: **only `CLAUDE_CODE_OAUTH_TOKEN`**). The host waits for vm-init's `ack`
+   asks for it the one local credential (`localCredential`: **only `CLAUDE_CODE_OAUTH_TOKEN`**, the allow-list `LOCAL_CREDENTIAL_NAMES` that the Worker's own check in Control shares, #980: vm-init
+   checks the shape of the object and not the name, so Control is the one that refuses a name it does not know before it puts the value into an environment; the host's per-VM `controlToken`
+   in the same document is for the environment control and is never given to the agent). The host waits for vm-init's `ack`
    (up to 120 s: the daemon's start comes before it). A refused or unanswered start, a VMM that ends first or a report before the `ack`
    fails the start: the claim is given back (`launch_failed`) and nothing is left.
 

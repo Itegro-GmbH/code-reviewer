@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""#856: when a runner announces Claude Code (decision 4 of the plan): only when the device has a
-login for it and the layer with the pinned version is there (built on a start, only looked for in
-the self-test command), and never as a reason for the base to fail."""
+"""#856: when a runner announces Claude Code (decision 4 of the plan): when the layer with the
+pinned version is there (built on a start, only looked for in the self-test command), and never as
+a reason for the base to fail. Which credential serves, and whether there is one at all, is the
+dispatcher's pool's to say before every claim (#980), so a login added after the start needs no
+restart."""
 
 from pathlib import Path
 from typing import Any
@@ -66,12 +68,28 @@ def status(daemon: Daemon, environment: dict[str, str], tmp_path: Path, *, build
     return claude_code_status(daemon, environment, tmp_path, build=build)
 
 
-# #856-T26
-def test_a_device_with_no_login_for_claude_code_does_not_announce_it(tmp_path: Path) -> None:
+# #856-T26, #980-FIX4
+def test_a_device_with_no_login_yet_is_ready_by_its_layer_alone_and_says_so(
+    tmp_path: Path,
+) -> None:
     daemon = Daemon()
 
-    assert status(daemon, {}, tmp_path) is None
-    assert daemon.built == 0, "nothing is built for a device that will not use it"
+    found = status(daemon, {}, tmp_path)
+
+    assert found is not None and found.ready and daemon.built == 1
+    assert any("credential" in note for note in found.notes)
+    # The dispatcher's pool decides the entry from the credentials it finds later (#980): a
+    # credential added after the start is offered without a restart.
+
+
+# #980-FIX4
+def test_the_readiness_of_a_device_does_not_depend_on_the_login(tmp_path: Path) -> None:
+    unusable = token_in(tmp_path, mode=0o644)
+
+    found = status(Daemon(layer=True), unusable, tmp_path)
+
+    assert found is not None and found.ready
+    assert any("can be read by others" in note for note in found.notes)
 
 
 # #856-T26
@@ -140,13 +158,13 @@ def test_a_build_that_fails_is_not_ready_with_the_reason_and_never_raises(tmp_pa
     assert any("npm could not be reached" in note for note in found.notes)
 
 
-# #856-T28
-def test_a_login_that_cannot_be_used_is_not_ready_and_the_note_never_holds_the_token(
+# #856-T28, #980-FIX4
+def test_a_login_that_cannot_be_used_is_a_note_and_the_note_never_holds_the_token(
     tmp_path: Path,
 ) -> None:
     found = status(Daemon(layer=True), token_in(tmp_path, mode=0o644), tmp_path)
 
-    assert found is not None and not found.ready
+    assert found is not None
     assert not any(TOKEN in note for note in found.notes)
     assert any("0600" in note for note in found.notes)
 

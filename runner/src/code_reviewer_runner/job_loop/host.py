@@ -372,6 +372,9 @@ class JobHost:
         self._log = SafeLog(logger or logging.getLogger("code_reviewer_runner.loop"), masker)
         self._environment = dict(environment or {})
         self._hard_stop = asyncio.Event()
+        # The error code of the last result this host reported (None: none, or a success): the
+        # Worker maps the codes of a refused subscription to an exit code of their own (#980).
+        self.last_error_code: str | None = None
         # Ends everything the engine user runs (uid, gid); it is only called once no Dynamic job
         # process runs, under the lock that also guards the start of one.
         self._sweeper = sweeper
@@ -949,6 +952,8 @@ class JobHost:
     ) -> Delivery:
         """Deliver the result. The heart keeps beating until the app has it (or we give up): a
         lease that lapses meanwhile would let another runner take the job a second time."""
+        code = result.get("errorCode")
+        self.last_error_code = code if isinstance(code, str) else None
         lost = asyncio.Event()
         beating = asyncio.ensure_future(self._heartbeats(claimed, lost))
         try:

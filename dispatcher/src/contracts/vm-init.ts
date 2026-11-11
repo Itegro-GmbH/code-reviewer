@@ -40,7 +40,7 @@ export type ReportRetrySeconds = 0.5;
  */
 export type ControlToken = string;
 /**
- * Why the VM ends: `worker_exited` (Control's container ran and ended; `exitCode` is its status: 0 ok, 1 the job failed, 2 setup error, 137 killed, anything else it was given), `docker_failed` (`docker run` itself failed: the status was 125, 126 or 127, so the container was not started or its command was not found), `prepare_failed` (a step of the VM's preparation or of the work volume failed, `exitCode` 2), `image_missing` and `image_mismatch` (the image check of `ImageCheck` failed, `exitCode` 2), `start_invalid` (the start was refused, `exitCode` 2), `start_timeout` (no start in time, `exitCode` 2).
+ * Why the VM ends: `worker_exited` (Control's container ran and ended; `exitCode` is its status: 0 ok, 1 the job failed, 2 setup error, 20, 21 and 22 the job failed because the subscription of the device refused it (#980: the login, the usage limit, the model; the result delivered to the app carries `subscription_auth`, `subscription_limit` or `subscription_model_refused`), 137 killed, anything else it was given), `docker_failed` (`docker run` itself failed: the status was 125, 126 or 127, so the container was not started or its command was not found), `prepare_failed` (a step of the VM's preparation or of the work volume failed, `exitCode` 2), `image_missing` and `image_mismatch` (the image check of `ImageCheck` failed, `exitCode` 2), `start_invalid` (the start was refused, `exitCode` 2), `start_timeout` (no start in time, `exitCode` 2).
  */
 export type ExitReason =
   | "worker_exited"
@@ -101,7 +101,7 @@ export interface StartRequest {
   workVolume: WorkVolume;
 }
 /**
- * The one credential that exists only on the dispatcher's device and that this job needs (`local-key`, `subscription`: for example `CLAUDE_CODE_OAUTH_TOKEN`, #980; ADR 0005, decision 4). vm-init writes it to Control's stdin as the `localCredential` key of the job document and nowhere else: not an argument, not a file, not a log. What Control does with it is #980's.
+ * The one credential that exists only on the dispatcher's device and that this job needs (`local-key`, `subscription`: for example `CLAUDE_CODE_OAUTH_TOKEN`, #980; ADR 0005, decision 4). vm-init writes it to Control's stdin as the `localCredential` key of the job document and nowhere else: not an argument, not a file, not a log. vm-init checks the shape; Control (the Worker image's `code-reviewer-worker`) checks the name against its own allow-list (today only `CLAUDE_CODE_OAUTH_TOKEN`) and refuses every other one before it puts the value into any environment (#980). The Worker of a dispatcher's own process reads the same `localCredential` object from its start document.
  */
 export interface LocalCredential {
   /**

@@ -378,7 +378,7 @@ class FirecrackerSandbox:
                 timeout_seconds=settings.job_timeout_seconds,
                 vcpus=settings.vcpus,
                 reserve_gib=settings.reserve_gib,
-                local=start.local_environment,
+                local=start.local_credential,
             )
             # What vm-init would check, checked here first (it names a field, never a value).
             parse_start(document)

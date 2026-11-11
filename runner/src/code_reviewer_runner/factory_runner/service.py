@@ -49,10 +49,11 @@ import random
 import signal
 import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 from code_reviewer_runner.factory_runner.app_client import (
     RELEASE_LAUNCH_FAILED,
@@ -84,6 +85,13 @@ from code_reviewer_runner.factory_runner.config import (
     update_credential,
     with_credential,
 )
+from code_reviewer_runner.factory_runner.credential_pool import (
+    Chosen,
+    Cooldowns,
+    CredentialPool,
+    Verdict,
+    verdict_of_exit,
+)
 from code_reviewer_runner.factory_runner.housekeeping import (
     NO_IDENTITY,
     TidySeams,
@@ -110,7 +118,9 @@ from code_reviewer_runner.factory_runner.update import (
     load_channel,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
-from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin, load_login
+from code_reviewer_runner.implementer.claude_code.credentials import store_for
+from code_reviewer_runner.implementer.claude_code.login import load_legacy_login
+from code_reviewer_runner.implementer.claude_code.readiness import HARNESS_CLAUDE_CODE
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR, IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable
@@ -177,6 +187,9 @@ class Seams:
     # The release channel of the image and how its documents are fetched (`update.py`).
     channel: Callable[[], ReleaseChannel | None] = load_channel
     fetch: Fetch = fetch_https
+    # The credentials of this device and the choice among them (#980); the default reads the store
+    # in the runner's home and, while it is empty, the older sources of R3.
+    pool: Callable[[Mapping[str, str], Callable[[], float]], CredentialPool] | None = None
 
 
 class WorkerEnd(StrEnum):
@@ -223,6 +236,8 @@ class RunnerService:
         self._workers: dict[str, RunningWorker] = {}
         self._stoppers: dict[str, asyncio.Task[None]] = {}
         self._announced: Announcement | None = None
+        self._pool = self._make_pool()
+        self._pool_problems = 0
         # The Workers that could not be started one after the other, and the time before which no
         # claim is made because of them.
         self._start_failures = 0
@@ -370,6 +385,7 @@ class RunnerService:
                 await self._wait(TIDY_RETRY_SECONDS)
                 continue
             await self._renew_if_due()
+            await self._sync_announcement()
             # Between jobs, never during one: a staged image is switched to here (`update.py`).
             if not once and not jobs and await asyncio.to_thread(self._updates.switch_due):
                 return EXIT_UPDATED
@@ -473,7 +489,7 @@ class RunnerService:
 
     async def _announce(self) -> int | None:
         """Tell the app what this runner is. An exit code if that ends the run."""
-        announcement = self._prepared.announcement
+        announcement = self.announcement()
         try:
             answer = await asyncio.to_thread(self._client.announce, announcement)
         except Revoked:
@@ -504,27 +520,117 @@ class RunnerService:
             grace_seconds=WORKER_STOP_GRACE_SECONDS,
         )
 
-    def _local_environment(self, claimed: ClaimedWorker) -> dict[str, str]:
-        """The one credential of this device the job needs, as the variables the job reads, or
-        nothing.
+    def _make_pool(self) -> CredentialPool:
+        make = self._seams.pool
+        if make is not None:
+            return make(self._environment, self._seams.wall)
+        home = home_directory(self._environment)
+        cooldowns, problems = Cooldowns.from_environment(self._environment)
+        pool = CredentialPool(
+            store_for(self._environment, home),
+            lambda: load_legacy_login(self._environment, home),
+            self._seams.wall,
+            cooldowns=cooldowns,
+        )
+        pool.problems.extend(problems)
+        return pool
 
-        Read from where the device keeps it (the token file of R3,
-        `implementer/claude_code/login.py`) for this job and handed to the Worker on its standard
-        input: never through the app, and never to a Worker whose job does not ask for it (`access`
-        of the claim: the harness and the auth). A login that cannot be used is said in words, and
-        the Worker fails the job with its own reason."""
+    def announcement(self) -> Announcement:
+        """What this runner says about itself now: what `prepare` found, with the entry of Claude
+        Code kept up to date from the credentials of this device (#980): the models of every
+        credential that can be used, and no entry while none can (all are rate limited, or were
+        refused). The app never learns a name or a reason, only that the entry is there."""
+        base = self._prepared.announcement
+        if self._prepared.claude_version is None:
+            return base
+        entries = [
+            entry
+            for entry in cast("Sequence[dict[str, object]]", base.manifest.get("harnesses", []))
+            if entry.get("harness") != HARNESS_CLAUDE_CODE
+        ]
+        offer = self._pool.offer()
+        if offer is not None:
+            entry: dict[str, object] = {
+                "harness": HARNESS_CLAUDE_CODE,
+                "version": self._prepared.claude_version,
+                "auth": AUTH_SUBSCRIPTION,
+            }
+            if offer.models is not None:
+                entry["models"] = list(offer.models)
+            entries.append(entry)
+        return replace(base, manifest={**base.manifest, "harnesses": entries})
+
+    async def _sync_announcement(self) -> None:
+        """Say it again when the entry of Claude Code changed (a credential was limited, refused or
+        replaced, a limit ran out). A device without Claude Code announces once, as before. A failed
+        call is tried again at the next claim; the app uses the last announcement it got."""
+        if self._prepared.claude_version is None:
+            return
+        for problem in self._pool.problems[self._pool_problems :]:
+            self._log.warning("credentials: %s", problem)
+        self._pool_problems = len(self._pool.problems)
+        desired = self.announcement()
+        if self._announced is not None and desired.manifest == self._announced.manifest:
+            return
+        try:
+            await asyncio.to_thread(self._client.announce, desired)
+        except (Revoked, UpdateNeeded):
+            return  # the claim that follows meets it and ends the run as it should
+        except ApiUnavailable as error:
+            self._log.warning("the announcement could not be sent (%s); trying again", error)
+            return
+        self._announced = desired
+        models = _claude_models(desired)
+        if models is None:
+            self._log.warning(
+                "claude-code is withdrawn from the manifest: no credential of this device can be "
+                "used now (rate limited, refused or without a model)"
+            )
+        else:
+            self._log.info("claude-code is offered (%s)", ", ".join(models) or "any model")
+
+    def _choose_credential(self, claimed: ClaimedWorker) -> tuple[Chosen | None, bool]:
+        """The one credential of this device the job needs, as `(credential, needed)`.
+
+        A job on a subscription (`access` of the claim) gets one credential, chosen among those not
+        rate limited and not refused whose models allow its model, and the Worker gets that one
+        only: handed on its standard input, never through the app, never to a Worker whose job does
+        not ask for it. `(None, True)`: the job needs one and none can serve it."""
         access = claimed.access
         if access is None or access.auth != AUTH_SUBSCRIPTION:
-            return {}
-        environment = self._environment
-        login = load_login(environment, home_directory(environment))
-        if not isinstance(login, ClaudeLogin):
-            self._log.warning(
-                "job %s: this device has no usable login: %s", claimed.job_id, login.text
-            )
-            return {}
-        self._masker.add("login", [login.secret])
-        return login.environment()
+            return None, False
+        chosen = self._pool.choose(access.model)
+        if chosen is not None:
+            self._masker.add(f"credential:{chosen.name}", [chosen.credential.value])
+        return chosen, True
+
+    def _learn(
+        self, claimed: ClaimedWorker, chosen: Chosen | None, exit_code: int
+    ) -> Verdict | None:
+        """What the end of a job says about the credential it ran on (the Worker's exit code), kept
+        in the store so a restart remembers it."""
+        verdict = verdict_of_exit(exit_code) if chosen is not None else None
+        if verdict is None or chosen is None:
+            return None
+        model = claimed.access.model if claimed.access is not None else None
+        self._pool.report(chosen.name, verdict, model)
+        # Every verdict is a hint that expires (the job's own sandbox can forge the exit code that
+        # carries it): the owner can end the pause at once with `credential retry`. A name is a
+        # label of a-z, 0-9, dot, dash and underscore (`credentials.check_name`).
+        what = {
+            Verdict.AUTH: "was reported as refused (a 401): it is put aside for hours and tried "
+            "again (replace the token: factory-runner credential add claude --name {name} "
+            "--replace; or let go: factory-runner credential retry {name})",
+            Verdict.LIMIT: "hit the usage limit of its subscription: it is put aside for a while "
+            "(factory-runner credential retry {name} ends that sooner)",
+            Verdict.MODEL: "was reported not to allow the model of the job: that model is put "
+            "aside for hours for this credential (factory-runner credential retry {name} lets "
+            "it go)",
+        }[verdict]
+        self._log.warning(
+            "job %s: credential %s %s", claimed.job_id, chosen.name, what.format(name=chosen.name)
+        )
+        return verdict
 
     async def _run_job(self, claimed: ClaimedWorker) -> WorkerEnd:
         """Start the Worker of the claim, watch it, and give the claim back when it did not do its
@@ -546,11 +652,27 @@ class RunnerService:
 
     async def _supervise(self, claimed: ClaimedWorker) -> WorkerEnd:
         assert self._sandbox is not None
+        chosen, needed = self._choose_credential(claimed)
+        if needed and chosen is None:
+            # The entry was withdrawn after the app picked this job (or never matched it): a Worker
+            # started without the credential would only fail the job with no way to run it.
+            self._log.warning(
+                "job %s: no credential of this device can serve it (rate limited, refused or not "
+                "allowed for its model); giving the job back",
+                claimed.job_id,
+            )
+            await self._give_back(claimed, RELEASE_LAUNCH_FAILED)
+            await self._sync_announcement()
+            # The app counts an attempt for every claim given back: a store that cannot serve
+            # (the secret cannot be read, say) must not make the next claim follow at once and
+            # spend an attempt of every queued job, as a Worker that cannot start would not.
+            self._start_failed()
+            return WorkerEnd.NOT_STARTED
         start = WorkerStart(
             self._config.url,
             claimed.job_id,
             claimed.credential,
-            self._local_environment(claimed),
+            chosen.credential if chosen is not None else None,
         )
         try:
             worker = await self._sandbox.start(start)
@@ -578,6 +700,8 @@ class RunnerService:
             if stopper is not None:
                 await asyncio.gather(stopper, return_exceptions=True)
         reaped = reaper.done() and not reaper.cancelled() and reaper.result() is True
+        if self._learn(claimed, chosen, outcome.exit_code) is not None:
+            await self._sync_announcement()
         if outcome.exit_code == 0 and not reaped:
             return WorkerEnd.OK
         self._log_worker(claimed, outcome)
@@ -743,6 +867,15 @@ class RunnerService:
             waiting.cancel()
             stopped.cancel()
             await asyncio.gather(waiting, stopped, return_exceptions=True)
+
+
+def _claude_models(announcement: Announcement) -> list[str] | None:
+    """The models the entry of Claude Code lists (empty: any), or None when it has no entry."""
+    entries = cast("Sequence[dict[str, object]]", announcement.manifest.get("harnesses", []))
+    for entry in entries:
+        if entry.get("harness") == HARNESS_CLAUDE_CODE:
+            return [str(model) for model in cast("Sequence[object]", entry.get("models") or [])]
+    return None
 
 
 def environment_work_dir(environment: Mapping[str, str]) -> str:

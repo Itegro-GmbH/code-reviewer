@@ -6,6 +6,8 @@
 import { sql } from "kysely";
 import { afterAll, describe, expect, it } from "vitest";
 import { createTestDatabase } from "../test-support/test-database.ts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   accessMatches,
   accessRule,
@@ -128,6 +130,66 @@ describe("the rule in the database and in memory", () => {
     // The table must not be one-sided: some pairs match and some do not.
     expect(taken).toBeGreaterThan(10);
     expect(taken).toBeLessThan(60);
+  });
+
+  // #980-T08 (the review of #988)
+  it("gives every vector of the alias map the contract's answer, and the same as the rule in memory", async () => {
+    const database = await createTestDatabase();
+    databases.push(database);
+    const { vectors } = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL(
+            "../../../contracts/claude-model-aliases.v1.json",
+            import.meta.url,
+          ),
+        ),
+        "utf8",
+      ),
+    ) as {
+      vectors: { announced: string; demanded: string; match: boolean }[];
+    };
+
+    for (const { announced, demanded, match } of vectors) {
+      const entries: HarnessAccess[] = [{ ...CLAUDE, models: [announced] }];
+      const { rows } = await sql<{ ok: boolean }>`
+        select ${accessRule(entriesParam(entries), "t")} as ok
+        from (values ('claude-code'::text, ${JSON.stringify({ provider: "claude-code", model: demanded })}::text)) as t(profile_harness, model_choice)`.execute(
+        database.db,
+      );
+      const inMemory = accessMatches(entries, {
+        harness: "claude-code",
+        auth: "subscription",
+        model: demanded,
+      });
+      expect({ announced, demanded, sql: rows[0]?.ok }).toEqual({
+        announced,
+        demanded,
+        sql: match,
+      });
+      expect(inMemory).toBe(match);
+    }
+  });
+
+  // #980-T08
+  it("does not fail for a manifest whose models are no list", async () => {
+    const database = await createTestDatabase();
+    databases.push(database);
+    const odd = JSON.stringify([
+      {
+        harness: "claude-code",
+        version: "2",
+        auth: "subscription",
+        models: "opus",
+      },
+    ]);
+    const { rows } = await sql<{ ok: boolean }>`
+      select ${accessRule(sql`${odd}::jsonb`, "t")} as ok
+      from (values ('claude-code'::text, ${JSON.stringify({ provider: "claude-code", model: "opus" })}::text)) as t(profile_harness, model_choice)`.execute(
+      database.db,
+    );
+
+    expect(rows[0]?.ok).toBe(false);
   });
 
   // #973-T01

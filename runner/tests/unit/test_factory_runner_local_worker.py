@@ -15,10 +15,14 @@ import pytest
 
 from code_reviewer_runner.factory_runner import local_worker
 from code_reviewer_runner.factory_runner.base import DISK_BUDGET_VARIABLE
+from code_reviewer_runner.job_loop.local_credential import (
+    LOCAL_CREDENTIAL_NAMES,
+    LocalCredential,
+)
 from code_reviewer_runner.job_loop.settings import WorkerSettings
 from code_reviewer_runner.job_loop.worker import (
     WorkerRequest,
-    parse_local_environment,
+    parse_local_credential,
 )
 from code_reviewer_runner.job_loop.worker_errors import WorkerExit, WorkerSetupError
 
@@ -35,42 +39,60 @@ def document(**extra: Any) -> str:
     )
 
 
-# -- the credentials of the device in the start document -----------------------------------------
+# -- the credential of the device in the start document (one shape, #980) -------------------------
 
 
-def test_a_start_document_without_local_credentials_has_none() -> None:
-    assert parse_local_environment(document()) == {}
+def credential_of(
+    name: str = "CLAUDE_CODE_OAUTH_TOKEN", value: object = LOGIN
+) -> dict[str, object]:
+    return {"name": name, "value": value}
 
 
-def test_a_start_document_names_the_variables_of_the_device_the_job_reads() -> None:
-    local = {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}
+def test_a_start_document_without_a_local_credential_has_none() -> None:
+    assert parse_local_credential(document()) is None
 
-    assert parse_local_environment(document(localEnvironment=local)) == local
+
+# #980-T01
+def test_a_start_document_names_the_one_credential_of_the_device_the_job_reads() -> None:
+    found = parse_local_credential(document(localCredential=credential_of()))
+
+    assert found == LocalCredential("CLAUDE_CODE_OAUTH_TOKEN", LOGIN)
+    assert found is not None and found.environment() == {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}
+    assert LOGIN not in repr(found) and LOGIN not in str(found)
 
 
 @pytest.mark.parametrize(
     "local",
     [
         ["CLAUDE_CODE_OAUTH_TOKEN"],
-        {"claude_code_oauth_token": "x"},
-        {"CLAUDE_CODE_OAUTH_TOKEN": 1},
-        {"CLAUDE_CODE_OAUTH_TOKEN": "two words"},
-        {"CLAUDE_CODE_OAUTH_TOKEN": ""},
-        {"CLAUDE_CODE_OAUTH_TOKEN": "x" * 5000},
+        {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN},  # the old map form (`localEnvironment`) is gone
+        credential_of("claude_code_oauth_token"),
+        credential_of(value=1),
+        credential_of(value="two words"),
+        credential_of(value=""),
+        credential_of(value="x" * 5000),
+        {"name": "CLAUDE_CODE_OAUTH_TOKEN"},
+        {**credential_of(), "extra": "field"},
+        "CLAUDE_CODE_OAUTH_TOKEN",
     ],
-    ids=["list", "name", "number", "space", "empty", "long"],
+    ids=["list", "map", "name", "number", "space", "empty", "long", "no value", "extra", "string"],
 )
-def test_a_local_credential_that_is_not_a_variable_with_one_token_is_an_input_error(
-    local: object,
-) -> None:
+def test_a_local_credential_that_does_not_fit_is_an_input_error(local: object) -> None:
     with pytest.raises(WorkerSetupError) as error:
-        parse_local_environment(document(localEnvironment=local))
+        parse_local_credential(document(localCredential=local))
 
     # The text names the field and never the value: the document holds secrets.
-    assert "x" * 100 not in str(error.value)
+    assert "x" * 100 not in str(error.value) and LOGIN not in str(error.value)
 
 
-# #974 review, #978-T11
+def test_the_old_map_form_is_not_read_as_a_credential() -> None:
+    assert (
+        parse_local_credential(document(localEnvironment={"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}))
+        is None
+    )
+
+
+# #974 review, #978-T11, #980-T07
 @pytest.mark.parametrize(
     "name",
     [
@@ -82,22 +104,26 @@ def test_a_local_credential_that_is_not_a_variable_with_one_token_is_an_input_er
         "RUNNER_IMPLEMENTER_WORK_DIR",
         "FACTORY_RUNNER_HOME",
         "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
     ],
 )
-def test_a_start_document_cannot_set_any_variable_but_the_claude_code_login(name: str) -> None:
-    """`{**env, **local}` would let a name override what the machine decided (PATH, RUNNER_*): the
-    one credential a device hands a Worker is the Claude Code login, and nothing else."""
+def test_a_start_document_cannot_set_any_variable_but_a_name_of_the_allow_list(name: str) -> None:
+    """One allow-list for the Worker of a process and for Control in a VM: a name outside it would
+    override what the machine decided (PATH, RUNNER_*)."""
+    assert name not in LOCAL_CREDENTIAL_NAMES
     with pytest.raises(WorkerSetupError) as error:
-        parse_local_environment(document(localEnvironment={name: "value"}))
+        parse_local_credential(document(localCredential=credential_of(name, "value")))
 
     assert "value" not in str(error.value)
 
 
+def test_the_allow_list_is_the_claude_code_login_and_nothing_else() -> None:
+    assert {"CLAUDE_CODE_OAUTH_TOKEN"} == LOCAL_CREDENTIAL_NAMES
+
+
 def test_the_error_of_a_bad_local_credential_never_shows_its_value() -> None:
     with pytest.raises(WorkerSetupError) as error:
-        parse_local_environment(
-            document(localEnvironment={"CLAUDE_CODE_OAUTH_TOKEN": LOGIN + " extra"})
-        )
+        parse_local_credential(document(localCredential=credential_of(value=LOGIN + " extra")))
 
     assert LOGIN not in str(error.value)
 
@@ -162,7 +188,7 @@ def test_the_local_credentials_go_to_the_job_environment_and_to_the_masker_and_n
 ) -> None:
     local = {"CLAUDE_CODE_OAUTH_TOKEN": LOGIN}
 
-    code, call = start({"PATH": "/usr/bin"}, document(localEnvironment=local), captured)
+    code, call = start({"PATH": "/usr/bin"}, document(localCredential=credential_of()), captured)
 
     assert code == 0 and call is not None
     assert call["environment"] == {"PATH": "/usr/bin", **local}

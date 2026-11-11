@@ -13,6 +13,7 @@
 // this rule runs a table of cases through both and demands the same answer.
 import { sql, type RawBuilder } from "kysely";
 import { CLAUDE_CODE_HARNESS, OPENCODE_HARNESS } from "./harness.ts";
+import { CLAUDE_MODEL_ALIASES, modelsAllow } from "./model-aliases.ts";
 
 export const ACCESS_AUTHS = [
   "managed",
@@ -160,7 +161,7 @@ export function runnerCanServe(demand: AccessDemand): boolean {
   return demand.auth !== MANAGED_AUTH;
 }
 
-/** The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it. */
+/** The rule in memory: one entry has the harness, the auth and, when the demand names a model, allows it (an alias allows the ids it stands for, #980). */
 export function accessMatches(
   entries: readonly HarnessAccess[],
   demand: AccessDemand,
@@ -169,9 +170,7 @@ export function accessMatches(
     (entry) =>
       entry.harness === demand.harness &&
       (demand.auth === null || entry.auth === demand.auth) &&
-      (demand.model === null ||
-        entry.models === undefined ||
-        entry.models.includes(demand.model)),
+      (demand.model === null || modelsAllow(entry.models, demand.model)),
   );
 }
 
@@ -207,6 +206,17 @@ function turnDemand(turn: string) {
   return { harness, auth, model, choice };
 }
 
+/** The alias an id belongs to, as an expression (null for any other name): `aliasOf` of `model-aliases.ts`, from the same patterns. */
+function aliasOfSql(name: RawBuilder<unknown>): RawBuilder<string | null> {
+  return sql<string | null>`(case ${sql.join(
+    CLAUDE_MODEL_ALIASES.map(
+      ({ alias, idPattern }) =>
+        sql`when ${name} ~ ${idPattern}::text then ${alias}::text`,
+    ),
+    sql` `,
+  )} end)`;
+}
+
 /**
  * The rule in the database: the dispatcher whose entries are `entries` (a jsonb list from `entriesParam`) can run the turn in the row `turn` of
  * `implementer_turns`. The claim and the pairing of the rings both write their condition with this and nothing else. A turn whose `model_choice` is
@@ -224,6 +234,12 @@ export function accessRule(
       and announced ->> 'auth' = ${demand.auth}
       and (${demand.model} is null
         or announced -> 'models' is null
-        or announced -> 'models' @> to_jsonb(${demand.model}::text))
+        or exists (
+          select 1 from jsonb_array_elements_text(
+            case when jsonb_typeof(announced -> 'models') = 'array' then announced -> 'models' else '[]'::jsonb end
+          ) as listed(name)
+          where listed.name = ${demand.model}::text
+            or ${aliasOfSql(sql`listed.name`)} = ${demand.model}::text
+            or ${aliasOfSql(sql`${demand.model}::text`)} = listed.name))
   )`;
 }
