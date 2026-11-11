@@ -33,6 +33,14 @@ Worker whose job the app has ended, and the tidying that a hosted VM gets by bei
 (`housekeeping.py`): before a claim whenever a job ended (or the last tidy failed), and right after
 every job, the leftover containers and networks of Control go and `/work` is emptied. A runner that
 cannot tidy does not claim: a job it takes would end `setup_failed`.
+
+With the Firecracker sandbox (#978) none of the Docker housekeeping applies: the Worker's Docker is
+inside its VM, so there is no lock on a daemon and nothing to tidy, and the sandbox has more than
+one slot: the dispatcher claims only while `sandbox.free` is above zero (a slot whose VMM would not
+die stays out of use) and runs the jobs beside each other (a job in `run --once` is still one
+job). A Worker that cannot be started is given back (`launch_failed`: the app counts an attempt
+for it, and has no release that does not), and the next claim waits, longer for every start that
+fails in a row: a fault of the machine does not spend an attempt of every queued job.
 """
 
 import asyncio
@@ -88,6 +96,7 @@ from code_reviewer_runner.factory_runner.prepare import Prepared
 from code_reviewer_runner.factory_runner.sandbox import (
     ProcessSandbox,
     RunningWorker,
+    SandboxInUse,
     WorkerOutcome,
     WorkerSandbox,
     WorkerStart,
@@ -124,6 +133,13 @@ UPDATE_NEEDED_WAIT_SECONDS = 300.0
 NOT_READY_WAIT_SECONDS = 300.0
 # How long a runner that cannot tidy waits before it tries again (it claims nothing meanwhile).
 TIDY_RETRY_SECONDS = 60.0
+# How long a dispatcher waits after a Worker that could not be started (a fault of this machine: the
+# disk is full, /dev/kvm or a TAP is gone, a cgroup fails), before it claims again; doubled with
+# every start that fails in a row, reset by one that works. The app counts an attempt for every
+# claim that is given back (three, then the job fails), so a fault that fails every start must not
+# be paid for by every job of the queue.
+START_FAILURE_BACKOFF_FIRST_SECONDS = 10.0
+START_FAILURE_BACKOFF_MAX_SECONDS = 300.0
 # How long `run --once` waits for a job by default.
 DEFAULT_ONCE_WAIT_SECONDS = 600.0
 # A credential this old is renewed between jobs (the app keeps the previous one until the new one
@@ -202,10 +218,17 @@ class RunnerService:
         self._log = SafeLog(self._logger, self._masker)
         self._stopping = asyncio.Event()
         self._sandbox: WorkerSandbox | None = None
-        # The Worker that runs now, and the task that ends it when the dispatcher is told to stop.
-        self._worker: RunningWorker | None = None
-        self._stopper: asyncio.Task[None] | None = None
+        # The Workers that run now (by job), and the tasks that end them when the dispatcher is
+        # told to stop.
+        self._workers: dict[str, RunningWorker] = {}
+        self._stoppers: dict[str, asyncio.Task[None]] = {}
         self._announced: Announcement | None = None
+        # The Workers that could not be started one after the other, and the time before which no
+        # claim is made because of them.
+        self._start_failures = 0
+        self._claim_not_before = 0.0
+        # The sandbox has no free slot (logged once per spell).
+        self._no_slot_logged = False
         # The machine is tidied before the first claim and again whenever a job has ended.
         self._untidy = True
         # This runner holds the lock container (`housekeeping.take_lock`).
@@ -244,16 +267,30 @@ class RunnerService:
             for number in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(number)
             await self._unlock()
+            if self._sandbox is not None:
+                await self._sandbox.close()
 
     def stop(self) -> None:
         """A signal: stop claiming, and end the Worker that runs: it gives its job back
         (`runner_shutdown`) within its grace and is killed after it."""
         self._stopping.set()
-        if self._worker is not None and self._stopper is None:
-            self._stopper = asyncio.get_running_loop().create_task(self._worker.stop())
+        for job_id in list(self._workers):
+            self._stop_worker(job_id)
+
+    def _stop_worker(self, job_id: str) -> None:
+        worker = self._workers.get(job_id)
+        if worker is not None and job_id not in self._stoppers:
+            self._stoppers[job_id] = asyncio.get_running_loop().create_task(worker.stop())
 
     async def _run(self, once: bool, wait_seconds: float) -> int:
-        other = await self._other_runner()
+        try:
+            sandbox = self._sandbox = self._make_sandbox()
+        except Exception as error:
+            # Class name only: the text of an error may name a path or hold a value of the settings.
+            self._log.error("the sandbox cannot be made: %s", type(error).__name__)
+            return EXIT_NOT_READY
+        host_docker = sandbox.uses_host_docker
+        other = await self._other_runner() if host_docker else None
         if other is not None:
             return other
         refused = await self._announce()
@@ -269,21 +306,72 @@ class RunnerService:
             if not once:
                 await self._wait(NOT_READY_WAIT_SECONDS)
             return EXIT_NOT_READY
-        await asyncio.to_thread(self._updates.tidy_references)
-        self._sandbox = self._make_sandbox()
+        if host_docker:
+            await asyncio.to_thread(self._updates.tidy_references)
+        try:
+            await sandbox.setup()
+        except SandboxInUse as error:
+            # Its text is the sandbox's own and holds no path or value.
+            self._log.error("%s", error)
+            return EXIT_SHARED_DAEMON
+        except Exception as error:
+            # Class name only: the text of an error may name a path or hold a value of the setup.
+            self._log.error("the sandbox cannot be used: %s", type(error).__name__)
+            return EXIT_NOT_READY
+        # A job in `--once` is one job; otherwise as many as the sandbox has slots.
+        slots = 1 if once else max(1, sandbox.capacity)
+        jobs: set[asyncio.Task[WorkerEnd]] = set()
         started = self._clock.monotonic()
+        try:
+            return await self._claim_loop(once, wait_seconds, slots, jobs, started, host_docker)
+        finally:
+            # A signal ended the loop: the Workers were told to stop; wait until each has ended.
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def _claim_loop(
+        self,
+        once: bool,
+        wait_seconds: float,
+        slots: int,
+        jobs: set[asyncio.Task[WorkerEnd]],
+        started: float,
+        host_docker: bool,
+    ) -> int:
         failures = 0
         # The app answered a claim at least once (a job, or none, or an update it requires).
         reached = False
         while not self._stopping.is_set():
-            if self._untidy and not await self._tidy_up(before_claim=True):
+            jobs.difference_update({job for job in jobs if job.done()})
+            if len(jobs) >= slots:
+                await self._wait_for_a_slot(jobs)
+                continue
+            assert self._sandbox is not None
+            if self._sandbox.free <= 0:
+                # A claim without a slot to run it in is a job that loses an attempt.
+                if not jobs and once:
+                    self._log.error("no free slot: nothing can run (every slot is out of use)")
+                    return EXIT_FAILED
+                if not self._no_slot_logged:
+                    self._no_slot_logged = True
+                    self._log.error(
+                        "no free slot: claiming stops until one is free (a slot whose VM would "
+                        "not end is out of use until the service restarts)"
+                    )
+                await self._wait(self._poll_pause(), jobs)
+                continue
+            self._no_slot_logged = False
+            pause = self._claim_not_before - self._clock.monotonic()
+            if pause > 0:
+                await self._wait(pause, jobs)
+                continue
+            if host_docker and self._untidy and not await self._tidy_up(before_claim=True):
                 if once:
                     return EXIT_FAILED
                 await self._wait(TIDY_RETRY_SECONDS)
                 continue
             await self._renew_if_due()
             # Between jobs, never during one: a staged image is switched to here (`update.py`).
-            if not once and await asyncio.to_thread(self._updates.switch_due):
+            if not once and not jobs and await asyncio.to_thread(self._updates.switch_due):
                 return EXIT_UPDATED
             try:
                 claimed = await asyncio.to_thread(self._client.claim)
@@ -328,13 +416,27 @@ class RunnerService:
                         wait_seconds,
                     )
                     return EXIT_OK
-                await self._wait(self._poll_pause())
+                await self._wait(self._poll_pause(), jobs)
                 continue
-            end = await self._run_job(claimed)
-            if once:
-                return EXIT_OK if end is WorkerEnd.OK else EXIT_FAILED
+            if slots == 1:
+                end = await self._run_job(claimed)
+                if once:
+                    return EXIT_OK if end is WorkerEnd.OK else EXIT_FAILED
+                continue
+            # More slots than one: the job runs beside the others and the loop claims again while a
+            # slot is free (a job that ends frees its slot and wakes the loop).
+            jobs.add(asyncio.get_running_loop().create_task(self._run_job(claimed)))
         self._log.info("stopped")
         return EXIT_OK
+
+    async def _wait_for_a_slot(self, jobs: set[asyncio.Task[WorkerEnd]]) -> None:
+        """Wait until a job ends (its slot is free) or the runner is told to stop."""
+        stopped = asyncio.ensure_future(self._stopping.wait())
+        try:
+            await asyncio.wait([*jobs, stopped], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
 
     # -- steps -------------------------------------------------------------------------------------
 
@@ -431,12 +533,14 @@ class RunnerService:
         try:
             end = await self._supervise(claimed)
         finally:
-            self._worker = None
-            self._stopper = None
-            # The turn's containers hold the workspace's key and its work holds the repository:
-            # neither stays until the next claim. A failure here is found again before that claim.
-            self._untidy = True
-            await self._tidy_up(before_claim=False)
+            self._workers.pop(claimed.job_id, None)
+            self._stoppers.pop(claimed.job_id, None)
+            if self._sandbox.uses_host_docker:
+                # The turn's containers hold the workspace's key and its work holds the
+                # repository: neither stays until the next claim. A failure here is found again
+                # before that claim.
+                self._untidy = True
+                await self._tidy_up(before_claim=False)
         self._log.info("job %s ended: %s", claimed.job_id, end.value)
         return end
 
@@ -458,18 +562,21 @@ class RunnerService:
                 type(error).__name__,
             )
             await self._give_back(claimed, RELEASE_LAUNCH_FAILED)
+            self._start_failed()
             return WorkerEnd.NOT_STARTED
-        self._worker = worker
-        if self._stopping.is_set() and self._stopper is None:
-            self._stopper = asyncio.get_running_loop().create_task(worker.stop())
+        self._start_failures = 0
+        self._workers[claimed.job_id] = worker
+        if self._stopping.is_set():
+            self._stop_worker(claimed.job_id)
         reaper = asyncio.ensure_future(self._reap(claimed, worker))
         try:
             outcome = await worker.wait()
         finally:
             reaper.cancel()
             await asyncio.gather(reaper, return_exceptions=True)
-            if self._stopper is not None:
-                await asyncio.gather(self._stopper, return_exceptions=True)
+            stopper = self._stoppers.get(claimed.job_id)
+            if stopper is not None:
+                await asyncio.gather(stopper, return_exceptions=True)
         reaped = reaper.done() and not reaper.cancelled() and reaper.result() is True
         if outcome.exit_code == 0 and not reaped:
             return WorkerEnd.OK
@@ -480,6 +587,16 @@ class RunnerService:
         # nothing changes; if it had not, the claim goes back to the queue (an attempt is counted).
         await self._give_back(claimed, RELEASE_WORKER_EXITED)
         return WorkerEnd.FAILED
+
+    def _start_failed(self) -> None:
+        """No claim for a while, longer for every start that fails in a row."""
+        self._start_failures += 1
+        pause = min(
+            START_FAILURE_BACKOFF_FIRST_SECONDS * 2 ** (self._start_failures - 1),
+            START_FAILURE_BACKOFF_MAX_SECONDS,
+        )
+        self._claim_not_before = self._clock.monotonic() + pause
+        self._log.warning("claiming again in %gs at the earliest (a start failed)", pause)
 
     def _log_worker(self, claimed: ClaimedWorker, outcome: WorkerOutcome) -> None:
         """What the Worker said when it ended badly, in the dispatcher's log: the lines are the
@@ -613,12 +730,15 @@ class RunnerService:
     def _poll_pause(self) -> float:
         return POLL_SECONDS * (1 + POLL_JITTER * (self._seams.jitter() - 0.5) * 2)
 
-    async def _wait(self, seconds: float) -> None:
-        """Sleep, but end at once when the runner is told to stop."""
+    async def _wait(self, seconds: float, jobs: set[asyncio.Task[WorkerEnd]] | None = None) -> None:
+        """Sleep, but end at once when the runner is told to stop, and wake when one of `jobs`
+        ends (its slot is free: the claim is made now, not at the next poll)."""
         waiting = asyncio.ensure_future(self._clock.sleep(seconds))
         stopped = asyncio.ensure_future(self._stopping.wait())
         try:
-            await asyncio.wait([waiting, stopped], return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(
+                [waiting, stopped, *(jobs or ())], return_when=asyncio.FIRST_COMPLETED
+            )
         finally:
             waiting.cancel()
             stopped.cancel()

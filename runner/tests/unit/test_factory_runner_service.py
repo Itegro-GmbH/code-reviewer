@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,7 @@ from loop_support import (
     make_settings,
     outcome,
     run,
+    settle,
 )
 from release_support import DIGEST, MANIFEST_URL, REPOSITORY, SIGNATURE_URL, Release, fetcher
 
@@ -52,7 +53,11 @@ from code_reviewer_runner.factory_runner.config import (
     save_config,
 )
 from code_reviewer_runner.factory_runner.prepare import Prepared
-from code_reviewer_runner.factory_runner.sandbox import WORKER_MODULE
+from code_reviewer_runner.factory_runner.sandbox import (
+    WORKER_MODULE,
+    SandboxInUse,
+    WorkerOutcome,
+)
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
 from code_reviewer_runner.factory_runner.service import (
     POLL_SECONDS,
@@ -73,6 +78,7 @@ from code_reviewer_runner.implementer.result_channel import make_result_director
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR_VARIABLE
 from code_reviewer_runner.job_loop.api import ApiUnavailable
+from code_reviewer_runner.job_loop.http import ApiError
 
 pytestmark = pytest.mark.unit
 
@@ -296,9 +302,13 @@ class Rig:
         auto_update: bool = True,
         channel: Any = None,
         fetch: Any = None,
+        reap_check_seconds: float | None = None,
     ) -> None:
+        extra: dict[str, Any] = {} if channel is None else {"channel": channel, "fetch": fetch}
+        if reap_check_seconds is not None:
+            extra["reap_check_seconds"] = reap_check_seconds
         self.client = FakeClient()
-        self.clock = clock or FastClock()
+        self.clock: Any = clock or FastClock()
         self.daemon = FakeDaemon()
         self.work = tmp_path / "work"
         self.work.mkdir()
@@ -321,7 +331,7 @@ class Rig:
                 launcher=lambda _grace: self.launcher,
                 docker=lambda: self.daemon,  # type: ignore[arg-type,return-value]
                 hostname=lambda: "runner-container",
-                **({} if channel is None else {"channel": channel, "fetch": fetch}),
+                **extra,
             ),
         )
 
@@ -1320,3 +1330,470 @@ def test_the_digest_references_of_old_releases_are_removed_at_the_start(tmp_path
     assert rig.go(once=False) == EXIT_REVOKED
 
     assert daemon.deleted == [old]
+
+
+# -- the local reaper (#974 review, tested in #978) ----------------------------------------------
+
+
+class HangingLauncher(FakeLauncher):
+    """A Worker that never ends by itself: only the reaper or a stop ends it."""
+
+
+def reaped_scenario(rig: Rig, *, seconds: float, step: float) -> int:
+    """Run `once` with a Worker that hangs, move the clock `seconds` in `step`s (waiting for the
+    reaper's thread to ask the app each time), then end whatever still runs and return the code."""
+    codes: list[int] = []
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: bool(rig.launcher.processes))
+        for number in range(1, int(seconds / step) + 1):
+            await rig.clock.advance(step)
+            await until(lambda n=number: len(rig.client.state_calls) >= n)
+            await settle()
+        for process in rig.launcher.processes:
+            process.finish()
+        codes.append(await asyncio.wait_for(task, 5))
+
+    run(scenario)
+    return codes[0]
+
+
+# #978-T10
+def test_a_worker_that_outlives_its_ended_job_is_stopped_after_the_grace(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["ended"]
+    process_before_grace: list[bool] = []
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: bool(rig.launcher.processes))
+        for number in range(1, 6):  # 10 s .. 50 s: over since 10 s, 40 s of the 45 s of grace
+            await rig.clock.advance(10)
+            await until(lambda n=number: len(rig.client.state_calls) >= n)
+            await settle()
+        process_before_grace.append(rig.launcher.processes[0].terminated)
+        await rig.clock.advance(10)  # 60 s: 50 s over, the grace is gone
+        assert await asyncio.wait_for(task, 5) == EXIT_FAILED
+
+    run(scenario)
+
+    assert process_before_grace == [False]
+    assert rig.launcher.processes[0].terminated is True
+    # The app ended the job: there is no claim to give back.
+    assert rig.client.releases == []
+
+
+# #978-T10
+def test_a_worker_whose_job_is_still_running_is_left_alone(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["running"]
+
+    code = reaped_scenario(rig, seconds=200, step=10)
+
+    assert code == EXIT_OK
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_superseded_job_is_still_live_and_its_worker_is_left_alone(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = ["superseded"]
+
+    reaped_scenario(rig, seconds=120, step=10)
+
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_job_that_was_over_and_is_live_again_starts_the_grace_over(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    # over at 10 s and 20 s, live at 30 s (the grace is reset), over again from 40 s on
+    rig.client.states = ["ended", "ended", "running", "ended", "running"]
+
+    reaped_scenario(rig, seconds=50, step=10)
+
+    assert rig.launcher.processes[0].terminated is False
+
+
+# #978-T10
+def test_a_check_the_app_cannot_answer_is_ignored_and_never_ends_the_worker(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, launcher=HangingLauncher(), clock=ManualClock(), reap_check_seconds=10.0)
+    rig.client.claims = [claim()]
+    rig.client.states = [
+        ApiUnavailable("app down"),
+        Revoked("revoked", 401),
+        ApiError("500", 500),
+        "running",
+    ]
+
+    code = reaped_scenario(rig, seconds=120, step=10)
+
+    assert code == EXIT_OK
+    assert rig.launcher.processes[0].terminated is False
+
+
+# -- a sandbox with slots and no host Docker: the Firecracker launcher's shape (#978) ------------
+
+
+class FakeVmWorker:
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.stopped = False
+        self.on_end: Callable[[], None] | None = None
+        self._done: asyncio.Future[WorkerOutcome] = asyncio.get_running_loop().create_future()
+
+    @property
+    def finished(self) -> bool:
+        return self._done.done()
+
+    def end(self, exit_code: int = 0) -> None:
+        if not self._done.done():
+            if self.on_end is not None:
+                self.on_end()
+            self._done.set_result(WorkerOutcome(exit_code, ""))
+
+    async def wait(self) -> WorkerOutcome:
+        return await asyncio.shield(self._done)
+
+    async def stop(self) -> None:
+        self.stopped = True
+        self.end(-9)
+
+
+class FakeVmSandbox:
+    """Slots, no host Docker, a setup: what `FirecrackerSandbox` is to the service."""
+
+    uses_host_docker = False
+
+    def __init__(
+        self,
+        capacity: int,
+        *,
+        setup_error: Exception | None = None,
+        start_errors: Sequence[Exception | None] | None = None,
+        lose_slot_at_end: bool = False,
+    ) -> None:
+        self.capacity = capacity
+        self.setups = 0
+        self.setup_error = setup_error
+        # One entry per start, in order: an error is raised, None starts a Worker; once the list is
+        # used up every start works.
+        self.start_errors = list(start_errors or [])
+        # A slot that cannot be given back when the Worker of the first job ends (its VMM would not
+        # die): the sandbox has one slot less from then on.
+        self.lose_slot_at_end = lose_slot_at_end
+        self.lost = 0
+        self.workers: list[FakeVmWorker] = []
+        self.events: list[str] = []
+
+    @property
+    def free(self) -> int:
+        running = sum(1 for worker in self.workers if not worker.finished)
+        return self.capacity - self.lost - running
+
+    async def setup(self) -> None:
+        self.setups += 1
+        self.events.append("setup")
+        if self.setup_error is not None:
+            raise self.setup_error
+
+    async def close(self) -> None:
+        self.events.append("close")
+
+    async def start(self, start: Any) -> FakeVmWorker:
+        self.events.append(f"start {start.job_id}")
+        if self.start_errors:
+            error = self.start_errors.pop(0)
+            if error is not None:
+                raise error
+        worker = FakeVmWorker(start.job_id)
+        if self.lose_slot_at_end and not self.workers:
+            worker.on_end = lambda: setattr(self, "lost", self.lost + 1)
+        self.workers.append(worker)
+        return worker
+
+
+def vm_rig(tmp_path: Path, sandbox: FakeVmSandbox) -> Rig:
+    def make(environment: Mapping[str, str], grace: float) -> FakeVmSandbox:
+        return sandbox
+
+    rig = Rig(tmp_path)
+    rig.service._seams = replace(  # pyright: ignore[reportPrivateUsage]
+        rig.service._seams,  # pyright: ignore[reportPrivateUsage]
+        sandbox=make,
+    )
+    return rig
+
+
+# #978-T15
+def test_the_sandbox_is_set_up_before_the_first_claim(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(1)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim()]
+    real_claim = rig.client.claim
+
+    def claim_after_setup() -> Any:
+        sandbox.events.append("claim")
+        return real_claim()
+
+    rig.client.claim = claim_after_setup  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert sandbox.events[:2] == ["setup", "claim"] and sandbox.setups == 1
+
+
+# #978-T15
+def test_a_sandbox_that_cannot_be_set_up_means_not_ready_and_no_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    sandbox = FakeVmSandbox(1, setup_error=PermissionError("/sys/fs/cgroup/secret-path"))
+    rig = vm_rig(tmp_path, sandbox)
+
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_NOT_READY
+
+    assert rig.client.claim_calls == 0
+    assert "PermissionError" in caplog.text and "secret-path" not in caplog.text
+
+
+# #978-T15
+def test_a_vm_sandbox_leaves_the_host_docker_alone(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(1)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim()]
+    rig.daemon.containers = [container_id("a")]  # a leftover that a Docker runner would remove
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert rig.daemon.lock_calls == [] and rig.daemon.removed == [] and rig.daemon.filters == []
+
+
+# #978-T15
+def test_the_dispatcher_claims_only_with_a_free_slot_and_again_when_one_frees(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeVmSandbox(2)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(1), claim(2), claim(3)]
+    seen: dict[str, int] = {}
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(sandbox.workers) == 2)
+        # Both slots are taken: no third claim, however long the loop waits.
+        await asyncio.sleep(0.1)
+        seen["claims_while_full"] = rig.client.claim_calls
+        sandbox.workers[0].end()  # a slot frees: the third job is claimed at once
+        await until(lambda: len(sandbox.workers) == 3)
+        for worker in sandbox.workers:
+            worker.end()
+        rig.service.stop()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert seen["claims_while_full"] == 2
+    assert [w.job_id for w in sandbox.workers] == [claim(n).job_id for n in (1, 2, 3)]
+
+
+# #978-T15
+def test_once_runs_one_job_even_when_the_sandbox_has_slots(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(4)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(1), claim(2)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert rig.client.claim_calls == 1 and len(sandbox.workers) == 1
+
+
+# #978-T15
+def test_a_signal_stops_every_worker_and_the_claims_of_the_ended_ones_are_given_back(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeVmSandbox(2)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(1), claim(2)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(sandbox.workers) == 2)
+        rig.service.stop()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    run(scenario)
+
+    assert all(worker.stopped for worker in sandbox.workers)
+    # A stopped VM ended without a result: both claims go back for another runner.
+    assert sorted(r[0] for r in rig.client.releases) == sorted(claim(n).job_id for n in (1, 2))
+    assert {r[2] for r in rig.client.releases} == {"worker_exited"}
+
+
+# #978-T15
+def test_the_reaper_watches_every_worker_by_itself(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(2)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.service._seams = replace(  # pyright: ignore[reportPrivateUsage]
+        rig.service._seams,  # pyright: ignore[reportPrivateUsage]
+        reap_check_seconds=10.0,
+    )
+    rig.clock = ManualClock()
+    rig.service._clock = rig.clock  # pyright: ignore[reportPrivateUsage]
+    rig.client.claims = [claim(1), claim(2)]
+    rig.client.states = ["ended"]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(sandbox.workers) == 2)
+        for _ in range(6):
+            await rig.clock.advance(10)
+            await asyncio.sleep(0.05)
+        await until(lambda: all(w.stopped for w in sandbox.workers))
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert [w.stopped for w in sandbox.workers] == [True, True]
+
+
+# #978-T15
+def test_a_slot_that_is_lost_is_not_claimed_for(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A VMM that would not die keeps its slot out of use: with no free slot the dispatcher claims
+    # nothing, whatever the queue holds (a claim it cannot start would cost the job an attempt).
+    sandbox = FakeVmSandbox(1, lose_slot_at_end=True)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(1), claim(2), claim(3)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        await until(lambda: rig.client.claim_calls >= 1 and sandbox.free == 0)
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        rig.service.stop()
+        assert await asyncio.wait_for(task, 5) == EXIT_OK
+
+    with caplog.at_level(logging.WARNING, logger="code_reviewer_runner.loop"):
+        run(scenario)
+
+    assert rig.client.claim_calls == 1 and len(sandbox.workers) == 1
+    assert "no free slot" in caplog.text
+
+
+# #978-T15
+def test_a_job_whose_vm_cannot_start_is_not_followed_by_a_claim_every_poll(
+    tmp_path: Path,
+) -> None:
+    # A fault of this machine (disk full, /dev/kvm, a TAP, a cgroup) fails every start: every claim
+    # of the queue would cost its job an attempt. The dispatcher backs off, longer each time.
+    sandbox = FakeVmSandbox(1, start_errors=[OSError("no space")] * 1000)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.clock = ManualClock()
+    rig.service._clock = rig.clock  # pyright: ignore[reportPrivateUsage]
+    rig.client.claims = [claim(n) for n in range(1, 60)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        for _ in range(60):
+            await rig.clock.advance(10)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    # 600 seconds: claims at 0, 10, 30, 70, 150, 310 (pauses of 10, 20, 40, 80, 160, 300).
+    assert 2 <= rig.client.claim_calls <= 7
+    assert len(rig.client.releases) == rig.client.claim_calls
+    assert {r[2] for r in rig.client.releases} == {"launch_failed"}
+
+
+# #978-T15
+def test_the_backoff_after_a_failed_start_starts_over_after_a_start_that_works(
+    tmp_path: Path,
+) -> None:
+    sandbox = FakeVmSandbox(1, start_errors=[OSError("a"), OSError("b"), None, OSError("c")])
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(n) for n in range(1, 5)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        await until(lambda: rig.client.claim_calls >= 5)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    pauses = [s for s in rig.clock.slept if s in (10.0, 20.0, 40.0)]
+    assert pauses[:3] == [10.0, 20.0, 10.0]
+
+
+# #978-T15
+def test_a_failed_start_in_once_mode_ends_the_run_with_a_failure(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(1, start_errors=[OSError("a")])
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim(1), claim(2)]
+
+    assert rig.go(once=True) == EXIT_FAILED
+    assert rig.client.claim_calls == 1
+
+
+# #978-T15
+def test_a_second_dispatcher_on_the_same_machine_ends_with_the_shared_daemon_code_and_no_claim(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    sandbox = FakeVmSandbox(2, setup_error=SandboxInUse("another dispatcher runs on this machine"))
+    rig = vm_rig(tmp_path, sandbox)
+
+    with caplog.at_level(logging.INFO, logger="code_reviewer_runner.loop"):
+        assert rig.go(once=True) == EXIT_SHARED_DAEMON
+
+    assert rig.client.claim_calls == 0 and "another dispatcher runs on this machine" in caplog.text
+
+
+# #978-T15
+def test_the_sandbox_is_closed_when_the_run_ends(tmp_path: Path) -> None:
+    sandbox = FakeVmSandbox(1)
+    rig = vm_rig(tmp_path, sandbox)
+    rig.client.claims = [claim()]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=True, wait_seconds=0))
+        await until(lambda: len(sandbox.workers) == 1)
+        sandbox.workers[0].end()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert sandbox.events[-1] == "close"

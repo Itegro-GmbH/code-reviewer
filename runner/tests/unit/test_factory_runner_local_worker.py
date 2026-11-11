@@ -52,14 +52,13 @@ def test_a_start_document_names_the_variables_of_the_device_the_job_reads() -> N
     "local",
     [
         ["CLAUDE_CODE_OAUTH_TOKEN"],
-        {"lower": "x"},
-        {"A": 1},
-        {"A": "two words"},
-        {"A": ""},
-        {"A": "x" * 5000},
-        {f"V{i}": "x" for i in range(9)},
+        {"claude_code_oauth_token": "x"},
+        {"CLAUDE_CODE_OAUTH_TOKEN": 1},
+        {"CLAUDE_CODE_OAUTH_TOKEN": "two words"},
+        {"CLAUDE_CODE_OAUTH_TOKEN": ""},
+        {"CLAUDE_CODE_OAUTH_TOKEN": "x" * 5000},
     ],
-    ids=["list", "name", "number", "space", "empty", "long", "many"],
+    ids=["list", "name", "number", "space", "empty", "long"],
 )
 def test_a_local_credential_that_is_not_a_variable_with_one_token_is_an_input_error(
     local: object,
@@ -71,9 +70,34 @@ def test_a_local_credential_that_is_not_a_variable_with_one_token_is_an_input_er
     assert "x" * 100 not in str(error.value)
 
 
+# #974 review, #978-T11
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PATH",
+        "HOME",
+        "LD_PRELOAD",
+        "PYTHONPATH",
+        "RUNNER_JOB_TIMEOUT_SECONDS",
+        "RUNNER_IMPLEMENTER_WORK_DIR",
+        "FACTORY_RUNNER_HOME",
+        "OPENROUTER_API_KEY",
+    ],
+)
+def test_a_start_document_cannot_set_any_variable_but_the_claude_code_login(name: str) -> None:
+    """`{**env, **local}` would let a name override what the machine decided (PATH, RUNNER_*): the
+    one credential a device hands a Worker is the Claude Code login, and nothing else."""
+    with pytest.raises(WorkerSetupError) as error:
+        parse_local_environment(document(localEnvironment={name: "value"}))
+
+    assert "value" not in str(error.value)
+
+
 def test_the_error_of_a_bad_local_credential_never_shows_its_value() -> None:
     with pytest.raises(WorkerSetupError) as error:
-        parse_local_environment(document(localEnvironment={"A": LOGIN + " extra"}))
+        parse_local_environment(
+            document(localEnvironment={"CLAUDE_CODE_OAUTH_TOKEN": LOGIN + " extra"})
+        )
 
     assert LOGIN not in str(error.value)
 

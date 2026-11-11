@@ -76,7 +76,7 @@ function build(): void {
       fragmentSha256: "4".repeat(64),
       configSha256: "5".repeat(64),
       bootArgs: "reboot=k panic=1",
-      initCommand: "/usr/bin/docker-init -- /usr/local/sbin/vm-init",
+      initCommand: "/usr/bin/docker-init -- /usr/local/sbin/vm-boot",
     },
     firecracker: { version: "1.17.0" },
     components: {

@@ -32,7 +32,7 @@ describe("the kernel command line", () => {
     expect(line).toContain("root=/dev/vda ro rootfstype=ext4");
     expect(line).toContain("reboot=k");
     expect(line).toContain("init=/usr/bin/docker-init");
-    expect(line.endsWith("-- /usr/local/sbin/vm-init")).toBe(true);
+    expect(line.endsWith("-- /usr/local/sbin/vm-boot")).toBe(true);
     expect(line).toContain("vm.mode=smoke");
   });
 
@@ -56,7 +56,7 @@ describe("the kernel command line", () => {
 
     expect(line.indexOf("vm.mode=smoke")).toBeLessThan(line.indexOf(" -- "));
     expect(RELEASE_INIT_COMMAND).toBe(
-      "/usr/bin/docker-init -- /usr/local/sbin/vm-init",
+      "/usr/bin/docker-init -- /usr/local/sbin/vm-boot",
     );
   });
 });
@@ -151,6 +151,9 @@ const good: ConsoleEvent[] = [
   ev("check", 3, { name: "root_read_only", result: "ok" }),
   ev("check", 3, { name: "runc_container", result: "ok" }),
   ev("check", 4, { name: "sysbox_container", result: "ok" }),
+  ev("check", 4, { name: "vsock_denied_agent", result: "ok" }),
+  ev("check", 4, { name: "vsock_allowed_control", result: "ok" }),
+  ev("check", 4, { name: "ia32_unavailable", result: "ok" }),
   ev("check", 5, { name: "worker_probe", result: "ok", output_b64: "e30=" }),
   ev("smoke_done", 6, { ok: "1" }),
 ];
@@ -291,5 +294,32 @@ describe("the verdict of the seed boot", () => {
         evaluateSeed([...seeded, ev(failure, 2)]).problems,
         failure,
       ).toContain(failure);
+  });
+});
+
+describe("the probes of AF_VSOCK in the smoke boot (#978)", () => {
+  // #978-T17
+  it("fail the smoke boot when the agent's container can open a vsock socket, and when a probe did not run", () => {
+    const denied = good.map((event) =>
+      event.name === "check" && event.fields.name === "vsock_denied_agent"
+        ? ev("check", 4, {
+            name: "vsock_denied_agent",
+            result: "fail",
+            tail: "created",
+          })
+        : event,
+    );
+    const missing = good.filter(
+      (event) =>
+        !(event.name === "check" && event.fields.name === "ia32_unavailable"),
+    );
+
+    expect(evaluateSmoke(denied, options).problems).toContain(
+      "check vsock_denied_agent failed",
+    );
+    expect(evaluateSmoke(missing, options).problems).toContain(
+      "check ia32_unavailable: missing",
+    );
+    expect(evaluateSmoke(good, options).problems).toEqual([]);
   });
 });

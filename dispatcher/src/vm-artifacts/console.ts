@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// What vm-init reports on the guest's console while it boots (docker/vm/rootfs/vm-init): `VMINIT <name> uptime=<s> [key=value ...]`. The build
+// What vm-init reports on the guest's console while it boots (docker/vm/rootfs/vm-boot and vm-build-init): `VMINIT <name> uptime=<s> [key=value ...]`. The build
 // and the smoke boot read the lines and decide from them (#976); the real vm-init (#977) reports the same milestones over vsock.
 
 export type ConsoleEvent = {
@@ -31,11 +31,14 @@ export function parseConsoleLine(line: string): ConsoleEvent | undefined {
   };
 }
 
-/** What the guest's smoke mode must have run (docker/vm/rootfs/vm-init): a check that is absent counts as a failure. */
+/** What the guest's smoke mode must have run (docker/vm/rootfs/vm-build-init): a check that is absent counts as a failure. */
 export const REQUIRED_CHECKS = [
   "root_read_only",
   "runc_container",
   "sysbox_container",
+  "vsock_denied_agent",
+  "vsock_allowed_control",
+  "ia32_unavailable",
   "worker_probe",
 ] as const;
 

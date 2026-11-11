@@ -154,3 +154,31 @@ describe("the host's check of an exit report", () => {
     expect(verifyExitReport({ ...report, token: OTHER }, check)).toBe("wrong");
   });
 });
+
+describe("the shared vectors of the token's check", () => {
+  interface Vector {
+    name: string;
+    kind: "control" | "exit";
+    message: Record<string, unknown>;
+    startAcked?: boolean;
+    verdict: string;
+  }
+  const vectors = readContract<{ token: string; cases: Vector[] }>(
+    "control-token-vectors.json",
+  );
+
+  // #978-T03
+  it("gives every case the verdict the Python host gives it", () => {
+    expect(vectors.cases.length).toBeGreaterThan(10);
+    for (const vector of vectors.cases) {
+      const verdict =
+        vector.kind === "control"
+          ? verifyControlMessage(vector.message, vectors.token)
+          : verifyExitReport(vector.message, {
+              expected: vectors.token,
+              startAcked: vector.startAcked === true,
+            });
+      expect(verdict, vector.name).toBe(vector.verdict);
+    }
+  });
+});

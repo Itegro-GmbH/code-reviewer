@@ -78,11 +78,20 @@ runscript /tmp/recipe-install-host-scripts.sh
 # What the pipeline's clean step removes
 rm -f "$root"/tmp/golden-* "$root"/tmp/recipe-*
 
-log "what is local to this VM: vm-init, the self-check, the recipe as data"
+log "what is local to this VM: the guest init, vm-init, the self-check, the recipe as data"
 [ -e "$root/usr/bin/docker-init" ] || ln -s tini "$root/usr/bin/docker-init"
 [ -x "$root/usr/bin/docker-init" ] || { echo "no docker-init (tini) in the root file system" >&2; exit 1; }
-install -D -m 0755 "$VM_DIR/rootfs/vm-init" "$root/usr/local/sbin/vm-init"
+# `vm-boot` is what PID 1's child runs in every boot (the release's initCommand): the mounts, the job disk, the cgroup controllers, the network,
+# then vm-init for a job's VM. `vm-build-init` is the placeholder of #976, kept only for the build-only boots (seed, smoke): the one place that
+# still runs vm-prepare.sh and sysbox-prepare.sh in the guest.
+install -D -m 0755 "$VM_DIR/rootfs/vm-boot" "$root/usr/local/sbin/vm-boot"
+install -D -m 0755 "$VM_DIR/rootfs/vm-build-init" "$root/usr/local/sbin/vm-build-init"
+# The real vm-init (#977): a zipapp of runner/src/code_reviewer_runner/vm_init/ at /usr/local/sbin/vm-init, and the seccomp profile of the
+# Control container at /etc/code-reviewer/control-seccomp.json. The shebang is the root file system's python3 (the build host's is not).
+"$REPO_DIR/runner/vm-init/install.sh" "$root"
 install -D -m 0755 "$recipe/check-worker-probe.sh" "$root/usr/local/share/code-reviewer-vm/check-worker-probe.sh"
+# The smoke boot's probe of AF_VSOCK from a container (the review of #977, #978): denied for the agent, allowed for Control, with controls.
+install -D -m 0644 "$VM_DIR/rootfs/vsock-probe.py" "$root/usr/local/share/code-reviewer-vm/vsock-probe.py"
 install -D -m 0644 "$recipe/recipe.json" "$root/etc/code-reviewer-vm/recipe.json"
 
 log "what was installed"
@@ -108,6 +117,7 @@ ln -sf /proc/self/mounts "$root/etc/mtab"
 echo "code-reviewer-vm" > "$root/etc/hostname"
 printf '127.0.0.1 localhost code-reviewer-vm\n::1 localhost\n' > "$root/etc/hosts"
 mkdir -p "$root/jobdisk" "$root/seed" "$root/var/lib/docker" "$root/var/lib/containerd" "$root/var/lib/sysbox" "$root/var/lib/sysboxfs" \
+  "$root/var/lib/code-reviewer-work" \
   "$root/run" "$root/tmp" "$root/var/log" "$root/var/tmp" "$root/var/cache" "$root/root" "$root/sys/fs/cgroup"
 chmod 1777 "$root/tmp" "$root/var/tmp"
 cleanup

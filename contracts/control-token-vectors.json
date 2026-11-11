@@ -1,0 +1,236 @@
+{
+  "_comment": "#978: the host's check of the per-VM token (dispatcher/src/launchers/control-token.ts and runner/src/code_reviewer_runner/factory_runner/firecracker/tokens.py); both suites read this file and must give the verdicts below. Dummy tokens. `kind` control: a narrow or end of the environment control (verifyControlMessage); exit: an exit report of vm-init (verifyExitReport, with `startAcked`: whether the host has an ack for the start).",
+  "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEE",
+  "otherToken": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+  "cases": [
+    {
+      "name": "narrow with the token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEE"
+      },
+      "verdict": "ok"
+    },
+    {
+      "name": "end with the token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "end",
+        "exitCode": 0,
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEE"
+      },
+      "verdict": "ok"
+    },
+    {
+      "name": "narrow without a token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com"
+      },
+      "verdict": "missing"
+    },
+    {
+      "name": "end without a token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "end",
+        "exitCode": 0
+      },
+      "verdict": "missing"
+    },
+    {
+      "name": "narrow with another token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "narrow with the token cut short",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEE"
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "narrow with the token and one more character",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEEx"
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "narrow with an empty token",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": ""
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "narrow with a token that is a number",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": 1
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "narrow with a token that is null",
+      "kind": "control",
+      "message": {
+        "version": 1,
+        "type": "narrow",
+        "network": {
+          "mode": "off",
+          "hosts": []
+        },
+        "modelHost": "api.example.com",
+        "token": null
+      },
+      "verdict": "wrong"
+    },
+    {
+      "name": "exit report with the token after the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited",
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEE"
+      },
+      "verdict": "ok",
+      "startAcked": true
+    },
+    {
+      "name": "exit report without a token after the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited"
+      },
+      "verdict": "missing",
+      "startAcked": true
+    },
+    {
+      "name": "exit report with another token after the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited",
+        "token": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "verdict": "wrong",
+      "startAcked": true
+    },
+    {
+      "name": "exit report without a token before the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 2,
+        "reason": "start_timeout"
+      },
+      "verdict": "ok",
+      "startAcked": false
+    },
+    {
+      "name": "exit report with the token before the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited",
+        "token": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDDEEE"
+      },
+      "verdict": "ok",
+      "startAcked": false
+    },
+    {
+      "name": "exit report with another token before the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited",
+        "token": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "verdict": "wrong",
+      "startAcked": false
+    },
+    {
+      "name": "exit report with a null token before the ack",
+      "kind": "exit",
+      "message": {
+        "version": 1,
+        "type": "exit",
+        "exitCode": 0,
+        "reason": "worker_exited",
+        "token": null
+      },
+      "verdict": "wrong",
+      "startAcked": false
+    }
+  ]
+}

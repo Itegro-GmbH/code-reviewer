@@ -16,7 +16,7 @@ util-linux
 psmisc
 # the prepare scripts, the sysbox proof and vm-init
 jq
-python3-minimal
+python3
 curl
 openssl
 ca-certificates

@@ -93,7 +93,7 @@ jobs:
             # and scripts of the pipeline, the two prepare scripts) and their workflow. This is the one job on a KVM runner and takes
             # about half an hour, so nothing else starts it. One brace pattern, because the quantifier "every" would read a list as "and".
             vm:
-              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,.github/workflows/vm-artifacts.yml}'
+              - '{docker/vm/**,docker/sandbox/**,dispatcher/src/vm-artifacts/**,dispatcher/src/snapshot/config.ts,dispatcher/src/snapshot/scripts.ts,dispatcher/src/snapshot/probe-flags.ts,runner/src/code_reviewer_runner/factory_runner/firecracker/**,runner/src/code_reviewer_runner/vm_init/**,runner/vm-init/**,runner/tests/kvm/**,contracts/vm-init.v1.json,contracts/environment-control.v1.json,.github/workflows/vm-artifacts.yml}'
 
   # The code-review.com landing page (website/, #696): an Astro site and its own pnpm project, deployed by
   # Cloudflare (Workers Builds, root directory website), not by a workflow. This job only proves that it

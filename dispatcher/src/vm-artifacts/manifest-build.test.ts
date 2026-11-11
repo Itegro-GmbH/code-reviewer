@@ -93,7 +93,7 @@ describe("the manifest of a build", () => {
     const text = `${JSON.stringify(manifest, null, 2)}\n`;
     expect(parseManifest(Buffer.from(text))).toEqual(manifest);
     expect(manifest.kernel.initCommand).toBe(
-      "/usr/bin/docker-init -- /usr/local/sbin/vm-init",
+      "/usr/bin/docker-init -- /usr/local/sbin/vm-boot",
     );
     expect(manifest.kernel.bootArgs).toContain("8250.nr_uarts=0");
   });
