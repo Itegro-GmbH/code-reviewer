@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "repository": "",
-  "manifestUrl": "",
-  "signatureUrl": "",
+  "version": 2,
+  "baseUrl": "",
+  "manifestAsset": "runner-manifest.json",
+  "signatureAsset": "runner-manifest.sig",
   "publicKey": ""
 }

@@ -1,6 +1,7 @@
 {
   "version": 1,
   "repository": "",
+  "baseUrl": "",
   "manifestAsset": "vm-artifacts-manifest.json",
   "signatureAsset": "vm-artifacts-manifest.sig",
   "publicKey": ""
