@@ -9,6 +9,7 @@ from code_reviewer_runner.factory_runner.config import RunnerConfig
 from code_reviewer_runner.factory_runner.sandbox import WorkerSandbox
 
 from .client import CliIncusClient
+from .host_wall import HostWallGate
 from .launcher import IncusSandbox
 from .settings import settings_from_environment
 
@@ -32,6 +33,7 @@ def incus_sandbox_factory(
             CliIncusClient(
                 settings.incus, call_seconds=settings.call_seconds, state_dir=settings.state_dir
             ),
+            host_wall=HostWallGate.for_settings(settings),
         )
 
     return make

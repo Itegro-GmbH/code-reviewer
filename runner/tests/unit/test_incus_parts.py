@@ -26,6 +26,7 @@ from code_reviewer_runner.factory_runner.firecracker.control_run import (
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWallMode
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import ProxyOuterWall, SlotAddresses
 from code_reviewer_runner.factory_runner.incus.control_run import build_control, unix_arguments
+from code_reviewer_runner.factory_runner.incus.host_wall import WallVerdict
 from code_reviewer_runner.factory_runner.incus.launcher import IncusNotReady
 from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
 from code_reviewer_runner.factory_runner.incus.provision import (
@@ -531,7 +532,7 @@ def test_the_machine_check_fails_naming_the_object_that_is_configured_otherwise(
             incus.network_configs[each.outer_network(0)]["ipv4.nat"] = "true"
             return incus
 
-        prepared = prepare_incus(runner_config(), env, client=client)
+        prepared = prepare_incus(runner_config(), env, client=client, wall=wall_in_place)
 
         failed = [check for check in prepared.selftest.checks if not check.ok]
         assert [check.name for check in failed] == ["incus-objects"]
@@ -555,6 +556,11 @@ def test_provisioning_over_an_object_that_is_there_with_another_configuration_fa
 # -- what `run` checks, and the choice of the sandbox ---
 
 
+def wall_in_place(settings: IncusSettings) -> WallVerdict:
+    """The host's nft table (#1008) as a machine that has it (the gate: test_incus_host_wall)."""
+    return WallVerdict(True)
+
+
 def runner_config(parallel: int = 1) -> RunnerConfig:
     return RunnerConfig(
         url="https://app.example.com",
@@ -568,7 +574,7 @@ def test_a_machine_that_has_everything_is_ready() -> None:
         incus = FakeIncus(pool="crpool")
         env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
 
-        prepared = prepare_incus(runner_config(), env, client=incus.provision)
+        prepared = prepare_incus(runner_config(), env, client=incus.provision, wall=wall_in_place)
 
         names = {check.name: check.ok for check in prepared.selftest.checks}
         assert names["incus"] and names["incus-objects"] and names["state-dir"]
@@ -580,7 +586,7 @@ def test_a_machine_that_lacks_something_says_what() -> None:
         incus.images.clear()
         env = environment(FACTORY_RUNNER_VM_STATE_DIR=str(root))
 
-        prepared = prepare_incus(runner_config(), env, client=incus.provision)
+        prepared = prepare_incus(runner_config(), env, client=incus.provision, wall=wall_in_place)
 
         failed = [check for check in prepared.selftest.checks if not check.ok]
         assert [check.name for check in failed] == ["incus-objects"]
@@ -593,7 +599,9 @@ def test_incus_that_does_not_answer_is_one_failed_check_and_nothing_more() -> No
     incus = FakeIncus(pool="crpool")
     incus.fail["version"] = IncusError("version", "permission denied")
 
-    prepared = prepare_incus(runner_config(), environment(), client=lambda settings: incus)
+    prepared = prepare_incus(
+        runner_config(), environment(), client=lambda settings: incus, wall=wall_in_place
+    )
 
     failed = [check for check in prepared.selftest.checks if not check.ok]
     assert [check.name for check in failed] == ["incus"]

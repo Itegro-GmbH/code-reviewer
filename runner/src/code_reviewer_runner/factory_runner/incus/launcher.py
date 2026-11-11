@@ -77,6 +77,7 @@ from code_reviewer_runner.implementer.environment_control import UNIX_SOCKET_PAT
 from .client import ExecProcess, ExecResult, IncusClient, IncusError, InstanceSpec, run_exec
 from .control_run import ControlLaunch, build_control
 from .endpoint import ControlListener
+from .host_wall import HostWallGate
 from .provision import misconfigured_objects, missing_objects
 from .reaper import MARK, OWNER_MARK, ROLE_MARK, SLOT_MARK, Reaped, reap_leftovers
 from .settings import IncusSettings
@@ -174,6 +175,7 @@ class IncusSandbox:
         *,
         template: ControlTemplate | None = None,
         wall: OuterWall | None = None,
+        host_wall: HostWallGate | None = None,
         new_token: Callable[[], str] = generate_control_token,
         logger: logging.Logger = _log,
     ) -> None:
@@ -186,6 +188,9 @@ class IncusSandbox:
         if wall is None:
             wall = _wall_for(self.settings)
         self._wall = wall
+        # The host's nft table (#1008): without a gate nothing is asked (the unit tests'); the
+        # service always has one (`factory.py`).
+        self._host_wall = host_wall
         self._lock_fd: int | None = None
         self._lost: list[IncusSlot] = []
         self._jobs: dict[str, _Job] = {}
@@ -204,6 +209,10 @@ class IncusSandbox:
 
     @property
     def free(self) -> int:
+        """Slots a claim can use: none while the host's nft table is missing or differs, so the
+        dispatcher takes no job (#1008)."""
+        if self._host_wall is not None and not self._host_wall.verify().ok:
+            return 0
         return self._pool.free
 
     async def setup(self) -> None:
@@ -220,12 +229,23 @@ class IncusSandbox:
         wrong = await misconfigured_objects(self._client, self.settings)
         if wrong:
             raise IncusNotReady(f"not as the launcher needs them: {'; '.join(wrong)}")
+        self._require_host_wall(IncusNotReady)
         self.reaped = await reap_leftovers(self._client, self.settings.prefix, self.settings.owner)
         for leftover in self.settings.jobs_dir.glob("job-*"):
             with contextlib.suppress(OSError):
                 _remove_directory(leftover, self.settings.jobs_dir)
         if isinstance(self._wall, WallLifecycle):
             await self._wall.start()
+
+    def _require_host_wall(self, error: type[Exception]) -> None:
+        """The outer wall's static table (#1008) must be loaded as this dispatcher's settings say
+        (root checks it and records it, the gate reads the record): a job must never run on bridges
+        that leave port 53 of the host open."""
+        if self._host_wall is None:
+            return
+        verdict = self._host_wall.verify()
+        if not verdict.ok:
+            raise error(f"the host's outer wall: {verdict.reason}")
 
     def _take_lock(self) -> None:
         """An exclusive `flock` on `<state_dir>/dispatcher.lock`, kept until `close` or the end of
@@ -264,6 +284,7 @@ class IncusSandbox:
     async def start(self, start: WorkerStart) -> "IncusWorker":
         # The launch is made and checked before anything exists: a job whose id, URL or credential
         # the guest would refuse costs no slot and no instance.
+        self._require_host_wall(StartFailed)
         token = self._new_token()
         slot = self._pool.acquire()
         if slot is None:
