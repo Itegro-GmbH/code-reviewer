@@ -13,21 +13,37 @@ a file through the network door, one more that commits, a closing text.
 What the host holds besides: the proxy wall of the lane (`ProxyOuterWall` with the lane's resolver
 and connector) that notes what the Worker's `narrow` said and when it was acknowledged."""
 
+import contextlib
 import copy
 import json
 import sys
 import time
+from collections.abc import Generator
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from fakes.wire.formats import Turn
-from lane_internet import FILES_HOST, GIT_HOST, MODEL_HOST
+from fakes.wire.upstream import ScriptedUpstream
+from lane_internet import (
+    APP_HOST,
+    FILES_HOST,
+    GIT_HOST,
+    MODEL_HOST,
+    SETUP_ONLY_HOST,
+    FilesHost,
+    LaneInternet,
+)
+from lane_pki import Ca, server_context
 
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import VmIdentity
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import ProxyOuterWall
 from code_reviewer_runner.factory_runner.firecracker.wire import NarrowMessage, Refusal
 from code_reviewer_runner.job import ImplementerInput, parse_implementer_input
+from git_support import HttpOrigin, Origin, system_git
+from runner_app import FakeRunnerApp
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts"
 EXAMPLE = CONTRACTS / "examples" / "implementer" / "RunnerJobInput.json"
@@ -47,6 +63,7 @@ CLOSING: Final = "I added what the setup and the network door fetched, and commi
 
 SETUP_SCRIPT: Final = f"""\
 curl -fsS http://{FILES_HOST}/setup -o /opt/setup-fetched.txt
+curl -fsS http://{SETUP_ONLY_HOST}/setup -o /opt/mirror-fetched.txt
 cp /opt/setup-fetched.txt setup-fetched.txt
 echo "the lane's setup is done"
 """
@@ -142,3 +159,54 @@ class RecordingProxyWall(ProxyOuterWall):
             self.narrows.append(message)
             self.narrowed_at = time.monotonic()
         return refusal
+
+
+@dataclass
+class LaneFakes:
+    """Everything the job reaches that is not the host's proxy: the App, the git endpoint, the
+    provider and the files host, each on the loopback behind a public-looking name."""
+
+    internet: LaneInternet
+    app: FakeRunnerApp
+    origin: Origin
+    git_host: HttpOrigin
+    model: ScriptedUpstream
+    files: FilesHost
+
+
+@contextlib.contextmanager
+def lane_fakes(directory: Path, ca: Ca, *, with_git: bool = True) -> Generator[LaneFakes]:
+    """Start the fakes. With `with_git` false the lane's git host has no name (the resolver refuses
+    it): the proxy cannot clone for the job, which is how the lane makes it refuse."""
+    with ExitStack() as stack:
+        origin = Origin(directory / "git")
+        git_host = stack.enter_context(
+            HttpOrigin(
+                origin,
+                GIT_TOKEN,
+                system_git(),
+                tls=server_context(ca, [GIT_HOST], directory / "git-cert"),
+                mount=CLONE_PATH,
+            )
+        )
+        model = stack.enter_context(
+            ScriptedUpstream(
+                "chat",
+                agent_script(),
+                MODEL,
+                real_key=MODEL_KEY,
+                tls=server_context(ca, [MODEL_HOST], directory / "model-cert"),
+            )
+        )
+        files = stack.enter_context(FilesHost())
+        app = FakeRunnerApp().start()
+        stack.callback(app.stop)
+        internet = LaneInternet()
+        if with_git:
+            internet.expose(GIT_HOST, 443, git_host.port)
+        internet.expose(MODEL_HOST, 443, model.port)
+        internet.expose(FILES_HOST, 80, files.port)
+        # The host only the setup may reach: the job's rule does not list it.
+        internet.expose(SETUP_ONLY_HOST, 80, files.port)
+        internet.expose(APP_HOST, 80, app.port)
+        yield LaneFakes(internet, app, origin, git_host, model, files)

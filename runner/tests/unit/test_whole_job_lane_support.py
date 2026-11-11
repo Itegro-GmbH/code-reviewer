@@ -12,6 +12,7 @@ What is not here, and only the lane proves: the Worker image trusting the CA, th
 the three rulesets in it, Sysbox, the agent."""
 
 import asyncio
+import json
 import os
 import socket
 import ssl
@@ -21,7 +22,6 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Generator
-from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,13 +36,14 @@ from code_reviewer_runner.dynamic_review.passthrough.upstream import (
     UpstreamError,
     UpstreamRequest,
 )
+from code_reviewer_runner.factory_runner.app_client import AppClient
 from code_reviewer_runner.factory_runner.firecracker.outer_wall import VmIdentity
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import SlotAddresses
 from code_reviewer_runner.factory_runner.firecracker.slots import Slot
 from code_reviewer_runner.factory_runner.firecracker.wire import NarrowMessage
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
 from code_reviewer_runner.outer_proxy import OuterProxy
-from git_support import HttpOrigin, Origin, basic, raw, system_git
+from git_support import Origin, basic, raw, system_git
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kvm"))
 import lane_pki
@@ -64,6 +65,7 @@ pytestmark = [
 
 # The proxy listens on HOST; the clients connect from 127.0.0.1, which is the guest the wall serves.
 HOST, GUEST = "127.0.1.1", "127.0.0.1"
+RUNNER = "crc_" + "K" * 43
 VM = VmIdentity("vm-lane", Slot(0), APP_HOST, 80)
 # What the door is told (a private address, as in a VM); `Lane.dial_proxy` stands for the TAP.
 VM_PROXY = OuterProxy(Slot(0).host_address, 3128)
@@ -72,18 +74,25 @@ VM_PROXY = OuterProxy(Slot(0).host_address, 3128)
 @dataclass
 class Lane:
     ca: lane_pki.Ca
-    internet: LaneInternet
+    fakes: job.LaneFakes
     wall: job.RecordingProxyWall
-    origin: Origin
-    git_host: HttpOrigin
-    model: ScriptedUpstream
-    files: FilesHost
     port: int
 
-    def dial_proxy(self, address: tuple[str, int], timeout: float) -> socket.socket:
-        """The door dials the host's address on the slot's TAP; here that is a loopback address."""
-        assert address == (VM_PROXY.host, VM_PROXY.port)
-        return socket.create_connection((HOST, self.port), timeout)
+    @property
+    def internet(self) -> LaneInternet:
+        return self.fakes.internet
+
+    @property
+    def origin(self) -> Origin:
+        return self.fakes.origin
+
+    @property
+    def model(self) -> ScriptedUpstream:
+        return self.fakes.model
+
+    @property
+    def files(self) -> FilesHost:
+        return self.fakes.files
 
     def trust(self) -> ssl.SSLContext:
         """What the Worker image's trust store is: the system's, plus the lane's CA."""
@@ -94,6 +103,11 @@ class Lane:
             NetworkRule(MODE_LIST, (job.GIT_HOST, job.FILES_HOST)), job.MODEL_HOST
         )
         assert asyncio.run(self.wall.narrow(VM, message)) is None
+
+    def dial_proxy(self, address: tuple[str, int], timeout: float) -> socket.socket:
+        """The door dials the host's address on the slot's TAP; here that is a loopback address."""
+        assert address == (VM_PROXY.host, VM_PROXY.port)
+        return socket.create_connection((HOST, self.port), timeout)
 
     def git(self, *args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         """git as the Worker runs it: https only, the token's header, the proxy as `http.proxy`."""
@@ -131,43 +145,18 @@ class Lane:
 @pytest.fixture
 def lane(tmp_path: Path) -> Generator[Lane]:
     ca = lane_pki.create_ca(tmp_path / "pki")
-    origin = Origin(tmp_path / "git")
-    with ExitStack() as stack:
-        git_host = stack.enter_context(
-            HttpOrigin(
-                origin,
-                job.GIT_TOKEN,
-                system_git(),
-                tls=lane_pki.server_context(ca, [GIT_HOST], tmp_path / "git-cert"),
-                mount=job.CLONE_PATH,
-            )
-        )
-        model = stack.enter_context(
-            ScriptedUpstream(
-                "chat",
-                job.agent_script(),
-                job.MODEL,
-                real_key=job.MODEL_KEY,
-                tls=lane_pki.server_context(ca, [MODEL_HOST], tmp_path / "model-cert"),
-            )
-        )
-        files = stack.enter_context(FilesHost())
-        internet = LaneInternet()
-        internet.expose(GIT_HOST, 443, git_host.port)
-        internet.expose(MODEL_HOST, 443, model.port)
-        internet.expose(FILES_HOST, 80, files.port)
-        internet.expose(SETUP_ONLY_HOST, 80, files.port)
+    with job.lane_fakes(tmp_path, ca) as fakes:
         wall = job.RecordingProxyWall(
             1,
             port=0,
             addresses=lambda _slot: SlotAddresses(HOST, GUEST),  # pyright: ignore[reportUnknownLambdaType]
-            resolver=internet.resolve,
-            connector=internet.connect,
+            resolver=fakes.internet.resolve,
+            connector=fakes.internet.connect,
         )
         asyncio.run(wall.start())
         asyncio.run(wall.admit(VM))
         try:
-            yield Lane(ca, internet, wall, origin, git_host, model, files, wall.port_of(Slot(0)))
+            yield Lane(ca, fakes, wall, wall.port_of(Slot(0)))
         finally:
             asyncio.run(wall.close())
 
@@ -194,6 +183,28 @@ def test_the_lanes_job_is_one_the_worker_parses_with_the_lanes_repository_provid
     assert "files.lane.example.com/setup" in spec.environment.setup_script
     assert parsed.model_access is not None
     assert parsed.model_access["modelEntry"]["upstreamBaseUrl"] == f"https://{MODEL_HOST}/v1"
+
+
+def test_the_fake_app_holds_the_lanes_job_to_the_contract_and_hands_it_to_the_claimant(
+    lane: Lane,
+) -> None:
+    app = lane.fakes.app
+    app.credentials[RUNNER] = "runner-kvm"
+    app.queue_job("00000000-0000-4000-8000-0000000000e1", job.job_document())
+    claim = AppClient(app.url, credential=RUNNER).claim()
+    assert claim is not None
+
+    request = urllib.request.Request(
+        f"{app.url}/api/workers/v1/jobs/{claim.job_id}",
+        headers={"Authorization": f"Bearer {claim.credential}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        document = json.loads(answer.read())
+
+    # The Worker gets the job as the lane wrote it; the App's contract checks (every request and
+    # answer is held to the schemas) found nothing wrong with it.
+    assert document["job"]["input"]["implementer"]["repo"]["cloneUrl"] == job.CLONE_URL
+    assert app.violations == []
 
 
 def test_the_lanes_job_carries_no_address_and_every_host_of_it_is_below_the_cas_one_domain() -> (
