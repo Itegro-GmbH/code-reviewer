@@ -533,6 +533,7 @@ def good_members(
     skip: str | None = None,
     commit: str = COMMIT,
     template: bytes = b"@SLOT_NETWORK@\n",
+    vm: object = 1,
 ) -> None:
     files = {
         "bin/factory-runner": b"#!/bin/sh\n",
@@ -540,7 +541,7 @@ def good_members(
         "libexec/host.sh": b"#!/bin/sh\n",
         "share/outer-wall.nft": template,
         "share/release.json": json.dumps(
-            {"release": 1, "commit": commit, "vmArtifacts": 1}
+            {"release": 1, "commit": commit, "vmArtifacts": vm}
         ).encode(),
     }
     for name, content in files.items():
@@ -563,6 +564,7 @@ def good_members(
         ("no-info", "no share/release.json"),
         ("wrong-commit", "names the commit"),
         ("no-template", "no @SLOT_NETWORK@"),
+        ("vm-not-a-number", "does not name the VM artifacts release it needs"),
     ],
 )
 def test_the_verifier_refuses_what_the_installer_refuses(
@@ -576,6 +578,7 @@ def test_the_verifier_refuses_what_the_installer_refuses(
             skip={"no-part": "bin/firecracker", "no-info": "share/release.json"}.get(damage),
             commit="b" * 40 if damage == "wrong-commit" else COMMIT,
             template=b"x\n" if damage == "no-template" else b"@SLOT_NETWORK@\n",
+            vm="one" if damage == "vm-not-a-number" else 1,
         )
         path = {"absolute": "/etc/evil", "parent": "../evil", "space": "share/a b"}.get(
             damage, "share/x"
@@ -597,6 +600,44 @@ def test_the_verifier_refuses_what_the_installer_refuses(
 
     assert done.returncode != 0, done.stdout
     assert re.search(message, done.stderr), done.stderr
+
+
+# #1002-T21
+def test_the_verifier_holds_the_release_to_the_vm_artifacts_release_it_is_asked_for(
+    built: tuple[Path, Signing], tmp_path: Path
+) -> None:
+    _, signing = built
+    out = forge(tmp_path, signing, good_members)  # names VM artifacts release 1
+
+    assert verify(out, signing, "--commit", COMMIT, "--vm", "1").returncode == 0
+    wrong = verify(out, signing, "--commit", COMMIT, "--vm", "2")
+
+    assert wrong.returncode != 0
+    assert "names the VM artifacts release 1, not 2" in wrong.stderr
+
+
+# #1002-T21
+def test_the_build_names_the_vm_artifacts_release_of_pair_json_unless_a_lane_names_another(
+    pins: Path, tmp_path: Path
+) -> None:
+    pair = json.loads((RELEASE_DIR / "pair.json").read_text())["vmArtifactsRelease"]
+
+    def named(out: Path, **options: int) -> int:
+        tarball = bp.build(
+            REPOSITORY_ROOT, out, release=1, commit=COMMIT, epoch=EPOCH, cache=pins, **options
+        )
+        plain = subprocess.run(
+            ["zstd", "-dcq", str(tarball)], capture_output=True, check=True
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
+            member = archive.extractfile("share/release.json")
+            assert member is not None
+            return json.loads(member.read())["vmArtifacts"]
+
+    assert named(tmp_path / "a") == pair
+    assert named(tmp_path / "b", vm_artifacts=pair + 6) == pair + 6
+    with pytest.raises(bp.BuildError, match="whole number from 1"):
+        named(tmp_path / "c", vm_artifacts=0)
 
 
 def test_a_complete_forged_tarball_passes_so_the_refusals_above_are_the_damage_and_nothing_else(
@@ -647,7 +688,9 @@ def program_release(
 def test_the_installer_installs_updates_and_rolls_back_the_programs_the_build_made(
     pins: Path, tmp_path: Path
 ) -> None:
-    first = program_release(pins, tmp_path, 1, 10)
+    # Both builds name the VM artifacts release of runner/release/pair.json: the installer takes exactly that one with them.
+    vm = json.loads((RELEASE_DIR / "pair.json").read_text())["vmArtifactsRelease"]
+    first = program_release(pins, tmp_path, 1, vm)
     machine: Machine = new_machine(tmp_path / "machine", first)
 
     installed = machine.install()
@@ -662,11 +705,12 @@ def test_the_installer_installs_updates_and_rolls_back_the_programs_the_build_ma
     assert (current / "libexec/host.sh").read_bytes() == SCRIPT.read_bytes()
     assert json.loads((current / "share/release.json").read_text())["release"] == 1
 
-    second = program_release(pins, tmp_path, 2, 11, like=first)
+    second = program_release(pins, tmp_path, 2, vm, like=first)
     machine.publish(second)
     staged = machine.host("update")
     assert staged.returncode == 0, staged.stderr
     assert "staged the program release 2" in staged.stdout
+    assert machine.release_of("artifacts", parent=machine.state_dir) == str(vm)
     switched = machine.host("switch")
     assert switched.returncode == 0, switched.stderr
     assert machine.release_of("current", parent=machine.opt) == "2"

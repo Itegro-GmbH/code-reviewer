@@ -33,6 +33,9 @@ FIRST_NETWORK = "10.250.0.0/24"
 
 PROGRAM_BASE = "https://releases.example/runner/"
 VM_BASE = "https://releases.example/vm/"
+# A VM channel with an address per release (`{release}` is the number the installer asks for): the program names the VM artifacts it needs,
+# and an older release than the newest one is still there to be fetched.
+VM_PER_RELEASE_BASE = "https://releases.example/vm/{release}/"
 PROGRAM_MANIFEST = "runner-manifest.json"
 PROGRAM_SIGNATURE = "runner-manifest.sig"
 VM_MANIFEST = "vm-artifacts-manifest.json"
@@ -63,6 +66,8 @@ class Release:
     extra_files: dict[str, tuple[bytes, int]] = field(
         default_factory=lambda: dict[str, tuple[bytes, int]]()
     )
+    # The VM artifacts release the program names in `share/release.json` (the pair); the one this release publishes when not given.
+    needs_vm: int | None = None
     # Changes the tests make to what is published, by name.
     tamper: set[str] = field(default_factory=lambda: set[str]())
 
@@ -85,6 +90,10 @@ class Release:
             "publicKey": self.public_key,
         }
 
+    @property
+    def vm_needed(self) -> int:
+        return self.vm if self.needs_vm is None else self.needs_vm
+
     def vm_channel(self, base: str = VM_BASE) -> dict[str, object]:
         return {
             "version": 1,
@@ -103,8 +112,11 @@ class Release:
         runner = (self.runner_script or FACTORY_RUNNER).replace("@RELEASE@", str(self.program))
         if "program-broken" in self.tamper:
             runner = "#!/bin/sh\nexit 3\n"
+        vm_needed: object = "x" if "bundle-vm-not-a-number" in self.tamper else self.vm_needed
+        info = {"release": self.program, "commit": "a" * 40, "vmArtifacts": vm_needed}
         files: dict[str, tuple[bytes, int]] = {
             "bin/factory-runner": (runner.encode(), 0o755),
+            "share/release.json": (json.dumps(info, indent=2).encode(), 0o644),
             "bin/firecracker": (b'#!/bin/sh\necho "Firecracker v1.17.0"\n', 0o755),
             "share/outer-wall.nft": (NFT_FILE.read_bytes(), 0o644),
             "libexec/host.sh": (SCRIPT.read_bytes(), 0o755),
@@ -206,9 +218,14 @@ class Release:
 
     # -- publishing -----------------------------------------------------------------------------
 
-    def publish(self, served: Path) -> None:
+    def publish(self, served: Path, *, vm_in: Path | None = None) -> None:
         """Write what the two release addresses answer into `served` (a stand-in `curl` copies
-        from there by file name), replacing an earlier release."""
+        from there by path, then by file name), replacing an earlier release. The VM artifacts go
+        beside the program's files, or into `vm_in` for a channel with an address per release."""
+        self.publish_program(served)
+        self.publish_vm(vm_in or served)
+
+    def publish_program(self, served: Path) -> None:
         served.mkdir(parents=True, exist_ok=True)
         bundle = self.bundle()
         program_manifest = self.program_manifest(bundle)
@@ -216,7 +233,15 @@ class Release:
         (served / name).write_bytes(bundle)
         (served / PROGRAM_MANIFEST).write_bytes(program_manifest)
         (served / PROGRAM_SIGNATURE).write_bytes(self.sign(program_manifest))
+        if "program-bad-signature" in self.tamper:
+            (served / PROGRAM_SIGNATURE).write_bytes(Release().sign(program_manifest))
+        if "program-flip-byte" in self.tamper:
+            data_bytes = bytearray((served / name).read_bytes())
+            data_bytes[-1] ^= 1
+            (served / name).write_bytes(bytes(data_bytes))
 
+    def publish_vm(self, served: Path) -> None:
+        served.mkdir(parents=True, exist_ok=True)
         kernel, rootfs, data = self.kernel(), self.rootfs(), self.data_disk()
         manifest = self.vm_manifest(kernel, rootfs, data)
         files = {
@@ -237,18 +262,14 @@ class Release:
         if "vm-bad-signature" in self.tamper:
             signature = Release().sign(manifest)  # another key
         (served / VM_SIGNATURE).write_bytes(signature)
-        if "program-bad-signature" in self.tamper:
-            (served / PROGRAM_SIGNATURE).write_bytes(Release().sign(program_manifest))
-        if "program-flip-byte" in self.tamper:
-            data_bytes = bytearray((served / name).read_bytes())
-            data_bytes[-1] ^= 1
-            (served / name).write_bytes(bytes(data_bytes))
 
-    def write_channels(self, folder: Path, base: str | None = None) -> tuple[Path, Path]:
+    def write_channels(
+        self, folder: Path, base: str | None = None, vm_base: str | None = None
+    ) -> tuple[Path, Path]:
         folder.mkdir(parents=True, exist_ok=True)
         program, vm = folder / "program-channel.json", folder / "vm-channel.json"
         program.write_text(json.dumps(self.program_channel(base or PROGRAM_BASE), indent=2))
-        vm.write_text(json.dumps(self.vm_channel(base or VM_BASE), indent=2))
+        vm.write_text(json.dumps(self.vm_channel(vm_base or base or VM_BASE), indent=2))
         return program, vm
 
 
@@ -359,6 +380,9 @@ done
 [ -z "${STUB_CURL_FAIL:-}" ] || exit 7
 case "$url" in *"?again") url="${url%\?again}"; again=1 ;; *) again="" ;; esac
 name="${url##*/}"
+# A file under the path of the address (a channel with an address per release), else by its name alone.
+path="${url#https://*/}"
+[ -f "$STUB_SERVED/$path" ] && name="$path"
 # A redirect the test asked for, to another host, or once to the same host (only answered to a request that asks for the status code).
 if [ -n "$write_code" ] && [ -n "${STUB_REDIRECT_TO:-}" ]; then
   printf 'HTTP/1.1 302 Found\r\nLocation: %s\r\n\r\n' "$STUB_REDIRECT_TO" >"$headers"; printf 302; exit 0
@@ -400,6 +424,8 @@ class Machine:
     program_channel: Path
     vm_channel: Path
     release: Release
+    # The VM channel has an address per release (`VM_PER_RELEASE_BASE`): a VM release is published into its own directory.
+    per_release_vm: bool = False
     # The directory tree of a machine that has nothing of ours, for "nothing is left behind".
     baseline: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
@@ -490,7 +516,16 @@ class Machine:
         return self.run_script(self.host_script, *args, env=env)
 
     def publish(self, release: Release | None = None) -> None:
-        (release or self.release).publish(self.served)
+        """The program of `release` and its VM artifacts, where this machine's channels point."""
+        published = release or self.release
+        published.publish_program(self.served)
+        self.publish_vm(published)
+
+    def publish_vm(self, release: Release) -> None:
+        release.publish_vm(self.vm_directory(release.vm))
+
+    def vm_directory(self, vm: int) -> Path:
+        return self.served / "vm" / str(vm) if self.per_release_vm else self.served
 
     # -- looking --------------------------------------------------------------------------------
 
@@ -530,7 +565,9 @@ class Machine:
         return (self.state / "nft-table").exists()
 
 
-def new_machine(tmp_path: Path, release: Release | None = None) -> Machine:
+def new_machine(
+    tmp_path: Path, release: Release | None = None, *, per_release_vm: bool = False
+) -> Machine:
     """A machine that satisfies every preflight and has nothing of ours."""
     root, bin_dir, state = tmp_path / "root", tmp_path / "bin", tmp_path / "state"
     for folder in (
@@ -556,9 +593,13 @@ def new_machine(tmp_path: Path, release: Release | None = None) -> Machine:
         path.chmod(0o755)
     served = tmp_path / "served"
     published = release or Release()
-    published.publish(served)
-    program_channel, vm_channel = published.write_channels(tmp_path / "channels")
+    program_channel, vm_channel = published.write_channels(
+        tmp_path / "channels", vm_base=VM_PER_RELEASE_BASE if per_release_vm else None
+    )
     log = tmp_path / "calls.log"
-    machine = Machine(root, bin_dir, state, log, served, program_channel, vm_channel, published)
+    machine = Machine(
+        root, bin_dir, state, log, served, program_channel, vm_channel, published, per_release_vm
+    )
+    machine.publish()
     machine.baseline = machine.tree()
     return machine

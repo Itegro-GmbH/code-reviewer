@@ -52,13 +52,15 @@ def installed(machine: Machine) -> Machine:
 
 
 def publish(machine: Machine, **changes: object) -> Release:
+    needs_vm = changes.pop("needs_vm", None)
     release = Release(
         program=int(str(changes.pop("program", 1))),
         vm=int(str(changes.pop("vm", 10))),
+        needs_vm=None if needs_vm is None else int(str(needs_vm)),
         key=machine.release.key,
         tamper=set(changes.pop("tamper", ())),  # type: ignore[call-overload]
     )
-    release.publish(machine.served)
+    machine.publish(release)
     return release
 
 
@@ -122,8 +124,9 @@ def test_a_rollback_during_the_download_is_respected_by_the_commit(installed: Ma
     assert done.returncode == 0, done.stderr
     assert "is not taken any more" in done.stdout
     assert not (installed.opt / "releases/2").exists()
-    # The VM artifacts, which nothing rejected, are staged alone.
-    assert (installed.state_dir / "pending").read_text().splitlines() == ["vm=11"]
+    # The VM artifacts were staged for that program only: they are not taken alone.
+    assert not (installed.state_dir / "pending").exists()
+    assert not (installed.state_dir / "artifact-releases/11").exists()
 
 
 # #982-T51

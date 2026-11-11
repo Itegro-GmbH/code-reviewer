@@ -6,18 +6,19 @@
 # and no Node or Python: the job that holds the signing key runs this and nothing it has to install.
 #
 #   verify-release.sh --dir DIR --manifest FILE --signature FILE --channel FILE
-#                     [--release N] [--commit SHA] [--min-release N] [--exact-dir]
+#                     [--release N] [--commit SHA] [--vm N] [--min-release N] [--exact-dir]
 #
 # The signature must verify with the public key of the channel (an ECDSA P-256 key) over the exact bytes of the manifest; the manifest names
 # the tarball by size and sha256; the tarball lists only names the installer accepts (no absolute path, no `..`, no odd character), holds no
 # device, socket or link out of its tree, carries the four parts the installer looks for, and its `share/release.json` names the release and
-# the commit that were asked for. `--min-release`: the number must be higher (the number only grows). `--exact-dir`: nothing but the tarball,
+# the commit that were asked for, and the VM artifacts release it needs (`vmArtifacts`, a whole number, which the installer takes together with the
+# program: `--vm`, the release the pair of the repository names). `--min-release`: the number must be higher (the number only grows). `--exact-dir`: nothing but the tarball,
 # the manifest and the signature is in DIR (what is published is what was signed).
 set -euo pipefail
 
 fail() { echo "verify-release: $*" >&2; exit 1; }
 
-dir="" manifest="" signature="" channel="" release="" commit="" min_release="" exact=0
+dir="" manifest="" signature="" channel="" release="" commit="" vm="" min_release="" exact=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --dir) dir="${2:?}"; shift 2 ;;
@@ -26,6 +27,7 @@ while [ $# -gt 0 ]; do
     --channel) channel="${2:?}"; shift 2 ;;
     --release) release="${2:?}"; shift 2 ;;
     --commit) commit="${2:?}"; shift 2 ;;
+    --vm) vm="${2:?}"; shift 2 ;;
     --min-release) min_release="${2:?}"; shift 2 ;;
     --exact-dir) exact=1; shift ;;
     *) fail "unknown option: $1" ;;
@@ -104,5 +106,9 @@ info="$work/tree/share/release.json"
 [ -f "$info" ] || fail "the tarball has no share/release.json"
 [ "$(jq -r .release "$info")" = "$number" ] || fail "share/release.json is release $(jq -r .release "$info"), not $number"
 [ -z "$commit" ] || [ "$(jq -r .commit "$info")" = "$commit" ] || fail "share/release.json names the commit $(jq -r .commit "$info"), not $commit"
+
+needed=$(jq -r 'if (.vmArtifacts | type) == "number" and .vmArtifacts >= 1 and .vmArtifacts == (.vmArtifacts | floor) then .vmArtifacts else empty end' "$info")
+[ -n "$needed" ] || fail "share/release.json does not name the VM artifacts release it needs (vmArtifacts): the installer would not take the program"
+[ -z "$vm" ] || [ "$needed" = "$vm" ] || fail "share/release.json names the VM artifacts release $needed, not $vm"
 
 echo "verify-release: release $number ok ($name, $size bytes, sha256 $digest, vm artifacts release $(jq -r .vmArtifacts "$info"))"

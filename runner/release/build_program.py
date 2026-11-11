@@ -613,14 +613,28 @@ def smoke_test(tree: Path) -> None:
             raise BuildError(f"{command.name} --version failed ({result.returncode}): {tail}")
 
 
-def build(root: Path, out: Path, *, release: int, commit: str, epoch: int, cache: Path) -> Path:
+def build(
+    root: Path,
+    out: Path,
+    *,
+    release: int,
+    commit: str,
+    epoch: int,
+    cache: Path,
+    vm_artifacts: int | None = None,
+) -> Path:
     if release < 1:
         raise BuildError("the release number is a whole number from 1")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise BuildError("the commit is a full 40-character SHA")
-    vm_release = json.loads((root / "runner/release/pair.json").read_text())["vmArtifactsRelease"]
+    # The VM artifacts release the program needs, exactly: the installer takes this release with it. The file is the truth; only a lane that
+    # builds a second program for the same commit names another (`--vm-artifacts`), never a release.
+    if vm_artifacts is not None:
+        vm_release = vm_artifacts
+    else:
+        vm_release = json.loads((root / "runner/release/pair.json").read_text())["vmArtifactsRelease"]
     if not isinstance(vm_release, int) or vm_release < 1:
-        raise BuildError("runner/release/pair.json: vmArtifactsRelease is a whole number from 1")
+        raise BuildError("the VM artifacts release (runner/release/pair.json) is a whole number from 1")
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="program-build-") as work_name:
         work = Path(work_name)
@@ -664,6 +678,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--root", type=Path, default=REPO)
     parser.add_argument(
+        "--vm-artifacts",
+        type=int,
+        help="the VM artifacts release to name instead of runner/release/pair.json (for the lane that builds a second program; the release workflow never passes it)",
+    )
+    parser.add_argument(
         "--epoch",
         type=int,
         help="the mtime of every file in the tarball (default: the commit's time)",
@@ -682,6 +701,7 @@ def main(argv: list[str] | None = None) -> int:
             commit=arguments.commit,
             epoch=epoch,
             cache=arguments.cache,
+            vm_artifacts=arguments.vm_artifacts,
         )
     except BuildError as error:
         print(f"build_program: {error}", file=sys.stderr)
