@@ -2208,7 +2208,7 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
 
 ## The Incus launcher (#1007)
 
-The local Dispatcher's `WorkerSandbox` on **Incus** (Runner v2, epic #969, spike [#1005](https://github.com/Itegro-GmbH/code-reviewer/pull/1006),
+The local Dispatcher's `WorkerSandbox` on **Incus** (Runner v2, epic #969, spike [#1005](#spike-incus-lxd-backend-1005),
 "Spike: Incus (LXD) backend"): the one local backend, the same behaviour on every Linux machine, KVM or not. It **replaces the
 [Firecracker launcher](#the-firecracker-launcher-978)** as the backend of the Linux dispatcher; that code stays until #1012 retires it, and `FACTORY_RUNNER_SANDBOX=firecracker` is still accepted
 until then (the installer of #982 writes it). The program is selected with `FACTORY_RUNNER_SANDBOX=incus`.
