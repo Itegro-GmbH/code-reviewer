@@ -249,6 +249,62 @@ describe("the release workflow", () => {
     expect(String(draft?.run)).toContain("Needs the VM artifacts release");
   });
 
+  // #1002-T21
+  it("checks the manifest and the release.json of the tarball against this tag, this commit and the pair before the signature", () => {
+    const steps = stepsOf(job(release, "release"));
+    const names = steps.map((step) => step.name ?? "");
+    const check = steps.find((step) =>
+      step.name?.startsWith("What is about to be signed"),
+    );
+
+    expect(check).toBeDefined();
+    expect(names.indexOf(check?.name ?? "")).toBeLessThan(
+      names.indexOf("Sign the manifest"),
+    );
+    expect(names.indexOf(check?.name ?? "")).toBeGreaterThan(
+      names.findIndex((name) => name.startsWith("The VM artifacts release")),
+    );
+    expect(check?.env?.RELEASE).toBe("${{ needs.number.outputs.release }}");
+    expect(check?.env?.VM_RELEASE).toBe("${{ steps.pair.outputs.vm }}");
+    const run = String(check?.run);
+    expect(run).toContain('"$(/usr/bin/jq -r .release "$manifest")" = "$RELEASE"');
+    expect(run).toContain("share/release.json");
+    expect(run).toContain('-r .commit)" = "$GITHUB_SHA"');
+    expect(run).toContain('-r .release)" = "$RELEASE"');
+    expect(run).toContain('-r .vmArtifacts)" = "$VM_RELEASE"');
+    expect(run).toContain("sha256sum");
+  });
+
+  // #1002-T21
+  it("reads the key with the system's PATH and the system's tools, and restores nothing before it but the build's output into a fresh directory that is not on PATH", () => {
+    const signing = job(release, "release");
+    const steps = stepsOf(signing);
+    const sign = steps.find((step) => step.name === "Sign the manifest");
+    const run = String(sign?.run);
+
+    expect(sign?.env?.PATH).toBe("/usr/bin:/bin");
+    // Every tool of the step is called by its full path (no bare `openssl`, `jq` or `base64` for a directory of the job to shadow).
+    expect(run).toMatch(/\/usr\/bin\/openssl pkey/);
+    expect(run).toMatch(/\/usr\/bin\/openssl dgst -sha256 -sign/);
+    expect(run).toMatch(/\/usr\/bin\/jq -r \.publicKey/);
+    expect(run).toMatch(/\/usr\/bin\/base64 -w0/);
+    expect(run).not.toMatch(/(^|[\s$(|])(openssl|jq|base64)\s/m);
+    // The check before it runs with the same PATH.
+    const check = steps.find((step) =>
+      step.name?.startsWith("What is about to be signed"),
+    );
+    expect(check?.env?.PATH).toBe("/usr/bin:/bin");
+    // One restore in the job, into `<work>/release`: the work directory is made fresh by the job and is nowhere on PATH.
+    const restores = steps.filter((step) => step.uses?.startsWith("actions/cache"));
+    expect(restores.map((step) => step.uses)).toEqual(["actions/cache/restore@v4"]);
+    expect(restores[0]?.with?.path).toBe("${{ env.PROGRAM_WORK }}/release");
+    expect(signing.env?.PROGRAM_WORK).toBe("/mnt/program");
+    const volume = steps.find((step) => step.name === "Work volume");
+    expect(volume?.run).toContain('sudo mkdir -p "$PROGRAM_WORK"');
+    expect(releaseText).not.toMatch(/GITHUB_PATH/);
+    expect(JSON.stringify(signing.env)).not.toMatch(/PATH/);
+  });
+
   // #1002-T01
   it("publishes the files under the names the channel file and the installer read", () => {
     const draft = stepsOf(job(release, "release")).find((step) =>

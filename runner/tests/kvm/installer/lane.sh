@@ -12,6 +12,8 @@
 #     signature is refused; the uninstall leaves nothing.
 #   - the slots' network is the first one that overlaps no address of the machine (a dummy interface sits on the first candidate), and the
 #     nft table and the TAP devices carry it;
+#   - the pair is the program's own statement: an update takes the VM artifacts release the new program names (`share/release.json`), not the
+#     newest one that exists, and a program whose VM release is not published is not taken;
 #   - an update whose VM artifacts download slowly does not stop the service, a start or the status, and stages both parts as a pair; a failed
 #     stage of the VM artifacts stages no program;
 #   - a flushed ruleset while the service runs ends in a restart that loads the outer wall again (the root timer, within 40 s).
@@ -160,7 +162,7 @@ test ! -e /var/lib/code-reviewer/pending
 
 echo "== an update with a slow download of the VM artifacts does not stop the service, a start or a rollback"
 release 4 13 --channels "$work/channels4" --base "https://localhost:$port/"
-printf 25 > "$work/served/vmlinux.slow"
+printf 25 > "$work/served/vm/13/vmlinux.slow"
 # shellcheck disable=SC2024 # the file is the lane's own, made by the lane's user
 sudo factory-runner update > "$work/slow-update.out" 2>&1 &
 updater=$!
@@ -171,7 +173,7 @@ sudo flock -n /var/lib/code-reviewer/switch.lock true || fail "the switch lock i
 timeout 10 sudo factory-runner status > /dev/null || fail "the status waited for the download"
 timeout 10 sudo sh /opt/code-reviewer/current/libexec/host.sh switch || fail "a start waited for the download"
 wait "$updater" || { cat "$work/slow-update.out" >&2; fail "the slow update failed"; }
-rm -f "$work/served/vmlinux.slow"
+rm -f "$work/served/vm/13/vmlinux.slow"
 grep -q '^pair=1$' /var/lib/code-reviewer/pending || fail "the two releases were not staged as a pair"
 wait_for_release 4
 test "$(readlink /var/lib/code-reviewer/artifacts)" = "artifact-releases/13" || fail "the artifacts are not release 13"
@@ -182,6 +184,24 @@ if sudo factory-runner update 2> "$work/flip.err"; then fail "an update with a f
 test ! -e /var/lib/code-reviewer/pending || fail "a pair with a failed part is staged"
 test ! -e /opt/code-reviewer/releases/5 || fail "the program of a failed pair is staged"
 test "$(readlink /opt/code-reviewer/current)" = "releases/4"
+
+echo "== the pair: the program names its VM artifacts release, a newer one that exists is not taken with it"
+release 6 15 --also-vm 20 --channels "$work/channels6" --base "https://localhost:$port/"
+sudo factory-runner update | tee "$work/pair.out"
+grep -q "staged the VM artifacts release 15" "$work/pair.out" || fail "the VM artifacts release the program names were not staged"
+grep -q '^vm=15$' /var/lib/code-reviewer/pending || fail "the pair is not the program's VM release"
+test ! -e /var/lib/code-reviewer/artifact-releases/20 || fail "the newest VM release was taken though no program names it"
+wait_for_release 6
+test "$(readlink /var/lib/code-reviewer/artifacts)" = "artifact-releases/15" || fail "the artifacts are not release 15"
+
+echo "== a program published before its VM artifacts is not taken, nothing is staged"
+release 7 16 --without-vm
+if sudo factory-runner update 2> "$work/early.err"; then fail "a program without its VM artifacts was accepted"; fi
+grep -q "not taken" "$work/early.err" || fail "the refusal does not say that the program is not taken"
+test ! -e /var/lib/code-reviewer/pending || fail "a program without its VM artifacts is staged"
+test ! -e /opt/code-reviewer/releases/7 || fail "the program of a pair that is not there is staged"
+test "$(readlink /opt/code-reviewer/current)" = "releases/6"
+systemctl is-active --quiet factory-runner || fail "the service stopped"
 
 echo "== the outer wall is checked while the service runs: a flushed ruleset ends in a restart that loads the table again"
 before=$(systemctl show factory-runner -p InvocationID --value)

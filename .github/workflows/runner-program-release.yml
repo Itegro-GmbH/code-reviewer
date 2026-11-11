@@ -15,9 +15,10 @@ name: Runner program release
 #
 # The job that holds the key runs no third-party code and installs nothing: not a package, not an action beyond `actions/checkout` and the cache's
 # restore, not a script of anybody's. It needs `gh`, `jq`, `openssl`, `zstd`, `tar` and `sha256sum`, which the runner image has, and the scripts of the
-# commit that was reviewed (runner/release/verify-release.sh). The build is the job `build` (runner-program.yml: downloads of pinned and checksummed
-# files, the bundled Python, no key, no environment, read-only token), and its files reach `release` through the Actions cache, never as a workflow
-# artifact. `release` verifies the tarball against the manifest it signs, with the verifier a customer's machine's checks are copied into, before anything
+# commit that was reviewed (runner/release/verify-release.sh). The step that reads the key runs with PATH=/usr/bin:/bin and the system's tools by their full
+# path, and the one cache the job restores is the build's output, into a fresh directory that is not on PATH. The build is the job `build` (runner-program.yml:
+# downloads of pinned and checksummed files, the bundled Python, no key, no environment, read-only token), and its files reach `release` through the Actions
+# cache, never as a workflow artifact. `release` verifies the tarball against the manifest it signs, with the verifier a customer's machine's checks are copied into, before anything
 # is published.
 #
 # The release is made as a DRAFT: nothing is public until the owner publishes it, and where it is published for the installers to find (a GitHub release,
@@ -122,8 +123,8 @@ jobs:
           path: ${{ env.PROGRAM_WORK }}/release
           key: program-release-files-${{ github.run_id }}
           fail-on-cache-miss: true
-      # Before any key is read: a channel without a key is a release nobody can verify, a channel with other asset names is not what the installer
-      # reads, and a tarball of another commit is not this tag's.
+      # Before any key is read: a channel without a key is a release nobody can verify, and a channel with other asset names is not what the
+      # installer reads. (That the tarball is this tag's release of this commit is checked by the step before the signature, below.)
       - name: The channel names a key and the assets the installer reads
         run: |
           set -euo pipefail
@@ -200,8 +201,30 @@ jobs:
               ;;
           esac
           echo "vm=$needed" >> "$GITHUB_OUTPUT"
+      # What is signed is this tag's release of this commit, made for the VM artifacts release of the pair: checked BEFORE the signature (the check after it
+      # is the verifier's, with the channel's key), from the files the build job handed over, with the tools of the runner image and nothing from the files.
+      - name: What is about to be signed is this tag's release of this commit, for the VM artifacts of the pair
+        env:
+          PATH: /usr/bin:/bin
+          RELEASE: ${{ needs.number.outputs.release }}
+          VM_RELEASE: ${{ steps.pair.outputs.vm }}
+        run: |
+          set -euo pipefail
+          cd "$PROGRAM_WORK/release"
+          manifest=manifest.json
+          test "$(/usr/bin/jq -r .release "$manifest")" = "$RELEASE" || { echo "manifest.json is not release $RELEASE" >&2; exit 1; }
+          name="factory-runner-$RELEASE-x86_64.tar.zst"
+          test "$(/usr/bin/jq -r .file.name "$manifest")" = "$name" || { echo "manifest.json does not name $name" >&2; exit 1; }
+          test "$(/usr/bin/jq -r .file.sha256 "$manifest")" = "$(/usr/bin/sha256sum "$name" | cut -d' ' -f1)" || { echo "$name is not the file manifest.json names" >&2; exit 1; }
+          info=$(/usr/bin/tar --zstd -xOf "$name" share/release.json)
+          test "$(printf '%s' "$info" | /usr/bin/jq -r .release)" = "$RELEASE" || { echo "share/release.json is not release $RELEASE" >&2; exit 1; }
+          test "$(printf '%s' "$info" | /usr/bin/jq -r .commit)" = "$GITHUB_SHA" || { echo "share/release.json names another commit than $GITHUB_SHA" >&2; exit 1; }
+          test "$(printf '%s' "$info" | /usr/bin/jq -r .vmArtifacts)" = "$VM_RELEASE" || { echo "share/release.json does not name the VM artifacts release $VM_RELEASE of the pair" >&2; exit 1; }
+      # The key is read here and nowhere else. PATH is the system's and the tools are the system's by their full path: no directory of this job (the files the
+      # build job handed over, the checkout) can put another `openssl` or `jq` in front of the key.
       - name: Sign the manifest
         env:
+          PATH: /usr/bin:/bin
           RUNNER_PROGRAM_SIGNING_KEY: ${{ secrets.RUNNER_PROGRAM_SIGNING_KEY }}
         run: |
           set -euo pipefail
@@ -210,13 +233,13 @@ jobs:
           key="$RUNNER_TEMP/signing-key.pem"
           printf '%s\n' "$RUNNER_PROGRAM_SIGNING_KEY" > "$key"
           # It must be the channel's key: the public half of this one is compared with the file of the repository.
-          derived=$(openssl pkey -in "$key" -pubout -outform DER | base64 -w0)
-          test "$derived" = "$(jq -r .publicKey runner/release-channel.json)" || {
+          derived=$(/usr/bin/openssl pkey -in "$key" -pubout -outform DER | /usr/bin/base64 -w0)
+          test "$derived" = "$(/usr/bin/jq -r .publicKey runner/release-channel.json)" || {
             rm -f "$key"
             echo "the signing key is not the one of runner/release-channel.json" >&2
             exit 1
           }
-          openssl dgst -sha256 -sign "$key" -out "$PROGRAM_WORK/release/manifest.sig" "$PROGRAM_WORK/release/manifest.json"
+          /usr/bin/openssl dgst -sha256 -sign "$key" -out "$PROGRAM_WORK/release/manifest.sig" "$PROGRAM_WORK/release/manifest.json"
           rm -f "$key"
       # The tarball against the signed manifest, with the checks a customer's machine makes of it, and nothing else in the directory (--exact-dir):
       # what is about to be published is exactly what was signed, and it is this tag's release of this commit.

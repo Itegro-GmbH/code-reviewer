@@ -6,10 +6,16 @@ small files, both signed with a key that lives in a file (so that the second rel
 one's key).
 
     make_release.py --served DIR --keyfile PEM --program N --vm M [--tamper NAME]...
-        [--channels DIR --base URL]
+        [--also-vm K]... [--without-vm] [--channels DIR --base URL]
+
+The program names the VM artifacts release M it needs (`share/release.json`) and the installer takes exactly that
+release with it. The VM artifacts go to `DIR/vm/<release>/`, the address per release of the VM channel (`<base>vm/{release}/`):
+`--also-vm K` publishes another VM release beside it (a newer one the program does not name), `--without-vm` publishes the
+program only (the owner has not published its VM artifacts yet).
 """
 
 import argparse
+import dataclasses
 import sys
 from pathlib import Path
 
@@ -45,6 +51,8 @@ def main() -> None:
     parser.add_argument("--program", type=int, required=True)
     parser.add_argument("--vm", type=int, required=True)
     parser.add_argument("--tamper", action="append", default=[])
+    parser.add_argument("--also-vm", type=int, action="append", default=[])
+    parser.add_argument("--without-vm", action="store_true")
     parser.add_argument("--channels", type=Path)
     parser.add_argument("--base")
     arguments = parser.parse_args()
@@ -56,9 +64,18 @@ def main() -> None:
         extra_files={"share/lane_service.py": ((HERE / "lane_service.py").read_bytes(), 0o644)},
         tamper=set(arguments.tamper),
     )
-    release.publish(arguments.served)
+    release.publish_program(arguments.served)
+    if not arguments.without_vm:
+        release.publish_vm(arguments.served / "vm" / str(arguments.vm))
+    for other in arguments.also_vm:
+        dataclasses.replace(release, vm=other, tamper=set()).publish_vm(
+            arguments.served / "vm" / str(other)
+        )
     if arguments.channels is not None:
-        release.write_channels(arguments.channels, arguments.base)
+        assert arguments.base is not None
+        release.write_channels(
+            arguments.channels, arguments.base, vm_base=f"{arguments.base}vm/{{release}}/"
+        )
 
 
 if __name__ == "__main__":
