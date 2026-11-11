@@ -14,7 +14,7 @@ no `ack`."""
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
 from .outer_wall import OuterWall, VmIdentity
 from .tokens import TokenVerdict, verify_control_message, verify_exit_report
@@ -33,12 +33,18 @@ from .wire import (
 
 _log = logging.getLogger(__name__)
 
+# How long the host waits for its outer wall to hold a rule. The Worker waits 30 s for its answer
+# (`NARROW_SECONDS` of the contract): the host answers before that, with a reason.
+WALL_SECONDS: Final = 10.0
+
 
 @dataclass
 class VmSession:
     vm: VmIdentity
     wall: OuterWall
     token: str = field(repr=False)
+    # How long `narrow` may take at the wall before the host answers `unavailable`.
+    wall_seconds: float = WALL_SECONDS
     # Whether the host has an `ack` of vm-init for the start: from then on a job and an agent may
     # exist, and every message must carry the token.
     start_acked: bool = False
@@ -87,11 +93,33 @@ class VmSession:
                 if request == self._narrow_request and self._narrow_reply is not None:
                     return self._narrow_reply
                 return refused("narrow", Refusal.INVALID_REQUEST)
-            refusal = await self.wall.narrow(self.vm, message)
+            refusal = await self._ask_wall(message)
             reply = ack("narrow") if refusal is None else refused("narrow", refusal)
             self._narrow_request, self._narrow_reply = request, reply
             self.narrowed = refusal is None
             return reply
+
+    async def _ask_wall(self, message: NarrowMessage) -> Refusal | None:
+        """The wall's answer to `narrow`. A wall that raises or does not answer in time is
+        `unavailable`: a dropped connection would leave the Worker to wait for its own timeout
+        with the failure unexplained in the host's log. Only the kind of the error is logged: its
+        text may name a value of the job."""
+        try:
+            async with asyncio.timeout(self.wall_seconds):
+                return await self.wall.narrow(self.vm, message)
+        except TimeoutError:
+            _log.error(
+                "%s: the outer wall did not answer within %gs: narrow refused",
+                self.vm.vm_id,
+                self.wall_seconds,
+            )
+        except Exception as error:
+            _log.error(
+                "%s: the outer wall failed (%s): narrow refused",
+                self.vm.vm_id,
+                type(error).__name__,
+            )
+        return Refusal.UNAVAILABLE
 
     # -- port 5101: the exit report ---
 

@@ -135,6 +135,17 @@ App** (the Worker API, `crj_`, everywhere).
   (route files, contract definitions `Runner*`, the app feature `runner_session_snapshot`), and `heartbeat`, `complete` and `steps` for a runner credential (they answer `404 RUNNER_JOB_NOT_FOUND`; the shared token's
   calls of the platform's Dispatcher are unchanged).
 
+## 3f. Details of #979
+
+- **The outer wall on a customer's machine is two parts.** A static nft table (`docker/vm/host/outer-wall.nft`, its own table `inet code_reviewer_wall`, every rule on our TAP devices `fctap*`, never another tool's tables) lets a VM's TAP open a TCP connection to the proxy port of the
+  host (3128) on a slot's address and drops everything else (the host's other ports and addresses, UDP and DNS, ICMP, the LAN, RFC1918, link-local and the metadata address, the other VMs, the internet, IPv6). The proxy is part of the local Dispatcher (a normal user): the network door's own
+  proxy code (an address is never a name, only 80 and 443, every address of a name must be public, the connection goes to an address that was checked) with a rule **per VM**.
+- **The proxy listens on each slot's TAP address and nowhere else** (the spike found that a guest could reach a proxy on the host's other addresses) and serves only the slot's own guest; the table lets a TAP reach any slot's proxy address because it is static, so the proxy closes a connection from another source unanswered.
+- **The rule language is the hosted one.** The narrowed list is `policyFor` of `dispatcher/src/network/rule.ts` (GitHub, the model provider, the app, the rule's hosts) without the Dispatcher's own host; `contracts/network-rule-examples.json` is read by both suites (rule documents, the narrowed list, verdicts on names and ports).
+  The setup runs under the **wide rule** (any public name, 80 and 443), `narrow` swaps in the job's rule, **acknowledged only once the proxy holds it**, and ends the connections of the setup that are still open.
+- **`OuterWall` gained `admit`** (the VM gets the wide rule before the VMM exists) and the proxy wall is a setting (`FACTORY_RUNNER_OUTER_WALL=proxy`), set by the installer (#982) once it has verified the nft table; the default stays `refuse` (the dispatcher cannot see nft state), and `inner-only` is an explicit choice. A wall that raises or does not answer within 10 seconds is answered `refused` `unavailable`, never by dropping the connection.
+- **Not done:** the software in the VM does not use the proxy yet (the doors, Control's calls, git and the setup container dial their targets directly), so a real job needs that wiring before the launcher is turned on; the installer loads the table (#982). See `docs/runner.md`, "The outer wall on a customer's machine".
+
 ## 4. Alternatives considered
 
 - **A third special rule for each new dispatcher.** Rejected: it multiplies with every kind of dispatcher and the rules cannot be read off one statement.

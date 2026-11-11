@@ -15,7 +15,7 @@ own `narrow`. A job clones its repository before it narrows the network, the Wor
 https only, and Control's `docker run` is fixed by vm-init's allow-list, so no job of this lane
 gets as far as the narrowing; the host's side of `narrow` is proved by the unit tests against the
 fake VM, and the exit report with the token, which is vm-init's own message over the same vsock, is
-what ends the job here.)"""
+what ends the job here. A real `narrow` with the outer wall is `test_outer_wall.py`.)"""
 
 import asyncio
 import copy
@@ -60,6 +60,9 @@ class RecordingWall:
     def __init__(self, mode: OuterWallMode = OuterWallMode.INNER_ONLY) -> None:
         self.inner: OuterWall = outer_wall_for(mode)
         self.narrows: list[str] = []
+
+    async def admit(self, vm: VmIdentity) -> None:
+        await self.inner.admit(vm)
 
     async def narrow(self, vm: VmIdentity, message: NarrowMessage) -> Refusal | None:
         self.narrows.append(f"{message.rule.mode} model={message.model_host}")

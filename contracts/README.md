@@ -122,6 +122,13 @@ it in every `narrow` and `end` (`token`, an **optional** field of `environment-c
 The host trusts the token and not the claim that the agent cannot open a vsock socket (seccomp is defence in depth); the helpers it checks with are in `dispatcher/src/launchers/control-token.ts`. The host takes the first exit report of a VM
 that passes the check and answers a repeated one with the same `ack` (the report is sent again when an `ack` is lost); a protocol error of the start is answered `refused` (`invalid_start`).
 
+## The network rule examples (#979)
+
+`network-rule-examples.json` holds the rule language of the outer wall to one set of answers for both implementations: the hosted Dispatcher's rule code (`dispatcher/src/network/rule.ts`: `NetworkRuleSchema` and `policyFor`) and the local
+Dispatcher's outer proxy (`runner/src/code_reviewer_runner/factory_runner/firecracker/outer_rule.py` with `implementer/network_rule.py`). It lists which rule documents are rules, the names a narrowed VM may reach for a rule (the hosted list
+has one more name, the Dispatcher's own host, which a local machine has none of) and the verdict on a set of names and ports under the one matching rule written in the file (exact, or strictly below a `*.suffix`; ports 80 and 443; an address is never a name).
+`dispatcher/src/network/network-examples.test.ts` and `runner/tests/unit/test_firecracker_outer_rule.py` read it and must give its answers.
+
 ## The job model entry contract
 
 `job-model-entry.v1.json` (#548) is written by the app (`app/src/models-dev/job-entry.ts`) and read by the runner

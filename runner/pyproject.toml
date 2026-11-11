@@ -94,7 +94,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 include = ["src", "tests", "scripts", "../fakes"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
-extraPaths = ["src", "..", "tests/engine"]
+extraPaths = ["src", "..", "tests/engine", "tests/kvm"]
 venvPath = "."
 venv = ".venv"
 

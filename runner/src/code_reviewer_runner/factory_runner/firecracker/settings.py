@@ -144,7 +144,7 @@ def settings_from_environment(
     try:
         mode = OuterWallMode(wall)
     except ValueError:
-        raise SettingsError("FACTORY_RUNNER_OUTER_WALL is refuse or inner-only") from None
+        raise SettingsError("FACTORY_RUNNER_OUTER_WALL is proxy, refuse or inner-only") from None
     settings = FirecrackerSettings(
         kernel=path("FACTORY_RUNNER_VM_KERNEL", artifacts / "vmlinux"),
         rootfs=path("FACTORY_RUNNER_VM_ROOTFS", artifacts / "rootfs.ext4"),
