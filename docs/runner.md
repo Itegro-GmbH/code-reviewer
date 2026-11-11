@@ -2557,8 +2557,8 @@ machine are not exercised; the model's cost is the scripted usage.
 The owner's own machine is a Hetzner Cloud VM **without `/dev/kvm`**, so the Firecracker launcher ([#978](#the-firecracker-launcher-978)) cannot run there, and the line is: one
 local backend, the same behaviour everywhere. This spike asks whether **Incus** (the LXD fork, from Ubuntu's apt, no snap) can be that backend: the Docker of the VM content
 ([Spike: Firecracker sandbox](#spike-firecracker-sandbox-970)) inside unprivileged system containers, the inner wall, the outer wall, limits and clean-up, with numbers. **Everything
-below was measured on the DevBox, as the user `luca`** (a member of `incus-admin`), by commands of [`spike/incus/`](https://github.com/Itegro-GmbH/code-reviewer/tree/spike-1005-lxd/spike/incus) on the
-branch `spike-1005-lxd` (commit `b3a3265b45176fd643d61b23d651c9e0fe7449c6`; **not product code, not merged**; the machine's own public addresses are placeholders there). Questions 1 to 6 of the issue are answered; **two answers are "does not work as
+below was measured on the DevBox, as the user `luca`** (a member of `incus-admin`), by commands of [`spike/incus/`](https://github.com/Itegro-GmbH/code-reviewer/tree/spike-1005-incus/spike/incus) on the
+branch `spike-1005-incus` (commit `61dde27d94d87be10b298facde2a0d8a0be894c8`; **not product code, not merged**; the machine's own public addresses are placeholders there). Questions 1 to 6 of the issue are answered; **two answers are "does not work as
 asked" (the disk quota, and the outer wall by Incus alone)** and several things need root at install, as the Firecracker backend's do. The recommendation is in the pull request.
 
 **Where it was measured.** Ubuntu 24.04.3, kernel 6.8.0-147-generic, cgroup v2, 4 vCPU and 7.7 GB RAM **shared with other users and agents** (load average 1.4 to 3.3 during the timings, 12 for a while
