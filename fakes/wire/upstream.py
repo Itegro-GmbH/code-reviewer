@@ -34,6 +34,7 @@ request is kept, with its headers and body. Dummy keys only; nothing here leaves
 import gzip
 import hashlib
 import json
+import ssl
 import threading
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -109,6 +110,7 @@ class ScriptedUpstream:
         judge: Judge | None = None,
         on_answer: OnAnswer | None = None,
         also_models: Sequence[str] = (),
+        tls: ssl.SSLContext | None = None,
     ) -> None:
         self.family: Family = family
         self.model = model
@@ -154,13 +156,21 @@ class ScriptedUpstream:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
+        if tls is not None:
+            # https on the loopback (#999: the lane's provider has a certificate the Worker image
+            # trusts); the clients are the same, only the socket is wrapped.
+            self._server.socket = tls.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
         )
 
     @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
+        return f"http://127.0.0.1:{self.port}"
 
     def __enter__(self) -> Self:
         self._thread.start()

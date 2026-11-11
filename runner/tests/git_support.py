@@ -13,6 +13,7 @@ import gzip
 import http.server
 import os
 import shutil
+import ssl
 import subprocess
 import threading
 import time
@@ -182,8 +183,18 @@ class HttpOrigin:
     push is then a live process the test can look at.
     """
 
-    def __init__(self, origin: Origin, token: str, git: str) -> None:
+    def __init__(
+        self,
+        origin: Origin,
+        token: str,
+        git: str,
+        tls: ssl.SSLContext | None = None,
+        mount: str | None = None,
+    ) -> None:
         self.origin = origin
+        # The path the repository has on the host the clients name (`/acme/widgets.git`), for a lane
+        # whose clients use the address of a real provider's repository (#999).
+        self.mount = mount
         self.token = token
         self.git = git
         self.requests: list[tuple[str, str | None]] = []
@@ -212,6 +223,8 @@ class HttpOrigin:
                     return
                 body = self._body()
                 path, _, query = self.path.partition("?")
+                if outer.mount is not None and path.startswith(outer.mount):
+                    path = f"/{outer.origin.path.name}" + path[len(outer.mount) :]
                 env = {
                     "PATH": os.environ["PATH"],
                     "GIT_HTTP_EXPORT_ALL": "1",
@@ -271,6 +284,10 @@ class HttpOrigin:
             do_POST = _serve
 
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        if tls is not None:
+            # https (#999): a lane's git host with a certificate the Worker image trusts.
+            self._server.socket = tls.wrap_socket(self._server.socket, server_side=True)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     def __enter__(self) -> "HttpOrigin":
@@ -283,8 +300,12 @@ class HttpOrigin:
         self._server.server_close()
 
     @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_address[1]}/{self.origin.path.name}"
+        return f"http://127.0.0.1:{self.port}/{self.origin.path.name}"
 
     def hold(self) -> None:
         self.arrived.clear()
