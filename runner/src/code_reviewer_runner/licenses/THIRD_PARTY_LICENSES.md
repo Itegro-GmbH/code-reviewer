@@ -532,6 +532,21 @@ release contains. Nothing of this is built into the app, the Dispatcher bundle o
 The data disk holds the Worker image and the agent image (`runner/Dockerfile`) as the golden snapshot builds them. Their copyleft packages are the ones
 named in "Copyleft and distribution" below, and the images are proprietary code. A release that carries them delivers them to a customer's machine.
 
+## Factory-Runner program release
+
+The program of the local Dispatcher (Runner v2, epic #969, issue #1002) is delivered to a customer's machine as a tarball `factory-runner-<N>-x86_64.tar.zst` built by
+`runner/release/build_program.py` and published only by the owner (a draft release, `docs/runner.md`, "The program release"). Unlike the VM artifacts it has no copyleft
+component: the licence texts and notices that the licences below ask for travel inside the tarball (`share/licenses/`, and the `.dist-info` directories of the packages), and
+`share/licenses/NOTICE.txt` says where each one is. Nothing of this is built into the app, the Dispatcher bundle or the Worker image.
+
+- **Python** (CPython 3.13.14, PSF-2.0): a standalone build by python-build-standalone (`install_only_stripped`, pinned by release tag and sha256 in `runner/release/pins.env`), unmodified,
+  with the libraries it is built with (OpenSSL and the others, all permissive: Apache-2.0, BSD, MIT, zlib) as that project's release notes list them. The licence text is `python/lib/python3.13/LICENSE.txt`.
+- **Firecracker** (1.17.0, Apache-2.0): the release binary of `docker/vm/pins.env`, unmodified, with its `LICENSE`, `NOTICE` and `THIRD-PARTY` files in `share/licenses/firecracker/`.
+  The jailer and the tools of its archive are not shipped.
+- **cryptography** (50.0.2, Apache-2.0 OR BSD-3-Clause; its wheel links OpenSSL, Apache-2.0), **cffi** (2.1.1, MIT) and **pycparser** (3.11, BSD-3-Clause): the wheels of `runner/uv.lock`, unmodified, with their licence files in
+  their `.dist-info` directories. They are the same packages the dependency review above covers; the host program needs only these three of the Worker's dependencies.
+- **The package** (`code_reviewer_runner`, proprietary, source-visible): its own `licenses/` directory (this file, `NOTICE`, `LICENSE`) travels with it.
+
 ## Copyleft and distribution
 
 The exceptions above include weak and strong copyleft packages (LGPL: sharp/libvips, python-gitlab,

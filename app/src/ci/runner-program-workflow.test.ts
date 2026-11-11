@@ -49,7 +49,9 @@ describe("the build workflow", () => {
   // #1002-T03
   it("runs the installer lane for a pull request, with the real tarball, and builds once and hands the files on for a release", () => {
     const steps = stepsOf(job(build, "program"));
-    const lane = steps.find((step) => step.run?.includes("runner/release/lane.sh"));
+    const lane = steps.find((step) =>
+      step.run?.includes("runner/release/lane.sh"),
+    );
     const built = steps.find((step) =>
       step.run?.includes("runner/release/build_program.py"),
     );
@@ -65,7 +67,9 @@ describe("the build workflow", () => {
   it("builds only a tree that is the commit, and hands a release's files to the signing job through the Actions cache, never as an artifact", () => {
     const steps = stepsOf(job(build, "program"));
     const names = steps.map((step) => step.name ?? "");
-    const save = steps.find((step) => step.uses?.startsWith("actions/cache/save"));
+    const save = steps.find((step) =>
+      step.uses?.startsWith("actions/cache/save"),
+    );
 
     expect(names.indexOf("The tree is the commit")).toBeLessThan(
       names.findIndex((name) => name.startsWith("Build the program tarball")),
@@ -170,7 +174,9 @@ describe("the release workflow", () => {
         /\b(pnpm|npm|npx|yarn|pip|pip3|uv|uvx|cargo|go) |apt-get|docker (build|run)|curl [^\n|]*\| *(ba)?sh/,
       );
     }
-    expect(releaseText).not.toMatch(/setup-node|setup-uv|setup-python|build-push-action/);
+    expect(releaseText).not.toMatch(
+      /setup-node|setup-uv|setup-python|build-push-action/,
+    );
   });
 
   // #1002-T01
@@ -248,13 +254,16 @@ describe("the release workflow", () => {
     const draft = stepsOf(job(release, "release")).find((step) =>
       step.name?.startsWith("Draft release"),
     );
-    const channel = JSON.parse(readText("runner/release-channel.json")) as Record<
-      string,
-      unknown
-    >;
+    const channel = JSON.parse(
+      readText("runner/release-channel.json"),
+    ) as Record<string, unknown>;
 
-    expect(String(draft?.run)).toContain(`mv manifest.json ${channel.manifestAsset}`);
-    expect(String(draft?.run)).toContain(`mv manifest.sig ${channel.signatureAsset}`);
+    expect(String(draft?.run)).toContain(
+      `mv manifest.json ${channel.manifestAsset}`,
+    );
+    expect(String(draft?.run)).toContain(
+      `mv manifest.sig ${channel.signatureAsset}`,
+    );
   });
 
   // #1002-T01
