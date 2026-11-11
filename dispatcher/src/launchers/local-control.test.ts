@@ -308,7 +308,7 @@ describe("the start request of vm-init", () => {
   });
 
   // #994-T04
-  it("is refused by the contract for a proxy outside the slots' network or of the wrong shape", async () => {
+  it("is refused by the contract for a proxy that is not a private address or of the wrong shape", async () => {
     const start = await buildStartRequest({
       ...options,
       image: IMAGE_ID,
@@ -318,8 +318,9 @@ describe("the start request of vm-init", () => {
     });
 
     for (const outerProxy of [
-      { host: "10.0.0.1", port: 3128 },
-      { host: "172.30.0.1", port: 3128 },
+      { host: "8.8.8.8", port: 3128 },
+      { host: "172.32.0.1", port: 3128 },
+      { host: "100.64.0.1", port: 3128 },
       { host: "172.31.0.01", port: 3128 },
       { host: "example.com", port: 3128 },
       { host: "172.31.0.5", port: 0 },

@@ -138,9 +138,11 @@ class FirecrackerSandbox:
 
     def __post_init__(self) -> None:
         self.settings = self.settings.validated()
-        self._pool = SlotPool(self.settings.slots)
+        self._pool = SlotPool(self.settings.slots, self.settings.slot_network)
         if self.wall is None:
-            self.wall = outer_wall_for(self.settings.outer_wall, self.settings.slots)
+            self.wall = outer_wall_for(
+                self.settings.outer_wall, self.settings.slots, self.settings.slot_network
+            )
 
     # -- what the service asks ---
 
@@ -218,7 +220,7 @@ class FirecrackerSandbox:
         token = self.new_token()
         # Checked with the address of the first slot: the document does not depend on which slot
         # the job gets, and the slot's own address is put in below, once there is one.
-        self._start_document(start, token, Slot(0))
+        self._start_document(start, token, Slot(0, self.settings.slot_network))
         slot = self._pool.acquire()
         if slot is None:
             raise NoFreeSlot

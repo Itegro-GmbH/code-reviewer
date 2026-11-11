@@ -21,12 +21,13 @@ starts under the setup's wide rule. `FACTORY_RUNNER_OUTER_WALL` chooses the wall
   then the inner wall (the network door) only, as on the Worker-as-a-process mode. For a machine
   whose owner accepts that."""
 
+import ipaddress
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from .slots import Slot
+from .slots import DEFAULT_SLOT_NETWORK, Slot
 from .wire import NarrowMessage, Refusal
 
 _log = logging.getLogger(__name__)
@@ -121,10 +122,13 @@ class InnerWallOnly:
         _ = vm
 
 
-def outer_wall_for(mode: OuterWallMode, slots: int = 1) -> OuterWall:
-    """The wall of a mode. `slots` is the number of TAP addresses the proxy listens on."""
+def outer_wall_for(
+    mode: OuterWallMode, slots: int = 1, network: ipaddress.IPv4Network = DEFAULT_SLOT_NETWORK
+) -> OuterWall:
+    """The wall of a mode. `slots` is the number of TAP addresses the proxy listens on, in
+    `network`."""
     if mode is OuterWallMode.PROXY:
         from .proxy_wall import ProxyOuterWall  # the proxy imports this module's types
 
-        return ProxyOuterWall(slots)
+        return ProxyOuterWall(slots, network=network)
     return InnerWallOnly() if mode is OuterWallMode.INNER_ONLY else RefusingOuterWall()

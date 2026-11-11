@@ -311,7 +311,7 @@ def test_the_start_document_carries_the_proxy_and_the_door_reads_it() -> None:
 
 # #994-T04
 @pytest.mark.parametrize(
-    "bad", [None, "172.31.0.9:3128", {"host": "10.0.0.1", "port": 3128}, {"host": "172.31.0.9"}, {}]
+    "bad", [None, "172.31.0.9:3128", {"host": "8.8.8.8", "port": 3128}, {"host": "172.31.0.9"}, {}]
 )
 def test_a_proxy_that_is_not_one_refuses_the_start(bad: Any) -> None:
     with pytest.raises(StartRefused):

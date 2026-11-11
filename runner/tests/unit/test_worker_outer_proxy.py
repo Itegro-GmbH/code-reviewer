@@ -122,7 +122,7 @@ def test_a_start_document_without_a_proxy_has_none() -> None:
     [
         None,
         "172.31.0.5:3128",
-        {"host": "10.0.0.1", "port": 3128},
+        {"host": "8.8.8.8", "port": 3128},
         {"host": "127.0.0.1", "port": 3128},
         {"host": "172.31.0.5"},
         {"host": "172.31.0.5", "port": 0},

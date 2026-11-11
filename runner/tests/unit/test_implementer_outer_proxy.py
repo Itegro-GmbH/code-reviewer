@@ -50,7 +50,7 @@ def test_a_job_process_with_the_variable_hands_the_proxy_to_each_seam() -> None:
 
 
 # #994-T04
-@pytest.mark.parametrize("value", ["", "10.0.0.1:3128", "172.31.0.1", "172.31.0.1:0", "proxy:3128"])
+@pytest.mark.parametrize("value", ["", "8.8.8.8:3128", "172.31.0.1", "172.31.0.1:0", "proxy:3128"])
 def test_a_variable_that_is_set_and_wrong_ends_the_turn_before_anything_is_started(
     value: str,
 ) -> None:

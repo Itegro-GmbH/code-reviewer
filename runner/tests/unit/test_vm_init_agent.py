@@ -603,9 +603,9 @@ def test_a_start_without_a_proxy_gives_control_no_proxy() -> None:
 
 
 # #994-T04
-def test_a_proxy_outside_the_slots_network_refuses_the_start_and_runs_nothing() -> None:
+def test_a_public_proxy_address_refuses_the_start_and_runs_nothing() -> None:
     guest = Guest()
-    guest.start(start_document(outerProxy={"host": "10.0.0.1", "port": 3128}))
+    guest.start(start_document(outerProxy={"host": "8.8.8.8", "port": 3128}))
 
     guest.run()
 

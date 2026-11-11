@@ -70,9 +70,11 @@ def loopback(target: tuple[str, int]) -> Callable[[tuple[str, int], float], sock
 @pytest.mark.parametrize(
     "host",
     [
-        "10.0.0.1",
-        "172.30.0.1",
+        "8.8.8.8",
+        "172.15.0.1",
         "172.32.0.1",
+        "192.167.0.1",
+        "100.64.0.1",
         "127.0.0.1",
         "169.254.169.254",
         "example.com",
@@ -80,7 +82,7 @@ def loopback(target: tuple[str, int]) -> Callable[[tuple[str, int], float], sock
         "::1",
     ],
 )
-def test_a_proxy_outside_the_slots_network_is_not_one(host: str) -> None:
+def test_a_proxy_that_is_not_a_private_address_is_not_one(host: str) -> None:
     with pytest.raises(OuterProxyError):
         OuterProxy(host, 3128)
 
@@ -125,7 +127,7 @@ def test_a_process_with_no_variable_has_no_proxy_and_dials_as_hosted() -> None:
 
 # #994-T04
 @pytest.mark.parametrize(
-    "value", ["", "172.31.0.1", "172.31.0.1:", "172.31.0.1:x", "10.0.0.1:3128"]
+    "value", ["", "172.31.0.1", "172.31.0.1:", "172.31.0.1:x", "8.8.8.8:3128"]
 )
 def test_a_variable_that_is_set_and_wrong_is_an_error_not_a_direct_connection(value: str) -> None:
     with pytest.raises(OuterProxyError):
