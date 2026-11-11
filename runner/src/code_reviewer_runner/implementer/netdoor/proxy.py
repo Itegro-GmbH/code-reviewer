@@ -22,8 +22,8 @@ its own. After the rule and the port are decided it asks the host's proxy for
 request too (a tunnel to port 80 and the request in origin form). The proxy does the lookup,
 judges every address and connects to one it checked, with the same decision (it is this class's
 decision). A proxy that refuses, or cannot be reached, is the same `502 upstream_failed` the agent
-gets for a host that does not answer: the door never dials anything but the proxy, and its own firewall says so
-(`netdoor_launcher.egress_rules`).
+gets for a host that does not answer: the door never dials anything but the proxy, and its own
+firewall says so (`netdoor_launcher.egress_rules`).
 
 The decision, in this order, and it is the same in every mode: an IP literal is refused; a name
 that is no plausible DNS name is refused; a port other than 80 and 443 is refused; the rule must
