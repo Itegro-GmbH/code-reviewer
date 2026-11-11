@@ -226,6 +226,8 @@ class Release:
         }
         if "vm-flip-kernel" in self.tamper:
             files["vmlinux"] = b"X" + kernel[1:]
+        if "vm-oversize-kernel" in self.tamper:
+            files["vmlinux"] = kernel + b"X" * 65536
         if "vm-flip-rootfs" in self.tamper:
             files["rootfs.ext4.zst"] = zstd(b"another root file system, same name")
         for file_name, content in files.items():
@@ -273,7 +275,7 @@ STUBS: dict[str, str] = {
 printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
 case "$1" in
   --version) echo "systemd ${STUB_SYSTEMD:-255} (${STUB_SYSTEMD:-255}.4-1)" ;;
-  is-active) [ -f "$STUB_STATE/active" ] ;;
+  is-active) [ -f "$STUB_STATE/active" ]; exit $? ;;
   start|restart)
     # The service's start takes the switch lock (prestart): the caller must not hold it, or it waits for ever.
     lock="$FACTORY_RUNNER_ROOT/var/lib/code-reviewer/switch.lock"
@@ -364,6 +366,8 @@ fi
 if [ -n "$write_code" ] && [ -n "${STUB_REDIRECT_ONCE:-}" ] && [ -z "$again" ]; then
   printf 'HTTP/1.1 302 Found\r\nLocation: /%s?again\r\n\r\n' "${url#https://*/}" >"$headers"; printf 302; exit 0
 fi
+# Something the test does while this file is being downloaded (a slow download: the machine goes on meanwhile).
+[ "$name" != "${STUB_CURL_HOOK_ON:-}" ] || sh -c "$STUB_CURL_HOOK" || true
 [ -f "$STUB_SERVED/$name" ] || { [ -n "$write_code" ] && printf 404; exit 22; }
 # A server that sends more than its manifest said (no Content-Length): the file is as long as the test made it.
 cp "$STUB_SERVED/$name" "$out" || exit 23
