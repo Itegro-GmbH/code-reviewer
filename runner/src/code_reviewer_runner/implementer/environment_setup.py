@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The environment's setup script as one step of a turn (#818): the budget it gets, the Setup
+"""The environment's setup script as one step of a turn (#818, #1009): the budget it gets, the
 container that runs it (`setup_container.py`), what becomes of the repository afterwards, and the
 words of its result.
 
 **Where it sits.** After the workspace is prepared (the clone is in the work volume) and before the
 model door exists: a script that fails ends the turn here, free, and the model key was never
-handed to anything. The agent's container starts from the image this step made.
+handed to anything. The script runs in the agent's own container, and the agent runs in that same
+container afterwards: what the script left is what the agent has, its processes included, and
+nothing is reset when the network narrows. The step ends with the container alive, off the setup
+network and frozen; the agent's container object takes it over (`AgentContainer`, `adopted=`).
 
 **The time.** The script has `SETUP_SCRIPT_SECONDS` (15 minutes,
-`contracts/environment-sizes.v1.json`) at most, and the whole step (start, script, saving the
-image) is part of the turn's time limit: the agent's own deadline is counted from the start of the
+`contracts/environment-sizes.v1.json`) at most, and the whole step (start, script, hand-over)
+is part of the turn's time limit: the agent's own deadline is counted from the start of the
 job, so the minutes of the step are gone from it (`session.deadline_seconds`). The script is also
 held to what the limit leaves: the grace for the end of the turn, the parts of the step around the
 script (`SETUP_OVERHEAD_SECONDS`) and at least `MIN_AGENT_SECONDS` for the agent; a limit that
@@ -53,11 +56,11 @@ from code_reviewer_runner.job import ImplementerEnvironment, JobError
 from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
+from .agent_container import Adopted
 from .git_workspace import GitWorkspace
 from .session import ShutdownRequested, deadline_seconds
 from .setup_container import (
-    OUTCOME_NO_ROOM,
-    OUTCOME_NOT_SAVED,
+    OUTCOME_NOT_HANDED_OVER,
     OUTCOME_SCRIPT_FAILED,
     OUTCOME_STOPPED,
     OUTCOME_TIMED_OUT,
@@ -101,11 +104,12 @@ def clean_output(raw: bytes, secrets: Iterable[str]) -> str:
 
 @dataclass(frozen=True)
 class EnvironmentSetup:
-    """What the step made. `image` is the agent's image when it succeeded. `block` is the
-    `ImplementerSetupResult` of the report (None when the script never ran: the Setup container
-    could not be had). `error` is why the turn ends, else None. `notes` are facts for the log."""
+    """What the step made. `adopted` is the container the agent runs in when it succeeded: the one
+    the script ran in. `block` is the `ImplementerSetupResult` of the report (None when the script
+    never ran: the container could not be had). `error` is why the turn ends, else None. `notes`
+    are facts for the log."""
 
-    image: str | None
+    adopted: Adopted | None
     block: dict[str, Any] | None
     error: JobError | None
     notes: tuple[str, ...]
@@ -131,10 +135,6 @@ def _closing_line(text: str, secrets: tuple[str, ...]) -> str:
     return clean_output(f"[setup] {text}".encode(), secrets).strip()
 
 
-def _megabytes(size: int | None) -> str:
-    return "an unknown size" if size is None else f"{size / (1024 * 1024):.0f} MB"
-
-
 def run_environment_setup(
     environment: ImplementerEnvironment,
     *,
@@ -146,9 +146,9 @@ def run_environment_setup(
     secrets: tuple[str, ...],
     seams: SetupSeams = SetupSeams(),  # noqa: B008 - frozen, shared on purpose
 ) -> EnvironmentSetup:
-    """Run the environment's script and make the agent's image of what it left. Never raises for a
-    script that failed (the result holds the error); raises `ShutdownRequested` when the runner was
-    told to stop meanwhile."""
+    """Run the environment's script in the agent's container and leave it for the agent as it is.
+    Never raises for a script that failed (the result holds the error); raises `ShutdownRequested`
+    when the runner was told to stop meanwhile."""
     seconds = script_seconds(time_limit, elapsed())
     if seconds < MIN_SCRIPT_SECONDS:
         return EnvironmentSetup(
@@ -161,24 +161,19 @@ def run_environment_setup(
             ),
             (),
         )
-    run = SetupContainer(memory_mb, seams).run(
-        environment.setup_script,
-        script_seconds=seconds,
-        should_stop=should_stop,
-        free_bytes=workspace.volume_free_bytes,
-    )
+    container = SetupContainer(memory_mb, seams)
+    run = container.run(environment.setup_script, script_seconds=seconds, should_stop=should_stop)
     if run.outcome == OUTCOME_STOPPED:
         raise ShutdownRequested
     output = clean_output(run.output, secrets)
     notes = [
         f"setup: the Setup container started in {run.start_seconds:.0f} s, the script ran "
         f"{run.script_seconds:.0f} s"
-        + (f", the image was saved in {run.save_seconds:.0f} s" if run.ok else "")
+        + (f", the container was handed over in {run.handover_seconds:.0f} s" if run.ok else "")
     ]
     notes.extend(f"setup: {note}" for note in run.notes)
     if run.ok:
-        notes[0] += f" ({_megabytes(run.image_bytes)})"
-        return _after_success(run, output, workspace, notes)
+        return _after_success(run, output, workspace, notes, container)
     closing = ""
     if run.outcome == OUTCOME_SCRIPT_FAILED:
         detail = run.detail or f"the setup script ended with exit status {run.exit_code}"
@@ -188,18 +183,9 @@ def run_environment_setup(
             closing = _closing_line(run.detail, secrets)
     elif run.outcome == OUTCOME_TIMED_OUT:
         detail = f"the setup script ran past its time limit of {seconds / 60:.0f} minutes"
-    elif run.outcome == OUTCOME_NO_ROOM:
-        # The customer's script left more than the VM's disk can keep as an image: theirs, free.
-        detail = (
-            "the setup script finished, but the disk of the VM is too full to keep its result: "
-            + run.detail
-        )
-        closing = _closing_line(
-            f"the VM had no room to save the setup result: {run.detail}", secrets
-        )
-    elif run.outcome == OUTCOME_NOT_SAVED:
-        detail = f"the setup script finished, but its result could not be kept: {run.detail}"
-        closing = _closing_line(f"the setup result could not be saved: {run.detail}", secrets)
+    elif run.outcome == OUTCOME_NOT_HANDED_OVER:
+        detail = f"the setup script finished, but its container could not be kept: {run.detail}"
+        closing = _closing_line(f"the setup container could not be kept: {run.detail}", secrets)
     else:
         # The Setup container could not be had: the runner's, not the script's.
         return EnvironmentSetup(
@@ -217,11 +203,16 @@ def run_environment_setup(
 
 
 def _after_success(
-    run: SetupRun, output: str, workspace: GitWorkspace, notes: list[str]
+    run: SetupRun,
+    output: str,
+    workspace: GitWorkspace,
+    notes: list[str],
+    container: SetupContainer,
 ) -> EnvironmentSetup:
     try:
         restored = workspace.settle_after_setup()
     except JobError as error:
+        container.discard()
         # The script ended well; Control could not read the repository afterwards (or the lists
         # could not be kept): the failure is ours, with the free code of a turn that did not start.
         return EnvironmentSetup(
@@ -248,7 +239,7 @@ def _after_success(
             f"setup: {workspace.excluded_count} file(s) or folder(s) the script added are in the "
             "agent's tree and are not part of its changes (not committed unless added by name)"
         )
-    return EnvironmentSetup(run.image, setup_block(run, output, ok=True), None, tuple(notes))
+    return EnvironmentSetup(run.adopted, setup_block(run, output, ok=True), None, tuple(notes))
 
 
 def log_output(setup: EnvironmentSetup) -> str:

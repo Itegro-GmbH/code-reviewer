@@ -100,6 +100,7 @@ class FakeContainer:
     exit_code: int | None = None
     oom_killed: bool = False
     removed: bool = False
+    paused: bool = False
     stdin_read: int = -1
     stdin_write: int = -1
     stdout_read: int = -1
@@ -137,8 +138,8 @@ class FakeDockerEngine:
         # `docker stop` of a container: the exit status it ends with, and whether it never ends.
         self.stop_exit = 0
         self.stop_hangs = False
-        self.commit_fails = False
-        self.committed: list[tuple[str, dict[str, str], str]] = []
+        # `pause` of a container is refused with this status (a runtime that cannot freeze).
+        self.pause_refused: int | None = None
         self._lock = threading.Lock()
         self._count = 0
         engine = self
@@ -276,8 +277,8 @@ class FakeDockerEngine:
             self._kill_request(connection, parts[1])
         elif method == "POST" and parts[0] == "containers" and parts[-1] == "stop":
             self._stop_request(connection, parts[1])
-        elif method == "POST" and parts[0] == "commit":
-            self._commit(connection, target)
+        elif method == "POST" and parts[0] == "containers" and parts[-1] in ("pause", "unpause"):
+            self._pause_request(connection, parts[1], parts[-1] == "pause")
         elif method == "GET" and path == "/info":
             self._reply(connection, 200, {"Runtimes": self.runtimes})
         elif method == "GET" and parts[0] == "images" and parts[-1] == "json":
@@ -347,10 +348,7 @@ class FakeDockerEngine:
             "OOMKilled": container.oom_killed,
         }
         host = container.document.get("HostConfig", {})
-        mode = host.get("NetworkMode", "bridge")
-        networks: dict[str, dict[str, Any]] = {name: {} for name in container.networks} or {
-            mode: {}
-        }
+        networks: dict[str, dict[str, Any]] = {name: {} for name in container.networks}
         mounts = [
             {"Type": m.get("Type"), "Destination": m.get("Target"), "Name": m.get("Source")}
             for m in host.get("Mounts", [])
@@ -391,6 +389,9 @@ class FakeDockerEngine:
                 container.networks[network] = body.get("EndpointConfig", {})
         else:
             entry["members"].pop(member, None)
+            container = self.containers.get(member)
+            if container is not None:
+                container.networks.pop(network, None)
         self._reply(connection, 200)
 
     def _create(self, connection: socket.socket, target: str, body: Any) -> None:
@@ -400,6 +401,9 @@ class FakeDockerEngine:
             return
         identifier = self._next()
         container = FakeContainer(identifier, name, body)
+        # The network a container is made on is one it is a member of, as with the daemon.
+        host: dict[str, Any] = body.get("HostConfig") or {}
+        container.networks[host.get("NetworkMode", "bridge")] = {}
         container.stdin_read, container.stdin_write = os.pipe()
         container.stdout_read, container.stdout_write = os.pipe()
         self.containers[identifier] = container
@@ -538,26 +542,19 @@ class FakeDockerEngine:
             if made.container == container:
                 made.killed.set()
 
-    def _commit(self, connection: socket.socket, target: str) -> None:
-        """`docker commit`: an image id, remembered under `repo:tag`; the container must exist."""
-        query = dict(
-            part.split("=", 1) for part in target.split("?", 1)[-1].split("&") if "=" in part
-        )
-        ref = query.get("container", "")
+    def _pause_request(self, connection: socket.socket, ref: str, pause: bool) -> None:
         container = self.containers.get(ref) or next(
             (c for c in self.containers.values() if c.name == ref), None
         )
         if container is None:
             self._reply(connection, 404, {"message": "no such container"})
-            return
-        if self.commit_fails:
-            self._reply(connection, 500, {"message": "no space left on device"})
-            return
-        identifier = "sha256:" + format(len(self.images) + 1, "064x")
-        self.images[f"{query.get('repo')}:{query.get('tag')}"] = identifier
-        self.images[identifier] = identifier
-        self.committed.append((container.name, dict(query), identifier))
-        self._reply(connection, 201, {"Id": identifier})
+        elif self.pause_refused is not None:
+            self._reply(connection, self.pause_refused, {"message": "cannot pause"})
+        elif not container.running or container.paused == pause:
+            self._reply(connection, 409, {"message": "wrong state"})
+        else:
+            container.paused = pause
+            self._reply(connection, 204)
 
     def _wait(self, connection: socket.socket, ref: str) -> None:
         container = self.containers.get(ref) or next(

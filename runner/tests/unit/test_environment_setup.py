@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The environment's setup script as one step of an Implementer turn (#818): its time budget, what
-the page and the log get of its output, the codes it ends a turn with, the rule for the tracked
-files it changed, and that a failed script ends the turn before a session, a door or a model call
-exists."""
+"""The environment's setup script as one step of an Implementer turn (#818, #1009): its time budget,
+what the page and the log get of its output, the codes it ends a turn with, the rule for the tracked
+files it changed, that the container it ran in is the agent's (alive, with whatever it started), and
+that a failed script ends the turn before a session, a door or a model call exists."""
 
 import json
 import sys
@@ -21,7 +21,11 @@ from fakes.docker_engine.server import HOSTNAME, FakeDockerEngine, FakeExec
 
 from code_reviewer_runner.implementer import environment_setup as es
 from code_reviewer_runner.implementer import setup_container as sc
-from code_reviewer_runner.implementer.agent_container import WRITE_FILE_SCRIPT
+from code_reviewer_runner.implementer.agent_container import (
+    AGENT_CONTAINER_NAME,
+    WRITE_FILE_SCRIPT,
+    Adopted,
+)
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.job_run import (
     EnvironmentHost,
@@ -197,8 +201,6 @@ class Rig:
             api=self.api,
             hostname=lambda: HOSTNAME,
             ready_seconds=5.0,
-            finish_seconds=5.0,
-            commit_seconds=5.0,
             **options,
         )
 
@@ -214,8 +216,6 @@ class Rig:
                 made.killed.wait(30)
                 return 137
             return self.script_exit
-        if argv[:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT]:
-            stdout.write(sc.NO_DOCKER + "\n")
         return 0
 
 
@@ -248,12 +248,16 @@ def step(
 
 
 # #818-T40
-def test_a_script_that_succeeds_gives_the_image_and_a_block_the_app_reads(rig: Rig) -> None:
+def test_a_script_that_succeeds_gives_the_container_and_a_block_the_app_reads(rig: Rig) -> None:
     done = step(rig, Workspace())
-    assert done.error is None and done.image is not None
+    assert done.error is None and done.adopted is not None
+    # The container the script ran in is the agent's, alive; it is what the agent takes over.
+    agent = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert done.adopted.container == agent.identifier and agent.running and not agent.removed
     assert done.block is not None and done.block["ok"] is True and done.block["exitCode"] == 0
     assert done.block["timedOut"] is False and done.block["output"] == "added 300 packages\n"
     assert any("the Setup container started in" in note for note in done.notes)
+    assert any("handed over in" in note for note in done.notes)
 
 
 # #818-T41
@@ -292,7 +296,9 @@ def test_a_repository_the_runner_cannot_read_after_the_script_is_the_runners_fai
     workspace = Workspace()
     workspace.restore_error = JobError(ErrorCode.SETUP_FAILED, "the repository has no HEAD")
     done = step(rig, workspace)
-    assert done.image is None
+    assert done.adopted is None
+    # Nothing takes the container over: it is removed, with the processes of the script.
+    assert rig.engine.container(AGENT_CONTAINER_NAME).removed
     # Control could not read the repository: that is not the script's failure (the script ended
     # with status 0, and the page shows it as it ran), and the code is the free one of ours.
     assert done.error is not None and done.error.code is ErrorCode.SETUP_FAILED
@@ -315,7 +321,8 @@ def test_a_script_that_fails_ends_with_its_status_and_its_output(rig: Rig) -> No
         "durationSeconds": done.block["durationSeconds"],
         "output": "npm ERR! 404\n",
     }
-    assert done.image is None and rig.engine.committed == []
+    assert done.adopted is None
+    assert rig.engine.container(AGENT_CONTAINER_NAME).removed
 
 
 # #818-T44
@@ -355,25 +362,21 @@ def test_a_container_that_cannot_be_had_is_the_runners_failure_not_the_scripts(r
     assert done.block is None
 
 
-# #818-T48
-def test_a_commit_the_disk_cannot_hold_is_the_environments_failure_and_names_the_disk(
+# #1009-E01
+def test_a_container_that_cannot_leave_the_setup_network_is_the_environments_failure(
     rig: Rig,
 ) -> None:
-    # The disk had room when it was asked and filled up under the commit.
-    rig.engine.commit_fails = True
-    workspace = Workspace()
-    done = step(rig, workspace)
+    rig.engine.refuse["/disconnect"] = 500
+    done = step(rig, Workspace())
     assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-    assert "could not be kept" in done.error.detail
+    assert "could not be kept" in done.error.detail and done.adopted is None
     # The Runs page shows the exit status and the output and nothing else: the last line of the
     # output says what happened to a script that exited 0.
     assert done.block is not None and done.block["ok"] is False and done.block["exitCode"] == 0
     assert (
-        done.block["output"]
-        .splitlines()[-1]
-        .startswith("[setup] the setup result could not be saved")
+        done.block["output"].splitlines()[-1].startswith("[setup] the setup container could not be")
     )
-    assert "no space left" in done.block["output"].splitlines()[-1]
+    assert rig.engine.container(AGENT_CONTAINER_NAME).removed
 
 
 # #827-T04: the reason of a container that went away under the script is on the page, in words
@@ -401,38 +404,20 @@ def test_a_container_the_guard_killed_says_why_on_the_page_not_only_by_a_status(
     assert last == f"[setup] {done.error.detail}", "the page names the reason in a whole sentence"
 
 
-# #818-DISK-05
-def test_a_disk_with_no_room_for_the_commit_ends_the_turn_free_and_says_how_much_is_missing(
-    rig: Rig,
-) -> None:
-    workspace = Workspace()
-    workspace.free = 100 * 1024 * 1024
-    done = step(rig, workspace)
-    assert done.error is not None and done.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-    assert "too full to keep its result" in done.error.detail
-    assert "100 MB left" in done.error.detail and "needs about" in done.error.detail
-    assert done.image is None and rig.engine.committed == []
-    assert done.block is not None and done.block["ok"] is False and done.block["exitCode"] == 0
-    assert any("100 MB left" in note for note in done.notes)
-    last = done.block["output"].splitlines()[-1]
-    assert last.startswith("[setup] the VM had no room to save the setup result: ")
-    assert "100 MB left" in last and "needs about" in last
-
-
-# #818-DISK-06
+# #818-DISK-06, #1009
 def test_the_closing_line_is_kept_whole_when_the_scripts_output_fills_the_block() -> None:
     run = sc.SetupRun(
-        outcome=sc.OUTCOME_NO_ROOM,
+        outcome=sc.OUTCOME_NOT_HANDED_OVER,
         exit_code=0,
         output=b"",
         output_bytes=0,
-        image=None,
+        container=None,
         detail="d",
         start_seconds=0.0,
         script_seconds=3.0,
-        save_seconds=0.0,
+        handover_seconds=0.0,
     )
-    closing = "[setup] the VM had no room to save the setup result: 1 MB free, 2 MB needed"
+    closing = "[setup] the setup container could not be kept: it is still on the network"
     block = es.setup_block(run, "x" * es.OUTPUT_CHARS, ok=False, closing=closing)
     assert len(block["output"]) == es.OUTPUT_CHARS
     assert block["output"].endswith("\n" + closing)
@@ -476,10 +461,10 @@ def job_run(
         def prepare(self) -> None:
             ran.append("prepare")
 
-    placed: list[str] = []
+    placed: list[Adopted] = []
 
-    def place_from(image: str) -> Callable[[], Any]:
-        placed.append(image)
+    def place_from(adopted: Adopted) -> Callable[[], Any]:
+        placed.append(adopted)
         return lambda: None
 
     def setup(*arguments: Any) -> TurnSetup:
@@ -555,16 +540,17 @@ def test_the_failure_is_free_in_the_apps_table_of_codes() -> None:
 
 
 # #818-T52
-def test_a_good_script_makes_the_agent_start_from_its_image() -> None:
+def test_a_good_script_makes_the_agent_run_in_the_container_of_the_script() -> None:
+    adopted = Adopted("ee" * 32, paused=True)
     good = es.EnvironmentSetup(
-        "sha256:" + "ee" * 32,
+        adopted,
         {"ok": True, "exitCode": 0, "timedOut": False, "durationSeconds": 40, "output": "ok\n"},
         None,
         ("setup: ready",),
     )
     calls: list[Any] = []
     result, ran, placed = job_run(good, session_calls=calls)
-    assert placed == ["sha256:" + "ee" * 32]
+    assert placed == [adopted]
     assert ran == ["prepare", "setup", "session"]
     assert result.ok is False  # the double raised; what matters is the order above
 
@@ -577,7 +563,7 @@ def test_a_stop_during_the_script_ends_the_turn_with_the_stop_code_and_no_sessio
 
 # #818-T54
 def test_a_job_without_an_environment_runs_no_setup_and_nothing_changes() -> None:
-    good = es.EnvironmentSetup("sha256:aa", None, None, ())
+    good = es.EnvironmentSetup(Adopted("aa" * 32), None, None, ())
     _, ran, placed = job_run(good, with_environment=False)
     assert "setup" not in ran and placed == []
     assert ran[:2] == ["prepare", "session"]
@@ -596,7 +582,7 @@ def test_the_early_report_is_one_the_app_reads_with_no_commit() -> None:
 
 
 # #818-T56
-def test_the_production_setup_starts_the_agent_from_the_image_of_the_step(
+def test_the_production_setup_makes_an_agent_container_that_takes_the_script_container_over(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from code_reviewer_runner.implementer import job_run
@@ -621,10 +607,12 @@ def test_the_production_setup_starts_the_agent_from_the_image_of_the_step(
     plain = setup.place()
     assert isinstance(plain, AgentContainer)
     assert plain._seams.image == "code-reviewer-agent:golden"  # pyright: ignore[reportPrivateUsage]
-    # The container of the step's image: the committed one by id, the helper's from the golden one.
-    made = setup.environment.place("sha256:" + "ee" * 32)()
+    # The container of the step: the golden image, the same container (its id), the same limits.
+    adopted = Adopted("ee" * 32, setup_environment=("HTTP_PROXY=http://10.0.0.1:3128",))
+    made = setup.environment.place(adopted)()
     assert isinstance(made, AgentContainer)
     seams = made._seams  # pyright: ignore[reportPrivateUsage]
-    assert seams.image == "sha256:" + "ee" * 32
-    assert seams.helper_image == "code-reviewer-agent:golden"
+    assert seams.image == "code-reviewer-agent:golden"
+    assert made._container == "ee" * 32  # pyright: ignore[reportPrivateUsage]
+    assert made._adopted == adopted  # pyright: ignore[reportPrivateUsage]
     assert made._memory_bytes == 6144 * 1024 * 1024  # pyright: ignore[reportPrivateUsage]

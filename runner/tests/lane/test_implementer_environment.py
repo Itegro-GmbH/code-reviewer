@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The environment's setup script on a real Docker daemon (#818, step 5 of the sandbox plan): the
-Setup container, its network, the image it commits and the agent that starts from it.
+"""The environment's setup script on a real Docker daemon (#818, step 5 of the sandbox plan; #1009):
+the container it runs in (the agent's own), its network and the agent that runs in that same
+container afterwards.
 
-Under `runc` (CI) the Setup container has no inner Docker, so what is proven here is the flow, the
-files, the failures, the secrets and the network rules of the host's side; under `sysbox-runc` (a
-VM, `LANE_RUNTIME=sysbox-runc`) the same tests also prove that the images the script put in the
-container's own Docker are in the agent's. What only a VM with the platform's network proves (the
-internet is reachable, the VM's control port is not) is in `docs/implementer.md`, "Measured on a
-real VM"."""
+Under `runc` (CI) the container has no inner Docker, so what is proven here is the flow, the files,
+the processes the script leaves running, the failures, the secrets and the network rules of the
+host's side; under `sysbox-runc` (a VM, `LANE_RUNTIME=sysbox-runc`) the same tests also prove that
+the images the script put in the container's own Docker are the agent's. What only a VM with the
+platform's network proves (the internet is reachable, the VM's control port is not) is in
+`docs/implementer.md`, "Measured on a real VM"."""
 
 import socket
 import threading
-from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
@@ -39,16 +39,11 @@ from code_reviewer_runner.implementer.session import ShutdownRequested
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_ADDRESS,
     SETUP_BRIDGE,
-    SETUP_CONTAINER_NAME,
-    SETUP_IMAGE_REPOSITORY,
-    SETUP_IMAGE_TAG,
     SETUP_NETWORK_GATEWAY,
     SETUP_NETWORK_NAME,
 )
 from code_reviewer_runner.result import ErrorCode
 from git_support import TOKEN, raw
-
-IMAGE = f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}"
 
 SETUP = """
 echo made-by-setup > /opt/setup-marker
@@ -58,24 +53,16 @@ echo 'setup is done'
 """
 
 
-@pytest.fixture(autouse=True)
-def no_committed_image_between_tests() -> Iterator[None]:
-    """A test starts without the image an earlier one committed, and leaves none."""
-    docker("image", "rm", IMAGE, check=False)
-    yield
-    docker("image", "rm", IMAGE, check=False)
-
-
 def nothing_of_the_setup_is_left() -> None:
-    """The Setup container and its network are gone, and so is the model side of a turn that
-    never began."""
+    """The container the script ran in and its network are gone, and so is the model side of a turn
+    that never began."""
     names = docker("ps", "-a", "--format", "{{.Names}}").stdout.split()
-    assert SETUP_CONTAINER_NAME not in names and AGENT_CONTAINER_NAME not in names
+    assert AGENT_CONTAINER_NAME not in names
     assert docker("network", "inspect", SETUP_NETWORK_NAME, check=False).returncode != 0
 
 
 # #818-L01
-def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_back(
+def test_the_agent_runs_in_the_container_the_script_left_and_the_tracked_files_are_back(
     tmp_path: Path,
 ) -> None:
     under_sysbox = lane_config().under_sysbox
@@ -108,10 +95,10 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
         result = turned.result
         assert result.ok, (result.error_code, result.error_detail, result.notes)
         prepared = turned.setup
-        assert prepared is not None and prepared.image is not None and prepared.error is None
+        assert prepared is not None and prepared.adopted is not None and prepared.error is None
         assert prepared.block is not None and prepared.block["ok"] is True
         assert "setup is done" in prepared.block["output"]
-        # The agent started from the committed image: the file the script left in the container's
+        # The agent ran in the container of the script: the file the script left in the container's
         # file system, and not in the repository, is there.
         tip = result.head_commit or ""
         shown = raw("show", f"{tip}:marker-copy.txt", cwd=turned.origin.path, git=turned.origin.git)
@@ -137,12 +124,9 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
         if under_sysbox:
             images = raw("show", f"{tip}:images.txt", cwd=turned.origin.path, git=turned.origin.git)
             assert "tiny:setup" in images
-        # The image is the one that was committed, by repository and tag, and the Setup container
-        # and its network are gone.
-        assert (
-            docker("image", "inspect", IMAGE, "--format", "{{.Id}}").stdout.strip()
-            == prepared.image
-        )
+        # It is the very container the script ran in: its id is the one the step handed over, and
+        # the turn removed it at the end.
+        assert docker("inspect", prepared.adopted.container, check=False).returncode != 0
     nothing_of_the_setup_is_left()
 
 
@@ -150,14 +134,13 @@ def test_the_agent_starts_from_what_the_script_left_and_the_tracked_files_are_ba
 def test_a_script_that_fails_ends_before_the_model_and_leaves_its_output(tmp_path: Path) -> None:
     with lane_environment(tmp_path, "echo about to fail\necho oops >&2\nexit 3\n") as (lane, step):
         assert step.error is not None and step.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-        assert step.image is None
+        assert step.adopted is None
         block = step.block
         assert block is not None and block["ok"] is False and block["exitCode"] == 3
         assert block["timedOut"] is False
         assert "about to fail" in block["output"] and "oops" in block["output"]
         # No door, no model network and no agent: the model was never within reach.
         assert docker("network", "inspect", "code-reviewer-model", check=False).returncode != 0
-        assert docker("image", "inspect", IMAGE, check=False).returncode != 0
         assert raw("rev-parse", "HEAD", cwd=lane.workspace.repo, git=lane.origin.git)
     nothing_of_the_setup_is_left()
 
@@ -195,33 +178,18 @@ def test_a_script_that_fills_the_disk_fails_and_the_reserve_is_untouched(tmp_pat
     nothing_of_the_setup_is_left()
 
 
-# #818-L09
-def test_a_script_that_fills_the_containers_root_beyond_the_disk_ends_with_no_room_for_the_commit(
+# #1009-L09
+def test_a_script_that_fills_the_containers_root_keeps_the_container_whole_for_the_agent(
     tmp_path: Path,
 ) -> None:
-    """The result of the script is a gigabyte in the container's own file system, the stand-in for
-    the VM's disk has two: a commit needs twice the layer and a headroom. Control says so before
-    `docker commit`, and nothing is committed. With a small result on the same disk it is."""
+    """A gigabyte in the container's own file system is just there for the agent: nothing is
+    committed any more, so there is no step that the VM's disk could fail (before #1009 the
+    commit needed twice the layer and a headroom, and a script that left a gigabyte on a small
+    disk ended the turn)."""
     big = "dd if=/dev/zero of=/opt/fill.bin bs=1M count=1024\n"
-    for name in ("big", "small"):
-        (tmp_path / name).mkdir()
-    with lane_environment(tmp_path / "big", big, disk_megabytes=2048) as (_, step):
-        assert step.error is not None and step.error.code is ErrorCode.ENVIRONMENT_SETUP_FAILED
-        assert "too full to keep its result" in step.error.detail, step.error.detail
-        assert "MB left" in step.error.detail and "needs about" in step.error.detail
-        # The Runs page shows the exit status and the end of the output: the script exited 0, and
-        # the last line of the output says what the runner found.
-        block = step.block
-        assert block is not None and block["ok"] is False and block["exitCode"] == 0
-        closing = block["output"].splitlines()[-1]
-        assert closing.startswith("[setup] the VM had no room to save the setup result: "), closing
-        assert "MB left" in closing and "needs about" in closing, closing
-        assert step.image is None
-        assert docker("image", "inspect", IMAGE, check=False).returncode != 0
-    nothing_of_the_setup_is_left()
-    small = "echo small > /opt/small.txt\n"
-    with lane_environment(tmp_path / "small", small, disk_megabytes=2048) as (_, step):
-        assert step.error is None and step.image is not None, (step.error, step.notes)
+    with lane_environment(tmp_path, big, disk_megabytes=2048) as (_, step):
+        assert step.error is None and step.adopted is not None, (step.error, step.notes)
+        assert step.block is not None and step.block["ok"] is True
     nothing_of_the_setup_is_left()
 
 
@@ -238,7 +206,7 @@ def test_a_stop_of_the_runner_ends_the_script_and_removes_the_container(tmp_path
 
 
 # #818-L06
-def test_the_setup_container_has_no_secret_of_any_kind(tmp_path: Path) -> None:
+def test_the_container_of_the_script_has_no_secret_of_any_kind(tmp_path: Path) -> None:
     probe = r"""
 echo '--- environment'; env | sort
 echo '--- pid 1'; tr '\0' '\n' < /proc/1/environ | sort
@@ -271,8 +239,11 @@ echo '--- done'
         # No socket of the VM, no device, no mount but the repository.
         mounts = shown.split("--- mounts")[1].split("--- files")[0]
         assert "docker.sock" not in mounts and "/work/repo" in mounts
-        # The image it makes carries none either.
-        config = docker("image", "inspect", IMAGE, "--format", "{{json .Config.Env}}").stdout
+        # Nor does its definition, which is the agent's: read back from the daemon.
+        assert step.adopted is not None
+        config = docker(
+            "inspect", step.adopted.container, "--format", "{{json .Config.Env}}"
+        ).stdout
         assert TOKEN not in config and REAL_KEY not in config
         for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"):
             assert word not in config.upper()
@@ -299,7 +270,7 @@ def _accept(server: socket.socket) -> None:
 
 
 # #818-L07
-def test_the_setup_container_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
+def test_the_container_of_the_script_cannot_reach_the_vms_services_over_ipv4_or_ipv6(
     tmp_path: Path,
 ) -> None:
     server, port = listener()
@@ -362,19 +333,90 @@ echo "neighbours: $(ip -6 neigh show dev eth0 | grep -c '^fe80')"
 
 
 # #818-L08
-def test_a_turn_without_an_environment_makes_no_setup_container_and_no_image(
-    tmp_path: Path,
-) -> None:
+def test_a_turn_without_an_environment_makes_no_setup_network(tmp_path: Path) -> None:
     def script(repo: Path) -> list[Turn]:
         return [write_file(repo, "hello.txt"), commit("Add hello"), says("Done.")]
 
     with lane_turn(tmp_path, script) as turned:
         assert turned.result.ok, (turned.result.error_code, turned.result.notes)
         assert turned.setup is None
-        assert docker("image", "inspect", IMAGE, check=False).returncode != 0
         assert docker("network", "inspect", SETUP_NETWORK_NAME, check=False).returncode != 0
-        calls = [
-            n for n in docker("ps", "-a", "--format", "{{.Names}}").stdout.split()
-            if n == SETUP_CONTAINER_NAME
-        ]  # fmt: skip
-        assert calls == []
+
+
+# The process the script starts, as a small database: it keeps rows in a file, answers on a
+# loopback port, and writes its pid. The agent reads the row the script wrote, adds one, stops the
+# process, starts it again and reads both (the lane's stand-in for a Postgres: the real one is a
+# container of the container's own Docker, which only `sysbox-runc` has).
+DATABASE = r"""
+import os, socketserver, sys
+rows = "/opt/rows.txt"
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        line = self.rfile.readline().decode().strip()
+        if line.startswith("insert "):
+            with open(rows, "a") as out:
+                out.write(line[7:] + "\n")
+            self.wfile.write(b"ok\n")
+        else:
+            self.wfile.write(open(rows).read().replace("\n", ",").encode() + b"\n")
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", 5433), Handler) as server:
+    open("/opt/db.pid", "w").write(str(os.getpid()))
+    server.serve_forever()
+"""
+TALK = (
+    "python3 -c \"import socket,sys; s=socket.create_connection(('127.0.0.1',5433),5); "
+    "s.sendall((sys.argv[1]+'\\\\n').encode()); print(s.makefile().readline().strip())\""
+)
+
+
+# #1009-L10 (T01 of the issue, in the lane's stand-in, T03: the process runs after the narrowing)
+def test_a_process_the_script_started_is_still_running_for_the_agent_and_its_data_persists(
+    tmp_path: Path,
+) -> None:
+    setup = f"""
+cat > /opt/db.py <<'PY'
+{DATABASE}
+PY
+echo 7 > /opt/rows.txt
+setsid nohup python3 /opt/db.py > /dev/null 2>&1 &
+for i in $(seq 1 50); do [ -s /opt/db.pid ] && break; sleep 0.1; done
+echo "started $(cat /opt/db.pid)"
+"""
+
+    def script(repo: Path) -> list[Turn]:
+        return [
+            bash(
+                f"{TALK} 'select' > rows-before.txt; "
+                f"{TALK} 'insert 8' > insert.txt; "
+                "kill $(cat /opt/db.pid); sleep 1; "
+                "(kill -0 $(cat /opt/db.pid) 2>/dev/null && echo still-alive || echo stopped) "
+                "> after-stop.txt; "
+                "setsid nohup python3 /opt/db.py > /dev/null 2>&1 & sleep 2; "
+                f"{TALK} 'select' > rows-after.txt; "
+                "git add rows-before.txt insert.txt after-stop.txt rows-after.txt "
+                "&& git commit -qm 'Use the database'"
+            ),
+            says("Used the process the setup left."),
+        ]
+
+    with lane_turn(tmp_path, script, setup_script=setup) as turned:
+        result = turned.result
+        assert result.ok, (result.error_code, result.error_detail, result.notes)
+        prepared = turned.setup
+        assert prepared is not None and prepared.block is not None and prepared.block["ok"] is True
+        assert "started " in prepared.block["output"]
+        tip = result.head_commit or ""
+
+        def shown(name: str) -> str:
+            return raw(
+                "show", f"{tip}:{name}", cwd=turned.origin.path, git=turned.origin.git
+            ).strip()
+
+        # The agent talked to the very process the script started (it had the row the script wrote),
+        # stopped it, started it again, and the data was there.
+        assert shown("rows-before.txt") == "7,"
+        assert shown("insert.txt") == "ok"
+        assert shown("after-stop.txt") == "stopped"
+        assert shown("rows-after.txt") == "7,8,"
+    nothing_of_the_setup_is_left()

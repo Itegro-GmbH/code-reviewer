@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-10
 - **Deciders:** the owner, designed in conversation on 2026-11-10
-- **Implemented by:** epic #969; this record with #971 (labels and the claim), then #972 to #974 (M1) and #975 to #982 (M2, M3)
+- **Implemented by:** epic #969; this record with #971 (labels and the claim), then #972 to #974 (M1), #975 to #982 (M2, M3) and #1009 (setup and agent in one environment)
 - **Amends:** the shape section of the Factory-Runner plan (a runner on the host's Docker). Its decisions on registration, labels, BYOK, the cost
   display and Anthropic's terms stand unless changed below
 
@@ -226,3 +226,28 @@ Everything of M2 and M3 (the Firecracker launcher and the rest): each is its own
 - **Licence texts are copied from archives and pinned.** The standalone Python's archive carries no licence files of the libraries it is built with, so their texts (and OpenSSL 4.0.3's, which the `cryptography` wheel links and its SBOM names) were copied from the full archive of the same build and from OpenSSL's source archive into `runner/release/licenses/`, with `SOURCES.md` and `SHA256SUMS`; the build refuses a changed or unlisted text and ships them in `share/licenses/third-party/`.
 - **The tar is reproducible, the tarball for one `zstd` version.** A rebuild is compared by its uncompressed tar (`zstd -dc <tarball> | sha256sum`); the tarball's own bytes depend on the `zstd` version that compressed it.
 - **Not done:** the real release (the owner's decisions: environment, key, `publicKey` and `baseUrl`, where to publish), a signed `expires` in the manifest, a program that checks its own VM artifacts at start (the installer checks the pair at staging), the live test on a real host (`docs/runner.md`, "First install on a real host").
+
+## 3j. Details of #1009: setup and agent in the same environment
+
+The owner's decision (2026-11-11): **the setup and the agent run in the same environment, hosted and local, with identical behaviour.** Spike #1005 (`docs/runner.md`, "Spike: Incus (LXD) backend", "Setup and agent in the same instance") showed what that gives: everything the setup started
+(files, images, containers, volumes and **processes**, such as a Postgres) is there for the agent, which can use and stop it, and nothing is reset at `narrow`. The hand-over of the VM content described under "VM content" of the plan (setup → `docker commit` → agent from `agent:environment`)
+kept files and images and **lost every process**, and hosted must match.
+
+- **Behaviour contract, item 9 (setup semantics), as decided.** The setup runs with its own Docker and the internet (the wide rule) and no secret. **When it ends well the agent runs in the same environment**: what it left, files, images, containers, volumes **and running processes**, is what the agent
+  has; **the setup's processes keep running after the hand-over; nothing is reset at `narrow`**; the agent can use them, stop them and start them again, and what a stopped service wrote to its volume is there when it starts. The things that do change at the hand-over are the network (the wide rule ends: the environment has
+  no way out but the doors, and the setup's open connections are cut before the outer wall narrows, so before any door exists) and the repository's bookkeeping, as before: tracked files are put back, the setup's history is undone, files it added are on the local ignore list (`settle_after_setup`).
+  A conformance test starts a service in the setup (a database with a row), lets the agent read the row, stop and start the service and read it again, and checks that after `narrow` the setup's containers and processes still run, on every backend (the other items of the list in PR #1006 are unchanged).
+- **Hosted, one container.** The agent's container (Sysbox, its own `dockerd`) is made once, **on the setup network**, runs the script as an exec and is then **taken over** by the agent's container object: it leaves the setup network (this must hold, or the turn ends free), is frozen while Control reads the repository, and is
+  put on the model network, which is its narrowing inside the VM. No `docker commit`, no `agent:environment` image, no second container; the room check of the commit (`no_room`) is gone and the one set of limits (memory, processes) is the script's and the agent's together. The VM's outer wall narrows as before
+  (`narrow`, then the doors, then the agent), and its order did not change.
+- **The inner wall is unchanged, and so is what the agent can reach.** The agent is root in a Sysbox container whose `dockerd` is the one it always had, so the setup's containers, images and volumes are its own Docker's: it can `exec` into, stop, start, remove and read them. That is inside the container, which has
+  no socket of the VM's Docker, no device, no mount but the repository and the model network only. Nothing of Control's was ever in it, the setup phase included (no git token, no model key, no job token): there is nothing for a process the setup left to have kept. A setup container started `--privileged` or
+  `--network host` is privileged inside the container's user namespace and shares its network namespace, so it reaches what the agent reaches, the two doors.
+- **The inner Docker learns another proxy by starting again.** The daemon reads its proxy variables at its start (Docker's own documentation says to restart it). On a customer's machine the setup phase has the outer-wall proxy in its environment and the agent the network door's; with a door in the rule the container's `dockerd` is
+  started again (`--live-restore`: the containers it started keep running) with the door's variables, by the image's init on request. Hosted with the rule `off` has no proxy in either phase and no restart.
+- **Local.** The Incus launcher (#1007) is one instance B for both phases and needs nothing of this: its setup and agent are one environment by construction, and `narrow` unplugs the outer NIC. The Firecracker path runs the same Worker code, so it has the one-container flow too (its Sysbox container is the same one); it is
+  removed by #1007 and is not given a separate design.
+- **Alternatives considered.** A second container from a *copy* of the setup's (the Incus "copy of the stopped instance"): processes are gone. Keeping the commit and restarting the setup's containers by a start script the customer writes: not "the same environment". Running the script in the agent's container on
+  the model network behind the door: the setup would lose raw TCP and the wide rule's meaning.
+- **Not done:** a lane test with a real Postgres in the inner Docker (the Docker lane runs under `runc`, where the container has no inner Docker; the lane proves a database-like process, and the KVM lane's whole job covers the real Sysbox path), what the Worker's hardening flags do to a database container in the inner Docker (not tried, as in #1005),
+  the Claude Code harness with a setup script (still refused: `subscription_setup_script`).

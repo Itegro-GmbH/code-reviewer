@@ -78,10 +78,10 @@ from code_reviewer_runner.implementer.reader import (
 )
 from code_reviewer_runner.implementer.setup_container import (
     SETUP_ADDRESS,
-    SETUP_CONTAINER_NAME,
     SETUP_NETWORK_GATEWAY,
     SETUP_NETWORK_NAME,
     SetupContainer,
+    SetupSeams,
 )
 from code_reviewer_runner.implementer.vm_memory import floor_bytes, read_memory
 
@@ -100,6 +100,9 @@ MIB = 1024 * 1024
 DOOR_PORT = slot_ports(dict(os.environ)).proxy
 LISTEN_PORT = 9999
 SETUP_LISTEN_PORT = 9998
+# The script's container is the agent's since #1009; the boundary check keeps an agent beside it to probe
+# between the two, so it names the one it probes.
+SETUP_CONTAINER_NAME = "code-reviewer-setup-probe"
 INTERNET = (("1.1.1.1", 443), ("8.8.8.8", 443), ("9.9.9.9", 80), ("1.1.1.1", 53))
 # Public IPv6 addresses the agent must not reach (a connect each, port 443).
 PUBLIC_V6 = ("2606:4700:4700::1111", "2001:4860:4860::8888")
@@ -1633,7 +1636,9 @@ def section_setup_container(lab: Rig) -> None:
     box: dict[str, Any] = {}
 
     def run() -> None:
-        box["run"] = SetupContainer(MEMORY_MB).run(script, script_seconds=170.0)
+        box["run"] = SetupContainer(MEMORY_MB, SetupSeams(container_name=SETUP_CONTAINER_NAME)).run(
+            script, script_seconds=170.0
+        )
 
     # A daemon: a Ctrl-C in the middle of this section must not wait for the Setup run (`main` removes the
     # container, which ends the run's calls).
@@ -1680,6 +1685,9 @@ def section_setup_container(lab: Rig) -> None:
             run_exec(lab.api, SETUP_CONTAINER_NAME, ["/usr/bin/touch", "/tmp/go"], timeout=10.0)
     thread.join(240.0)
     run_result = box.get("run")
+    # A script that ended well leaves its container alive for the agent (#1009); nothing takes it here.
+    with contextlib.suppress(Exception):
+        lab.api.remove_container(SETUP_CONTAINER_NAME)
     if run_result is None:
         checks.say(
             "setup",

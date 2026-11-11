@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Setup container on a customer's machine (#994): its internet is the host's outer-wall proxy
-and nothing else. What these tests hold: the container gets the proxy variables from the host's
-address, the VM's table lets its bridge reach that address and port and drops everything else
-(no DNS, no other address, no other port), the seal check knows exactly those variables and no
-others, and without a proxy everything is as hosted."""
+"""The container the setup script runs in, on a customer's machine (#994): its internet is the
+host's outer-wall proxy and nothing else. What these tests hold: the container gets the proxy
+variables from the host's address, the VM's table lets its bridge reach that address and port and
+drops everything else (no DNS, no other address, no other port), the seal check knows exactly
+those variables and no others, and without a proxy everything is as hosted."""
 
 from dataclasses import replace
 from typing import Any
@@ -13,6 +13,7 @@ from test_setup_container import Rig, rig, run  # noqa: F401  # pyright: ignore[
 
 from code_reviewer_runner.implementer import host_rules
 from code_reviewer_runner.implementer import setup_container as sc
+from code_reviewer_runner.implementer.agent_container import AGENT_CONTAINER_NAME
 from code_reviewer_runner.implementer.setup_container import (
     OUTCOME_OK,
     OUTCOME_UNAVAILABLE,
@@ -24,7 +25,7 @@ PROXY = OuterProxy("172.31.0.13", 3128)
 
 
 def setup_container_of(rig: Rig) -> Any:  # noqa: F811
-    return next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
+    return next(c for c in rig.engine.containers.values() if c.name == AGENT_CONTAINER_NAME)
 
 
 # #994-T03
@@ -115,7 +116,7 @@ def test_the_seal_check_accepts_the_proxys_variables_and_refuses_any_other_one(
         entries = [*PROXY.tool_environment(), "GIT_TOKEN=x"]
         return {**answer, "Config": {"Env": entries}}
 
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = other
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = other
     done = run(rig, outer_proxy=PROXY)
 
     assert done.outcome == OUTCOME_UNAVAILABLE and "environment" in done.detail
@@ -129,7 +130,7 @@ def test_a_container_without_the_proxy_it_was_given_is_not_what_was_asked_for(
     def without(answer: dict[str, Any]) -> dict[str, Any]:
         return {**answer, "Config": {"Env": []}}
 
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = without
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = without
     done = run(rig, outer_proxy=PROXY)
 
     assert done.outcome == OUTCOME_UNAVAILABLE and "environment" in done.detail
@@ -142,7 +143,7 @@ def test_the_proxy_variables_are_refused_in_a_hosted_container(
     def with_proxy(answer: dict[str, Any]) -> dict[str, Any]:
         return {**answer, "Config": {"Env": PROXY.tool_environment()}}
 
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = with_proxy
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = with_proxy
     done = run(rig)
 
     assert done.outcome == OUTCOME_UNAVAILABLE and "environment" in done.detail
