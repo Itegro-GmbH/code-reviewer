@@ -201,8 +201,8 @@ class DockerApi:
         return answer
 
     def container_rw_bytes(self, ref: str, *, timeout: float) -> int | None:
-        """The size of a container's writable layer, what a commit has to write (`size=true` makes
-        the daemon walk the layer, so it takes a moment); None when the daemon does not say."""
+        """The size of a container's writable layer (`size=true` makes the daemon walk the layer, so
+        it takes a moment); None when the daemon does not say."""
         answer = as_object(
             self.request("GET", f"/containers/{ref}/json?size=true", timeout=timeout)
         )
@@ -304,33 +304,24 @@ class DockerApi:
             "POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409), timeout=timeout
         )
 
+    def pause_container(self, container: str, *, timeout: float | None = None) -> None:
+        """Freeze every process of a running container (the cgroup freezer): nothing in it changes
+        until `unpause_container`. The environment's setup step uses it while Control reads the
+        repository the script worked in (#1009)."""
+        self.request("POST", f"/containers/{container}/pause", ok=(204,), timeout=timeout)
+
+    def unpause_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request("POST", f"/containers/{container}/unpause", ok=(204,), timeout=timeout)
+
     def stop_container(self, container: str, *, grace: int, timeout: float) -> None:
         """SIGTERM the container's init, SIGKILL after `grace` seconds. A container that is already
-        stopped (304) or gone (404) is what was wanted. Under Sysbox a stop that ends the init
-        by itself is the one that lets it write the inner Docker's data back into the container's
-        file system, where `commit_container` finds it (#818)."""
+        stopped (304) or gone (404) is what was wanted."""
         self.request(
             "POST",
             f"/containers/{container}/stop?t={int(grace)}",
             ok=(204, 304, 404),
             timeout=timeout,
         )
-
-    def commit_container(self, container: str, repository: str, tag: str, *, timeout: float) -> str:
-        """Make an image of a container's file system (the image id). The container is not paused:
-        the caller has stopped it. The repository and the tag are constants of the runner."""
-        answer = as_object(
-            self.request(
-                "POST",
-                f"/commit?container={container}&repo={repository}&tag={tag}&pause=false",
-                ok=(201,),
-                timeout=timeout,
-            )
-        )
-        identifier: Any = None if answer is None else answer.get("Id")
-        if not isinstance(identifier, str) or not identifier.startswith("sha256:"):
-            raise DockerError(0, "the daemon's answer has no image id")
-        return identifier
 
     def build_image(self, context: bytes, tag: str, *, timeout: float) -> None:
         """Build an image from a tar (`context`, a Dockerfile and what it copies) and name it

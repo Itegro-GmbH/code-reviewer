@@ -93,9 +93,6 @@ from code_reviewer_runner.implementer.result_channel import make_result_director
 from code_reviewer_runner.implementer.resume_session import ResumeInput
 from code_reviewer_runner.implementer.session import ImplementerSession, SessionSeams
 from code_reviewer_runner.implementer.setup_container import (
-    SETUP_CONTAINER_NAME,
-    SETUP_IMAGE_REPOSITORY,
-    SETUP_IMAGE_TAG,
     SETUP_NETWORK_NAME,
     SetupSeams,
 )
@@ -216,13 +213,19 @@ def preflight(config: LaneConfig) -> None:
         raise AssertionError(f"the daemon has no {config.runtime} runtime")
 
 
-def remove_fixed() -> None:
+def remove_fixed(*, agent: bool = True) -> None:
     """The containers of the turn's model side that the turn names by constants, and the network.
-    Not the readers: they are made when the workspace is prepared, before the network is."""
-    for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER, SETUP_CONTAINER_NAME, HELPER_NAME):
-        docker("rm", "-f", name, check=False)
+    Not the readers: they are made when the workspace is prepared, before the network is. `agent`
+    False leaves the agent's container, which a turn with a setup script made before the network
+    (#1009) and which the agent's container object takes over."""
+    for name in (AGENT_CONTAINER_NAME, RELAY_CONTAINER, HELPER_NAME):
+        if agent or name != AGENT_CONTAINER_NAME:
+            docker("rm", "-f", name, check=False)
     docker("network", "rm", MODEL_NETWORK_NAME, check=False)
-    docker("network", "rm", SETUP_NETWORK_NAME, check=False)
+    if agent:
+        # The agent's container made for a script names this network, and the agent's container
+        # object removes it once it has joined the model network.
+        docker("network", "rm", SETUP_NETWORK_NAME, check=False)
 
 
 def host_nft(config: LaneConfig, command: str) -> subprocess.CompletedProcess[str]:
@@ -244,10 +247,8 @@ def inet_family_supported(config: LaneConfig) -> bool:
 
 
 def remove_setup_leftovers(config: LaneConfig) -> None:
-    """The image a Setup container was committed to, and the firewall tables in the host's
-    namespace that its network and the model network got (they only name the bridges; they are
-    removed so that the machine is as the lane found it)."""
-    docker("image", "rm", f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}", check=False)
+    """The firewall tables in the host's namespace that the setup network and the model network got
+    (they only name the bridges; they are removed so that the machine is as the lane found it)."""
     for table in ("ip setup_egress", "inet implementer_ipv6_setup", "inet implementer_ipv6_agent"):
         host_nft(config, f"delete table {table}")
 
@@ -271,11 +272,12 @@ def bridge_gateway() -> str:
 
 
 @contextmanager
-def model_network(config: LaneConfig, port: int) -> Generator[None]:
+def model_network(config: LaneConfig, port: int, *, keep_agent: bool = False) -> Generator[None]:
     """The model network of the turn and the relay container that stands at the door's address on
     it. Under Sysbox the network is the production one (`--internal`, isolated gateway), so the
-    agent reaches nothing but the relay; under runc it is a plain bridge."""
-    remove_fixed()
+    agent reaches nothing but the relay; under runc it is a plain bridge. `keep_agent`: the agent's
+    container exists already (the container the setup script ran in)."""
+    remove_fixed(agent=not keep_agent)
     options = (
         ["--internal", "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated"]
         if config.under_sysbox
@@ -629,11 +631,12 @@ def lane_workspace(
         yield LaneWorkspace(config, origin, workspace, reader, scratch, volume, control)
 
 
-def setup_seams(lane: LaneWorkspace) -> SetupSeams:
-    """The Setup container of the lane: the lane's images and runtime, Control's stand-in as the
-    container the work volume is read from."""
+def setup_seams(lane: LaneWorkspace, *, result: bool = False) -> SetupSeams:
+    """The container the script runs in, in the lane: the lane's images and runtime, Control's
+    stand-in as the container the work volume is read from."""
     config = lane.config
     return SetupSeams(
+        result=result,
         hostname=lambda: lane.control,
         image=config.agent_image,
         helper_image=config.agent_image,
@@ -650,8 +653,10 @@ def environment_step(
     memory_mb: int = 2048,
     time_limit: float = 3600.0,
     should_stop: Callable[[], bool] = lambda: False,
+    result: bool = False,
 ) -> EnvironmentSetup:
-    """The environment's script as `job_run` runs it, against the lane's workspace."""
+    """The environment's script as `job_run` runs it, against the lane's workspace. A script that
+    ended well leaves the agent's container, alive and frozen, for whoever takes it over."""
     return run_environment_setup(
         ImplementerEnvironment("lane environment", script),
         workspace=lane.workspace,
@@ -660,7 +665,7 @@ def environment_step(
         elapsed=lambda: 0.0,
         should_stop=should_stop,
         secrets=(TOKEN, REAL_KEY),
-        seams=setup_seams(lane),
+        seams=setup_seams(lane, result=result),
     )
 
 
@@ -676,13 +681,20 @@ def lane_environment(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> Generator[tuple[LaneWorkspace, EnvironmentSetup]]:
     """Only the environment's step: the prepared workspace and what the script did. For the scripts
-    that fail, run out of time or fill the disk, and the questions about the Setup container
-    itself."""
+    that fail, run out of time or fill the disk, and the questions about the container itself. The
+    container a script that ended well leaves is removed when the block ends (nothing takes it
+    over here)."""
     with lane_workspace(scratch, seed=seed, disk_megabytes=disk_megabytes) as lane:
         step = environment_step(
             lane, script, memory_mb=memory_mb, time_limit=time_limit, should_stop=should_stop
         )
-        yield lane, step
+        try:
+            yield lane, step
+        finally:
+            if step.adopted is not None:
+                docker("unpause", step.adopted.container, check=False)
+                docker("rm", "-f", step.adopted.container, check=False)
+                docker("network", "rm", SETUP_NETWORK_NAME, check=False)
 
 
 @contextmanager
@@ -709,9 +721,9 @@ def lane_turn(
 ) -> Generator[Turned]:
     """Run one whole turn to its result against a model that follows `script(repo)` (the path of
     the repository in the agent's container). With `setup_script`, the environment's script runs
-    first in a Setup container (`run_environment_setup`, as `job_run` runs it) and the agent's
-    container starts from the image it made; a script that fails raises: use `lane_environment`
-    for those.
+    first in the agent's container (`run_environment_setup`, as `job_run` runs it) and the agent
+    runs in that same container, with what the script left, processes included; a script that
+    fails raises: use `lane_environment` for those.
 
     A follow-up turn (#840) is `resume` (the job's `implementer.resume`), the
     `origin_of_earlier_turn` it continues on and the `resume_input` the job host and the process
@@ -756,10 +768,10 @@ def lane_turn(
         config = lane.config
         prepared: EnvironmentSetup | None = None
         if setup_script is not None:
-            prepared = environment_step(lane, setup_script, memory_mb=memory_mb)
+            prepared = environment_step(lane, setup_script, memory_mb=memory_mb, result=with_result)
             if prepared.error is not None:
                 raise AssertionError(f"the setup failed: {prepared.error.detail}")
-        stack.enter_context(model_network(config, port))
+        stack.enter_context(model_network(config, port, keep_agent=prepared is not None))
         upstream = stack.enter_context(
             ScriptedUpstream(
                 family, script(REPO_IN_AGENT), entry["model"], real_key=REAL_KEY, judge=judge
@@ -777,13 +789,14 @@ def lane_turn(
                 memory_mb,
                 AgentSeams(
                     hostname=lambda: lane.control,
-                    image=config.agent_image if prepared is None else str(prepared.image),
+                    image=config.agent_image,
                     helper_image=config.agent_image,
                     runtime=config.runtime,
                     entrypoint=config.entrypoint,
                     ready_seconds=180.0,
                 ),
                 result=with_result,
+                adopted=None if prepared is None else prepared.adopted,
             )
 
         session = ImplementerSession(

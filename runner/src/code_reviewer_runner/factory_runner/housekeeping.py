@@ -42,7 +42,6 @@ from urllib.parse import quote
 
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
-from code_reviewer_runner.implementer.setup_container import SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
@@ -54,7 +53,9 @@ WORK_SUBDIRECTORIES: Final = ("reserve", "repo", "result")
 _IDENTIFIER: Final = re.compile(r"[0-9a-f]{12,64}")
 # The image a setup container's result is committed as (`setup_container.py`); the golden agent
 # image has the same repository and another tag.
-ENVIRONMENT_IMAGE: Final = f"{SETUP_IMAGE_REPOSITORY}:{SETUP_IMAGE_TAG}"
+# The image a setup container's result was committed as before #1009 (the setup now runs in the
+# agent's own container and nothing is committed): a machine that was updated may still hold one.
+ENVIRONMENT_IMAGE: Final = "code-reviewer-agent:environment"
 
 
 @dataclass(frozen=True)
@@ -338,21 +339,21 @@ def _identifiers(answer: object) -> list[str]:
 
 
 def remove_environment_image(api: DockerApi) -> None:
-    """Drop the name of the image a setup container's result was committed as, so the daemon frees
-    its layers: a machine keeps what a job made until somebody removes it, a hosted VM does not."""
+    """Drop the name of the image an earlier version committed a setup container's result as, so the
+    daemon frees its layers: a machine keeps what a job made until somebody removes it."""
     with contextlib.suppress(DockerError):
         api.remove_image(ENVIRONMENT_IMAGE)
 
 
 def tidy(seams: TidySeams = TidySeams()) -> list[str]:  # noqa: B008
-    """The containers and networks first (nothing mounts the work volume then), then the image a
-    setup container's result was committed as, then the work volume, unless the daemon could not
+    """The containers and networks first (nothing mounts the work volume then), then the image an
+    earlier version committed a setup result as, then the work volume, unless the daemon could not
     be cleaned: a container that stays may still have the volume mounted. The problems, empty when
     the machine is clean."""
     api = seams.api()
     problems = [f"docker: {problem}" for problem in remove_leftovers(api, seams.runner_id)]
     if problems:
         return problems
-    # What a hosted VM loses with the VM: the layers of the environment image (`disk_budget.py`).
+    # What a hosted VM loses with the VM: layers of an environment image of an earlier version.
     remove_environment_image(api)
     return [f"work volume: {problem}" for problem in clear_work(seams.work_dir)]

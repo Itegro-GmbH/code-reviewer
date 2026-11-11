@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Setup container of an environment (#818, step 5 of the sandbox plan), against the fake Docker
-Engine of `fakes/docker_engine`.
+"""The container an environment's script runs in (#818, #1009), against the fake Docker Engine of
+`fakes/docker_engine`.
 
-The questions: what the daemon is asked for (a Sysbox container from the agent's image with the
-repository and nothing else, no secret and no variable in any body), that the VM's rules for its
-bridge go in first and are only drops, that the script runs as a file in the container with the
-streams merged, that a script that fails or runs out of time or a container that goes away is told
-apart, that the committed image is the result, and that the container and the network are always
-taken away."""
+The questions: what the daemon is asked for (the agent's container, a Sysbox container from the
+agent's image with the repository and nothing else, no secret and no variable in any body), that the
+VM's rules for its bridge go in first and are only drops, that the script runs as a file in the
+container with the streams merged, that a script that fails or runs out of time or a container that
+goes away is told apart, that a script that ended well leaves the container alive, off the setup
+network and frozen, for the agent to take over (nothing is stopped, committed or reset), and that
+a container that is not handed over is always taken away."""
 
+import contextlib
 import json
+import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,11 +37,16 @@ from fakes.docker_engine.server import (
 
 from code_reviewer_runner.implementer import host_rules
 from code_reviewer_runner.implementer import setup_container as sc
-from code_reviewer_runner.implementer.agent_container import READY_FILE, WRITE_FILE_SCRIPT
+from code_reviewer_runner.implementer.agent_container import (
+    AGENT_CONTAINER_NAME,
+    READY_FILE,
+    WRITE_FILE_SCRIPT,
+    agent_document,
+)
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.door_launcher import PRIVATE_RANGES
 from code_reviewer_runner.implementer.setup_container import (
-    OUTCOME_NOT_SAVED,
+    OUTCOME_NOT_HANDED_OVER,
     OUTCOME_OK,
     OUTCOME_SCRIPT_FAILED,
     OUTCOME_STOPPED,
@@ -65,11 +75,6 @@ class Rig:
         # script runs wait for this, not for a time (a slow host starts the container later than
         # any timer).
         self.script_started = threading.Event()
-        # What the end script finds: "stops" (the container's Docker stops and the container
-        # ends with it), "no-docker" (nothing runs in it but its init) or "hangs".
-        self.finish_mode = "no-docker"
-        # The VM runs low while the end script runs (a background process of the script).
-        self.finish_squeezes = False
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
         # The VM's memory as `MemoryGuard` reads it: plenty, until a test says otherwise.
         self.meminfo = directory / "meminfo"
@@ -88,8 +93,6 @@ class Rig:
             "api": self.api,
             "hostname": lambda: HOSTNAME,
             "ready_seconds": 5.0,
-            "finish_seconds": 5.0,
-            "commit_seconds": 5.0,
             "meminfo": str(self.meminfo),
         }
         base.update(options)
@@ -111,19 +114,6 @@ class Rig:
                 made.killed.wait(30)
                 return 137
             return self.script_exit
-        if argv[:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT]:
-            if self.finish_squeezes:
-                self.set_left(300_000)
-                threading.Event().wait(0.5)  # five looks of the guard
-            if self.finish_mode == "no-docker":
-                stdout.write(sc.NO_DOCKER + "\n")
-            else:
-                stdout.write("stopping\n")
-                if self.finish_mode == "stops":
-                    threading.Timer(
-                        0.2, lambda: self.engine.kill(sc.SETUP_CONTAINER_NAME, exit_code=0)
-                    ).start()
-            return 0
         return 0
 
     def stop(self) -> None:
@@ -140,9 +130,8 @@ def rig() -> Iterator[Rig]:
 
 def run(made: Rig, script: str = "echo hi\n", seconds: float = 5.0, **options: Any) -> sc.SetupRun:
     stop = options.pop("should_stop", lambda: False)
-    free = options.pop("free_bytes", lambda: None)
     return SetupContainer(2048, made.seams(**options)).run(
-        script, script_seconds=seconds, should_stop=stop, free_bytes=free
+        script, script_seconds=seconds, should_stop=stop
     )
 
 
@@ -163,19 +152,18 @@ def test_the_setup_container_is_the_agent_image_under_sysbox_with_the_repository
 ) -> None:
     done = run(rig)
     assert done.outcome == OUTCOME_OK
-    setup = next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
+    setup = next(c for c in rig.engine.containers.values() if c.name == AGENT_CONTAINER_NAME)
     document = setup.document
     host = document["HostConfig"]
     assert document["Image"] == AGENT_IMAGE_ID
     assert document["User"] == "0:0"
     assert document["Env"] == []
+    assert document["Hostname"] == "agent", "it is the agent's container"
     assert host["Runtime"] == "sysbox-runc"
     assert host["Privileged"] is False
     assert host["NetworkMode"] == sc.SETUP_NETWORK_NAME
     assert host["Memory"] == host["MemorySwap"] == 2048 * 1024 * 1024
-    assert host["OomScoreAdj"] == 1000, (
-        "the VM's OOM killer takes the Setup container before Control"
-    )
+    assert host["OomScoreAdj"] == 1000, "the VM's OOM killer takes the container before Control"
     assert host["Dns"] == list(sc.SETUP_DNS)
     assert [m["Target"] for m in host["Mounts"]] == ["/work/repo"]
     assert host["Mounts"][0]["VolumeOptions"]["Subpath"] == "repo"
@@ -191,9 +179,9 @@ def test_nothing_secret_is_in_any_request_to_the_daemon(rig: Rig) -> None:
     for secret in (TOKEN, KEY, "api_key", "apiKey", "token"):
         assert secret not in text.replace("accessToken", "")
     # The container's definition has no environment, no label of a job, no argument of a job.
-    setup = next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
+    setup = next(c for c in rig.engine.containers.values() if c.name == AGENT_CONTAINER_NAME)
     assert setup.document["Cmd"] == []
-    assert setup.document["Labels"] == {"code-reviewer.role": "setup"}
+    assert setup.document["Labels"] == {"code-reviewer.role": "agent"}
 
 
 # #818-T03
@@ -201,6 +189,17 @@ def test_the_document_is_made_of_constants_and_the_given_names_only() -> None:
     first = setup_document("sha256:aa", "volume-1", 1_000_000)
     second = setup_document("sha256:aa", "volume-1", 1_000_000)
     assert first == second
+    # The agent's container but for its network: the same image, limits, labels and mounts, so that
+    # nothing about it changes when the agent takes it over.
+    agent = agent_document("sha256:aa", "volume-1", 1_000_000)
+    for key in ("Image", "Entrypoint", "User", "Hostname", "WorkingDir", "Labels"):
+        assert first[key] == agent[key]
+    assert first["HostConfig"]["Mounts"] == agent["HostConfig"]["Mounts"]
+    assert (
+        first["HostConfig"]["NetworkMode"]
+        == sc.SETUP_NETWORK_NAME
+        != agent["HostConfig"]["NetworkMode"]
+    )
     assert set(first) == {
         "Image", "Entrypoint", "Cmd", "User", "Env", "Hostname", "WorkingDir", "Labels",
         "NetworkingConfig", "HostConfig",
@@ -273,7 +272,7 @@ def test_the_vms_side_of_the_bridge_is_closed_before_the_setup_container_exists(
         for method, target, _ in rig.engine.calls
         if method == "POST" and "containers/create" in target
     ]
-    assert created[-1].endswith(sc.SETUP_CONTAINER_NAME)
+    assert created[-1].endswith(AGENT_CONTAINER_NAME)
     assert all(t.endswith(host_rules.HELPER_NAME) for t in created[:-1])
 
 
@@ -284,7 +283,7 @@ def test_a_setup_whose_rules_did_not_go_in_is_never_started(rig: Rig) -> None:
     assert done.outcome == OUTCOME_UNAVAILABLE
     assert "network rules" in done.detail
     assert not any(
-        t == "/containers/create?name=" + sc.SETUP_CONTAINER_NAME for _, t, _ in rig.engine.calls
+        t == "/containers/create?name=" + AGENT_CONTAINER_NAME for _, t, _ in rig.engine.calls
     )
     assert rig.engine.networks == {}, "the network is taken away again"
 
@@ -295,7 +294,7 @@ def test_a_setup_whose_bridge_could_not_be_closed_to_ipv6_is_never_started(rig: 
     done = run(rig)
     assert done.outcome == OUTCOME_UNAVAILABLE and "network rules" in done.detail
     assert not any(
-        t == "/containers/create?name=" + sc.SETUP_CONTAINER_NAME for _, t, _ in rig.engine.calls
+        t == "/containers/create?name=" + AGENT_CONTAINER_NAME for _, t, _ in rig.engine.calls
     )
 
 
@@ -348,13 +347,14 @@ def test_the_script_is_a_file_in_the_container_run_as_root_in_the_repository(rig
     assert done.outcome == OUTCOME_OK and done.exit_code == 0
     assert rig.script_text == "#!/bin/bash\napt-get update\n"
     ran = next(e for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", sc.RUN_SCRIPT])
-    assert ran[0][3:] == ["run", sc.SCRIPT_PATH]
+    assert ran[0][3:] == ["run", sc.SCRIPT_PATH, sc.SCRIPT_OUTPUT]
     assert ran[1] == sc.SCRIPT_ENVIRONMENT
     assert ran[2] == "/work/repo"
     # The script is never in an argument of a call: it is the standard input of one exec.
     assert "apt-get" not in calls_text(rig.engine)
-    # Both streams in one, in order: the merge is the script's wrapper's (`2>&1`).
-    assert "2>&1" in sc.RUN_SCRIPT
+    # Both streams in one, in order, in a file and not the exec's stream: the shell around the
+    # script does it (`> "$2" 2>&1`, run for real by the `Shell` tests below).
+    assert '> "$2" 2>&1' in sc.RUN_SCRIPT
 
 
 # #818-T08
@@ -374,11 +374,13 @@ def test_the_tail_keeps_the_last_bytes_whatever_the_chunks() -> None:
 
 
 # #818-T09
-def test_a_script_that_exits_non_zero_is_its_own_outcome_and_nothing_is_committed(rig: Rig) -> None:
+def test_a_script_that_exits_non_zero_is_its_own_outcome_and_nothing_is_handed_over(
+    rig: Rig,
+) -> None:
     rig.script_exit = 3
     done = run(rig)
     assert done.outcome == OUTCOME_SCRIPT_FAILED and done.exit_code == 3
-    assert done.image is None and rig.engine.committed == []
+    assert done.container is None and done.adopted is None
     # The container and the network are gone.
     assert all(c.removed for c in rig.engine.containers.values())
     assert rig.engine.networks == {}
@@ -391,7 +393,7 @@ def test_a_script_that_runs_out_of_time_is_killed_and_its_output_is_kept(rig: Ri
     done = run(rig, seconds=0.5)
     assert done.outcome == OUTCOME_TIMED_OUT and done.exit_code is None
     assert done.output == b"still going\n"
-    assert rig.engine.committed == []
+    assert done.container is None
     assert all(c.removed for c in rig.engine.containers.values())
 
 
@@ -411,7 +413,7 @@ def test_a_container_killed_under_the_script_is_the_scripts_and_says_why(rig: Ri
 
     def oom() -> None:
         rig.script_started.wait(30)
-        setup = next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
+        setup = next(c for c in rig.engine.containers.values() if c.name == AGENT_CONTAINER_NAME)
         rig.engine.kill(setup.name, exit_code=137, oom=True)
 
     threading.Thread(target=oom, daemon=True).start()
@@ -436,210 +438,358 @@ def test_a_vm_running_out_of_memory_ends_the_script_and_says_so(rig: Rig) -> Non
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #745-T11 (#827): the container has ended when `docker commit` runs; the guard is closed by then
-# and does not kill the container under it
-def test_the_guard_is_closed_when_the_container_ended_before_the_commit(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
+# -- the hand-over ---------------------------------------------------------------------------------
+
+
+def posted(engine: FakeDockerEngine) -> list[str]:
+    """The requests of the run as `METHOD kind[/verb]`, in order, for the order of the hand-over."""
+    seen: list[str] = []
+    for method, target, _ in engine.calls:
+        parts = target.split("?")[0].strip("/").split("/")
+        seen.append(f"{method} {parts[0]}{'/' + parts[-1] if len(parts) > 2 else ''}")
+    return seen
+
+
+# #1009-T03
+def test_a_script_that_ended_well_leaves_the_container_alive_and_nothing_is_committed_or_stopped(
+    rig: Rig,
 ) -> None:
-    checked = sc.SetupContainer._check_room  # pyright: ignore[reportPrivateUsage]
-
-    def squeezed(self: Any, container: str, free_bytes: Any) -> None:
-        rig.set_left(300_000)  # below the floor while the layer is being saved
-        threading.Event().wait(0.5)  # five looks of the guard
-        checked(self, container, free_bytes)
-
-    monkeypatch.setattr(sc.SetupContainer, "_check_room", squeezed)
     done = run(rig)
-    assert done.outcome == OUTCOME_OK and done.image is not None
-    assert rig.engine.committed, "the commit ran"
-    assert "running out of memory" not in done.detail
+    assert done.outcome == OUTCOME_OK and done.exit_code == 0
+    setup = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert done.container == setup.identifier
+    assert setup.running and not setup.removed, "the processes of the script keep running"
+    names = posted(rig.engine)
+    assert "POST commit" not in names
+    assert not any(n.endswith("/stop") or n.endswith("/kill") for n in names)
+    # Nothing of the script is reset: it is the same container, frozen while Control reads the
+    # repository (the agent's container object unfreezes it).
+    assert setup.paused
+    assert done.adopted is not None and done.adopted.container == setup.identifier
+    assert done.adopted.paused is True and done.adopted.setup_environment == ()
 
 
-# #827-T01: the script exited well, but a process of it still runs until the container stops; the
-# VM running out of memory while the setup is finished is the guard's, and nothing is committed
-def test_a_vm_running_out_of_memory_while_the_setup_is_finished_is_not_committed(rig: Rig) -> None:
-    rig.finish_squeezes = True
-    done = run(rig)
-    assert done.outcome == OUTCOME_NOT_SAVED and done.image is None
-    assert done.detail.startswith("vm_memory: ")
-    assert "running out of memory" in done.detail
-    assert rig.engine.committed == []
-    assert all(c.removed for c in rig.engine.containers.values())
-
-
-# #827-N3: the guard tripped while the end script ran, its kill did not end the container, and the
-# container's Docker did not stop in time: the reason is the VM's memory, not "Docker did not stop"
-def test_a_vm_out_of_memory_while_the_docker_does_not_stop_says_vm_memory(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
+# #1009-T05
+def test_the_container_leaves_the_setup_network_before_it_is_frozen_and_the_network_stays(
+    rig: Rig,
 ) -> None:
-
-    def no_kill(_: Any) -> None:
-        return None
-
-    monkeypatch.setattr(sc.SetupContainer, "_kill", no_kill)
-    rig.finish_squeezes = True
-    rig.finish_mode = "hangs"
-    done = run(rig, docker_stop_seconds=0.5)
-    assert done.outcome == OUTCOME_NOT_SAVED and done.image is None
-    assert done.detail.startswith("vm_memory: ")
-    assert "Docker did not stop" not in done.detail
-    assert rig.engine.committed == []
-
-
-# -- the result ------------------------------------------------------------------------------------
-
-
-# #818-T13
-def test_a_script_that_ended_well_becomes_the_image_after_the_docker_is_stopped(rig: Rig) -> None:
+    """The daemon refuses to connect a container whose network mode names a removed network (KVM
+    lane, #1009), so whoever connects the model network removes the setup network afterwards."""
     done = run(rig)
     assert done.outcome == OUTCOME_OK
-    assert done.image is not None and done.image.startswith("sha256:")
-    assert done.image_bytes == 123_456_789
-    # The order: the end script (it removes the file and stops the container's Docker), the stop of
-    # the container, the commit, the removal.
-    paths = [(m, t.split("?")[0]) for m, t, _ in rig.engine.calls]
-    names = [
-        f"{m} {p.split('/')[1]}{'/' + p.split('/')[-1] if len(p.split('/')) > 2 else ''}"
-        for m, p in paths
-    ]
-    stop_at = max(i for i, n in enumerate(names) if n.endswith("/stop"))
-    commit_at = names.index("POST commit")
-    remove_at = max(i for i, n in enumerate(names) if n.startswith("DELETE containers"))
-    assert stop_at < commit_at < remove_at
-    assert any(e[0][:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT] for e in rig.execs)
-    assert any(t.split("?")[0].endswith("/stop") for m, t, _ in rig.engine.calls if m == "POST")
-    repository, tag = rig.engine.committed[0][1]["repo"], rig.engine.committed[0][1]["tag"]
-    assert (repository, tag) == (sc.SETUP_IMAGE_REPOSITORY, sc.SETUP_IMAGE_TAG)
-    assert rig.engine.committed[0][1]["pause"] == "false"
+    names = posted(rig.engine)
+    left = names.index("POST networks/disconnect")
+    assert left < names.index("POST containers/pause")
+    assert len(names) - 1 - names[::-1].index("DELETE networks") < left, "only the early clean-up"
+    assert len(rig.engine.networks) == 1, "the setup network is left for the agent's step"
+    assert done.adopted is not None and done.adopted.setup_network == sc.SETUP_NETWORK_NAME
+    setup = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert set(setup.networks) == set(), "it has no network at all until the agent takes it over"
+    # The one thing the agent's tools must not find: the script's file.
+    assert any(e[0][:3] == ["/bin/sh", "-c", sc.CLEAN_SCRIPT] for e in rig.execs)
+    assert 'rm -f "$1" "$2"' in sc.CLEAN_SCRIPT
 
 
-# #818-T14
-def test_the_script_file_is_removed_before_the_commit(rig: Rig) -> None:
-    run(rig)
-    finish = next(e for e in rig.execs if e[0][:3] == ["/bin/sh", "-c", sc.FINISH_SCRIPT])
-    assert finish[0][-1] == sc.SCRIPT_PATH and 'rm -f "$1"' in sc.FINISH_SCRIPT
+# #1009-T49: a daemon the script left may still hold its output file; removing the name alone would
+# leave the daemon writing into an unlinked file that no measure of the disk budget sees. The file
+# is emptied before it is removed, so what was written so far is freed.
+def test_the_clean_up_empties_the_output_file_a_daemon_still_holds(tmp_path: Path) -> None:
+    script = tmp_path / "script"
+    output = tmp_path / "output"
+    script.write_text("true\n")
+    output.write_bytes(b"x" * 100_000)
+    with output.open("ab") as held:
+        subprocess.run(
+            ["/bin/sh", "-c", sc.CLEAN_SCRIPT, "clean", str(script), str(output)], check=True
+        )
+        assert not output.exists() and not script.exists()
+        assert os.fstat(held.fileno()).st_size == 0
 
 
-# #818-T15
-def test_a_docker_that_does_not_stop_means_the_images_are_not_kept(rig: Rig) -> None:
-    rig.finish_mode = "hangs"
-    done = run(rig, docker_stop_seconds=0.5)
-    assert done.outcome == OUTCOME_NOT_SAVED and "Docker did not stop" in done.detail
-    assert rig.engine.committed == []
-
-
-# #818-T15b
-def test_a_docker_that_stops_ends_the_container_by_itself_and_then_the_commit_happens(
-    rig: Rig,
-) -> None:
-    rig.finish_mode = "stops"
+# #1009-T07
+def test_a_container_that_cannot_be_frozen_is_not_handed_over_and_is_removed(rig: Rig) -> None:
+    """A refused freeze is a failure, not a note: the script's root processes would go on writing
+    the repository (a link into the work volume) while Control reads it."""
+    rig.engine.pause_refused = 500
     done = run(rig)
-    assert done.outcome == OUTCOME_OK and done.image is not None
-    # The container ended by itself: no stop call was needed.
-    assert not any(t.split("?")[0].endswith("/stop") for m, t, _ in rig.engine.calls if m == "POST")
-
-
-# #818-T16
-def test_a_commit_the_disk_cannot_hold_is_told_as_such(rig: Rig) -> None:
-    rig.engine.commit_fails = True
-    done = run(rig)
-    assert done.outcome == OUTCOME_NOT_SAVED and "no space left" in done.detail
-    assert done.image is None
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.container is None
+    assert done.adopted is None
+    assert "could not be frozen" in done.detail
     assert all(c.removed for c in rig.engine.containers.values())
 
 
-def layer_of(size: int) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    return lambda answer: {**answer, "SizeRw": size}
+# #1009-T08
+def test_a_freeze_the_daemon_answers_with_a_conflict_is_not_handed_over_either(rig: Rig) -> None:
+    rig.engine.pause_refused = 409
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #818-DISK-01
-def test_a_disk_without_room_for_the_commit_is_its_own_outcome_and_nothing_is_committed(
+# #1009-T09
+def test_a_freeze_that_was_answered_but_that_the_daemon_does_not_report_is_not_trusted(
     rig: Rig,
 ) -> None:
-    """The script filled the disk of the VM (the container's layer is 3 GiB, 1 GiB is left): the
-    commit would fail minutes in with the daemon's own words. Control says so before it starts."""
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(3 * 1024**3)
-    done = run(rig, free_bytes=lambda: 1024**3)
-    assert done.outcome == sc.OUTCOME_NO_ROOM and done.image is None
-    assert "1024 MB left" in done.detail and "7168 MB" in done.detail
-    assert "3072 MB" in done.detail
-    assert rig.engine.committed == []
+    """After a 204 the daemon is asked: `State.Paused` is what says the container is frozen."""
+    rig.engine.pause_has_no_effect = True
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert "not report" in done.detail
     assert all(c.removed for c in rig.engine.containers.values())
-    assert rig.engine.networks == {}
 
 
-# #818-DISK-02
-def test_a_disk_with_room_for_twice_the_layer_and_a_headroom_is_committed(rig: Rig) -> None:
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(3 * 1024**3)
-    needed = 2 * 3 * 1024**3 + sc.COMMIT_HEADROOM_BYTES
-    done = run(rig, free_bytes=lambda: needed)
-    assert done.outcome == OUTCOME_OK and len(rig.engine.committed) == 1
-
-
-# #818-DISK-03
-def test_a_free_space_or_a_size_that_cannot_be_had_does_not_stop_the_commit_and_is_a_note(
+# #1009-T10
+def test_a_freeze_the_client_gave_up_on_is_looked_at_and_taken_when_the_daemon_did_it(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    unread = run(rig, free_bytes=lambda: None)
-    assert unread.outcome == OUTCOME_OK
-    assert any("free space" in note and "not checked" in note for note in unread.notes)
-    # No `SizeRw` in the answer: the headroom alone is what is needed, and the note says so.
-    unsized = run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES)
-    assert unsized.outcome == OUTCOME_OK
-    assert any("did not say how big" in note for note in unsized.notes)
-    assert run(rig, free_bytes=lambda: sc.COMMIT_HEADROOM_BYTES - 1).outcome == sc.OUTCOME_NO_ROOM
-
-    # The walk of the layer ran past its time (or the daemon refused): not a reason to refuse.
-    def walk_timed_out(self: DockerApi, ref: str, *, timeout: float) -> int | None:
-        raise DockerError(0, "timed out")
-
-    monkeypatch.setattr(DockerApi, "container_rw_bytes", walk_timed_out)
-    walked = run(rig, free_bytes=lambda: 1)
-    assert walked.outcome == OUTCOME_OK
-    assert any("could not be had" in note and "not checked" in note for note in walked.notes)
+    """A client timeout is no answer: the daemon is asked what it did, never guessed about."""
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 0.5)
+    rig.engine.pause_answers_after = 2.0
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK and done.adopted is not None
+    assert done.adopted.paused is True
+    assert rig.engine.container(AGENT_CONTAINER_NAME).paused
 
 
-# #818-DISK-03b
-def test_a_commit_with_room_made_a_check_and_has_no_note_about_it(rig: Rig) -> None:
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = layer_of(1024**2)
-    done = run(rig, free_bytes=lambda: 10 * 1024**3)
-    assert done.outcome == OUTCOME_OK and done.notes == ()
+# #1009-T11
+def test_a_freeze_the_client_gave_up_on_and_the_daemon_did_not_do_is_not_handed_over(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 0.5)
+    rig.engine.pause_answers_after = 2.0
+    rig.engine.pause_has_no_effect = True
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert all(c.removed for c in rig.engine.containers.values())
 
 
-# #818-DISK-04
-def test_the_commit_budget_holds_four_gigabytes_on_a_disk_four_times_slower_than_measured() -> None:
-    slowest = sc.COMMIT_MEASURED_BYTES_PER_SECOND / sc.COMMIT_SLOWDOWN
-    assert sc.COMMIT_REFERENCE_BYTES / slowest <= sc.COMMIT_SECONDS
-    assert SetupSeams().commit_seconds == sc.COMMIT_SECONDS
+# #1009-T12
+def test_the_memory_guard_keeps_watching_until_the_freeze_is_confirmed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The container is still running while the freeze is asked for: a VM that runs out of memory
+    meanwhile still loses the container (it is no longer in the agent's or Control's hands)."""
+    monkeypatch.setattr(sc, "HANDOVER_SECONDS", 5.0)
+    rig.engine.pause_answers_after = 1.5
+
+    def low_once_the_freeze_is_asked_for() -> None:
+        for _ in range(200):
+            if any(target.endswith("/pause") for _, target, _ in list(rig.engine.calls)):
+                break
+            threading.Event().wait(0.02)
+        rig.set_left(300_000)
+
+    threading.Thread(target=low_once_the_freeze_is_asked_for, daemon=True).start()
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.adopted is None
+    assert any(n.endswith("/kill") for n in posted(rig.engine))
 
 
-# #818-OVERHEAD-01
-def test_the_overhead_counts_the_kill_and_the_join_of_the_container_and_the_room_check() -> None:
+# #1009-T13
+def test_a_container_the_script_left_frozen_is_not_one_the_turn_can_exec_into(rig: Rig) -> None:
+    """The fake daemon refuses an exec in a frozen container as the real one does, so a step that
+    ran a command after the freeze would fail here and not only on a VM."""
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK
+    api = rig.api()
+    with pytest.raises(DockerError) as refused:
+        api.create_exec(done.container or "", {"Cmd": ["/bin/true"]})
+    assert refused.value.status == 409
+
+
+# #1009-T06
+def test_a_container_that_cannot_leave_the_setup_network_is_not_handed_over_and_is_removed(
+    rig: Rig,
+) -> None:
+    """The one step that must hold: a container still on the setup network would keep the internet
+    into the agent's turn."""
+    rig.engine.refuse["/disconnect"] = 500
+    done = run(rig)
+    assert done.outcome == OUTCOME_NOT_HANDED_OVER and done.container is None
+    assert done.adopted is None
+    assert "could not be handed to the agent" in done.detail
+    assert all(c.removed for c in rig.engine.containers.values())
+
+
+# #1009-T15
+def test_the_setup_container_can_be_made_with_no_new_privileges_like_the_agents_container() -> None:
+    """The Claude Code agent's container is sealed (`no-new-privileges`); the setup container is the
+    agent's container, so it takes the same flag. `subscription_setup_script` refuses that harness
+    with a script today; the day it does not, the setup's definition already has the one change it
+    needs, and the agent's seal check refuses an adopted container that lacks it."""
+    plain = setup_document("sha256:aa", "volume-1", 1_000_000)["HostConfig"]
+    sealed = setup_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)
+    sealed = sealed["HostConfig"]
+    assert "SecurityOpt" not in plain
+    assert sealed["SecurityOpt"] == ["no-new-privileges"] and sealed["Privileged"] is False
+    agent = agent_document("sha256:aa", "volume-1", 1_000_000, no_new_privileges=True)["HostConfig"]
+    assert sealed["SecurityOpt"] == agent["SecurityOpt"]
+
+
+# #1009-T16
+def test_the_seams_make_the_setup_container_without_new_privileges(rig: Rig) -> None:
+    done = run(rig, no_new_privileges=True)
+    assert done.outcome == OUTCOME_OK
+    host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+    assert host["SecurityOpt"] == ["no-new-privileges"]
+    assert done.adopted is not None and done.adopted.dns == sc.SETUP_DNS
+
+
+# #1009-T14
+def test_the_proxy_variables_of_a_customers_machine_are_the_setups_and_the_agent_is_told(
+    rig: Rig,
+) -> None:
+    from code_reviewer_runner.outer_proxy import OuterProxy
+
+    proxy = OuterProxy("10.99.0.1", 3128)
+    done = run(rig, outer_proxy=proxy, install_rules=False)
+    assert done.adopted is not None
+    assert done.adopted.setup_environment == tuple(proxy.tool_environment())
+
+
+# #745-T11 (#827), #1009: the guard of the script's phase stops with the hand-over; the container is
+# alive afterwards and a VM that runs low no longer kills it under the setup's step
+def test_the_guard_is_closed_at_the_hand_over(rig: Rig) -> None:
+    done = run(rig)
+    assert done.outcome == OUTCOME_OK
+    rig.set_left(300_000)  # below the floor, after the hand-over
+    threading.Event().wait(0.6)  # more than five looks of the guard
+    assert rig.engine.container(AGENT_CONTAINER_NAME).running, "the guard did not kill it"
+
+
+# #1009-T17
+def test_the_overhead_counts_the_rules_the_ready_wait_the_kill_steps_and_the_hand_over() -> None:
     parts = (
-        sc.RULES_SECONDS * 4
-        + sc.READY_SECONDS
-        + sc.SCRIPT_WRITE_SECONDS
-        + sc.FINISH_EXEC_SECONDS
-        + sc.DOCKER_STOP_SECONDS
-        + sc.STOP_WAIT_SECONDS
-        + sc.ROOM_SECONDS
-        + sc.COMMIT_SECONDS
-        + sc.REMOVE_SECONDS
+        sc.RULES_SECONDS * 4 + sc.READY_SECONDS + sc.SCRIPT_WRITE_SECONDS + sc.HANDOVER_SECONDS * 4
     )
     # A script that has to be killed: the kill, the wait for its exec, and the kill of the clean-up.
     assert sc.KILL_STEPS_SECONDS == 3 * sc.KILL_SECONDS
     assert parts + 3 * sc.KILL_SECONDS == sc.SETUP_OVERHEAD_SECONDS
 
 
-# #818-T17
-def test_a_container_that_never_stops_is_not_committed(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
+# -- the script run for real: the shell around it (#1009) ------------------------------------------
+
+
+class Shell:
+    """`RUN_SCRIPT` run by the host's `/bin/sh` as the exec runs it in the container: its standard
+    output is a pipe, read to its end, as the daemon's attach is."""
+
+    def __init__(self, directory: Path, text: str) -> None:
+        self.script = directory / "setup.sh"
+        self.script.write_text(text)
+        self.output_file = directory / "setup.out"
+        self.pid_file = directory / "daemon.pid"
+        self.ended = False
+        self.status: int | None = None
+        self.seen = bytearray()
+        self.process = subprocess.Popen(
+            ["/bin/sh", "-c", sc.RUN_SCRIPT, "run", str(self.script), str(self.output_file)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        def read() -> None:
+            assert self.process.stdout is not None
+            while chunk := self.process.stdout.read(65536):
+                self.seen += chunk
+            self.ended = True
+
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
+
+    def finish(self, seconds: float = 20.0) -> None:
+        self.status = self.process.wait(timeout=seconds)
+        self.reader.join(5.0)
+
+    def daemon(self) -> int | None:
+        text = self.pid_file.read_text().strip() if self.pid_file.exists() else ""
+        return int(text) if text.isdigit() else None
+
+
+@pytest.fixture
+def shell(tmp_path: Path) -> Iterator[Callable[[str], Shell]]:
+    made: list[Shell] = []
+
+    def start(text: str) -> Shell:
+        made.append(Shell(tmp_path, text))
+        return made[-1]
+
+    yield start
+    for each in made:
+        pid = each.daemon()
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        each.process.kill()
+
+
+# #1009-T40
+def test_a_daemon_that_inherits_the_scripts_output_does_not_keep_the_exec_stream_open(
+    shell: Callable[[str], Shell], tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(sc, "STOP_WAIT_SECONDS", 0.3)
-    rig.engine.stop_hangs = True
-    done = run(rig)
-    assert done.outcome == OUTCOME_NOT_SAVED and "did not stop" in done.detail
-    assert rig.engine.committed == []
+    """`nohup postgres &`, `pg_ctl start`, `./server &`: the daemon holds whatever standard output
+    the script had. With the daemon holding the exec's pipe the stream never ended, the step waited
+    for its time limit though the script had exited 0, and the daemon got SIGPIPE later."""
+    pid_file = tmp_path / "daemon.pid"
+    run_it = shell(
+        f"nohup /bin/sh -c 'echo $$ > {pid_file}; exec sleep 120' &\n"
+        f"for i in $(seq 1 50); do [ -s {pid_file} ] && break; sleep 0.1; done\n"
+        "echo started\n"
+    )
+    run_it.finish()
+    assert run_it.status == 0
+    assert run_it.ended, "the stream ended with the script, not with the daemon"
+    assert bytes(run_it.seen) == b"started\n"
+    pid = run_it.daemon()
+    assert pid is not None
+    os.kill(pid, 0)  # still there for the agent
+    # Its standard output is the script's output file, not the pipe of the exec: nothing for it to
+    # keep open and no SIGPIPE when the pipe goes.
+    target = os.readlink(f"/proc/{pid}/fd/1")
+    assert not target.startswith("pipe:") and target == str(run_it.output_file), target
+    assert os.readlink(f"/proc/{pid}/fd/2") == str(run_it.output_file)
+
+
+# #1009-T41
+def test_the_exit_status_is_the_scripts_and_both_its_streams_are_in_the_output_in_order(
+    shell: Callable[[str], Shell],
+) -> None:
+    run_it = shell("#!/bin/sh\necho first\necho second >&2\necho third\nexit 7\n")
+    run_it.finish()
+    assert run_it.status == 7
+    assert bytes(run_it.seen) == b"first\nsecond\nthird\n"
+
+
+# #1009-T42
+def test_a_script_without_a_shebang_runs_under_bash_dash_e(shell: Callable[[str], Shell]) -> None:
+    run_it = shell("false\necho not-reached\n")
+    run_it.finish()
+    assert run_it.status == 1
+    assert bytes(run_it.seen) == b""
+
+
+# #1009-T43
+def test_a_long_output_arrives_whole_and_in_order(shell: Callable[[str], Shell]) -> None:
+    run_it = shell(
+        "i=0; while [ $i -lt 20000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; "
+        "i=$((i+1)); done\n"
+    )
+    run_it.finish(60.0)
+    lines = bytes(run_it.seen).decode().splitlines()
+    assert run_it.status == 0
+    assert (
+        len(lines) == 20000
+        and lines[0].startswith("line-0-")
+        and lines[-1].startswith("line-19999-")
+    )
+
+
+# #1009-T44
+def test_the_script_has_no_input(shell: Callable[[str], Shell]) -> None:
+    run_it = shell("read -r line || echo no-input\n")
+    run_it.finish()
+    assert bytes(run_it.seen) == b"no-input\n"
 
 
 # -- what is checked before the script -------------------------------------------------------------
@@ -669,6 +819,9 @@ CHANGES: list[tuple[Callable[[dict[str, Any]], dict[str, Any]], str]] = [
     (_host(Privileged=True), "privileged"),
     (_host(Runtime="runc"), "runtime"),
     (_host(Binds=["/:/host"]), "host access"),
+    (_host(Dns=["10.0.0.2"]), "resolvers"),
+    (_host(NetworkMode="bridge"), "network mode"),
+    (_host(SecurityOpt=["no-new-privileges"]), "no-new-privileges"),
     (_networks, "networks"),
     (_mounts, "mounts"),
     (_environment, "environment"),
@@ -680,7 +833,7 @@ CHANGES: list[tuple[Callable[[dict[str, Any]], dict[str, Any]], str]] = [
 def test_a_container_that_is_not_what_was_asked_for_never_gets_the_script(
     rig: Rig, change: Any, word: str
 ) -> None:
-    rig.engine.inspect_override[sc.SETUP_CONTAINER_NAME] = change
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = change
     done = run(rig)
     assert done.outcome == OUTCOME_UNAVAILABLE and word in done.detail
     assert rig.script_text == ""
@@ -706,7 +859,7 @@ def test_the_runtime_and_entrypoint_of_a_lane_without_sysbox_are_the_agents_to_n
     rig.engine.runtimes["runc"] = {}
     done = run(rig, runtime="runc", entrypoint=("/bin/sleep", "infinity"))
     assert done.outcome == OUTCOME_OK
-    setup = next(c for c in rig.engine.containers.values() if c.name == sc.SETUP_CONTAINER_NAME)
+    setup = next(c for c in rig.engine.containers.values() if c.name == AGENT_CONTAINER_NAME)
     assert setup.document["HostConfig"]["Runtime"] == "runc"
     assert setup.document["Entrypoint"] == ["/bin/sleep", "infinity"]
 

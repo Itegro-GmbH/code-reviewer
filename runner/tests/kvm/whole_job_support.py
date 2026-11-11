@@ -81,6 +81,33 @@ cp /opt/setup-fetched.txt setup-fetched.txt
 echo "the lane's setup is done"
 """
 
+# The freeze proof (#1009): the setup starts a process in an INNER container of its own Docker (the
+# image is imported from the agent image's own `sh`, `date` and `sleep`, no pull) that appends the
+# time to a file under the repository every few milliseconds, and changes a tracked file. Control
+# freezes the container (`docker pause`) while it reads the repository and puts the tracked file
+# back and the new file on the exclude list (its two writes into the repository, which the agent
+# reads the times of); the agent copies the file and the times into its commit. The inner container
+# is on no network (`--network none`): nothing it needs is outside.
+TICKS: Final = "ticks.log"
+TICK_COPY: Final = "freeze-ticks.txt"
+CONTROL_WRITES: Final = "freeze-control.txt"
+INNER_CONTAINERS: Final = "freeze-inner.txt"
+TICKER: Final = "ticker"
+FREEZE_SETUP_SCRIPT: Final = f"""\
+echo '# changed by the setup' >> README.md
+rootfs=/tmp/ticker-rootfs
+mkdir -p "$rootfs"
+for tool in "$(command -v sh)" "$(command -v date)" "$(command -v sleep)"; do
+  cp --parents -L "$tool" "$rootfs"
+  for lib in $(ldd "$tool" | grep -o '/[^ ]*'); do cp --parents -L "$lib" "$rootfs"; done
+done
+tar -C "$rootfs" -c . | docker import - ticker:setup
+docker run -d --name {TICKER} --network none -v /work/repo:/w ticker:setup "$(command -v sh)" -c \
+  'while :; do '"$(command -v date)"' +%s%N >> /w/{TICKS}; '"$(command -v sleep)"' 0.01; done'
+for i in $(seq 1 100); do [ -s {TICKS} ] && break; sleep 0.1; done
+echo "the ticker runs: $(wc -l < {TICKS}) ticks"
+"""
+
 BOOK: Final[dict[str, Any]] = {
     "input": "3000000",
     "output": "15000000",
@@ -165,6 +192,26 @@ def agent_script() -> list[Turn]:
     ]
 
 
+def freeze_script() -> list[Turn]:
+    """What the model does in the freeze job: wait a second (the ticker runs again after the
+    unfreeze), copy the ticker's file and the times of Control's two writes into the repository,
+    and the inner containers the Docker lists, commit, say so."""
+    command = (
+        "sleep 1 && "
+        f"cp {TICKS} {TICK_COPY} && "
+        'python3 -c "import os; '
+        "[print(p, os.stat(p).st_mtime_ns) for p in ('README.md', '.git/info/exclude')]\" "
+        f"> {CONTROL_WRITES} && "
+        f"docker ps --format '{{{{.Names}}}} {{{{.Status}}}}' > {INNER_CONTAINERS} && "
+        f"git add -f {TICK_COPY} {CONTROL_WRITES} {INNER_CONTAINERS} && "
+        "git commit -qm 'Add the freeze evidence'"
+    )
+    return [
+        Turn(tool="bash", args={"command": command, "description": "collect the evidence"}),
+        Turn(text=CLOSING),
+    ]
+
+
 class RecordingProxyWall(ProxyOuterWall):
     """The real proxy wall that notes what the Worker's `narrow` said and when the wall held it."""
 
@@ -195,9 +242,12 @@ class LaneFakes:
 
 
 @contextlib.contextmanager
-def lane_fakes(directory: Path, ca: Ca, *, with_git: bool = True) -> Generator[LaneFakes]:
+def lane_fakes(
+    directory: Path, ca: Ca, *, with_git: bool = True, script: list[Turn] | None = None
+) -> Generator[LaneFakes]:
     """Start the fakes. With `with_git` false the lane's git host has no name (the resolver refuses
-    it): the proxy cannot clone for the job, which is how the lane makes it refuse."""
+    it): the proxy cannot clone for the job, which is how the lane makes it refuse. `script` is
+    what the model does (`agent_script()` unless a test says another)."""
     with ExitStack() as stack:
         origin = Origin(directory / "git")
         git_host = stack.enter_context(
@@ -212,7 +262,7 @@ def lane_fakes(directory: Path, ca: Ca, *, with_git: bool = True) -> Generator[L
         model = stack.enter_context(
             ScriptedUpstream(
                 "chat",
-                agent_script(),
+                script if script is not None else agent_script(),
                 MODEL,
                 real_key=MODEL_KEY,
                 tls=server_context(ca, [MODEL_HOST], directory / "model-cert"),

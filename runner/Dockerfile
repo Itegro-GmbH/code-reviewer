@@ -113,8 +113,9 @@ FROM ${DOCKER_IMAGE} AS docker-bins
 # runc, containerd's shim) and the tools of an engineer: git 2.53, Node.js and pnpm, uv, Python (the base image), a
 # compiler, make, jq, unzip, nc and ping. Root, no secret, no credential, no key; it is started by the Control
 # container through the Engine API under the Sysbox runtime (runner/src/code_reviewer_runner/implementer/agent_container.py).
-# It is also the base of the Setup container of step 5 (root, `docker commit`). It carries none of the runner:
-# no venv, no PR-Agent, no license of the product beyond the ones the toolchain brings. It is not the default target
+# It is also the container the environment's setup script runs in (step 5, #1009): the agent then runs in that
+# same container. It carries none of the runner: no venv, no PR-Agent, no license of the product beyond the ones
+# the toolchain brings. It is not the default target
 # (`sandbox`, the last stage, is): `docker build --target agent`.
 FROM ${PYTHON_IMAGE} AS agent
 LABEL org.opencontainers.image.source="https://github.com/Itegro-GmbH/code-reviewer" \
