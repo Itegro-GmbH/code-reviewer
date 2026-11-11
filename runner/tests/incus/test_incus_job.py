@@ -6,7 +6,7 @@ probe with a control that reached without the wall), `narrow` as the unplug of B
 write past the quota, and the clean-up after a crash. The Worker image and Docker are stand-ins
 (`fake_docker.py`, the host's `nft`): the real image is the golden image's smoke test, not this.
 
-Run it with `-m incus --force-enable-socket` and the variables of `lane_support.py`."""
+Run it with `-m incus --force-enable-socket` and the variables of `incus_lane.py`."""
 
 import asyncio
 import json
@@ -15,7 +15,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
-from lane_support import StandInClient, probe, reaches
+from incus_lane import StandInClient, probe, reaches
 
 from code_reviewer_runner.factory_runner.incus.launcher import (
     EXIT_DISK_QUOTA,

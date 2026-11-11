@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """Fixtures of the Incus lane (#1007): a real Incus, the launcher's own objects made for the lane
-and removed after it. The lane runs only with `-m incus` and the variables of `lane_support.py`."""
+and removed after it. The lane runs only with `-m incus` and the variables of `incus_lane.py`."""
 
 import asyncio
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lane_support import (
+from incus_lane import (
     IMAGE_ID,
     Machine,
     StandInClient,
