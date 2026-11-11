@@ -88,6 +88,9 @@ describe("the build workflow", () => {
     expect(script).toContain("-m pytest -m kvm tests/kvm");
     expect(script).not.toMatch(/sudo [^\n]*pytest/);
     expect(script).toContain("tuntap add dev fctap0");
+    // The two-slot case needs the second slot's TAP, with its /30 (slot 1 owns 172.31.0.4/30).
+    expect(script).toContain("tuntap add dev fctap1");
+    expect(script).toContain("172.31.0.5/30");
     for (const variable of [
       "KVM_VM_KERNEL",
       "KVM_VM_ROOTFS",

@@ -1919,7 +1919,13 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
 ```
 
 1. **Slot.** The number of slots is `parallelRuns` (`FACTORY_RUNNER_PARALLEL_RUNS` or `limits.parallelRuns`; 1 to 64). The dispatcher claims
-   only with a free slot and runs jobs beside each other (`run --once` is still one job). A TAP device per slot was made at install (root);
+   only while the sandbox has a free slot (`sandbox.free`: a slot whose VMM would not die is out of use until the service restarts, and
+   with none free the dispatcher claims nothing and logs it) and runs jobs beside each other (`run --once` is still one job).
+   **A start that fails** (the disk is full, `/dev/kvm` or a TAP is gone, a cgroup fails: a fault of this machine, not of the job) gives
+   the claim back (`launch_failed`) and the **next claim waits** 10 s, doubled with every start that fails in a row up to 300 s, and
+   starts over after one that works. The app counts an attempt for every claim that is given back and has no release that does not
+   (three attempts, then the job fails): without the pause, a machine that cannot start any VM would spend an attempt of every job of the
+   queue within a minute. A TAP device per slot was made at install (root);
    slot *N* is `fctapN` with the /30 network `172.31.<N*4 div 256>.<N*4 mod 256>`: the host's side is its first address, the guest's the
    second (given to the guest on the kernel command line, `vm.ip` and `vm.gw`).
 2. **Job disk.** The base disk (`dockerdata.ext4`, the Worker and agent images in the guest's own Docker) is copied to `disk.ext4`: a
@@ -1934,10 +1940,14 @@ claim ─▶ slot (TAP fctapN) ─▶ job disk ─▶ token ─▶ listen on _51
    `memory.max` = the guest's memory + 384 MiB (the VMM and what the disk files cost in the page cache), `memory.swap.max` 0,
    `memory.oom.group` 1, `pids.max` 256. The service moves only itself into a leaf (`service`) and enables `cpu memory pids` below its own
    cgroup (the "no internal process" rule). Firecracker (**no jailer**, `--no-api --config-file`) starts **inside** the cgroup (the child
-   writes itself into `cgroup.procs` before `exec`), as the service's user, with an **empty environment**, in the VM's directory, with
-   stderr to `firecracker.log`. VM size: `FACTORY_RUNNER_VM_VCPUS` (2, 4, 6 or 8; 2 GB per vCPU as hosted; the agent's memory is the
+   writes itself into `cgroup.procs` before `exec`), as the service's user, with an **empty environment**, in the VM's directory. Its
+   stdout and stderr go through a pipe the service reads into `firecracker.log`, **never more than 4 MiB** of it (past that the file is
+   cut and its last 16 KiB written again; a VMM that loops on an error or a serial console cannot fill the disk), and the outcome carries
+   the last 6,000 bytes, read by seeking to them. VM size: `FACTORY_RUNNER_VM_VCPUS` (2, 4, 6 or 8; 2 GB per vCPU as hosted; the agent's memory is the
    hosted table's, `agentMemoryMb` of the template).
-5. **Start.** The start of `contracts/vm-init.v1.json`: `{appUrl, jobId, credential}`, the token, the image check (`code-reviewer-worker:golden`
+5. **Start.** The start document is made and **checked before anything exists** (vm-init's own parser, `parse_start`: the job id and the
+   URL against the contract's patterns, no credential in an argument): a job the VM would refuse costs no slot, no disk copy and no VMM.
+   The start of `contracts/vm-init.v1.json`: `{appUrl, jobId, credential}`, the token, the image check (`code-reviewer-worker:golden`
    and the id from the verified manifest, `FACTORY_RUNNER_VM_IMAGE_ID`), Control's `docker run` and the work volume, and for a job that
    asks for it the one local credential (`localCredential`: **only `CLAUDE_CODE_OAUTH_TOKEN`**). The host waits for vm-init's `ack`
    (up to 120 s: the daemon's start comes before it). A refused or unanswered start, a VMM that ends first or a report before the `ack`
@@ -1953,7 +1963,11 @@ and compares to `docker-run.local-control.golden.json`, the file vm-init's tests
 ### The host side of the vsock protocol
 
 Every connection is one request and one reply (a frame: four bytes of length, one JSON object, at most 64 KiB; any byte after the frame,
-a field the contract does not have, a version other than 1 is a protocol error and the connection is closed).
+a field the contract does not have, a version other than 1 is a protocol error and the connection is closed, a frame not whole in 10 s
+is closed). **Each listener serves at most 4 connections at a time** and closes every other one the moment it is accepted, so whatever
+opens connections in a loop holds a few file descriptors of the service, not all of them, and never those of another VM's listeners.
+The service's unit still needs a `LimitNOFILE` that covers its slots (the installer sets it, #982: 2 listeners × 4 connections × slots,
+the VMs' files and the app's connections, with room).
 
 | Port | Message | The host |
 |---|---|---|
@@ -1979,15 +1993,23 @@ clock is the host's, from the start of the VMM: **the job's timeout + Control's 
 for the default 3,600 s. A VM that reported is given 5 s to power itself off (the guest's `reboot=k` ends Firecracker), then it is killed.
 Whatever ends it, before the worker returns: the VMM and its cgroup are killed (`cgroup.kill`), the listeners closed, the outer wall told
 (`forget`), the **job disk and the VM's directory deleted** and the slot free. A VMM that will not die keeps its slot out of use (its TAP
-may be busy) and the log says so; the next start of the service removes it.
+may be busy) **and its cgroup stays** (it is not removed with a process in it) and the log says so; the next start of the service removes
+both. The cgroup is removed off the event loop: it may take seconds for a killed process to leave it, and the other VMs' listeners are
+served by the same loop.
 
 The dispatcher's **stop** (a signal) kills the VM at once: the Worker inside cannot be asked to give its job back from outside, so the
 dispatcher gives the claim back itself (`worker_exited`). The **local reaper** (`GET /jobs/{id}` every 60 s, 45 s of grace) stops the VM
 of a job the app ended, as it did the process: it is the same code, per worker, so every slot is watched.
 
+**One dispatcher per machine.** `setup` first takes an exclusive `flock` on `<state dir>/dispatcher.lock` (the kernel drops it when the
+process ends, whatever way), before it touches the cgroup tree or removes anything: two dispatchers on one state directory would reap
+each other's running VMs and share the slots and the TAPs. A second one, `run --once` included, ends with exit code 9 and says so. (The
+Docker mode keeps its own guard, the lock container.)
+
 **At every start of the service**, before the first claim (`setup`): the cgroup tree is made usable and **what an earlier service left is
-removed**: each `vms/vm-*` directory (their processes are found by their command line, `--config-file <directory>/...`, never by a
-remembered pid, killed with their cgroups, the directory and its disk deleted) and every cgroup named like a VM's.
+removed**: each `vms/vm-*` directory (its process is the one whose command line is the **configured Firecracker binary** with
+`--config-file <directory>/firecracker.json`, never a remembered pid and never a process that merely names a file of the directory, such
+as a `tail -f` on its log; killed with its cgroup, the directory and its disk deleted) and every cgroup named like a VM's.
 
 ### Files under `/var/lib/code-reviewer/`
 
@@ -2008,7 +2030,7 @@ delegated cgroup that is not the service's own (tests).
 **Hardening without the jailer** (the open point of the spike): what is done is Firecracker's own seccomp filter and no capability
 (measured in #970), a directory per VM made 0700, an empty environment, one cgroup per VM that kills the whole tree, and no Docker or
 other service on the host. What is **not** done and is an open decision: systemd's sandboxing for the unit (`ProtectSystem=strict`,
-`PrivateTmp`, `NoNewPrivileges`, `CapabilityBoundingSet=`, `ReadWritePaths=/var/lib/code-reviewer`) belongs to the installer's unit (#982),
+`PrivateTmp`, `NoNewPrivileges`, `CapabilityBoundingSet=`, `ReadWritePaths=/var/lib/code-reviewer`, `LimitNOFILE=`) belongs to the installer's unit (#982),
 which holds every VM; **one unit per VM** (so that an escaped VMM does not see the other jobs' files) is not tried and costs a root-owned
 helper that starts transient units, which the "nothing needs root at runtime" decision rules out; a user per slot would need root at
 install and a TAP owner per user. Until decided, a VMM escape lands in the service user, which also owns the other VMs' disks: run the
@@ -2021,7 +2043,10 @@ it over the real Unix sockets, framing, session and token checks), slots, disks,
 template against the golden file, the settings, the service with a sandbox that has slots. The **KVM lane** (`runner/tests/kvm`,
 the `Launcher lane` step of `.github/workflows/vm-artifacts.yml`, only for a change to its paths): T05 a real job (the Worker image
 fetches a job from the fake App through the TAP, delivers its result) with the VM's cgroup limits read while it runs, nothing left
-after it, and the wall clock killing a real VM. The smoke boot of the same workflow proves that a container of the agent **cannot open a
+after it, the wall clock killing a real VM, **the Worker's own `narrow` arriving over the vsock with the VM's token and getting the
+operator's answer** (`refuse`: the job ends `environment_control_failed`; `inner-only`: it goes on), **two jobs at once in two slots**,
+and **a VM left by a dispatcher that "crashed" found and removed by the next one** (the real VMM killed by its command line, its
+directory and cgroup gone). The smoke boot of the same workflow proves that a container of the agent **cannot open a
 vsock socket**: `vsock_denied_agent` (Docker's default profile, under Sysbox), its control `vsock_allowed_control` (Control's profile
 allows it: the probe can see a socket), and `ia32_unavailable` (a 32-bit `int 0x80` / `socketcall`, which would bypass the profile's
 argument filter, does not work on the guest kernel; on a kernel with IA32 emulation the same probe sees `EINVAL`).
@@ -2032,5 +2057,8 @@ argument filter, does not work on the guest kernel; on a kernel with IA32 emulat
   (the installer writes `parallelRuns`); the no-Docker `selftest` (a VM boot as the self-test).
 - A stop that asks the Worker in the VM to give its job back (`runner_shutdown`) before the VM is killed needs a channel to Control that
   vm-init does not have (a `stop` message over the start connection).
+- A lane check that a **token-less `narrow` from a container** is refused by a real host: the guest can run only Control's allow-listed
+  `docker run` (vm-init refuses other arguments), so a probe container needs a lane-only start with another command; the refusal is
+  proved today by the unit tests against the fake VM, and the lane proves the other half (a `narrow` with the token reaches the wall).
 - The first measurement of "Control could start" with vm-init in the path and of the interpreter's start in a real guest (the lane prints
   the time to vm-init's `ack`).

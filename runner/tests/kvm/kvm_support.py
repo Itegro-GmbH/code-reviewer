@@ -11,10 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from code_reviewer_runner.factory_runner.firecracker.cgroups import delegated_root
 from code_reviewer_runner.factory_runner.firecracker.settings import FirecrackerSettings
 from code_reviewer_runner.factory_runner.firecracker.slots import Slot
 
-HOST_ADDRESS = Slot(0).host_address
+# The lane's machine has this many TAP devices (the workflow makes them); the two-slot case uses
+# both.
+TAPS = 2
 
 
 @dataclass(frozen=True)
@@ -41,8 +44,9 @@ def load_machine() -> Machine:
             pytest.fail(f"{path} is not a file", pytrace=False)
     if not Path("/dev/kvm").exists():
         pytest.fail("this runner has no /dev/kvm", pytrace=False)
-    if not (Path("/sys/class/net") / Slot(0).tap).exists():
-        pytest.fail(f"no TAP device {Slot(0).tap} (the workflow makes it)", pytrace=False)
+    for index in range(TAPS):
+        if not (Path("/sys/class/net") / Slot(index).tap).exists():
+            pytest.fail(f"no TAP device {Slot(index).tap} (the workflow makes it)", pytrace=False)
     state.mkdir(parents=True, exist_ok=True)
     settings = FirecrackerSettings(
         kernel=kernel,
@@ -52,6 +56,9 @@ def load_machine() -> Machine:
         state_dir=state,
         firecracker=Path(os.environ.get("KVM_FIRECRACKER", "/usr/local/bin/firecracker")),
         slots=1,
+        # Read once, before any launcher moved this process into its leaf: every sandbox of the lane
+        # works in the same delegated cgroup.
+        cgroup_root=delegated_root(),
         vcpus=2,
         disk_gib=16,
         job_timeout_seconds=300,

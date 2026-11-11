@@ -201,12 +201,16 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       - name: Install the runner's dependencies (the launcher lane is Python)
         run: uv --directory runner sync --frozen
-      - name: Launcher lane (T05, a real job in a VM; the wall clock for real)
+      - name: Launcher lane (T05, a real job in a VM; the wall clock; narrow over vsock; two slots; a crashed dispatcher's VM)
         run: |
           set -euo pipefail
           sudo ip tuntap add dev fctap0 mode tap user "$USER" group "$(id -gn)"
           sudo ip addr add 172.31.0.1/30 dev fctap0
           sudo ip link set fctap0 up
+          # The second slot of the two-slot case (slot N owns 172.31.0.<4N>/30, the host side is its first address).
+          sudo ip tuntap add dev fctap1 mode tap user "$USER" group "$(id -gn)"
+          sudo ip addr add 172.31.0.5/30 dev fctap1
+          sudo ip link set fctap1 up
           mkdir -p "$VM_WORK/launcher-state"
           # The unit's one process is the interpreter itself (a wrapper such as `uv run` would stay behind in the delegated cgroup, and a cgroup
           # with processes in it cannot enable controllers for its children: the launcher moves only itself into its leaf).
