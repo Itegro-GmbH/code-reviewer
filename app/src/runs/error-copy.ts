@@ -198,7 +198,7 @@ export const errorCopy = (
     "The machine that runs this task did not confirm the network rule of its environment, so the task was stopped before the AI model was called and nothing was charged. Start the task again; if it keeps failing, check that the machine's runner is up to date and running.",
   // #980: the subscription of a runner's own machine. The sentences say what the machine's owner does; nothing of ours was used.
   subscription_auth:
-    "The Claude login on the machine that runs this task was refused (it has expired or was revoked), so the task stopped and nothing was charged. The owner of that machine makes a new token with claude setup-token and replaces the old one there; until then the machine takes no task for Claude Code.",
+    "The Claude login on the machine that runs this task was refused (it has expired or was revoked), so the task stopped and nothing was charged. The owner of that machine makes a new token with claude setup-token and replaces the old one there; the machine takes tasks for Claude Code again after a few hours or when the token is replaced.",
   subscription_limit:
     "The usage limit of the Claude subscription on the machine that runs this task is reached, so the task stopped and nothing was charged. The machine takes tasks for Claude Code again when the limit has reset; start the task again later.",
   subscription_model_refused:

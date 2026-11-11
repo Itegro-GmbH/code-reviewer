@@ -1839,12 +1839,14 @@ def verdict_launcher(exit_code: int) -> AutoLauncher:
     return AutoLauncher(outcome(exit_code=exit_code, stdout=b""))
 
 
-def credential_rig(tmp_path: Path, exit_code: int = 0, **tokens: str) -> Rig:
+def credential_rig(
+    tmp_path: Path, exit_code: int = 0, *, extra: dict[str, str] | None = None, **tokens: str
+) -> Rig:
     rig = Rig(
         tmp_path,
         launcher=verdict_launcher(exit_code),
         claude="2.1.311",
-        environment=PLAIN_STORAGE,
+        environment={**PLAIN_STORAGE, **(extra or {})},
     )
     store = credentials_of(rig)
     for name, token in tokens.items():
@@ -1930,17 +1932,22 @@ def test_the_entry_comes_back_when_a_credential_is_usable_again(tmp_path: Path) 
     assert [claude_entry(a) is not None for a in rig.client.announced[:3]] == [True, False, True]
 
 
-# #980-T04
-def test_a_401_withdraws_the_entry_for_good_until_the_credential_is_replaced(
+# #980-T04, #980-FIX3
+def test_a_401_withdraws_the_entry_until_the_credential_is_replaced_when_the_hint_is_long(
     tmp_path: Path,
 ) -> None:
-    rig = credential_rig(tmp_path, exit_code=20, only=LOGIN)
+    rig = credential_rig(
+        tmp_path,
+        exit_code=20,
+        extra={"FACTORY_RUNNER_CREDENTIAL_AUTH_COOLDOWN_SECONDS": "1e12"},
+        only=LOGIN,
+    )
     rig.client.claims = [claim(access=SUBSCRIPTION)]
 
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
         await until(lambda: len(rig.client.announced) >= 2)
-        # Hours pass: a refused token is not tried again.
+        # Time passes: the token is not tried again while the hint holds.
         rig.clock.now += 10 * COOLDOWN
         await asyncio.sleep(0.2)
         assert len(rig.client.announced) == 2
@@ -1954,21 +1961,69 @@ def test_a_401_withdraws_the_entry_for_good_until_the_credential_is_replaced(
     assert [claude_entry(a) is not None for a in rig.client.announced[:3]] == [True, False, True]
 
 
-# #980-T05
-def test_a_model_the_subscription_refused_leaves_the_entry(tmp_path: Path) -> None:
-    rig = credential_rig(tmp_path, exit_code=22, only=LOGIN)
-    rig.client.claims = [claim(access=SUBSCRIPTION)]  # asks for claude-sonnet-5-5
+# #980-FIX3
+def test_a_401_is_a_hint_that_expires_so_that_a_forged_one_cannot_withdraw_the_device_for_good(
+    tmp_path: Path,
+) -> None:
+    rig = credential_rig(tmp_path, exit_code=20, only=LOGIN)
+    rig.client.claims = [claim(access=SUBSCRIPTION)]
 
     async def scenario() -> None:
         task = asyncio.create_task(rig.service.run(once=False))
-        await until(lambda: len(rig.client.announced) >= 2)
+        # The default is six hours of the dispatcher's own clock; the loop's pauses add them up.
+        await until(lambda: len(rig.client.announced) >= 3, seconds=20.0)
         rig.service.stop()
         await asyncio.wait_for(task, 5)
 
     run(scenario)
 
-    entry = claude_entry(rig.client.announced[1])
-    assert entry is not None and entry["models"] == ["opus", "haiku"]
+    assert [claude_entry(a) is not None for a in rig.client.announced[:3]] == [True, False, True]
+    assert credentials_of(rig).records()[0].refused_until > 0, "it was held, and it let go"
+
+
+# #980-T05, #980-FIX2
+def test_a_model_the_subscription_refused_leaves_the_entry_for_a_while(tmp_path: Path) -> None:
+    rig = Rig(
+        tmp_path,
+        launcher=verdict_launcher(22),
+        claude="2.1.311",
+        environment=PLAIN_STORAGE,
+    )
+    credentials_of(rig).add("only", LOGIN, models=("claude-sonnet-5-5", "opus"))
+    rig.client.claims = [claim(access=SUBSCRIPTION)]  # asks for claude-sonnet-5-5
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 3, seconds=20.0)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    entries = [claude_entry(a) for a in rig.client.announced[:3]]
+    assert [entry["models"] for entry in entries if entry] == [
+        ["claude-sonnet-5-5", "opus"],
+        ["opus"],
+        ["claude-sonnet-5-5", "opus"],
+    ], "one id leaves for six hours and comes back"
+    assert credentials_of(rig).records()[0].models == ("claude-sonnet-5-5", "opus")
+
+
+# #980-FIX2
+def test_a_refused_model_never_removes_an_alias_from_the_announcement(tmp_path: Path) -> None:
+    rig = credential_rig(tmp_path, exit_code=22, only=LOGIN)  # default list: sonnet, opus, haiku
+    rig.client.claims = [claim(access=SUBSCRIPTION)]  # asks for claude-sonnet-5-5
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: rig.client.claim_calls >= 3)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert len(rig.client.announced) == 1
+    assert credentials_of(rig).records()[0].models == ("sonnet", "opus", "haiku")
 
 
 # #980-T04, #980-T05
@@ -2023,4 +2078,58 @@ def test_a_job_that_asks_for_no_subscription_leaves_the_credentials_alone(tmp_pa
 
     assert b"localCredential" not in rig.launcher.processes[0].spec.stdin
     record = credentials_of(rig).records()[0]
-    assert record.limited_until == 0.0 and not record.refused, "no verdict is read for it"
+    assert record.limited_until == 0.0 and record.refused_until == 0.0, "no verdict is read for it"
+
+
+# #980-FIX1
+def test_a_credential_that_cannot_be_read_is_not_announced_and_a_claim_that_comes_anyway_backs_off(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, claude="2.1.311", environment=PLAIN_STORAGE)
+    rig.clock = ManualClock()
+    rig.service._clock = rig.clock  # pyright: ignore[reportPrivateUsage]
+    credentials_of(rig).add("broken", LOGIN)
+    (Path(rig.environment["FACTORY_RUNNER_HOME"]) / "credentials" / "broken.secret").chmod(0o644)
+    rig.client.claims = [claim(n, access=SUBSCRIPTION) for n in range(1, 60)]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        for _ in range(60):
+            await rig.clock.advance(10)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert all(claude_entry(a) is None for a in rig.client.announced), "no credential can serve"
+    # Claims at 0, 10, 30, 70, 150, 310 seconds: a broken store does not spend an attempt of every
+    # queued job (the app counts one for every release).
+    assert 2 <= rig.client.claim_calls <= 7
+    assert len(rig.client.releases) == rig.client.claim_calls
+    assert {r[2] for r in rig.client.releases} == {"launch_failed"}
+    assert rig.launcher.processes == []
+
+
+# #980-FIX4
+def test_a_service_that_started_before_the_first_credential_offers_claude_code_without_a_restart(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, claude="2.1.311", environment=PLAIN_STORAGE)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(rig.service.run(once=False))
+        await until(lambda: len(rig.client.announced) >= 1)
+        assert claude_entry(rig.client.announced[0]) is None, "nothing to offer yet"
+        credentials_of(rig).add("late", LOGIN, models=("opus",))
+        await until(lambda: len(rig.client.announced) >= 2)
+        rig.service.stop()
+        await asyncio.wait_for(task, 5)
+
+    run(scenario)
+
+    assert claude_entry(rig.client.announced[1]) == {
+        "harness": "claude-code",
+        "version": "2.1.311",
+        "auth": "subscription",
+        "models": ["opus"],
+    }

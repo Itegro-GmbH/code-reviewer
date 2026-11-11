@@ -163,15 +163,50 @@ def test_retry_ends_the_pause_of_a_rate_limited_credential(tmp_path: Path) -> No
     assert store(tmp_path).records()[0].limited_until == 0.0
 
 
+# #980-FIX3
+def test_retry_also_clears_a_refusal_and_the_models_set_aside(tmp_path: Path) -> None:
+    invoke(tmp_path, "credential", "add", "claude", "--name", "work", "--models", "sonnet,opus",
+           stdin=TOKEN)  # fmt: skip
+    store(tmp_path).mark_refused("work", NOW + 3600)
+    store(tmp_path).set_model_aside("work", "claude-opus-5-5", NOW + 3600)
+
+    code, out, _ = invoke(tmp_path, "credential", "retry", "work")
+
+    [record] = store(tmp_path).records()
+    assert code == EXIT_OK and "usable" in out
+    assert record.refused_until == 0.0 and record.models_aside == ()
+    assert record.models == ("sonnet", "opus")
+    assert invoke(tmp_path, "credential", "retry", "nobody")[0] == EXIT_FAILED
+
+
 def test_a_refused_credential_is_listed_as_refused_and_says_how_to_replace_it(
     tmp_path: Path,
 ) -> None:
     invoke(tmp_path, "credential", "add", "claude", "--name", "work", stdin=TOKEN)
-    store(tmp_path).mark_refused("work")
+    store(tmp_path).mark_refused("work", NOW + 3600)
 
     _, out, _ = invoke(tmp_path, "credential", "list")
 
-    assert "refused" in out and "--replace" in out
+    assert "refused" in out and "--replace" in out and "retry" in out
+
+
+# #980-FIX3
+def test_the_listing_says_which_models_are_set_aside_and_until_when(tmp_path: Path) -> None:
+    invoke(tmp_path, "credential", "add", "claude", "--name", "work", "--models", "sonnet,opus",
+           stdin=TOKEN)  # fmt: skip
+    store(tmp_path).set_model_aside("work", "claude-opus-5-5", NOW + 3600)
+
+    _, out, _ = invoke(tmp_path, "credential", "list")
+
+    assert "claude-opus-5-5" in out and "set aside until" in out and "retry" in out
+    assert "sonnet,opus" in out, "the list the owner gave is shown as it is"
+
+
+# #980-FIX4
+def test_adding_a_credential_says_a_running_service_needs_no_restart(tmp_path: Path) -> None:
+    _, out, _ = invoke(tmp_path, "credential", "add", "claude", "--name", "work", stdin=TOKEN)
+
+    assert "no restart is needed" in out
 
 
 def test_storage_systemd_creds_that_cannot_be_had_is_said_and_stores_nothing(

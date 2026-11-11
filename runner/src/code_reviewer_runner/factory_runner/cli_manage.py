@@ -52,6 +52,7 @@ from code_reviewer_runner.factory_runner.update import (
 from code_reviewer_runner.implementer.claude_code.credentials import (
     DEFAULT_MODELS,
     STATE_LIMITED,
+    STATE_REFUSED,
     STORAGE_SYSTEMD,
     CredentialError,
     store_for,
@@ -123,7 +124,9 @@ def add_parsers(commands: "argparse._SubParsersAction[Any]") -> None:  # pyright
     remove = steps.add_parser("remove", help="remove a Claude Code credential")
     remove.add_argument("name")
     retry = steps.add_parser(
-        "retry", help="let a rate limited Claude Code credential be used again now"
+        "retry",
+        help="let go of everything held against a Claude Code credential (rate limited, refused, "
+        "models set aside) and use it again now; the models you gave are never changed",
     )
     retry.add_argument("name")
 
@@ -343,8 +346,9 @@ def credential_add(
         f"the token is {_how_stored(record.storage)}\n"
     )
     out.write(
-        "a running service reads its credentials before each claim: no restart is needed; it "
-        "offers Claude Code to the app as soon as one can be used\n"
+        "a running service reads its credentials before each claim: no restart is needed, even "
+        "when it started before the first credential; it offers Claude Code to the app (the "
+        "layer with Claude Code is built when the service starts) as soon as one can be used\n"
     )
     return EXIT_OK
 
@@ -367,7 +371,9 @@ def credential_list(env: Mapping[str, str], out: TextIO, now: Callable[[], float
     for record in records:
         state = record.state(current)
         if state == STATE_LIMITED:
-            state += " until " + time.strftime("%H:%M", time.localtime(record.limited_until))
+            state += " until " + _clock_time(record.limited_until)
+        elif state == STATE_REFUSED:
+            state += " until " + _clock_time(record.refused_until)
         created = time.strftime("%Y-%m-%d", time.gmtime(record.created))
         rows.append((record.name, created, ",".join(record.models), state, record.storage))
     widths = [max(len(row[column]) for row in rows) for column in range(5)]
@@ -377,13 +383,27 @@ def credential_list(env: Mapping[str, str], out: TextIO, now: Callable[[], float
             + "\n"
         )
     for record in records:
-        if record.refused:
+        if record.refused_until > current:
             out.write(
-                f"{record.name} was refused by Anthropic (a 401): make a new token with "
-                f"`claude setup-token` and run `factory-runner credential add claude --name "
-                f"{record.name} --replace`\n"
+                f"{record.name} was reported as refused by Anthropic (a 401). It is tried again "
+                f"after that time: for good, make a new token with `claude setup-token` and run "
+                f"`factory-runner credential add claude --name {record.name} --replace`; to try "
+                f"it now, `factory-runner credential retry {record.name}`\n"
             )
+        for model, until in record.models_aside:
+            if until > current:
+                out.write(
+                    f"{record.name}: model {model} is set aside until {_clock_time(until)} "
+                    f"(a job on it was reported refused); `factory-runner credential retry "
+                    f"{record.name}` lets it go now\n"
+                )
     return EXIT_OK
+
+
+def _clock_time(moment: float) -> str:
+    """`moment` in the device's own time, with its date: hints last hours, and a bare HH:MM would
+    not say which day."""
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(moment))
 
 
 def credential_remove(name: str, env: Mapping[str, str], out: TextIO, err: TextIO) -> int:
@@ -398,9 +418,9 @@ def credential_remove(name: str, env: Mapping[str, str], out: TextIO, err: TextI
 
 def credential_retry(name: str, env: Mapping[str, str], out: TextIO, err: TextIO) -> int:
     try:
-        store_for(env, home_directory(env)).set_limited(name, 0.0)
+        store_for(env, home_directory(env)).clear_hints(name)
     except CredentialError as error:
         err.write(f"{PROGRAM}: credential: {error}\n")
         return EXIT_FAILED
-    out.write(f"credential {name} is usable again\n")
+    out.write(f"credential {name} is usable again (nothing is held against it any more)\n")
     return EXIT_OK

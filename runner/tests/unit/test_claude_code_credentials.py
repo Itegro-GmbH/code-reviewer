@@ -149,16 +149,119 @@ def test_an_added_name_is_not_replaced_without_the_flag(tmp_path: Path) -> None:
 def test_replacing_a_credential_clears_what_was_held_against_it(tmp_path: Path) -> None:
     store = store_in(tmp_path)
     store.add("work", TOKEN, models=("opus",))
-    store.mark_refused("work")
+    store.mark_refused("work", 6_000.0)
     store.set_limited("work", 5_000.0)
+    store.set_model_aside("work", "claude-opus-5-5", 5_000.0)
 
     store.add("work", OTHER, replace=True)
 
     [record] = store.records()
-    assert not record.refused and record.limited_until == 0.0
+    assert record.refused_until == 0.0 and record.limited_until == 0.0
     assert record.models == ("opus",), "the models stay unless new ones are given"
     store.add("work", TOKEN, models=("haiku",), replace=True)
     assert store.records()[0].models == ("haiku",)
+
+
+# #980-FIX2
+def test_replacing_without_models_keeps_the_list_given_at_add_time_not_a_shrunken_one(
+    tmp_path: Path,
+) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("sonnet", "claude-opus-5-5"))
+    store.set_model_aside("work", "claude-opus-5-5", 9_000.0)
+    assert store.records()[0].offered(1_000.0) == ("sonnet",)
+
+    store.add("work", OTHER, replace=True)
+
+    [record] = store.records()
+    assert record.models == ("sonnet", "claude-opus-5-5")
+    assert record.offered(1_000.0) == ("sonnet", "claude-opus-5-5"), "what was held is forgotten"
+
+
+# #980-FIX2
+def test_a_model_set_aside_leaves_the_offer_only_while_the_hint_holds(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("sonnet", "claude-opus-5-5"))
+    store.set_model_aside("work", "claude-opus-5-5", 5_000.0)
+    [record] = store.records()
+
+    assert record.offered(1_000.0) == ("sonnet",)
+    assert not record.allows(1_000.0, "claude-opus-5-5")
+    assert record.allows(1_000.0, "claude-sonnet-5-5")
+    assert record.offered(5_000.0) == ("sonnet", "claude-opus-5-5"), "the hint expired"
+    assert record.allows(5_000.0, "claude-opus-5-5")
+
+
+# #980-FIX2
+def test_an_alias_is_not_taken_off_by_one_refusal_of_an_id_it_covers(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("opus",))
+    store.set_model_aside("work", "claude-opus-5-5", 9_000.0)
+    [record] = store.records()
+
+    assert record.offered(1_000.0) == ("opus",)
+    assert not record.allows(1_000.0, "claude-opus-5-5"), "that id waits"
+    assert record.allows(1_000.0, "claude-opus-5-6"), "another id of the family is not refused"
+    assert record.state(1_000.0) == "usable"
+
+
+# #980-FIX2
+def test_an_alias_is_set_aside_after_refusals_of_two_ids_it_covers(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("opus", "haiku"))
+    store.set_model_aside("work", "claude-opus-5-5", 9_000.0)
+    store.set_model_aside("work", "claude-opus-5-6", 4_000.0)
+    [record] = store.records()
+
+    assert record.offered(1_000.0) == ("haiku",), "two ids of the family were refused"
+    assert not record.allows(1_000.0, "claude-opus-5-7")
+    assert record.offered(4_000.0) == ("opus", "haiku"), "one refusal expired: the alias is back"
+
+
+# #980-FIX2
+def test_a_credential_whose_every_model_is_set_aside_has_no_models_for_now(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("claude-opus-5-5",))
+    store.set_model_aside("work", "claude-opus-5-5", 9_000.0)
+
+    [record] = store.records()
+
+    assert record.state(1_000.0) == "no models" and not record.usable(1_000.0)
+    assert record.state(9_000.0) == "usable"
+
+
+# #980-FIX2
+def test_clearing_the_hints_lets_a_limited_refused_credential_with_models_aside_go(
+    tmp_path: Path,
+) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN, models=("sonnet", "claude-opus-5-5"))
+    store.set_limited("work", 9_000.0)
+    store.mark_refused("work", 9_000.0)
+    store.set_model_aside("work", "claude-opus-5-5", 9_000.0)
+
+    store.clear_hints("work")
+
+    [record] = store.records()
+    assert record.usable(1_000.0) and record.offered(1_000.0) == ("sonnet", "claude-opus-5-5")
+    assert (record.limited_until, record.refused_until, record.models_aside) == (0.0, 0.0, ())
+    with pytest.raises(CredentialError):
+        store.clear_hints("nobody")
+
+
+# #980-FIX7
+def test_a_link_in_place_of_the_lock_file_is_refused(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("work", TOKEN)
+    lock = tmp_path / "home" / "credentials" / ".lock"
+    lock.unlink()
+    lock.symlink_to(tmp_path / "elsewhere")
+
+    with pytest.raises(CredentialError) as error:
+        store.add("other", OTHER)
+
+    assert "lock" in str(error.value)
+    assert not (tmp_path / "elsewhere").exists(), "the link was not followed"
 
 
 def test_a_credential_is_removed_with_its_secret(tmp_path: Path) -> None:
@@ -184,11 +287,14 @@ def test_the_state_of_a_credential_is_kept_across_stores(tmp_path: Path) -> None
     store = store_in(tmp_path)
     store.add("a", TOKEN)
     store.set_limited("a", 9_000.0)
-    store.drop_model("a", "haiku")
+    store.mark_refused("a", 8_000.0)
+    store.set_model_aside("a", "claude-haiku-5-5", 7_000.0)
 
     again = store_in(tmp_path).records()[0]
 
-    assert again.limited_until == 9_000.0 and again.models == ("sonnet", "opus")
+    assert (again.limited_until, again.refused_until) == (9_000.0, 8_000.0)
+    assert again.models_aside == (("claude-haiku-5-5", 7_000.0),)
+    assert again.models == ("sonnet", "opus", "haiku"), "the list the owner gave is never shrunk"
 
 
 def test_a_state_in_the_past_is_not_a_limit(tmp_path: Path) -> None:
@@ -198,8 +304,9 @@ def test_a_state_in_the_past_is_not_a_limit(tmp_path: Path) -> None:
 
     assert store.records()[0].state(1_000.0) == "usable"
     assert store.records()[0].state(100.0) == "rate limited"
-    store.mark_refused("a")
+    store.mark_refused("a", 5_000.0)
     assert store.records()[0].state(1_000.0) == "refused"
+    assert store.records()[0].state(6_000.0) == "usable", "a refusal is a hint that expires"
     assert record.state(1_000.0) == "usable"
 
 
@@ -348,6 +455,53 @@ def test_a_store_whose_credentials_are_all_unusable_is_a_login_problem(tmp_path:
 
     assert isinstance(login, LoginProblem) and login.configured
     assert TOKEN not in login.text
+
+
+# #980-FIX5
+def test_the_store_wins_over_the_token_file_and_the_environment_when_it_has_credentials(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    store_in(tmp_path).add("work", TOKEN)
+    named = tmp_path / "named-token"
+    named.write_text(OTHER)
+    named.chmod(0o600)
+    for source in (
+        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(named)},
+        {"CLAUDE_CODE_OAUTH_TOKEN": OTHER},
+    ):
+        login = load_login(source, home)
+        assert isinstance(login, ClaudeLogin) and login.secret == TOKEN
+
+
+# #980-FIX5
+def test_a_store_with_credentials_none_of_which_can_be_used_is_not_hidden_by_other_sources(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    store = store_in(tmp_path)
+    store.add("work", TOKEN)
+    store.set_limited("work", 4_000_000_000.0)
+
+    login = load_login({"CLAUDE_CODE_OAUTH_TOKEN": OTHER}, home)
+
+    assert isinstance(login, LoginProblem) and login.configured
+    assert "rate limited" in login.text and TOKEN not in login.text and OTHER not in login.text
+
+
+# #980-FIX5
+def test_the_login_of_the_store_is_the_first_credential_that_can_be_used(tmp_path: Path) -> None:
+    store = store_in(tmp_path)
+    store.add("first", TOKEN)
+    store.add("second", OTHER)
+    store.mark_refused("first", 4_000_000_000.0)
+
+    login = store_login(tmp_path / "home")
+
+    assert isinstance(login, ClaudeLogin) and login.secret == OTHER
+    store.mark_refused("first", 1.0)  # the refusal expired long ago
+    login = store_login(tmp_path / "home")
+    assert isinstance(login, ClaudeLogin) and login.secret == TOKEN
 
 
 # -- systemd-creds as a command ------------------------------------------------------------------

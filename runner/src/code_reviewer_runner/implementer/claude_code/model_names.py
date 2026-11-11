@@ -45,8 +45,3 @@ def allows(models: Sequence[str] | None, demanded: str | None) -> bool:
     if models is None or demanded is None:
         return True
     return any(models_match(model, demanded) for model in models)
-
-
-def covering(models: Sequence[str], demanded: str) -> tuple[str, ...]:
-    """The entries of a list that stand for the model: what a refusal of that model takes away."""
-    return tuple(model for model in models if models_match(model, demanded))

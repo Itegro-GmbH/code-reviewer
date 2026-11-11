@@ -4,12 +4,15 @@
 `claude setup-token` made, several of them, kept only on the dispatcher's machine.
 
 A credential is a name (visible only here), the token, the models its subscription allows (given
-when it is added; the aliases `sonnet`, `opus` and `haiku` by default) and what the dispatcher found
-out about it (rate limited until, refused). They live in `<runner home>/credentials/`, a directory
-only its owner may enter:
+when it is added; the aliases `sonnet`, `opus` and `haiku` by default) and what the dispatcher was
+told about it (rate limited until, refused until, models set aside until). The three are **hints
+that expire**: they come from the exit code of a job, which the agent inside the job's sandbox can
+forge (`credential_pool.py`), so none of them is a verdict for good and none rewrites the list of
+models the owner gave. They live in `<runner home>/credentials/`, a directory only its owner may
+enter:
 
-- `index.json` (0600): names, creation times, models, how each token is stored, the state. **No
-  value.** The dispatcher and `credential list` read this.
+- `index.json` (0600): names, creation times, the models as given, how each token is stored, the
+  hints. **No value.** The dispatcher and `credential list` read this.
 - `<name>.secret` (0600): the token. With `systemd-creds` available it is sealed (the file holds
   `systemd-creds --user encrypt` output); without it, or with
   `FACTORY_RUNNER_CREDENTIAL_STORAGE=plain`, it is the token itself in a file that only the owner
@@ -40,6 +43,8 @@ from dataclasses import replace as with_changes
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
 
+from .model_names import alias_of, allows
+
 if TYPE_CHECKING:
     from .login import ClaudeLogin, LoginProblem
 
@@ -60,6 +65,10 @@ STORAGE_VARIABLE: Final = "FACTORY_RUNNER_CREDENTIAL_STORAGE"
 # What a subscription offers every account; the manifest announces them as they are.
 DEFAULT_MODELS: Final = ("sonnet", "opus", "haiku")
 MAX_MODELS: Final = 64
+# An alias is set aside too once this many different ids it stands for are set aside at the same
+# time: one refused id says nothing of the family (an older or a newer id may be allowed), two of
+# them say the subscription probably has none.
+ALIAS_ASIDE_AFTER: Final = 2
 NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 # The same pattern as `MODEL_NAME_PATTERN` of the app (`app/src/runner-identity/access.ts`).
 MODEL_PATTERN: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}")
@@ -79,19 +88,47 @@ class CredentialRecord:
 
     name: str
     created: float
+    # The models as the owner gave them: never shrunk by what a job's end says.
     models: tuple[str, ...]
     storage: str
     # Until when the subscription's usage limit holds it back (0: not at all).
     limited_until: float = 0.0
-    # The token was refused (a 401: expired or revoked): it stays out until it is replaced.
-    refused: bool = False
+    # Until when a 401 holds it back (0: not at all): a hint, tried again after it.
+    refused_until: float = 0.0
+    # Models a refusal set aside, each with the time it is tried again: `(model, until)`.
+    models_aside: tuple[tuple[str, float], ...] = ()
+
+    def aside(self, now: float) -> frozenset[str]:
+        """The models (ids as a job named them) that are set aside now."""
+        return frozenset(model for model, until in self.models_aside if until > now)
+
+    def offered(self, now: float) -> tuple[str, ...]:
+        """The entries of the list that serve now: not set aside, and no alias of which
+        `ALIAS_ASIDE_AFTER` ids are set aside."""
+        aside = self.aside(now)
+        families: dict[str, int] = {}
+        for model in aside:
+            family = alias_of(model)
+            if family is not None:
+                families[family] = families.get(family, 0) + 1
+        return tuple(
+            model
+            for model in self.models
+            if model not in aside and families.get(model, 0) < ALIAS_ASIDE_AFTER
+        )
+
+    def allows(self, now: float, demanded: str | None) -> bool:
+        """Whether a job that names `demanded` (None: any) can run on this credential now."""
+        if demanded is not None and demanded in self.aside(now):
+            return False
+        return allows(self.offered(now), demanded)
 
     def state(self, now: float) -> str:
-        if self.refused:
+        if self.refused_until > now:
             return STATE_REFUSED
         if self.limited_until > now:
             return STATE_LIMITED
-        if not self.models:
+        if not self.offered(now):
             return STATE_NO_MODELS
         return STATE_USABLE
 
@@ -240,24 +277,30 @@ class CredentialStore:
         if not os.path.lexists(self._directory):
             return []
         self._check_directory()
-        return self._read_index()
+        with self._shared():
+            return self._read_index()
 
     def secret(self, name: str) -> str:
         """The token of a credential. `CredentialError` in words when it cannot be had."""
-        record = self._find(self.records(), name)
+        if not os.path.lexists(self._directory):
+            raise CredentialError(f"there is no credential named {name}")
         self._check_directory()
-        path = self._directory / f"{record.name}.secret"
-        try:
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
-            raise CredentialError(
-                f"the secret of {name} is not there, or is a link or cannot be opened"
-            ) from None
-        try:
-            _owned_private(os.fstat(descriptor), f"the secret file of {name}", directory=False)
-            raw = os.read(descriptor, _SECRET_FILE_BYTES)
-        finally:
-            os.close(descriptor)
+        # One shared lock for the index and the secret: a `credential add --replace` that runs at
+        # the same time (index and secret are two files) is seen whole or not at all.
+        with self._shared():
+            record = self._find(self._read_index(), name)
+            path = self._directory / f"{record.name}.secret"
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            except OSError:
+                raise CredentialError(
+                    f"the secret of {name} is not there, or is a link or cannot be opened"
+                ) from None
+            try:
+                _owned_private(os.fstat(descriptor), f"the secret file of {name}", directory=False)
+                raw = os.read(descriptor, _SECRET_FILE_BYTES)
+            finally:
+                os.close(descriptor)
         sealer = self._systemd if record.storage == STORAGE_SYSTEMD else self._plain
         token = sealer.unseal(record.name, raw)
         if not _TOKEN.fullmatch(token):
@@ -275,8 +318,8 @@ class CredentialStore:
         replace: bool = False,
     ) -> CredentialRecord:
         """Store a token under a name. `replace` is `--replace`: the token is exchanged
-        and what was held against the old one (refused, rate limited) is forgotten; the models stay
-        unless new ones are given."""
+        and what was held against the old one (refused, rate limited, models set aside) is
+        forgotten; the models stay as they were given unless new ones are given."""
         check_name(name)
         token = check_token(secret)
         chosen = check_models(models) if models is not None else None
@@ -311,20 +354,32 @@ class CredentialStore:
             with contextlib.suppress(FileNotFoundError):
                 (self._directory / f"{record.name}.secret").unlink()
 
-    def mark_refused(self, name: str) -> None:
-        """The token was refused (a 401): it stays out until it is replaced."""
-        self._update(name, lambda record: with_changes(record, refused=True))
+    def mark_refused(self, name: str, until: float) -> None:
+        """The token was refused (a 401): it stays out until `until`."""
+        self._update(name, lambda record: with_changes(record, refused_until=until))
 
     def set_limited(self, name: str, until: float) -> None:
         """The subscription's usage limit holds the credential back until `until`; 0 lets it go."""
         self._update(name, lambda record: with_changes(record, limited_until=until))
 
-    def drop_model(self, name: str, model: str) -> None:
-        """The subscription does not allow `model`: it is taken off the credential's list."""
+    def set_model_aside(self, name: str, model: str, until: float) -> None:
+        """The subscription refused `model`: it is left out until `until`. The credential's list
+        stays as it was given."""
+        now = self._clock()
+
+        def change(record: CredentialRecord) -> CredentialRecord:
+            kept = tuple((known, end) for known, end in record.models_aside if end > now)
+            others = tuple((known, end) for known, end in kept if known != model)
+            return with_changes(record, models_aside=(*others, (model, until)))
+
+        self._update(name, change)
+
+    def clear_hints(self, name: str) -> None:
+        """Let go of everything a job's end said about the credential (`credential retry`)."""
         self._update(
             name,
             lambda record: with_changes(
-                record, models=tuple(known for known in record.models if known != model)
+                record, limited_until=0.0, refused_until=0.0, models_aside=()
             ),
         )
 
@@ -382,12 +437,37 @@ class CredentialStore:
     def _locked(self) -> Generator[None]:
         self._directory_exists()
         self._check_directory()
-        descriptor = os.open(self._directory / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+        descriptor = self._open_lock(os.O_RDWR | os.O_CREAT)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
         finally:
             os.close(descriptor)
+
+    @contextlib.contextmanager
+    def _shared(self) -> Generator[None]:
+        """A reader's lock. A store that has never been written to has no lock file and no writer
+        to wait for."""
+        try:
+            descriptor = self._open_lock(os.O_RDONLY)
+        except FileNotFoundError:
+            yield
+            return
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(descriptor)
+
+    def _open_lock(self, flags: int) -> int:
+        try:
+            return os.open(self._directory / LOCK_NAME, flags | os.O_NOFOLLOW, 0o600)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            raise CredentialError(
+                "the lock file of the credentials is a link or cannot be opened"
+            ) from None
 
     def _read_index(self) -> list[CredentialRecord]:
         path = self._directory / INDEX_NAME
@@ -420,7 +500,8 @@ class CredentialStore:
                     "models": list(record.models),
                     "storage": record.storage,
                     "limitedUntil": record.limited_until,
-                    "refused": record.refused,
+                    "refusedUntil": record.refused_until,
+                    "modelsAside": [[model, until] for model, until in record.models_aside],
                 }
                 for record in records
             ],
@@ -446,10 +527,26 @@ class CredentialStore:
             raise
 
 
+def _aside_of(raw: object) -> tuple[tuple[str, float], ...]:
+    if not isinstance(raw, list):
+        raise ValueError("record")
+    aside: list[tuple[str, float]] = []
+    for item in raw:  # pyright: ignore[reportUnknownVariableType]
+        if (
+            not isinstance(item, list)
+            or len(item) != 2  # pyright: ignore[reportUnknownArgumentType]
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], (int, float))
+        ):
+            raise ValueError("record")
+        aside.append((item[0], float(item[1])))
+    return tuple(aside)
+
+
 def _record_of(item: Mapping[str, object]) -> CredentialRecord:
     name, created = item["name"], item["created"]
     models, storage = item["models"], item["storage"]
-    limited, refused = item["limitedUntil"], item["refused"]
+    limited, refused = item["limitedUntil"], item["refusedUntil"]
     if (
         not isinstance(name, str)
         or not NAME_PATTERN.fullmatch(name)
@@ -458,7 +555,7 @@ def _record_of(item: Mapping[str, object]) -> CredentialRecord:
         or not all(isinstance(model, str) for model in models)  # pyright: ignore[reportUnknownVariableType]
         or storage not in (STORAGE_PLAIN, STORAGE_SYSTEMD)
         or not isinstance(limited, (int, float))
-        or not isinstance(refused, bool)
+        or not isinstance(refused, (int, float))
     ):
         raise ValueError("record")
     return CredentialRecord(
@@ -467,7 +564,8 @@ def _record_of(item: Mapping[str, object]) -> CredentialRecord:
         models=tuple(models),  # pyright: ignore[reportUnknownArgumentType]
         storage=str(storage),
         limited_until=float(limited),
-        refused=refused,
+        refused_until=float(refused),
+        models_aside=_aside_of(item["modelsAside"]),
     )
 
 
@@ -477,10 +575,14 @@ def store_for(environment: Mapping[str, str], home: Path) -> CredentialStore:
     return CredentialStore(home, choice=choice)
 
 
-def store_login(home: Path) -> "ClaudeLogin | LoginProblem | None":
-    """The login of the first usable credential in the store at `home`, `None` when the store has
-    none, a `LoginProblem` when it has credentials and none can be used. The credentials of a store
-    are read only here and by the dispatcher's own pool: a job process has no home to look in."""
+def store_login(
+    home: Path, now: Callable[[], float] = time.time
+) -> "ClaudeLogin | LoginProblem | None":
+    """The login of the first credential in the store at `home` that can be used now (not rate
+    limited, not refused, with a model, its secret readable), `None` when the store has no
+    credential at all, a `LoginProblem` when it has some and none can be used. The credentials of a
+    store are read only here and by the dispatcher's own pool: a job process has no home to look
+    in."""
     from .login import ClaudeLogin, LoginProblem  # a cycle otherwise: login.py reads the store
 
     store = CredentialStore(home)
@@ -491,7 +593,11 @@ def store_login(home: Path) -> "ClaudeLogin | LoginProblem | None":
     if not records:
         return None
     reasons: list[str] = []
+    moment = now()
     for record in records:
+        if not record.usable(moment):
+            reasons.append(f"{record.name}: {record.state(moment)}")
+            continue
         try:
             return ClaudeLogin.oauth_token(store.secret(record.name))
         except CredentialError as error:

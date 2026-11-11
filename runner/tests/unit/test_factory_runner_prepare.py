@@ -28,6 +28,7 @@ from code_reviewer_runner.factory_runner.prepare import (
     split_reference,
 )
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
+from code_reviewer_runner.implementer.claude_code.readiness import HarnessStatus
 from code_reviewer_runner.implementer.docker_api import DockerError
 
 pytestmark = pytest.mark.unit
@@ -209,6 +210,7 @@ def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
         api=lambda: Daemon({"runc"}),  # type: ignore[arg-type,return-value]
         pull=None,
         machine_mb=lambda: 8000,
+        harnesses=no_harnesses,
     )
 
     assert seen[0]["runner_id"] == "r1" and seen[0]["pull"] is None
@@ -255,6 +257,15 @@ class Daemon:
         return self._runtimes
 
 
+def passing_selftest(**_options: Any) -> SelfTestResult:
+    return passing()
+
+
+def no_harnesses(*_arguments: Any) -> dict[str, Any]:
+    """These tests are about the base; the daemon they use has no images to look at."""
+    return {}
+
+
 def run_prepare(
     runtimes: set[str], results: dict[str, SelfTestResult], tried: list[str], **changes: Any
 ) -> module.Prepared:
@@ -268,6 +279,7 @@ def run_prepare(
         selftest=selftest,
         api=lambda: Daemon(runtimes),  # type: ignore[arg-type,return-value]
         machine_mb=lambda: 8000,
+        harnesses=no_harnesses,
     )
 
 
@@ -323,6 +335,26 @@ def test_the_host_of_a_runner_advertises_the_implementer_engine_and_nothing_else
     assert prepared.settings.implementer_docker is True
     assert prepared.settings.implementer_work_dir == Path("/work")
     assert prepared.settings.diff_job_user is None and prepared.settings.dynamic_engine_user is None
+
+
+# #980-FIX4
+def test_a_device_with_no_credential_yet_is_prepared_for_claude_code_by_its_layer_alone() -> None:
+    def layer_only(*_arguments: Any) -> dict[str, HarnessStatus]:
+        return {"claude-code": HarnessStatus("2.1.311", True, ("no Claude Code login yet",))}
+
+    prepared = prepare(
+        config(),
+        {"PATH": "/usr/bin", "FACTORY_RUNNER_HOME": "/nonexistent-home"},
+        selftest=passing_selftest,
+        api=lambda: Daemon({"runc"}),  # type: ignore[arg-type,return-value]
+        machine_mb=lambda: 8000,
+        harnesses=layer_only,
+    )
+
+    # The service offers the entry once the pool finds a credential, with no restart: it needs the
+    # version from the start, not a login.
+    assert prepared.claude_version == "2.1.311"
+    assert any("no Claude Code login yet" in note for note in prepared.harness_notes)
 
 
 def test_pulling_an_image_is_one_engine_api_pull_and_one_tag() -> None:

@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from code_reviewer_runner.factory_runner.credential_pool import (
+    AUTH_COOLDOWN_SECONDS,
     LIMIT_COOLDOWN_SECONDS,
+    MODEL_COOLDOWN_SECONDS,
+    Cooldowns,
     CredentialPool,
     Verdict,
     verdict_of_exit,
@@ -109,32 +112,104 @@ def test_when_all_credentials_are_rate_limited_the_entry_is_withdrawn_until_one_
     assert chosen is not None and chosen.name == "a"
 
 
-# #980-T04
-def test_a_refused_credential_stays_out_until_it_is_replaced(tmp_path: Path) -> None:
+# #980-T04, #980-FIX3
+def test_a_refused_credential_is_set_aside_for_hours_and_then_tried_again(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     rig.store.add("only", ONE)
 
     rig.pool.report("only", Verdict.AUTH, None)
 
     assert rig.models() == "withdrawn"
-    rig.clock.now += 10 * LIMIT_COOLDOWN_SECONDS
+    rig.clock.now += AUTH_COOLDOWN_SECONDS - 1
     assert rig.models() == "withdrawn" and rig.pool.choose(None) is None
+    rig.clock.now += 2
+    assert rig.models() == ("sonnet", "opus", "haiku"), "a forged 401 must not be for good"
+    assert rig.pool.choose(None) is not None
+
+
+# #980-T04
+def test_a_refused_credential_that_is_replaced_is_usable_at_once(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("only", ONE)
+    rig.pool.report("only", Verdict.AUTH, None)
+
     rig.store.add("only", TWO, replace=True)
+
     assert rig.models() == ("sonnet", "opus", "haiku")
 
 
-# #980-T05
-def test_a_model_the_subscription_refused_is_taken_off_the_entry(tmp_path: Path) -> None:
+# #980-FIX3
+def test_retry_clears_a_refusal_a_limit_and_the_models_set_aside(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
-    rig.store.add("a", ONE, models=("sonnet", "opus"))
+    rig.store.add("a", ONE, models=("sonnet", "claude-opus-5-5"))
+    rig.pool.report("a", Verdict.AUTH, None)
+    rig.pool.report("a", Verdict.LIMIT, None)
+    rig.pool.report("a", Verdict.MODEL, "claude-opus-5-5")
+    assert rig.models() == "withdrawn"
+
+    rig.pool.retry("a")
+
+    assert rig.models() == ("sonnet", "claude-opus-5-5")
+
+
+# #980-T05, #980-FIX2
+def test_a_model_the_subscription_refused_leaves_the_entry_for_a_while_and_only_that_id(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("a", ONE, models=("sonnet", "claude-opus-5-5", "haiku"))
 
     rig.pool.report("a", Verdict.MODEL, "claude-opus-5-5")  # the job's model is an id
 
-    assert rig.models() == ("sonnet",)
+    assert rig.models() == ("sonnet", "haiku")
     assert rig.pool.choose("claude-opus-5-5") is None
     assert rig.pool.choose("claude-sonnet-5-5") is not None
+    rig.clock.now += MODEL_COOLDOWN_SECONDS + 1
+    assert rig.models() == ("sonnet", "claude-opus-5-5", "haiku"), "a hint, not a verdict"
+    assert rig.pool.choose("claude-opus-5-5") is not None
+
+
+# #980-FIX2
+def test_one_refusal_never_takes_an_alias_off_the_list(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("a", ONE, models=("sonnet", "opus"))
+
+    rig.pool.report("a", Verdict.MODEL, "claude-opus-5-5")
+
+    assert rig.models() == ("sonnet", "opus"), "the alias stays: other opus ids may be allowed"
+    assert rig.pool.choose("claude-opus-5-5") is None
+    chosen = rig.pool.choose("claude-opus-5-6")
+    assert chosen is not None and chosen.name == "a"
+    assert rig.store.records()[0].models == ("sonnet", "opus"), "the owner's list is untouched"
+
+
+# #980-FIX2
+def test_a_refusal_of_the_alias_itself_sets_that_entry_aside(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("a", ONE, models=("sonnet", "opus"))
+
     rig.pool.report("a", Verdict.MODEL, "sonnet")
-    assert rig.models() == "withdrawn", "no model left: nothing to offer"
+
+    assert rig.models() == ("opus",)
+    rig.pool.report("a", Verdict.MODEL, "opus")
+    assert rig.models() == "withdrawn", "no model left for now: nothing to offer"
+    rig.clock.now += MODEL_COOLDOWN_SECONDS + 1
+    assert rig.models() == ("sonnet", "opus")
+
+
+# #980-FIX2
+def test_repeated_refusals_of_ids_an_alias_covers_hide_the_alias_for_a_while(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("a", ONE, models=("sonnet", "opus"))
+
+    rig.pool.report("a", Verdict.MODEL, "claude-opus-5-5")
+    rig.pool.report("a", Verdict.MODEL, "claude-opus-5-6")
+
+    assert rig.models() == ("sonnet",)
+    rig.clock.now += MODEL_COOLDOWN_SECONDS + 1
+    assert rig.models() == ("sonnet", "opus")
 
 
 def test_the_entry_lists_the_models_of_every_usable_credential_once(tmp_path: Path) -> None:
@@ -160,6 +235,20 @@ def test_the_login_of_an_older_device_is_used_while_the_store_is_empty(tmp_path:
     assert chosen is not None and chosen.name == "new", "the store wins over the old sources"
 
 
+def test_the_older_login_is_set_aside_by_a_401_for_a_while_and_then_tried_again(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, legacy=ClaudeLogin.oauth_token(LEGACY))
+    chosen = rig.pool.choose(None)
+    assert chosen is not None
+
+    rig.pool.report(chosen.name, Verdict.AUTH, None)
+
+    assert rig.models() == "withdrawn"
+    rig.clock.now += AUTH_COOLDOWN_SECONDS + 1
+    assert rig.models() is None
+
+
 def test_a_device_without_any_credential_offers_nothing(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
 
@@ -176,6 +265,74 @@ def test_a_secret_that_cannot_be_read_is_skipped_and_said_in_words(tmp_path: Pat
 
     assert chosen is not None and chosen.name == "fine"
     assert rig.pool.problems and ONE not in " ".join(rig.pool.problems)
+
+
+# #980-FIX1
+def test_a_credential_whose_secret_cannot_be_read_is_not_announced(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("broken", ONE)
+    (tmp_path / "home" / "credentials" / "broken.secret").chmod(0o644)
+
+    assert rig.models() == "withdrawn", "an entry no credential can serve is not announced"
+    assert rig.pool.choose(None) is None
+    assert rig.pool.problems and ONE not in " ".join(rig.pool.problems)
+
+
+# #980-FIX1
+def test_the_models_of_a_credential_that_cannot_be_read_are_not_announced_but_the_others_are(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("broken", ONE, models=("opus",))
+    rig.store.add("fine", TWO, models=("haiku",))
+    (tmp_path / "home" / "credentials" / "broken.secret").chmod(0o644)
+
+    assert rig.models() == ("haiku",)
+
+
+# #980-FIX1
+def test_a_sealed_secret_that_cannot_be_opened_is_not_announced(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.store.add("sealed", ONE)
+    (tmp_path / "home" / "credentials" / "sealed.secret").write_bytes(b"\n")  # no token in it
+
+    assert rig.models() == "withdrawn"
+
+
+# #980-FIX3
+def test_the_cooldowns_are_set_by_the_environment_and_a_bad_value_keeps_the_default() -> None:
+    cooldowns, problems = Cooldowns.from_environment(
+        {
+            "FACTORY_RUNNER_CREDENTIAL_AUTH_COOLDOWN_SECONDS": "120",
+            "FACTORY_RUNNER_CREDENTIAL_MODEL_COOLDOWN_SECONDS": "soon",
+        }
+    )
+
+    assert cooldowns.auth == 120.0 and cooldowns.model == MODEL_COOLDOWN_SECONDS
+    assert cooldowns.limit == LIMIT_COOLDOWN_SECONDS
+    assert len(problems) == 1 and "MODEL_COOLDOWN" in problems[0] and "soon" not in problems[0]
+    assert Cooldowns.from_environment({})[1] == ()
+    for bad in ("0", "-5", "nan", "inf", ""):
+        assert Cooldowns.from_environment({"FACTORY_RUNNER_CREDENTIAL_AUTH_COOLDOWN_SECONDS": bad})[
+            0
+        ].auth in (AUTH_COOLDOWN_SECONDS,)
+
+
+def test_a_pool_uses_the_cooldowns_it_is_given(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    rig.pool = CredentialPool(
+        rig.store,
+        lambda: rig.legacy,
+        rig.clock,
+        cooldowns=Cooldowns(limit=10.0, auth=20.0, model=30.0),
+    )
+    rig.store.add("a", ONE)
+
+    rig.pool.report("a", Verdict.AUTH, None)
+    rig.clock.now += 19
+    assert rig.models() == "withdrawn"
+    rig.clock.now += 2
+    assert rig.models() == ("sonnet", "opus", "haiku")
 
 
 def test_a_store_that_cannot_be_read_offers_nothing_and_says_why(tmp_path: Path) -> None:

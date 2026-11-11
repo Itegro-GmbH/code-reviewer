@@ -12,16 +12,25 @@ them. The pool decides:
 - **What the manifest offers**: the models of every usable credential, or nothing (the entry is
   withdrawn) while none is usable. The app never learns a name, a count or a reason.
 - **What a job's end teaches**: the Worker's exit code says why a subscription refused a job
-  (`WorkerExit.SUBSCRIPTION_*`). A usage limit puts the credential aside for
-  `LIMIT_COOLDOWN_SECONDS` and then tries it again; a 401 keeps it out until the owner replaces it;
-  a refused model leaves its list (and the credential has no use once its list is empty).
+  (`WorkerExit.SUBSCRIPTION_*`). **Every one of them is a hint that expires**, never a verdict:
+  the exit code comes from the job's `result` event, which the agent inside the job's sandbox can
+  forge (it runs as the same user as Claude Code and can write to Claude Code's pipes; see
+  ADR 0005 3f). What a forgery can do is therefore bounded to the owner's own credentials and to
+  hours: a usage limit puts the credential aside for `Cooldowns.limit` (one hour), a 401 for
+  `Cooldowns.auth` (six hours), a refused model leaves the list for `Cooldowns.model` (six hours,
+  that one id; an alias is never taken off by one refusal, it is set aside once
+  `ALIAS_ASIDE_AFTER` ids it covers are, `credentials.py`). `credential retry` ends all of them
+  at once, and the list the owner gave is never shrunk.
+- **A job that hits the limit fails** (free, `subscription_limit`); it is never moved to another
+  credential in the middle of a run (the turn's state is Claude Code's session on one login).
 
 The login of an older device (the token file or the environment variable of R3) is used only while
 the store is empty. It has no list of models (it allows any, as before) and its state is not kept
-across restarts; a refused model cannot be taken off it.
+across restarts; a refused model cannot be set aside on it.
 """
 
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
@@ -36,7 +45,6 @@ from code_reviewer_runner.implementer.claude_code.login import (
     ClaudeLogin,
     LoginProblem,
 )
-from code_reviewer_runner.implementer.claude_code.model_names import allows, covering
 from code_reviewer_runner.job_loop.local_credential import LocalCredential
 from code_reviewer_runner.job_loop.worker_errors import WorkerExit
 
@@ -45,7 +53,55 @@ from code_reviewer_runner.job_loop.worker_errors import WorkerExit
 # the dispatcher does not read it: a credential tried again too early costs the job that finds the
 # limit still there, so the pause is long. `factory-runner credential retry` ends it sooner.
 LIMIT_COOLDOWN_SECONDS: Final = 60 * 60.0
+# How long a credential a job reported as refused (a 401) is set aside, and a model a job reported
+# as refused. Long, because a real expiry or a real missing model does not mend itself and every
+# early try costs a job; bounded, because the report can be forged from inside the job.
+AUTH_COOLDOWN_SECONDS: Final = 6 * 60 * 60.0
+MODEL_COOLDOWN_SECONDS: Final = 6 * 60 * 60.0
+LIMIT_COOLDOWN_VARIABLE: Final = "FACTORY_RUNNER_CREDENTIAL_LIMIT_COOLDOWN_SECONDS"
+AUTH_COOLDOWN_VARIABLE: Final = "FACTORY_RUNNER_CREDENTIAL_AUTH_COOLDOWN_SECONDS"
+MODEL_COOLDOWN_VARIABLE: Final = "FACTORY_RUNNER_CREDENTIAL_MODEL_COOLDOWN_SECONDS"
 LEGACY_NAME: Final = "(older login)"
+
+
+@dataclass(frozen=True)
+class Cooldowns:
+    """How long each kind of hint holds, in seconds."""
+
+    limit: float = LIMIT_COOLDOWN_SECONDS
+    auth: float = AUTH_COOLDOWN_SECONDS
+    model: float = MODEL_COOLDOWN_SECONDS
+
+    @staticmethod
+    def from_environment(environment: Mapping[str, str]) -> "tuple[Cooldowns, tuple[str, ...]]":
+        """The cooldowns of this device and the words about a setting that is not a positive
+        number of seconds (that one keeps its default; the value is not repeated)."""
+        problems: list[str] = []
+
+        def read(variable: str, default: float) -> float:
+            raw = environment.get(variable, "").strip()
+            if not raw:
+                return default
+            try:
+                seconds = float(raw)
+            except ValueError:
+                seconds = math.nan
+            if not math.isfinite(seconds) or seconds <= 0:
+                problems.append(
+                    f"{variable} is not a positive number of seconds: the default "
+                    f"({default:g}) is used"
+                )
+                return default
+            return seconds
+
+        return (
+            Cooldowns(
+                limit=read(LIMIT_COOLDOWN_VARIABLE, LIMIT_COOLDOWN_SECONDS),
+                auth=read(AUTH_COOLDOWN_VARIABLE, AUTH_COOLDOWN_SECONDS),
+                model=read(MODEL_COOLDOWN_VARIABLE, MODEL_COOLDOWN_SECONDS),
+            ),
+            tuple(problems),
+        )
 
 
 class Verdict(StrEnum):
@@ -87,7 +143,7 @@ class Chosen:
 @dataclass
 class _Legacy:
     limited_until: float = 0.0
-    refused: bool = False
+    refused_until: float = 0.0
 
 
 class CredentialPool:
@@ -97,12 +153,12 @@ class CredentialPool:
         legacy: Callable[[], ClaudeLogin | LoginProblem],
         clock: Callable[[], float],
         *,
-        cooldown: float = LIMIT_COOLDOWN_SECONDS,
+        cooldowns: Cooldowns = Cooldowns(),  # noqa: B008
     ) -> None:
         self._store = store
         self._legacy_login = legacy
         self._clock = clock
-        self._cooldown = cooldown
+        self._cooldowns = cooldowns
         self._legacy = _Legacy()
         self._last_used: dict[str, float] = {}
         # Words about what could not be read, for the dispatcher's log; never a value.
@@ -126,13 +182,16 @@ class CredentialPool:
     def _legacy_usable(self) -> bool:
         now = self._clock()
         return (
-            not self._legacy.refused
+            self._legacy.refused_until <= now
             and self._legacy.limited_until <= now
             and isinstance(self._legacy_login(), ClaudeLogin)
         )
 
     def offer(self) -> Offer | None:
-        """What to announce for Claude Code, or None while no credential can be used."""
+        """What to announce for Claude Code, or None while no credential can be used: one that is
+        rate limited or refused for now, has no model for now, or whose secret cannot be read (an
+        entry no credential can serve is not announced: the app would send jobs that could only
+        be given back)."""
         records = self._records()
         if records is None:
             return None
@@ -141,9 +200,17 @@ class CredentialPool:
         now = self._clock()
         models: list[str] = []
         for record in records:
-            if record.usable(now):
-                models.extend(model for model in record.models if model not in models)
+            if record.usable(now) and self._readable(record):
+                models.extend(model for model in record.offered(now) if model not in models)
         return Offer(tuple(models)) if models else None
+
+    def _readable(self, record: CredentialRecord) -> bool:
+        try:
+            self._store.secret(record.name)
+        except CredentialError as error:
+            self._problem(f"credential {record.name}: {error}")
+            return False
+        return True
 
     # -- a job -----------------------------------------------------------------------------------
 
@@ -157,7 +224,7 @@ class CredentialPool:
         if not records:
             return self._choose_legacy(now)
         candidates = [
-            record for record in records if record.usable(now) and allows(record.models, model)
+            record for record in records if record.usable(now) and record.allows(now, model)
         ]
         candidates.sort(key=lambda record: (self._last_used.get(record.name, 0.0), record.name))
         for record in candidates:
@@ -189,21 +256,20 @@ class CredentialPool:
             self._problem(f"credential {name}: {error}")
 
     def _report(self, name: str, verdict: Verdict, model: str | None, now: float) -> None:
+        cooldowns = self._cooldowns
         if name == LEGACY_NAME:
             if verdict is Verdict.AUTH:
-                self._legacy.refused = True
+                self._legacy.refused_until = now + cooldowns.auth
             elif verdict is Verdict.LIMIT:
-                self._legacy.limited_until = now + self._cooldown
+                self._legacy.limited_until = now + cooldowns.limit
             return
         if verdict is Verdict.AUTH:
-            self._store.mark_refused(name)
+            self._store.mark_refused(name, now + cooldowns.auth)
         elif verdict is Verdict.LIMIT:
-            self._store.set_limited(name, now + self._cooldown)
+            self._store.set_limited(name, now + cooldowns.limit)
         elif model is not None:
-            record = next((r for r in self._store.records() if r.name == name), None)
-            for refused in covering(record.models, model) if record is not None else ():
-                self._store.drop_model(name, refused)
+            self._store.set_model_aside(name, model, now + cooldowns.model)
 
     def retry(self, name: str) -> None:
-        """Let a rate limited credential go (the owner knows the limit has reset)."""
-        self._store.set_limited(name, 0.0)
+        """Let go of every hint held against a credential (the owner knows better)."""
+        self._store.clear_hints(name)

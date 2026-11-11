@@ -7,10 +7,11 @@ who runs the runner. The credential is a one-year inference-only token from `cla
 it is printed once and stored nowhere by Claude Code, and it is **never stored in our app or its
 database, never sent to the app, never logged**. The runner reads it from
 
-1. the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else
-2. the credential store of the runner's home (`credentials.py`, #980: `factory-runner credential
-   add claude`; the first usable credential serves the self-test and the readiness, while the
-   dispatcher's pool chooses one for each job), else
+1. the credential store of the runner's home (`credentials.py`, #980: `factory-runner credential
+   add claude`) as soon as it holds a credential: the first usable one serves the self-test, while
+   the dispatcher's pool chooses one for each job, and the sources below are not looked at (one
+   source for the self-test, the readiness and the jobs), else
+2. the file named by `FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE`, else
 3. `claude-code-token` in the runner's home directory (`FACTORY_RUNNER_HOME`), else
 4. `CLAUDE_CODE_OAUTH_TOKEN` in the runner's own environment,
 
@@ -117,13 +118,11 @@ def _read_file(path: Path) -> ClaudeLogin | LoginProblem:
 
 
 def load_login(environment: Mapping[str, str], home: Path) -> ClaudeLogin | LoginProblem:
-    """The subscription login of this device, or why there is none: the file the operator named,
-    else the first usable credential of the store (`credentials.py`, #980), else the older sources
-    of `load_legacy_login`. A job process has no home to look in and finds its credential in its
-    own environment."""
-    named = environment.get(TOKEN_FILE_VARIABLE, "").strip()
-    if named:
-        return _read_file(Path(named))
+    """The subscription login of this device, or why there is none: the first usable credential of
+    the store (`credentials.py`, #980) as soon as the store holds one (a store whose credentials
+    cannot be used is a problem, never a reason to fall back to another source: the dispatcher's
+    pool does not fall back either), else the older sources of `load_legacy_login`. A job process
+    has no home to look in and finds its credential in its own environment."""
     stored = store_login(home)
     if stored is not None:
         return stored

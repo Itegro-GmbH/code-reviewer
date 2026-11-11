@@ -87,6 +87,7 @@ from code_reviewer_runner.factory_runner.config import (
 )
 from code_reviewer_runner.factory_runner.credential_pool import (
     Chosen,
+    Cooldowns,
     CredentialPool,
     Verdict,
     verdict_of_exit,
@@ -524,11 +525,15 @@ class RunnerService:
         if make is not None:
             return make(self._environment, self._seams.wall)
         home = home_directory(self._environment)
-        return CredentialPool(
+        cooldowns, problems = Cooldowns.from_environment(self._environment)
+        pool = CredentialPool(
             store_for(self._environment, home),
             lambda: load_legacy_login(self._environment, home),
             self._seams.wall,
+            cooldowns=cooldowns,
         )
+        pool.problems.extend(problems)
+        return pool
 
     def announcement(self) -> Announcement:
         """What this runner says about itself now: what `prepare` found, with the entry of Claude
@@ -609,14 +614,22 @@ class RunnerService:
             return None
         model = claimed.access.model if claimed.access is not None else None
         self._pool.report(chosen.name, verdict, model)
+        # Every verdict is a hint that expires (the job's own sandbox can forge the exit code that
+        # carries it): the owner can end the pause at once with `credential retry`. A name is a
+        # label of a-z, 0-9, dot, dash and underscore (`credentials.check_name`).
         what = {
-            Verdict.AUTH: "was refused (a 401): it stays out until it is replaced "
-            "(factory-runner credential add claude --name %s --replace)",
+            Verdict.AUTH: "was reported as refused (a 401): it is put aside for hours and tried "
+            "again (replace the token: factory-runner credential add claude --name {name} "
+            "--replace; or let go: factory-runner credential retry {name})",
             Verdict.LIMIT: "hit the usage limit of its subscription: it is put aside for a while "
-            "(factory-runner credential retry %s ends that sooner)",
-            Verdict.MODEL: "does not allow the model of the job: the model is off its list (%s)",
+            "(factory-runner credential retry {name} ends that sooner)",
+            Verdict.MODEL: "was reported not to allow the model of the job: that model is put "
+            "aside for hours for this credential (factory-runner credential retry {name} lets "
+            "it go)",
         }[verdict]
-        self._log.warning("job %s: credential %s " + what, claimed.job_id, chosen.name, chosen.name)
+        self._log.warning(
+            "job %s: credential %s %s", claimed.job_id, chosen.name, what.format(name=chosen.name)
+        )
         return verdict
 
     async def _run_job(self, claimed: ClaimedWorker) -> WorkerEnd:
@@ -650,6 +663,10 @@ class RunnerService:
             )
             await self._give_back(claimed, RELEASE_LAUNCH_FAILED)
             await self._sync_announcement()
+            # The app counts an attempt for every claim given back: a store that cannot serve
+            # (the secret cannot be read, say) must not make the next claim follow at once and
+            # spend an attempt of every queued job, as a Worker that cannot start would not.
+            self._start_failed()
             return WorkerEnd.NOT_STARTED
         start = WorkerStart(
             self._config.url,

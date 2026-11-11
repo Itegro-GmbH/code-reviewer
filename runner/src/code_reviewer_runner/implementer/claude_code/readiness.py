@@ -4,16 +4,17 @@
 
 The platform's catalog holds only OpenCode; Claude Code exists for the app only when a runner
 announces it in its manifest as **ready**: installed (the layer with the pinned version is on the
-device's daemon, `layer.py`) and logged in (a token the device holds, `login.py`). A device with no
-login at all does not use Claude Code and says nothing about it. A device that has a login but no
-usable layer or token announces it as not ready and says why in its log; a harness that is not
+device's daemon, `layer.py`). Readiness is decided from the layer **alone** (#980): whether the
+entry is offered at any moment is the dispatcher's pool's to say from the credentials the device
+holds then (`credential_pool.py`), before every claim, so a credential added after the service
+started is offered without a restart. A device with no credential yet is ready and says so in its
+log; a login that cannot be used is a note, not a reason for "not ready". A harness that is not
 ready never costs the base: OpenCode stays as it was.
 
 The proof is the layer's own: its build fails unless the installed program reports the pinned
-version, and the token file is read the way the turn reads it. What is **not** yet proven here is a
-turn of the adapter against a canned provider inside the container (a follow-up of #856): until it
-exists, "ready" means "installed and logged in", and the first real turn is the first real test of
-the login.
+version. What is **not** yet proven here is a turn of the adapter against a canned provider inside
+the container (a follow-up of #856): until it exists, "ready" means "installed", and the first real
+turn is the first real test of the login.
 """
 
 from collections.abc import Mapping
@@ -61,29 +62,27 @@ def claude_code_status(
     *,
     build: bool,
     agent_image: str = AGENT_IMAGE,
-) -> HarnessStatus | None:
-    """None for a device that does not use Claude Code. `build` False only looks (the self-test
-    command pulls and names nothing); True builds a missing layer (a starting runner)."""
-    login = load_login(environment, home)
-    if isinstance(login, LoginProblem) and not login.configured:
-        return None
+) -> HarnessStatus:
+    """What a runner says of Claude Code from the layer alone (#980): ready when the layer is there
+    (or could be built). The notes carry what the login of the device says now: a problem in words,
+    or that there is no credential yet. `build` False only looks (the self-test command pulls and
+    names nothing); True builds a missing layer (a starting runner)."""
     spec = layer_spec(environment)
     if isinstance(spec, str):
         return HarnessStatus("0", False, (spec,))
-    if isinstance(login, LoginProblem):
-        return HarnessStatus(spec.version, False, (login.text,))
+    login = load_login(environment, home)
+    notes = (login.text,) if isinstance(login, LoginProblem) else ()
     try:
         if build:
             layer = ensure_layer(daemon, agent_image, spec)
-            notes = (f"the layer with Claude Code {spec.version} was built",) if layer.built else ()
+            if layer.built:
+                notes = (f"the layer with Claude Code {spec.version} was built", *notes)
         elif find_layer(daemon, agent_image, spec) is None:
             return HarnessStatus(
                 spec.version,
                 False,
                 (f"the layer with Claude Code {spec.version} is not built (a start builds it)",),
             )
-        else:
-            notes = ()
     except LayerError as error:
         return HarnessStatus(spec.version, False, (str(error),))
     return HarnessStatus(spec.version, True, notes)

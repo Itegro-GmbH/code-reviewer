@@ -144,16 +144,29 @@ App** (the Worker API, `crj_`, everywhere).
   uses the same parser. Control had read no `localCredential` before this issue; the host's per-VM `controlToken` in the same document goes to the environment control and not to the agent.
 - **The store** (`implementer/claude_code/credentials.py`): `<runner home>/credentials/` (0700) with an index without values and one 0600 secret file for each credential, **sealed with `systemd-creds --user`
   when that works** and otherwise a plain 0600 file (`FACTORY_RUNNER_CREDENTIAL_STORAGE`: `auto`, `systemd-creds`, `plain`). Added from the standard input only (`factory-runner credential add claude --name`, `list`,
-  `remove`, `retry`, `add --replace`); never mirrored from `~/.claude/.credentials.json`. The token files of R3 are read only while the store is empty.
-- **The manifest** announces `claude-code`, `auth: subscription` and the union of the `models` of the credentials that can be used now (defaults `sonnet`, `opus`, `haiku`), never a name. **Alias or id (settled):** the runner
-  announces what its owner gave and the matching learns the alias-to-id map: `contracts/claude-model-aliases.v1.json` (patterns and vectors), a typed copy in the app (`model-aliases.ts`, also written into `accessRule`)
-  and in the runner (`model_names.py`), a test of each side against the file, the vectors run through the SQL rule as well. Announcing ids was rejected: it would need a list that changes with every model release.
-- **Choice, withdrawal and verdicts** (`factory_runner/credential_pool.py`, `service.py`): one credential for a job, the one that is not rate limited, not refused and allows the job's model, the one unused longest first. A job the
-  subscription refused ends with `subscription_auth`, `subscription_limit` or `subscription_model_refused` (free; contract, app copy and billing class), and the Worker's exit code (20, 21, 22) tells the dispatcher, which cannot read the
-  result: the credential is put aside for an hour, kept out until it is replaced, or loses the model. The entry is withdrawn from the manifest (a new `PUT /self` before the next claim) while no credential is usable, and returns by itself.
-- **Not built, on purpose:** running `claude setup-token` in a throwaway VM. It is interactive, and neither vm-init (one start, one report, no terminal) nor the missing outer wall (#979) can carry it; a follow-up of #978 and #979.
-  Claude Code's answer to a model the subscription does not allow was not measured against the real program (status 404 and its own sentence are read). In Firecracker mode the entry is not announced yet: whether the golden image
-  holds Claude Code is #981.
+  `remove`, `retry`, `add --replace`); never mirrored from `~/.claude/.credentials.json`. **One login source:** `load_login` reads the store as soon as it holds a credential (and then ignores the token file and the
+  environment variable of R3), so the self-test, the readiness and the jobs agree with the dispatcher's pool; `store_login` returns only a credential that can be used now. The token files of R3 are read only while the store
+  is empty. **What the seal is:** `systemd-creds` protects the token **at rest** only. The dispatcher decrypts without a passphrase, so code running as the service user can decrypt it as well; the sealed path was written
+  against the documented behaviour and has **not** been run against a real systemd 256 or later (the DevBox has 255) (#997).
+- **The manifest** announces `claude-code`, `auth: subscription` and the union of the `models` of the credentials that can be used now (defaults `sonnet`, `opus`, `haiku`), never a name. A credential counts only if its
+  secret can be read: an entry no credential can serve is not announced, and a claim that comes anyway is given back **with the start-failure backoff**, so a broken store cannot loop claim and release and spend an attempt
+  of every queued job. **Readiness is decided from the layer alone** (`claude_code_status`): the service offers the entry whenever the pool finds a usable credential, also when it started before the first
+  `credential add`, so no restart is needed. **Alias or id (settled):** the runner announces what its owner gave and the matching learns the alias-to-id map: `contracts/claude-model-aliases.v1.json` (patterns and vectors),
+  a typed copy in the app (`model-aliases.ts`, also written into `accessRule`) and in the runner (`model_names.py`), a test of each side against the file, the vectors run through the SQL rule as well. Announcing ids was rejected:
+  it would need a list that changes with every model release.
+- **Choice, and what a job's end teaches** (`factory_runner/credential_pool.py`, `service.py`): one credential for a job, the one that is not rate limited, not refused and allows the job's model, the one unused longest
+  first. A job the subscription refused ends with `subscription_auth`, `subscription_limit` or `subscription_model_refused` (free; contract, app copy and billing class), and the Worker's exit code (20, 21, 22) tells the
+  dispatcher, which cannot read the result. **All three are hints that expire, none is a verdict.** The exit code derives from the job's `result` event on Claude Code's standard output, and the agent in the sandbox runs as
+  the same user as Claude Code (`agent`, uid 10201), so it can, as far as we can tell, write that event itself or ptrace the process: the verdict is **forgeable from inside the sandbox**, and nothing cheap prevents it
+  (the tools are Claude Code's children, `no-new-privileges` does not stop a same-user ptrace, the token is in the same environment anyway). So a 401 puts the credential aside for six hours (`AUTH_COOLDOWN_SECONDS`), a
+  refused model leaves the offer for six hours (that one id; an alias is never taken off by one refusal and is set aside once two ids it covers are, `ALIAS_ASIDE_AFTER`), a limit puts it aside for one hour; all three
+  are configurable (`FACTORY_RUNNER_CREDENTIAL_{LIMIT,AUTH,MODEL}_COOLDOWN_SECONDS`) and `credential retry` ends them at once. The list the owner gave is never shrunk (`add --replace` without `--models` keeps it).
+  The impact of a forgery is limited to the owner's own credentials on the owner's own device, for hours. The entry is withdrawn from the manifest (a new `PUT /self` before the next claim) while no credential is usable,
+  and returns by itself. **A job that hits the limit fails (free) and is not moved to another credential in the middle of its run:** a turn is one Claude Code session on one login.
+- **The agent still gets the token** in its environment, as in R3 (Claude Code needs it there and the tool processes inherit it); what limits its use of it is the outer wall (#979), which does not exist yet.
+- **Not built, on purpose:** running `claude setup-token` in a throwaway VM (#995). It is interactive, and neither vm-init (one start, one report, no terminal) nor the missing outer wall (#979) can carry it; a follow-up of
+  #978 and #979. Claude Code's answer to a model the subscription does not allow was not measured against the real program (status 404 and its own sentence are read; #996). In Firecracker mode the entry is not
+  announced yet: whether the golden image holds Claude Code is #981.
 
 ## 4. Alternatives considered
 
