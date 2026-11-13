@@ -2904,7 +2904,7 @@ The spike's three open gates (a copy-on-write pool, Docker in Incus on the packa
 
 #### Docker in the instance, AppArmor on (question 1)
 
-The profile is the spike's without the `raw.lxc` line (`spike/incus/setup.sh`: `SPIKE_APPARMOR_OFF` adds it back). `docker info`: `overlayfs`, `io.containerd.snapshotter.v1`, cgroup v2 with the `systemd` driver, Docker 29.1.3; root of the instance `uid_map 0 1065536 65536`, `Seccomp: 2`. The battery of `q1-docker-in-incus.sh` (images pre-pulled, load 12 to 15): `docker run hello-world` 2.1 s and 2.7 s, `run busybox` 2.4 to 2.6 s, `build` of three layers (a 50 MB file) 9.2 to 9.3 s, `compose up` 6.0 to 6.3 s (3 s of it the service's `sleep`). **These are 2.5 to 9 times the first spike's (0.85, 0.78, 0.99, 3.92 s at load 1.4) and the cause was not isolated**: AppArmor is not it (the same instance with `raw.lxc` unconfined: `docker run busybox true` 1.8 to 2.1 s against 2.0 to 2.7 s with the profile on), nor is Docker's cgroup driver (`cgroupfs`: 1.8 to 2.4 s), nor the options of `docker run` (`--network none`, `--privileged`, seccomp off, host namespaces: 1.6 to 2.0 s each); `docker create` and `rm` take 0.2 s, `start` 0.65 s and `wait` 0.41 s (and each `incus exec` adds its own 0.2 to 0.4 s at this load). A quiet-host re-measure is a follow-up.
+The profile is the spike's without the `raw.lxc` line (`spike/incus/setup.sh`: `SPIKE_APPARMOR_OFF` adds it back). `docker info`: `overlayfs`, `io.containerd.snapshotter.v1`, cgroup v2 with the `systemd` driver, Docker 29.1.3; root of the instance `uid_map 0 1065536 65536`, `Seccomp: 2`. The battery of `q1-docker-in-incus.sh` (images pre-pulled, load 12 to 15): `docker run hello-world` 2.1 s and 2.7 s, `run busybox` 2.4 to 2.6 s, `build` of three layers (a 50 MB file) 9.2 to 9.3 s, `compose up` 6.0 to 6.3 s (3 s of it the service's `sleep`). **These are 2.5 to 9 times the first spike's (0.85, 0.78, 0.99, 3.92 s at load 1.4) and the cause was not isolated**: AppArmor is not it (the same instance with `raw.lxc` unconfined: `docker run busybox true` 1.8 to 2.1 s against 2.0 to 2.7 s with the profile on), nor is Docker's cgroup driver (`cgroupfs`: 1.8 to 2.4 s), nor the options of `docker run` (`--network none`, `--privileged`, seccomp off, host namespaces: 1.6 to 2.0 s each); `docker create` and `rm` take 0.2 s, `start` 0.65 s and `wait` 0.41 s (and each `incus exec` adds its own 0.2 to 0.4 s at this load). **The quiet-host re-measure (#1013) found the cause: a busy disk, not anything in the setup; on a quiet runner a `docker run busybox true` takes 0.35 s, see [The cost of a docker run in an instance](#the-cost-of-a-docker-run-in-an-instance-1013).**
 **The bench's three-layer build is not comparable to the first spike's** (6.6, 1.3 and 0.9 s) **and those figures should be treated as doubtful**: it now takes 48 to 61 s in the instance, of which 36 s is Docker exporting the image (gzip of about 700 MB; `gzip` of 300 MB of random data costs 10.8 s in the instance and 14.2 s on the host at that load, so it is CPU, not the storage), and the bench discards the build's output, so a failed build looks like a fast one.
 
 **Privileged DinD** (the agent): ready 8.4 s after `docker run` at load 15 (5.6 to 5.9 s at a load of about 6; 1.30 s at load 1.4 in the first spike), `postgres:17-alpine` pulled through the proxy and run inside it (`select 6*7` = 42), `docker run hello-world` and a `docker build` inside it work. What "privileged" reaches is unchanged: `/dev` holds no block device (`mount /dev/sda1` answers `No such file or directory`; 6.0.0 said `permission denied`), `uid_map 0 1065536 65536`, all capabilities of the instance's user namespace only, and the AppArmor namespace of the instance around it.
@@ -2980,6 +2980,81 @@ So **the hand-over is "the same instance"** and it is trivial in Incus: what the
 #### Clean-up of the re-measure
 
 At the end: no instance, no image (the golden image and the Ubuntu base), no network (`spkin`, `spkout`), no ACL, no profile, **no volume** (the `images` volume), `storage.images_volume` unset again (the server config is `{}`), the host proxy, the decoy and the control endpoint stopped, the downloads and the scratch files deleted; **`crpool` is kept** (empty: 8.6 MiB used) and the `default` pool, `default` profile and `incusbr0` were never touched. `/` is at 71 % as before (27 G; nothing of the spike was on it: `storage.images_volume` pointed the image store at `crpool` before the first image).
+
+### The cost of a docker run in an instance (#1013)
+
+The re-measure above found `docker run busybox true` at about 2 s inside an instance (0.8 s in the first spike) and could not name the cause: the host was at load 5 to 20. This section is the quiet-host measurement and the controls that find the cause. **Short answer: on a quiet host a `docker run busybox true` in the instance takes 0.26 to 0.35 s on three runners (Docker on the same machine without Incus: 0.17 to 0.20 s), so the instance costs about 0.1 s and not 2 s. Every control that took a suspect away (AppArmor, the user namespace, the limits, the options) changed nothing; what takes it to 2 s is a busy disk: one process that `fsync`s next to the pool gives 2.0 to 2.9 s in the instance and 1.3 to 3.5 s on the host (`create`, `start` and `wait` 0.6 to 1.2 s each, the DevBox's shape), while `runc` stays at 0.03 s.** So the DevBox's 2 s is fsync latency of a shared disk, not Incus.
+
+#### The bench
+
+`tools/incus-docker-bench/` and `.github/workflows/incus-docker-bench.yml` (it runs on a pull request that touches those files, and by hand; nothing else starts it). On a GitHub `ubuntu-24.04` runner (AMD EPYC 7763, 4 vCPUs, 16 GiB, kernel 7.0 azure, load 0.1 to 0.9 at the start) `bench.sh` installs **Incus 7.6 from the Zabbly stable repository** (the package of the re-measure, `1:7.6-ubuntu24.04-202611072126`, key fingerprint checked), makes a **btrfs loop pool** (12 GiB, `crpool`) and a `dir` pool, builds a golden instance (Ubuntu 24.04, Docker 29.1.3 static bundle, **containerd image store, overlayfs, cgroup v2 with the systemd driver, AppArmor on**; the spike's profile: unprivileged, isolated idmap, nesting, 2 CPUs, 2 GiB, 4096 processes; every download pinned by sha256) and times, in variants of that instance, 12 repetitions after one warm-up each:
+
+- `run.total`: `docker run --rm --pull=never busybox true` **in a shell inside the instance** (no `incus exec` in the path), and the same work split into `docker create`, `start`, `wait`, `rm`;
+- `exec.*`: the same from the host through `incus exec` (the client overhead; `exec.true` is the floor of one exec);
+- options that each take one thing from the container (`--network none`, seccomp and AppArmor unconfined), and floors: a daemon round trip (`docker ps`), the client alone, 200 process starts, **`runc run` alone** (no dockerd, no containerd), **`ctr run`** (containerd and its shim, no dockerd), 20 small `dsync` writes;
+- the timeline of one `docker run` as Docker's and containerd's events show it;
+- the first spike's comparison points (`hello-world`, a 50 MB one-layer build, `compose up`, 1 GiB of sha256 and of `fdatasync` writes) and its three-layer build.
+
+**A failed command never has a time.** `lib.sh` records `FAILED` (and no seconds) for a command that exited non-zero or printed something other than it must; `timed_build` records a build's time only after the build exited 0, printed an image id, left the image and a container of it printed the marker the Dockerfile wrote. `summarize.py` fails the job on any `FAILED` of a series that is not a control, and on a series with fewer good samples than it promised. (The first spike's `bench.sh` discarded the build's output.) Every variant is checked to be what its name says before it is measured (AppArmor profile read from the host's `/proc/<pid>/attr/current`, `uid_map`, `pids.max`, `docker info` store and root); a variant that is not fails the job. `docker run` always has `--pull=never`, so a missing image is a failure and not a pull in the timing. The helpers' tests are `app/src/ci/incus-docker-bench.test.ts`.
+
+#### Where the 0.3 s goes (quiet runner, median seconds, run `43080835665` on the head of this branch; two earlier runs on the same kind of runner, `43066107223` and `43068362543`, differ by at most 0.05 s; a fourth, `43090882032`, on a faster CPU (AMD EPYC 9V74), gives the same shape at 0.8 times the times: host 0.17, setup 0.26, classic store 0.23, tmpfs 0.21, `dir` pool 0.23, privileged 0.28, AppArmor off 0.26)
+
+| Variant (what it takes away) | `run --rm` | create | start | wait | rm | `--network none` |
+|---|---|---|---|---|---|---|
+| **Docker on the runner, no Incus** (overlay2 on ext4, Docker 28.0.4) | **0.20** | 0.02 | 0.12 | 0.06 | 0.02 | 0.13 |
+| **instance, btrfs pool, AppArmor on, containerd store (the setup)** | **0.35** | 0.08 | 0.16 | 0.10 | 0.03 | 0.26 |
+| same again, 25 minutes later (drift) | 0.31 | 0.07 | 0.14 | 0.09 | 0.03 | 0.23 |
+| AppArmor off (`raw.lxc` unconfined) | 0.35 | 0.08 | 0.15 | 0.10 | 0.03 | 0.26 |
+| privileged instance (the host's uid_map) | 0.34 | 0.08 | 0.15 | 0.10 | 0.03 | 0.26 |
+| no CPU, memory and process limits | 0.31 | 0.07 | 0.14 | 0.09 | 0.03 | 0.24 |
+| Docker's classic overlay2 store instead of the containerd store | 0.27 | 0.03 | 0.14 | 0.09 | 0.02 | 0.19 |
+| Docker's data root on a tmpfs in the instance | 0.26 | 0.06 | 0.14 | 0.08 | 0.02 | 0.19 |
+| the instance on a `dir` pool (ext4) | 0.28 | 0.06 | 0.14 | 0.08 | 0.02 | 0.20 |
+
+Read: **AppArmor, the user namespace, the cgroup limits and the options of `docker run` cost nothing measurable**: the setup measured twice, 0.35 and 0.31 s, 25 minutes apart (0.26 and 0.29 s on the other runner), so the noise is about 0.05 s and all four variants lie inside it. What is left of the 0.15 s between the host and the setup is **the storage under Docker's data root and the image store**: the classic store (0.27 s, `create` 0.03 s against 0.08 s), the `dir` pool's ext4 (0.28 s) and a tmpfs (0.26 s) each take 0.05 to 0.09 s off, and about 0.06 s stays that the instance costs even then (0.26 s against the host's 0.20 s; the network connect of a container in a user namespace is the likely part: `--network none` takes 0.09 s off in the instance and 0.07 s on the host). `runc run` alone takes 0.03 s and `ctr run` 0.12 to 0.15 s in every variant, so **runc, the cgroup and the AppArmor profile of a container are not where the time is**; dockerd's work is. The `incus exec` around a `docker run` adds **0.06 s** (`exec.run` 0.41 s against 0.35 s; one `exec true` takes 0.04 s); four execs for create, start, wait and rm add 0.16 s to the split.
+The timeline of one run in the setup: container created at +0.09 s, network connected +0.22 s, started +0.24 s, die +0.34 s; containerd's events inside it: snapshot prepare, commit, prepare, container create, task create, **task start +0.045 s, exit 6 ms later, delete 12 ms after**. The shim and runc take about 0.1 s of the 0.34.
+
+#### Startup and the first spike's comparison points
+
+| | quiet runner (this measurement) | first spike (Incus 6.0.0, `dir`, load 1.4) | re-measure (7.6, btrfs, load 5) |
+|---|---|---|---|
+| `incus init` (btrfs pool) | **0.09 s**; the first one of the image **5.4 s** (image volume unpacked once) | 19 s per instance | 0.14 to 0.46 s; first 20.8 s |
+| `incus init` (`dir` pool) | 2.6 s (every instance; 1.3 GB copied) | 19 s | |
+| `incus start` | 0.24 s | 0.3 s | 0.23 to 0.33 s |
+| dockerd answers after start | **1.7 s** (btrfs; 1.5 to 1.75), 1.8 s (`dir`) | 2.5 to 3.1 s | 1.95 to 2.18 s |
+| first `docker run busybox true` through `incus exec` | 0.42 s (btrfs); **2.7 s on the `dir` pool** | | 1.90 to 2.23 s |
+| nothing to the first container | **2.5 s** (btrfs; 7.8 s the very first), 7.3 s (`dir`) | | 4.35 to 4.68 s |
+| `docker run hello-world` | 0.35 s (host Docker 0.20 s) | 0.85 s | 2.1 to 2.7 s |
+| `docker run busybox` | 0.31 to 0.35 s | 0.78 s | 2.4 to 2.6 s |
+| `docker build` of one layer with 50 MB | 1.25 s (classic store 0.53 s, host 0.64 s, `dir` 0.96 s) | 0.99 s | 9.2 s |
+| `compose up` (3 s of it a `sleep`) | 3.55 s (host 3.3 s) | 3.92 s | 6.0 to 6.3 s |
+| `incus delete -f` | 0.81 s (btrfs), 2.6 s (`dir`) | | 0.3 to 3.6 s |
+
+Two things the table says. **The btrfs pool is what makes the start cheap** (0.09 s against 2.6 s), as the re-measure said; and **on the `dir` pool the first container after the start takes 2.7 s** (the first `docker run` through `incus exec` after a fresh copy reads the image's files cold; the btrfs clone does not), so a `dir` pool is not a fallback that is only 19 s slower at `init`. The quiet-host start to the first container, 2.5 s, is **the same as Firecracker's 2.6 s** ("Control could start") and not worse by 2 s as the busy host suggested.
+**The three-layer build of the first spike's `bench.sh`** (150 MB of random data and its gzip, 200 MB of zeros, a tar) now has a checked number: **host 11.8 s, instance with the classic overlay2 store 12.2 s, instance with the containerd store 27 to 30 s** (btrfs, `dir` pool and AppArmor off alike). The build is slow because of the **containerd image store** (it exports and unpacks the layers itself, the 36 s the re-measure saw), not because of Incus; with Docker's classic store the instance builds as fast as the host. 1 GiB of sha256 takes 0.93 s on the host and 0.91 to 1.01 s in the instance; 1 GiB with `fdatasync` 2.66 s on the host, 2.65 s on the `dir` pool and 3.4 to 3.5 s on btrfs.
+
+#### The cause of the 2 s: a busy disk, not a busy CPU
+
+The DevBox ran at load 5 to 20. The bench keeps the runner busy and measures the same series (6 repetitions; Docker on the host and in the setup instance):
+
+| While the runner is kept busy with | host `run --rm` | instance `run --rm` | instance create / start / wait | `runc run` | 20 `dsync` writes |
+|---|---|---|---|---|---|
+| nothing (load 0.5 to 3) | 0.20 | 0.35 | 0.08 / 0.16 / 0.10 | 0.03 | 0.01 |
+| 8 busy loops (load 7 to 11; earlier run) | 0.39 to 0.42 | 0.47 to 0.54 | 0.12 / 0.21 / 0.15 | 0.04 | |
+| 16 busy loops (load 12 to 18) | 0.43 to 0.51 | 0.39 to 0.75 | 0.16 / 0.23 / 0.15 | 0.04 | 0.04 |
+| **1 writer that `fsync`s on the disk** (load 4 to 7) | **1.33** (3.54) | **2.01** (2.92) | 0.64 / 0.69 / 0.66 (0.84 / 1.11 / 1.05) | 0.03 | 0.43 (0.99) |
+| **4 such writers** (load 6 to 7) | **15.1** (49.9) | **18.9** (31.7) | 4.0 / 10.4 / 4.7 (9.6 / 9.1 / 7.6) | 0.04 | 6.2 (7.8) |
+
+(In the two rows of the disk, the numbers in parentheses are the other runner's: a disk-bound number depends on the runner's disk and varies by a factor of two to three between runners, the shape does not.) **CPU load alone does not make a `docker run` 2 s**: at a load of 12 to 18 on 4 vCPUs the instance takes 0.4 to 0.75 s. **A busy disk does**: one process that writes and `fsync`s on the disk the pool's loop file lives on takes the instance to **2.0 s** (create 0.64, start 0.69, wait 0.66 s; 2.9 s on the other runner) and plain Docker on the host to 1.3 s (3.5 s), while the **same load leaves `runc run` at 0.03 s and 200 process starts at 0.15 s**: the time is in what dockerd and containerd wait for. 20 small `dsync` writes take 0.01 s on a quiet disk and 0.43 s (1.0 s) next to one writer, about 20 ms for each fsync, which is what each of `create`, `start` and `wait` waits for several times (Docker writes the container's config and state, containerd's database and the snapshot's metadata with fsync); four writers make it 6 s for 20 writes and 15 to 19 s per `docker run`. **The DevBox's numbers (create and rm 0.2 s, start 0.65 s, wait 0.41 s, each `incus exec` 0.2 to 0.4 s, `docker run` 2 s) are the one-writer row**, and not a CPU one: the DevBox's disk is shared with the other agents' installs, builds and test databases, and the pool's loop file and `/var/lib/docker` both sit on it. This does not prove the DevBox's disk was the cause (no I/O counters were read there, and the runner's disk is not the DevBox's); it shows that a busy disk, and only that, takes `docker run` from 0.35 s to 2 s with every other part of the setup unchanged, in the shape the DevBox showed.
+
+#### What follows
+
+- **There is nothing in Incus to fix.** The setup's `docker run` is 0.35 s on a quiet host; AppArmor on, the isolated user namespace, the limits and the options need no change. Nothing in this PR changes a product file.
+- **The start budget of the local backend is 2.5 s to the first container on btrfs** (init 0.09 s, start 0.23 s, dockerd 1.7 s, first run 0.42 s), and 7.3 s on a `dir` pool. The btrfs pool is a requirement of that number, not an optimisation.
+- **A job's `docker run`s depend on the disk's fsync latency.** The runner on a customer's machine should keep the pool (and with it Docker's data root) on a disk that is not shared with heavy writers; the runner's self-test could time 20 small `dsync` writes there (0.01 s here when quiet) and warn above 0.1 s. That check is a follow-up, not part of this issue. A tmpfs data root is 0.09 s faster per run than btrfs but takes memory from the instance's limit; it is not a recommendation.
+- **Docker's classic image store builds 2.4 times faster than the containerd store in an instance** (12.2 s against 27 to 30 s for the bench's three-layer build; the host's overlay2: 11.8 s) and `docker run` is 0.05 s faster. Which store the golden image should use is a follow-up for whoever owns the image recipe: it is a choice between build speed and what the hosted VM does, and this measurement is the input.
+- **Not measured:** memory pressure and swap (the DevBox had under 1 GB free), a busy disk with fewer than one writer, other kernels (the runner's is 7.0 azure, the DevBox's 6.8), the host's own Docker and Incus side by side under load.
+- The numbers of this section are re-made by running the workflow (`workflow_dispatch`, or any change to the bench's files in a pull request): the job summary has every table, the artifact `incus-docker-bench` the raw samples (`samples.tsv`).
 
 ### What was not proven
 
