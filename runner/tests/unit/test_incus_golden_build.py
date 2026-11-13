@@ -76,6 +76,27 @@ def test_the_script_names_the_pinned_version_and_refuses_what_is_not_an_image_id
     assert run_script().returncode != 0
 
 
+# #1023-T19
+def test_the_layer_is_built_on_the_agents_tag_as_a_bare_id_does_not_resolve_there() -> None:
+    """Found by the first real build: in the image's Docker (containerd store) `FROM sha256:<id>`
+    is resolved as `docker.io/library/sha256` and fails. The layer is built `FROM` the agent's tag
+    there; its own tag still names the id the tag had at that moment."""
+    on_tag = run_script("context", "--base-id", BASE, "--from", "code-reviewer-agent:golden")
+
+    assert on_tag.returncode == 0, on_tag.stderr
+    with tarfile.open(fileobj=io.BytesIO(on_tag.stdout)) as archive:
+        member = archive.extractfile("Dockerfile")
+        assert member is not None
+        text = member.read().decode()
+    assert text == dockerfile(BASE, LayerSpec()).replace(
+        f"FROM {BASE}\n", "FROM code-reviewer-agent:golden\n", 1
+    )
+    for bad in ("", "-x", "a b", "a;b", "$(x)"):
+        refused = run_script("context", "--base-id", BASE, "--from", bad)
+        assert refused.returncode != 0 and refused.stdout == b"", bad
+    assert '--from "$AGENT"' in BUILD_GOLDEN.read_text(encoding="utf-8")
+
+
 # #1023-T16
 def test_build_golden_installs_the_layer_after_the_agent_image_and_checks_it_across_a_restart() -> (
     None

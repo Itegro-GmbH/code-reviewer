@@ -231,7 +231,7 @@ if [ "$CLAUDE_CODE" = 1 ]; then
   # variables are build arguments only (a predefined argument is not kept in the image).
   claude_tag="$(python3 "$LAYER" tag --base-id "$agent_id")"
   say "installing Claude Code $(python3 "$LAYER" version) into the agent image as $claude_tag"
-  python3 "$LAYER" context --base-id "$agent_id" \
+  python3 "$LAYER" context --base-id "$agent_id" --from "$AGENT" \
     | "$INCUS" exec "$BUILD" -- docker build --network host \
       --build-arg "HTTPS_PROXY=http://$HOST_ADDRESS:$PROXY_PORT" --build-arg "HTTP_PROXY=http://$HOST_ADDRESS:$PROXY_PORT" \
       --tag "$claude_tag" - >&2
