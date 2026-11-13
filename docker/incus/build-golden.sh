@@ -6,11 +6,13 @@
 # into that Docker, published as the Incus image alias the launcher expects (`code-reviewer-golden`, FACTORY_RUNNER_INCUS_IMAGE).
 #
 #   docker/incus/build-golden.sh [--alias NAME] [--pool POOL] [--prefix PREFIX] [--network-cidr CIDR] [--base IMAGE]
-#                                [--worker TAG] [--agent TAG] [--cache-dir DIR] [--replace]
+#                                [--worker TAG] [--agent TAG] [--worker-command CMD] [--agent-command CMD] [--cache-dir DIR] [--replace]
 #
 # What it needs: an `incus` the caller may use (a member of `incus-admin`: run it as that user, or put a command such as `sg incus-admin -c` around
 # the whole script), a storage pool (the jobs' own pool, btrfs), a Docker on the caller's side that holds the two images (built from
-# runner/Dockerfile, targets `sandbox` and `agent`, tagged as below) and internet for the base image, the Ubuntu archive and the two downloads.
+# runner/Dockerfile, targets `sandbox` and `agent`, tagged as below; or, instead of a stored image, `--worker-command` / `--agent-command`: a shell
+# command whose standard output is the image's archive, for a machine that has no room for the image twice, e.g. `docker buildx build --target sandbox
+# --output type=docker,dest=- .`; the tag is then the one the archive carries) and internet for the base image, the Ubuntu archive and the two downloads.
 # The build instance itself has no way out but a small forward proxy of this directory (build-proxy.py, started on the host's address of the build
 # bridge and allowed to reach the Ubuntu archive only): on the DevBox, whose Docker belongs to other users, a NATed Incus bridge does not reach the
 # internet, and a build that needs a router's help would not be a build any machine can repeat.
@@ -45,6 +47,8 @@ BASE="images:ubuntu/24.04"
 CIDR="10.97.77.1/24"
 WORKER="code-reviewer-worker:golden"
 AGENT="code-reviewer-agent:golden"
+WORKER_COMMAND=""
+AGENT_COMMAND=""
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/code-reviewer/incus-golden"
 REPLACE=0
 KEEP=0
@@ -59,6 +63,8 @@ while [ $# -gt 0 ]; do
     --base) BASE="$2"; shift 2 ;;
     --worker) WORKER="$2"; shift 2 ;;
     --agent) AGENT="$2"; shift 2 ;;
+    --worker-command) WORKER_COMMAND="$2"; shift 2 ;;
+    --agent-command) AGENT_COMMAND="$2"; shift 2 ;;
     --cache-dir) CACHE="$2"; shift 2 ;;
     --replace) REPLACE=1; shift ;;
     --keep) KEEP=1; shift ;;
@@ -95,9 +101,10 @@ exe() { ix exec "$BUILD" -- "$@"; }
 script() { "$INCUS" exec "$BUILD" -- bash -s; }
 
 # -- 0. what it is told to load ---------------------------------------------------------------------------------------------------------------------
-for tag in "$WORKER" "$AGENT"; do
-  docker image inspect --format '{{.Id}}' "$tag" >/dev/null 2>&1 \
-    || { say "the image $tag is not in the caller's Docker (build runner/Dockerfile, targets sandbox and agent)"; exit 1; }
+for pair in "$WORKER:$WORKER_COMMAND" "$AGENT:$AGENT_COMMAND"; do
+  [ -z "${pair#*:}" ] || continue
+  docker image inspect --format '{{.Id}}' "${pair%%:*}" >/dev/null 2>&1 \
+    || { say "the image ${pair%%:*} is not in the caller's Docker (build runner/Dockerfile, targets sandbox and agent)"; exit 1; }
 done
 if ix image alias list --format csv 2>/dev/null | cut -d, -f1 | grep -qx "$ALIAS"; then
   [ "$REPLACE" = 1 ] || { say "the image alias $ALIAS exists (--replace to replace it)"; exit 1; }
@@ -184,7 +191,12 @@ EOS
 
 # -- 4. the two images, streamed ----------------------------------------------------------------------------------------------------------------------
 say "loading $WORKER and $AGENT (streamed, no archive)"
-docker save "$WORKER" "$AGENT" | "$INCUS" exec "$BUILD" -- docker load >&2
+load_image() { # <tag> <command or empty>: the archive goes from the producer into the instance's `docker load`
+  if [ -n "$2" ]; then bash -c "$2" | "$INCUS" exec "$BUILD" -- docker load >&2
+  else docker save "$1" | "$INCUS" exec "$BUILD" -- docker load >&2; fi
+}
+load_image "$WORKER" "$WORKER_COMMAND"
+load_image "$AGENT" "$AGENT_COMMAND"
 id_of() { exe docker image inspect --format '{{.Id}}' "$1" | tr -d '\r\n'; }
 worker_id="$(id_of "$WORKER")"
 agent_id="$(id_of "$AGENT")"

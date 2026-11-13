@@ -9,10 +9,11 @@
 #
 #   runner/tests/incus/build-lane-image.sh <pki dir> [--pool POOL] [--prefix PREFIX] [--alias ALIAS] [--ca-days N]
 #
-# It expects the two images of the recipe in the caller's Docker (`code-reviewer-worker:golden`, `code-reviewer-agent:golden`: runner/Dockerfile,
-# targets `sandbox` and `agent`), makes the CA in <pki dir> unless it is there, derives the Worker image (same tag, the CA appended), runs build-golden.sh
-# for the alias (default `crlane-golden`) and removes the derived Worker image from the caller's Docker again. It prints the variables of the lane:
-# CR_INCUS_JOB_IMAGE, CR_INCUS_JOB_IMAGE_ID, CR_INCUS_JOB_PKI. Run it as a member of `incus-admin` (see build-golden.sh).
+# It makes the CA in <pki dir> unless it is there, builds the Worker image from runner/Dockerfile (target `sandbox`) with one more stage that appends the
+# CA to the bundle, and the agent image (target `agent`), and **streams both** from the builds into build-golden.sh (`--output type=docker,dest=-`: no image
+# is stored on the caller's disk, which on the DevBox has no room for the images twice; the layers come from the builder's cache). It runs build-golden.sh
+# for the alias (default `crlane-golden`, replacing the old one) and prints the variables of the lane: CR_INCUS_JOB_IMAGE, CR_INCUS_JOB_IMAGE_ID,
+# CR_INCUS_JOB_PKI. Run it as a member of `incus-admin` (see build-golden.sh); a build is heavy: `flock /tmp/cr-heavy.lock` on a shared machine.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
@@ -32,29 +33,36 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$POOL" ] || { echo "build-lane-image: --pool is required" >&2; exit 2; }
-WORKER="code-reviewer-worker:golden"
 
 mkdir -p "$PKI"
 if [ ! -f "$PKI/lane-ca.crt" ]; then
   (cd "$REPO/runner" && uv run --frozen python tests/kvm/lane_pki.py ca "$PKI" "$DAYS" >/dev/null)
 fi
 
-context="$(mktemp -d "$PKI/image-context.XXXXXX")"
-trap 'rm -rf "$context"' EXIT
-cp "$PKI/lane-ca.crt" "$context/lane-ca.crt"
-worker_user="$(docker image inspect --format '{{.Config.User}}' "$WORKER")"
-cat > "$context/Dockerfile" <<DOCKERFILE
-FROM $WORKER
+work="$(mktemp -d "$PKI/image-build.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+# The Dockerfile of the product, plus one stage on its `sandbox` stage: the user is the one the stage ends with.
+worker_user="$(awk '/^FROM runtime-base AS sandbox/ {found=1} found && /^USER / {user=$2} END {print user}' "$REPO/runner/Dockerfile")"
+[ -n "$worker_user" ] || { echo "build-lane-image: no USER in the sandbox stage of runner/Dockerfile" >&2; exit 1; }
+{
+  cat "$REPO/runner/Dockerfile"
+  cat <<DOCKERFILE
+
+FROM sandbox AS lane
 USER 0:0
-COPY lane-ca.crt /usr/local/share/ca-certificates/lane-ca.crt
+COPY --from=pki lane-ca.crt /usr/local/share/ca-certificates/lane-ca.crt
 RUN cat /usr/local/share/ca-certificates/lane-ca.crt >> /etc/ssl/certs/ca-certificates.crt
 USER $worker_user
 DOCKERFILE
-# The daemon's own builder: the base is the image the daemon already has, which a builder container would not see. The same tag, so the launcher's
-# Control starts the same reference; the image id is the lane's own (build-golden.sh prints it).
-docker buildx build --builder default --load --tag "$WORKER" "$context"
+} > "$work/Dockerfile"
 
-out="$("$REPO/docker/incus/build-golden.sh" --alias "$ALIAS" --pool "$POOL" --prefix "$PREFIX" --replace | tee /dev/stderr)"
+# The tags the launcher and the agent's definition expect. `docker load` takes them from the archive; buildx names the image with --tag.
+build() { # <target> <tag>
+  echo "docker buildx build --builder default -f '$work/Dockerfile' --build-context pki='$PKI' --target '$1' --tag '$2' --output type=docker,dest=- '$REPO'"
+}
+out="$("$REPO/docker/incus/build-golden.sh" --alias "$ALIAS" --pool "$POOL" --prefix "$PREFIX" --replace \
+  --worker code-reviewer-worker:golden --worker-command "$(build lane code-reviewer-worker:golden)" \
+  --agent code-reviewer-agent:golden --agent-command "$(build agent code-reviewer-agent:golden)" | tee /dev/stderr)"
 image_id="$(printf '%s\n' "$out" | sed -n 's/^FACTORY_RUNNER_VM_IMAGE_ID=//p')"
 [ -n "$image_id" ] || { echo "build-lane-image: build-golden.sh did not print the Worker image's id" >&2; exit 1; }
 echo "CR_INCUS_JOB_IMAGE=$ALIAS"
