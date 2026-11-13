@@ -20,6 +20,7 @@ from .docker_api import DockerApi, DockerError
 from .exec_run import exec_document, exit_status
 from .reader import (
     CONTROL_REPO,
+    DOCKER_SOCKET_OPTION,
     READER_CONTAINER_NAME,
     READER_REPO,
     UPLOAD_PACK_PROTOCOL_VARIABLE,
@@ -28,6 +29,7 @@ from .reader import (
 )
 
 _PROTOCOL = re.compile(r"version=[0-9]")
+_SOCKET = re.compile(r"/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
 USAGE_ERROR = 2
 UNAVAILABLE = 3
 
@@ -40,6 +42,13 @@ def main(
     stdin_descriptor: int = 0,
     stdout_descriptor: int = 1,
 ) -> int:
+    socket_path: str | None = None
+    if len(argv) == 2 and argv[0].startswith(DOCKER_SOCKET_OPTION):
+        # B's Docker (#1017): the one option, a constant of the runner's own command.
+        socket_path = argv[0][len(DOCKER_SOCKET_OPTION) :]
+        if not _SOCKET.fullmatch(socket_path):
+            return USAGE_ERROR
+        argv = argv[1:]
     if argv != [CONTROL_REPO]:
         return USAGE_ERROR
     env = reader_environment()
@@ -48,7 +57,7 @@ def main(
         if not _PROTOCOL.fullmatch(protocol):
             return USAGE_ERROR
         env[UPLOAD_PACK_PROTOCOL_VARIABLE] = protocol
-    api = api or DockerApi()
+    api = api or (DockerApi() if socket_path is None else DockerApi(socket_path))
     try:
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,

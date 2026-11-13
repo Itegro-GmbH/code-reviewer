@@ -104,6 +104,7 @@ from .host_rules import (
     inet_failure_note,
     run_helper,
 )
+from .placement import B_WORK_VOLUME, HOSTED, Placement
 from .reader import work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY
 from .role_labels import role_labels
@@ -299,6 +300,7 @@ def setup_document(
     outer_proxy: OuterProxy | None = None,
     result: bool = False,
     no_new_privileges: bool = False,
+    placement: Placement = HOSTED,
 ) -> dict[str, Any]:
     """The container of the setup, which is the agent's: the agent's definition (its image, limits,
     name, labels and mounts, so that nothing has to change when it takes over) on the setup network
@@ -315,6 +317,7 @@ def setup_document(
         result=result,
         nano_cpus=nano_cpus,
         no_new_privileges=no_new_privileges,
+        placement=placement,
     )
     document["Env"] = [] if outer_proxy is None else outer_proxy.tool_environment()
     document["NetworkingConfig"] = {
@@ -406,6 +409,10 @@ class SetupSeams:
     # setup's is the agent's container, so it takes the same seam (`subscription_setup_script`
     # refuses that harness with a script today).
     no_new_privileges: bool = False
+    # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend. There
+    # `install_rules` is False: the setup network's walls are the NICs of the instances (the
+    # outer wall's proxy for the setup, the inner wall in A), and no host of ours is in B.
+    placement: Placement = HOSTED
 
 
 def _variables(listed: object) -> set[str]:
@@ -539,11 +546,14 @@ class SetupContainer:
 
     def _start(self) -> str:
         api = self._api
-        own = api.inspect_container(self._seams.hostname())
+        split = self._seams.placement.split
+        # B's Docker (split) has no Control in it: the Worker image is not there, nor needed (the
+        # host helpers are not run), and the volume is B's own.
+        own = {} if split else api.inspect_container(self._seams.hostname())
         worker_image = str(own.get("Image", ""))
-        volume = work_volume_of(own)
+        volume = B_WORK_VOLUME if split else work_volume_of(own)
         image = str(api.inspect_image(self._seams.image).get("Id", ""))
-        if not worker_image or not image:
+        if (not worker_image and not split) or not image:
             raise _Unavailable("setup_unavailable: an image of the VM is missing")
         if self._seams.runtime not in api.runtimes():
             raise _Unavailable(
@@ -565,6 +575,7 @@ class SetupContainer:
                 outer_proxy=self._seams.outer_proxy,
                 result=self._seams.result,
                 no_new_privileges=self._seams.no_new_privileges,
+                placement=self._seams.placement,
             ),
             self._seams.container_name,
         )
@@ -574,10 +585,11 @@ class SetupContainer:
         # The script is as free as the agent is and can take the VM's memory the same way:
         # the container goes (the script ends as one whose container went away) before the VM
         # is out of it.
-        self._guard = MemoryGuard(
-            lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
-        )
-        self._guard.start()
+        if not split:
+            self._guard = MemoryGuard(
+                lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
+            )
+            self._guard.start()
         self._wait_ready(container)
         self._seal_check(container, image)
         return container
@@ -636,7 +648,7 @@ class SetupContainer:
         networks = as_object(settings.get("Networks")) or {}
         mounts = document.get("Mounts")
         problems: list[str] = []
-        if host.get("Privileged"):
+        if bool(host.get("Privileged")) != self._seams.placement.split:
             problems.append("privileged")
         if host.get("Runtime") != self._seams.runtime:
             problems.append("runtime")

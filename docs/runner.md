@@ -2306,6 +2306,24 @@ The service user is a member of **`incus-admin`, which is root-equivalent** (a m
 Firecracker service's is. The restricted per-user `incus-user` socket cannot set the options the instances need. **Root is needed at install only** (the group, the pool, the image and one throwaway instance so that
 the first job does not pay the ≈ 21 s unpack of the image, the bridges and ACLs of `provision.py`, the host's nft table of #1008); `provision.py` creates only objects of the prefix, idempotently, and never touches the `default` pool or profile, `incusbr0`, or the host's Docker.
 
+### Control drives B's Docker (#1017)
+
+Placement is `implementer/placement.py`; the launcher tells Control with three variables in its `docker run` (`RUNNER_ENVIRONMENT_DOCKER=split`, `RUNNER_ENVIRONMENT_DOCKER_SOCKET=/b-docker.sock`, `RUNNER_ENVIRONMENT_DOOR_ADDRESS=10.98.0.2`, part of `control_run.unix_arguments`, held by a test). Unset, everything is as hosted.
+
+| | hosted / Firecracker | Incus (`split`) |
+|---|---|---|
+| Control, the two doors | the VM's Docker | **A's** Docker; the doors run with **`--network host`** and listen on A's inner address only (`--bind 10.98.0.2:8080` and `:8081`, the wall's two ports): the inner wall's input chain matches traffic delivered to A, whereas a Docker-published port is DNATed and dropped by `forward … iifname eth1 drop` (by design). No model network, no connect, no door-side nft table (A has no default route, its outer NIC leads to the proxy of the host, the wall holds the inner side) |
+| setup/agent container, readers | the VM's Docker, Sysbox | **B's** Docker, `runc`, the container privileged (it runs its own Docker; no Sysbox in an Incus instance: B's user namespace, cgroup and the inner wall confine it, as the spike measured). The readers run from the agent's golden image |
+| how Control reaches that Docker | the VM's socket | a unix socket `/b-docker.sock` in A, from **two `proxy` devices**: B's (`bind=host`, listens on a file in the job's directory that only `incusd` reaches, connects to B's `/var/run/docker.sock`) and A's (`bind=instance`, listens at `/b-docker.sock`, connects to that file); mode 0600. A dials B. **B has no connection of any kind to A through it; no Docker API on a TCP port exists anywhere.** The launcher checks that B's Docker answers through A's socket before Control starts |
+| networks | setup network (nft rules of ours), model network (`--internal`) | both are plain bridges of **B's** Docker (`code-reviewer-setup`, `code-reviewer-model`), the setup with the proxy variables of the outer wall; the setup's rules of ours are not installed (`install_rules=False`): the walls are the NICs (outer proxy for the wide rule, B's outer NIC unplugged at `narrow`, the inner wall in A) |
+| hand-over of #1009 | leave setup network → pause (fail-closed) → Control reads the repo → model network → unpause | the same code, against B's daemon. **B's daemon is untrusted, so the pause is not a security boundary here** (a root process of B cannot influence Control: Control pulls what it reads through the checked fetch below) |
+| the repository | one volume, Control, the readers and the agent mount it | the mirror and Control's checkout stay in **A's** volume. B has **its own volume** (`code-reviewer-work`: `repo/`, `result/`). **A→B, once:** a tar of the checkout Control made from its mirror (links stored as links, never followed) is put into a container that is made and never started (`PUT /containers/<c>/archive`). **B→A:** only `git upload-pack` in a reader, piped to Control's `git fetch` whose objects the mirror's git checks (`fsckObjects`); the list of branches is capped and every name validated, as hosted. No shared mount, no socket |
+| memory guard | `MemoryGuard` reads the VM's `/proc/meminfo` | none: B's memory is its cgroup (`limits.memory`); a guard that reads B's memory is a follow-up |
+
+Everything B's daemon says is data from the untrusted side: parsed with bounds, never put into a request to A's Docker (A's Docker only ever gets bodies made from constants and A's own identifiers).
+
+**Tests** (no Incus, no Docker): `tests/unit/test_split_docker.py` (two fake engines, A's and B's: where each thing is made, the doors' documents, the agent's definition and its seal check, the seed and the readers, the pipe's socket option, the profile), `test_incus_launcher.py` (the two devices, the variables, B's Docker not answering, the clean-up) and `test_incus_parts.py` (the arguments).
+
 ### Start budget
 
 Nothing to the first container ≈ **4.5 s** at a moderate load (spike #1005 on btrfs: `incus init` 0.14 to 0.46 s, `start` 0.3 s, dockerd answers 2 s later, the first container 2 s), against the Firecracker launcher's 2.6 s.
@@ -2334,8 +2352,7 @@ waits until both instances show their addresses (`ip -4 -o addr show`; the golde
 
 ### Not done here, follow-ups
 
-- **The Worker's use of the two instances.** Control runs in A with **A's** Docker; the setup and the agent must run in **B's** Docker and the doors in A's, reachable on A's inner address, and the agent must see what the setup left (the owner's "same environment" decision, **#1009**, hosted too).
-  Until that change a real Worker image would run its containers in A. The launcher gives it the environment (instances, wall, control socket, quota); it does not yet make it use it.
+- **The Worker's use of the two instances** is [#1017](#control-drives-bs-docker-1017) (below); the full `worker-once` job with the real engine on this backend is run by the CI lane that needs the golden image.
 - **The golden Incus image** (Docker, the Worker image pre-loaded, systemd-networkd, `nft`) and its release artifact (#1012, #1011); the first start of an image in a pool unpacks it (≈ 21 s), which the installer pays once.
 - **A CI lane with Incus** on `ubuntu-24.04` (needs the image above and root for Incus's own install); the lane here runs on the DevBox.
 - **The host's nft table** (#1008), the installer and updater (#1011), conformance suite (#1010), removal of the Firecracker code, the kernel/rootfs release artifacts, the KVM lane and vm-init's vsock side (#1012).

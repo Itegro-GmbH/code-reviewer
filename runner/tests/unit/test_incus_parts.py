@@ -54,8 +54,11 @@ from code_reviewer_runner.factory_runner.incus.walls import (
     slot_addresses,
 )
 from code_reviewer_runner.factory_runner.selftest import Check
+from code_reviewer_runner.implementer.placement import B_DOCKER_SOCKET
 
 pytestmark = pytest.mark.unit
+
+DOOR_ADDRESS = "10.98.0.2"
 
 NETWORK = ipaddress.IPv4Network("10.99.0.0/24")
 
@@ -319,6 +322,7 @@ def launch(**changes: Any) -> Any:
         "timeout_seconds": 3600,
         "vcpus": 2,
         "reserve_gib": 2,
+        "door_address": DOOR_ADDRESS,
     }
     values.update(changes)
     return build_control(load_template(), **values)
@@ -327,7 +331,7 @@ def launch(**changes: Any) -> Any:
 def test_control_gets_the_unix_variable_the_socket_mount_and_no_vsock_profile() -> None:
     template = load_template().fill(job_id="j", image=IMAGE_ID, timeout_seconds=1, vcpus=2)
 
-    arguments = unix_arguments(template)
+    arguments = unix_arguments(template, door_address=DOOR_ADDRESS)
 
     assert "RUNNER_ENVIRONMENT_CONTROL=vsock" in template
     assert "RUNNER_ENVIRONMENT_CONTROL=unix" in arguments
@@ -335,9 +339,16 @@ def test_control_gets_the_unix_variable_the_socket_mount_and_no_vsock_profile() 
     assert not any(each.startswith("seccomp=") for each in arguments)
     mount = "type=bind,source=/ctl.sock,target=/ctl.sock"
     assert arguments[arguments.index(mount) - 1] == "--mount"
-    # Everything else is the renderer's: exactly these items differ, no more.
+    # Everything else is the renderer's: exactly these items differ, no more (the split Docker of
+    # #1017 is its own test below).
+    split = {
+        "RUNNER_ENVIRONMENT_DOCKER=split": 1,
+        f"RUNNER_ENVIRONMENT_DOCKER_SOCKET={B_DOCKER_SOCKET}": 1,
+        f"RUNNER_ENVIRONMENT_DOOR_ADDRESS={DOOR_ADDRESS}": 1,
+        f"type=bind,source={B_DOCKER_SOCKET},target={B_DOCKER_SOCKET}": 1,
+    }
     assert Counter(arguments) - Counter(template) == Counter(
-        {"RUNNER_ENVIRONMENT_CONTROL=unix": 1, "--mount": 1, mount: 1}
+        {"RUNNER_ENVIRONMENT_CONTROL=unix": 1, "--mount": 2, "--env": 3, mount: 1, **split}
     )
     assert Counter(template) - Counter(arguments) == Counter(
         {
@@ -350,7 +361,7 @@ def test_control_gets_the_unix_variable_the_socket_mount_and_no_vsock_profile() 
 
 def test_arguments_without_the_expected_shape_are_refused_not_guessed() -> None:
     with pytest.raises(ControlRunError, match="expected shape"):
-        unix_arguments(["run", "--env", "A=b", IMAGE_ID, "worker-once"])
+        unix_arguments(["run", "--env", "A=b", IMAGE_ID, "worker-once"], door_address=DOOR_ADDRESS)
 
 
 def test_the_launch_is_the_one_vm_init_would_have_started() -> None:

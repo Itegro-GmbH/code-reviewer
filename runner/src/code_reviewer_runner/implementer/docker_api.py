@@ -22,7 +22,7 @@ import json
 import re
 import socket
 from collections.abc import Iterator
-from typing import Any, Final
+from typing import IO, Any, Final
 from urllib.parse import quote
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -350,6 +350,26 @@ class DockerApi:
             failure = None if document is None else document.get("error")
             if isinstance(failure, str) and failure:
                 raise DockerError(0, failure[:500])
+
+    def put_archive(self, container: str, path: str, archive: IO[bytes], *, timeout: float) -> None:
+        """Unpack the tar stream `archive` into the directory `path` of a container (started or
+        not: a path under one of its mounts goes into the volume). The one way Control puts bytes
+        into B's volume (#1017). The body is read from the file, never held whole."""
+        connection = _UnixConnection(self._path, timeout)
+        target = f"/containers/{container}/archive?path={quote(path, safe='')}"
+        size = archive.seek(0, 2)
+        archive.seek(0)
+        headers = {"Content-Type": "application/x-tar", "Content-Length": str(size)}
+        try:
+            connection.request("PUT", target, archive, headers)
+            response = connection.getresponse()
+            data = response.read(_MAX_BODY_BYTES + 1)
+        except (OSError, http.client.HTTPException) as error:
+            raise DockerError(0, f"the daemon did not answer ({type(error).__name__})") from None
+        finally:
+            connection.close()
+        if response.status != 200:
+            raise DockerError(response.status, _message_of(data))
 
     def remove_image(self, reference: str) -> None:
         """Remove the name `reference` and, when no other name or container holds them, the layers.

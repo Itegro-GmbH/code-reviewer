@@ -79,6 +79,7 @@ from .host_rules import (
 )
 from .netdoor.registries import rule_has_registries
 from .network_rule import MODE_OFF, OFF, NetworkRule
+from .placement import B_WORK_VOLUME, HOSTED, Placement, split_model_network_document
 from .reader import REPO_SUBPATH, work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
 from .role_labels import role_labels
@@ -220,19 +221,22 @@ def trust_environment(rule: NetworkRule) -> dict[str, str]:
     }
 
 
-def proxy_environment(rule: NetworkRule) -> dict[str, str]:
+def proxy_environment(rule: NetworkRule, placement: Placement = HOSTED) -> dict[str, str]:
     """The variables that point the agent's tools at the network door; none for `off`, where there
-    is no door and the container has no variable of any kind."""
+    is no door and the container has no variable of any kind. On the Incus backend the door is in
+    instance A, at its address on the inner bridge (`Placement`)."""
     if rule.mode == MODE_OFF:
         return {}
+    url = placement.network_door_url
+    no_proxy = placement.no_proxy
     return {
         **trust_environment(rule),
-        "HTTP_PROXY": NETWORK_DOOR_URL,
-        "HTTPS_PROXY": NETWORK_DOOR_URL,
-        "http_proxy": NETWORK_DOOR_URL,
-        "https_proxy": NETWORK_DOOR_URL,
-        "NO_PROXY": NO_PROXY,
-        "no_proxy": NO_PROXY,
+        "HTTP_PROXY": url,
+        "HTTPS_PROXY": url,
+        "http_proxy": url,
+        "https_proxy": url,
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
         "NODE_USE_ENV_PROXY": "1",
     }
 
@@ -248,6 +252,7 @@ def agent_document(
     result: bool = False,
     nano_cpus: int = 0,
     no_new_privileges: bool = False,
+    placement: Placement = HOSTED,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -274,7 +279,7 @@ def agent_document(
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
-        "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
+        "Env": [f"{name}={value}" for name, value in proxy_environment(rule, placement).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
         "Labels": role_labels("agent"),
@@ -286,7 +291,10 @@ def agent_document(
         "HostConfig": {
             "Runtime": runtime,
             "NetworkMode": MODEL_NETWORK_NAME,
-            "Privileged": False,
+            # Incus (#1017): no Sysbox in an instance, so the container is `runc` and privileged:
+            # its own Docker needs it, and what confines it is instance B (its user namespace, its
+            # cgroup, the inner wall), which is the untrusted side as a whole.
+            "Privileged": placement.split,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
             **limits,
@@ -457,6 +465,8 @@ class AgentSeams:
     no_new_privileges: bool = False
     # The file the VM's available memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
+    # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend.
+    placement: Placement = HOSTED
 
 
 def unavailable(reason: str) -> JobError:
@@ -509,13 +519,19 @@ class AgentContainer:
         try:
             if self._seams.runtime not in api.runtimes():
                 raise unavailable(f"the daemon has no {self._seams.runtime} runtime")
-            own = api.inspect_container(self._seams.hostname())
-            self._close_the_model_network(own, notes)
+            own: dict[str, Any] = {}
+            if self._seams.placement.split:
+                # B's Docker: Control is not in it, there is no VM side to close, and the model
+                # network is B's own (a bridge the agent reaches A's doors through).
+                self._ensure_model_network()
+            else:
+                own = api.inspect_container(self._seams.hostname())
+                self._close_the_model_network(own, notes)
             if self._adopted is not None:
                 self._adopt(self._adopted)
                 return tuple(notes)
             image = str(api.inspect_image(self._seams.image).get("Id", ""))
-            volume = work_volume_of(own)
+            volume = B_WORK_VOLUME if self._seams.placement.split else work_volume_of(own)
             if not image:
                 raise unavailable("the agent image is not in this VM")
             container = api.create_container(
@@ -529,6 +545,7 @@ class AgentContainer:
                     result=self._result,
                     nano_cpus=self._seams.nano_cpus,
                     no_new_privileges=self._seams.no_new_privileges,
+                    placement=self._seams.placement,
                 ),
                 AGENT_CONTAINER_NAME,
             )
@@ -550,6 +567,18 @@ class AgentContainer:
             self._remove()
             raise
 
+    def _ensure_model_network(self) -> None:
+        """B's model network (split only): a plain bridge of B's Docker at the model network's
+        range, which is what the hand-over's `narrow` puts the container on. It is not internal:
+        the agent reaches A's two doors through B's one NIC, and the inner wall in A is what lets
+        nothing else through. In hosted the model door makes the network instead."""
+        try:
+            self._api.inspect_network(MODEL_NETWORK_NAME)
+        except DockerError as error:
+            if error.status != 404:
+                raise
+            self._api.create_network(split_model_network_document())
+
     def _close_the_model_network(self, own: dict[str, Any], notes: list[str]) -> None:
         """The VM's side of the model network gets no IPv6 address before the agent is on it: root
         in the container can switch IPv6 on and would find the bridge's link-local address and,
@@ -570,10 +599,17 @@ class AgentContainer:
             notes.append(inet_failure_note("model"))
 
     def _watch(self, container: str) -> None:
-        # Before the watch: `_watch_end` reads whether the guard killed the container.
-        self._guard = MemoryGuard(self._vm_memory_low, path=self._seams.meminfo, ended=self._ended)
+        # Before the watch: `_watch_end` reads whether the guard killed the container. On the Incus
+        # backend there is none: the memory the guard reads is the VM's, and B's is bounded by
+        # its own cgroup (`limits.memory`), which ends the agent's processes itself (follow-up
+        # in `docs/runner.md`: a guard that reads B's memory).
+        if not self._seams.placement.split:
+            self._guard = MemoryGuard(
+                self._vm_memory_low, path=self._seams.meminfo, ended=self._ended
+            )
         threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
-        self._guard.start()
+        if self._guard is not None:
+            self._guard.start()
 
     def _adopt(self, adopted: Adopted) -> None:
         """Take over the container the setup script ran in (#1009): it has no network of its own
@@ -600,7 +636,7 @@ class AgentContainer:
                 _log.warning("the setup network could not be removed (%s)", error.status)
         self._wait_ready(container)
         self._seal_check(container)
-        wanted = proxy_environment(self._rule)
+        wanted = proxy_environment(self._rule, self._seams.placement)
         if wanted or adopted.setup_environment:
             self.restart_docker(wanted)
 
@@ -647,7 +683,7 @@ class AgentContainer:
         networks = as_object(settings.get("Networks")) or {}
         mounts = document.get("Mounts")
         problems: list[str] = []
-        if host.get("Privileged"):
+        if bool(host.get("Privileged")) != self._seams.placement.split:
             problems.append("privileged")
         if host.get("Runtime") != self._seams.runtime:
             problems.append("runtime")

@@ -64,6 +64,7 @@ from .door.protocol import (
 )
 from .door.status import parse_status
 from .door_state import DoorEnd, DoorState
+from .placement import HOSTED, Placement
 from .role_labels import role_labels
 
 _log = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ DOOR_ENTRYPOINT: Final = [
 READY_SECONDS: Final = 30.0
 STOP_SECONDS: Final = 5.0
 BRIDGE_NETWORK: Final = "bridge"
+HOST_NETWORK: Final = "host"
 
 # The door's own network rules (#745, step 3). The door is on the VM's default bridge, which has a
 # route to the internet and to the VM itself (its Docker gateway, its control port). A one-shot
@@ -186,12 +188,42 @@ def network_document() -> dict[str, Any]:
     }
 
 
-def door_document(image: str) -> dict[str, Any]:
-    """The door's container. Constants and the image id the daemon gave: nothing from a job."""
+def door_document(
+    image: str, placement: Placement = HOSTED, port: int | None = None
+) -> dict[str, Any]:
+    """The door's container. Constants and the image id the daemon gave: nothing from a job.
+
+    On the Incus backend (#1017) the door runs with the **host network of instance A** and listens
+    on A's address on the inner bridge only (`--bind`): the inner wall's input chain matches what is
+    delivered to A itself, and a published port would be DNATed and dropped by its forward chain
+    (by design: nothing is routed through A). There is no model network and no table of the door's
+    own: A has no default route, its outer NIC leads to the host's proxy and nothing else, and the
+    wall holds the inner side."""
+    split = placement.split
+    host_config: dict[str, Any] = {
+        "NetworkMode": HOST_NETWORK if split else BRIDGE_NETWORK,
+        "Privileged": False,
+        "ReadonlyRootfs": True,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+        "Memory": DOOR_MEMORY_BYTES,
+        "MemorySwap": DOOR_MEMORY_BYTES,
+        "PidsLimit": DOOR_PIDS_LIMIT,
+        "Tmpfs": {"/tmp": DOOR_TMPFS},
+        "RestartPolicy": {"Name": "no"},
+        "PublishAllPorts": False,
+    }
+    if not split:
+        # The rules below are an `ip` table: it does not see IPv6, so the door has none. (Docker
+        # refuses network sysctls on the host network.)
+        host_config["Sysctls"] = {
+            "net.ipv6.conf.all.disable_ipv6": "1",
+            "net.ipv6.conf.default.disable_ipv6": "1",
+        }
     return {
         "Image": image,
         "Entrypoint": DOOR_ENTRYPOINT,
-        "Cmd": [],
+        "Cmd": ["--bind", f"{placement.model_door_address}:{port}"] if split else [],
         "User": DOOR_USER,
         "Env": [],
         "Hostname": "model-door",
@@ -202,24 +234,7 @@ def door_document(image: str) -> dict[str, Any]:
         "AttachStdout": True,
         "AttachStderr": True,
         "Tty": False,
-        "HostConfig": {
-            "NetworkMode": BRIDGE_NETWORK,
-            "Privileged": False,
-            "ReadonlyRootfs": True,
-            "CapDrop": ["ALL"],
-            "SecurityOpt": ["no-new-privileges:true"],
-            "Memory": DOOR_MEMORY_BYTES,
-            "MemorySwap": DOOR_MEMORY_BYTES,
-            "PidsLimit": DOOR_PIDS_LIMIT,
-            "Tmpfs": {"/tmp": DOOR_TMPFS},
-            "RestartPolicy": {"Name": "no"},
-            "PublishAllPorts": False,
-            # The rules below are an `ip` table: it does not see IPv6, so the door has none.
-            "Sysctls": {
-                "net.ipv6.conf.all.disable_ipv6": "1",
-                "net.ipv6.conf.default.disable_ipv6": "1",
-            },
-        },
+        "HostConfig": host_config,
     }
 
 
@@ -291,6 +306,9 @@ class DoorSeams:
     # The host's outer-wall proxy (#994): the door's only way to the provider on a customer's
     # machine, handed to Control by the host. None: as hosted.
     outer_proxy: OuterProxy | None = None
+    # Which Docker the door is made in and where it listens (#1017): always the VM's (instance
+    # A's) Docker; on the Incus backend with the host network, at A's inner address.
+    placement: Placement = HOSTED
 
 
 class RunningDoor:
@@ -315,7 +333,7 @@ class RunningDoor:
         self._seams = seams
         self._stopping = threading.Event()
         self._closed = False
-        self.url = f"http://{MODEL_DOOR_ADDRESS}:{port}"
+        self.url = f"http://{seams.placement.model_door_address}:{port}"
         self._reader = threading.Thread(target=self._read, daemon=True)
 
     def begin(self) -> None:
@@ -420,15 +438,20 @@ def start_door(
         image = str(me.get("Image", ""))
         if not image or not me.get("Id"):
             raise _unavailable("the daemon does not know this container")
-        network = api.create_network(network_document())
-        container = api.create_container(door_document(image), DOOR_CONTAINER_NAME)
-        api.connect_network(
-            network,
-            {
-                "Container": container,
-                "EndpointConfig": {"IPAMConfig": {"IPv4Address": MODEL_DOOR_ADDRESS}},
-            },
+        split = seams.placement.split
+        if not split:
+            network = api.create_network(network_document())
+        container = api.create_container(
+            door_document(image, seams.placement, port), DOOR_CONTAINER_NAME
         )
+        if network is not None:
+            api.connect_network(
+                network,
+                {
+                    "Container": container,
+                    "EndpointConfig": {"IPAMConfig": {"IPv4Address": MODEL_DOOR_ADDRESS}},
+                },
+            )
         streams = api.attach(container)
         state = DoorState()
         running = RunningDoor(
@@ -437,7 +460,8 @@ def start_door(
         )  # fmt: skip
         running.begin()
         api.start_container(container)
-        _close_the_doors_network(api, image, container, seams.outer_proxy)
+        if not split:
+            _close_the_doors_network(api, image, container, seams.outer_proxy)
         document = start_document(
             model_access=model_access,
             capability=capability,

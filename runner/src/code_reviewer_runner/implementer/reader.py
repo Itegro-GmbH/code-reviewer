@@ -52,10 +52,13 @@ the place where that decision costs nothing.
 
 import logging
 import socket
+import tarfile
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, cast
+from pathlib import Path
+from typing import IO, Any, Final, cast
 
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -64,6 +67,7 @@ from code_reviewer_runner.result import ErrorCode
 from .docker_api import DockerApi, DockerError
 from .exec_run import run_exec
 from .git_process import Outcome
+from .placement import B_WORK_VOLUME, HOSTED, Placement
 from .result_channel import (
     ASK_FILE,
     READ_RESULT_SCRIPT,
@@ -221,6 +225,66 @@ def reader_document(
     }
 
 
+SEED_NAME: Final = "code-reviewer-seed"
+SEED_TARGET: Final = "/seed"
+SEED_SECONDS: Final = 600.0
+DOCKER_SOCKET_OPTION: Final = "--docker-socket="
+
+
+def seed_document(image: str, volume: str, runtime: str) -> dict[str, Any]:
+    """The container that only carries B's volume while the archive is put into it: made, never
+    started, no network."""
+    return {
+        "Image": image,
+        "Entrypoint": ["/bin/true"],
+        "Cmd": [],
+        "User": "0:0",
+        "Env": [],
+        "Labels": role_labels("seed"),
+        "NetworkDisabled": True,
+        "HostConfig": {
+            "Runtime": runtime,
+            "NetworkMode": "none",
+            "Privileged": False,
+            "RestartPolicy": {"Name": "no"},
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": volume,
+                    "Target": SEED_TARGET,
+                    "ReadOnly": False,
+                    "VolumeOptions": {"NoCopy": True},
+                }
+            ],
+        },
+    }
+
+
+def _plain(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """A tar entry without the owner of A's files: B's root owns what it receives."""
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    return info
+
+
+def repository_archive(repo: Path, scratch: Path) -> IO[bytes]:
+    """The tar of Control's checkout (as `repo/`) and an empty `result/`, in a file that is deleted
+    when it is closed. Links are stored as links and never followed."""
+    archive = tempfile.TemporaryFile(dir=scratch)  # noqa: SIM115 - the caller closes it
+    try:
+        with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as tar:
+            directory = tarfile.TarInfo("result")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            tar.addfile(directory)
+            tar.add(repo, arcname="repo", filter=_plain)
+        archive.seek(0)
+    except BaseException:
+        archive.close()
+        raise
+    return archive
+
+
 def work_volume_of(own: Mapping[str, Any]) -> str:
     """The name of the volume mounted at `/work` in Control's own container, as the daemon says."""
     mounts = own.get("Mounts")
@@ -246,6 +310,15 @@ class ReaderSeams:
     runtime: str = READER_RUNTIME
     # The interpreter of the pipe command Control's `git fetch` runs (the Worker image's venv).
     python: str = UPLOAD_PACK_PYTHON
+    # Which Docker the readers are made in (#1017). On the Incus backend it is B's: the readers run
+    # there, from `image` (the agent's golden image, which has git; the Worker image is in A), on
+    # B's own volume, which `_seed` fills once.
+    placement: Placement = HOSTED
+    image: str = ""
+    # Where Control's checkout of the agent's repository is (what `_seed` copies to B) and where it
+    # may keep the archive meanwhile.
+    repo_directory: str = CONTROL_REPO
+    scratch_directory: str = WORK_VOLUME_TARGET
 
 
 class ReaderAccess:
@@ -267,6 +340,8 @@ class ReaderAccess:
         self._seams = seams
         self._environment = reader_environment(environment)
         self._containers: dict[bool, str] = {}
+        # B's volume has the repository once the first reader is made (`_seed`).
+        self._seeded = False
 
     @property
     def repo_source(self) -> str:
@@ -275,7 +350,10 @@ class ReaderAccess:
         return CONTROL_REPO
 
     def upload_pack(self) -> str:
-        return f"{self._seams.python} -I -m {UPLOAD_PACK_MODULE}"
+        command = f"{self._seams.python} -I -m {UPLOAD_PACK_MODULE}"
+        if self._seams.placement.split:
+            command += f" {DOCKER_SOCKET_OPTION}{self._seams.placement.docker_socket}"
+        return command
 
     def warm(self) -> bool:
         """Make both readers now, before the agent runs: the final push must not need a container
@@ -434,11 +512,19 @@ class ReaderAccess:
         if existing is not None:
             return existing
         try:
-            own = self._api.inspect_container(self._seams.hostname())
-            image = str(own.get("Image", ""))
-            if not image:
-                raise DockerError(0, "the daemon does not know this container")
-            volume = work_volume_of(own)
+            if self._seams.placement.split:
+                image = str(self._api.inspect_image(self._seams.image).get("Id", ""))
+                volume = B_WORK_VOLUME
+                if not image:
+                    raise DockerError(0, "the daemon does not know the reader's image")
+                if not self._seeded:
+                    self._seed(image, volume)
+            else:
+                own = self._api.inspect_container(self._seams.hostname())
+                image = str(own.get("Image", ""))
+                if not image:
+                    raise DockerError(0, "the daemon does not know this container")
+                volume = work_volume_of(own)
             name = READER_WRITER_CONTAINER_NAME if writable else READER_CONTAINER_NAME
             container = self._api.create_container(
                 reader_document(
@@ -452,17 +538,40 @@ class ReaderAccess:
             )
             self._containers[writable] = container
             self._api.start_container(container)
-        except (DockerError, JobError) as error:
+        except (DockerError, JobError, OSError) as error:
             # What the daemon said is about containers and paths of this VM, never about the job.
             reason = (
                 f"{error.status}: {error.message[:160]}"
                 if isinstance(error, DockerError)
                 else error.detail[:160]
+                if isinstance(error, JobError)
+                else type(error).__name__
             )
             _log.warning("the reader could not be started (%s)", reason)
             self._drop(writable)
             return None
         return self._containers.get(writable)
+
+    def _seed(self, image: str, volume: str) -> None:
+        """The one way the agent's repository gets from A to B (#1017): the checkout Control made
+        from its own mirror is packed into a tar and unpacked into B's volume (`repo/`, and the
+        empty `result/` the hosted layout has), through a container that is made and never
+        started. Nothing is shared: no mount, no socket, B holds a copy. Nothing comes back this
+        way; the end of the turn fetches the agent's branches through `git upload-pack` in a
+        reader and Control's git checks every object. Raises `DockerError` or `OSError`."""
+        api = self._api
+        seeder = api.create_container(seed_document(image, volume, self._seams.runtime), SEED_NAME)
+        try:
+            with repository_archive(
+                Path(self._seams.repo_directory), Path(self._seams.scratch_directory)
+            ) as archive:
+                api.put_archive(seeder, SEED_TARGET, archive, timeout=SEED_SECONDS)
+        finally:
+            try:
+                api.remove_container(seeder)
+            except DockerError as error:
+                _log.warning("the seed container could not be removed (%s)", error.status)
+        self._seeded = True
 
     def _drop(self, writable: bool, *, timeout: float | None = None) -> None:
         container = self._containers.pop(writable, None)

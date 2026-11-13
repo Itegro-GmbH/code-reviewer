@@ -38,6 +38,7 @@ from code_reviewer_runner.dynamic_review.self_check import SelfCheckFailed, Self
 from .agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
 from .docker_api import DOCKER_SOCKET, DockerApi, DockerError
 from .git_process import TRUSTED_PATH
+from .placement import SPLIT_RUNTIME, placement_of
 
 
 def _failed(reason: SelfCheckReason, detail: str) -> SelfCheckFailed:
@@ -45,12 +46,17 @@ def _failed(reason: SelfCheckReason, detail: str) -> SelfCheckFailed:
 
 
 def _agent_runtime_present() -> bool:
+    """The agent's runtime is in the daemon the agent runs in: Sysbox in the VM's, and on the Incus
+    backend (#1017, `placement.py`) `runc` in B's."""
+    placement = placement_of(os.environ)
+    if placement.split:
+        return SPLIT_RUNTIME in placement.environment_api().runtimes()
     return AGENT_RUNTIME in DockerApi().runtimes()
 
 
 def _agent_image_present() -> bool:
     try:
-        DockerApi().inspect_image(AGENT_IMAGE_REFERENCE)
+        placement_of(os.environ).environment_api().inspect_image(AGENT_IMAGE_REFERENCE)
     except DockerError:
         return False
     return True

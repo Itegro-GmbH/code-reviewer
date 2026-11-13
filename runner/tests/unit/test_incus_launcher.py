@@ -579,7 +579,7 @@ def test_narrow_unplugs_bs_outer_nic_after_the_wall_holds_the_rule_and_only_then
 
         before, reply, after, order, again = go(scenario)
 
-        assert before == ["eth0", "eth1"] and after == ["eth0"]
+        assert before == ["bdocker", "eth0", "eth1"] and after == ["bdocker", "eth0"]
         assert reply == {"version": 1, "type": "ack", "for": "narrow"}
         assert order == ["admit", "narrow"]
         # The same request again is answered the same way, and nothing is unplugged twice.
@@ -604,7 +604,7 @@ def test_a_wall_that_refuses_leaves_the_nic_in_place_and_refuses() -> None:
         reply, devices = go(scenario)
 
         assert reply["type"] == "refused" and reply["reason"] == "unavailable"
-        assert devices == ["eth0", "eth1"]
+        assert devices == ["bdocker", "eth0", "eth1"]
 
 
 # #1007-T02
@@ -653,7 +653,7 @@ def test_a_message_without_the_jobs_token_changes_nothing() -> None:
 
         for reply in (forged, wrong):
             assert reply["type"] == "refused" and reply["reason"] == "invalid_request"
-        assert devices == ["eth0", "eth1"]
+        assert devices == ["bdocker", "eth0", "eth1"]
         assert [e[0] for e in events] == ["admit", "forget"]
 
 
@@ -839,4 +839,131 @@ def test_an_instance_that_never_gets_its_addresses_fails_the_start_and_leaves_no
             return sandbox.free
 
         assert go(scenario) == 1
+        assert rig.incus.instances == {}
+
+
+# -- #1017: Control drives B's Docker ---
+
+
+# #1017-T02
+def test_b_docker_reaches_a_through_two_proxy_devices_and_never_a_tcp_port() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        async def scenario() -> Any:
+            worker = await started(rig)
+            a, b = instance(rig, "a"), instance(rig, "b")
+            devices = {"a": dict(a.devices), "b": dict(b.devices)}
+            job_directory = next(iter(root.glob("jobs/job-*")))
+            finish_control(rig)
+            await worker.wait()
+            return devices, job_directory
+
+        devices, job_directory = go(scenario)
+
+        in_b = devices["b"]["bdocker"]
+        in_a = devices["a"]["bdocker"]
+        # B's device listens on the host (a file in the job's directory) and dials B's own socket;
+        # A's device listens in A and dials that file: A dials B, and nothing B owns dials A.
+        assert in_b["type"] == "proxy" and in_b["bind"] == "host"
+        assert in_b["listen"] == f"unix:{job_directory}/bdocker.sock"
+        assert in_b["connect"] == "unix:/var/run/docker.sock"
+        assert in_a["type"] == "proxy" and in_a["bind"] == "instance"
+        assert in_a["listen"] == "unix:/b-docker.sock"
+        assert in_a["connect"] == in_b["listen"]
+        # Only the user of the service can have the sockets; no device offers B's Docker (or A's)
+        # on a TCP port, and B has no proxy device that connects into A.
+        assert in_a["mode"] == in_b["mode"] == "0600"
+        for role in "ab":
+            for each in devices[role].values():
+                if each["type"] == "proxy":
+                    assert each["listen"].startswith("unix:") and each["connect"].startswith(
+                        "unix:"
+                    )
+        assert [
+            d for d in devices["b"].values() if d["type"] == "proxy" and d["bind"] == "instance"
+        ] == []
+
+
+# #1017-T02
+def test_control_is_told_that_the_setup_and_the_agent_live_in_b_and_where_the_doors_are() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        async def scenario() -> Any:
+            worker = await started(rig)
+            arguments = rig.incus.controls[-1].argv
+            finish_control(rig)
+            await worker.wait()
+            return arguments
+
+        arguments = go(scenario)
+
+        assert "RUNNER_ENVIRONMENT_DOCKER=split" in arguments
+        assert "RUNNER_ENVIRONMENT_DOCKER_SOCKET=/b-docker.sock" in arguments
+        assert "RUNNER_ENVIRONMENT_DOOR_ADDRESS=10.98.0.2" in arguments
+        assert "type=bind,source=/b-docker.sock,target=/b-docker.sock" in arguments
+        # A's own Docker stays Control's (the doors, its image).
+        assert any(each.startswith("type=bind,source=/var/run/docker.sock") for each in arguments)
+
+
+# #1017-T01
+def test_a_start_whose_b_docker_does_not_answer_in_a_is_refused_and_leaves_nothing() -> None:
+    with short_directory() as root:
+        rig = Rig(root, ready_seconds=0.3)
+        rig.incus.responder = lambda name, argv: (
+            ExecResult(1, "", "Cannot connect") if "-H" in argv and argv[0] == "docker" else None
+        )
+
+        async def scenario() -> Any:
+            sandbox = rig.sandbox()
+            with pytest.raises(StartFailed, match="B's Docker"):
+                await sandbox.start(start_for())
+            return sandbox.free
+
+        assert go(scenario) == 1
+        assert rig.incus.instances == {}
+        assert not list((root / "jobs").glob("job-*"))
+        assert rig.incus.controls == []
+
+
+# #1017-T04
+def test_the_file_incusd_makes_for_b_docker_goes_with_the_job_directory() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        async def scenario() -> Any:
+            worker = await started(rig)
+            directory = next(iter(root.glob("jobs/job-*")))
+            # What `incusd` makes for B's proxy device on the host.
+            (directory / "bdocker.sock").write_bytes(b"")
+            finish_control(rig)
+            await worker.wait()
+            return directory
+
+        directory = go(scenario)
+
+        assert not directory.exists()
+        assert rig.incus.instances == {}
+
+
+# #1017-T04
+def test_a_crash_is_cleaned_by_the_mark_with_both_instances_and_their_devices() -> None:
+    with short_directory() as root:
+        rig = Rig(root)
+
+        async def scenario() -> Any:
+            first = rig.sandbox()
+            await first.setup()
+            await first.start(start_for())
+            assert all("bdocker" in i.devices for i in rig.incus.instances.values())
+            # The service dies with the job running (its lock goes with the process); the next
+            # one deletes by the mark, devices and all.
+            await first.close()
+            second = rig.sandbox()
+            await second.setup()
+            await second.close()
+
+        go(scenario)
+
         assert rig.incus.instances == {}
