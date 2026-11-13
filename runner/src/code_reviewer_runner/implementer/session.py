@@ -1251,8 +1251,10 @@ class ImplementerSession:
             )
         elif error is None and not report.branches:
             # No commit and nothing to commit, on no branch: the agent did not do the task, unless
-            # it ended the turn with a question (#920), which it may ask before changing anything.
-            if self._agent_ask is None:
+            # it ended the turn with a question (#920), which it may ask before changing anything,
+            # or handed in a result (#965): a turn may rightly change nothing, as a follow-up whose
+            # review contradicts an answer does.
+            if self._agent_ask is None and self._agent_result is None:
                 error = (ErrorCode.AGENT_GAVE_UP, "the agent ended without a commit")
         elif error is None and (
             not report.pushed_any
@@ -1264,6 +1266,10 @@ class ImplementerSession:
             # is work that did not arrive, and a branch that is gone is not verifiably empty. Not a
             # success, whatever else was pushed.
             error = (ErrorCode.PUSH_REJECTED, _push_failure(form))
+        if error is None and form is None and head is None and workspace.earlier_head is not None:
+            # #965: a follow-up turn that added nothing to the session branch leaves it where the
+            # earlier turns did, and that branch is the work: the facts keep naming it.
+            head, pushed = workspace.earlier_head, True
         return self._turn_result(
             error,
             head,

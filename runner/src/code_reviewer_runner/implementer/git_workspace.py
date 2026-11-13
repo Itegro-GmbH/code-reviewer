@@ -498,6 +498,9 @@ class GitWorkspace:
         # The tags of the provider (name to the object the tag is), kept as they were fetched.
         self._tags: dict[str, str] = {}
         self._start: str | None = None
+        # The tip an earlier turn left the session branch at on the provider (#965); None for a
+        # first turn and for a session branch that never arrived.
+        self._earlier_head: str | None = None
         # The branch the session branch is made from: the start branch the job names, or the base
         # branch when it names none (or, on a follow-up, the provider no longer has it).
         self._start_source: str | None = None
@@ -527,6 +530,13 @@ class GitWorkspace:
         if self._start is None:
             raise fail(ErrorCode.SETUP_FAILED, "the base branch is not cloned yet")
         return self._start
+
+    @property
+    def earlier_head(self) -> str | None:
+        """The tip an earlier turn pushed the session branch at, as the provider had it when this
+        turn began (#965): the branch fact of a follow-up turn that adds no commit of its own.
+        None for a first turn, and for a follow-up whose session branch never arrived."""
+        return self._earlier_head
 
     @property
     def start_source(self) -> str:
@@ -653,6 +663,7 @@ class GitWorkspace:
                     self._moved.append(BranchMoved(entry.name, entry.head, tip))
         self._check_no_ref_collision_with(tips)
         # The session branch starts at the start branch's tip unless an earlier turn pushed it.
+        self._earlier_head = tips.get(branch)
         self._start_source = start if start is not None and start in tips else base
         self._start = tips.setdefault(branch, tips[self._start_source])
         return tips
