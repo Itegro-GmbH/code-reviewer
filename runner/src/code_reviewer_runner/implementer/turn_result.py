@@ -45,6 +45,7 @@ class TurnResult:
     base_commit: str
     head_commit: str | None
     # The form's branch: its tip when it has work on top of the base commit, and whether it arrived.
+    # A follow-up turn that added nothing names the tip the earlier turns left it at (#965).
     pushed: bool
     # Every local branch of the agent's repository the final push dealt with, pushed or rejected.
     branches: tuple[BranchPush, ...]

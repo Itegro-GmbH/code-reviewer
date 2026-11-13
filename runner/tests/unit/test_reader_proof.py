@@ -187,3 +187,28 @@ def test_readers_that_cannot_be_made_fail_the_proof_instead_of_crashing(
 
     assert failed == ["reader_unavailable_500"]
     assert lines[-1] == "READER_PROOF done"
+
+
+class _BrokenApi(DockerApi):
+    """A daemon client that fails the way a bug does, not the way a daemon does."""
+
+    def create_container(self, document: dict[str, Any], name: str) -> str:
+        raise ValueError("the answer is not what the client expects")
+
+
+# #745-T23: the snapshot's proof reads these lines and discards the standard error, so a crash of
+# the proof must say what it was on the standard output, or it reads as "not contained"
+def test_a_crash_of_the_proof_is_named_and_does_not_end_without_a_last_line() -> None:
+    lines: list[str] = []
+
+    status = reader_proof.main(
+        ["--image", IMAGE_ID, "--volume", WORK_VOLUME],
+        api=_BrokenApi("/nonexistent/docker.sock"),
+        write=lines.append,
+    )
+
+    assert status == 0
+    assert "READER_PROOF fail reader_crashed_valueerror" in lines
+    assert any(line.startswith("READER_PROOF detail ValueError") for line in lines)
+    assert "READER_PROOF ok reader_contained" not in lines
+    assert lines[-1] == "READER_PROOF done"
