@@ -2691,18 +2691,179 @@ def test_a_turn_that_asks_before_any_commit_succeeds_and_pushes_nothing(play: An
     assert turn.git.pushes == []
 
 
-# #961-T02: without a question, no commit is still giving up
-def test_a_turn_that_may_ask_and_neither_asks_nor_commits_still_gave_up(play: Any) -> None:
+# #961-T02 (#965): a turn that hands in nothing at all (no question, no result) and makes no commit
+# is no success; with a result schema it ends `no_result`, without one `agent_gave_up` (#765-T04)
+def test_a_turn_that_may_ask_and_neither_asks_nor_hands_in_a_result_nor_commits_is_no_success(
+    play: Any,
+) -> None:
     results = FakeResults()
 
     def script(agent: FakeAgent, check: Callable[[], None]) -> str:
         agent.use_the_model()
-        results.write(RIGHT_RESULT)
         return "Nothing to do."
 
     turn = play(script, result_schema=RESULT_SCHEMA, results=results, can_ask=True)
 
-    assert turn.result["ok"] is False and turn.result["errorCode"] == "agent_gave_up"
+    assert turn.result["ok"] is False and turn.result["errorCode"] == "no_result"
+    assert turn.git.pushes == []
+
+
+# -- #965: a turn that rightly changes nothing ---------------------------------------------------
+
+
+def hands_in_without_a_commit(results: FakeResults) -> Callable[..., str]:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        results.write(RIGHT_RESULT)
+        return "The review contradicts the answer, so I changed nothing."
+
+    return script
+
+
+def asks_without_a_commit(results: FakeResults) -> Callable[..., str]:
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        agent.use_the_model()
+        results.write_ask(QUESTION)
+        return "I need an answer first."
+
+    return script
+
+
+def after_a_pushed_turn(git: FakeGit) -> None:
+    """A follow-up whose session branch an earlier turn pushed: the turn starts at its tip."""
+    at_the_start_of_a_follow_up(git)
+    git._start = TIP  # pyright: ignore[reportPrivateUsage]
+    git._earlier_head = TIP  # pyright: ignore[reportPrivateUsage]
+
+
+# #965-T01
+def test_a_first_turn_that_hands_in_a_result_without_a_commit_succeeds_and_pushes_nothing(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(hands_in_without_a_commit(results), result_schema=RESULT_SCHEMA, results=results)
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    assert result["errorCode"] is None
+    assert valid_result(result)
+    block = result["implementer"]
+    assert block["agentResult"] == json.loads(RIGHT_RESULT)
+    assert block["baseCommit"] == START
+    assert block["headCommit"] is None and block["pushed"] is False
+    assert turn.git.pushes == []
+
+
+# #965-T02
+def test_a_follow_up_that_hands_in_a_result_without_a_commit_keeps_the_branch_of_the_earlier_turn(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(
+        hands_in_without_a_commit(results),
+        result_schema=RESULT_SCHEMA,
+        results=results,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=after_a_pushed_turn,
+    )
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    assert valid_result(result)
+    block = result["implementer"]
+    assert block["agentResult"] == json.loads(RIGHT_RESULT)
+    assert block["baseCommit"] == TIP
+    assert block["headCommit"] == TIP and block["pushed"] is True
+    assert block["commits"] == [] and block["filesChanged"] == []
+    assert turn.git.pushes == [], "nothing is pushed again"
+
+
+# #965-T03
+def test_a_follow_up_that_asks_without_a_commit_keeps_the_branch_of_the_earlier_turn(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(
+        asks_without_a_commit(results),
+        result_schema=RESULT_SCHEMA,
+        results=results,
+        can_ask=True,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=after_a_pushed_turn,
+    )
+
+    result = turn.result
+    assert turn.exit_code == 0 and result["ok"] is True, turn.output
+    block = result["implementer"]
+    assert block["agentAsk"] == json.loads(QUESTION)
+    assert block["headCommit"] == TIP and block["pushed"] is True
+    assert turn.git.pushes == []
+
+
+# #965-T04
+def test_a_follow_up_with_a_new_commit_reports_the_new_head_not_the_earlier_one(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    def script(agent: FakeAgent, check: Callable[[], None]) -> str:
+        results.write(RIGHT_RESULT)
+        return commits_then_ends(SECOND)(agent, check)
+
+    turn = play(
+        script,
+        result_schema=RESULT_SCHEMA,
+        results=results,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=after_a_pushed_turn,
+    )
+
+    block = turn.result["implementer"]
+    assert (block["baseCommit"], block["headCommit"], block["pushed"]) == (TIP, SECOND, True)
+    assert turn.git.pushes == [SECOND]
+
+
+# #965-T05
+def test_a_follow_up_without_any_result_or_question_or_commit_still_gave_up_and_keeps_no_head(
+    play: Any,
+) -> None:
+    turn = play(
+        never_commits,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=after_a_pushed_turn,
+    )
+
+    result = turn.result
+    assert result["ok"] is False and result["errorCode"] == "agent_gave_up"
+    assert result["implementer"]["headCommit"] is None
+    assert result["implementer"]["pushed"] is False
+
+
+# #965-T06
+def test_a_follow_up_whose_session_branch_never_arrived_has_no_branch_fact_to_keep(
+    play: Any,
+) -> None:
+    results = FakeResults()
+
+    turn = play(
+        hands_in_without_a_commit(results),
+        result_schema=RESULT_SCHEMA,
+        results=results,
+        resume={**FOLLOW_UP, "snapshot": True},
+        resume_outcome=ResumeOutcome(ResumeMode.IMPORTED),
+        configure=at_the_start_of_a_follow_up,
+    )
+
+    block = turn.result["implementer"]
+    assert turn.result["ok"] is True
+    assert block["headCommit"] is None and block["pushed"] is False
 
 
 def test_can_ask_needs_a_result_schema_and_a_boolean() -> None:

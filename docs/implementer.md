@@ -251,7 +251,10 @@ when the task's branch arrived, or when the task's branch is verifiably empty (i
 arrived**. It ends `push_rejected` when the task's branch was not taken (rejected for any reason, among them `unreadable`,
 `not_a_commit` and `timed_out`, or gone from the repository) whatever else was pushed, when no branch arrived although some had
 commits, or when the agent's repository, or its list of branches (read up to 4 MiB), could not be read at all; it ends
-`agent_gave_up` when no branch has anything new. A rejected branch of the report is not an error of the turn by itself.
+`agent_gave_up` when no branch has anything new, unless the agent handed in a result or a question (#920, #965): a turn may rightly
+change nothing (a follow-up whose review contradicts an earlier answer). Such a follow-up turn names the tip the earlier turns left the
+session branch at as its head (`pushed: true`, no commits of its own), so the next step works with the branch as it is. A rejected branch
+of the report is not an error of the turn by itself.
 
 **The branch the agent ended on.** The result also says which local branch HEAD was on when the runner read the repository
 (`checkedOut`, #837): read in the reader from the `symbolic-ref` that the rescue of a detached HEAD already runs, so it costs no
