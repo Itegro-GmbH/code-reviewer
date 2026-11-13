@@ -449,6 +449,7 @@ case "$1" in
         case ${o.readerProof} in
           0) echo "READER_PROOF ok reader_contained"; echo "READER_PROOF done" ;;
           1) echo "READER_PROOF fail reader_remount"; echo "READER_PROOF done" ;;
+          2) echo "ModuleNotFoundError: No module named 'code_reviewer_runner'" >&2; exit 1 ;;
         esac
         exit 0 ;;
       *1.1.1.1*) exit ${o.outsideNc} ;;
@@ -526,6 +527,25 @@ exit 0`;
       expect(lines).not.toContain("SYSBOX_PROBE ok reader");
     else expect(lines).not.toContain("SYSBOX_PROBE ok volume_mapped");
     expect(lines.at(-1)).toBe("SYSBOX_PROBE_DONE");
+  });
+
+  // #1024: the probe's output is all the pipeline logs of a failed proof, and the proof's standard error was dropped
+  it("names the check the proof of the reader failed, besides the reason of the proof", () => {
+    const lines = isolation({ readerProof: 1 });
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_reader_not_contained");
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_reader_reader_remount");
+  });
+
+  it("names the exit status and the last line of the standard error when the proof of the reader gives no answer", () => {
+    const lines = isolation({ readerProof: 2 });
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_reader_not_contained");
+    expect(lines).toContain("SYSBOX_PROBE fail sysbox_reader_exit_1");
+    expect(lines).toContain(
+      "SYSBOX_PROBE fail sysbox_reader_stderr_modulenotfounderror__no_module_named",
+    );
+    // Every reason is one the pipeline reads (`SYSBOX_FAILURE`).
+    for (const line of lines.filter((l) => l.includes(" fail ")))
+      expect(line).toMatch(/^SYSBOX_PROBE fail [a-z][a-z0-9_]{0,63}$/);
   });
 
   // #745: the reader of the proof is the one production makes, not a copy of its flags
