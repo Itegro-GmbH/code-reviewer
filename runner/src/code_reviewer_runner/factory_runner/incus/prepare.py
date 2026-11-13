@@ -9,13 +9,15 @@ what the installer (#1011) arranges; a machine that fails one is not ready and t
 The instances' own content (Docker, the Worker image) is proven by the release's smoke test in CI
 and
 by the readiness probe of every job, not here: a runner does not boot instances to announce
-itself."""
+itself. What the image holds of the harnesses (OpenCode, Claude Code) is read from the properties
+the image build recorded (`harnesses.py`, #1023); a job looks at the real Docker of instance B
+again."""
 
 import asyncio
 import os
 from collections.abc import Callable, Mapping
 
-from code_reviewer_runner.factory_runner.config import RunnerConfig
+from code_reviewer_runner.factory_runner.config import RunnerConfig, home_directory
 from code_reviewer_runner.factory_runner.prepare import (
     Prepared,
     announcement_for,
@@ -26,9 +28,11 @@ from code_reviewer_runner.factory_runner.selftest import (
     Check,
     SelfTestResult,
 )
+from code_reviewer_runner.implementer.claude_code.readiness import HARNESS_CLAUDE_CODE
 from code_reviewer_runner.job_loop.settings import worker_settings_from_environment
 
 from .client import CliIncusClient, IncusClient, IncusError
+from .harnesses import GoldenHarnesses, golden_harnesses
 from .provision import misconfigured_objects, missing_objects
 from .settings import IncusSettings, SettingsError, settings_from_environment
 
@@ -83,6 +87,21 @@ def host_checks(settings: IncusSettings, client: IncusClient) -> tuple[Check, ..
     return asyncio.run(_host_checks(settings, client))
 
 
+def image_harnesses(
+    settings: IncusSettings, client: IncusClient, source: Mapping[str, str]
+) -> GoldenHarnesses:
+    """What the golden image says of its harnesses (never raises: an image that cannot be read
+    costs the harnesses, not the machine)."""
+    try:
+        properties = asyncio.run(client.image_properties(settings.image))
+    except (IncusError, OSError) as error:
+        detail = error.detail if isinstance(error, IncusError) else "the incus program is missing"
+        return GoldenHarnesses(
+            None, None, (f"the golden image could not be read for its harnesses ({detail})",)
+        )
+    return golden_harnesses(properties, source, home_directory(source))
+
+
 def prepare_incus(
     config: RunnerConfig,
     source: Mapping[str, str],
@@ -109,6 +128,21 @@ def prepare_incus(
 
     run = checks or real_checks
     results = (*run(vm), Check(CHECK_AGENT_DOCKER, True, "Docker is in the instances"))
-    result = SelfTestResult(results, RUNTIME)
     environment = {name: source[name] for name in ("RUNNER_JOB_TIMEOUT_SECONDS",) if name in source}
-    return Prepared(settings, environment, announcement_for(config, result, vm.memory_mib), result)
+    # Only on a machine whose base holds: the image is there to be read.
+    found = (
+        image_harnesses(vm, client(vm), source)
+        if all(check.ok for check in results)
+        else GoldenHarnesses(None, None, ())
+    )
+    result = SelfTestResult(results, RUNTIME, opencode_version=found.opencode_version)
+    claude = found.claude
+    added = {HARNESS_CLAUDE_CODE: claude} if claude is not None else {}
+    return Prepared(
+        settings,
+        environment,
+        announcement_for(config, result, vm.memory_mib, added),
+        result,
+        found.notes,
+        claude_version=claude.version if claude is not None and claude.ready else None,
+    )
