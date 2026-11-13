@@ -57,7 +57,7 @@ def main(
         if not _PROTOCOL.fullmatch(protocol):
             return USAGE_ERROR
         env[UPLOAD_PACK_PROTOCOL_VARIABLE] = protocol
-    api = api or (DockerApi() if socket_path is None else DockerApi(socket_path))
+    api = api or (DockerApi() if socket_path is None else DockerApi(socket_path, half_close=False))
     try:
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,

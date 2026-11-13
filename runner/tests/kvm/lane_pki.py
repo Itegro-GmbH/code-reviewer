@@ -15,7 +15,8 @@ permitted subtree, every IPv4 and IPv6 address is excluded): even in the lane's 
 vouch for any other name, nor for an IP address. Nothing here is a secret worth keeping, and
 nothing here is ever committed (`*.key` and `*.pem` are ignored by the repository).
 
-    python lane_pki.py ca <directory>        makes `lane-ca.crt` and `lane-ca.key` there"""
+    python lane_pki.py ca <directory> [days]   makes `lane-ca.crt` and `lane-ca.key` there
+                                               (3 days by default)"""
 
 import datetime
 import ipaddress
@@ -55,8 +56,10 @@ def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
 
 
-def create_ca(directory: Path, domain: str = LANE_DOMAIN) -> Ca:
-    """Make the CA, restricted to `domain` and what is below it, and write it into `directory`."""
+def create_ca(directory: Path, domain: str = LANE_DOMAIN, days: int = CA_DAYS) -> Ca:
+    """Make the CA, restricted to `domain` and what is below it, and write it into
+    `directory`. It is valid for `days`: a CI run needs three, a lane whose image is built
+    once and kept (the Incus whole-job lane, #1020) asks for longer."""
     directory.mkdir(parents=True, exist_ok=True)
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, CA_NAME)])
@@ -68,7 +71,7 @@ def create_ca(directory: Path, domain: str = LANE_DOMAIN) -> Ca:
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(begin)
-        .not_valid_after(begin + datetime.timedelta(days=CA_DAYS))
+        .not_valid_after(begin + datetime.timedelta(days=days))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -181,10 +184,10 @@ def server_context(ca: Ca, names: list[str], directory: Path) -> ssl.SSLContext:
 
 
 def main(arguments: list[str]) -> int:
-    if len(arguments) != 2 or arguments[0] != "ca":
-        print("usage: lane_pki.py ca <directory>", file=sys.stderr)
+    if len(arguments) not in (2, 3) or arguments[0] != "ca":
+        print("usage: lane_pki.py ca <directory> [days]", file=sys.stderr)
         return 2
-    ca = create_ca(Path(arguments[1]))
+    ca = create_ca(Path(arguments[1]), days=int(arguments[2]) if len(arguments) == 3 else CA_DAYS)
     print(ca.certificate_path)
     return 0
 

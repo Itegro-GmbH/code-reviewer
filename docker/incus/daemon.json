@@ -1,0 +1,9 @@
+{
+  "ipv6": false,
+  "ip6tables": false,
+  "live-restore": false,
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "2"
+  }
+}

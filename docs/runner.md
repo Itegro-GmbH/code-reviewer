@@ -2322,11 +2322,18 @@ Placement is `implementer/placement.py`; the launcher tells Control with three v
 
 Everything B's daemon says is data from the untrusted side: parsed with bounds, never put into a request to A's Docker (A's Docker only ever gets bodies made from constants and A's own identifiers).
 
+**A connection through a `proxy` device cannot be half-closed (found by the whole-job lane, #1020).** The device ends the *whole* connection, the daemon's answer included, when one side shuts down its half. Every `docker exec` of the runner said "no more input" with `shutdown(SHUT_WR)` right after attaching, so every command in B
+(`git rev-parse`, the readers, the setup script's write) came back with **empty output and exit status 0** (measured by hand with a client that did and did not half-close, through the same two devices). B's API is therefore `DockerApi(half_close=False)` (`Placement.environment_api`): `close_write` does nothing, a command without input attaches none (`AttachStdin: false`), and a command with input
+reads exactly its length (`head -c <n> | <command>`, `exec_run.framed_argv`: the end of its input is the end of the `n` bytes; the exit status is the command's). The one streamed command, `git upload-pack` of the agent's repository, ends only when its input ends in protocol 2, so a split job fetches the agent's branches with **protocol 0**
+(`RepoAccess.protocol_version`: the upload-pack ends by itself after the pack; the cost is an advertisement of every ref of the agent's repository instead of the one asked for, read through the pipe).
+
 **Tests** (no Incus, no Docker): `tests/unit/test_split_docker.py` (two fake engines, A's and B's: where each thing is made, the doors' documents, the agent's definition and its seal check, the seed and the readers, the pipe's socket option, the profile), `test_incus_launcher.py` (the two devices, the variables, B's Docker not answering, the clean-up) and `test_incus_parts.py` (the arguments).
 
 ### Start budget
 
 Nothing to the first container ≈ **4.5 s** at a moderate load (spike #1005 on btrfs: `incus init` 0.14 to 0.46 s, `start` 0.3 s, dockerd answers 2 s later, the first container 2 s), against the Firecracker launcher's 2.6 s.
+
+With the real golden image (Docker, the Worker image, the agent image) `start()` took **6.7 to 10.3 s, median 7.5 s**, on the DevBox at a load of 4 to 8 ([#1020](#a-whole-job-on-incus-1020)).
 
 ### Tests
 
@@ -2350,11 +2357,44 @@ The lane found two defects the unit tests could not: **`incus config device add`
 waits until both instances show their addresses (`ip -4 -o addr show`; the golden image needs `iproute2`), which turned two flaky lane failures into none.
 **What the lane does not prove**: Docker inside B and the agent's own containers (so "from the agent's Docker" of the walls is the spike's measurement, not this lane's), the real Worker image and the golden image, the host's static nft table (#1008), AppArmor and the real hardening flags.
 
+### A whole job on Incus (#1020)
+
+`runner/tests/incus/test_incus_whole_job.py` runs the job of the KVM lane's `test_whole_job.py` (#999) on this backend, on the DevBox: a real job claimed from the `FakeRunnerApp` over the runner API, started by the real `IncusSandbox` in **two real instances of the golden image**, with the launcher's own client (no stand-ins: Docker, `nft` and the images are the image's), the real proxy wall (`FACTORY_RUNNER_OUTER_WALL=proxy`)
+and the same fakes behind public-looking names (`runner/tests/kvm/lane_internet.py`, a test CA that **only the lane's copy of the Worker image trusts**, the scripted model of `fakes/wire`). What runs for real: Control and the two doors in A's Docker, the inner wall as an nft table in A, the setup script in B's Docker through the proxy (wide rule), the hand-over (leave the setup network, pause, Control reads the
+repository, model network, unpause), the real `narrow` over the unix socket (rule held, B's outer NIC unplugged), OpenCode in the agent's container in B calling the model through A's door and the proxy, the agent's commit fetched back through the checked fetch, the push over https through the proxy, the end report, and the deletion of both instances.
+
+| Case | What it asserts |
+|---|---|
+| T01 | exit 0, the app got `ok`, the branch is on the lane's git endpoint with the agent's commit (both of its files), the job `succeeded` |
+| T02 | the setup's fetch (before `narrow`) and the agent's fetch (after it) are in the commit, in that order around the acknowledgement of `narrow` |
+| T03 | `narrow` carried the job's rule and the provider; the host only the setup may reach was reached by the setup and refused to the agent; the whole job's traffic is by name on 80 and 443; the report says `narrowed` |
+| T04 | the provider got the real key (the agent in B has only the dummy) and the scripted turns, through the door and the proxy |
+| T05 | no instance of the job is left, and `start()` takes under 90 s |
+| T06 | a clone the proxy refuses ends `clone_failed`, pushes nothing, dials nothing else |
+
+**Measured on the DevBox** (2026-11-13, Incus 7.6, btrfs pool `crpool` in a loop file, kernel 6.8, a shared host at a load of 4 to 8; A and B 2 vCPU and 2 GiB each; the image below): `start()` (two instances from the image, boot, addresses, wall, readiness of both Dockers, the image check, Control launched) **6.7 to 10.3 s over seven runs, median 7.5 s**; the whole job (setup container 5 s to start, script 1 s, hand-over under 1 s, two model calls, commit, fetch, push) **48 s**, the six cases **71 s**. The image: **1.6 GiB** in the image store (zstd), **4.4 GiB** unpacked in the pool (Worker image 1.9 GB and agent image 1.5 GB as Docker counts them, containerd store); an instance of it is a btrfs snapshot.
+What the lane does **not** prove: the host's static nft table (#1008: the host's port 53, the drop counters), the freeze of a setup process under `docker pause` (#1009-T48 has no twin here yet: the setup container is a privileged runc container with its own dockerd, a follow-up), a real provider, a real git host, and a machine other than the DevBox.
+
+**Variables.** The pool, state directory, prefix and slot network of the lane above, and `CR_INCUS_JOB_IMAGE` (the golden image's alias), `CR_INCUS_JOB_IMAGE_ID` (the Worker image's id) and `CR_INCUS_JOB_PKI` (the lane's CA): without them the lane is skipped. Run it as a member of `incus-admin`:
+`sg incus-admin -c '. env; uv run pytest -m incus --force-enable-socket tests/incus/test_incus_whole_job.py -s'` in `runner/`. The state directory is under the user's home, never `/tmp` (`incusd` does not see it), and every object it makes carries the lane's prefix.
+
+**The golden image and how to rebuild it.** `docker/incus/build-golden.sh` is the recipe (the product's, not the lane's): Ubuntu 24.04, the static Docker bundle of the golden snapshot's version (29.1.3) and buildx (`docker/incus/pins.env`, sha256-checked), `iproute2`, `nftables`, `iptables`, `git`, `docker.service` (`dockerd` starts and manages **its own containerd**, the spike's lesson: two units made the loaded images depend on which started first) and `daemon.json`; the Worker image and the agent image are streamed into its `docker load`
+(no archive on any disk), it **restarts the build instance and checks that both images are there with the same ids**, publishes the image as the alias (`code-reviewer-golden` by default), starts one throwaway instance so that the first job does not pay the unpack, and prints `FACTORY_RUNNER_INCUS_IMAGE` and **`FACTORY_RUNNER_VM_IMAGE_ID`** (the Worker image's id, which the launcher checks in A). It makes and removes only objects of its prefix
+(`<prefix>-bld`: a bridge and an instance); the build instance has **no way out but `docker/incus/build-proxy.py`**, a forward proxy on the host's address of the build bridge that reaches the Ubuntu archive only (on the DevBox, whose Docker belongs to other users, a NATed Incus bridge does not leave the host: the same finding as the spike, which used a proxy too). The recipe takes the images from the caller's Docker
+(`--worker`/`--agent` tags) or from a command that prints an archive (`--worker-command`/`--agent-command`, for a machine without room for the images twice). The lane's variant is `runner/tests/incus/build-lane-image.sh <pki dir> --pool crpool --prefix crlane` (heavy: `flock /tmp/cr-heavy.lock`): it builds `runner/Dockerfile` (`sandbox` with one more stage that appends the lane's CA to the bundle, and `agent`) and streams both into the recipe as `crlane-golden`, and prints the three variables above.
+Rebuild it after **every change of the runner's code**: the Worker image in the image is the code the job runs (the whole-job lane found three defects because it ran the real image).
+
+**What the lane found** (each fixed in #1020 with a test of its own; none was visible to the unit tests or the stand-in lane):
+
+1. `disk_space()` read **btrfs's inode count (always 0) as a full inode table**: every job on the Incus pool ended `clone_failed: the repository leaves too little room on the disk` on an empty disk. A file system that reports no inodes (`f_files` 0) has no inode limit now (`tests/unit/test_disk_space.py`).
+2. **Half-close through a `proxy` device** (above): every command in B returned empty output, which first showed as `setup_failed: the agent repository is not at the start tip`.
+3. **The adopted agent container's tools got the hosted doors' addresses** (`10.213.77.x`, `proxy_environment` without the placement in `_exec_environment`): OpenCode in B sent its model calls to the network door's *hosted* address as a proxy, and every call ended `APIError`. The tools get A's doors on the inner bridge now.
+
 ### Not done here, follow-ups
 
-- **The Worker's use of the two instances** is [#1017](#control-drives-bs-docker-1017) (below); the full `worker-once` job with the real engine on this backend is run by the CI lane that needs the golden image.
-- **The golden Incus image** (Docker, the Worker image pre-loaded, systemd-networkd, `nft`) and its release artifact (#1012, #1011); the first start of an image in a pool unpacks it (≈ 21 s), which the installer pays once.
-- **A CI lane with Incus** on `ubuntu-24.04` (needs the image above and root for Incus's own install); the lane here runs on the DevBox.
+- **The Worker's use of the two instances** is [#1017](#control-drives-bs-docker-1017); the full job with the real engine on this backend is [#1020](#a-whole-job-on-incus-1020) (above), run on the DevBox, not in CI.
+- **The golden Incus image's release artifact** (signed, with a manifest, as the VM artifacts are: #1012, #1011); the recipe is `docker/incus/` (#1020, above). The first start of an image in a pool unpacks it, which the installer pays once (the recipe does it with one throwaway instance).
+- **A CI lane with Incus** on `ubuntu-24.04` (needs the golden image and root for Incus's own install); the lanes here run on the DevBox. The twin of the freeze test (#1009-T48) and a **quiet-host re-measure** of the start budget are open; so is a **protocol 2 fetch** for B (the advertisement of every ref is read with protocol 0) and a guard that reads B's memory.
 - **The host's nft table** (#1008), the installer and updater (#1011), conformance suite (#1010), removal of the Firecracker code, the kernel/rootfs release artifacts, the KVM lane and vm-init's vsock side (#1012).
 
 ## The outer wall on a customer's machine (#979)

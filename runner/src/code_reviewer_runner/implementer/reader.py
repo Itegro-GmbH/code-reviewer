@@ -349,6 +349,12 @@ class ReaderAccess:
         upload-pack is told about is the reader's own (`exec_pipe` ignores this one)."""
         return CONTROL_REPO
 
+    @property
+    def protocol_version(self) -> int:
+        """0 on B's Docker, whose connection cannot be half-closed: the upload-pack of protocol 2
+        waits for the end of its input, the one of protocol 0 ends after the pack."""
+        return 0 if self._seams.placement.split else 2
+
     def upload_pack(self) -> str:
         command = f"{self._seams.python} -I -m {UPLOAD_PACK_MODULE}"
         if self._seams.placement.split:

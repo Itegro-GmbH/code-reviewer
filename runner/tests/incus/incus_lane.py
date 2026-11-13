@@ -56,6 +56,39 @@ def load_machine(environment: Mapping[str, str] = os.environ) -> Machine | None:
     )
 
 
+@dataclass(frozen=True)
+class JobMachine:
+    """The whole-job lane's machine (#1020): the lane's pool, state directory, prefix and slot
+    network (as above), the golden image's alias, the Worker image's id in it (`build-golden.sh`
+    prints it) and the directory of the lane's test CA that the image trusts."""
+
+    machine: Machine
+    image_id: str
+    pki: Path
+
+
+def load_job_machine(environment: Mapping[str, str] = os.environ) -> JobMachine | None:
+    """`CR_INCUS_JOB_IMAGE` (the golden image's alias), `CR_INCUS_JOB_IMAGE_ID` and
+    `CR_INCUS_JOB_PKI` on top of the pool, state directory, prefix and network the other lane
+    names; None when one of them is not set."""
+    pool, state = environment.get("CR_INCUS_LANE_POOL"), environment.get("CR_INCUS_LANE_STATE")
+    image, image_id = (
+        environment.get("CR_INCUS_JOB_IMAGE"),
+        environment.get("CR_INCUS_JOB_IMAGE_ID"),
+    )
+    pki = environment.get("CR_INCUS_JOB_PKI")
+    if not (pool and state and image and image_id and pki):
+        return None
+    machine = Machine(
+        pool,
+        image,
+        environment.get("CR_INCUS_LANE_PREFIX", "crlane"),
+        environment.get("CR_INCUS_LANE_NETWORK", "10.99.0.0/24"),
+        Path(state),
+    )
+    return JobMachine(machine, image_id, Path(pki))
+
+
 def have_nft_to_push() -> bool:
     return NFT.exists() and all((LIBRARY_DIRECTORY / name).exists() for name in LIBRARIES)
 
