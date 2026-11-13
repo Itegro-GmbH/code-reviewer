@@ -567,14 +567,29 @@ if docker exec "$box" sh -c 'cat /work/repo/from-control > /dev/null && echo age
     # The reader is the one the Worker makes: its image runs \`reader_proof\`, which sends the daemon the reader's own document over
     # this volume (both readers, read-only and read-write) and runs in them the commands production runs.
     reader_image=$(docker image inspect --format '{{.Id}}' ${workerImage} 2> /dev/null)
-    reader_lines=$(timeout 120 docker run --rm --user 0:0 --entrypoint /opt/venv/bin/python --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock ${workerImage} -I -m code_reviewer_runner.implementer.reader_proof --image "$reader_image" --volume "$vol" --runtime=sysbox-runc 2> /dev/null)
-    if printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF ok reader_contained' &&
-       printf '%s\n' "$reader_lines" | grep -qx 'READER_PROOF done' &&
-       ! printf '%s\n' "$reader_lines" | grep -q '^READER_PROOF fail '; then
+    reader_err=$(mktemp)
+    reader_lines=$(timeout 120 docker run --rm --user 0:0 --entrypoint /opt/venv/bin/python --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock ${workerImage} -I -m code_reviewer_runner.implementer.reader_proof --image "$reader_image" --volume "$vol" --runtime=sysbox-runc 2> "$reader_err")
+    reader_status=$?
+    if printf '%s\\n' "$reader_lines" | grep -qx 'READER_PROOF ok reader_contained' &&
+       printf '%s\\n' "$reader_lines" | grep -qx 'READER_PROOF done' &&
+       ! printf '%s\\n' "$reader_lines" | grep -q '^READER_PROOF fail '; then
       report ok reader
     else
       report fail sysbox_reader_not_contained
+      # Why, as further reasons: the pipeline logs the reasons and nothing else of this script's output. The checks the proof
+      # named; else its exit status and the last line of its standard error (a crash before it could say anything); and its
+      # own note of what it hit. Lower case and underscores only, as every reason is.
+      checks=$(printf '%s\\n' "$reader_lines" | sed -n 's/^READER_PROOF fail \\([a-z0-9_]\\{1,40\\}\\)$/\\1/p' | head -n 4)
+      for check in $checks; do report fail "sysbox_reader_$check"; done
+      if [ -z "$checks" ]; then
+        report fail "sysbox_reader_exit_$reader_status"
+        last_error=$(tail -n 1 "$reader_err" 2> /dev/null | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\\n' '_' | cut -c1-36)
+        if [ -n "$last_error" ]; then report fail "sysbox_reader_stderr_$last_error"; fi
+      fi
+      note=$(printf '%s\\n' "$reader_lines" | sed -n 's/^READER_PROOF detail //p' | head -n 1 | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\\n' '_' | cut -c1-36)
+      if [ -n "$note" ]; then report fail "sysbox_reader_detail_$note"; fi
     fi
+    rm -f "$reader_err"
   else
     report fail sysbox_volume_not_mapped
   fi

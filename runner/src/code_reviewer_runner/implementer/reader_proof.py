@@ -15,7 +15,8 @@ read-only in both, and that the reader that writes writes.
 
 It runs in the Worker image with the Docker socket, as root, and prints one
 `READER_PROOF ok <check>` or `READER_PROOF fail <check>` per check and `READER_PROOF done` last. It
-exits 0 whatever it found: the script reads the lines.
+exits 0 whatever it found, a crash included (`READER_PROOF fail reader_crashed_<type>` and a
+`READER_PROOF detail` line with its message): the script reads the lines.
 """
 
 import argparse
@@ -170,13 +171,21 @@ def main(
     parser.add_argument("--volume", required=True)
     parser.add_argument("--runtime", default=READER_RUNTIME)
     options = parser.parse_args(list(argv))
-    prove(
-        api or DockerApi(),
-        options.image,
-        options.volume,
-        runtime=options.runtime,
-        report=write or (lambda line: print(line, flush=True)),
-    )
+    report: Callable[[str], None] = write or (lambda line: print(line, flush=True))
+    try:
+        prove(
+            api or DockerApi(),
+            options.image,
+            options.volume,
+            runtime=options.runtime,
+            report=report,
+        )
+    except Exception as error:
+        # The script reads these lines and drops the standard error: a crash that only showed there
+        # would read as "not contained" and say nothing else.
+        report(f"{PROOF_PREFIX} fail reader_crashed_{type(error).__name__.lower()[:32]}")
+        report(f"{PROOF_PREFIX} detail {type(error).__name__}: {str(error)[:160]}")
+        report(f"{PROOF_PREFIX} done")
     return 0
 
 
