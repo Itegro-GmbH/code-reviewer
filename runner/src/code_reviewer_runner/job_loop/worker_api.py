@@ -55,6 +55,7 @@ from code_reviewer_runner.job_loop.resume_download import (
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotPart
 from code_reviewer_runner.job_loop.worker_errors import WorkerFailure, WorkerSetupError
 from code_reviewer_runner.llm_providers import registered_provider_ids
+from code_reviewer_runner.outer_proxy import OuterProxy
 from code_reviewer_runner.resume_wire import (
     HEADER_BYTES,
     HEADER_PARTS,
@@ -165,15 +166,20 @@ class WorkerApi(Protocol):
 class HttpWorkerApi:
     """The Worker API over HTTP. Blocking calls run in a thread, so the event loop stays free."""
 
-    # The routes of the snapshot (`{prefix}/{id}/session`, `/resume-session`): a customer's runner
-    # has its own (#879).
-    _session_prefix = "/api/workers/v1/jobs"
-
-    def __init__(self, base_url: str, credential: str, *, request_timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        credential: str,
+        *,
+        request_timeout: float = 30.0,
+        proxy: OuterProxy | None = None,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._credential = credential
         self._timeout = request_timeout
-        self._opener = build_opener()
+        # A VM on a customer's machine reaches the app through the host's outer-wall proxy only
+        # (#994); hosted and every other Worker dial the app themselves, as before.
+        self._opener = build_opener(None if proxy is None else proxy.url)
         # The features the app listed in the version answer (empty: none or not asked).
         self._features: frozenset[str] = frozenset()
         # The thread of the steps call in flight, if any, and of the snapshot call (`_call_alone`).
@@ -313,8 +319,7 @@ class HttpWorkerApi:
         on its own and a part sent twice is the same call; the body is the bytes of the part.
 
         On a thread of its own like `steps`, one at a time."""
-        path = f"{self._session_prefix}/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
-        headers = self._session_headers(job_id)
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/session?{snapshot_query(part)}"
         reply = await self._call_alone(
             "_snapshot_thread",
             "snapshot-call",
@@ -324,7 +329,6 @@ class HttpWorkerApi:
                 part.data,
                 SNAPSHOT_REQUEST_TIMEOUT_SECONDS,
                 content_type="application/octet-stream",
-                headers=headers,
             ),
         )
         if reply.status != 200:
@@ -341,22 +345,19 @@ class HttpWorkerApi:
         the wait ends at it even when the thread does not (a daemon thread, left to end by itself):
         a socket timeout bounds one wait, and a server that sends a byte now and then never trips
         it."""
-        path = f"{self._session_prefix}/{self._safe_id(job_id)}/resume-session"
-        headers = self._session_headers(job_id)
+        path = f"/api/workers/v1/jobs/{self._safe_id(job_id)}/resume-session"
         deadline = time.monotonic() + RESUME_TOTAL_SECONDS
         try:
             return await asyncio.wait_for(
                 self._run_on_thread(
-                    "resume-download", lambda: self._download_resume(path, headers, deadline)
+                    "resume-download", lambda: self._download_resume(path, deadline)
                 ),
                 RESUME_TOTAL_SECONDS,
             )
         except TimeoutError:
             raise ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED) from None
 
-    def _download_resume(
-        self, path: str, headers: Mapping[str, str], deadline: float
-    ) -> ResumeFile:
+    def _download_resume(self, path: str, deadline: float) -> ResumeFile:
         failed = ResumeUnavailable(ResumeReason.DOWNLOAD_FAILED)
         header: SnapshotHeader | None = None
         chunks: list[bytes] = []
@@ -374,7 +375,6 @@ class HttpWorkerApi:
                     min(RESUME_REQUEST_TIMEOUT_SECONDS, left),
                     max_bytes=CHUNK_BYTES + 1,
                     deadline=deadline,
-                    headers=headers,
                 )
             except ApiError:
                 raise failed from None
@@ -397,10 +397,6 @@ class HttpWorkerApi:
         if hashlib.sha256(data).hexdigest() != header.sha256:
             raise failed
         return ResumeFile(header, data)
-
-    def _session_headers(self, job_id: str) -> Mapping[str, str]:
-        """What the two session calls send besides the credential: nothing for a Worker."""
-        return {}
 
     async def _call_alone(self, slot: str, name: str, call: Callable[[], Reply]) -> Reply:
         """Run `call` on a daemon thread kept in `slot`, and refuse (`ApiUnavailable`) while the
@@ -474,16 +470,12 @@ class HttpWorkerApi:
         content_type: str = "application/json",
         max_bytes: int | None = None,
         deadline: float | None = None,
-        headers: Mapping[str, str] | None = None,
     ) -> Reply:
-        """`headers` are added to the fixed ones (a customer's runner sends `X-Lease-Token` with
-        them); the fixed ones win."""
         request = urllib.request.Request(
             f"{self._base_url}{path}",
             data=data,
             method=method,
             headers={
-                **(headers or {}),
                 "Authorization": f"Bearer {self._credential}",
                 "Content-Type": content_type,
                 "Accept": "application/json",

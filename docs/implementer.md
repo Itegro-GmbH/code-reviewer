@@ -128,8 +128,8 @@ follow-up's cost is not counted in the budget of the workflow run that started t
 ### On a customer's machine
 
 A turn on a runner of the customer (section "Environments of the kind `runner`" in [`runner.md`](runner.md)) is a turn like any other for
-the session, its branches and the preface, and so is the conversation (#879): the runner moves the snapshot through its own two routes with its own credential and the lease token (`runner.md`, "Resume on customer runners"),
-so a follow-up on a runner continues the engine's conversation, whichever machine ran the earlier turns. That holds when the app lists the feature `runner_session_snapshot`, which the runner reads from the version
+the session, its branches and the preface, and so is the conversation (#879): the runner's Worker moves the snapshot through the Worker API's two calls with the per-job credential, as the hosted Worker does (`runner.md`, "Resume on customer runners"),
+so a follow-up on a runner continues the engine's conversation, whichever machine ran the earlier turns. That holds when the app lists the feature `implementer_snapshot`, which the Worker reads from the version
 call for every job; against an app that does not, a turn on a runner stores no snapshot and a follow-up continues from the summary and the digest (`summary_only`). The app sends `resume` only to a
 runner that names the claim feature `implementer_resume`; for any other the follow-up ends `implementer_engine_unavailable`, free, before a
 credential exists.
@@ -167,9 +167,11 @@ the two deployments costs nothing but the follow-ups that fall into it. The live
    any branch. Nothing else is put into that repository: no hook, no guard, no spool. A follow-up turn (the job carries `resume`)
    gets the same clone and checks out the branch the earlier turn ended on (section "A follow-up turn: the workspace with several
    branches"). A repository too large for the clone's time limit (`CLONE_FETCH_SECONDS`, 600 s) ends the turn `clone_failed`, free; there is no size cap yet. The job carries `startBranch` only for a Worker that names the claim feature `implementer_start_branch`; for any other a task with a start branch ends `implementer_engine_unavailable`, free, before a credential exists (a Worker that did not read it would start from the base branch).
-5. **Set up** (only when the task's environment has a script). The runner starts the **Setup container** from the agent's image, runs the
-   script in it with full internet access, and commits the container as the agent's image; a script that fails ends the turn here, free,
-   before the model door exists (section "The environment's setup script"). Without a script nothing happens and nothing changes.
+5. **Set up** (only when the task's environment has a script). The runner starts the **agent's container** (the agent's image, on a setup
+   network), runs the script in it with full internet access and no secret, and then goes on in **that same container**: what the script
+   left (files, the images, containers and volumes of the container's own Docker, **and the processes it started**) is what the agent has,
+   and nothing is reset when the network narrows (#1009). A script that fails ends the turn here, free, before the model door exists
+   (section "The environment's setup script"). Without a script nothing happens and nothing changes.
 6. **Work.** The runner starts the **model door**, a container of its own that holds the model key, and the **agent's container**,
    and OpenCode then runs there as root in `/work/repo` with a configuration the runner wrote. It reads, edits, writes,
    searches and runs shell commands, and starts containers in its own Docker; it cannot fetch web pages, search the web,
@@ -1099,7 +1101,7 @@ The branch names: the legal odd ones (`x;touch${IFS}...`, `$(touch${IFS}...)`) a
    root of the container can only lower it as far as -999 (measured in the third round; see below). (2) `vm_memory.MemoryGuard` in Control looks ten times a second at the memory the VM has left, **free memory plus the page cache of files, not
    `MemAvailable`** (the kernel counts the `struct file` of every open file as reclaimable slab: `MemAvailable` said 2.2 GB when the OOM killer ran), and kills the agent's container,
    or the Setup container, when less than 512 MiB or 8% of the VM's memory is left, and **again every half second while the memory stays low and the container has not ended** (a kill that failed is logged and tried again; the
-   guard of the Setup container watches until the container has ended (a process the script left behind runs until then) and is closed just before the room check and `docker commit`, which need memory of their own (#827: it was closed right after the script, so a background process could flood unguarded while the end script ran; a kill during the end ends the setup `not_saved` with the reason word `vm_memory`, and nothing is committed), and says once in the log when `/proc/meminfo` cannot be read for 5 s). The turn then ends as a turn whose container died: the
+   guard of the script's container (the agent's own since #1009) watches while the script runs and is closed at the hand-over, when the agent's container object starts its own, which watches the same container for the agent's turn (before #1009 the guard was closed just before the room check and `docker commit`, which needed memory of their own, and a kill during the end of the setup ended it with the reason word `vm_memory` and nothing committed: #827), and says once in the log when `/proc/meminfo` cannot be read for 5 s). The turn then ends as a turn whose container died: the
    detail starts with the reason word `vm_memory:` ("vm_memory: the agent's container ended during the turn: the container was killed because the VM was running out of memory"; `AgentEnd.vm_memory`, and for the Setup container
    the same word), and the billing class is the one of any container that died. The guard goes on looking after it has fired and keeps the least value it saw (`lowest_left`).
    Measured with both, the same floods (first round, 4 vCPU rows: the guard's own 10 Hz look at its metric, which misses the true minimum):
@@ -1223,7 +1225,7 @@ its two drops.
 **Without a network door (the rule `off`, the default), `npm install`, `pnpm install`, `pip install`, `apt-get`, `cargo`, `go get` and `docker pull`
 all need a registry and fail** ("lookup registry-1.docker.io ... server misbehaving", measured). Whatever such a task needs must already
 be in the image: the toolchain of the agent image is there, and an environment's setup script (section "The environment's setup script":
-full internet, no secrets, its result becomes the agent image with `docker commit`) installs the rest. A task without an environment, or with a
+full internet, no secrets, in the agent's own container, which the agent then keeps) installs the rest. A task without an environment, or with a
 repository whose dependencies the script does not install, can read and edit but not build or test. **Since step 7 an environment can give the agent a
 network back**, on its owner's terms, through the network door (next section).
 
@@ -1291,6 +1293,8 @@ The first wall is the door and its table. The second is outside the VM, so that 
 
 **What the Dispatcher accepts.** The route takes a JSON body of at most 64 KB; the VM's name must be `cr-implementer-<job id>-<suffix>`; the model host a plain host name (no wildcard, no address); the rule the contract's; and the token must be the HMAC. Every refusal of one status has the same words, so a caller cannot tell which check failed. Nothing logs a token or a body.
 
+**An interface, and a second transport (#975).** Since the runner v2 (ADR 0005) the call is one of two transports of the Worker's *environment control* (`narrow(rule, model_host)` and `report_end(exit_code)`, `implementer/environment_control.py`). The transport above is the `https` one, chosen by `RUNNER_IMPLEMENTER_NETWORK_SWITCH` and unchanged. A VM on a customer's own Linux machine has no Vercel and no Dispatcher in the Internet: its host answers over **vsock** (`RUNNER_ENVIRONMENT_CONTROL=vsock`; closed JSON messages, `contracts/environment-control.v1.json`), and a `narrow` that times out (30 seconds) or is refused ends the turn `environment_control_failed`, free, before the agent exists. With neither variable the Worker runs with the door only, says so once, and the report's `vmPolicy` is `not_configured`.
+
 **Wildcards.** The platform's policy takes `*.suffix` in its `allow` list, and the entries are passed on as they are. The platform's wildcard may be wider than the door's (the door never lets the suffix's own name through, the platform may), which is harmless: the door decides for the agent, the policy decides for the VM.
 
 ### Measured on a real VM (2026-11-03, `spike-net-door-1`, 2 vCPU, 4 GB, from the golden snapshot of 17:28 with this branch's runner source over the Worker image)
@@ -1319,15 +1323,28 @@ What was **not** run here: the Dispatcher's `POST /network` route and the call f
 ## The environment's setup script
 
 A task whose environment has a script runs it once, between the clone and the model (step 5 of "The data flow"). A task without an
-environment, or with an environment without a script, has no Setup container, no extra network, no extra image and no extra second.
-Everything below is `setup_container.py` (the container), `environment_setup.py` (the step: budget, output, the tracked files, the codes)
-and `host_rules.py` (what Control does to the VM's own network), driven by `job_run.py` before the session exists.
+environment, or with an environment without a script, has no setup network and no extra second.
+Everything below is `setup_container.py` (the container's first phase), `environment_setup.py` (the step: budget, output, the tracked files, the
+codes), `agent_container.py` (the second phase: `AgentContainer(adopted=...)`) and `host_rules.py` (what Control does to the VM's own network),
+driven by `job_run.py` before the session exists.
 
-**The Setup container** is a throw-away container of the **agent's own image**, under `sysbox-runc`, as root, with its own `dockerd`,
+**One container, two phases (#1009).** The script and the agent run in **the same container**, not in two with an image between them. Before
+#1009 the script ran in a throw-away "Setup container", whose file system was committed (`docker commit`) as `code-reviewer-agent:environment`,
+and the agent's container was made from that image: the files and the inner Docker's images survived, **every process died** (a Postgres the
+script started was gone, and its container in the inner Docker was stopped). Now the container is made once, from the agent's image, **on the
+setup network**; the script runs in it; when the script ends well the container **leaves the setup network** (its processes that held a
+connection to the internet lose it), is **frozen** (`docker pause`, confirmed by `State.Paused`) while Control reads the repository
+(`settle_after_setup`), and is taken over by the agent's container object (`AgentContainer(adopted=...)`), which **puts it on the model network** (this is the narrowing of the
+container: from here on only the doors are reachable), unfreezes it and seals it. Nothing in it is stopped, committed or reset: the processes the
+script started keep running, the agent can use and stop them (behaviour contract item 9, ADR 0005). The one process that is started again
+is the container's own `dockerd`, when its proxy has to change (below), under `--live-restore`, so the containers it started keep running.
+
+**The first phase** is the **agent's own container** (the same name, image, hostname, labels, mounts and limits), under `sysbox-runc`, as root, with its own `dockerd`,
 the `repo` directory of the work volume mounted as `/work/repo` (the Subpath the agent will get, so the mirror is out of its reach) and the
 agent's limits: its memory (what the VM has left after the OS, Control, the door and the readers, no swap) and 16,384 processes. **It has no
 secret of any kind**: no git token, no model key, no job token, no environment variable besides the image's own, no mount besides the
-repository, no socket, no device, no label of the job, and the image carries none either. Its definition is made of constants and of
+repository (and the result directory of a task with a result schema), no socket, no device, no label of the job, and the image carries none
+either. Its definition is made of constants and of
 identifiers the daemon gave; Control reads the container back from the daemon before the script is written and stops the run if it is
 privileged, not under Sysbox, on another network, has another mount or another variable (`_seal_check`). The model door does not exist yet
 while it runs, and the script's text is in one place only, a file in this container.
@@ -1360,15 +1377,16 @@ the bridge**, in the VM's own network namespace, by two things that a one-shot c
 
 These are on the VM's side because the container is root of a user namespace of its own and owns its network namespace: any rule it
 installs inside, its script can flush (and one `nft flush ruleset` in it changes nothing outside, measured). The rules are read back
-(`list table`) and a Setup whose network is not closed is never started (`setup_failed`, free).
+(`list table`) and a container whose network is not closed is never started (`setup_failed`, free).
 
 **Time.** The script has 15 minutes at most (`contracts/environment-sizes.v1.json`). The whole step is part of the turn's 60 minutes: the
 agent's own deadline is counted from the start of the job, so the minutes of the step are gone from it. Around the script the step may
 take, at its ceilings, 20 s for each of the four host helpers (the bridge's IPv6, the `ip` table, its read back and the `inet` table), 60 s until the container's Docker is ready, 30 s to write the script,
-45 s for the kill of a script that has to be stopped (the kill, the wait for its exec, the kill of the clean-up: 15 s each), 30 s for the end
-script, 120 s for the container's Docker to stop, 40 s for the stop, 30 s for the question about the disk, 300 s for the commit and 120 s for
-the removal, 855 s together (`SETUP_OVERHEAD_SECONDS`); a test holds the sum. The script is held to what the limit leaves after the grace
-for the end of the turn (270 s), those 855 s and **at least 10 minutes for the agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
+45 s for the kill of a script that has to be stopped (the kill, the wait for its exec, the kill of the clean-up: 15 s each) and 30 s for each of
+the four calls of the hand-over (the script's file removed, off the setup network, frozen, the freeze read back), 365 s together
+(`SETUP_OVERHEAD_SECONDS`; before #1009 it was 855 s, of which the stop of the inner Docker, the commit and the removal were 535 s); a test holds the
+sum. The script is held to what the limit leaves after the grace for the end of the turn (270 s), those 365 s and **at least 10 minutes for the
+agent** (`MIN_AGENT_SECONDS`); with the normal 3600 s that is the 15 minutes. A
 limit that leaves less than a minute for the script ends the turn here, free ("the time limit of the turn leaves no room for the setup
 script"). A script that runs out of its time is killed with its container and ends the turn.
 
@@ -1378,13 +1396,39 @@ itself), whether it ran out of time, the seconds, and the **end of its output** 
 a carriage return a line end, the job's secrets removed, the last 8,192 characters. The log line of a failed turn has the notes of the step
 and the last 1,200 characters of it. The page renders it as text.
 
-**What becomes of what it did.** When the script ends with status 0: the script's file is removed, the container's own Docker is stopped the
-way a daemon is stopped (SIGTERM; the container's init ends with it and the container stops by itself), and the container's file system is
-committed (`docker commit`, `POST /commit`) as `code-reviewer-agent:environment`. **Under Sysbox a stopped container's file system holds its
-inner Docker's images** (Sysbox writes them back into it when the container stops; measured on a VM, below), so the packages and the
-browsers the script installed and the images its Docker pulled are in the image. The Setup container is then removed, and the Agent container
-starts from the committed image by its id (`AgentSeams.image`). The repository volume is not part of the commit: the files the script left in
-`/work/repo` are in the volume, which the agent mounts as before. There is no cache of the result: every turn runs its script.
+**What becomes of what it did.** When the script ends with status 0 the container stays as it is, and four things happen (`SetupContainer._hand_over`):
+the script's file is removed (the agent must not find it), the container is **taken off the setup network and the network is removed**
+(this one must hold: a container that cannot leave it is killed and removed and the turn ends `environment_setup_failed`, because it would carry
+the internet into the agent's turn), the memory guard of the first phase stops (the agent's container object starts its own), and the
+container is **frozen** (`docker pause`, the cgroup freezer), so that Control reads the repository while no process of the script changes it: a
+root process the script left would otherwise go on writing the repository (a link into the work volume) while `settle_after_setup` resets and cleans
+it. **This one must hold too**: a freeze the daemon refuses (a status, a conflict), one it answers but does not report (`State.Paused`, read back after
+every answer) and a client timeout after which the daemon does not report the container frozen (the daemon is asked, nothing is guessed; a freeze it did
+complete is taken) all end like the network step: the container is killed and removed and the turn ends `environment_setup_failed` (`not_handed_over`,
+"the container could not be kept"), free. The memory guard of the first phase keeps watching until the freeze is confirmed. **What is proven:** a process in an
+**inner container** of the setup's own Docker, under Sysbox on a real VM, writes nothing to the repository while Control reads it and writes again after the
+unfreeze (`runner/tests/kvm/test_whole_job.py`, the freeze job, #1009-T48); under `runc` the same for a plain process (`test_implementer_environment.py`, #1009-T47). The files the script left
+in `/work/repo` are in the work volume, which the agent mounts as before; the files it left anywhere else, and the images, containers and
+volumes of the container's own Docker, are in the container itself. There is no cache of the result: every turn runs its script.
+
+**What the agent finds, and what it can reach of the script's Docker.** The agent is root in this container and the container's `dockerd` is the one
+its own Docker always was, so **the script's containers, images, volumes and networks are its own Docker's** and it may `docker exec`
+into them, stop, start, remove and rebuild them, and read their volumes (a database's files). That is all inside the container, which is
+Sysbox's and has no more than the agent already had: no socket of the VM's Docker, no device, no mount but the repository, on the model network
+only. A container the script started with `--privileged` or `--network host` is privileged inside the container's user namespace and shares the
+container's network namespace, so it reaches exactly what the agent reaches (the two doors), no more. Nothing of Control's (the git token, the
+model key, the job token) was ever in the container, the script's phase included, so there is nothing for it to have left in the Docker or in
+a process's memory; and the one thing the script's phase had that the agent's does not, the internet, is cut when the container leaves the setup
+network, before the outer wall narrows and before any door exists. What the script cannot do is anything to the inner wall: the container is on the
+model network from the moment the agent runs, and that network's wall is the same for a container that was a script's first.
+
+**The proxy of the container's Docker.** `dockerd` reads its proxy variables at its start and cannot learn others while it runs. The container is
+made for the setup, so on a customer's machine (#994) its `dockerd` and its tools have the host's outer-wall proxy in their environment; the agent's
+tools get those emptied and the network door's instead (`AgentContainer._exec_environment`, on every exec of the engine and of its tools), and
+the `dockerd` is started again with the door's variables (or none, rule `off`) when they differ (`AgentContainer.restart_docker`: the new
+variables in `/run/agent-docker-env`, a flag file, `SIGTERM` to the daemon; the image's init, `runner/docker/agent-init.sh`, runs the daemon in a loop
+under `--live-restore` and starts it again with the new environment, the old proxy variables unset). A hosted container with the rule `off`
+has no proxy anywhere and is not restarted. A container with no inner Docker (the test lane under `runc`) says so and is left alone.
 
 **The repository after the script (what is the base of the turn).** The script ran in the repository's folder and may have changed anything in
 it. What it did to the repository is the **base** the agent starts from, not a change the agent made, and two rules follow
@@ -1407,32 +1451,25 @@ This is a rule about where the agent starts, not about what the script may do. I
 repository unreadable (it removed `.git`) ends the turn with `setup_failed` (free: the runner could not read what the script left, and the script's output is not shown).
 
 **When it fails.** A script that exits non-zero, runs past its time limit, fills the disk, is killed for the memory of the container (the
-log says so: "killed for its memory"), or leaves a container whose result cannot be committed (the disk) ends the turn `environment_setup_failed`
+log says so: "killed for its memory"), or leaves a container that could not be taken off the setup network ends the turn `environment_setup_failed`
 **before the model door exists**: nothing was handed a key, nothing was used, the turn is free, and the Runs page shows the exit status, the
-seconds, whether it timed out and the end of the output. A script that exited 0 and whose result could not be kept (the VM's disk had no room for the commit, or the daemon could not save the image)
-has the exit status 0 and the runner's own last line in the output (`[setup] the VM had no room to save the setup result: the VM's disk has X MB left and the result of the script needs about Y MB`);
-the page says "The script finished, but its result could not be kept" and shows that line. A script whose container went away under it (its own memory, or the guard when the VM was running out of memory) has no exit status that says why (137 or none), so the same last line carries the reason as a whole sentence (`[setup] vm_memory: the container ended during the script: it was killed because the VM was running out of memory (exit code 137)`, #827). The room check is skipped, with a note in the report, when the VM's free space or the size of the container's file system cannot be had. A Setup container that could not be had (the daemon refused a step, the network rules
+seconds, whether it timed out and the end of the output. A script that exited 0 and whose container could not be kept (it would not leave the setup network)
+has the exit status 0 and the runner's own last line in the output (`[setup] the setup container could not be kept: ...`);
+the page says "The script finished, but its result could not be kept" and shows that line. A script whose container went away under it (its own memory, or the guard when the VM was running out of memory) has no exit status that says why (137 or none), so the same last line carries the reason as a whole sentence (`[setup] vm_memory: the container ended during the script: it was killed because the VM was running out of memory (exit code 137)`, #827). A container that could not be had (the daemon refused a step, the network rules
 did not go in, the container was not what was asked for) is `setup_failed`, free as well, with the reason word in the log: it is the runner's, not
-the script's. A SIGTERM during the script kills the container and ends the turn `runner_shutdown` as for the agent.
+the script's. A repository Control cannot read after the script (it removed `.git`) removes the container and ends the turn `setup_failed`. A SIGTERM
+during the script kills the container and ends the turn `runner_shutdown` as for the agent.
 
-**Disk and memory.** Setup has the agent's limits for memory and processes. What it writes goes to the VM's disk like everything the agent
-writes: the container's file system, the inner Docker's images, the commit (an image the size of what changed, for the measured
-Playwright environment below) and, while the agent runs from it, the agent's own copy of the inner images. **Control's reserve disk is
+**Disk and memory.** The container has the agent's limits for memory and processes, **one set for the script and the agent together** (before #1009
+the agent had a second, fresh set). What the script writes goes to the VM's disk like everything the agent writes: the container's file system and
+the inner Docker's images, **once** (before #1009 they were also in a committed image and in the agent's own copy of them: the measured Playwright
+environment cost about 2.9 GB twice, and the commit had a room check of its own, which is gone with the commit). **Control's reserve disk is
 untouched** by any of it: the mirror is on its own 8 GiB file system, and a script that fills the work volume or the VM's disk fails with
 "No space left on device" (the lane proves it with a small stand-in disk), the step reads how much of the disk is left after the script and
-says so when it is under 1 GiB.
+says so when it is under 1 GiB. A runner's disk budget (#855) counts the container's writable layer **and**, under Sysbox, the data of its inner Docker (`du` in the container):
+the images the script pulled are in that data, which Sysbox mounts in and which is not part of the layer the daemon sizes (`docs/runner.md`, "The disk budget").
 
-**A disk too full for the commit.** A script can end well and leave a container whose file system the VM's disk cannot keep as an image. Once the
-container has stopped (the inner Docker's data is in its layer by then) and before `docker commit`, Control asks the daemon for the size of the
-container's writable layer (`SizeRw`) and for the free room of the VM's disk, and needs **twice the layer and 1 GiB** (`COMMIT_ROOM_FACTOR`,
-`COMMIT_HEADROOM_BYTES`: the layer as a tar and the copy the daemon unpacks). With less, the run ends with its own outcome `no_room` and the turn
-with `environment_setup_failed`, free, saying "the disk of the VM is too full to keep its result: the VM's disk has N MB left and the result of
-the script needs about M MB (the container's file system is K MB)", instead of a commit that fails minutes in with the daemon's words. A size or a free
-space that cannot be had is not a reason to refuse: the commit is tried. The commit has `COMMIT_SECONDS` = 300 s: measured 3.9 GB in 61 s (64 MB/s),
-and 4 GB on a disk four times slower is 250 s (`COMMIT_MEASURED_BYTES_PER_SECOND`, `COMMIT_SLOWDOWN`; a test holds it). The lane (L09) fills the
-container's root beyond a small stand-in disk and expects `no_room`.
-
-**Measured on a real VM, round of #818 (2026-11-03, 2 vCPU, 4 GB, a `spike-` VM from a snapshot built from the branch; its images are from commit
+**Measured on a real VM, round of #818 (2026-11-03, **before #1009: the table's "saving the result", "removing the Setup container" and "committed image" rows are the hand-over by `docker commit`, which no longer exists; the script, the container's start and the agent's turn are as measured**, 2 vCPU, 4 GB, a `spike-` VM from a snapshot built from the branch; its images are from commit
 `1bfda743`, the Dockerfile and the boot scripts have not changed since, the code under test is the head, run on the VM with `uv`; `sysbox: proven`).**
 
 *The whole step with a real environment.* The script: `npm install playwright@1.49.1`, `npx playwright install --with-deps chromium`, `docker pull
@@ -1674,6 +1711,10 @@ used):
 | `setup_failed` | The runner could not prepare the workplace before the turn started: git missing, the mirror could not be made, the model door could not be started (`model_door_unavailable` in the log), the agent's container could not be had (`agent_container_unavailable` in the log: no Sysbox runtime, the agent image missing, the daemon refused a step, the inner Docker did not become ready, or the container was not what was asked for). It is the free code of a turn that never started: once the model was used, the same trouble shows as `agent_gave_up`. The Runs-page sentence says "the repository's own set-up steps", which is not what happens: no repository script is ever run | free | Look at the Worker log of the job; it is the image or the VM |
 | `sandbox_unproven` | The golden snapshot's Sysbox is not proven (its build's proof did not pass, or the Dispatcher was told so). The turn ends before the clone | free | Look at the `sysbox` field of the snapshot's record and the log of its build step; rebuild the snapshot |
 | `environment_setup_failed` | The setup script of the task's environment exited with a status other than 0, ran out of its time (15 minutes, or what the turn's limit leaves), was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs before the model door exists, so nothing was used. The Runs page shows the exit status, the seconds, whether it timed out and the end of the output (the job's secrets removed) | free | Fix the script in Environments and send the task again |
+| `environment_control_failed` | The machine that started the VM controls the VM's outer network wall over vsock (a customer's own Linux machine, #975) and did not narrow it to the task's rule: no answer in 30 seconds, a refusal, no host to ask, or an answer outside the contract. The turn ends before the agent exists | free | Start the task again; if it persists, the runner on that machine is not the version of the Worker image |
+| `subscription_auth` | A turn on Claude Code (a subscription of the customer's own machine, #980): the token the machine's dispatcher handed the job was refused with a 401 (expired or revoked). The machine's dispatcher puts that credential aside for hours (a hint: the exit code can be forged from inside the job, so it is never held for good) and stops offering Claude Code while no other credential is usable | free | On that machine make a new token with `claude setup-token` and run `factory-runner credential add claude --name <name> --replace` (or `credential retry <name>` to try the old one now) |
+| `subscription_limit` | The same turn: the subscription's usage limit ended the call. The dispatcher puts that credential aside for a while (and withdraws Claude Code from its manifest when every credential is aside); this job fails and does not move to another credential mid-run | free | Start the task again later, or add a second credential on the machine |
+| `subscription_model_refused` | The same turn: the subscription does not allow the model the task asks for. The dispatcher sets that model aside for that credential for hours (the list the owner gave is not changed) | free | Choose a model the subscription includes |
 | `sandbox_size_unsupported` | The VM leaves the agent's container less than 1,024 MB (a 1 vCPU VM does: 512 MB). The turn ends before the clone | free | Choose a size of 2 vCPU or more |
 | `no_result` | The task had a [result schema](#the-finish-tool) and the agent ended without a result that fits it, also after the one reminder (the detail says why: no file, too large, not JSON, or N problems against the schema). What it committed is pushed when the profile may push | charged | Read its summary; make the schema or the task clearer; check the schema with `POST /workflows/validate` |
 | `agent_gave_up` | The agent ended with no new commit on any branch and nothing to commit, or its engine died, or its container ended ("the agent's container ended during the turn": killed, most likely for its memory), or the model door went away ("the model door ended during the turn"), after the model had been used (what it had committed is pushed when possible). The summary also says when files the agent wrote could not be kept, such as `opencode.json` | charged | Read its summary; try again with a clearer or smaller task |

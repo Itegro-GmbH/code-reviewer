@@ -114,6 +114,17 @@ class ErrorCode(StrEnum):
     # or
     # its result could not be saved as the agent's image. Before the model: free.
     ENVIRONMENT_SETUP_FAILED = "environment_setup_failed"
+    # #975: the sandbox's environment control (vsock) did not narrow the outer network wall: the
+    # host did not answer in time, refused the rule, could not be reached or answered something the
+    # contract does not know. The agent never started: free.
+    ENVIRONMENT_CONTROL_FAILED = "environment_control_failed"
+    # #980: a turn on Claude Code with a subscription token of the runner's own device. The token
+    # was refused (401: expired or revoked), the subscription's usage limit ended the call, or the
+    # subscription does not allow the model. Nothing of ours was used: free. The dispatcher of the
+    # device reads them (through the Worker's exit code) to withdraw the credential or the model.
+    SUBSCRIPTION_AUTH = "subscription_auth"
+    SUBSCRIPTION_LIMIT = "subscription_limit"
+    SUBSCRIPTION_MODEL_REFUSED = "subscription_model_refused"
     # The runner was told to stop (SIGTERM, #765): what is committed was pushed, and the job host
     # gives the job back to the queue under this code.
     RUNNER_SHUTDOWN = "runner_shutdown"

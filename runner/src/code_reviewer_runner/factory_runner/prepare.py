@@ -4,11 +4,10 @@
 agent image, the memory, the self-test, and from them the announcement and the environment of the
 job processes.
 
-The result is `Prepared`. A runner whose base is not proven is `ready: false` in its manifest and
-takes no job (the app routes only to a ready OpenCode); the failed check says why.
+The result is `Prepared`. A runner whose base is not proven announces no OpenCode entry and
+takes no job (the app routes only to a runner that announces OpenCode); the failed check says why.
 """
 
-import json
 import os
 import shutil
 from collections.abc import Callable, Mapping
@@ -18,13 +17,20 @@ from typing import Final
 
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER
 from code_reviewer_runner.factory_runner.app_client import Announcement
-from code_reviewer_runner.factory_runner.base import BASE_VERSION, HARNESS_OPENCODE
+from code_reviewer_runner.factory_runner.base import (
+    AUTH_APP_KEY,
+    AUTH_SUBSCRIPTION,
+    BASE_VERSION,
+    DISK_BUDGET_VARIABLE,
+    HARNESS_OPENCODE,
+)
 from code_reviewer_runner.factory_runner.config import (
     RunnerConfig,
     home_directory,
     limits_document,
     runner_identity,
 )
+from code_reviewer_runner.factory_runner.disk_budget import budget_bytes
 from code_reviewer_runner.factory_runner.limits import (
     LimitsError,
     agent_environment,
@@ -39,7 +45,6 @@ from code_reviewer_runner.factory_runner.selftest import (
     run_selftest,
 )
 from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME
-from code_reviewer_runner.implementer.claude_code.login import login_source
 from code_reviewer_runner.implementer.claude_code.readiness import (
     HARNESS_CLAUDE_CODE,
     HarnessStatus,
@@ -58,7 +63,6 @@ from code_reviewer_runner.job import (
 from code_reviewer_runner.job_loop.settings import WorkerSettings, worker_settings_from_environment
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 
-IMAGE_FILE: Final = Path("/opt/code-reviewer/agent-image.json")
 PULL_SECONDS: Final = 900.0
 RUNC: Final = "runc"
 _GOLDEN_REPOSITORY, _GOLDEN_TAG = AGENT_IMAGE_REFERENCE.split(":")
@@ -74,19 +78,15 @@ class Prepared:
     selftest: SelfTestResult
     # What the runner found out about the harnesses it adds to the base (#856), for its log.
     harness_notes: tuple[str, ...] = ()
+    # The version of Claude Code when this device can run it (the layer is there; no login is
+    # needed at the start), else None. The dispatcher keeps the entry's `models` up to date from its
+    # credentials before every claim and leaves the entry out while none is usable (#980); the rest
+    # of the manifest is fixed here.
+    claude_version: str | None = None
 
     @property
     def ready(self) -> bool:
         return self.selftest.base_ok
-
-
-def baked_agent_image(path: Path = IMAGE_FILE) -> str | None:
-    """The agent image reference the runner image was built with (`agent-image.json`), if any."""
-    try:
-        reference = json.loads(path.read_text(encoding="utf-8")).get("reference")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return reference if isinstance(reference, str) and reference else None
 
 
 def split_reference(reference: str) -> tuple[str, str]:
@@ -132,12 +132,21 @@ def _failure(check: str, detail: str) -> SelfTestResult:
     return SelfTestResult((Check(check, False, detail),), RUNC)
 
 
+# The setting of the job host a Worker reads from its environment
+# (`worker_settings_from_environment`).
+_WORKER_SETTING_VARIABLES = ("RUNNER_JOB_TIMEOUT_SECONDS",)
+
+
 def job_environment(
     source: Mapping[str, str], config: RunnerConfig, runtime: str, memory_mb: int
 ) -> dict[str, str]:
-    """The environment of the job host: the plain variables the process may have (never the
-    runner's credential), and the variables that describe this machine's containers."""
+    """The environment of the Worker the dispatcher starts (and of the job processes below it): the
+    plain variables the process may have (never the runner's credential), the variables that
+    describe this machine's containers and the disk budget. Nothing about a login of the device:
+    the dispatcher hands the one credential a job needs on the Worker's standard input
+    (`sandbox.WorkerStart`), so the Worker of a job that needs none never holds one (#974)."""
     environment = {name: source[name] for name in PASSTHROUGH_VARIABLES if name in source}
+    environment.update({name: source[name] for name in _WORKER_SETTING_VARIABLES if name in source})
     if "PR_AGENT_COMMAND" in source:  # test stacks only, as for the Worker
         environment["PR_AGENT_COMMAND"] = source["PR_AGENT_COMMAND"]
     environment.update(
@@ -152,8 +161,8 @@ def job_environment(
     )
     if identity := runner_identity(config):
         environment[RUNNER_ID_VARIABLE] = identity
-    # #856: a job that asks for Claude Code reads the login of this device in its own process.
-    environment.update(login_source(source, home_directory(source)))
+    if (budget := budget_bytes(config.limits)) is not None:
+        environment[DISK_BUDGET_VARIABLE] = str(budget)
     return environment
 
 
@@ -171,10 +180,15 @@ HarnessChecks = Callable[[DockerApi, Mapping[str, str], bool], dict[str, Harness
 def harness_checks(
     api: DockerApi, source: Mapping[str, str], build: bool
 ) -> dict[str, HarnessStatus]:
-    """What this device adds to the base: Claude Code when it has a login for it (#856). `build`
-    False only looks."""
+    """What this device adds to the base: Claude Code when its layer is there (#856); the
+    credentials are the dispatcher's pool's to look at, before every claim (#980). `build` False
+    only looks."""
     found = claude_code_status(api, source, home_directory(source), build=build)
-    return {} if found is None else {HARNESS_CLAUDE_CODE: found}
+    return {HARNESS_CLAUDE_CODE: found}
+
+
+def _ready_version(status: HarnessStatus | None) -> str | None:
+    return status.version if status is not None and status.ready else None
 
 
 def announcement_for(
@@ -183,17 +197,28 @@ def announcement_for(
     memory_mb: int | None,
     harnesses: Mapping[str, HarnessStatus] | None = None,
 ) -> Announcement:
-    """What this runner says about itself: its labels, the base, the harness it proved, the
-    harnesses it adds (never instead of OpenCode) and the capabilities of the self-test, the limits
-    it works within."""
-    harness: dict[str, object] = {
-        "version": result.opencode_version or pinned_opencode_version() or "0",
-        "ready": result.base_ok,
-    }
-    announced: dict[str, object] = {HARNESS_OPENCODE: harness}
+    """What this runner says about itself: its labels, the base, the entries it can run (a harness
+    with the source of its access, #973), the harnesses it adds (never instead of OpenCode), the
+    capabilities of the self-test, the limits it works within.
+
+    An entry is announced only while the runner can run it: a base that is not proven announces no
+    OpenCode (a runner without it gets no job) and a harness that is not ready is left out. OpenCode
+    runs on the key the app hands out through the Worker API (`app-key`); Claude Code on the
+    subscription of this device, whatever model it reads (no `models`)."""
+    announced: list[dict[str, object]] = []
+    if result.base_ok:
+        announced.append(
+            {
+                "harness": HARNESS_OPENCODE,
+                "version": result.opencode_version or pinned_opencode_version() or "0",
+                "auth": AUTH_APP_KEY,
+            }
+        )
     for name, status in (harnesses or {}).items():
-        if name != HARNESS_OPENCODE:
-            announced[name] = {"version": status.version, "ready": status.ready}
+        if name != HARNESS_OPENCODE and status.ready:
+            announced.append(
+                {"harness": name, "version": status.version, "auth": AUTH_SUBSCRIPTION}
+            )
     manifest: dict[str, object] = {"harnesses": announced}
     if result.capabilities:
         manifest["capabilities"] = list(result.capabilities)
@@ -221,8 +246,8 @@ def prepare(
     ready: that is a `Prepared` whose base is not proven. `pull=None` only looks: an image that is
     not here, or is not the pinned one, is reported and left alone."""
     settings = worker_settings_from_environment(source)
-    settings = _implementer_settings(settings)
-    reference = config.agent_image or baked_agent_image()
+    settings = implementer_settings(settings)
+    reference = config.agent_image
     try:
         memory = agent_memory_mb(config.limits, machine_mb=machine_mb())
     except LimitsError as error:
@@ -249,10 +274,11 @@ def prepare(
         announcement_for(config, result, memory, added),
         result,
         tuple(f"{name}: {note}" for name, status in sorted(added.items()) for note in status.notes),
+        claude_version=_ready_version(added.get(HARNESS_CLAUDE_CODE)),
     )
 
 
-def _implementer_settings(settings: WorkerSettings) -> WorkerSettings:
+def implementer_settings(settings: WorkerSettings) -> WorkerSettings:
     """The settings of a runner's job host: it advertises the Implementer engine and nothing else
     (the self-test is the proof, there is no engine user or rule set of the hosted Worker here)."""
     return replace(

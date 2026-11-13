@@ -6,8 +6,18 @@
 // the fields that are wrong by name (`RunnerApiFieldError`-shaped, no value in it). A field the format does not know is dropped, so a
 // newer runner can say more than this app reads; a field it does know and gets wrong is refused.
 //
-// The labels are the only thing the routing reads (together with the harnesses and the version). They are lower case and sorted, so
-// two runners that say the same thing store the same text.
+// The labels, the harness entries (#973: harness, auth and models) and the version are what the routing reads. The labels are lower case and sorted,
+// so two runners that say the same thing store the same text.
+
+import {
+  ACCESS_AUTHS,
+  DEVICE_AUTHS,
+  legacyAccessOf,
+  MODEL_NAME_PATTERN,
+  MODELS_MAX,
+  type AccessAuth,
+  type HarnessAccess,
+} from "./access.ts";
 
 export type FieldIssue = { field: string; code: "required" | "invalid" };
 
@@ -34,14 +44,13 @@ export const LIMIT_KEYS = [
 ] as const;
 const LIMIT_MAX = 1_000_000;
 
-export type HarnessAnnouncement = {
-  version: string;
-  /** Installed, logged in and proven by the runner's self test. Only a ready harness takes a job. */
-  ready: boolean;
-};
-
+/**
+ * What the runner adds to the base. `harnesses` is the list of entries (#973): an entry is announced only while the dispatcher can run it, so
+ * "ready" is no field any more; a dispatcher that cannot run an entry for a while (all its subscriptions rate limited) leaves it out of its next
+ * announcement, and the app uses the last one.
+ */
 export type RunnerManifest = {
-  harnesses: Record<string, HarnessAnnouncement>;
+  harnesses: HarnessAccess[];
   capabilities: string[];
 };
 
@@ -114,38 +123,122 @@ function checkLabels(
   return normalizeLabels(labels);
 }
 
+/** One entry of the list form: a harness with its version, the source of its access and, for a device's access, the models it allows. */
+function checkHarnessEntry(
+  entry: unknown,
+  index: number,
+  issues: FieldIssue[],
+): HarnessAccess | undefined {
+  const where = `manifest.harnesses[${String(index)}]`;
+  if (!isRecord(entry)) {
+    issues.push({ field: where, code: "invalid" });
+    return undefined;
+  }
+  const { harness, version, auth, models } = entry;
+  if (typeof harness !== "string" || !HARNESS_NAME_PATTERN.test(harness)) {
+    issues.push({ field: `${where}.harness`, code: "invalid" });
+    return undefined;
+  }
+  if (typeof version !== "string" || !HARNESS_VERSION_PATTERN.test(version)) {
+    issues.push({ field: `${where}.version`, code: "invalid" });
+    return undefined;
+  }
+  if (
+    typeof auth !== "string" ||
+    !(ACCESS_AUTHS as readonly string[]).includes(auth)
+  ) {
+    issues.push({ field: `${where}.auth`, code: "invalid" });
+    return undefined;
+  }
+  const checked: HarnessAccess = { harness, version, auth: auth as AccessAuth };
+  if (models === undefined) return checked;
+  // Only an access that exists on the device says which models it allows: the app's catalog decides for a key of the app and for the platform's.
+  if (
+    !DEVICE_AUTHS.includes(checked.auth) ||
+    !Array.isArray(models) ||
+    models.length < 1 ||
+    models.length > MODELS_MAX ||
+    !models.every(
+      (model) => typeof model === "string" && MODEL_NAME_PATTERN.test(model),
+    )
+  ) {
+    issues.push({ field: `${where}.models`, code: "invalid" });
+    return undefined;
+  }
+  checked.models = [...new Set(models as string[])].sort();
+  return checked;
+}
+
+/** The old map form `{ "<harness>": { version, ready } }`: an entry that is ready is read as the access its harness had (see `legacyAccessOf`), one that is not is left out. */
+function checkLegacyHarnesses(
+  announced: Record<string, unknown>,
+  issues: FieldIssue[],
+): HarnessAccess[] {
+  const entries: HarnessAccess[] = [];
+  for (const [name, entry] of Object.entries(announced)) {
+    // A name that is not of the form is not echoed: the field names only what the app itself would accept.
+    if (!HARNESS_NAME_PATTERN.test(name)) {
+      issues.push({ field: "manifest.harnesses", code: "invalid" });
+      continue;
+    }
+    const where = `manifest.harnesses.${name}`;
+    if (!isRecord(entry)) {
+      issues.push({ field: where, code: "invalid" });
+      continue;
+    }
+    const { version, ready } = entry;
+    if (typeof version !== "string" || !HARNESS_VERSION_PATTERN.test(version))
+      issues.push({ field: `${where}.version`, code: "invalid" });
+    else if (typeof ready !== "boolean")
+      issues.push({ field: `${where}.ready`, code: "invalid" });
+    else if (ready) entries.push(legacyAccessOf(name, version));
+  }
+  return entries;
+}
+
+function checkHarnesses(
+  announced: unknown,
+  issues: FieldIssue[],
+): HarnessAccess[] {
+  if (Array.isArray(announced)) {
+    if (announced.length > HARNESSES_MAX) {
+      issues.push({ field: "manifest.harnesses", code: "invalid" });
+      return [];
+    }
+    const entries: HarnessAccess[] = [];
+    const seen = new Set<string>();
+    for (const [index, entry] of announced.entries()) {
+      const checked = checkHarnessEntry(entry, index, issues);
+      if (checked === undefined) continue;
+      // A harness with one source of access is one entry: the same pair twice says nothing more and is not stored twice.
+      const key = `${checked.harness}\n${checked.auth}`;
+      if (seen.has(key))
+        issues.push({
+          field: `manifest.harnesses[${String(index)}]`,
+          code: "invalid",
+        });
+      else entries.push(checked);
+      seen.add(key);
+    }
+    return entries;
+  }
+  if (!isRecord(announced) || Object.keys(announced).length > HARNESSES_MAX) {
+    issues.push({ field: "manifest.harnesses", code: "invalid" });
+    return [];
+  }
+  return checkLegacyHarnesses(announced, issues);
+}
+
 function checkManifest(
   value: unknown,
   issues: FieldIssue[],
 ): RunnerManifest | undefined {
-  if (value === undefined) return { harnesses: {}, capabilities: [] };
+  if (value === undefined) return { harnesses: [], capabilities: [] };
   if (!isRecord(value)) {
     issues.push({ field: "manifest", code: "invalid" });
     return undefined;
   }
-  const harnesses: Record<string, HarnessAnnouncement> = {};
-  const announced = value.harnesses ?? {};
-  if (!isRecord(announced) || Object.keys(announced).length > HARNESSES_MAX)
-    issues.push({ field: "manifest.harnesses", code: "invalid" });
-  else
-    for (const [name, entry] of Object.entries(announced)) {
-      // A name that is not of the form is not echoed: the field names only what the app itself would accept.
-      if (!HARNESS_NAME_PATTERN.test(name)) {
-        issues.push({ field: "manifest.harnesses", code: "invalid" });
-        continue;
-      }
-      const where = `manifest.harnesses.${name}`;
-      if (!isRecord(entry)) {
-        issues.push({ field: where, code: "invalid" });
-        continue;
-      }
-      const { version, ready } = entry;
-      if (typeof version !== "string" || !HARNESS_VERSION_PATTERN.test(version))
-        issues.push({ field: `${where}.version`, code: "invalid" });
-      else if (typeof ready !== "boolean")
-        issues.push({ field: `${where}.ready`, code: "invalid" });
-      else harnesses[name] = { version, ready };
-    }
+  const harnesses = checkHarnesses(value.harnesses ?? [], issues);
   const capabilities: string[] = [];
   const listed = value.capabilities ?? [];
   if (!Array.isArray(listed) || listed.length > CAPABILITIES_MAX)
@@ -221,9 +314,9 @@ export function checkAnnouncement(body: unknown): AnnouncementCheck {
 export function manifestFromText(text: string): RunnerManifest {
   try {
     const checked = checkManifestOnly(JSON.parse(text) as unknown);
-    return checked ?? { harnesses: {}, capabilities: [] };
+    return checked ?? { harnesses: [], capabilities: [] };
   } catch {
-    return { harnesses: {}, capabilities: [] };
+    return { harnesses: [], capabilities: [] };
   }
 }
 

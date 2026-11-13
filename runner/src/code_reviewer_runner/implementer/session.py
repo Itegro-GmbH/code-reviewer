@@ -53,11 +53,9 @@ from code_reviewer_runner.dynamic_review.job_model_entry import (
     native_model_reference,
     native_provider_config,
 )
-from code_reviewer_runner.dynamic_review.model_door_route import MODEL_DOOR_ADDRESS
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily, spec_of
 from code_reviewer_runner.dynamic_review.static_isolation import slot_ports
 from code_reviewer_runner.job import (
-    IMPLEMENTER_NETWORK_SWITCH_VARIABLE,
     ImplementerInput,
     JobError,
 )
@@ -84,6 +82,12 @@ from .claude_code.login import ClaudeLogin
 from .config import build_engine_config, implementer_environment
 from .door_launcher import DoorSeams, RunningDoor, start_door
 from .door_model import build_door_ledger
+from .environment_control import (
+    NARROW_SECONDS,
+    Connect,
+    control_from_environment,
+    vsock_connect,
+)
 from .git_workspace import (
     CONFIRM_PAUSE_SECONDS,
     CONFIRM_SECONDS,
@@ -110,7 +114,8 @@ from .network_report import (
     network_report,
 )
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
-from .network_switch import Post, model_host_of, narrow_policy, parse_switch, urllib_post
+from .network_switch import Post, model_host_of, urllib_post
+from .placement import placement_of
 from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
@@ -123,6 +128,7 @@ from .result_channel import (
     redacted_value,
 )
 from .resume_session import ResumeInput
+from .runner_profile import door_seams, netdoor_seams
 from .session_export import ExportFailed
 from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
@@ -225,6 +231,9 @@ class SessionSeams:
     netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
     switch_post: Post = urllib_post
     switch_pause_seconds: float = 2.0
+    # The connection of the vsock environment control (#975); a test brings a socket of its own.
+    control_connect: Connect = vsock_connect
+    control_narrow_seconds: float = NARROW_SECONDS
     # The system's root certificates, which the agent's trust bundle (#784) starts with: this
     # container has the agent's image's roots (the same Debian bundle); a test brings its own.
     system_roots: Callable[[], bytes] = lambda: Path(SYSTEM_ROOTS_PATH).read_bytes()
@@ -786,22 +795,31 @@ class ImplementerSession:
         rule = self.rule
         if rule.mode != MODE_OFF:
             self._netdoor = start_network_door(
-                rule, deadline_seconds=self._deadline_seconds(), seams=self.seams.netdoor
+                rule,
+                deadline_seconds=self._deadline_seconds(),
+                seams=netdoor_seams(self.environment, self.seams.netdoor),
             )
-        switch = parse_switch(self.environment.get(IMPLEMENTER_NETWORK_SWITCH_VARIABLE))
+        # The environment control (#975) is the one way to the second wall: https for the hosted
+        # Dispatcher, vsock for a VM on a customer's machine, none for a runner without one.
+        control = control_from_environment(
+            self.environment,
+            post=self.seams.switch_post,
+            pause_seconds=self.seams.switch_pause_seconds,
+            connect=self.seams.control_connect,
+            narrow_seconds=self.seams.control_narrow_seconds,
+            token=self.job.control_token,
+        )
         if rule.mode == MODE_OPEN:
             self._vm_policy = VM_POLICY_UNCHANGED
-        elif switch is None:
+        elif control is None:
             # For every mode, `off` included: a second wall that is not there is said.
             self._note("the VM's network policy was not changed: this runner has no way to do it")
-        else:
-            narrow_policy(
-                switch,
-                rule,
-                model_host,
-                post=self.seams.switch_post,
-                pause_seconds=self.seams.switch_pause_seconds,
+            _log.warning(
+                "environment control: none configured, so the outer network wall is not narrowed "
+                "and the job runs with the network door only"
             )
+        else:
+            control.narrow(rule, model_host)
             self._vm_policy = VM_POLICY_NARROWED
 
     def _install_registry_trust(self, place: AgentPlace) -> None:
@@ -880,13 +898,15 @@ class ImplementerSession:
                 model_access=access,
                 capability=capability,
                 deadline_seconds=self._deadline_seconds(),
-                port=slot_ports(self.environment).proxy,
+                port=placement_of(self.environment).model_door_port(
+                    slot_ports(self.environment).proxy
+                ),
                 environment={
                     name: value
                     for name, value in self.environment.items()
                     if name == "RUNNER_DYNAMIC_MAX_COST_USD"
                 },
-                seams=self.seams.door,
+                seams=door_seams(self.environment, self.seams.door),
             )
         finally:
             # The door has the key (or the turn ends without one): Control's copy of the hand-off,
@@ -903,7 +923,7 @@ class ImplementerSession:
             entry,
             base_url=spec_of(family).proxy_base_url(proxy_url),
             api_key=model.capability,
-            door_host=MODEL_DOOR_ADDRESS,
+            door_host=placement_of(self.environment).model_door_address,
         )
 
         def make_config(instructions_path: str) -> dict[str, Any]:
@@ -914,7 +934,7 @@ class ImplementerSession:
                 proxy_url=proxy_url,
                 capability=model.capability,
                 instructions_path=instructions_path,
-                door_host=MODEL_DOOR_ADDRESS,
+                door_host=placement_of(self.environment).model_door_address,
                 finish_command=None if self._schema is None else finish_server_command(),
             )
 

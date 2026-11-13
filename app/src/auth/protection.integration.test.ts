@@ -52,9 +52,6 @@ const PUBLIC_ROUTES = [
   "/api/runners/v1/jobs/[id]/complete",
   // The steps of a running turn of the Implementer, with the same token and the lease token in the body (#745).
   "/api/runners/v1/jobs/[id]/steps",
-  // The session snapshot of a turn and its read by the follow-up turn, with the runner credential and the lease token in a header (#879).
-  "/api/runners/v1/jobs/[id]/session",
-  "/api/runners/v1/jobs/[id]/resume-session",
   // A customer's own runner sends the registration token in the body, or its own credential (#854).
   "/api/runners/v1/register",
   "/api/runners/v1/self",

@@ -28,8 +28,6 @@ from typing import Final
 SNAPSHOT_FD_VARIABLE: Final = "RUNNER_SNAPSHOT_FD"
 # The feature of `GET /api/runners/v1/version` that says the snapshot call exists.
 FEATURE_IMPLEMENTER_SNAPSHOT: Final = "implementer_snapshot"
-# #879: the same for a customer's runner (`/api/runners/v1/jobs/{id}/session`, `/resume-session`).
-FEATURE_RUNNER_SESSION_SNAPSHOT: Final = "runner_session_snapshot"
 
 # The plan's cap on a stored snapshot, gzipped. The app holds the same number.
 MAX_SNAPSHOT_BYTES: Final = 8 * 1024 * 1024

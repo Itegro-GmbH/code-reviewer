@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The runner's calls to the app that are not about one job (#854, R1b): the registration, the
-announcement, the renewal of the credential and the claim.
+"""The local dispatcher's calls to the app (#854, R1b; #974): the registration, the announcement,
+the renewal of the credential, the claim, the release of a claim and the state of a job.
+
+The claim is the split one (`worker_credential`): it answers with the job's id and the credential of
+its Worker and **nothing secret**: no git token, no key of the workspace, no job input. The Worker
+fetches the job with that credential over the Worker API (`/api/workers/v1`); this client never
+holds what only the Worker may hold.
 
 The formats are `contracts/runner-registration.v1.json` and `contracts/runner-api.v1.json`; the
 runner is the writer of the bodies and a reader that ignores what it does not know. Blocking calls
@@ -19,13 +24,14 @@ What a caller tells apart:
 """
 
 import json
+import re
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, cast
+from urllib.parse import quote
 
 from code_reviewer_runner import __version__
-from code_reviewer_runner.job_loop.api import ClaimedJob
 from code_reviewer_runner.job_loop.http import (
     ApiError,
     ApiRejected,
@@ -38,17 +44,23 @@ from code_reviewer_runner.job_loop.http import (
     send,
 )
 from code_reviewer_runner.job_loop.jsonvalues import as_object
-from code_reviewer_runner.job_loop.worker_api import (
-    MAX_HEARTBEAT_INTERVAL_SECONDS,
-    WORKER_FEATURES,
-)
 from code_reviewer_runner.llm_providers import registered_provider_ids
 
 REGISTER_PATH = "/api/runners/v1/register"
 SELF_PATH = "/api/runners/v1/self"
 CREDENTIAL_PATH = "/api/runners/v1/credential"
 CLAIM_PATH = "/api/runners/v1/claim"
+JOBS_PATH = "/api/runners/v1/jobs"
 ENGINE_IMPLEMENTER = "implementer"
+# The one claim feature this client names: the split answer (`worker_credential`, #320). What the
+# Worker reads of a job (`WORKER_FEATURES`) it says itself when it fetches the job.
+FEATURE_WORKER_CREDENTIAL = "worker_credential"
+# Why a dispatcher gives a claim back (`KnownReleaseReason` of the runner API contract).
+RELEASE_LAUNCH_FAILED = "launch_failed"
+RELEASE_WORKER_EXITED = "worker_exited"
+_JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+# `WorkerCredential` of the runner API contract: `crj_` and 256 bits in base64url.
+_WORKER_CREDENTIAL = re.compile(r"crj_[A-Za-z0-9_-]{43}")
 
 
 class Revoked(ApiError):
@@ -82,6 +94,28 @@ class Registered:
 class Announced:
     min_base_version: str | None
     update_needed: bool
+
+
+@dataclass(frozen=True)
+class JobAccess:
+    """What a job asks of this device (`access` of the split claim answer): the harness, the auth
+    and, for a device-bound access, the model. Never a credential."""
+
+    harness: str
+    auth: str
+    model: str | None = None
+
+
+@dataclass(frozen=True)
+class ClaimedWorker:
+    """What a claim hands the local dispatcher (`SplitClaimResponse`): the job and the credential of
+    its Worker. No git token, no key, no job input: the dispatcher cannot hold what it is not
+    given."""
+
+    job_id: str
+    credential: str = field(repr=False)
+    labels: tuple[str, ...] = ()
+    access: JobAccess | None = None
 
 
 @dataclass(frozen=True)
@@ -149,16 +183,18 @@ class AppClient:
 
     # -- the claim ---------------------------------------------------------------------------
 
-    def claim(self) -> ClaimedJob | None:
-        """The next job of this runner, or None (204: nothing for its labels now).
+    def claim(self) -> ClaimedWorker | None:
+        """The next job of this runner (the oldest due one it matches), or None (204: nothing for
+        its labels and its manifest now).
 
-        The claim names the engine `implementer` and the features the job host understands, so the
-        job carries everything the hosted Worker gets (`WORKER_FEATURES`): the app sends an optional
-        field only to a caller that names it.
+        The claim names the engine `implementer` and the feature `worker_credential`: the answer is
+        the job's id and the credential of its Worker, and the app sends nothing else of the job.
+        The providers this runner knows go along so that the app can refuse a turn this runner
+        cannot run.
         """
         body = {
             "engines": [ENGINE_IMPLEMENTER],
-            "features": list(WORKER_FEATURES),
+            "features": [FEATURE_WORKER_CREDENTIAL],
             "llmProviders": list(registered_provider_ids()),
         }
         reply = self._send("POST", CLAIM_PATH, body)
@@ -168,10 +204,56 @@ class AppClient:
             raise self._failure(reply)
         return _parse_claim(reply)
 
+    def release(self, job_id: str, credential: str, reason: str) -> str:
+        """Give a claim back because the Worker could not be started or ended without a result
+        (`POST /api/runners/v1/jobs/{id}/release`, the credential of the claim in the body).
+        Answers `released`, `ended` (the job already has its result or another claim holds it:
+        nothing to do) or `not_holder`. Never a value of the answer."""
+        if not _JOB_ID.fullmatch(job_id):
+            raise ApiRejected("the job id is not a UUID", 400, None)
+        reply = self._send(
+            "POST",
+            f"{JOBS_PATH}/{quote(job_id)}/release",
+            {"credential": credential, "reason": reason},
+        )
+        if reply.status == 200:
+            return "released"
+        if reply.status == 409:
+            return "ended"
+        if reply.status in (401, 404):
+            if reply.status == 401 and error_code(reply) == "RUNNER_UNAUTHORIZED":
+                raise Revoked("the app does not accept the runner credential (HTTP 401)", 401)
+            return "not_holder"
+        raise self._failure(reply)
+
+    def job_state(self, job_id: str) -> str | None:
+        """The status of a job of this runner's workspace (`GET /api/runners/v1/jobs/{id}`):
+        `queued`, `running`, `superseded`, `succeeded`, `failed` or `cancelled`. None for a job
+        that is not there (or not this workspace's). The local reaper's question: is the job of a
+        Worker over?"""
+        if not _JOB_ID.fullmatch(job_id):
+            raise ApiRejected("the job id is not a UUID", 400, None)
+        reply = self._send("GET", f"{JOBS_PATH}/{quote(job_id)}", None)
+        if reply.status == 404:
+            return None
+        if reply.status != 200:
+            raise self._failure(reply)
+        body = as_object(parse_json(reply))
+        job = as_object(body.get("job")) if body and body.get("version") == 1 else None
+        status = job.get("status") if job and job.get("id") == job_id else None
+        if not isinstance(status, str):
+            raise ApiUnavailable("the job state answer does not match the contract", 200)
+        return status
+
     # -- internals ---------------------------------------------------------------------------
 
     def _send(
-        self, method: str, path: str, body: Mapping[str, Any], *, authenticated: bool = True
+        self,
+        method: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+        *,
+        authenticated: bool = True,
     ) -> Reply:
         headers = {
             "Content-Type": "application/json",
@@ -184,7 +266,7 @@ class AppClient:
             headers["Authorization"] = f"Bearer {self._credential}"
         request = urllib.request.Request(
             f"{self._base_url}{path}",
-            data=json.dumps(body, separators=(",", ":")).encode("ascii"),
+            data=None if body is None else json.dumps(body, separators=(",", ":")).encode("ascii"),
             method=method,
             headers=headers,
         )
@@ -241,26 +323,41 @@ def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _parse_claim(reply: Reply) -> ClaimedJob:
+def _parse_claim(reply: Reply) -> ClaimedWorker:
+    """The split answer. Only the id, the credential and what the dispatcher needs to start are
+    read: an answer that is not the split one (it would hold a job input) is never read further."""
     body = as_object(parse_json(reply))
     job = as_object(body.get("job")) if body and body.get("version") == 1 else None
-    interval = job.get("heartbeatIntervalSeconds") if job else None
-    job_input = as_object(job.get("input")) if job else None
     job_id = job.get("id") if job else None
-    lease = job.get("leaseToken") if job else None
+    credential = job.get("credential") if job else None
     if (
         job is None
         or not isinstance(job_id, str)
-        or not isinstance(lease, str)
-        or not isinstance(interval, int)
-        or isinstance(interval, bool)
-        or interval < 1
-        or job_input is None
+        or not _JOB_ID.fullmatch(job_id)
+        or not isinstance(credential, str)
+        or not _WORKER_CREDENTIAL.fullmatch(credential)
+        or "input" in job
     ):
         raise ApiUnavailable("the claim answer does not match the contract", 200)
-    return ClaimedJob(
-        id=job_id,
-        lease_token=lease,
-        heartbeat_interval=float(min(interval, MAX_HEARTBEAT_INTERVAL_SECONDS)),
-        input=job_input,
+    return ClaimedWorker(
+        job_id=job_id,
+        credential=credential,
+        labels=_labels(job.get("labels")),
+        access=_access(job.get("access")),
     )
+
+
+def _labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(label for label in cast("list[object]", value) if isinstance(label, str))
+
+
+def _access(value: object) -> JobAccess | None:
+    fields = as_object(value)
+    if fields is None:
+        return None
+    harness, auth, model = fields.get("harness"), fields.get("auth"), fields.get("model")
+    if not isinstance(harness, str) or not isinstance(auth, str):
+        return None
+    return JobAccess(harness, auth, model if isinstance(model, str) else None)

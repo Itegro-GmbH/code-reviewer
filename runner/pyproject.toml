@@ -44,14 +44,15 @@ testpaths = ["tests"]
 # Network guard: only loopback is reachable. Unix sockets stay allowed (asyncio needs them).
 # engine tests (the real PR-Agent against loopback fakes), privileged tests (root, the dedicated
 # engine user, nft) and lane tests (a whole Implementer turn on a real Docker daemon) are deselected
-# unless asked for with -m engine / -m privileged / -m lane.
+# unless asked for with -m engine / -m privileged / -m lane. incus tests (a job in two real Incus instances, #1007) need Incus, a pool and an image and are asked for with -m incus. kvm tests (a job in a Firecracker VM, #978) need
+# /dev/kvm and the VM artifacts: they run only in the KVM lane of .github/workflows/vm-artifacts.yml.
 addopts = [
     "--strict-markers",
     "--disable-socket",
     "--allow-unix-socket",
     "--allow-hosts=127.0.0.1,::1,localhost",
     "-m",
-    "not engine and not privileged and not lane",
+    "not engine and not privileged and not lane and not kvm and not incus",
 ]
 filterwarnings = [
     # pytest-socket warns about every blocked connection; the tests assert the block themselves.
@@ -67,6 +68,8 @@ markers = [
     "smoke: the few engine tests that prove the runner end to end (run with -m \"engine and smoke\", #713)",
     "privileged: root with the production capabilities, the dedicated engine user and nft (deselected by default)",
     "lane: a whole Implementer turn on a real Docker daemon, as root, with the images (deselected by default, #745)",
+    "kvm: a job in a real Firecracker VM started by the local Dispatcher's launcher (KVM and the VM artifacts; deselected by default, #978)",
+    "incus: a job in two real Incus instances started by the local Dispatcher's launcher (Incus, a pool and an image; deselected by default, #1007)",
 ]
 
 [tool.ruff]
@@ -85,18 +88,20 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 "scripts/sandbox_boundary_check.py" = ["E501"]
 # The network door's lane: the embedded server and client programs and the sentences that say what each check proves (#745, step 7).
 "tests/lane/test_network_door.py" = ["E501"]
+# The stand-ins of the installer's tests (#982) are shell programs in strings.
+"tests/unit/host_install_support.py" = ["E501"]
 # The spikes of the Factory-Runner (#853): the embedded programs (the MCP server, the command) and the sentences that say what a check proves.
 "scripts/runner_spikes.py" = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests", "scripts", "../fakes"]
+include = ["src", "tests", "scripts", "release", "../fakes"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
-extraPaths = ["src", "..", "tests/engine"]
+extraPaths = ["src", "..", "tests/engine", "tests/kvm", "tests/incus", "tests/unit", "release"]
 venvPath = "."
 venv = ".venv"
 
 # The follow-up spike (#837) drives the lane's helpers from a script, as the lane's tests do.
 [[tool.pyright.executionEnvironments]]
 root = "scripts"
-extraPaths = ["src", "..", "tests", "tests/engine", "tests/lane"]
+extraPaths = ["src", "..", "tests", "tests/engine", "tests/lane", "tests/kvm"]

@@ -155,6 +155,10 @@ describe("the migrations of both epics", () => {
       "20261107210000_tracker_review_requested_from",
       "20261107220000_todo_list_indexes",
       "20261107230000_add_tracker_items_write_index",
+      "20261110090000_add_job_required_labels",
+      "20261110120000_add_runner_delivery",
+      "20261110170000_create_json_or_null",
+      "20261110180000_rewrite_runner_manifests",
     ]);
   });
 
@@ -213,6 +217,7 @@ describe("starting the database", () => {
       "job_claimed_keys",
       "job_comments",
       "job_dispatches",
+      "job_rings",
       "job_vm_runs",
       "jobs",
       "kysely_migration",

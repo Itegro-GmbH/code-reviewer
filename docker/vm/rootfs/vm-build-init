@@ -1,0 +1,133 @@
+#!/bin/bash
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# The init of the BUILD-ONLY boots (#976, #978): `vm.mode=seed` (makes the data disk) and `vm.mode=smoke` (the release's own test). It is what
+# `vm-boot` hands over to after the mounts, the job disk and the cgroup controllers (docker/vm/rootfs/vm-boot, which every boot starts with),
+# and the only place that still runs `vm-prepare.sh` and `sysbox-prepare.sh` in the guest: a job's VM (`vm.mode=run`) never gets here, its
+# vm-init (runner/vm-init/) runs the prepare scripts itself, in the hosted order. It reports to the console as
+# `VMINIT <name> uptime=<s> [key=value ...]`, one line each; the build and the smoke boot read them (dispatcher/src/vm-artifacts/console.ts).
+#   seed   prepare, load the image archive of the second extra disk into Docker, stop Docker cleanly, power off (builds the data disk)
+#   smoke  prepare, run the checks below, power off (the release's own test)
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+
+say() {
+  local name=$1
+  shift
+  printf 'VMINIT %s uptime=%s%s\n' "$name" "$(cut -d' ' -f1 /proc/uptime)" "${*:+ $*}" 2> /dev/null > /dev/console || true
+}
+
+# The end of a VM that nobody waits for: sync, then the guest reboots itself and Firecracker exits (`reboot=k`).
+power_off() {
+  sync
+  echo 1 > /proc/sys/kernel/sysrq
+  echo b > /proc/sysrq-trigger
+  sleep 60
+}
+
+# The seed boot (it makes the data disk) fails loudly: `seed_failed` and the power off, never `seed_done`, so the build refuses a disk that was
+# not left clean. The tail of the tool's own message goes with it.
+seed_fail() {
+  say seed_failed "$@"
+  power_off
+  exit 1
+}
+seed_unmount() {
+  umount -R "$1" 2> /run/umount.err || seed_fail reason=umount "path=$1" "tail=$(tail -n 2 /run/umount.err | tr '\n ' '|_')"
+}
+
+mode=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^vm.mode=//p' | head -n 1)
+mode=${mode:-smoke}
+
+# vm-boot did the mounts and the job disk; what remains is the daemons: vm-prepare.sh (the hosted VM's script: cgroup layout, dockerd) and
+# sysbox-prepare.sh (the two Sysbox daemons).
+if vm-prepare.sh; then say docker_ready; else say docker_failed; fi
+if sysbox-prepare.sh; then say sysbox_ready; else say sysbox_failed; fi
+
+recipe=/etc/code-reviewer-vm/recipe.json
+worker_tag=$(jq -r .worker.tag "$recipe")
+agent_tag=$(jq -r .agent.tag "$recipe")
+image_id() { docker image inspect --format '{{.Id}}' "$1" 2> /dev/null; }
+
+case "$mode" in
+  seed)
+    mkdir -p /seed
+    mount -t ext4 -o ro /dev/vdc /seed || seed_fail reason=no_seed_disk
+    if docker load --input /seed/images.tar > /run/docker-load.log 2>&1; then
+      say images_loaded
+    else
+      seed_fail reason=docker_load "tail=$(tail -n 3 /run/docker-load.log | tr '\n ' '|_')"
+    fi
+    say image role=worker "tag=$worker_tag" "id=$(image_id "$worker_tag")"
+    say image role=agent "tag=$agent_tag" "id=$(image_id "$agent_tag")"
+    say store "driver=$(docker info --format '{{.Driver}}' 2> /dev/null)" "snapshotter=$(docker info --format '{{range .DriverStatus}}{{index . 1}}{{end}}' 2> /dev/null | tr ' ' '_')"
+    # Every daemon that writes to the disk stops before anything is unmounted. Docker stops the way the golden snapshot's pipeline stops it
+    # before it snapshots (SIGTERM, then wait until it and containerd are gone); the two Sysbox daemons (sysbox-fs first: its FUSE mounts
+    # come down with it, then sysbox-mgr) have state under /var/lib/sysbox.
+    for daemon in dockerd sysbox-fs sysbox-mgr; do
+      pkill -TERM -x "$daemon" 2> /dev/null || true
+      for _ in $(seq 1 300); do
+        pgrep -x "$daemon" > /dev/null || break
+        sleep 0.2
+      done
+    done
+    for _ in $(seq 1 300); do
+      pgrep -x 'dockerd|containerd|containerd-shim|sysbox-mgr|sysbox-fs' > /dev/null || break
+      sleep 0.2
+    done
+    if pgrep -x 'dockerd|containerd|containerd-shim|sysbox-mgr|sysbox-fs' > /dev/null; then
+      seed_fail reason=daemon_not_stopped "left=$(pgrep -x -l 'dockerd|containerd|containerd-shim|sysbox-mgr|sysbox-fs' | awk '{print $2}' | tr '\n' ',')"
+    fi
+    sync
+    # In the reverse order of the mounts; a failed unmount is a failed seed, because the disk is not known to be clean then.
+    for target in /seed /var/lib/sysboxfs /var/lib/sysbox /var/lib/containerd /var/lib/docker /jobdisk; do
+      seed_unmount "$target"
+    done
+    sync
+    say seed_done
+    power_off
+    ;;
+  smoke)
+    ok=1
+    check() {
+      local name=$1
+      shift
+      if "$@" > "/run/check-$name.log" 2>&1; then
+        say check name="$name" result=ok
+      else
+        say check name="$name" result=fail "tail=$(tail -n 3 "/run/check-$name.log" | tr '\n ' '|_')"
+        ok=0
+      fi
+    }
+    say store "driver=$(docker info --format '{{.Driver}}' 2> /dev/null)" "snapshotter=$(docker info --format '{{range .DriverStatus}}{{index . 1}}{{end}}' 2> /dev/null | tr ' ' '_')"
+    say image role=worker "tag=$worker_tag" "id=$(image_id "$worker_tag")"
+    say image role=agent "tag=$agent_tag" "id=$(image_id "$agent_tag")"
+    check root_read_only bash -c '! touch /usr/local/sbin/.write-test'
+    check runc_container docker run --rm --runtime=runc --network none --entrypoint true "$worker_tag"
+    check sysbox_container docker run --rm --runtime=sysbox-runc --network none --entrypoint true "$agent_tag"
+    # AF_VSOCK is the way to the host (#977, #978): the agent's container must not be able to open one (Docker's default seccomp profile refuses
+    # it, the kernel has no 32-bit entry that would bypass the profile), and every denial has a control that says the probe CAN see one: Control's
+    # own profile allows it. The probe is docker/vm/rootfs/vsock-probe.py (what each mode proves is in its header).
+    probe=/usr/local/share/code-reviewer-vm/vsock-probe.py
+    agent_probe() { docker run --rm --runtime=sysbox-runc --network none --entrypoint python3 -v "$probe:/probe.py:ro" "$agent_tag" /probe.py "$1"; }
+    control_probe() {
+      docker run --rm --runtime=runc --network none --security-opt seccomp=/etc/code-reviewer/control-seccomp.json --entrypoint python3 \
+        -v "$probe:/probe.py:ro" "$worker_tag" /probe.py "$1"
+    }
+    check vsock_denied_agent agent_probe vsock-denied
+    check vsock_allowed_control control_probe vsock-created
+    check ia32_unavailable agent_probe ia32-unavailable
+    # The golden snapshot's own self-check of the Worker image (`probe` mode, the hardened container flags): one JSON line, the verdict.
+    if probe=$(/usr/local/share/code-reviewer-vm/check-worker-probe.sh 2> /run/check-probe.err); then
+      say check name=worker_probe result=ok "output_b64=$(printf '%s' "$probe" | base64 -w0)"
+    else
+      say check name=worker_probe result=fail "tail=$(tail -n 3 /run/check-probe.err | tr '\n ' '|_')"
+      ok=0
+    fi
+    say smoke_done "ok=$ok"
+    power_off
+    ;;
+  *)
+    say unknown_mode "mode=$mode"
+    power_off
+    ;;
+esac

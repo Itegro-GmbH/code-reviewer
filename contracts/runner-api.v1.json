@@ -71,7 +71,7 @@
           "uniqueItems": true
         },
         "jobId": {
-          "description": "#318: claim exactly this job (a Dispatcher woken by the dispatch webhook). Absent: the next due job, as before.",
+          "description": "#318: claim exactly this job (a Dispatcher woken by the dispatch webhook). Every rule of the claim applies to it unchanged, the labels included (#971). Absent (Runner v2, #971): the oldest due job this caller matches: it has every label the job requires (`cr:managed` and a size label for a hosted job, the labels of the environment for a turn of a runner environment), the job is of its workspace (a customer's runner) and of a kind and harness it runs. 204 when there is none. Naming the job stays for a Dispatcher that is still woken by id.",
           "$ref": "#/$defs/JobId"
         },
         "maxRunning": {
@@ -282,7 +282,7 @@
       ]
     },
     "KnownRunnerErrorCode": {
-      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `no_result` (#843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder; the model was used), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
+      "description": "The error codes the runner reports in a result (ErrorCode in the runner, plus runner_shutdown from the job loop). #746 adds the codes of the Implementer: `branch_exists` (no longer produced: a branch the remote refuses is a rejected entry of `branches` and the turn ends `push_rejected`; the word stays for runs that carry it), `base_branch_not_found`, `clone_failed`, `setup_failed` (the repository's own set-up did not run), `agent_gave_up` (the agent ended without a result it stands behind), `no_result` (#843: the turn had a result schema and the agent ended without a result that fits it, also after the one reminder; the model was used), `push_rejected` (the remote refused the push), `branch_violation` (no longer produced: git is free in the workspace; the word stays for runs that carry it), `time_limit_reached` and the existing `cost_limit_reached` (the two limits of the turn), `git_write_not_granted` (the token cannot write contents of the repository), `implementer_engine_unavailable` (no engine of the runner runs the kind) and `implementer_config_invalid` (the turn's options cannot be used). `environment_control_failed` (#975: the sandbox's environment control did not narrow the outer network wall, because the host did not answer in time, refused the rule, could not be reached or answered something `contracts/environment-control.v1.json` does not know; the agent never started, so it is free). `subscription_auth`, `subscription_limit` and `subscription_model_refused` (#980: a turn on Claude Code with a subscription token of the runner's own device: the token was refused with a 401 (expired or revoked), the subscription's usage limit ended the call, or the subscription does not allow the model; free, nothing of ours was used). A caller branches on the code, never on a message. The app accepts any code of the form below and stores an unknown one as 'unknown' (the original stays in the stored result), so a newer runner never loses a result.",
       "type": "string",
       "enum": [
         "invalid_job",
@@ -340,7 +340,11 @@
         "implementer_config_invalid",
         "sandbox_unproven",
         "sandbox_size_unsupported",
-        "environment_setup_failed"
+        "environment_setup_failed",
+        "environment_control_failed",
+        "subscription_auth",
+        "subscription_limit",
+        "subscription_model_refused"
       ]
     },
     "JobEnv": {
@@ -1229,6 +1233,28 @@
               "type": "integer",
               "minimum": 1
             },
+            "sizeLabel": {
+              "description": "#971: the size label the job requires, `cr:size-<vCPUs>` of a size of `contracts/environment-sizes.v1.json` (the sizes of the platform: 1, 2, 4, 6, 8). The Dispatcher checks it: a label that names a size it does not launch is given back unlaunched. The size of the VM stays what it was: `vcpus` of the answer when the turn's environment names one, else the Dispatcher's own configuration for the kind (so a hosted turn without an environment gets the size the operator configured, whatever `cr:size-2` says). A hosted job always has one: reviews run on `cr:size-1`, a turn of the Implementer on the size of its environment (`cr:size-2` without one). A job of a customer's runner has none (#974: its labels are `labels`). Optional only so that a Dispatcher can read the answer of an app of the previous release, which does not send it; the Dispatcher's own configuration applies then. It comes from the app's authenticated answer only. The namespace `cr:` is reserved for the platform identity (`contracts/runner-registration.v1.json`).",
+              "type": "string",
+              "pattern": "^cr:size-[1-9][0-9]{0,1}$"
+            },
+            "labels": {
+              "description": "#974: the labels the job requires, for a job of a customer's runner (its environment's labels, never in the reserved namespace `cr:`); a hosted job names its size in `sizeLabel` and has no `labels`. Information: the claim already matched them (a dispatcher takes a job only when it has all of them).",
+              "type": "array",
+              "maxItems": 64,
+              "items": { "type": "string", "minLength": 1, "maxLength": 64 }
+            },
+            "access": {
+              "description": "#974: what a customer's job asks of the dispatcher's device: the harness, the auth and, for a device-bound access, the model (null otherwise). It lets the dispatcher hand the Worker the one local credential the job needs and no other: `subscription` and `local-key` are credentials that exist only on the device (never in the app), `app-key` needs nothing local (the Worker fetches the workspace's key itself). Never a credential or a credential's name. Only for a turn of the Implementer on a customer's runner (`sizeLabel` and `access` are not both present).",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["harness", "auth", "model"],
+              "properties": {
+                "harness": { "type": "string", "minLength": 1, "maxLength": 64 },
+                "auth": { "enum": ["app-key", "local-key", "subscription"] },
+                "model": { "oneOf": [{ "type": "string", "minLength": 1, "maxLength": 100 }, { "type": "null" }] }
+              }
+            },
             "vcpus": {
               "description": "#818: the VM size in vCPUs that the turn's environment asks for. Present only for a job of the kind `implementer` that was started with an environment; absent otherwise, and then the Dispatcher's configuration and default apply. It comes from the app's authenticated answer only. The Dispatcher launches only the sizes of the platform (`contracts/environment-sizes.v1.json`) and fails the launch with its own code for any other, and it ignores the field for every other kind, so a review can never name a size.",
               "type": "integer",
@@ -1256,7 +1282,7 @@
       "enum": ["launch_failed", "worker_exited"]
     },
     "ReleaseRequest": {
-      "description": "#318: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).",
+      "description": "#318, #974: POST /api/runners/v1/jobs/{id}/release, with the dispatcher credential (RUNNER_TOKEN, or the credential of a customer's runner for a job of its own workspace) in Authorization and the job credential in the body. Gives the job back to the queue (or fails it on the last attempt).",
       "type": "object",
       "required": ["credential", "reason"],
       "properties": {
@@ -1323,7 +1349,7 @@
       }
     },
     "JobStateResponse": {
-      "description": "#364: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential only; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.",
+      "description": "#364, #974: 200 from GET /api/runners/v1/jobs/{id} (the dispatcher credential, or the credential of a customer's runner for a job of its own workspace: 404 for any other; a per-job credential is refused). What a Dispatcher asks to decide whether the VM of a job is a leftover: the job's status and nothing else, no job input, lease, repository or credential. `running`: the app holds the job under a lease. Any other status: it does not (`queued` also covers a lease that lapsed and a job that was given back). A reader that meets a status it does not know treats the job as running. An unknown id is 404 RUNNER_JOB_NOT_FOUND. An app of a previous release has no such route (a 404 without an ErrorResponse body); it is not a required feature, so a reader goes on without it.",
       "type": "object",
       "required": ["version", "job"],
       "properties": {
@@ -1346,7 +1372,7 @@
       }
     },
     "KnownAppFeature": {
-      "description": "The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input. `runner_session_snapshot` (#879): PUT /api/runners/v1/jobs/{id}/session and GET /api/runners/v1/jobs/{id}/resume-session exist (the same calls for a customer's runner, which holds a runner credential and no per-job credential: `RunnerLeaseTokenHeader`, `RunnerSessionPartQuery`, `RunnerResumeSessionQuery`); such a runner reads the list from GET /api/runners/v1/version with its own credential and uses the two calls only if the app lists the feature. `implementer_snapshot` does not say it: an app can have the Worker API's calls and not these.",
+      "description": "The features an app lists in VersionResponse.features. A reader ignores a name it does not know and refuses to run against an app that lacks one it needs. `worker_api`: /api/workers/v1 exists. `claim_by_job_id`: ClaimRequest.jobId is honoured. `pool_cap`: ClaimRequest.maxRunning is honoured. `release`: the release call exists. `vm_lifecycle` (#493): POST /api/runners/v1/jobs/{id}/vm exists (the Dispatcher reports the VM it created, for the billable minutes); a Dispatcher sends that call only to an app that lists the feature. `implementer_steps` (#745): POST /api/runners/v1/jobs/{id}/steps and POST /api/workers/v1/jobs/{id}/steps exist (the steps of a running turn of the Implementer, for the live view); a runner sends them only to an app that lists the feature. It is an app feature, not a claim feature: the call adds nothing to the job input, so there is nothing the app must withhold from a caller that does not know it. `implementer_snapshot` (#839): PUT /api/workers/v1/jobs/{id}/session exists (one part of the session snapshot of a turn of the Implementer, for the follow-up turns); a Worker puts it only to an app that lists the feature. An app feature too: the call adds nothing to the job input.",
       "type": "string",
       "enum": [
         "worker_api",
@@ -1355,8 +1381,7 @@
         "release",
         "vm_lifecycle",
         "implementer_steps",
-        "implementer_snapshot",
-        "runner_session_snapshot"
+        "implementer_snapshot"
       ]
     },
     "KnownStepKind": {
@@ -1430,11 +1455,6 @@
         "dropped": { "type": "integer", "minimum": 0, "maximum": 50 }
       }
     },
-    "RunnerLeaseTokenHeader": {"description": "#879: the request headers of the two runner calls whose body is raw bytes (`PUT .../session`, `GET .../resume-session`), as an object of lower-case header names. The lease token of the claim, which the calls with a JSON body (heartbeat, complete, steps) carry in the body, travels in `X-Lease-Token` here, next to the runner credential in `Authorization: Bearer crc_...` (contracts/runner-registration.v1.json). Secret: never log it. The shared `RUNNER_TOKEN` of a Dispatcher is not accepted by these two calls (401 RUNNER_UNAUTHORIZED): a Dispatcher's Worker has the Worker API's calls of the same names.", "type": "object", "required": ["x-lease-token"], "properties": {"x-lease-token": {"$ref": "#/$defs/LeaseToken"}}},
-    "RunnerSessionPartQuery": {"description": "#879: the query string of PUT /api/runners/v1/jobs/{id}/session, as an object of its parameters (every value is decimal digits or text in the URL): one part of the session snapshot of the running turn of the Implementer a customer's runner holds (follow-up turns). It is the call of the Worker API (`SessionPartQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, at most 3, the same description of the whole file in every part, the same checks, the same replacement of the session's old snapshot once the last part is in) for a runner that holds no per-job credential: the runner credential is in `Authorization`, the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`), the bytes of the part are the body (`application/octet-stream`, up to 3 MiB: 413 RUNNER_BODY_TOO_LARGE above, 400 RUNNER_REQUEST_INVALID with `fields` naming `body` unless exactly as long as `bytes` says for that part). The call proves the claim and nothing more: it does NOT extend the lease. 401 RUNNER_UNAUTHORIZED for a credential the app does not know, a revoked runner's included (and for the shared token); 404 RUNNER_JOB_NOT_FOUND for a job of another workspace, one another runner holds, or a hosted one (a Dispatcher holds it); 409 RUNNER_LEASE_LOST for a lease that ran out, a claim that ended or a token that is not the claim's (stop sending); 400 for a job that is not a turn of the Implementer, a missing or malformed `X-Lease-Token` (`fields`: `x-lease-token`) or a query or body that does not fit. The sender is best effort: a snapshot that is not stored means the next turn starts from a summary. The app lists the feature `runner_session_snapshot` in `KnownAppFeature`; a runner sends the call only to an app that lists it.", "type": "object", "required": ["part", "parts", "bytes", "rawBytes", "sha256", "opencodeVersion"], "properties": {"part": {"type": "string", "pattern": "^(0|[1-9][0-9]{0,15})$"}, "parts": {"type": "string", "pattern": "^[1-3]$"}, "bytes": {"type": "string", "pattern": "^[1-9][0-9]{0,15}$"}, "rawBytes": {"type": "string", "pattern": "^[1-9][0-9]{0,15}$"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "opencodeVersion": {"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$"}}},
-    "RunnerSessionPartResponse": {"description": "#879: 200 from PUT /api/runners/v1/jobs/{id}/session. `part` and `parts` repeat the request's; `complete` is true once the whole snapshot is stored, also for a part sent again after that. Repeating a part answers 200.", "type": "object", "required": ["version", "part", "parts", "complete"], "properties": {"version": {"const": 1}, "part": {"type": "integer", "minimum": 0, "maximum": 2}, "parts": {"type": "integer", "minimum": 1, "maximum": 3}, "complete": {"type": "boolean"}}},
-    "RunnerResumeSessionQuery": {"description": "#879: the query string of GET /api/runners/v1/jobs/{id}/resume-session, as an object of its parameters: one part of the session snapshot the earlier turns stored, read by the customer's runner that holds a follow-up turn of the Implementer. It is the call of the Worker API (`ResumeSessionQuery` in contracts/worker-api.v1.json: the same parts of exactly 3 MiB, `part` from 0 and 0 when absent, the same answer of 200 with the bytes of the part, 204 when the session has no stored snapshot, a snapshot of the job's own session and of an earlier turn only) with the runner credential in `Authorization` and the lease token in `X-Lease-Token` (`RunnerLeaseTokenHeader`). The description of the whole file is in the headers of every part (`RunnerResumeSessionHeaders`). It proves the claim and nothing more: it does NOT extend the lease. The refusals are those of `RunnerSessionPartQuery`: 401 RUNNER_UNAUTHORIZED, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST, and 400 RUNNER_REQUEST_INVALID (`fields`: `part` for a part that is not a number or beyond the last, `x-lease-token` for a missing or malformed token) also for a job that is not a turn of the Implementer. The runner checks the size and the sha256 of the whole file; a file it cannot fetch or read means the turn continues from a summary, never a failed turn.", "type": "object", "properties": {"part": {"type": "string", "pattern": "^[0-2]$"}}},
-    "RunnerResumeSessionHeaders": {"description": "#879: the response headers of a 200 from GET /api/runners/v1/jobs/{id}/resume-session, as an object of lower-case header names (every value is text in the header). They are those of `ResumeSessionHeaders` in contracts/worker-api.v1.json and describe the WHOLE file, not the part: `x-snapshot-parts` (how many parts, 1 to 3, which is what `x-snapshot-bytes` makes), `x-snapshot-bytes` (the size of the gzip file), `x-snapshot-raw-bytes` (the size of the JSON inside it), `x-snapshot-sha256` (the lower case hex digest of the gzip file) and `x-snapshot-opencode-version` (the engine that wrote it). `Content-Length` is the size of this part. `Cache-Control` is `no-store`.", "type": "object", "required": ["x-snapshot-parts", "x-snapshot-bytes", "x-snapshot-raw-bytes", "x-snapshot-sha256", "x-snapshot-opencode-version"], "properties": {"x-snapshot-parts": {"type": "string", "pattern": "^[1-3]$"}, "x-snapshot-bytes": {"type": "string", "pattern": "^[1-9][0-9]{0,15}$"}, "x-snapshot-raw-bytes": {"type": "string", "pattern": "^[1-9][0-9]{0,15}$"}, "x-snapshot-sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "x-snapshot-opencode-version": {"type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$"}}},
     "VersionResponse": {
       "description": "#879: a customer's runner may also send its own credential (`Authorization: Bearer crc_...`; a revoked or unknown one is 401), to read the features before it uses a call the app of an earlier release does not have. The answer holds no job data; authenticating with a runner credential also marks the runner seen, as every call of the runner does. #318: 200 from GET /api/runners/v1/version (dispatcher credential; #322: a Worker may also send its per-job credential with ?jobId=<its job>, which must be the running claim of that job). Lets a Dispatcher or a Worker detect an app that is too old before it claims anything. An app of a previous release has no such route (404), which means it is too old. `version` is the runner API version; `appVersion` is the build of the app, for logs.",
       "type": "object",
@@ -1451,7 +1471,7 @@
       }
     },
     "ApiErrorCode": {
-      "description": "Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED.",
+      "description": "Every error of the API has one of these codes. 401 RUNNER_UNAUTHORIZED, 400 RUNNER_ID_INVALID / RUNNER_REQUEST_INVALID, 404 RUNNER_JOB_NOT_FOUND, 409 RUNNER_LEASE_LOST / RUNNER_RESULT_CONFLICT, 413 RUNNER_BODY_TOO_LARGE, 503 RUNNER_GIT_ACCESS_UNAVAILABLE (with Retry-After), 500 RUNNER_INTERNAL_ERROR. #318 adds 401 WORKER_CREDENTIAL_INVALID (a Worker route got a credential that is not the job's: wrong job, unknown, expired or from an earlier claim; also the fourth call of the details route in one claim, whose three calls are spent: the Worker has nothing left to fetch and stops, the claim itself is not lost) and 409 RUNNER_JOB_ENDED (the app ended the job, for example after a permanent access failure at fetch; the Worker stops). #854 adds 401 RUNNER_REGISTRATION_TOKEN_INVALID (the registration token of a customer's runner is unknown, used or expired: one answer for all three) and 426 RUNNER_UPDATE_NEEDED (a customer's runner whose base is older than the minimum the app requires gets no job; the error carries `minBaseVersion`). A customer's runner authenticates with its own credential (contracts/runner-registration.v1.json); a revoked credential is a plain 401 RUNNER_UNAUTHORIZED. #971 adds 422 RUNNER_LABEL_RESERVED (a customer's runner announced a label of the platform's reserved namespace `cr:` in `POST /api/runners/v1/register` or `PUT /api/runners/v1/self`; `fields` names each by position, `labels[1]`, with the field code `reserved`; nothing is stored. Only the platform identity, the Dispatcher's shared token, may carry such a label, and it is the identity that decides, never the text). #973 adds 422 RUNNER_ACCESS_RESERVED (a customer's runner announced an entry of its manifest with the auth `managed`, which only the platform identity has; `fields` names each by position, `manifest.harnesses[0].auth`, with the field code `reserved`; nothing is stored).",
       "type": "string",
       "enum": [
         "RUNNER_UNAUTHORIZED",
@@ -1466,7 +1486,9 @@
         "WORKER_CREDENTIAL_INVALID",
         "RUNNER_JOB_ENDED",
         "RUNNER_REGISTRATION_TOKEN_INVALID",
-        "RUNNER_UPDATE_NEEDED"
+        "RUNNER_UPDATE_NEEDED",
+        "RUNNER_LABEL_RESERVED",
+        "RUNNER_ACCESS_RESERVED"
       ]
     },
     "ErrorResponse": {
@@ -1480,7 +1502,7 @@
             "code": { "$ref": "#/$defs/ApiErrorCode" },
             "message": { "type": "string", "minLength": 1, "maxLength": 500 },
             "fields": {
-              "description": "For RUNNER_REQUEST_INVALID: which fields were refused and why (never their values).",
+              "description": "For RUNNER_REQUEST_INVALID, RUNNER_LABEL_RESERVED and RUNNER_ACCESS_RESERVED (field code `reserved`): which fields were refused and why (never their values).",
               "type": "array",
               "items": {
                 "type": "object",
@@ -1489,7 +1511,7 @@
                   "field": { "type": "string", "maxLength": 100 },
                   "code": {
                     "type": "string",
-                    "enum": ["required", "invalid", "too_long"]
+                    "enum": ["required", "invalid", "too_long", "reserved"]
                   }
                 }
               }

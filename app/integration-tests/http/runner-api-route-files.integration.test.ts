@@ -5,6 +5,7 @@
 // RUNNER_TOKEN and LLM_*. A pull request delivery goes in through the webhook route and comes out
 // through claim, heartbeat and complete, so the pieces are proven to be connected. The details of each
 // behavior are in runner-api-claim, -report and -security.integration.test.ts.
+import { existsSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   startGithubFake,
@@ -66,10 +67,6 @@ type Steps =
   typeof import("../../src/app/api/runners/v1/jobs/[id]/steps/route.ts");
 type WorkerSteps =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts");
-type RunnerSession =
-  typeof import("../../src/app/api/runners/v1/jobs/[id]/session/route.ts");
-type RunnerResumeSession =
-  typeof import("../../src/app/api/runners/v1/jobs/[id]/resume-session/route.ts");
 type WorkerSession =
   typeof import("../../src/app/api/workers/v1/jobs/[id]/session/route.ts");
 type WorkerResumeSession =
@@ -133,10 +130,6 @@ async function startRoutes() {
       (await import("../../src/app/api/runners/v1/jobs/[id]/steps/route.ts")) as Steps,
     workerSteps:
       (await import("../../src/app/api/workers/v1/jobs/[id]/steps/route.ts")) as WorkerSteps,
-    runnerSession:
-      (await import("../../src/app/api/runners/v1/jobs/[id]/session/route.ts")) as RunnerSession,
-    runnerResumeSession:
-      (await import("../../src/app/api/runners/v1/jobs/[id]/resume-session/route.ts")) as RunnerResumeSession,
     workerSession:
       (await import("../../src/app/api/workers/v1/jobs/[id]/session/route.ts")) as WorkerSession,
     workerResumeSession:
@@ -211,10 +204,6 @@ function workerRequest(
   });
 }
 
-/** The HTTP methods a route file exports, to tell them from anything else it exports. */
-const isMethod = (name: string) =>
-  ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(name);
-
 function runnerRequest(
   action: string,
   body: unknown,
@@ -268,7 +257,6 @@ describe("the runner API route files", () => {
         "vm_lifecycle",
         "implementer_steps",
         "implementer_snapshot",
-        "runner_session_snapshot",
       ],
     });
     const anonymous = await routes.version.GET(
@@ -537,61 +525,14 @@ describe("the runner API route files", () => {
     });
   });
 
-  // #879-T70
-  it("wires the session and resume-session calls of a customer's runner: PUT and GET only, and a runner credential is needed on each", async () => {
-    const routes = await startRoutes();
-    await queueJobThroughWebhook(routes);
-    const claim = await routes.claim.POST(runnerRequest("claim", undefined));
-    const { job } = await claim.json();
-    const context = { params: Promise.resolve({ id: job.id }) };
-    const putUrl = `https://app.test/api/runners/v1/jobs/${job.id}/session?part=0&parts=1&bytes=3&rawBytes=9&sha256=${"a".repeat(64)}&opencodeVersion=1.19.0`;
-    const getUrl = `https://app.test/api/runners/v1/jobs/${job.id}/resume-session?part=0`;
-    const put = (headers: Record<string, string>) =>
-      routes.runnerSession.PUT(
-        new Request(putUrl, {
-          method: "PUT",
-          headers: {
-            "content-type": "application/octet-stream",
-            "x-lease-token": job.leaseToken,
-            ...headers,
-          },
-          body: new Uint8Array(3),
-        }),
-        context,
-      );
-    const get = (headers: Record<string, string>) =>
-      routes.runnerResumeSession.GET(
-        new Request(getUrl, {
-          method: "GET",
-          headers: { "x-lease-token": job.leaseToken, ...headers },
-        }),
-        context,
-      );
-
-    const answers = [
-      await put({}),
-      await put({ authorization: `Bearer ${RUNNER_TOKEN}` }),
-      await put({ authorization: `Bearer crc_${"A".repeat(43)}` }),
-      await get({}),
-      await get({ authorization: `Bearer ${RUNNER_TOKEN}` }),
-      await get({ authorization: `Bearer crc_${"A".repeat(43)}` }),
-    ];
-
-    // The one method of each route, and nothing else.
-    expect(Object.keys(routes.runnerSession).filter(isMethod)).toStrictEqual([
-      "PUT",
-    ]);
-    expect(
-      Object.keys(routes.runnerResumeSession).filter(isMethod),
-    ).toStrictEqual(["GET"]);
-    // Through the runner API: its answer for a caller it does not know, which the Worker routes do not give.
-    for (const answer of answers) {
-      expect(answer.status).toBe(401);
-      expect(answer.headers.get("cache-control")).toBe("no-store");
-      expect(await answer.json()).toMatchObject({
-        error: { code: "RUNNER_UNAUTHORIZED" },
-      });
-    }
+  // #974-T04
+  it("has no session and resume-session routes for a customer's runner any more: the route files are gone", () => {
+    const routes = new URL(
+      "../../src/app/api/runners/v1/jobs/[id]/",
+      import.meta.url,
+    );
+    for (const name of ["session", "resume-session"])
+      expect(existsSync(new URL(`${name}/route.ts`, routes))).toBe(false);
   });
 
   // #320-T01

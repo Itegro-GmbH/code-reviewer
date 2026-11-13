@@ -12,6 +12,7 @@ makes git run runs there."""
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -37,17 +38,21 @@ from code_reviewer_runner.dynamic_review.model_door_route import (
     MODEL_NETWORK_NAME,
 )
 from code_reviewer_runner.implementer import agent_container as ac
-from code_reviewer_runner.implementer import exec_pipe
+from code_reviewer_runner.implementer import exec_pipe, host_rules
 from code_reviewer_runner.implementer import reader as ac_reader
 from code_reviewer_runner.implementer.agent_container import (
     AGENT_CONTAINER_NAME,
+    Adopted,
     AgentContainer,
     AgentSeams,
     agent_document,
+    docker_environment_file,
+    proxy_environment,
 )
 from code_reviewer_runner.implementer.claude_code.agent import ClaudePlace
 from code_reviewer_runner.implementer.docker_api import DockerApi
 from code_reviewer_runner.implementer.door_launcher import network_document
+from code_reviewer_runner.implementer.network_rule import MODE_LIST, OFF, NetworkRule
 from code_reviewer_runner.implementer.reader import (
     READER_CONTAINER_NAME,
     READER_WRITER_CONTAINER_NAME,
@@ -68,6 +73,8 @@ class Rig:
         self.socket = directory / "docker.sock"
         self.engine = FakeDockerEngine(self.socket).start()
         self.ready_after = 0
+        # A container without an inner Docker (the test lane under `runc`).
+        self.no_inner_docker = False
         self.execs: list[tuple[list[str], dict[str, str], str | None]] = []
         # What was written to the files of the engine's configuration: path -> bytes.
         self.written: dict[str, bytes] = {}
@@ -105,6 +112,10 @@ class Rig:
         self.execs.append((argv, env, made.document.get("WorkingDir")))
         if argv[:3] == ["/bin/sh", "-c", ac.WRITE_FILE_SCRIPT]:
             self.written[argv[4]] = stdin.read()
+            return 0
+        if argv[:3] == ["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT]:
+            self.written[argv[4]] = stdin.read()
+            stdout.write(ac.NO_DOCKER + "\n" if self.no_inner_docker else "restarting\n")
             return 0
         if argv[:2] == ["/usr/bin/test", "-e"]:
             self._tries += 1
@@ -1216,3 +1227,345 @@ def test_a_streamed_command_in_a_container_that_is_not_there_is_unanswered_not_r
     )
 
     assert done.unanswered
+
+
+# -- the container the setup script ran in (#1009) -----------------------------------------------
+
+from code_reviewer_runner.implementer import setup_container as sc  # noqa: E402
+from code_reviewer_runner.outer_proxy import OuterProxy  # noqa: E402
+
+LIST_RULE = NetworkRule(MODE_LIST, ("registry.npmjs.org",))
+
+
+def script_container(
+    made: Rig, outer_proxy: OuterProxy | None = None, *, paused: bool = True
+) -> Adopted:
+    """What the setup step leaves: the agent's container on no network, frozen, started from the
+    setup's definition (the proxy's variables, when there is a proxy)."""
+    api = made.api()
+    api.create_network(sc.network_document())
+    identifier = api.create_container(
+        sc.setup_document(
+            AGENT_IMAGE_ID,
+            WORK_VOLUME,
+            2560 * 1024 * 1024,
+            runtime="sysbox-runc",
+            outer_proxy=outer_proxy,
+        ),
+        AGENT_CONTAINER_NAME,
+    )
+    api.start_container(identifier)
+    api.disconnect_network(sc.SETUP_NETWORK_NAME, identifier)
+    if paused:
+        api.pause_container(identifier)
+    return Adopted(
+        identifier,
+        setup_environment=() if outer_proxy is None else tuple(outer_proxy.tool_environment()),
+        paused=paused,
+        setup_network=sc.SETUP_NETWORK_NAME,
+        dns=sc.SETUP_DNS,
+    )
+
+
+def adopted_container(made: Rig, adopted: Adopted, rule: Any = OFF) -> AgentContainer:
+    return AgentContainer(2560, made.seams(), rule, adopted=adopted)
+
+
+def calls_of(made: Rig) -> list[str]:
+    return [f"{m} {t.split('?')[0]}" for m, t, _ in made.engine.calls]
+
+
+# #1009-T04
+def test_an_adopted_container_is_put_on_the_model_network_and_is_the_same_container(
+    rig: Rig,
+) -> None:
+    adopted = script_container(rig)
+    before = set(rig.engine.containers)
+    place = adopted_container(rig, adopted)
+
+    notes = place.create()
+
+    assert notes == ()
+    agent = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert agent.identifier == adopted.container and not agent.removed
+    assert not agent.paused, "unfrozen: its processes run again"
+    assert set(agent.networks) == {MODEL_NETWORK_NAME}
+    assert agent.networks[MODEL_NETWORK_NAME] == {
+        "IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}
+    }
+    # The setup network goes after the model network is joined, never before (the daemon refuses
+    # to connect a container whose network mode is gone).
+    names = calls_of(rig)
+    connected = names.index(f"POST /networks/{MODEL_NETWORK_NAME}/connect")
+    assert names.index(f"DELETE /networks/{sc.SETUP_NETWORK_NAME}") > connected
+    assert sc.SETUP_NETWORK_NAME not in {n["Name"] for n in rig.engine.networks.values()}
+    # Nothing was made, stopped, killed, committed or removed for it: only the IPv6 helpers.
+    made = set(rig.engine.containers) - before
+    assert {rig.engine.containers[i].name for i in made} == {host_rules.HELPER_NAME}
+    names = calls_of(rig)
+    assert not any(n.endswith("/kill") or n.endswith("/stop") for n in names)
+    assert not any("create?name=code-reviewer-agent" in n for n in names)
+
+
+# #1009-T18
+def test_a_hosted_container_with_no_door_keeps_its_inner_docker_as_it_is(rig: Rig) -> None:
+    place = adopted_container(rig, script_container(rig))
+    place.create()
+    assert ac.DOCKER_ENV_FILE not in rig.written, "no restart: no proxy changes"
+    assert not any(e[0][:3] == ["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT] for e in rig.execs)
+
+
+# #1009-T19
+def test_with_a_door_the_inner_docker_is_started_again_with_the_doors_proxy(rig: Rig) -> None:
+    place = adopted_container(rig, script_container(rig), LIST_RULE)
+    place.create()
+    text = rig.written[ac.DOCKER_ENV_FILE].decode()
+    assert f"HTTPS_PROXY={ac.NETWORK_DOOR_URL}\n" in text
+    assert "NODE_USE_ENV_PROXY=1\n" in text
+    # The restart is the last thing: the container was on the model network and sealed first.
+    kinds = [e[0][:3] for e in rig.execs]
+    assert kinds.count(["/bin/sh", "-c", ac.RESTART_DOCKER_SCRIPT]) == 1
+    assert ac.RESTART_DOCKER_SCRIPT.count("kill -TERM") == 1
+    # The inner containers keep running across it: the init starts the daemon with `--live-restore`
+    # (`runner/docker/agent-init.sh`, pinned by `test_agent_init_script.py`).
+
+
+# #1009-T20
+def test_a_customers_machine_has_the_setups_proxy_in_the_daemon_until_it_is_started_again(
+    rig: Rig,
+) -> None:
+    proxy = OuterProxy("172.31.0.13", 3128)
+    place = adopted_container(rig, script_container(rig, proxy))
+    place.create()
+    # The rule is off: no door variable, but the setup's proxy must not stay in the daemon (it
+    # would be a stale one): the file is there and empty, and the init unsets the old variables.
+    assert rig.written[ac.DOCKER_ENV_FILE] == b""
+
+
+# #1009-T21
+def test_the_tools_of_an_adopted_container_get_the_doors_variables_and_the_setups_are_emptied(
+    rig: Rig,
+) -> None:
+    proxy = OuterProxy("172.31.0.13", 3128)
+    place = adopted_container(rig, script_container(rig, proxy), LIST_RULE)
+    place.create()
+    place.start_engine(["/usr/local/bin/opencode", "serve"], {"HOME": "/root"})
+    env = next(e[1] for e in rig.execs if e[0][-2:] == ["/usr/local/bin/opencode", "serve"])
+    door = proxy_environment(LIST_RULE)
+    for name, value in door.items():
+        assert env[name] == value
+    assert env["HOME"] == "/root"
+    # A name only the setup had is emptied, never left to the container's own environment.
+    stale = {entry.partition("=")[0] for entry in proxy.tool_environment()} - set(door)
+    assert all(env[name] == "" for name in stale)
+    # The same for a command of the engine.
+    place.run_command(["/usr/local/bin/opencode", "import"], {"HOME": "/root"}, 5.0)
+    imported = next(e[1] for e in rig.execs if e[0][-1] == "import")
+    assert imported["HTTPS_PROXY"] == ac.NETWORK_DOOR_URL
+
+
+# #1009-T22
+def test_a_container_that_is_not_a_container_made_for_the_agent_is_refused_even_when_adopted(
+    rig: Rig,
+) -> None:
+    adopted = script_container(rig)
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+        **a,
+        "HostConfig": {**a["HostConfig"], "Privileged": True},
+    }
+    place = adopted_container(rig, adopted)
+    with pytest.raises(JobError) as refused:
+        place.create()
+    assert refused.value.code is ErrorCode.SETUP_FAILED and "privileged" in refused.value.detail
+
+
+# #1009-T23
+def test_a_container_without_an_inner_docker_is_not_waited_for_after_the_restart_request(
+    rig: Rig,
+) -> None:
+    rig.no_inner_docker = True
+    place = adopted_container(rig, script_container(rig), LIST_RULE)
+    place.create()
+    tests = [e for e in rig.execs if e[0][:2] == ["/usr/bin/test", "-e"]]
+    assert len(tests) == 1, "the ready check before the seal, and none after the restart request"
+
+
+# #1009-T24
+def test_the_environment_file_is_quoted_assignments_for_the_inits_shell() -> None:
+    text = docker_environment_file({"HTTP_PROXY": "http://10.0.0.1:3128", "NO_PROXY": "a,b c"})
+    assert text == "HTTP_PROXY=http://10.0.0.1:3128\nNO_PROXY='a,b c'\n"
+    assert docker_environment_file({}) == ""
+
+
+# #1009-T25
+def test_the_restart_script_asks_the_daemon_to_end_and_the_init_to_start_it_again(
+    tmp_path: Path,
+) -> None:
+    """The script run by a real shell with the files it names moved under a directory of the test
+    and a stand-in daemon process: it writes the environment, takes the ready file away, leaves the
+    restart marker and ends the daemon (`kill -TERM`), in that order of effect."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    pid_file = run_dir / "docker.pid"
+    environment_file = run_dir / "agent-docker-env"
+    restart_file = run_dir / "agent-docker-restart"
+    ready_file = run_dir / "agent-ready"
+    ready_file.write_text("")
+    # The daemon: a shell that notes the signal it gets in a file.
+    daemon = subprocess.Popen(
+        ["/bin/sh", "-c", f'trap \'echo term > {run_dir}/signal; exit 0\' TERM; echo up > '
+         f'{run_dir}/alive; while :; do sleep 0.05; done']
+    )  # fmt: skip
+    pid_file.write_text(f"{daemon.pid}\n")
+    for _ in range(100):
+        if (run_dir / "alive").exists():
+            break
+        time.sleep(0.05)
+    script = (
+        ac.RESTART_DOCKER_SCRIPT.replace(ac.DOCKER_PID_FILE, str(pid_file))
+        .replace(ac.READY_FILE, str(ready_file))
+        .replace(ac.DOCKER_RESTART_FILE, str(restart_file))
+    )
+    try:
+        done = subprocess.run(
+            ["/bin/sh", "-c", script, "restart", str(environment_file)],
+            input=docker_environment_file({"HTTPS_PROXY": "http://door:3128"}).encode(),
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        daemon.wait(timeout=10)
+    finally:
+        daemon.kill()
+    assert done.returncode == 0 and done.stdout.decode().strip() == "restarting"
+    assert environment_file.read_text() == "HTTPS_PROXY=http://door:3128\n"
+    assert oct(environment_file.stat().st_mode & 0o777) == "0o600", "umask 077: only root reads it"
+    assert not ready_file.exists() and restart_file.exists()
+    assert (run_dir / "signal").read_text().strip() == "term", "the daemon was asked to end"
+    # The marker was there before the signal reached the daemon: the init that sees the daemon end
+    # finds it and starts the daemon again (a stand-in cannot prove the init, which
+    # `test_agent_init_script.py` runs for real).
+    assert ac.RESTART_DOCKER_SCRIPT.index(ac.DOCKER_RESTART_FILE) < ac.RESTART_DOCKER_SCRIPT.index(
+        "kill -TERM"
+    )
+
+
+# #1009-T26
+def test_the_restart_script_of_a_container_with_no_daemon_says_so_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    environment_file = tmp_path / "agent-docker-env"
+    script = ac.RESTART_DOCKER_SCRIPT.replace(ac.DOCKER_PID_FILE, str(tmp_path / "no-such-pid"))
+    done = subprocess.run(
+        ["/bin/sh", "-c", script, "restart", str(environment_file)],
+        input=b"A=b\n",
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 0 and done.stdout.decode().strip() == ac.NO_DOCKER
+    assert not environment_file.exists()
+
+
+# -- what the seal check holds the adopted container to (#1009) -----------------------------------
+
+
+# #1009-T27
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"Dns": ["1.1.1.1", "8.8.8.8", "9.9.9.9"]}, "resolvers"),
+        ({"Dns": ["10.0.0.2"]}, "resolvers"),
+        ({"Dns": []}, "resolvers"),
+        ({"NetworkMode": "bridge"}, "network mode"),
+        ({"NetworkMode": "host"}, "network mode"),
+        ({"NetworkMode": MODEL_NETWORK_NAME}, "network mode"),
+    ],
+)
+def test_an_adopted_container_is_held_to_the_setups_resolvers_and_network_mode(
+    rig: Rig, changes: dict[str, Any], word: str
+) -> None:
+    """The container keeps the definition of its first phase for good: the setup's resolvers and
+    its network mode (a network that is removed once the model network is joined). A container that
+    reads back with anything else is not the one the setup made."""
+    adopted = script_container(rig)
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+        **a,
+        "HostConfig": {**a["HostConfig"], **changes},
+    }
+    with pytest.raises(JobError) as refused:
+        adopted_container(rig, adopted).create()
+    assert refused.value.code is ErrorCode.SETUP_FAILED and word in refused.value.detail
+
+
+# #1009-T28
+def test_an_adopted_container_that_reads_back_as_the_setup_made_it_is_accepted(rig: Rig) -> None:
+    adopted = script_container(rig)
+    host = rig.engine.container(AGENT_CONTAINER_NAME).document["HostConfig"]
+    assert host["Dns"] == list(sc.SETUP_DNS) and host["NetworkMode"] == sc.SETUP_NETWORK_NAME
+    assert adopted.dns == sc.SETUP_DNS
+    adopted_container(rig, adopted).create()
+
+
+# #1009-T29
+@pytest.mark.parametrize(
+    ("changes", "word"),
+    [
+        ({"Dns": ["1.1.1.1"]}, "resolvers"),
+        ({"NetworkMode": "bridge"}, "network mode"),
+        ({"SecurityOpt": ["no-new-privileges"]}, "no-new-privileges"),
+    ],
+)
+def test_a_container_made_for_the_agent_with_no_script_is_held_to_its_own_definition(
+    rig: Rig, changes: dict[str, Any], word: str
+) -> None:
+    rig.engine.inspect_override[AGENT_CONTAINER_NAME] = lambda a: {
+        **a,
+        "HostConfig": {**a["HostConfig"], **changes},
+    }
+    with pytest.raises(JobError) as refused:
+        container(rig).create()
+    assert word in refused.value.detail
+
+
+# #1009-T30
+def test_an_adopted_container_must_be_as_sealed_as_the_seams_say(rig: Rig) -> None:
+    """The Claude Code harness is refused with a setup script (`subscription_setup_script`) because
+    its agent runs with `no-new-privileges` and the setup's container is made without. Whoever lifts
+    that refusal has to make the setup container sealed too: an agent whose seams say sealed over a
+    container that was made without is refused here, not run."""
+    adopted = script_container(rig)
+    sealed = AgentContainer(2560, rig.seams(no_new_privileges=True), OFF, adopted=adopted)
+    with pytest.raises(JobError) as refused:
+        sealed.create()
+    assert "no-new-privileges" in refused.value.detail
+
+
+# #1009-T31
+def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_seams_say_so(
+    rig: Rig,
+) -> None:
+    api = rig.api()
+    api.create_network(sc.network_document())
+    identifier = api.create_container(
+        sc.setup_document(
+            AGENT_IMAGE_ID,
+            WORK_VOLUME,
+            2560 * 1024 * 1024,
+            runtime="sysbox-runc",
+            no_new_privileges=True,
+        ),
+        AGENT_CONTAINER_NAME,
+    )
+    api.start_container(identifier)
+    api.disconnect_network(sc.SETUP_NETWORK_NAME, identifier)
+    adopted = Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME, dns=sc.SETUP_DNS)
+    AgentContainer(2560, rig.seams(no_new_privileges=True), OFF, adopted=adopted).create()
+    # ... and a container that is sealed when the seams say it is not is as wrong the other way.
+    with pytest.raises(JobError):
+        AgentContainer(
+            2560,
+            rig.seams(),
+            OFF,
+            adopted=Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME, dns=sc.SETUP_DNS),
+        ).create()

@@ -5,6 +5,7 @@
     "credential": "crj_EXAMPLEexampleEXAMPLEexampleEXAMPLE-0123456",
     "reviewKind": "diff",
     "leaseExpiresAt": "2026-10-10T12:02:00.000Z",
-    "heartbeatIntervalSeconds": 30
+    "heartbeatIntervalSeconds": 30,
+    "sizeLabel": "cr:size-1"
   }
 }

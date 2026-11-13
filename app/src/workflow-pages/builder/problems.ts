@@ -11,6 +11,8 @@ export type Problem = Pick<Issue, "path" | "message"> & {
   /** A code the validator or the save route gave; the builder shows it as it is and branches on none but the fixable ones. */
   code: string;
   available?: string[];
+  /** `warning`: said and does not stop a save (#973). Left out: an error. */
+  severity?: "warning";
 };
 
 const NODE_PREFIX =

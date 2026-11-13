@@ -6,6 +6,7 @@
 // | Variable                    | Meaning                                                                                                      |
 // | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
 // | RUNNER_MIN_BASE_VERSION     | The oldest version of the base (`1.4.0`) a customer's runner may have and still get jobs. Unset: no minimum. |
+// | RUNNER_DELIVERY_ALLOW_LOOPBACK | `1`: a webhook dispatcher may announce an address on this machine, with plain http (the fakes, the E2E, local development). Never set in production. Unset: https to a public address only. |
 import { BASE_VERSION_PATTERN } from "./announcement.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
@@ -17,4 +18,9 @@ export const ONLINE_WITHIN_SECONDS = 120;
 export function minimumBaseVersion(env: Env): string | null {
   const text = env.RUNNER_MIN_BASE_VERSION?.trim();
   return text !== undefined && BASE_VERSION_PATTERN.test(text) ? text : null;
+}
+
+/** Whether a webhook dispatcher may announce an address on this machine (`RUNNER_DELIVERY_ALLOW_LOOPBACK=1`). Off unless it is exactly `1`. */
+export function deliveryAllowsLoopback(env: Env): boolean {
+  return env.RUNNER_DELIVERY_ALLOW_LOOPBACK?.trim() === "1";
 }

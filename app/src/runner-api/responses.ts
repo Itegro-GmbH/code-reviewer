@@ -29,6 +29,10 @@ const MESSAGES: Record<RunnerApiErrorCode, string> = {
     "The registration token is not valid. It may have been used or have expired.",
   RUNNER_UPDATE_NEEDED:
     "The runner is older than the minimum the app requires. Update it to get jobs.",
+  RUNNER_LABEL_RESERVED:
+    "Labels that start with cr: belong to the platform and cannot be announced by a runner.",
+  RUNNER_ACCESS_RESERVED:
+    "The access managed belongs to the platform and cannot be announced by a runner.",
 };
 
 export function jsonResponse(

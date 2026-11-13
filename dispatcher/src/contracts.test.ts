@@ -225,6 +225,18 @@ describe("the contracts the Dispatcher speaks", () => {
         parseSplitClaim({ ...split, job: { ...split.job, vcpus } }),
         String(vcpus),
       ).toBeNull();
+    // #971: the size label the job requires is optional (an app of the release before sends none) and, when there, `cr:size-<n>`.
+    expect(parseSplitClaim(split)).toMatchObject({ sizeLabel: "cr:size-1" });
+    const noLabel = { ...split.job };
+    delete noLabel.sizeLabel;
+    expect(parseSplitClaim({ ...split, job: noLabel })).not.toHaveProperty(
+      "sizeLabel",
+    );
+    for (const sizeLabel of ["gpu", "cr:size-", "cr:size-0", 2, null, {}])
+      expect(
+        parseSplitClaim({ ...split, job: { ...split.job, sizeLabel } }),
+        String(sizeLabel),
+      ).toBeNull();
     // The raw example file is read from disk too, so a change of the schema file shows here.
     expect(
       JSON.parse(
@@ -359,6 +371,23 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
       "RunnerResult.json",
       "SplitClaimResponse.json",
     ]);
+  });
+});
+
+describe("the size labels of the platform (#971)", () => {
+  // #971-T06
+  it("name the sizes of contracts/environment-sizes.v1.json, and read the size back from a label", async () => {
+    const sizes = readContract<{ vcpus: number[] }>(
+      "environment-sizes.v1.json",
+    );
+    const { PLATFORM_VCPUS, vcpusOfSizeLabel } =
+      await import("./core/size-labels.ts");
+
+    expect([...PLATFORM_VCPUS]).toEqual(sizes.vcpus);
+    for (const vcpus of sizes.vcpus)
+      expect(vcpusOfSizeLabel(`cr:size-${String(vcpus)}`)).toBe(vcpus);
+    for (const label of ["cr:size-3", "cr:size-08", "size-2", "cr:managed", ""])
+      expect(vcpusOfSizeLabel(label), label).toBeUndefined();
   });
 });
 

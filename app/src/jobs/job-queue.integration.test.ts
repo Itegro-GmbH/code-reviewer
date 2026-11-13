@@ -64,6 +64,8 @@ describe("enqueueing a job", () => {
       errorCode: null,
       supersededBy: null,
       cancelRequestedAt: null,
+      // #971-T02: a hosted review requires the platform's label and the size reviews run on.
+      requiredLabels: ["cr:managed", "cr:size-1"],
       createdAt: T0.toISOString(),
       updatedAt: T0.toISOString(),
       finishedAt: null,

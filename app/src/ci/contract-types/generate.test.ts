@@ -126,7 +126,9 @@ describe("the generated contract types", () => {
       TYPE_TARGETS.flatMap((t) =>
         [
           "dispatch-webhook",
+          "environment-control",
           "runner-api",
+          "vm-init",
           "worker-api",
           "worker-container",
         ].map((name) => `${t.directory}/${name}.ts`),
@@ -151,5 +153,11 @@ describe("the generated contract types", () => {
     expect(text("worker-container")).toContain(
       "export interface WorkerContainerSpec",
     );
+    // #975
+    expect(text("environment-control")).toContain(
+      "export interface NarrowRequest",
+    );
+    // #977
+    expect(text("vm-init")).toContain("export interface StartRequest");
   });
 });

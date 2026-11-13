@@ -17,8 +17,15 @@ import {
   type NativeCostService,
 } from "../native-cost/service.ts";
 import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
-import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
-import type { ClaimResponse } from "./contract.ts";
+import {
+  startRunnerApiHarness,
+  TEST_LLM_API_KEY,
+} from "../test-support/runner-api-harness.ts";
+import type {
+  ClaimResponse,
+  SplitClaimResponse,
+  WorkerJobDetailsResponse,
+} from "./contract.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { createRunnersRepository } from "../db/repositories/runners-repository.ts";
 import { createRunnerFleetService } from "../runner-fleet/service.ts";
@@ -147,6 +154,16 @@ function claimOf(credential: string, extra: { llmProviders?: string[] } = {}) {
   };
 }
 
+/** #974: the claim of a customer's runner is the split answer: the job's credential and nothing secret. */
+async function claimedJob(
+  h: Awaited<ReturnType<typeof start>>,
+  credential: string,
+) {
+  const response = await h.claim(claimOf(credential));
+  expect(response.status).toBe(200);
+  return ((await response.json()) as SplitClaimResponse).job;
+}
+
 const OWN_MODEL = { provider: "anthropic", model: SONNET } as const;
 const RUNNER_ENV = {
   id: "env-runner",
@@ -169,15 +186,29 @@ describe("the claim of a customer's runner", () => {
     const response = await h.claim(claimOf(credential));
 
     expect(response.status).toBe(200);
-    const { job } = (await response.json()) as ClaimResponse;
+    const { job } = (await response.json()) as SplitClaimResponse;
     expect(job.id).toBe(turn.job.id);
-    expect(job.input).toMatchObject({
+    // #974-T01: the claim holds no job input at all, so no git token and no key of the workspace.
+    expect(job).not.toHaveProperty("input");
+    expect(JSON.stringify(job)).not.toContain(KEY);
+    expect(h.issuedJobTokens()).toEqual([]);
+    // The Worker that holds the credential fetches the job, with its own key (BYOK).
+    const details = await h.worker.details(
+      job.id,
+      job.credential,
+      FEATURES_OF_A_RUNNER.join(","),
+      undefined,
+      "openrouter,anthropic",
+    );
+    expect(details.status).toBe(200);
+    const { job: fetched } = (await details.json()) as WorkerJobDetailsResponse;
+    expect(fetched.input).toMatchObject({
       reviewKind: "implementer",
       llm: { provider: "anthropic", apiKey: KEY },
     });
     // A turn of a runner environment has no size, script or network rule of its own: the runner decides how it works.
     expect(
-      (job.input as { implementer: { environment?: unknown } }).implementer
+      (fetched.input as { implementer: { environment?: unknown } }).implementer
         .environment,
     ).toBeUndefined();
     expect(await h.queue.get(turn.job.id)).toMatchObject({
@@ -221,19 +252,16 @@ describe("the claim of a customer's runner", () => {
   });
 
   // #854-T152
-  it("hands a runner whose OpenCode is not ready, or not announced, nothing", async () => {
+  it("hands a runner whose OpenCode is not announced, or only another harness, nothing", async () => {
     const h = await start();
     const notReady = await h.registerRunner({
       labels: ["gpu", "linux"],
-      manifest: {
-        harnesses: { opencode: { version: "1.19.0", ready: false } },
-        capabilities: [],
-      },
+      manifest: { harnesses: [], capabilities: [] },
     });
     const otherOnly = await h.registerRunner({
       labels: ["gpu", "linux"],
       manifest: {
-        harnesses: { "custom/tool": { version: "1", ready: true } },
+        harnesses: [{ harness: "custom/tool", version: "1", auth: "app-key" }],
         capabilities: [],
       },
     });
@@ -359,9 +387,7 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: { id: "env-cpu", name: "CPU box", labels: ["cpu"] },
     });
-    const { job: busyJob } = (await (
-      await h.claim(claimOf(busy.credential))
-    ).json()) as ClaimResponse;
+    const busyJob = await claimedJob(h, busy.credential);
     expect(busyJob.id).toBe(busyTurn.job.id);
     const waiting = await h.enqueueTurn({
       modelChoice: OWN_MODEL,
@@ -372,11 +398,7 @@ describe("the claim of a customer's runner", () => {
     for (let minute = 0; minute < 29; minute += 1) {
       h.clock.advance(60 * 1000);
       expect(
-        (
-          await h.heartbeat(busyJob.id, busyJob.leaseToken, {
-            token: busy.credential,
-          })
-        ).status,
+        (await h.worker.heartbeat(busyJob.id, busyJob.credential)).status,
       ).toBe(200);
     }
     expect((await h.claim(claimOptions())).status).toBe(204);
@@ -386,9 +408,7 @@ describe("the claim of a customer's runner", () => {
 
     // At its own deadline it ends as no_runner_available while the other runner still works.
     h.clock.advance(2 * 60 * 1000);
-    await h.heartbeat(busyJob.id, busyJob.leaseToken, {
-      token: busy.credential,
-    });
+    await h.worker.heartbeat(busyJob.id, busyJob.credential);
     expect((await h.claim(claimOptions())).status).toBe(204);
     expect(await h.queue.get(waiting.job.id)).toMatchObject({
       status: "cancelled",
@@ -470,17 +490,13 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job: runnerJob } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const runnerJob = await claimedJob(h, runner.credential);
     // A hosted turn that no Dispatcher claims (no hosted pool is alive): the running turn of the customer's runner is no sign of one.
     const hosted = await h.enqueueTurn({ modelChoice: OWN_MODEL });
 
     for (let minute = 0; minute < 31; minute += 1) {
       h.clock.advance(60 * 1000);
-      await h.heartbeat(runnerJob.id, runnerJob.leaseToken, {
-        token: runner.credential,
-      });
+      await h.worker.heartbeat(runnerJob.id, runnerJob.credential);
     }
     expect((await h.queue.expireStaleJobs()).noCapableRunner).toBe(1);
 
@@ -493,8 +509,8 @@ describe("the claim of a customer's runner", () => {
     });
   });
 
-  // #854-T158
-  it("lets the runner that holds a turn report on it, and no runner of another workspace", async () => {
+  // #854-T158, #974-T04
+  it("lets the Worker that holds a turn report on it with the job's credential, and answers a runner credential 404 on the job routes that are gone", async () => {
     const h = await start();
     const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
     const otherWorkspace = await addWorkspace(h.db, "other");
@@ -506,26 +522,34 @@ describe("the claim of a customer's runner", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, runner.credential);
 
-    const own = await h.heartbeat(job.id, job.leaseToken, {
-      token: runner.credential,
-    });
-    const strange = await h.heartbeat(job.id, job.leaseToken, {
-      token: foreign.credential,
-    });
-
+    const own = await h.worker.heartbeat(job.id, job.credential);
+    // The runner credential is not a job's: the Worker API takes the per-job credential alone.
+    const byRunner = await h.worker.heartbeat(job.id, runner.credential);
     expect(own.status).toBe(200);
-    expect(strange.status).toBe(404);
-    expect(await strange.json()).toMatchObject({
-      error: { code: "RUNNER_JOB_NOT_FOUND" },
-    });
+    expect(byRunner.status).toBe(401);
+    // The runner API's job routes have no use for it any more (heartbeat, complete, steps), whoever's runner it is.
+    for (const credential of [runner.credential, foreign.credential])
+      for (const answer of [
+        await h.heartbeat(job.id, job.credential, { token: credential }),
+        await h.complete(job.id, job.credential, {}, { token: credential }),
+        await h.steps(
+          job.id,
+          { leaseToken: job.credential, records: [] },
+          { token: credential },
+        ),
+      ]) {
+        expect(answer.status).toBe(404);
+        expect(await answer.json()).toMatchObject({
+          error: { code: "RUNNER_JOB_NOT_FOUND" },
+        });
+      }
+    expect(await h.queue.get(job.id)).toMatchObject({ status: "running" });
   });
 
-  // #854-T159
-  it("ends a runner turn on the operator's key at the claim, before a key or a token exists", async () => {
+  // #854-T159, #973-T02
+  it("never hands a runner a turn on the operator's key: no runner announces managed, so the claim finds nothing and no key or token exists", async () => {
     const h = await start({ key: null });
     await h.llm
       .operatorKey()
@@ -568,10 +592,9 @@ describe("the claim of a customer's runner", () => {
     const response = await h.claim(claimOf(runner.credential));
 
     expect(response.status).toBe(204);
-    expect(await h.queue.get(turn.job.id)).toMatchObject({
-      status: "failed",
-      errorCode: "runner_needs_own_key",
-    });
+    // The rule that was here (a managed selection on a runner ends the job) is the manifest now: the turn asks for `managed` and only the
+    // platform identity announces it. The start of a task and the validator still refuse the combination with `runner_needs_own_key`.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
     expect(h.issuedJobTokens()).toEqual([]);
     expect(h.logLines().join("\n")).not.toContain("dummy-operator");
   });
@@ -585,9 +608,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: RUNNER_ENV,
     });
-    const { job } = (await (
-      await h.claim(claimOf(runner.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, runner.credential);
     const fleet = createRunnerFleetService({
       runners: createRunnersRepository(h.db, h.workspaceId, {
         now: h.clock.now,
@@ -604,30 +625,36 @@ describe("revoking a runner that is running a turn (#854)", () => {
   // #854-T240
   it("refuses it every report about the job it was running, and ends the job at once as failed", async () => {
     const { h, runner, turn, job, fleet } = await runningTurn();
+    // The Worker fetches the turn: this is where the GitHub token is made (the claim made none).
+    const fetched = await h.worker.details(
+      job.id,
+      job.credential,
+      FEATURES_OF_A_RUNNER.join(","),
+      undefined,
+      "openrouter,anthropic",
+    );
+    expect(fetched.status).toBe(200);
     const issued = h.issuedJobTokens();
-    expect(
-      (await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }))
-        .status,
-    ).toBe(200);
+    expect((await h.worker.heartbeat(job.id, job.credential)).status).toBe(200);
 
     await fleet.revoke(runner.runnerId);
 
+    // The Worker's calls: the claim ended with the runner, so the job is over for it.
     for (const answer of [
-      await h.heartbeat(job.id, job.leaseToken, { token: runner.credential }),
-      await h.complete(
-        job.id,
-        job.leaseToken,
-        {},
-        { token: runner.credential },
-      ),
-      await h.steps(
-        job.id,
-        { leaseToken: job.leaseToken, records: [] },
-        { token: runner.credential },
-      ),
+      await h.worker.heartbeat(job.id, job.credential),
+      await h.worker.result(job.id, job.credential),
+    ]) {
+      expect(answer.status).toBe(409);
+      expect(await answer.json()).toMatchObject({
+        error: { code: "RUNNER_JOB_ENDED" },
+      });
+    }
+    // The runner's own credential is refused everywhere it is still taken: the job's state and the release of the claim.
+    for (const answer of [
+      await h.jobState(job.id, { token: runner.credential }),
       await h.release(
         job.id,
-        { leaseToken: job.leaseToken, reason: "shutdown" },
+        { credential: job.credential, reason: "launch_failed" },
         { token: runner.credential },
       ),
     ]) {
@@ -654,16 +681,30 @@ describe("revoking a runner that is running a turn (#854)", () => {
   it("cannot reach the session snapshot of the job either: the Worker API takes the per-job credential alone", async () => {
     const { h, runner, job, fleet } = await runningTurn();
     await fleet.revoke(runner.runnerId);
+    const query = {
+      part: 0,
+      parts: 1,
+      bytes: 1,
+      rawBytes: 1,
+      sha256: "0".repeat(64),
+      opencodeVersion: "1.19.0",
+    };
 
-    for (const credential of [runner.credential, job.leaseToken]) {
-      const answer = await h.worker.session(
-        job.id,
-        credential,
-        { index: 0, count: 1, size: 1, rawBytes: 1, sha256: "0".repeat(64) },
-        new Uint8Array([1]),
-      );
-      expect(answer.status).toBe(401);
-    }
+    // The runner's own credential is no proof of a claim; the job's own finds its claim over.
+    const byRunner = await h.worker.session(
+      job.id,
+      runner.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    const byClaim = await h.worker.session(
+      job.id,
+      job.credential,
+      query,
+      new Uint8Array([1]),
+    );
+    expect(byRunner.status).toBe(401);
+    expect(byClaim.status).toBe(409);
   });
 
   // #854-T242
@@ -674,9 +715,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       modelChoice: OWN_MODEL,
       runnerEnvironment: { ...RUNNER_ENV, id: "env-2" },
     });
-    const { job } = (await (
-      await h.claim(claimOf(other.credential))
-    ).json()) as ClaimResponse;
+    const job = await claimedJob(h, other.credential);
 
     await fleet.revoke(runner.runnerId);
 
@@ -684,10 +723,7 @@ describe("revoking a runner that is running a turn (#854)", () => {
       status: "running",
       runnerId: customerRunnerId(other.runnerId),
     });
-    expect(
-      (await h.heartbeat(job.id, job.leaseToken, { token: other.credential }))
-        .status,
-    ).toBe(200);
+    expect((await h.worker.heartbeat(job.id, job.credential)).status).toBe(200);
   });
 });
 
@@ -762,6 +798,420 @@ describe("what a customer's runner never gets (#854)", () => {
 
     expect(await h.queue.get(operatorTurn.job.id)).toMatchObject({
       status: "queued",
+    });
+  });
+});
+
+// #971: one rule for every Dispatcher. A job requires labels (`jobs.required_labels`) and a caller takes it only when it has all of them: the
+// platform identity (the shared token) has the reserved labels `cr:managed` and `cr:size-<vCPUs>`, a customer's runner its own. The two
+// special rules of #854 above are this rule: their tests are unchanged and still hold.
+describe("the labels a job requires (#971)", () => {
+  /** The harness of the tests above, with the key of the default provider as well, so a hosted review can be claimed. */
+  async function startWithReviews() {
+    const h = await start();
+    await h.setLlmKey(TEST_LLM_API_KEY);
+    return h;
+  }
+
+  const requiredOf = async (
+    h: Awaited<ReturnType<typeof start>>,
+    jobId: string,
+  ) =>
+    (
+      await h.db
+        .selectFrom("jobs")
+        .select("required_labels")
+        .where("id", "=", jobId)
+        .executeTakeFirstOrThrow()
+    ).required_labels;
+
+  // #971-T02
+  it("enqueues a hosted review with cr:managed and its size, and a turn with the size of its environment, or the labels of a runner environment", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const standard = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const sized = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      environment: {
+        id: "env-big",
+        name: "Big",
+        vcpus: 4,
+        setupScript: "",
+      },
+    });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    expect(await requiredOf(h, review.job.id)).toBe("cr:managed\ncr:size-1");
+    expect(await requiredOf(h, standard.job.id)).toBe("cr:managed\ncr:size-2");
+    expect(await requiredOf(h, sized.job.id)).toBe("cr:managed\ncr:size-4");
+    expect(await requiredOf(h, runnerTurn.job.id)).toBe("gpu\nlinux");
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      requiredLabels: ["cr:managed", "cr:size-1"],
+    });
+  });
+
+  // #971-T03
+  it("hands the platform identity a hosted job without a job id, and a customer's runner never gets it, even with every label that is not cr:", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({
+      labels: ["gpu", "linux", "extra"],
+    });
+    const review = await h.enqueue({ prNumber: 7 });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+
+    for (const jobId of [undefined, review.job.id, hostedTurn.job.id])
+      expect(
+        (
+          await h.claim({
+            ...claimOf(runner.credential),
+            engines: ["pr-agent", "opencode", "implementer"],
+            ...(jobId === undefined ? {} : { jobId }),
+          })
+        ).status,
+      ).toBe(204);
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      status: "queued",
+    });
+
+    const byPlatform = await h.claim({ engines: ["pr-agent"] });
+    expect(byPlatform.status).toBe(200);
+    expect(((await byPlatform.json()) as ClaimResponse).job.id).toBe(
+      review.job.id,
+    );
+    const turnByPlatform = await h.claim(claimOptions());
+    expect(((await turnByPlatform.json()) as ClaimResponse).job.id).toBe(
+      hostedTurn.job.id,
+    );
+  });
+
+  // #971-T03
+  it("keeps the reserved labels out of a customer's runner that stored one before the namespace was reserved", async () => {
+    const h = await startWithReviews();
+    // Registered through the repository, as a runner of the release before was: the door of today would refuse these labels.
+    const old = await h.registerRunner({
+      labels: ["cr:managed", "cr:size-2", "gpu", "linux"],
+    });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+
+    expect((await h.claim(claimOf(old.credential))).status).toBe(204);
+
+    expect(await h.queue.get(hostedTurn.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  // #971-T04
+  it("hands a runner with gpu and linux a turn that requires linux, and a runner with linux only no turn that requires linux and gpu", async () => {
+    const h = await startWithReviews();
+    const both = await h.registerRunner({ labels: ["linux", "gpu"] });
+    const linuxOnly = await h.registerRunner({ labels: ["linux"] });
+    const needsLinux = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-l", name: "Linux", labels: ["linux"] },
+    });
+    const needsBoth = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    // The one with linux only gets the first turn, not the second.
+    const first = await h.claim(claimOf(linuxOnly.credential));
+    expect(((await first.json()) as ClaimResponse).job.id).toBe(
+      needsLinux.job.id,
+    );
+    expect((await h.claim(claimOf(linuxOnly.credential))).status).toBe(204);
+    expect(await h.queue.get(needsBoth.job.id)).toMatchObject({
+      status: "queued",
+    });
+    // The one with both takes the second, without naming it.
+    const second = await h.claim(claimOf(both.credential));
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(
+      needsBoth.job.id,
+    );
+  });
+
+  // #971-T03, #971-T04
+  it("routes a job written before the labels as it was: a runner turn by its environment's labels, any other job to the platform", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const hostedTurn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "in", [hostedTurn.job.id, runnerTurn.job.id])
+      .execute();
+
+    expect((await h.claim(claimOptions())).status).toBe(200);
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    const taken = await h.claim(claimOf(runner.credential));
+    expect(((await taken.json()) as ClaimResponse).job.id).toBe(
+      runnerTurn.job.id,
+    );
+    expect(await h.queue.get(hostedTurn.job.id)).toMatchObject({
+      status: "running",
+      runnerId: "runner-a",
+    });
+  });
+
+  // #971-T05
+  it("claims by job id as before: the platform gets the hosted job it names, and one that is not its to take stays", async () => {
+    const h = await startWithReviews();
+    const older = await h.enqueue({ prNumber: 7 });
+    const wanted = await h.enqueue({ prNumber: 8 });
+    const runnerTurn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+
+    const byId = await h.claimSplit({ jobId: wanted.job.id });
+    expect(byId.status).toBe(200);
+    expect(((await byId.json()) as SplitClaimResponse).job.id).toBe(
+      wanted.job.id,
+    );
+    expect(await h.queue.get(older.job.id)).toMatchObject({ status: "queued" });
+    expect(
+      (
+        await h.claimSplit({
+          engines: ["implementer"],
+          jobId: runnerTurn.job.id,
+        })
+      ).status,
+    ).toBe(204);
+    // Without an id the next claim takes the oldest hosted job.
+    const next = await h.claimSplit();
+    expect(((await next.json()) as SplitClaimResponse).job.id).toBe(
+      older.job.id,
+    );
+  });
+
+  // #971-T06
+  it("names the size label of the job in the claim answer, and the vcpus of an environment as before", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const standard = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    const sized = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      environment: { id: "env-big", name: "Big", vcpus: 6, setupScript: "" },
+    });
+    const split = async (jobId: string, engines: string[]) =>
+      (await (
+        await h.claimSplit({
+          engines,
+          features: FEATURES_OF_A_RUNNER,
+          jobId,
+        })
+      ).json()) as SplitClaimResponse;
+
+    const reviewAnswer = await split(review.job.id, ["pr-agent"]);
+    const standardAnswer = await split(standard.job.id, ["implementer"]);
+    const sizedAnswer = await split(sized.job.id, ["implementer"]);
+
+    expect(reviewAnswer.job.sizeLabel).toBe("cr:size-1");
+    expect(reviewAnswer.job).not.toHaveProperty("vcpus");
+    expect(standardAnswer.job.sizeLabel).toBe("cr:size-2");
+    expect(standardAnswer.job).not.toHaveProperty("vcpus");
+    expect(sizedAnswer.job).toMatchObject({
+      sizeLabel: "cr:size-6",
+      vcpus: 6,
+    });
+  });
+
+  // #971-T07
+  it("never hands the platform a runner turn stored with a cr: label, and still hands it to the customer's runner", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    // An environment written before the namespace was reserved: its labels hold `cr:` ones.
+    const stored = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: {
+        id: "env-old",
+        name: "Old",
+        labels: ["cr:managed", "cr:size-8", "gpu", "linux"],
+      },
+    });
+    // The same turn as a row of the release before: no required labels, the environment's labels as stored.
+    const legacy = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "=", legacy.job.id)
+      .execute();
+    await h.db
+      .updateTable("implementer_turns")
+      .set({ environment_labels: "cr:managed\ncr:size-8\ngpu\nlinux" })
+      .where("job_id", "=", legacy.job.id)
+      .execute();
+    // Defence in depth: even a required list that is only the platform's labels never reaches the platform for a runner turn.
+    const reserved = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: { id: "env-r", name: "R", labels: ["linux"] },
+    });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "cr:managed\ncr:size-8" })
+      .where("id", "=", reserved.job.id)
+      .execute();
+
+    expect(await requiredOf(h, stored.job.id)).toBe("gpu\nlinux");
+    expect((await h.claim(claimOptions())).status).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: legacy.job.id }))
+        .status,
+    ).toBe(204);
+    expect(
+      (await h.claimSplit({ engines: ["implementer"], jobId: reserved.job.id }))
+        .status,
+    ).toBe(204);
+    for (const turn of [stored, legacy, reserved])
+      expect(await h.queue.get(turn.job.id)).toMatchObject({
+        status: "queued",
+      });
+
+    const first = await h.claim(claimOf(runner.credential));
+    expect(((await first.json()) as ClaimResponse).job.id).toBe(stored.job.id);
+    const second = await h.claim(claimOf(runner.credential));
+    expect(((await second.json()) as ClaimResponse).job.id).toBe(legacy.job.id);
+  });
+
+  // #971-T08
+  it("hands a job that requires no label to nobody", async () => {
+    const h = await startWithReviews();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const review = await h.enqueue({ prNumber: 7 });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: "" })
+      .where("id", "=", review.job.id)
+      .execute();
+
+    expect((await h.claim({ engines: ["pr-agent"] })).status).toBe(204);
+    expect((await h.claimSplit({ jobId: review.job.id })).status).toBe(204);
+    expect(
+      (
+        await h.claim({
+          ...claimOf(runner.credential),
+          engines: ["pr-agent", "opencode", "implementer"],
+        })
+      ).status,
+    ).toBe(204);
+    expect(await h.queue.get(review.job.id)).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  // #971-T06
+  it("names the size label of a job written before the labels from its kind: 1 for a review, 2 for a turn without an environment", async () => {
+    const h = await startWithReviews();
+    const review = await h.enqueue({ prNumber: 7 });
+    const turn = await h.enqueueTurn({ modelChoice: OWN_MODEL });
+    await h.db
+      .updateTable("jobs")
+      .set({ required_labels: null })
+      .where("id", "in", [review.job.id, turn.job.id])
+      .execute();
+    const split = async (jobId: string, engines: string[]) =>
+      (await (
+        await h.claimSplit({ engines, features: FEATURES_OF_A_RUNNER, jobId })
+      ).json()) as SplitClaimResponse;
+
+    expect((await split(review.job.id, ["pr-agent"])).job.sizeLabel).toBe(
+      "cr:size-1",
+    );
+    expect((await split(turn.job.id, ["implementer"])).job.sizeLabel).toBe(
+      "cr:size-2",
+    );
+  });
+});
+
+// #974: the state of a job is the one call about a job that a customer's dispatcher still makes with its own credential (its local reaper asks
+// whether the job of a Worker it started is over); everything else about a running job is the Worker's, with the credential of the claim.
+describe("the state of a job for a customer's dispatcher (#974)", () => {
+  // #974-T03
+  it("answers 200 with the status alone for a job of the runner's own workspace, and 404 for a job of another workspace", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const otherWorkspace = await addWorkspace(h.db, "other");
+    const foreign = await h.registerRunner({
+      labels: ["gpu", "linux"],
+      workspaceId: otherWorkspace,
+    });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    const own = await h.jobState(job.id, { token: runner.credential });
+    const strange = await h.jobState(job.id, { token: foreign.credential });
+
+    expect(own.status).toBe(200);
+    expect(await own.json()).toEqual({
+      version: 1,
+      job: { id: job.id, status: "running" },
+    });
+    expect(strange.status).toBe(404);
+    expect(await strange.json()).toMatchObject({
+      error: { code: "RUNNER_JOB_NOT_FOUND" },
+    });
+    // A job that is not there is one that is not its own.
+    const unknown = await h.jobState("00000000-0000-4000-8000-0000000000ff", {
+      token: runner.credential,
+    });
+    expect(unknown.status).toBe(404);
+  });
+
+  // #974-T03
+  it("keeps answering the shared token as before and refuses a credential the app does not know", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    expect((await h.jobState(job.id)).status).toBe(200);
+    expect(
+      (await h.jobState(job.id, { token: `crc_${"A".repeat(43)}` })).status,
+    ).toBe(401);
+    expect((await h.jobState(job.id, { token: null })).status).toBe(401);
+  });
+
+  // #974-T03
+  it("lets the dispatcher give a claim back with the credential of the job: a launch that failed ends the turn as the hosted Dispatcher's does", async () => {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["gpu", "linux"] });
+    const turn = await h.enqueueTurn({
+      modelChoice: OWN_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+    });
+    const job = await claimedJob(h, runner.credential);
+
+    const released = await h.release(
+      job.id,
+      {
+        credential: job.credential,
+        reason: "launch_failed",
+        retryAfterSeconds: 1,
+      },
+      { token: runner.credential },
+    );
+
+    expect(released.status).toBe(200);
+    // A turn is never queued again by a release (its Worker may have had the input): it ends with the reason.
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "launch_failed",
     });
   });
 });

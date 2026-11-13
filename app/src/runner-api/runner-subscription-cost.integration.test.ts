@@ -4,6 +4,10 @@
 // Worker that names `subscription` for a job that is not a turn on the harness claude-code of a customer's runner is booked as it
 // would have been without the word (an unknown cost, visible to the alert and the counts of #361, #385); a real claude-code turn on a
 // customer's runner is a subscription. Against a real Postgres with the harness of the runner API.
+import {
+  CLAUDE_CODE_ACCESS,
+  OPENCODE_ACCESS,
+} from "../test-support/runner-access.ts";
 import { describe, expect, it } from "vitest";
 import { createUsageRecordsRepository } from "../db/repositories/usage-records-repository.ts";
 import { createUsageFeedRepository } from "../db/repositories/usage-feed-repository.ts";
@@ -27,13 +31,7 @@ const PROFILE = {
   instructions: "",
   canPush: true,
 };
-const BOTH = {
-  harnesses: {
-    opencode: { version: "1.19.0", ready: true },
-    "claude-code": { version: "2.1.311", ready: true },
-  },
-  capabilities: [],
-};
+const BOTH = { harnesses: [...CLAUDE_CODE_ACCESS], capabilities: [] };
 const BLOCK: ImplementerResult = {
   baseCommit: sha("a"),
   headCommit: sha("b"),
@@ -89,7 +87,7 @@ describe("who may say that a job ran on a subscription", () => {
         customerRunner: {
           workspaceId: h.workspaceId,
           labels: ["box"],
-          harnesses: ["opencode", "claude-code"],
+          access: CLAUDE_CODE_ACCESS,
         },
       },
     );
@@ -121,14 +119,21 @@ describe("who may say that a job ran on a subscription", () => {
     const { h, records, unknown } = await start();
     const runner = await h.registerRunner({ labels: ["box"] });
     const turn = await h.enqueueTurn({
-      modelChoice: { entryId: "entry-1" },
+      // A runner works with the workspace's own key: a model of the catalog is the platform's and no runner announces it.
+      modelChoice: { provider: "anthropic", model: "claude-sonnet-5-5" },
       runnerEnvironment: RUNNER_ENV,
       profile: { ...PROFILE, harness: "opencode" },
     });
     const claimed = await h.queue.claimNext(
       customerRunnerId(runner.runnerId),
       IMPLEMENTER,
-      { customerRunner: { workspaceId: h.workspaceId, labels: ["box"] } },
+      {
+        customerRunner: {
+          workspaceId: h.workspaceId,
+          labels: ["box"],
+          access: OPENCODE_ACCESS,
+        },
+      },
     );
     expect(claimed?.job.id).toBe(turn.job.id);
 

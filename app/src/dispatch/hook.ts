@@ -14,6 +14,7 @@ import {
   loadDispatchConfig,
   type WebhookDispatchConfig,
 } from "./config.ts";
+import type { RingService } from "./rings.ts";
 import { createDispatchService, type DispatchService } from "./service.ts";
 import { testInlineRetryDelays } from "./test-timing.ts";
 
@@ -30,6 +31,11 @@ export type DispatchHookOptions = {
   monotonicMs?: () => number;
   /** The service to use instead of the real one (tests). */
   service?: (config: WebhookDispatchConfig) => DispatchService;
+  /**
+   * #972: the doorbell to the webhook dispatchers of customers. It rings beside the platform's wake-up call, not behind its retries; none
+   * is made when it is left out.
+   */
+  rings?: RingService;
 };
 
 export function createDispatchHook(
@@ -59,6 +65,12 @@ export function createDispatchHook(
     // The function lives from the start of the request, and `after()` runs the work later: the time is noted now so that
     // the budget of the inline retries counts what the request already used (#479).
     const receivedAt = monotonicMs();
-    options.schedule(() => service.onEnqueued(result, { receivedAt }));
+    options.schedule(async () => {
+      // Side by side: the platform's call may spend its inline retries, and the customers' dispatchers must not wait for them.
+      await Promise.all([
+        service.onEnqueued(result, { receivedAt }),
+        options.rings?.onEnqueued(result),
+      ]);
+    });
   };
 }

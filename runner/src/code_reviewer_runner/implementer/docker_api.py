@@ -22,7 +22,7 @@ import json
 import re
 import socket
 from collections.abc import Iterator
-from typing import Any, Final
+from typing import IO, Any, Final
 from urllib.parse import quote
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -69,8 +69,10 @@ class AttachedStreams:
     """The attached standard streams of one container: lines of its stdout to read, bytes of its
     stdin to write. One reader, any number of writers."""
 
-    def __init__(self, sock: socket.socket, buffered: bytes) -> None:
+    def __init__(self, sock: socket.socket, buffered: bytes, *, half_close: bool = True) -> None:
         self._sock = sock
+        # False on a daemon behind a connection that cannot be half-closed (see `DockerApi`).
+        self._half_close = half_close
         self._pending = buffered
         self._stderr = bytearray()
         self._write_closed = False
@@ -79,10 +81,13 @@ class AttachedStreams:
         self._sock.sendall(data)
 
     def close_write(self) -> None:
-        """End the container's stdin (it reads the end of its input)."""
+        """End the container's stdin (it reads the end of its input). Nothing on a daemon that
+        cannot be half-closed: the connection would end with it, answer included."""
         if self._write_closed:
             return
         self._write_closed = True
+        if not self._half_close:
+            return
         with contextlib.suppress(OSError):
             self._sock.shutdown(socket.SHUT_WR)
 
@@ -146,13 +151,23 @@ class AttachedStreams:
 
 
 class DockerApi:
-    """The Engine API of one daemon, at one socket."""
+    """The Engine API of one daemon, at one socket.
+
+    `half_close` is False for a socket that ends the whole connection when one side shuts down its
+    half: B's Docker on the Incus backend is reached through two `proxy` devices, which do (found by
+    the whole-job lane, #1020). Nothing is then ever half-closed: `AttachedStreams.close_write` does
+    nothing, and `run_exec` sends the end of a command's input as its length (`framed_argv`)."""
 
     def __init__(
-        self, socket_path: str = DOCKER_SOCKET, *, timeout: float = DEFAULT_TIMEOUT_SECONDS
+        self,
+        socket_path: str = DOCKER_SOCKET,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        half_close: bool = True,
     ) -> None:
         self._path = socket_path
         self._timeout = timeout
+        self.half_close = half_close
 
     # -- plain calls ----------------------------------------------------------------------------
 
@@ -201,8 +216,8 @@ class DockerApi:
         return answer
 
     def container_rw_bytes(self, ref: str, *, timeout: float) -> int | None:
-        """The size of a container's writable layer, what a commit has to write (`size=true` makes
-        the daemon walk the layer, so it takes a moment); None when the daemon does not say."""
+        """The size of a container's writable layer (`size=true` makes the daemon walk the layer, so
+        it takes a moment); None when the daemon does not say."""
         answer = as_object(
             self.request("GET", f"/containers/{ref}/json?size=true", timeout=timeout)
         )
@@ -293,7 +308,7 @@ class DockerApi:
             sock.close()
             raise DockerError(status, "the daemon refused to attach")
         sock.settimeout(None)
-        return AttachedStreams(sock, remainder)
+        return AttachedStreams(sock, remainder, half_close=self.half_close)
 
     # -- the agent container (#745, step 4) -------------------------------------------------------
 
@@ -304,33 +319,24 @@ class DockerApi:
             "POST", f"/containers/{container}/kill?signal=KILL", ok=(204, 404, 409), timeout=timeout
         )
 
+    def pause_container(self, container: str, *, timeout: float | None = None) -> None:
+        """Freeze every process of a running container (the cgroup freezer): nothing in it changes
+        until `unpause_container`. The environment's setup step uses it while Control reads the
+        repository the script worked in (#1009)."""
+        self.request("POST", f"/containers/{container}/pause", ok=(204,), timeout=timeout)
+
+    def unpause_container(self, container: str, *, timeout: float | None = None) -> None:
+        self.request("POST", f"/containers/{container}/unpause", ok=(204,), timeout=timeout)
+
     def stop_container(self, container: str, *, grace: int, timeout: float) -> None:
         """SIGTERM the container's init, SIGKILL after `grace` seconds. A container that is already
-        stopped (304) or gone (404) is what was wanted. Under Sysbox a stop that ends the init
-        by itself is the one that lets it write the inner Docker's data back into the container's
-        file system, where `commit_container` finds it (#818)."""
+        stopped (304) or gone (404) is what was wanted."""
         self.request(
             "POST",
             f"/containers/{container}/stop?t={int(grace)}",
             ok=(204, 304, 404),
             timeout=timeout,
         )
-
-    def commit_container(self, container: str, repository: str, tag: str, *, timeout: float) -> str:
-        """Make an image of a container's file system (the image id). The container is not paused:
-        the caller has stopped it. The repository and the tag are constants of the runner."""
-        answer = as_object(
-            self.request(
-                "POST",
-                f"/commit?container={container}&repo={repository}&tag={tag}&pause=false",
-                ok=(201,),
-                timeout=timeout,
-            )
-        )
-        identifier: Any = None if answer is None else answer.get("Id")
-        if not isinstance(identifier, str) or not identifier.startswith("sha256:"):
-            raise DockerError(0, "the daemon's answer has no image id")
-        return identifier
 
     def build_image(self, context: bytes, tag: str, *, timeout: float) -> None:
         """Build an image from a tar (`context`, a Dockerfile and what it copies) and name it
@@ -359,6 +365,26 @@ class DockerApi:
             failure = None if document is None else document.get("error")
             if isinstance(failure, str) and failure:
                 raise DockerError(0, failure[:500])
+
+    def put_archive(self, container: str, path: str, archive: IO[bytes], *, timeout: float) -> None:
+        """Unpack the tar stream `archive` into the directory `path` of a container (started or
+        not: a path under one of its mounts goes into the volume). The one way Control puts bytes
+        into B's volume (#1017). The body is read from the file, never held whole."""
+        connection = _UnixConnection(self._path, timeout)
+        target = f"/containers/{container}/archive?path={quote(path, safe='')}"
+        size = archive.seek(0, 2)
+        archive.seek(0)
+        headers = {"Content-Type": "application/x-tar", "Content-Length": str(size)}
+        try:
+            connection.request("PUT", target, archive, headers)
+            response = connection.getresponse()
+            data = response.read(_MAX_BODY_BYTES + 1)
+        except (OSError, http.client.HTTPException) as error:
+            raise DockerError(0, f"the daemon did not answer ({type(error).__name__})") from None
+        finally:
+            connection.close()
+        if response.status != 200:
+            raise DockerError(response.status, _message_of(data))
 
     def remove_image(self, reference: str) -> None:
         """Remove the name `reference` and, when no other name or container holds them, the layers.

@@ -43,6 +43,10 @@ export const BUILDER_COPY = {
   noErrors: "No errors on this step.",
   errorsHeading: "Errors",
   documentErrors: "Errors in the lane as a whole",
+  warningsHeading: "Warnings",
+  documentWarnings: "Warnings for the lane as a whole",
+  warnings: (count: number): string =>
+    `${String(count)} ${count === 1 ? "warning" : "warnings"}`,
   target: "target · one value",
   targetLiteral: "target · literal",
   laneCardTitle: "Lane",

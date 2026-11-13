@@ -107,11 +107,19 @@ import {
   CLAUDE_CODE_HARNESS,
   CLAUDE_CODE_MODEL_PATTERN,
   CLAUDE_CODE_PROVIDER,
+  OPENCODE_HARNESS,
 } from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
+import type { HarnessAccess } from "../runner-identity/access.ts";
+import {
+  DEFAULT_IMPLEMENTER_VCPUS,
+  REVIEW_VCPUS,
+  sizeLabel,
+  sizeLabelOf,
+} from "../runner-identity/labels.ts";
 
 /**
  * The codes a job gets when it ends at claim time. Branch on these, not on messages. The queue's
@@ -345,17 +353,10 @@ export type Refusal =
   | { kind: "cancelled"; errorCode: JobErrorCode }
   | { kind: "retry"; reason: string; retryAfterSeconds: number };
 
-/** The answer of a claim as it leaves, which for a turn on the harness `claude-code` (#856) is a job without `llm`. */
-type ClaimAnswer = Omit<ClaimResponse, "job"> & {
-  job: Omit<ClaimResponse["job"], "input"> & {
-    input: AnyJobInput | SubscriptionJobInput;
-  };
-};
-
 type Prepared =
   | {
       kind: "ready";
-      response: ClaimAnswer;
+      response: ClaimResponse;
       entryModel: string | null;
       native: boolean;
       /** #753: the write token of a turn, which the claim remembers before the input leaves and switches off if it cannot. */
@@ -990,7 +991,9 @@ export async function checkJob(
   if (!selected.ok) return refuse(selected.errorCode, selected.detail);
   const { selection } = selected;
   // #854: a turn of a runner environment runs on a customer's machine with the owner's own key. The operator's key never leaves for a
-  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists.
+  // runner, whatever the turn says: a managed selection ends the job here, before a record, a key or a credential exists. Since #973
+  // the routing keeps such a turn from reaching a runner at all (it asks for `managed`, which only the platform announces); this stays as the
+  // last line in front of the key.
   if (turn?.turn.runnerEnvironment != null && selection.keyMode === "managed")
     return refuse("runner_needs_own_key", "kind=implementer");
   await deps.recordSelection(job, selection);
@@ -1540,28 +1543,28 @@ function modelHostOf(
 }
 
 /**
- * #856: the claim of a turn on the harness `claude-code`, or `undefined` for every other job. The turn runs on the login of the
+ * #856, #974: the claim of a turn on the harness `claude-code`, or `undefined` for every other job. The turn runs on the login of the
  * customer's device, so none of what makes a model run is done here: no selection, no key, no price, no catalog entry, no usage
- * selection, and nothing of the login is known to the app. What stays is what makes any turn run: the guard of the project, the
- * installation's right to write, the git token of exactly this repository, and the facts of the turn. The turn's cost limit becomes
- * `--max-budget-usd` (the smaller of the profile's and the operator's), the only brake besides the clock.
+ * selection, and nothing of the login is known to the app. A customer's dispatcher gets the split answer like any other (the job's
+ * credential and no input); what is checked here needs no secret and is the claim's to refuse: the kind, that the caller is a customer's
+ * runner and the turn one of its environments, the guard of the project and the model the turn names. The input, with the git token of
+ * exactly this repository, is built when the Worker fetches the job (`buildSubscriptionJob`).
  */
 async function prepareSubscription(
   deps: ClaimDeps,
   claimed: NonNullable<ClaimResult>,
   engines: readonly RunnerEngine[],
-  features: readonly ClaimFeature[],
-  split: boolean,
+  customer: boolean,
 ): Promise<Prepared | undefined> {
-  const { job, leaseToken } = claimed;
+  const { job } = claimed;
   if (job.reviewKind !== "implementer") return undefined;
   const turn = await deps.implementerTurn(job);
   if (turn === undefined || turn.turn.profile?.harness !== CLAUDE_CODE_HARNESS)
     return undefined;
   const unbuilt = refusalForKind(job.reviewKind, engines);
   if (unbuilt !== null) return refuse(unbuilt);
-  // Only a runner of the customer takes it: a Dispatcher's claim (split) and a hosted Worker have no login of a device.
-  if (split || turn.turn.runnerEnvironment == null)
+  // Only a customer's runner takes it: the platform's Dispatcher and a hosted Worker have no login of a device.
+  if (!customer || turn.turn.runnerEnvironment == null)
     return refuse("implementer_config_invalid", "reason=harness_needs_runner");
   const decision = await deps.guard.check(job);
   if (!decision.allow)
@@ -1575,8 +1578,73 @@ async function prepareSubscription(
     !CLAUDE_CODE_MODEL_PATTERN.test(choice.model)
   )
     return refuse("implementer_config_invalid", "reason=subscription_model");
-  // The caller must read what the turn carries, as for any turn: a runner that does not would run it without the profile, or without
-  // the finish tool, or from the base branch.
+  if (job.leaseExpiresAt === null)
+    throw new Error(`Claimed job ${job.id} has no lease expiry.`);
+  if (claimed.credential === undefined)
+    throw new Error(`Claim of job ${job.id} has no credential.`);
+  return {
+    kind: "split",
+    response: {
+      version: RUNNER_API_VERSION,
+      job: {
+        id: job.id,
+        credential: claimed.credential,
+        reviewKind: job.reviewKind,
+        leaseExpiresAt: job.leaseExpiresAt,
+        heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+        ...(job.requiredLabels === null ? {} : { labels: job.requiredLabels }),
+        access: {
+          harness: CLAUDE_CODE_HARNESS,
+          auth: "subscription" as const,
+          model: choice.model,
+        },
+        // The rule for the agent's network: a turn of a runner environment has none of its own (the runner decides how it works).
+        network: NETWORK_OFF,
+      },
+    },
+  };
+}
+
+/** What `buildSubscriptionJob` made: the input of the turn and when its git token stops working. */
+export type SubscriptionBuilt = {
+  kind: "built-subscription";
+  input: SubscriptionJobInput;
+  tokenExpiresAt: string | null;
+  /** The write token of the turn (the same value as `input.git.token`): remembered before the input leaves, switched off when it does not. */
+  writeToken: GitTokenEntry;
+};
+
+/**
+ * #856, #974: the input of a turn on the harness `claude-code`, built when the Worker that holds the job's credential fetches it (the
+ * claim answered with the credential only). `undefined` for a job that is no such turn. What stays of the checks of any turn: the guard
+ * of the project, the installation's right to write, the git token of exactly this repository and the facts of the turn. The caller must
+ * read what the turn carries, as for any turn (`features` are the Worker's): a Worker that does not would run it without the profile, or
+ * without the finish tool, or from the base branch. The turn's cost limit becomes `--max-budget-usd` (the smaller of the profile's and
+ * the operator's), the only brake besides the clock.
+ */
+export async function buildSubscriptionJob(
+  deps: ClaimDeps,
+  job: Job,
+  features: readonly ClaimFeature[],
+): Promise<SubscriptionBuilt | Refusal | undefined> {
+  if (job.reviewKind !== "implementer") return undefined;
+  const turn = await deps.implementerTurn(job);
+  if (turn === undefined || turn.turn.profile?.harness !== CLAUDE_CODE_HARNESS)
+    return undefined;
+  if (turn.turn.runnerEnvironment == null)
+    return refuse("implementer_config_invalid", "reason=harness_needs_runner");
+  const decision = await deps.guard.check(job);
+  if (!decision.allow)
+    return decision.outcome === "cancel"
+      ? { kind: "cancelled", errorCode: decision.errorCode }
+      : refuse(decision.errorCode);
+  const choice = turn.turn.modelChoice;
+  if (
+    "entryId" in choice ||
+    choice.provider !== CLAUDE_CODE_PROVIDER ||
+    !CLAUDE_CODE_MODEL_PATTERN.test(choice.model)
+  )
+    return refuse("implementer_config_invalid", "reason=subscription_model");
   if (!features.includes("implementer_profile"))
     return refuse("implementer_engine_unavailable", "reason=profile");
   if (
@@ -1591,8 +1659,6 @@ async function prepareSubscription(
     !features.includes("implementer_start_branch")
   )
     return refuse("implementer_engine_unavailable", "reason=start_branch");
-  if (job.leaseExpiresAt === null)
-    throw new Error(`Claimed job ${job.id} has no lease expiry.`);
 
   const repository = await deps
     .repositories(job.workspaceId)
@@ -1734,21 +1800,10 @@ async function prepareSubscription(
     `[runner-api] job=${job.id} selection harness=claude-code key=device`,
   );
   return {
-    kind: "ready",
-    entryModel: null,
-    native: false,
+    kind: "built-subscription",
+    input,
+    tokenExpiresAt: git.expiresAt,
     writeToken: writeTokenOf(git),
-    response: {
-      version: RUNNER_API_VERSION,
-      job: {
-        id: job.id,
-        leaseToken,
-        leaseExpiresAt: job.leaseExpiresAt,
-        heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
-        tokenExpiresAt: git.expiresAt,
-        input,
-      },
-    },
   };
 }
 
@@ -1759,15 +1814,15 @@ async function prepare(
   features: readonly ClaimFeature[],
   split: boolean,
   llmProviders: readonly string[] | undefined,
+  customer: boolean,
 ): Promise<Prepared> {
-  const { job, leaseToken } = claimed;
+  const { job } = claimed;
   // #856: a turn on the harness claude-code takes its own road: no model, no key and no price are chosen, the login is the device's.
   const subscription = await prepareSubscription(
     deps,
     claimed,
     engines,
-    features,
-    split,
+    customer && split,
   );
   if (subscription !== undefined) return subscription;
   const checked = await checkJob(deps, job, {
@@ -1805,6 +1860,36 @@ async function prepare(
           reviewKind: job.reviewKind,
           leaseExpiresAt: job.leaseExpiresAt,
           heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
+          // #971: the size label the job requires (`cr:size-<vCPUs>`), the one the Dispatcher checks; the VM size stays `vcpus`. A hosted job always
+          // has one: the stored label, or for a job written before the labels the size its kind runs on. #974: a customer's job has none (its labels
+          // are the customer's own, `labels`) and its dispatcher needs the demand of the turn to hand its device's credential: `access`.
+          ...(customer
+            ? {
+                ...(job.requiredLabels === null
+                  ? {}
+                  : { labels: job.requiredLabels }),
+                // A turn on the harness claude-code took the road of `prepareSubscription`; every other turn of a customer's runner runs OpenCode
+                // on a key of the workspace (a catalog entry is the platform's and was refused above).
+                ...(checked.implementer === null
+                  ? {}
+                  : {
+                      access: {
+                        harness: OPENCODE_HARNESS,
+                        auth: "app-key" as const,
+                        model: null,
+                      },
+                    }),
+              }
+            : {
+                sizeLabel:
+                  sizeLabelOf(job.requiredLabels) ??
+                  sizeLabel(
+                    checked.implementer === null
+                      ? REVIEW_VCPUS
+                      : (checked.implementer.environment?.vcpus ??
+                          DEFAULT_IMPLEMENTER_VCPUS),
+                  ),
+              }),
           // #818: the size the turn's environment asks for, for the Dispatcher that launches the VM before any Worker exists. Only a
           // turn that has an environment names one, and nothing else of the environment is in this answer.
           ...(checked.implementer?.environment == null
@@ -1838,7 +1923,7 @@ async function prepare(
       version: RUNNER_API_VERSION,
       job: {
         id: job.id,
-        leaseToken,
+        leaseToken: claimed.leaseToken,
         leaseExpiresAt: job.leaseExpiresAt,
         heartbeatIntervalSeconds: deps.heartbeatIntervalSeconds,
         tokenExpiresAt: built.tokenExpiresAt,
@@ -1978,13 +2063,13 @@ export async function handleClaim(
     /** #424: the providers the caller advertised in its claim; absent means the default provider only. */
     llmProviders?: readonly string[];
     /**
-     * #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. #856: and
-     * whose profile's harness it announced as ready.
+     * #854: the claim is a customer's runner's: only the turns of its workspace's runner environments whose labels it has. #973: and
+     * that an entry of its manifest (`access`) can run: the harness, the auth and the model the turn asks for.
      */
     customerRunner?: {
       workspaceId: string;
       labels: readonly string[];
-      harnesses?: readonly string[];
+      access: readonly HarnessAccess[];
     };
   } = {},
 ): Promise<Response> {
@@ -2026,6 +2111,7 @@ export async function handleClaim(
         features,
         split,
         target.llmProviders,
+        target.customerRunner !== undefined,
       );
       if (prepared.kind === "ready") writeToken = prepared.writeToken;
 
@@ -2072,9 +2158,10 @@ export async function handleClaim(
       // Before the key leaves with the response: if it cannot be remembered, the job is given back (below)
       // and no runner has the key.
       // A turn on a login of the device has no key of ours to remember (#856).
-      const key = prepared.response.job.input.llm?.apiKey;
-      if (key !== undefined)
-        await deps.claimedKeys.remember(claimed.job.id, key);
+      await deps.claimedKeys.remember(
+        claimed.job.id,
+        prepared.response.job.input.llm.apiKey,
+      );
       if (prepared.entryModel !== null)
         await deps.claimedKeys.rememberModel(
           claimed.job.id,

@@ -3,10 +3,7 @@
 // The service behind the runners page and its routes (#854): the runners of ONE workspace with their state, a registration token for
 // a new one, and the revoking of a runner. Who may do this is the route's (`withWorkspace` with a right of the matrix); every rule
 // about the data is here.
-import type {
-  RunnersRepository,
-  StoredRunner,
-} from "../db/repositories/runners-repository.ts";
+import type { RunnersRepository } from "../db/repositories/runners-repository.ts";
 import type {
   RunnerLimits,
   RunnerManifest,
@@ -18,16 +15,12 @@ import {
   newRegistrationToken,
   REGISTRATION_TOKEN_TTL_SECONDS,
 } from "../runner-identity/tokens.ts";
-import { meetsMinimum } from "../runner-identity/versions.ts";
+import { statusOf, type RunnerStatus } from "../runner-identity/online.ts";
+
+export { statusOf, type RunnerStatus };
 
 /** How many registration tokens a workspace may hold that are neither used nor expired. */
 export const OPEN_TOKENS_PER_WORKSPACE_MAX = 20;
-
-/**
- * `online`: heard from lately and good enough for jobs. `update_needed`: heard from lately, but the base is older than the minimum, so
- * it gets no jobs. `offline`: not heard from for `onlineWithinSeconds`.
- */
-export type RunnerStatus = "online" | "update_needed" | "offline";
 
 export type RunnerView = {
   id: string;
@@ -61,21 +54,6 @@ export type RunnerFleetService = {
 };
 
 const ID_MAX_LENGTH = 128;
-
-/** The state of a runner at `now`: the one rule of the list and of the claim. */
-export function statusOf(
-  runner: Pick<StoredRunner, "lastSeenAt" | "baseVersion">,
-  now: Date,
-  settings: { minBaseVersion: string | null; onlineWithinSeconds: number },
-): RunnerStatus {
-  const seen = Date.parse(runner.lastSeenAt);
-  if (!(now.getTime() - seen <= settings.onlineWithinSeconds * 1000))
-    return "offline";
-  return settings.minBaseVersion !== null &&
-    !meetsMinimum(runner.baseVersion, settings.minBaseVersion)
-    ? "update_needed"
-    : "online";
-}
 
 export function createRunnerFleetService(deps: {
   runners: RunnersRepository;

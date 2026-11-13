@@ -111,3 +111,54 @@ export function denySocketFamilies(
   ];
   return copy;
 }
+
+/**
+ * A copy of `defaultProfile` in which `socket` is allowed for each of `families` too: the family conditions (`SCMP_CMP_NE`
+ * on the first argument) that deny them are taken out of the rule that allows `socket`. It is the opposite of
+ * `denySocketFamilies` and exists for one container, the Control container of a Firecracker VM on a customer's machine
+ * (`local-control.ts`, #977): its Worker connects to the host over AF_VSOCK (`contracts/environment-control.v1.json`), which
+ * Docker's default profile since 2022 refuses with exactly such a condition (`socket` allowed for `arg0 != 40`). Throws
+ * `SeccompProfileError` for a profile that does not deny by default, has no `socket` rule that denies one of the families
+ * this way (a profile that allows them already is not the one this was written for), or has a `socket` rule of another
+ * shape, so that an unknown profile never passes as derived. Nothing else of the profile changes.
+ */
+export function allowSocketFamilies(
+  defaultProfile: unknown,
+  families: readonly number[],
+): Profile {
+  if (families.length === 0 || !families.every(Number.isInteger))
+    throw new SeccompProfileError("families must be a list of integers");
+  if (!isProfile(defaultProfile))
+    throw new SeccompProfileError("not a seccomp profile");
+  if (!DENYING_DEFAULT_ACTIONS.has(String(defaultProfile.defaultAction)))
+    throw new SeccompProfileError("the profile does not deny by default");
+
+  const copy = structuredClone(defaultProfile);
+  const lifted = new Set<number>();
+  for (const rule of copy.syscalls) {
+    if (!rule.names.includes("socket")) continue;
+    if (rule.action !== "SCMP_ACT_ALLOW")
+      throw new SeccompProfileError(
+        "the profile has a rule for socket it does not know",
+      );
+    const conditions = rule.args ?? [];
+    const kept = conditions.filter((condition) => {
+      const { index, value, op } = condition as Record<string, unknown>;
+      const denied =
+        index === 0 &&
+        op === "SCMP_CMP_NE" &&
+        typeof value === "number" &&
+        families.includes(value);
+      if (denied) lifted.add(value);
+      return !denied;
+    });
+    if (kept.length > 0) rule.args = kept;
+    else delete rule.args;
+  }
+  for (const family of families)
+    if (!lifted.has(family))
+      throw new SeccompProfileError(
+        "the profile does not deny a family it was asked to allow",
+      );
+  return copy;
+}

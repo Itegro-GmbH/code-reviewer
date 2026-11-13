@@ -123,8 +123,6 @@ export const APP_FEATURES = [
   "vm_lifecycle",
   "implementer_steps",
   "implementer_snapshot",
-  // #879: the snapshot calls of the runner API, for a customer's runner (`implementer_snapshot` is the Worker API's).
-  "runner_session_snapshot",
 ] as const;
 export type AppFeature = (typeof APP_FEATURES)[number];
 
@@ -289,6 +287,13 @@ export const RUNNER_ERROR_CODES = [
   "sandbox_size_unsupported",
   // #818: the setup script of the environment failed (a non-zero exit or its time limit) before the model was called.
   "environment_setup_failed",
+  // #975: the sandbox's environment control did not narrow the outer network wall (no answer in time, a refusal, no host) before the agent started.
+  "environment_control_failed",
+  // #980: a turn on Claude Code with a subscription token of the runner's own device: the token was refused (401), the subscription's usage limit
+  // ended the call, or the subscription does not allow the model. Free: nothing of ours was used.
+  "subscription_auth",
+  "subscription_limit",
+  "subscription_model_refused",
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
 
@@ -337,10 +342,14 @@ export const RUNNER_API_ERROR_CODES = [
   // A customer's runner (#854): a registration token that cannot be exchanged, and a base older than the minimum.
   "RUNNER_REGISTRATION_TOKEN_INVALID",
   "RUNNER_UPDATE_NEEDED",
+  // Runner v2 (#971): a customer's runner announced a label of the platform's reserved namespace `cr:`.
+  "RUNNER_LABEL_RESERVED",
+  // Runner v2 (#973): a customer's runner announced the access `managed`, which only the platform identity has.
+  "RUNNER_ACCESS_RESERVED",
 ] as const;
 export type RunnerApiErrorCode = (typeof RUNNER_API_ERROR_CODES)[number];
 
-export type FieldErrorCode = "required" | "invalid" | "too_long";
+export type FieldErrorCode = "required" | "invalid" | "too_long" | "reserved";
 export type FieldError = { field: string; code: FieldErrorCode };
 
 export type ErrorResponse = {
@@ -588,6 +597,20 @@ export type SplitClaimResponse = {
     reviewKind: ReviewKind;
     leaseExpiresAt: string;
     heartbeatIntervalSeconds: number;
+    /** #971: the size label the job requires (`cr:size-<vCPUs>`); the Dispatcher checks it; the size of the VM stays `vcpus`, or its own configuration. Not for a customer's job. */
+    sizeLabel?: string;
+    /** #974: the labels a customer's job requires (the platform's jobs name the size in `sizeLabel`). Information: the claim already matched them. */
+    labels?: string[];
+    /**
+     * #974: what a customer's job asks of the dispatcher's device, so that it hands the Worker the one local credential the job needs and no
+     * other: the harness, the auth (`app-key`: nothing local; `subscription` or `local-key`: a credential of the device) and the model a
+     * device-bound access names. Never a credential. Only for a turn of the Implementer on a customer's runner.
+     */
+    access?: {
+      harness: string;
+      auth: "app-key" | "local-key" | "subscription";
+      model: string | null;
+    };
     /** #818: the VM size the turn's environment asks for; only for a turn that has an environment. */
     vcpus?: number;
     /** #745, step 7: the rule for the agent's network; for every turn of the Implementer, for no other job. */
@@ -609,6 +632,19 @@ export type WorkerJobDetailsResponse = {
     heartbeatIntervalSeconds: number;
     tokenExpiresAt: string | null;
     input: AnyJobInput;
+  };
+};
+
+/**
+ * #856, #974: the same answer for a turn on the harness `claude-code`: its input has no `llm` (the login is the device's, never the
+ * app's) and its git token is the only secret in it.
+ */
+export type WorkerSubscriptionDetailsResponse = Omit<
+  WorkerJobDetailsResponse,
+  "job"
+> & {
+  job: Omit<WorkerJobDetailsResponse["job"], "input"> & {
+    input: SubscriptionJobInput;
   };
 };
 

@@ -1,0 +1,99 @@
+#!/bin/bash
+# SPDX-License-Identifier: LicenseRef-Proprietary
+#
+# What the guest's PID 1 (`docker-init`, tini: it reaps) runs first, in EVERY boot (#978; the release's `kernel.initCommand`): the part of a VM's
+# start that the hosted platform's own init does before the Launcher's first command (runner/vm-init/README.md, "What the root file system must
+# provide"): the pseudo file systems, tmpfs for everything that is written, the job disk with the directories that live on it, the cgroup
+# controllers and, for a job's VM, the network. It runs NO prepare script: for `vm.mode=run` it starts `vm-init` (runner/vm-init/, installed by
+# runner/vm-init/install.sh), which runs `vm-prepare.sh` and `sysbox-prepare.sh` itself in the hosted order; for the build-only boots (`seed`, `smoke`)
+# it hands over to `vm-build-init`, the only script that still runs them. The mode and the network come from the kernel command line:
+#   vm.mode=run|seed|smoke   (default run)
+#   vm.ip=<address>/<prefix> vm.gw=<address>   the VM's address on its TAP and the host's side of it (run only; the launcher sets both, #978)
+# It reports to the console as `VMINIT <name> uptime=<s> [key=value ...]` (a job's VM has no console: the line goes nowhere and costs nothing).
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+
+say() {
+  local name=$1
+  shift
+  printf 'VMINIT %s uptime=%s%s\n' "$name" "$(cut -d' ' -f1 /proc/uptime)" "${*:+ $*}" 2> /dev/null > /dev/console || true
+}
+
+# The end of a VM that nobody waits for: sync, then the guest reboots itself and Firecracker exits (`reboot=k`).
+power_off() {
+  sync
+  echo 1 > /proc/sys/kernel/sysrq
+  echo b > /proc/sysrq-trigger
+  sleep 60
+}
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=1777 tmpfs /var/tmp
+mount -t tmpfs tmpfs /var/log
+mount -t tmpfs tmpfs /var/cache
+mount -t tmpfs -o mode=0700 tmpfs /root
+mount -t cgroup2 none /sys/fs/cgroup
+
+getarg() { tr ' ' '\n' < /proc/cmdline | sed -n "s/^$1=//p" | head -n 1; }
+mode=$(getarg vm.mode)
+mode=${mode:-run}
+
+: > /run/resolv.conf
+hostname code-reviewer-vm
+ip link set lo up
+say init_up mode="$mode"
+
+# The job disk: Docker's state, the containerd image store and Sysbox's state live on it, bound to the places the daemons use. The hosted
+# daemon.json is used as it is (no data-root): Docker 29's containerd image store ignores `data-root` and keeps its images under
+# /var/lib/containerd, so the disk is mounted over the three default directories and nothing in the daemon's configuration differs.
+mkdir -p /jobdisk
+mount -t ext4 -o noatime /dev/vdb /jobdisk || { say disk_failed; power_off; }
+for d in docker containerd sysbox; do
+  mkdir -p "/jobdisk/$d" "/var/lib/$d"
+  mount --bind "/jobdisk/$d" "/var/lib/$d"
+done
+# The work volume of a job (vm-init makes it, with a reserve disk that is a file in this directory): on the job disk too, so the quota of the
+# job is the one disk. Build-only boots have no work volume.
+if [ "$mode" = run ]; then
+  mkdir -p /jobdisk/code-reviewer-work /var/lib/code-reviewer-work
+  mount --bind /jobdisk/code-reviewer-work /var/lib/code-reviewer-work
+fi
+# sysbox-fs mounts its FUSE file systems under /var/lib/sysboxfs and fails the container's pre-registration when it cannot create it
+# ("FuseServer with invalid mountpoint"): on a read-only root file system the directory must exist and be writable.
+mount -t tmpfs tmpfs /var/lib/sysboxfs
+say disk_ready
+
+# vm-prepare.sh (the hosted VM's script) starts by DISabling cpuset/cpu/pids in the root's subtree_control: it expects the layout the
+# platform's init made. A kernel that starts with no controller enabled makes that write fail (EINVAL), so enable them first.
+for controller in cpuset cpu io memory pids; do
+  echo "+$controller" > /sys/fs/cgroup/cgroup.subtree_control || echo "vm-boot: cgroup controller $controller cannot be enabled" >&2
+done
+
+case "$mode" in
+  run)
+    # The VM's one NIC is on the slot's TAP; the host side of it is the default route (the outer wall, #979, lets only the proxy through).
+    ip_address=$(getarg vm.ip)
+    gateway=$(getarg vm.gw)
+    if [ -n "$ip_address" ] && [ -n "$gateway" ]; then
+      ip link set eth0 up
+      ip addr add "$ip_address" dev eth0
+      ip route add default via "$gateway"
+      say network_ready "ip=$ip_address"
+    else
+      say network_missing
+    fi
+    # vm-init runs until the VM ends; when it returns, the power off was refused (or it failed to start): the VM must not stay.
+    vm-init
+    say vm_init_returned "status=$?"
+    power_off
+    ;;
+  *)
+    exec /usr/local/sbin/vm-build-init
+    ;;
+esac

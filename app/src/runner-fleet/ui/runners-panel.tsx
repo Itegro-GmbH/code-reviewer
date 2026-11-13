@@ -340,12 +340,12 @@ function Runners({
                 <dd className="font-mono">{runner.baseVersion}</dd>
                 <dt className="text-muted-foreground">{PAGE_COPY.harnesses}</dt>
                 <dd className="font-mono break-words">
-                  {Object.keys(runner.manifest.harnesses).length === 0
+                  {runner.manifest.harnesses.length === 0
                     ? PAGE_COPY.noHarnesses
-                    : Object.entries(runner.manifest.harnesses)
+                    : runner.manifest.harnesses
                         .map(
-                          ([name, harness]) =>
-                            `${name} ${harness.version} (${harness.ready ? PAGE_COPY.ready : PAGE_COPY.notReady})`,
+                          (entry) =>
+                            `${entry.harness} ${entry.version} (${entry.auth}${entry.models === undefined ? "" : `: ${entry.models.join(", ")}`})`,
                         )
                         .join(", ")}
                 </dd>

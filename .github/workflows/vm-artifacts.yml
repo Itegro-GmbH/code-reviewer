@@ -1,0 +1,479 @@
+name: VM artifacts
+
+# The Linux VM artifacts of Runner v2 (#976, epic #969): the guest kernel, the read-only root file system and the prepared Docker data
+# disk of a Firecracker microVM, built from the golden snapshot's recipe (docker/vm, dispatcher/src/vm-artifacts), booted once in CI as a
+# smoke test (KVM through nested virtualization: ubuntu-24.04 runners have /dev/kvm, the development server has not) and described by a
+# manifest. One definition for the two callers: ci.yml (a pull request that changes what these files are made from, never anything
+# else) and vm-artifacts-release.yml (a tag, which signs and publishes). This workflow never signs for real and never publishes: it holds no
+# secret, and the one key lives only in the release job, in the environment `vm-artifacts-release` (docs/runner.md, "VM artifacts").
+# A throwaway key signs and verifies the build's own manifest, and a changed byte must be refused (docker/vm/selftest-signing.sh).
+#
+# The files are NOT workflow artifacts. A workflow artifact of a public repository can be downloaded by anybody who is signed in to GitHub, and
+# the data disk holds the Worker image (proprietary code, copyleft packages): it must not be downloadable before the owner has decided to publish
+# it. A pull request run keeps only what its own jobs need, for a day (the kernel), and its logs, for three. A run for a release (`for_release`)
+# hands the release's files to the signing job through the Actions cache (nobody can download a cache's content, only a workflow of this
+# repository restores it, and the key names this run) and builds the kernel again: it never takes one from the cache.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: The release number of the manifest; it only grows (the tag's number, or the run number for a build that is not published)
+        required: true
+        type: number
+      for_release:
+        description: The run feeds a release (vm-artifacts-release.yml). The kernel is built, never taken from the cache, and the release's files go to the job that signs them through the Actions cache, not as an artifact
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      release:
+        description: The release number of the manifest
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  VM_WORK: /mnt/vm
+
+jobs:
+  # The installer (#982, runner/install/install.sh) on a real systemd, nft and `ip tuntap`, with a stand-in program and small signed releases served over
+  # https on the loopback: install, the unit's sandbox probed from inside the unit, update between jobs, rollback, a bad signature, uninstall.
+  # No VM boots here (the build job below has the artifacts and runs the launcher lane). Not part of a release build.
+  installer:
+    name: "Installer lane: install, update, rollback, uninstall (real systemd)"
+    if: ${{ !inputs.for_release }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Installer lane
+        run: runner/tests/kvm/installer/lane.sh
+
+  kernel:
+    name: "VM artifacts: guest kernel"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Packages for the kernel build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flex bison libelf-dev libssl-dev bc dwarves
+          sudo mkdir -p "$VM_WORK"
+          sudo chown "$USER" "$VM_WORK"
+      # Always, and fast (seconds, no compiler beyond the kconfig tools): the kernel's source and Firecracker's base config are
+      # downloaded and checked against their pinned checksums, the fragment is merged, and the step FAILS when an option did not stick
+      # or RT_GROUP_SCHED is on. A kernel that comes from the cache below is never trusted without this.
+      - name: Configuration (fails when an option of the fragment did not stick)
+        run: |
+          docker/vm/kernel/configure.sh "$VM_WORK/kwork"
+          cat "$VM_WORK/kwork/added-options.txt"
+      # Pull requests only: what is signed is built from the source, never restored from a cache that an earlier run wrote.
+      - name: Cache of the built kernel
+        id: kcache
+        if: ${{ !inputs.for_release }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VM_WORK }}/vmlinux-cache
+          key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
+      # A skipped restore is no hit: a release always builds.
+      - name: Build the kernel (about 10 minutes on 4 cores)
+        if: steps.kcache.outputs.cache-hit != 'true'
+        run: docker/vm/kernel/build.sh "$VM_WORK/kwork" "$VM_WORK/vmlinux-cache"
+      # Right away: a later failure must not lose a 10 minute build.
+      - name: Save the kernel to the cache
+        if: ${{ !inputs.for_release && steps.kcache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VM_WORK }}/vmlinux-cache
+          key: vm-kernel-v1-${{ hashFiles('docker/vm/pins.env', 'docker/vm/lib.sh', 'docker/vm/kernel/**') }}
+      - name: "The kernel's files (the source offer: source, base config, fragment, final config)"
+        run: |
+          set -euo pipefail
+          . docker/vm/pins.env
+          out="$VM_WORK/kernel-out"
+          mkdir -p "$out"
+          cp "$VM_WORK/vmlinux-cache/vmlinux" "$out/vmlinux"
+          cp "$VM_WORK/vmlinux-cache/kernel.config" "$out/kernel.config"
+          cp "$VM_WORK/kwork/fc-base.config" "$out/fc-base.config"
+          cp "$VM_WORK/kwork/linux-$KERNEL_VERSION.tar.xz" "$out/linux-$KERNEL_VERSION.tar.xz"
+          cp docker/vm/kernel/config.fragment "$out/config.fragment"
+          # The .config of the kernel that is published, built now or restored from the cache, is held to the fragment too.
+          docker/vm/kernel/verify-config.sh "$out/kernel.config" "$out/fc-base.config"
+          ls -l "$out"
+          cat "$VM_WORK/vmlinux-cache/build-seconds.txt" 2> /dev/null || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vm-kernel
+          path: ${{ env.VM_WORK }}/kernel-out
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    name: "VM artifacts: root file system, data disk, smoke boot, manifest"
+    needs: kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install the dispatcher dependencies (the recipe, the boot, the manifest and the verifier are TypeScript)
+        run: pnpm install --frozen-lockfile --filter code-reviewer-dispatcher...
+      # The launcher lanes are Python, and so is the lane's test CA (below): the runner's dependencies first.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install the runner's dependencies (the launcher lanes are Python)
+        run: uv --directory runner sync --frozen
+      - name: Work volume
+        run: |
+          sudo mkdir -p "$VM_WORK"
+          sudo chown "$USER" "$VM_WORK"
+          df -h / "$VM_WORK" | cat
+      - uses: actions/download-artifact@v8
+        with:
+          name: vm-kernel
+          path: ${{ env.VM_WORK }}/kernel
+      - name: KVM and Firecracker
+        run: sudo docker/vm/host/setup.sh
+      # The golden snapshot pipeline's own install scripts and pins, written as the pipeline would send them: the recipe of both outputs.
+      - name: The golden snapshot's recipe
+        id: recipe
+        run: |
+          set -euo pipefail
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/recipe-main.ts "$VM_WORK/recipe"
+          {
+            echo "dockerfile=$(jq -r .dockerfile "$VM_WORK/recipe/recipe.json")"
+            echo "worker_target=$(jq -r .worker.target "$VM_WORK/recipe/recipe.json")"
+            echo "worker_tag=$(jq -r .worker.tag "$VM_WORK/recipe/recipe.json")"
+            echo "agent_target=$(jq -r .agent.target "$VM_WORK/recipe/recipe.json")"
+            echo "agent_tag=$(jq -r .agent.tag "$VM_WORK/recipe/recipe.json")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Root file system (Ubuntu Base, then the golden snapshot's scripts, unchanged, in a chroot)
+        run: sudo docker/vm/rootfs/build.sh "$VM_WORK/recipe" "$VM_WORK/rwork" "$VM_WORK/rootfs-out"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # The two images the hosted snapshot builds, from the same Dockerfile, targets and tags. The cache of the CI image job is read, never written.
+      - name: Worker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ steps.recipe.outputs.dockerfile }}
+          target: ${{ steps.recipe.outputs.worker_target }}
+          load: true
+          push: false
+          tags: ${{ steps.recipe.outputs.worker_tag }}
+          cache-from: type=gha,scope=runner-sandbox
+      - name: Agent image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ steps.recipe.outputs.dockerfile }}
+          target: ${{ steps.recipe.outputs.agent_target }}
+          load: true
+          push: false
+          tags: ${{ steps.recipe.outputs.agent_tag }}
+          cache-from: type=gha,scope=runner-sandbox
+      - name: Save the images
+        env:
+          WORKER_TAG: ${{ steps.recipe.outputs.worker_tag }}
+          AGENT_TAG: ${{ steps.recipe.outputs.agent_tag }}
+        run: |
+          docker save "$WORKER_TAG" "$AGENT_TAG" --output "$VM_WORK/images.tar"
+          docker image ls
+          ls -l "$VM_WORK/images.tar"
+          # The whole-job lane's own copy of the Worker image (#999). A job clones over https and calls its provider over https, and the lane has
+          # neither a git host nor a provider on the internet: its fakes answer with certificates of a CA made in this run
+          # (runner/tests/kvm/lane_pki.py: one domain only, a critical name constraint), and ONLY this copy trusts it (the CA appended to the image's
+          # bundle). The release's image, its data disk and its manifest are the ones saved above and are never touched; the lane's copy goes to a
+          # data disk of its own (below), is never assembled and never published, and the CA's key lives in $VM_WORK of this run.
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/lane_pki.py ca "$VM_WORK/lane-pki"
+          lane_context="$VM_WORK/lane-image"
+          mkdir -p "$lane_context"
+          cp "$VM_WORK/lane-pki/lane-ca.crt" "$lane_context/lane-ca.crt"
+          worker_user="$(docker image inspect --format '{{.Config.User}}' "$WORKER_TAG")"
+          cat > "$lane_context/Dockerfile" <<DOCKERFILE
+          FROM $WORKER_TAG
+          USER 0:0
+          COPY lane-ca.crt /usr/local/share/ca-certificates/lane-ca.crt
+          RUN cat /usr/local/share/ca-certificates/lane-ca.crt >> /etc/ssl/certs/ca-certificates.crt
+          USER $worker_user
+          DOCKERFILE
+          # The daemon's own builder: the base is the image just loaded into the daemon, which a builder container would not see.
+          # The same tag, so the VM's start names the same reference; the image id is the lane disk's own (its images.json).
+          docker buildx build --builder default --load --tag "$WORKER_TAG" "$lane_context"
+          docker save "$WORKER_TAG" "$AGENT_TAG" --output "$VM_WORK/images-lane.tar"
+          ls -l "$VM_WORK/images-lane.tar"
+          # The runner's Docker is done: the disk is needed for the data image.
+          docker rmi "$WORKER_TAG" "$AGENT_TAG" > /dev/null
+          docker image prune --force > /dev/null
+          docker builder prune --all --force > /dev/null
+      - name: Prepared Docker data disk (the images loaded into a guest's own Docker)
+        run: |
+          docker/vm/data/build.sh "$VM_WORK/images.tar" "$VM_WORK/kernel/vmlinux" "$VM_WORK/rootfs-out/rootfs.ext4" "$VM_WORK/dwork" "$VM_WORK/data-out"
+          rm -f "$VM_WORK/images.tar"
+          cat "$VM_WORK/data-out/images.json"
+      # The whole-job lane's data disk (#999): the same recipe on the lane's copy of the Worker image (the test CA in its bundle). Used by that lane only.
+      - name: Lane-only data disk (the Worker image with the lane's test CA, for the whole-job lane alone)
+        run: |
+          docker/vm/data/build.sh "$VM_WORK/images-lane.tar" "$VM_WORK/kernel/vmlinux" "$VM_WORK/rootfs-out/rootfs.ext4" "$VM_WORK/dwork-lane" "$VM_WORK/data-lane-out"
+          rm -f "$VM_WORK/images-lane.tar"
+          cat "$VM_WORK/data-lane-out/images.json"
+      # T03: a job's VM, as the launcher makes it: a copy of the base grown to a quota, booted read-only from the root file system.
+      - name: Smoke boot (dockerd ready within the budget, Sysbox, the images, the Worker's self-check)
+        run: |
+          cp --reflink=auto "$VM_WORK/data-out/dockerdata.ext4" "$VM_WORK/smoke-data.ext4"
+          docker/vm/data/grow.sh "$VM_WORK/smoke-data.ext4" 8G
+          node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dispatcher/src/vm-artifacts/boot-main.ts \
+            --mode smoke --kernel "$VM_WORK/kernel/vmlinux" --rootfs "$VM_WORK/rootfs-out/rootfs.ext4" --data "$VM_WORK/smoke-data.ext4" \
+            --work "$VM_WORK/smoke" --vcpus 2 --mem 4096 --timeout-s 300 --docker-ready-budget-ms 10000 \
+            --images-in "$VM_WORK/data-out/images.json" --events-out "$VM_WORK/smoke/events.json"
+          rm -f "$VM_WORK/smoke-data.ext4"
+      # T05 (#978): a job in a VM, started by the launcher of the local Dispatcher (runner/src/code_reviewer_runner/factory_runner/firecracker/).
+      # The artifacts of this build, a TAP device for the one slot as the installer makes it (#982), and a transient service with a delegated cgroup
+      # subtree as the installer's unit has (`Delegate=yes`, the user a normal one): the launcher runs as that user, with no capability. The fake App
+      # listens on every address, so the Worker in the VM reaches it through the TAP, which the outer wall of #979 forbids (the VM reaches the host
+      # only through the proxy), so this lane runs with the inner wall only (`inner-only`), an explicit choice of the launcher; the outer wall has
+      # its own step below.
+      - name: Launcher lane (T05, a real job in a VM; the wall clock; narrow over vsock; two slots; a crashed dispatcher's VM)
+        run: |
+          set -euo pipefail
+          sudo ip tuntap add dev fctap0 mode tap user "$USER" group "$(id -gn)"
+          sudo ip addr add 172.31.0.1/30 dev fctap0
+          sudo ip link set fctap0 up
+          # The second slot of the two-slot case (slot N owns 172.31.0.<4N>/30, the host side is its first address).
+          sudo ip tuntap add dev fctap1 mode tap user "$USER" group "$(id -gn)"
+          sudo ip addr add 172.31.0.5/30 dev fctap1
+          sudo ip link set fctap1 up
+          mkdir -p "$VM_WORK/launcher-state"
+          # The unit's one process is the interpreter itself (a wrapper such as `uv run` would stay behind in the delegated cgroup, and a cgroup
+          # with processes in it cannot enable controllers for its children: the launcher moves only itself into its leaf).
+          sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+            -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+            --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+            --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+            --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+            --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
+            --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
+            --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm --ignore=tests/kvm/test_outer_wall.py --ignore=tests/kvm/test_clients_through_proxy.py --ignore=tests/kvm/test_whole_job.py -v -s -p no:cacheprovider
+      # T01 and T02 (#979): the outer wall. The static nft table (docker/vm/host/outer-wall.nft) is checked as a file (`nft -c`), then a real VM runs the
+      # lane's probe in Control's own container (tests/kvm/wall_probe.py: a job clones over https before it narrows, and no lane has a git host) twice.
+      # First a CONTROL: no table, NAT on, so every target of T01 must be REACHED from the VM and the host's listeners must see the connection arrive.
+      # A probe that is "blocked" proves nothing unless the same probe reached its target without the wall (spike #970). Then the table is loaded and
+      # the same probes must reach nothing, while the proxy lets a setup-only host through before a real `narrow` (the Worker's own client, over vsock,
+      # with the VM's token) and refuses it after. The proxy connects to the real internet here, so the runner's `--disable-socket` is forced off. Targets on the host: RFC1918 and link-local addresses on a dummy interface, an IPv6 address on the TAP.
+      # The host forwards on purpose (as the runner does for its own Docker): the table, not the absence of routing, is what stops the VM.
+      - name: Outer wall lane (T01 and T02, the nft table, the proxy, a real narrow over vsock, with a control)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          sudo nft --version
+          # The table is a template: the installer fills in the network of the slots; these lanes use the launcher's default one.
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -c -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo sysctl -w net.ipv4.ip_forward=1
+          # The runner's Docker sets the policy of the FORWARD chain to DROP: the control's forwarded packets (and the wall run's, which the table must be
+          # the one to drop) need an explicit accept for our TAP devices.
+          sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
+          sudo ip link add lanehost type dummy
+          sudo ip link set lanehost up
+          for address in 10.77.0.2 172.16.77.2 192.168.77.2 169.254.169.253; do
+            sudo ip addr add "$address/32" dev lanehost
+          done
+          sudo ip -6 addr add fd00:fc:0::1/64 dev fctap0 nodad
+          sudo nft -f - <<'NAT'
+          table ip lanenat
+          delete table ip lanenat
+          table ip lanenat {
+            chain post {
+              type nat hook postrouting priority 100; policy accept;
+              ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+            }
+          }
+          NAT
+          lane() {
+            sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+              -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+              --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+              --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+              --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+              --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
+              --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
+              --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+              --setenv=KVM_WALL_PHASE="$1" \
+              "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_outer_wall.py -k "$2" --force-enable-socket -v -s -p no:cacheprovider
+          }
+          lane control control
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/wall-before.json" > /dev/null
+          lane wall "not control"
+          # The control of the whole-job lane's negative proof (#999): the probes above dial the host, the LAN and the internet directly, and the
+          # table drops them, so its drop counters MUST have moved. A table whose counters never move would make "they did not move" worth nothing.
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/wall-after.json" > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/wall_counters.py some "$RUNNER_TEMP/wall-before.json" "$RUNNER_TEMP/wall-after.json"
+      # T01 and T02 (#994): every client in the VM goes through the proxy. The table is loaded again (a no-op after the step above, and the one
+      # thing that stops a direct connection), the launcher runs with the proxy wall (the start carries the slot's `outerProxy`, vm-init writes it
+      # into Control's stdin), and a real VM runs tests/kvm/clients_probe.py in Control's own container: the product's own clients from the image
+      # (Control's calls to the app, git as the Implementer runs it, the model door's upstream, the network door chained to the proxy) before and
+      # after a real `narrow`. NAT and forwarding are on, as in the step above, so that the table is the only thing between the VM and the
+      # internet. The targets are public hosts (the runner has the internet; `--force-enable-socket` as above). The follow-up of #994 is a whole job
+      # in this lane (an https git host the Worker image trusts, an app on a public-looking name): see docs/runner.md.
+      - name: Clients lane (T01 and T02 of #994, every client through the proxy, the nft table loaded)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          # The table is a template: the installer fills in the network of the slots; these lanes use the launcher's default one.
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft list table inet code_reviewer_wall > /dev/null
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo iptables -C FORWARD -i 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -C FORWARD -o 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
+          sudo nft -f - <<'NAT'
+          table ip lanenat
+          delete table ip lanenat
+          table ip lanenat {
+            chain post {
+              type nat hook postrouting priority 100; policy accept;
+              ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+            }
+          }
+          NAT
+          sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+            -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+            --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+            --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+            --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+            --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-out/dockerdata.ext4" \
+            --setenv=KVM_VM_IMAGES="$VM_WORK/data-out/images.json" \
+            --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_clients_through_proxy.py --force-enable-socket -v -s -p no:cacheprovider
+      # The three rulesets the guest loads (the model door's, the network door's and the Setup bridge's, with the proxy), checked by `nft -c -f` on this
+      # runner's kernel (#999, the review of #994): nothing is loaded, a rule nft does not accept fails here and not on a customer's machine. The
+      # whole-job lane below loads them for real in the guest.
+      - name: In-VM rulesets (nft -c)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/render_rulesets.py "$RUNNER_TEMP/rulesets" | while read -r file; do
+            echo "nft -c -f $file"
+            sudo nft -c -f "$file"
+          done
+      # T01 to T05 (#999): a whole Implementer job in a VM with the outer wall's table loaded and `FACTORY_RUNNER_OUTER_WALL=proxy`. The local dispatcher's
+      # side claims from the fake App, the Worker fetches its job over the Worker API through the proxy, clones from a lane-local https git endpoint, runs
+      # a setup that reaches a public-looking host, gets the real `narrow`, the agent works behind the network door chained to the proxy and the model
+      # door reaches a fake provider through it, and the job pushes to the lane's git endpoint. The fakes are on this runner's loopback behind names
+      # below lane.example.com (the proxy gets a resolver and a connector of the lane: runner/tests/kvm/lane_internet.py); the Worker image is the
+      # lane's own copy with a test CA (built above, a data disk of its own). The table's drop counters are read before and after: a client that went
+      # round the proxy would be dropped and counted (the control is the outer wall lane above). A third job (#1009-T48) proves the freeze under Sysbox:
+      # a process in an inner container of the setup's Docker writes nothing to the repository while Control reads it, and writes again after.
+      - name: Whole-job lane (T01 to T05 of #999: a whole job through the proxy, the table loaded; #1009-T48: the freeze)
+        # The run takes about two minutes; a Worker that hangs would otherwise hold the job until its own limit. The step is stopped here, and the
+        # next step (always) still reads and prints the counters.
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq nftables > /dev/null
+          sed 's#@SLOT_NETWORK@#172.31.0.0/16#' docker/vm/host/outer-wall.nft > "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft -f "$RUNNER_TEMP/outer-wall.nft"
+          sudo nft list table inet code_reviewer_wall > /dev/null
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo iptables -C FORWARD -i 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -i 'fctap+' -j ACCEPT
+          sudo iptables -C FORWARD -o 'fctap+' -j ACCEPT 2> /dev/null || sudo iptables -I FORWARD -o 'fctap+' -j ACCEPT
+          sudo nft -f - <<'NAT'
+          table ip lanenat
+          delete table ip lanenat
+          table ip lanenat {
+            chain post {
+              type nat hook postrouting priority 100; policy accept;
+              ip saddr 172.31.0.0/16 oifname != "fctap*" masquerade
+            }
+          }
+          NAT
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/job-before.json" > /dev/null
+          sudo systemd-run --quiet --collect --wait --pipe --service-type=exec \
+            -p Delegate=yes -p User="$USER" --working-directory="$PWD/runner" \
+            --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
+            --setenv=KVM_VM_KERNEL="$VM_WORK/kernel/vmlinux" \
+            --setenv=KVM_VM_ROOTFS="$VM_WORK/rootfs-out/rootfs.ext4" \
+            --setenv=KVM_VM_BASE_DISK="$VM_WORK/data-lane-out/dockerdata.ext4" \
+            --setenv=KVM_VM_IMAGES="$VM_WORK/data-lane-out/images.json" \
+            --setenv=KVM_VM_STATE_DIR="$VM_WORK/launcher-state" \
+            --setenv=KVM_LANE_PKI="$VM_WORK/lane-pki" \
+            "$PWD/runner/.venv/bin/python" -m pytest -m kvm tests/kvm/test_whole_job.py --force-enable-socket -v -s -p no:cacheprovider
+      # The negative side of the whole-job lane (#999): no drop counter moved while the job ran (the control is the outer wall lane). Its own step, and
+      # `always()`, so that a job that failed, hung or was stopped by the step's timeout still prints what the table counted; it is skipped only when the
+      # snapshot before the job was never taken.
+      - name: Whole-job lane, the drop counters (none moved)
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUNNER_TEMP/job-before.json" ]; then
+            echo "no snapshot before the whole-job lane: it did not start"
+            exit 0
+          fi
+          sudo nft -j list table inet code_reviewer_wall | tee "$RUNNER_TEMP/job-after.json" > /dev/null
+          "$PWD/runner/.venv/bin/python" runner/tests/kvm/wall_counters.py none "$RUNNER_TEMP/job-before.json" "$RUNNER_TEMP/job-after.json"
+      # What the table did, for the log of a run (and of a failed one): the counters of each rule.
+      - name: The outer wall's counters
+        if: ${{ always() }}
+        run: sudo nft list table inet code_reviewer_wall || true
+      - name: Manifest
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: docker/vm/assemble.sh "$VM_WORK/release" "$VM_WORK/kernel" "$VM_WORK/rootfs-out" "$VM_WORK/data-out" "$RELEASE" "$(git rev-parse HEAD)"
+      - name: Sign with a throwaway key, verify, and see a changed byte refused
+        run: docker/vm/selftest-signing.sh "$VM_WORK/release"
+      - name: Summary
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          {
+            echo "### VM artifacts (release $RELEASE)"
+            echo
+            echo "| File | Size (MiB) |"
+            echo "|---|---|"
+            for f in "$VM_WORK"/release/*; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(( $(stat -c %s "$f") / 1048576 ))"
+            done
+            echo
+            echo "Smoke boot events:"
+            echo
+            echo '```'
+            jq -r '.[] | "\(.hostMs) ms  \(.name) \(.fields | tojson)"' "$VM_WORK/smoke/events.json" | cut -c1-200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Logs of the guests
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: vm-artifacts-logs
+          path: |
+            ${{ env.VM_WORK }}/dwork/seed-boot
+            ${{ env.VM_WORK }}/smoke
+            ${{ env.VM_WORK }}/release/manifest.json
+          retention-days: 3
+          if-no-files-found: ignore
+      # For a release only. Not an artifact (see the top): the cache is restored by the one job that signs, which verifies every file against the
+      # manifest before it publishes anything, so a cache that held other bytes would fail there.
+      - name: The release's files, for the job that signs and publishes them (the Actions cache, not an artifact)
+        if: ${{ inputs.for_release }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VM_WORK }}/release
+          key: vm-release-files-${{ github.run_id }}

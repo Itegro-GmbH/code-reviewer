@@ -23,8 +23,9 @@ import json
 import logging
 import re
 import signal
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Final
 from urllib.parse import urlsplit
 
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
@@ -32,6 +33,11 @@ from code_reviewer_runner.job_loop.api import ApiError, ApiRejected, ApiUnavaila
 from code_reviewer_runner.job_loop.clock import Clock, RealClock
 from code_reviewer_runner.job_loop.host import JobEnd, JobHost
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.job_loop.local_credential import (
+    LOCAL_CREDENTIAL_NAMES,
+    LOCAL_CREDENTIAL_VALUE,
+    LocalCredential,
+)
 from code_reviewer_runner.job_loop.masking import SafeLog, SecretMasker
 from code_reviewer_runner.job_loop.process import ProcessLauncher, SubprocessLauncher
 from code_reviewer_runner.job_loop.settings import WorkerSettings
@@ -48,6 +54,8 @@ from code_reviewer_runner.job_loop.worker_errors import (
     WorkerFailure,
     WorkerSetupError,
 )
+from code_reviewer_runner.outer_proxy import OuterProxy, OuterProxyError
+from code_reviewer_runner.result import ErrorCode
 
 LOGGER_NAME = "code_reviewer_runner.loop"
 # The start document is small; anything larger is not one.
@@ -61,6 +69,8 @@ FETCH_MAX_PAUSE_SECONDS = 30.0
 _JOB_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 # WorkerCredential of the runner API contract: `crj_` and 256 bits in base64url.
 _CREDENTIAL = re.compile(r"crj_[A-Za-z0-9_-]{43}")
+# `ControlToken` of the contracts: the host's per-VM token for the environment control (#977).
+_CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,13 @@ class WorkerRequest:
     app_url: str
     job_id: str
     credential: str = field(repr=False)
+    # The host's per-VM token (vm-init puts it on this stdin with the credential, #977): the
+    # environment control sends it in every request. None for a Worker that no vm-init started.
+    control_token: str | None = field(default=None, repr=False)
+    # The outer wall's proxy of this VM's slot (vm-init puts it on this stdin from the host's start,
+    # #994): every client of this Worker that dials the internet goes through it. None: no outer
+    # wall (hosted, or a machine without the proxy wall), the clients dial as before.
+    outer_proxy: OuterProxy | None = None
 
 
 def _invalid(detail: str) -> WorkerSetupError:
@@ -91,8 +108,9 @@ def _app_url(raw: object) -> str:
 
 
 def parse_request(raw: str) -> WorkerRequest:
-    """The start document: `{"appUrl", "jobId", "credential"}`. Other keys are ignored, so a newer
-    Dispatcher can add one without breaking an older Worker."""
+    """The start document: `{"appUrl", "jobId", "credential"}` and, from vm-init, `"controlToken"`
+    and `"outerProxy"`. Other keys are ignored, so a newer Dispatcher can add one without breaking
+    an older Worker."""
     if len(raw.encode("utf-8", errors="replace")) > MAX_START_DOCUMENT_BYTES:
         raise _invalid("the start document is too large")
     try:
@@ -108,14 +126,65 @@ def parse_request(raw: str) -> WorkerRequest:
         raise _invalid("jobId must be a UUID")
     if not isinstance(credential, str) or not _CREDENTIAL.fullmatch(credential):
         raise _invalid("credential must be a job credential")
+    control_token: str | None = None
+    if "controlToken" in fields:
+        given = fields["controlToken"]
+        if not isinstance(given, str) or not _CONTROL_TOKEN.fullmatch(given):
+            raise _invalid("controlToken must be a control token")
+        control_token = given
+    outer_proxy: OuterProxy | None = None
+    if "outerProxy" in fields:
+        # A proxy that is given and is not one the host could have given is an input error: the
+        # Worker never dials directly because it could not read where its way out is.
+        try:
+            outer_proxy = OuterProxy.from_json(fields["outerProxy"])
+        except OuterProxyError as error:
+            raise _invalid(f"outerProxy: {error}") from None
     return WorkerRequest(
-        app_url=_app_url(fields.get("appUrl")), job_id=job_id, credential=credential
+        app_url=_app_url(fields.get("appUrl")),
+        job_id=job_id,
+        credential=credential,
+        control_token=control_token,
+        outer_proxy=outer_proxy,
     )
 
 
-def _exit_for(end: JobEnd) -> WorkerExit:
+def parse_local_credential(raw: str) -> LocalCredential | None:
+    """The credential of the dispatcher's own device in the start document (`localCredential`,
+    #980): a Claude Code subscription token that exists only on that device, as `{"name", "value"}`.
+    One shape for the Worker of a process and for Control in a VM (`local_credential.py`). It comes
+    from the dispatcher, never from the app. An unknown name, an odd value or an extra field is an
+    input error that names the field and never the value."""
+    fields = as_object(json.loads(raw))
+    given = fields.get("localCredential") if fields is not None else None
+    if given is None:
+        return None
+    record = as_object(given)
+    if record is None or set(record) != {"name", "value"}:
+        raise _invalid("localCredential must be an object with a name and a value")
+    name, value = record["name"], record["value"]
+    if not isinstance(name, str) or name not in LOCAL_CREDENTIAL_NAMES:
+        raise _invalid("localCredential names a variable that is not a credential of a device")
+    if not isinstance(value, str) or not LOCAL_CREDENTIAL_VALUE.fullmatch(value):
+        raise _invalid("localCredential holds a value that is not one token")
+    return LocalCredential(name, value)
+
+
+# #980: a job the subscription of the device refused ends with the code the app stores and, for the
+# dispatcher of that device, an exit code of its own: the exit code is what reaches it through a
+# process and through a VM alike (vm-init passes any status on). Under 125 (Docker's own statuses).
+_VERDICT_EXITS: Final = {
+    ErrorCode.SUBSCRIPTION_AUTH.value: WorkerExit.SUBSCRIPTION_AUTH,
+    ErrorCode.SUBSCRIPTION_LIMIT.value: WorkerExit.SUBSCRIPTION_LIMIT,
+    ErrorCode.SUBSCRIPTION_MODEL_REFUSED.value: WorkerExit.SUBSCRIPTION_MODEL_REFUSED,
+}
+
+
+def _exit_for(end: JobEnd, error_code: str | None = None) -> WorkerExit:
     if end in (JobEnd.OK, JobEnd.GIVEN_BACK, JobEnd.SUPERSEDED, JobEnd.CANCELLED):
         return WorkerExit.OK
+    if end in (JobEnd.FAILED, JobEnd.NOT_DELIVERED) and error_code in _VERDICT_EXITS:
+        return _VERDICT_EXITS[error_code]
     return WorkerExit.FAILED
 
 
@@ -171,15 +240,30 @@ async def run_worker(
     logger: logging.Logger | None = None,
     sweeper: Callable[[int, int], bool] = sweep_user,
     install_signals: bool = False,
+    guard: Callable[[], Awaitable[str]] | None = None,
+    extra_secrets: Sequence[str] = (),
 ) -> WorkerExit:
     """Fetch the job, run it, deliver the result. `install_signals`: SIGTERM and SIGINT end the job
-    and give it back (the entry point sets it; a test that runs this in-process does not)."""
+    and give it back (the entry point sets it; a test that runs this in-process does not).
+
+    `guard` and `extra_secrets` are for a Worker a customer's own dispatcher starts (#974): a guard
+    that ends the job with a text when the machine's disk budget is used up, and the credentials of
+    that device (the environment holds them for the job process; the masker must know them too)."""
     logger = logger or logging.getLogger(LOGGER_NAME)
     clock = clock or RealClock()
-    masker = SecretMasker([request.credential])
+    masker = SecretMasker(
+        [
+            request.credential,
+            *([request.control_token] if request.control_token else []),
+            *extra_secrets,
+        ]
+    )
     log = SafeLog(logger, masker)
     api = api or HttpWorkerApi(
-        request.app_url, request.credential, request_timeout=settings.request_timeout
+        request.app_url,
+        request.credential,
+        request_timeout=settings.request_timeout,
+        proxy=request.outer_proxy,
     )
     host = JobHost(
         settings,
@@ -191,6 +275,9 @@ async def run_worker(
         environment=environment,
         sweeper=sweeper,
         refuse_unadvertised_engine=True,
+        guard=guard,
+        control_token=request.control_token,
+        outer_proxy=request.outer_proxy,
     )
     stopping = asyncio.Event()
 
@@ -235,7 +322,7 @@ async def _run(
         await asyncio.gather(stop, fetching, return_exceptions=True)
     end = await host.run_job(claimed)
     log.info("worker done: %s", end.value)
-    return _exit_for(end)
+    return _exit_for(end, host.last_error_code)
 
 
 async def _prepare(

@@ -68,7 +68,7 @@ describe("the GitHub Actions files", () => {
         if (uses.startsWith("./")) continue;
         if (uses.startsWith("actions/")) {
           expect(uses, `${path}: ${uses}`).toMatch(
-            /^actions\/[\w-]+@(v\d+|[0-9a-f]{40})$/,
+            /^actions\/[\w-]+(\/(restore|save))?@(v\d+|[0-9a-f]{40})$/,
           );
           continue;
         }
@@ -157,9 +157,18 @@ describe("the GitHub Actions files", () => {
             "${{ secrets.INFISICAL_PROJECT_SLUG }}",
           );
         }
-        // Nothing else uses the environment: it is the one that holds the sign-in.
+        // Nothing else uses the environment: it is the one that holds the sign-in. The other environments are the release environments of
+        // the VM artifacts (#976) and of the Factory-Runner's program (#1002), each of which holds the signing key of its release and no
+        // Infisical sign-in (the loop above fails for any job that has both).
         if (job.environment !== undefined)
-          expect(job.environment, `${path}: ${name}`).toBe("production");
+          expect(
+            job.environment === "production" ||
+              (path === ".github/workflows/vm-artifacts-release.yml" &&
+                job.environment === "vm-artifacts-release") ||
+              (path === ".github/workflows/runner-program-release.yml" &&
+                job.environment === "runner-program-release"),
+            `${path}: ${name}`,
+          ).toBe(true);
       }
     }
     expect(signIns).toBeGreaterThanOrEqual(10);

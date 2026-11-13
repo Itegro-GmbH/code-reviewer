@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """The disk budget of a runner's job on a real Docker daemon (#855, R2): what a container writes
-into its own layer and what a setup result is committed as are measured, a budget that is passed
-is noticed, and the cleaning after a job frees both. The host's side (the job is ended and
+into its own layer is measured (the agent's container is also the one the environment's setup
+script ran in, #1009), a budget that is passed is noticed, and the cleaning after a job frees it,
+and the image an earlier version committed a setup result as. The host's side (the job is ended and
 reported) is the unit test's; this proves the measure and the removal against the daemon they
 are for."""
 
@@ -65,8 +66,8 @@ def test_what_a_container_writes_is_measured_noticed_and_freed_by_the_tidy(tmp_p
         docker("rm", "-f", WRITER, check=False)
 
 
-# #855-L02
-def test_the_image_a_setup_result_is_committed_as_counts_its_added_layer_and_is_removed(
+# #855-L02, #1009
+def test_the_image_an_earlier_version_committed_a_setup_result_as_is_removed_by_the_tidy(
     tmp_path: Path,
 ) -> None:
     config = lane_config()
@@ -81,10 +82,9 @@ def test_the_image_a_setup_result_is_committed_as_counts_its_added_layer_and_is_
         docker("rm", "-f", COMMITTED)
         api = DockerApi()
 
-        # What the commit added to the agent image: the 5 000 000 bytes, not the agent image's own
-        # size (gigabytes) that the committed image carries as its parent.
-        used = used_bytes(api, tmp_path, RUNNER, base_image=base)
-        assert 5_000_000 <= used < 5_000_000 + 2**20, f"{used} bytes"
+        # Nothing is counted for the name: a setup result is not committed any more, what the script
+        # left is in the agent's container, whose layer is measured above.
+        assert used_bytes(api, tmp_path, RUNNER) < 2**20
 
         assert tidy(TidySeams(work_dir=tmp_path, runner_id=RUNNER)) == []
 

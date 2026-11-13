@@ -11,6 +11,10 @@
       "secret": "example-dispatch-secret-previous-0000000"
     }
   },
+  "otherDispatcher": {
+    "kid": "d-3f9a1c7e",
+    "secret": "example-other-dispatcher-secret-000000"
+  },
   "vectors": [
     {
       "name": "valid, current key",
@@ -179,6 +183,32 @@
       },
       "body": "{\"version\":1,\"type\":\"job.ready\",\"jobId\":\"0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10\",\"reviewKind\":\"diff\",\"attempt\":1,\"dispatchId\":\"5d3a8c0e-91b4-4f6a-a2c7-3e8b1d7f4a92\",\"sentAt\":\"2026-10-10T12:00:00.000Z\"}",
       "expected": "malformed"
+    },
+    {
+      "name": "another dispatcher's secret under this dispatcher's key id",
+      "now": 1791633600,
+      "headers": {
+        "content-type": "application/json",
+        "x-dispatch-timestamp": "1791633600",
+        "x-dispatch-id": "5d3a8c0e-91b4-4f6a-a2c7-3e8b1d7f4a92",
+        "x-dispatch-key-id": "k2",
+        "x-dispatch-signature": "v1=4194f7c48d9a68836a252249a11a47ad55e7ada8cc02632f2ce394293cc29135"
+      },
+      "body": "{\"version\":1,\"type\":\"job.ready\",\"jobId\":\"0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10\",\"reviewKind\":\"diff\",\"attempt\":1,\"dispatchId\":\"5d3a8c0e-91b4-4f6a-a2c7-3e8b1d7f4a92\",\"sentAt\":\"2026-10-10T12:00:00.000Z\"}",
+      "expected": "bad_signature"
+    },
+    {
+      "name": "another dispatcher's key id and secret",
+      "now": 1791633600,
+      "headers": {
+        "content-type": "application/json",
+        "x-dispatch-timestamp": "1791633600",
+        "x-dispatch-id": "5d3a8c0e-91b4-4f6a-a2c7-3e8b1d7f4a92",
+        "x-dispatch-key-id": "d-3f9a1c7e",
+        "x-dispatch-signature": "v1=4194f7c48d9a68836a252249a11a47ad55e7ada8cc02632f2ce394293cc29135"
+      },
+      "body": "{\"version\":1,\"type\":\"job.ready\",\"jobId\":\"0b9f6f4e-3c1a-4d9e-8f43-2a7d5e1c9b10\",\"reviewKind\":\"diff\",\"attempt\":1,\"dispatchId\":\"5d3a8c0e-91b4-4f6a-a2c7-3e8b1d7f4a92\",\"sentAt\":\"2026-10-10T12:00:00.000Z\"}",
+      "expected": "unknown_key"
     }
   ]
 }

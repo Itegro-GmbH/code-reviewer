@@ -1,0 +1,30 @@
+# What the local root file system adds to the golden snapshot's install (#976). The hosted base image (Vercel's Ubuntu 26.04.1) already has
+# these; Ubuntu Base does not. Docker, buildx, kmod and Sysbox are NOT here: they come from the golden snapshot's own install scripts
+# (dispatcher/src/vm-artifacts/recipe.ts), run unchanged. One package per line; Ubuntu's signed archive, not version pinned (the build
+# records every installed version, packages.txt of the release).
+#
+# docker-init's source: Docker runs `docker-init` for `docker run --init`, and the guest's PID 1 is it
+tini
+# the base of a VM that Docker and Sysbox need (cgroup layout, mounts, network namespace tools, the nft/iptables Docker programs)
+iproute2
+iptables
+nftables
+fuse3
+lsb-release
+procps
+util-linux
+psmisc
+# the prepare scripts, the sysbox proof and vm-init
+jq
+python3
+curl
+openssl
+ca-certificates
+# the job disk: grown before the start (resize2fs) and checked after a crash (e2fsck)
+e2fsprogs
+xfsprogs
+# tools the images' own tooling expects on the host
+rsync
+iputils-ping
+pigz
+xz-utils

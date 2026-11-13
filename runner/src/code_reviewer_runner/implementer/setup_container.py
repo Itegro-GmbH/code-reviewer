@@ -1,29 +1,41 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The Setup container (#818, step 5 of `plans/implementer-sandbox.md`): the environment's script
-runs here, once, before the model is called, and what it leaves behind becomes the agent's image.
+"""The first phase of the agent's container (#818, #1009): the environment's script runs in it,
+once, before the model is called, and the agent then runs in the very same container.
 
-Control starts a throwaway container from the agent's own image, under `sysbox-runc`, as root, with
-its own `dockerd` and the repository (the same Subpath of the work volume the agent will get). The
-script from the environment runs in it as an exec: `bash -e` (or the interpreter of its `#!` line),
-working directory the repository, root, all of the image's tools. When it ends with status 0 the
-container's own Docker is stopped, the container is stopped, and its file system, with whatever the
-script installed and whatever images its inner Docker pulled, is committed (`docker commit`) as the
-image the Agent container starts from. Then the Setup container is removed.
+Control starts the container from the agent's own image under `sysbox-runc`, as root, with its own
+`dockerd` and the repository (the same Subpath of the work volume the agent gets) and puts it on the
+setup network. The script from the environment runs in it as an exec: `bash -e` (or the interpreter
+of its `#!` line), working directory the repository, root, all of the image's tools. When it ends
+with status 0 the container is **not** stopped and nothing is saved: Control takes it off the setup
+network (the one change of the hand-over that stops something: a process of the script that still
+holds a connection to the internet loses it; the network itself is removed by whoever connects the
+container to the model network next) and freezes it (`docker pause`, and asks the daemon whether it
+is frozen) while it reads the repository: a root process the script left would otherwise go on
+writing the repository, a link into the work volume among it, while Control resets and cleans it.
+Both steps must hold: a container that cannot leave the network or be confirmed frozen is killed
+and removed and the turn ends. The agent's container object (`AgentContainer`, `adopted=`) takes it
+over: it puts it on the model network, which is what `narrow` is for the container, and starts the
+agent in it. What the script left is what the agent has: files, the images, containers and
+volumes of the container's own Docker, and the processes that are still running (a Postgres the
+script started keeps serving). The agent can use them and stop them. Nothing is reset at the
+narrowing. (Before #1009 the container was stopped and committed as an image, which kept the files
+and images and lost every process.)
 
 **What it has: nothing of ours.** No git token, no model key, no job token, no environment variable
-of its own, no mount but the repository, no socket, no device. Its definition is made of constants
-and of identifiers the daemon gave (as the agent's is), and Control reads the container back from
-the daemon before it runs the script, as it does for the agent. The script is free inside it: it has
-root, the internet and Docker. The script's text is data written by a member of the workspace, and
-the only place it is ever put is a file in this container.
+of its own, no mount but the repository (and the result directory of a turn with a result schema),
+no socket, no device. Its definition is made of constants and of identifiers the daemon gave (as it
+is for an agent with no script), and Control reads the container back from the daemon before it runs
+the script, as it does for the agent. The script is free inside it: it has root, the internet and
+Docker. The script's text is data written by a member of the workspace, and the only place it is
+ever put is a file in this container.
 
 **How it reaches the internet and nothing of ours.** The container is alone on a network of its own
 (`SETUP_NETWORK_NAME`, a bridge named `SETUP_BRIDGE`, not internal, so Docker masquerades its
 traffic to the internet). Its way to Control, the model door, the VM's services (the control port
 `23456` among them), the platform's own addresses and every private range is closed **in the VM's
 own network namespace**, by a table of `nft` rules that a one-shot container with `NET_ADMIN` in
-the host's namespace installs before the Setup container exists (`EGRESS_RULES`). The rules are on
+the host's namespace installs before the container exists (`EGRESS_RULES`). The rules are on
 the VM's side of the bridge, not in the container: the container is root of a user namespace of its
 own and owns its network namespace, so anything installed inside it, the script could remove; the
 host's rules, it cannot reach. Packets from its bridge to the VM itself (input) are dropped; packets
@@ -32,12 +44,30 @@ the model network), are dropped (IPv6 is not forwarded by the VM at all); the re
 is open on every port,
 which includes the inner containers of its own Docker (their traffic is routed through the
 container's address). DNS goes to public resolvers named in the container's definition, because the
-VM's own resolver is on a private address. A Setup whose rules did not go in is never started.
+VM's own resolver is on a private address. A container whose rules did not go in is never started.
+
+**On a customer's machine** (#994, a VM with no direct internet whose only way out is the host's
+outer-wall proxy, `outer_proxy.py`) the container gets the usual proxy variables (`HTTP_PROXY`,
+`HTTPS_PROXY` and their lower-case twins, `NO_PROXY` for loopback) from the host's address, so the
+script's package managers, `git`, `curl` and the Docker daemon inside it (which reads them for
+image pulls) go through the proxy, which does the name lookup and applies the wide rule of the
+setup. The VM's own table then lets the bridge reach that proxy's address and port and nothing
+else (`egress_rules`): no DNS, no other port, no other address. A tool that ignores the variables
+finds no way out, and says so; none falls back to a direct connection. This container's one
+variable that is not the image's own is those, and the seal check knows them. The agent's tools get
+them emptied and the door's instead (`AgentContainer`), and the inner daemon is started again with
+the door's (`AgentContainer.restart_docker`).
+
+**The script's output** goes to a file in the container (`SCRIPT_OUTPUT`), which the shell around
+the script sends on as it grows and until the script's own process has exited (`RUN_SCRIPT`), never
+the exec's stream itself: a daemon the script leaves behind (`nohup postgres &`) inherits the
+script's standard output, and one that held the exec's pipe kept the stream open after the script
+had exited and got SIGPIPE when it was closed.
 
 **The result.** The end of the script's output (stdout and stderr together, bounded to the last
-`OUTPUT_KEEP_BYTES`), its exit status, whether it ran out of time and the image id. A script that
-exits non-zero, runs past its time limit, or leaves a disk that cannot hold the commit, ends the
-turn before the model is used (`environment_setup.py`).
+`OUTPUT_KEEP_BYTES`), its exit status, whether it ran out of time and the container's id. A script
+that exits non-zero or runs past its time limit ends the turn before the model is used
+(`environment_setup.py`), and the container is removed.
 """
 
 import contextlib
@@ -50,16 +80,17 @@ from dataclasses import dataclass
 from typing import Any, Final, cast
 
 from code_reviewer_runner.job_loop.jsonvalues import as_object
+from code_reviewer_runner.outer_proxy import OuterProxy
 
 from .agent_container import (
-    AGENT_ENTRYPOINT,
+    AGENT_CONTAINER_NAME,
     AGENT_IMAGE_REFERENCE,
-    AGENT_OOM_SCORE_ADJ,
-    AGENT_PIDS_LIMIT,
     AGENT_REPO,
     AGENT_RUNTIME,
     READY_FILE,
     WRITE_FILE_SCRIPT,
+    Adopted,
+    agent_document,
 )
 from .docker_api import DockerApi, DockerError
 from .door_launcher import PRIVATE_RANGES
@@ -73,13 +104,14 @@ from .host_rules import (
     inet_failure_note,
     run_helper,
 )
-from .reader import REPO_SUBPATH, work_volume_of
+from .placement import B_WORK_VOLUME, HOSTED, Placement
+from .reader import work_volume_of
+from .result_channel import AGENT_RESULT_DIRECTORY
 from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
 
 _log = logging.getLogger(__name__)
 
-SETUP_CONTAINER_NAME: Final = "code-reviewer-setup"
 SETUP_NETWORK_NAME: Final = "code-reviewer-setup"
 # The bridge's own name, so that the rules can name it before it exists (a name is matched when a
 # packet comes in).
@@ -89,35 +121,58 @@ SETUP_NETWORK_GATEWAY: Final = "10.213.78.1"
 SETUP_ADDRESS: Final = "10.213.78.2"
 # Public resolvers: the VM's resolver is on a private address the rules close.
 SETUP_DNS: Final = ("1.1.1.1", "8.8.8.8")
-# The image the committed result gets: the agent's repository name and a tag of its own.
-SETUP_IMAGE_REPOSITORY: Final = "code-reviewer-agent"
-SETUP_IMAGE_TAG: Final = "environment"
-SETUP_HOSTNAME: Final = "setup"
 
 SCRIPT_PATH: Final = "/tmp/code-reviewer-setup.sh"
 BASH: Final = "/bin/bash"
 SH: Final = "/bin/sh"
 # The environment of the script: the image's own, and these two (no terminal, no prompt, a home).
 SCRIPT_ENVIRONMENT: Final = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-# The script runs through this (the script path is the one argument); a script that starts with a
-# `#!` line is executed as itself.
-RUN_SCRIPT: Final = (
-    'if head -c 2 "$1" | grep -q "^#!"; then chmod 700 "$1"; exec "$1" 2>&1; '
-    'else exec /bin/bash -e "$1" 2>&1; fi'
-)
-
-# What happens after a script that ended well: remove the script's file, then ask the container's
-# Docker to stop the way a daemon is stopped (SIGTERM), so that its images are on disk in one piece.
-# The container's init ends with the daemon and the container stops by itself, which also ends this
-# exec: its exit status says nothing, so Control waits for the container, not for the exec. A
-# container with no daemon (the test lane under runc) has no pid file and says so.
-NO_DOCKER: Final = "no-docker"
-FINISH_SCRIPT: Final = f"""
-rm -f "$1"
-pid=$(cat /var/run/docker.pid 2>/dev/null) || {{ echo {NO_DOCKER}; exit 0; }}
-kill -TERM "$pid" 2>/dev/null || {{ echo {NO_DOCKER}; exit 0; }}
-echo stopping
+SCRIPT_OUTPUT: Final = "/tmp/code-reviewer-setup.out"
+# The script runs through this (`$1` is the script's path, `$2` the file its output goes to); a
+# script that starts with a `#!` line is executed as itself. The script's standard output and error
+# are that **file**, never the exec's stream: a daemon the script leaves behind (`nohup postgres
+# &`, `pg_ctl start`, `./server &`) inherits them, and a daemon that held the exec's pipe kept the
+# stream open after the script had exited 0 (the step then waited for its time limit) and got
+# SIGPIPE when the stream was closed. The shell sends the file's new bytes on its own standard
+# output while the script's own process runs, and the rest once it has exited (`$2.done` tells the
+# reader), so that the output reaches Control as it is written and the exec ends with the script.
+# Its status is the script's. The script has no input. The script is root in the container and can
+# tamper with the file, `$2.done` or the tools the shell uses: that hides its own output or keeps
+# the step waiting until its time limit, never a status of 0 it did not exit with.
+RUN_SCRIPT: Final = r"""
+rm -f "$2.done"
+: > "$2"
+(
+  if head -c 2 "$1" | grep -q "^#!"; then chmod 700 "$1"; exec "$1"
+  else exec /bin/bash -e "$1"; fi
+) < /dev/null > "$2" 2>&1 &
+script=$!
+(
+  sent=0
+  while :; do
+    [ -e "$2.done" ] && last=1 || last=0
+    size=$(wc -c < "$2")
+    if [ "$size" -gt "$sent" ]; then
+      tail -c +$((sent + 1)) "$2" | head -c $((size - sent))
+      sent=$size
+    fi
+    [ "$last" = 1 ] && break
+    sleep 0.1
+  done
+) &
+reader=$!
+wait "$script"
+status=$?
+: > "$2.done"
+wait "$reader"
+exit "$status"
 """
+
+# What happens after a script that ended well: its file and its output are removed (the hand-over
+# keeps the container, and the agent must not find the script lying around in it). The output is
+# emptied first: a daemon the script left may still hold it open, and a removed name alone would
+# leave it writing into an unlinked file that no measure of the disk budget sees.
+CLEAN_SCRIPT: Final = ': > "$2"; rm -f "$1" "$2" "$2.done"'
 
 # The VM's firewall for the Setup container's bridge (see the module text). An `ip` table in the
 # host's namespace, hooked before Docker's own rules (priority -10), whose only verdicts are drops:
@@ -148,6 +203,34 @@ EGRESS_RULES: Final = "; ".join(
         f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
     ]
 )
+
+
+def egress_rules(outer_proxy: OuterProxy | None = None) -> str:
+    """The VM's firewall for the Setup bridge. With the host's outer-wall proxy (#994) the bridge
+    may open a connection to that proxy's address and port (let through before the drop; the table's
+    only `accept`) and nothing else leaves it: every other packet from the bridge is dropped, the
+    private ranges and the internet alike, since the proxy is the one way to the internet and does
+    the lookup. Without a proxy it is `EGRESS_RULES`, as hosted."""
+    if outer_proxy is None:
+        return EGRESS_RULES
+    bridge = f'iifname "{SETUP_BRIDGE}"'
+    return "; ".join(
+        [
+            f"add table ip {EGRESS_TABLE}",
+            f"add chain ip {EGRESS_TABLE} input "
+            "{ type filter hook input priority -10 ; policy accept ; }",
+            f'add rule ip {EGRESS_TABLE} input iifname "{SETUP_BRIDGE}" drop',
+            f"add chain ip {EGRESS_TABLE} forward "
+            "{ type filter hook forward priority -10 ; policy accept ; }",
+            f"add rule ip {EGRESS_TABLE} forward {bridge} ip daddr {outer_proxy.host} "
+            f"tcp dport {outer_proxy.port} accept",
+            f"add rule ip {EGRESS_TABLE} forward {bridge} drop",
+            f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "docker0" drop',
+            f'add rule ip {EGRESS_TABLE} forward oifname "{SETUP_BRIDGE}" iifname "br-*" drop',
+        ]
+    )
+
+
 CHECK_RULES: Final = f"list table ip {EGRESS_TABLE}"
 RULES_SECONDS: Final = 20.0
 
@@ -155,25 +238,11 @@ RULES_SECONDS: Final = 20.0
 # turn's time budget); these are the parts around it, and `SETUP_OVERHEAD_SECONDS` is their sum:
 # what the caller must leave besides the script.
 READY_SECONDS: Final = 60.0
-FINISH_EXEC_SECONDS: Final = 30.0
-# How long the container's Docker has to stop and end the container by itself.
-DOCKER_STOP_SECONDS: Final = 120.0
-STOP_GRACE_SECONDS: Final = 20
-STOP_WAIT_SECONDS: Final = 40.0
-# The commit. Measured on a platform VM (2 vCPU, 2026-11-03): 3.9 GB of image in 61 s, which is
-# 64 MB/s. The budget is a commit of 4 GB (`COMMIT_REFERENCE_BYTES`) on a disk four times slower
-# than that (a VM whose disk is busy with the agent's Docker): 250 s, rounded up to 300 s.
-COMMIT_MEASURED_BYTES_PER_SECOND: Final = 64 * 1000**2
-COMMIT_REFERENCE_BYTES: Final = 4 * 1000**3
-COMMIT_SLOWDOWN: Final = 4
-COMMIT_SECONDS: Final = 300.0
-# What a commit needs on the VM's disk besides the container's writable layer, which it writes
-# twice (the layer as a tar and the copy the daemon unpacks), and the question about that size.
-COMMIT_ROOM_FACTOR: Final = 2
-COMMIT_HEADROOM_BYTES: Final = 1024**3
-ROOM_SECONDS: Final = 30.0
-REMOVE_SECONDS: Final = 120.0
+# The hand-over: the script's file removed, the container taken off the setup network, the network
+# removed and the container frozen. Each call to the daemon has this.
+HANDOVER_SECONDS: Final = 30.0
 SCRIPT_WRITE_SECONDS: Final = 30.0
+REMOVE_SECONDS: Final = 120.0
 KILL_SECONDS: Final = 15.0
 # After a script that did not end by itself the container is killed, the exec that ran it is
 # joined, and the clean-up kills it once more before it removes it (each call to the daemon has
@@ -187,12 +256,7 @@ SETUP_OVERHEAD_SECONDS: Final = (
     + READY_SECONDS
     + SCRIPT_WRITE_SECONDS
     + KILL_STEPS_SECONDS
-    + FINISH_EXEC_SECONDS
-    + DOCKER_STOP_SECONDS
-    + STOP_WAIT_SECONDS
-    + ROOM_SECONDS
-    + COMMIT_SECONDS
-    + REMOVE_SECONDS
+    + HANDOVER_SECONDS * 4
 )
 # The most of the script's output that is kept: its end.
 OUTPUT_KEEP_BYTES: Final = 64 * 1024
@@ -203,9 +267,8 @@ OUTCOME_SCRIPT_FAILED: Final = "script_failed"
 OUTCOME_TIMED_OUT: Final = "timed_out"
 OUTCOME_STOPPED: Final = "stopped"
 OUTCOME_UNAVAILABLE: Final = "unavailable"
-OUTCOME_NOT_SAVED: Final = "not_saved"
-# The script ended well and the VM's disk has too little room for the commit of its result.
-OUTCOME_NO_ROOM: Final = "no_room"
+# The script ended well and the container could not be handed to the agent.
+OUTCOME_NOT_HANDED_OVER: Final = "not_handed_over"
 
 
 def network_document() -> dict[str, Any]:
@@ -234,46 +297,36 @@ def setup_document(
     runtime: str = AGENT_RUNTIME,
     entrypoint: Sequence[str] | None = None,
     nano_cpus: int = 0,
+    outer_proxy: OuterProxy | None = None,
+    result: bool = False,
+    no_new_privileges: bool = False,
+    placement: Placement = HOSTED,
 ) -> dict[str, Any]:
-    """The Setup container: the agent's image, the agent's limits, the repository and nothing else.
-    Constants, the image id, the volume name the daemon gave and the memory the Dispatcher computed.
-    No environment variable, no secret, no job."""
-    return {
-        "Image": image,
-        "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
-        "Cmd": [],
-        "User": "0:0",
-        "Env": [],
-        "Hostname": SETUP_HOSTNAME,
-        "WorkingDir": AGENT_REPO,
-        "Labels": role_labels("setup"),
-        "NetworkingConfig": {
-            "EndpointsConfig": {SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}}
-        },
-        "HostConfig": {
-            "Runtime": runtime,
-            "NetworkMode": SETUP_NETWORK_NAME,
-            "Dns": list(SETUP_DNS),
-            "Privileged": False,
-            "Memory": memory_bytes,
-            "MemorySwap": memory_bytes,
-            # A customer's runner (#855) limits the CPUs of this container as it does the agent's.
-            **({"NanoCpus": nano_cpus} if nano_cpus > 0 else {}),
-            "PidsLimit": AGENT_PIDS_LIMIT,
-            "OomScoreAdj": AGENT_OOM_SCORE_ADJ,
-            "RestartPolicy": {"Name": "no"},
-            "PublishAllPorts": False,
-            "Mounts": [
-                {
-                    "Type": "volume",
-                    "Source": work_volume,
-                    "Target": AGENT_REPO,
-                    "ReadOnly": False,
-                    "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
-                }
-            ],
-        },
+    """The container of the setup, which is the agent's: the agent's definition (its image, limits,
+    name, labels and mounts, so that nothing has to change when it takes over) on the setup network
+    instead of the model network, with the public resolvers, and no environment variable of its own
+    but the proxy's (#994, only on a customer's machine: the host's address, never a job's).
+    Constants, the image id, the volume name the daemon gave and the memory the Dispatcher
+    computed. No secret, no job."""
+    document = agent_document(
+        image,
+        work_volume,
+        memory_bytes,
+        runtime=runtime,
+        entrypoint=entrypoint,
+        result=result,
+        nano_cpus=nano_cpus,
+        no_new_privileges=no_new_privileges,
+        placement=placement,
+    )
+    document["Env"] = [] if outer_proxy is None else outer_proxy.tool_environment()
+    document["NetworkingConfig"] = {
+        "EndpointsConfig": {SETUP_NETWORK_NAME: {"IPAMConfig": {"IPv4Address": SETUP_ADDRESS}}}
     }
+    host: dict[str, Any] = document["HostConfig"]
+    host["NetworkMode"] = SETUP_NETWORK_NAME
+    host["Dns"] = list(SETUP_DNS)
+    return document
 
 
 class Tail:
@@ -299,20 +352,23 @@ class Tail:
 class SetupRun:
     """How a run of the Setup container went. `outcome` is one of the `OUTCOME_*` words; `detail` is
     a sentence of ours (never a value of the job) for the outcomes that have no script output;
-    `image` is the committed image's id after `OUTCOME_OK`."""
+    `container` is the container's id after `OUTCOME_OK`: alive, off the setup network, handed to
+    the agent (`adopted`)."""
 
     outcome: str
     exit_code: int | None
     output: bytes
     output_bytes: int
-    image: str | None
+    container: str | None
     detail: str
     start_seconds: float
     script_seconds: float
-    save_seconds: float
-    # The size of the committed image in bytes (None when it was not asked for or not made).
-    image_bytes: int | None = None
-    # Facts for the log: a check that could not be made (the room for the commit), never a failure.
+    # The seconds the hand-over took (off the network, frozen and confirmed).
+    handover_seconds: float
+    # What the agent's container object takes over (None unless the script ended well).
+    adopted: Adopted | None = None
+    # Facts for the log: a step that could not be done and is no failure (the script's file that
+    # could not be removed, a freeze the daemon answered late).
     notes: tuple[str, ...] = ()
 
     @property
@@ -329,6 +385,12 @@ class SetupSeams:
     hostname: Callable[[], str] = socket.gethostname
     clock: Callable[[], float] = time.monotonic
     image: str = AGENT_IMAGE_REFERENCE
+    # #843: a turn with a result schema has the result directory in the container (it is the
+    # agent's container).
+    result: bool = False
+    # The container's name: the agent's, which it is. Only the VM's boundary check, which keeps an
+    # agent beside a script's container to probe between them, names another.
+    container_name: str = AGENT_CONTAINER_NAME
     # The image the host helpers run from, for the `ip` it has: the agent's golden one.
     helper_image: str = AGENT_IMAGE_REFERENCE
     runtime: str = AGENT_RUNTIME
@@ -336,13 +398,21 @@ class SetupSeams:
     # A customer's runner (#855) limits the CPUs of the container (`NanoCpus`); 0: no limit.
     nano_cpus: int = 0
     ready_seconds: float = READY_SECONDS
-    commit_seconds: float = COMMIT_SECONDS
-    finish_seconds: float = FINISH_EXEC_SECONDS
-    docker_stop_seconds: float = DOCKER_STOP_SECONDS
     # False only in a test that has no host namespace to put rules in (never in production).
     install_rules: bool = True
+    # The host's outer-wall proxy (#994): the Setup's way to the internet on a customer's machine,
+    # handed to Control by the host. None: as hosted.
+    outer_proxy: OuterProxy | None = None
     # The file the VM's memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
+    # The agent's container of a turn on Claude Code is made with `no-new-privileges` (#856); the
+    # setup's is the agent's container, so it takes the same seam (`subscription_setup_script`
+    # refuses that harness with a script today).
+    no_new_privileges: bool = False
+    # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend. There
+    # `install_rules` is False: the setup network's walls are the NICs of the instances (the
+    # outer wall's proxy for the setup, the inner wall in A), and no host of ours is in B.
+    placement: Placement = HOSTED
 
 
 def _variables(listed: object) -> set[str]:
@@ -356,14 +426,13 @@ class _Unavailable(Exception):
     """A step before the script that could not be done; the word is the reason."""
 
 
-class _NoRoom(Exception):
-    """The VM's disk has too little room for the commit; the message says how much and how much is
-    needed."""
-
-
 class SetupContainer:
-    """One run of the Setup container. `run` does everything and always ends with the container and
-    the network removed; it does not raise for a script that failed."""
+    """One run of the container the script runs in. `run` does everything. A script that failed
+    ends with the container and the network removed (it does not raise); one that ended well ends
+    with the container alive, off the setup network, frozen when that could be done, and the
+    network still there (the agent's container object removes it): the caller reads the repository
+    and the agent takes the container over.
+    `discard` removes it when nothing takes it."""
 
     def __init__(self, memory_mb: int, seams: SetupSeams = SetupSeams()) -> None:  # noqa: B008
         self._api = seams.api()
@@ -374,6 +443,8 @@ class SetupContainer:
         self._ended = threading.Event()
         self._guard: MemoryGuard | None = None
         self._notes: list[str] = []
+        # Set when a freeze was asked for: the container may be frozen, and is thawed to be removed.
+        self._pause_sent = False
 
     # -- the whole run -----------------------------------------------------------------------------
 
@@ -383,10 +454,7 @@ class SetupContainer:
         *,
         script_seconds: float,
         should_stop: Callable[[], bool] = lambda: False,
-        free_bytes: Callable[[], int | None] = lambda: None,
     ) -> SetupRun:
-        """`free_bytes` is what the VM's disk has left (None: it cannot be asked, and the commit is
-        tried all the same)."""
         clock = self._seams.clock
         begun = clock()
         tail = Tail()
@@ -410,37 +478,40 @@ class SetupContainer:
                 self._clean()
                 return self._ended_run(outcome, why, tail, begun, started, finished, code=code)
             try:
-                image = self._save(container, free_bytes)
-            except _NoRoom as reason:
-                self._clean()
-                return self._ended_run(
-                    OUTCOME_NO_ROOM, str(reason), tail, begun, started, finished, code=code
-                )
+                self._hand_over(container)
             except _Unavailable as reason:
                 self._clean()
                 return self._ended_run(
-                    OUTCOME_NOT_SAVED, str(reason), tail, begun, started, finished, code=code
+                    OUTCOME_NOT_HANDED_OVER, str(reason), tail, begun, started, finished, code=code
                 )
             except DockerError as error:
                 self._clean()
-                detail = f"the image could not be saved ({error.status}: {error.message[:160]})"
-                return self._ended_run(
-                    OUTCOME_NOT_SAVED, detail, tail, begun, started, finished, code=code
+                detail = (
+                    "the container could not be handed to the agent "
+                    f"({error.status}: {error.message[:160]})"
                 )
-            saved = clock()
-            size = self._image_bytes(image)
-            self._clean()
+                return self._ended_run(
+                    OUTCOME_NOT_HANDED_OVER, detail, tail, begun, started, finished, code=code
+                )
+            handed = clock()
+            proxy = self._seams.outer_proxy
             return SetupRun(
                 outcome=OUTCOME_OK,
                 exit_code=code,
                 output=tail.value(),
                 output_bytes=tail.total,
-                image=image,
+                container=container,
                 detail="",
                 start_seconds=started - begun,
                 script_seconds=finished - started,
-                save_seconds=saved - finished,
-                image_bytes=size,
+                handover_seconds=handed - finished,
+                adopted=Adopted(
+                    container,
+                    setup_environment=() if proxy is None else tuple(proxy.tool_environment()),
+                    paused=True,
+                    setup_network=SETUP_NETWORK_NAME,
+                    dns=SETUP_DNS,
+                ),
                 notes=tuple(self._notes),
             )
         except BaseException:
@@ -463,11 +534,11 @@ class SetupContainer:
             exit_code=code,
             output=tail.value(),
             output_bytes=tail.total,
-            image=None,
+            container=None,
             detail=detail,
             start_seconds=started - begun,
             script_seconds=finished - started,
-            save_seconds=0.0,
+            handover_seconds=0.0,
             notes=tuple(self._notes),
         )
 
@@ -475,11 +546,14 @@ class SetupContainer:
 
     def _start(self) -> str:
         api = self._api
-        own = api.inspect_container(self._seams.hostname())
+        split = self._seams.placement.split
+        # B's Docker (split) has no Control in it: the Worker image is not there, nor needed (the
+        # host helpers are not run), and the volume is B's own.
+        own = {} if split else api.inspect_container(self._seams.hostname())
         worker_image = str(own.get("Image", ""))
-        volume = work_volume_of(own)
+        volume = B_WORK_VOLUME if split else work_volume_of(own)
         image = str(api.inspect_image(self._seams.image).get("Id", ""))
-        if not worker_image or not image:
+        if (not worker_image and not split) or not image:
             raise _Unavailable("setup_unavailable: an image of the VM is missing")
         if self._seams.runtime not in api.runtimes():
             raise _Unavailable(
@@ -498,8 +572,12 @@ class SetupContainer:
                 runtime=self._seams.runtime,
                 entrypoint=self._seams.entrypoint,
                 nano_cpus=self._seams.nano_cpus,
+                outer_proxy=self._seams.outer_proxy,
+                result=self._seams.result,
+                no_new_privileges=self._seams.no_new_privileges,
+                placement=self._seams.placement,
             ),
-            SETUP_CONTAINER_NAME,
+            self._seams.container_name,
         )
         self._container = container
         api.start_container(container)
@@ -507,10 +585,11 @@ class SetupContainer:
         # The script is as free as the agent is and can take the VM's memory the same way:
         # the container goes (the script ends as one whose container went away) before the VM
         # is out of it.
-        self._guard = MemoryGuard(
-            lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
-        )
-        self._guard.start()
+        if not split:
+            self._guard = MemoryGuard(
+                lambda _: self._kill(), path=self._seams.meminfo, ended=self._ended
+            )
+            self._guard.start()
         self._wait_ready(container)
         self._seal_check(container, image)
         return container
@@ -524,7 +603,12 @@ class SetupContainer:
         try:
             close_bridge_ipv6(api, self._seams.helper_image, SETUP_NETWORK_NAME)
             run_helper(
-                api, worker_image, [NFT], [EGRESS_RULES], "setup-rules", seconds=RULES_SECONDS
+                api,
+                worker_image,
+                [NFT],
+                [egress_rules(self._seams.outer_proxy)],
+                "setup-rules",
+                seconds=RULES_SECONDS,
             )
             run_helper(
                 api, worker_image, [NFT], [CHECK_RULES], "setup-rules-check", seconds=RULES_SECONDS
@@ -564,7 +648,7 @@ class SetupContainer:
         networks = as_object(settings.get("Networks")) or {}
         mounts = document.get("Mounts")
         problems: list[str] = []
-        if host.get("Privileged"):
+        if bool(host.get("Privileged")) != self._seams.placement.split:
             problems.append("privileged")
         if host.get("Runtime") != self._seams.runtime:
             problems.append("runtime")
@@ -577,15 +661,28 @@ class SetupContainer:
             problems.append("host access")
         if set(networks) != {SETUP_NETWORK_NAME}:
             problems.append("networks")
+        if host.get("NetworkMode") != SETUP_NETWORK_NAME:
+            problems.append("network mode")
+        if tuple(cast("list[Any]", host.get("Dns") or [])) != SETUP_DNS:
+            problems.append("resolvers")
+        if ("no-new-privileges" in cast("list[Any]", host.get("SecurityOpt") or [])) != (
+            self._seams.no_new_privileges
+        ):
+            problems.append("no-new-privileges")
         destinations: set[object] = set()
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
-        if destinations - {AGENT_REPO}:
+        allowed = {AGENT_REPO, AGENT_RESULT_DIRECTORY} if self._seams.result else {AGENT_REPO}
+        if destinations - allowed:
             problems.append("mounts")
-        # Not one variable besides the image's own.
+        # Not one variable besides the image's own (and the host's proxy on a customer's machine).
         image_config = as_object(self._api.inspect_image(image).get("Config")) or {}
-        if _variables(config.get("Env")) != _variables(image_config.get("Env")):
+        proxy = self._seams.outer_proxy
+        expected: set[str] = _variables(image_config.get("Env"))
+        if proxy is not None:
+            expected |= set(proxy.tool_environment())
+        if _variables(config.get("Env")) != expected:
             problems.append("environment")
         if problems:
             self._kill()
@@ -632,7 +729,7 @@ class SetupContainer:
                 run_exec(
                     self._api,
                     container,
-                    [SH, "-c", RUN_SCRIPT, "run", SCRIPT_PATH],
+                    [SH, "-c", RUN_SCRIPT, "run", SCRIPT_PATH, SCRIPT_OUTPUT],
                     env=SCRIPT_ENVIRONMENT,
                     workdir=AGENT_REPO,
                     timeout=seconds + 60.0,
@@ -702,96 +799,75 @@ class SetupContainer:
             f" (exit code {code})" if isinstance(code, int) and not isinstance(code, bool) else ""
         )
 
-    def _image_bytes(self, image: str) -> int | None:
-        try:
-            size = self._api.inspect_image(image).get("Size")
-        except DockerError:
-            return None
-        return size if isinstance(size, int) and not isinstance(size, bool) else None
+    # -- the hand-over -----------------------------------------------------------------------------
 
-    # -- the result --------------------------------------------------------------------------------
-
-    def _save(self, container: str, free_bytes: Callable[[], int | None]) -> str:
-        """Stop the container's Docker, then the container, and commit its file system. Under
-        Sysbox the stop of the inner Docker is what ends the container, and the end of the
-        container is what writes the inner Docker's images into the file system the commit reads.
-        Raises `_NoRoom` before the commit when the VM's disk could not hold it."""
+    def _hand_over(self, container: str) -> None:
+        """The script ended well; the container goes on. The script's file and output are removed.
+        The container leaves the setup network (which stays until the agent's container object has
+        joined the model network): from here on nothing of it has the internet, and a process of the
+        script that held a connection loses it before the outer wall narrows and before any door
+        exists. Then the container is frozen (`docker pause`) and the daemon is asked whether it
+        is: Control reads the repository next (`settle_after_setup`), and a root process the
+        script left would go on writing it while it does (a link into the work volume). The
+        memory guard watches until the freeze is confirmed. Raises `_Unavailable` or `DockerError`
+        when the container could not be taken off the network or frozen: the two steps that must
+        hold."""
         api = self._api
-        finished = run_exec(
+        removed = run_exec(
             api,
             container,
-            [SH, "-c", FINISH_SCRIPT, "finish", SCRIPT_PATH],
-            timeout=self._seams.finish_seconds,
+            [SH, "-c", CLEAN_SCRIPT, "clean", SCRIPT_PATH, SCRIPT_OUTPUT],
+            timeout=HANDOVER_SECONDS,
             name="the end of the setup",
         )
-        if NO_DOCKER in finished.stdout or self._ended.is_set():
-            # Nothing runs in the container but its init: stop it.
-            api.stop_container(
-                container, grace=STOP_GRACE_SECONDS, timeout=STOP_WAIT_SECONDS + 30.0
-            )
-        elif not self._ended.wait(self._seams.docker_stop_seconds):
-            # A guard that tripped is why it did not stop in time (its kill may have failed).
-            self._refuse_if_the_vm_ran_out_of_memory()
-            raise _Unavailable(
-                "the container's Docker did not stop in time, so its images are not kept"
-            )
-        if not self._ended.wait(STOP_WAIT_SECONDS):
-            self._refuse_if_the_vm_ran_out_of_memory()
-            raise _Unavailable("the container did not stop, so its file system is not kept")
-        # The container is gone and the memory it could take is back: the guard must not kill
-        # anything under `docker commit`, which reads its layer and needs memory of its own. Until
-        # now it watched, because a process the script left behind runs until the container stops.
+        if removed.returncode != 0 or removed.unanswered:
+            self._notes.append("the script's file could not be removed from the container")
+        api.disconnect_network(SETUP_NETWORK_NAME, container)
+        # The network stays until the agent's container object has put the container on the model
+        # network: the daemon refuses a `connect` of a container whose network mode names a
+        # network that is gone ("could not find a network matching network mode", measured on the
+        # KVM lane), so the one who connects removes it (`Adopted.setup_network`).
+        self._freeze(container)
         if self._guard is not None:
             self._guard.close()
-        self._refuse_if_the_vm_ran_out_of_memory()
-        self._check_room(container, free_bytes)
-        return api.commit_container(
-            container, SETUP_IMAGE_REPOSITORY, SETUP_IMAGE_TAG, timeout=self._seams.commit_seconds
-        )
 
-    def _refuse_if_the_vm_ran_out_of_memory(self) -> None:
-        """The guard's kill came while the setup was being finished: what the image would hold is
-        not what the script left, whatever else went wrong after it."""
-        if self._guard is not None and self._guard.tripped_at is not None:
-            raise _Unavailable(
-                f"{REASON_VM_MEMORY}: the VM was running out of memory while the setup was "
-                "being finished, so its result is not kept"
-            )
-
-    def _check_room(self, container: str, free_bytes: Callable[[], int | None]) -> None:
-        """The commit writes the container's file system into the VM's disk; a disk the script
-        filled would fail it half way, after minutes, with the daemon's own words. Asked once the
-        container has stopped (the inner Docker's data is in its layer by then): the layer's size,
-        twice, and a headroom. A size or a free space that cannot be had is not a reason to
-        refuse, but it is a note in the report."""
-        free = free_bytes()
-        if free is None:
-            self._notes.append(
-                "the free space of the VM's disk could not be read, so the room for the commit "
-                "was not checked"
-            )
-            return
+    def _freeze(self, container: str) -> None:
+        """Freeze the container and see that it is. Any refusal (a status, a conflict), an answer
+        the daemon does not back up (`State.Paused`) and a client timeout the daemon did not
+        complete is `_Unavailable`: a container that is not known to be frozen is never handed
+        over. After a timeout the daemon is asked what it did, nothing is guessed."""
+        self._pause_sent = True
         try:
-            layer = self._api.container_rw_bytes(container, timeout=ROOM_SECONDS)
+            self._api.pause_container(container, timeout=HANDOVER_SECONDS)
         except DockerError as error:
+            if error.status != 0:
+                raise _Unavailable(
+                    f"the container could not be frozen ({error.status}: {error.message[:160]})"
+                ) from None
+            if not self._is_frozen(container):
+                raise _Unavailable(
+                    "the container could not be frozen (the daemon did not answer in time and "
+                    "does not report it frozen)"
+                ) from None
             self._notes.append(
-                f"the size of the container's file system could not be had ({error.status}), so "
-                "the room for the commit was not checked"
+                "the daemon answered the freeze late; it reports the container frozen"
             )
             return
-        if layer is None:
-            self._notes.append(
-                "the daemon did not say how big the container's file system is, so the room for "
-                "the commit was checked against its headroom only"
-            )
-        needed = COMMIT_ROOM_FACTOR * (layer or 0) + COMMIT_HEADROOM_BYTES
-        if free >= needed:
-            return
-        mb = 1024 * 1024
-        raise _NoRoom(
-            f"the VM's disk has {free // mb} MB left and the result of the script needs about "
-            f"{needed // mb} MB (the container's file system is {(layer or 0) // mb} MB)"
-        )
+        if not self._is_frozen(container):
+            raise _Unavailable("the daemon did not report the container frozen after the freeze")
+
+    def _is_frozen(self, container: str) -> bool:
+        """What the daemon says: running, and paused. A daemon that cannot say is no."""
+        try:
+            state = as_object(self._api.inspect_container(container).get("State")) or {}
+        except DockerError:
+            return False
+        return state.get("Running") is True and state.get("Paused") is True
+
+    def discard(self) -> None:
+        """Remove the container and what is left of the network, for a container nothing took over
+        (the repository could not be read after the script)."""
+        self._clean()
 
     # -- the end -----------------------------------------------------------------------------------
 
@@ -811,6 +887,11 @@ class SetupContainer:
         if self._guard is not None:
             self._guard.close()
         if container is not None:
+            if self._pause_sent:
+                # A frozen container is not killed or removed by every daemon: thaw it first (the
+                # turn ends here, nothing reads the repository again).
+                with contextlib.suppress(DockerError):
+                    self._api.unpause_container(container, timeout=KILL_SECONDS)
             self._kill()
             try:
                 self._api.remove_container(container, timeout=REMOVE_SECONDS)

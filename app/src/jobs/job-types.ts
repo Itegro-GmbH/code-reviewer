@@ -69,6 +69,11 @@ export type Job = {
   supersededBy: string | null;
   /** #891: when a member asked for the running turn to stop; the heartbeat tells its holder. Null when nobody did. */
   cancelRequestedAt: string | null;
+  /**
+   * #971: the labels a dispatcher must all have to take the job (`cr:managed` and a size label for a hosted job, the labels of the
+   * environment for a turn of a runner environment); null for a job written before the labels, which the claim derives.
+   */
+  requiredLabels: string[] | null;
   createdAt: string;
   updatedAt: string;
   /** When the job reached a final status. */

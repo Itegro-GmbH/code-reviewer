@@ -12,7 +12,11 @@
 //
 // A revoked runner, an unknown credential and a missing header are the same 401, so the answer says nothing about which.
 import "server-only";
-import type { RunnerCredentialsRepository } from "../db/repositories/runner-credentials-repository.ts";
+import type {
+  MintedDeliveryKey,
+  RunnerCredentialsRepository,
+  StoredDelivery,
+} from "../db/repositories/runner-credentials-repository.ts";
 import type { StoredRunner } from "../db/repositories/runners-repository.ts";
 import { readJsonBody } from "./body.ts";
 import type { FieldError } from "./contract.ts";
@@ -32,6 +36,12 @@ import {
   REGISTRATION_TOKEN_PATTERN,
   RUNNER_CREDENTIAL_PATTERN,
 } from "../runner-identity/tokens.ts";
+import {
+  checkDelivery,
+  type DeliveryPolicy,
+} from "../runner-identity/delivery.ts";
+import { reservedLabelIssues } from "../runner-identity/labels.ts";
+import { reservedAccessIssues } from "../runner-identity/access.ts";
 import { meetsMinimum } from "../runner-identity/versions.ts";
 
 /**
@@ -59,6 +69,10 @@ export type RunnerRegistrationApiDeps = {
   credentials: RunnerCredentialsRepository;
   settings: () => FleetSettings;
   logger: RunnerApiLogger;
+  /** #972: makes the signing secret of a webhook delivery for a runner: the secret, its id and the sealed text the database keeps. */
+  mintDeliveryKey: (runnerId: string) => MintedDeliveryKey;
+  /** #972: which addresses a webhook delivery may name (`RUNNER_DELIVERY_ALLOW_LOOPBACK`); read on every call. Default: public https only. */
+  deliveryPolicy?: () => DeliveryPolicy;
 };
 
 export type RunnerRegistrationApi = {
@@ -69,8 +83,50 @@ export type RunnerRegistrationApi = {
   authenticate(request: Request): Promise<AuthenticatedRunner | null>;
 };
 
+function isRecordBody(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function fieldErrors(issues: readonly FieldIssue[]): FieldError[] {
   return issues.map((issue) => ({ field: issue.field, code: issue.code }));
+}
+
+/**
+ * #971: the labels of a body that are in the platform's reserved namespace `cr:`, as the 422 answer of the door. Only the platform
+ * identity (the shared token) carries those labels, and nothing in this API is that identity: a customer's runner is refused whatever
+ * the spelling. Asked only for a body that passed the form check, so a malformed body keeps its 400.
+ */
+function reservedLabelsOf(body: unknown): Response | null {
+  const labels =
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>).labels
+      : undefined;
+  const issues = Array.isArray(labels) ? reservedLabelIssues(labels) : [];
+  return issues.length === 0
+    ? null
+    : errorResponse(422, "RUNNER_LABEL_RESERVED", { fields: issues });
+}
+
+/**
+ * #973: the entries of a body that announce the auth `managed`, as the 422 answer of the door. The platform's keys are the platform identity's
+ * alone; a customer's runner may announce `app-key`, `local-key` and `subscription`. Asked, like the labels, only for a body that passed the form check.
+ */
+function reservedAccessOf(body: unknown): Response | null {
+  const manifest =
+    typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>).manifest
+      : undefined;
+  const issues = reservedAccessIssues(manifest);
+  return issues.length === 0
+    ? null
+    : errorResponse(422, "RUNNER_ACCESS_RESERVED", { fields: issues });
+}
+
+/** The `delivery` of an answer: what the app holds; the secret only when this call made it. Left out for a runner that polls. */
+function deliveryAnswer(
+  delivery: StoredDelivery | undefined,
+): { delivery: StoredDelivery } | Record<string, never> {
+  return delivery === undefined || delivery.mode === "poll" ? {} : { delivery };
 }
 
 export function updateNeededFor(
@@ -135,18 +191,40 @@ export function createRunnerRegistrationApi(
         else if (name === null) issues.push({ field: "name", code: "invalid" });
         const announcement = checkAnnouncement(fields);
         if (!announcement.ok) issues.push(...announcement.fields);
-        if (issues.length > 0 || !announcement.ok || name === null)
+        const delivery = checkDelivery(
+          fields.delivery,
+          deps.deliveryPolicy?.(),
+        );
+        if (!delivery.ok) issues.push(...delivery.fields);
+        if (
+          issues.length > 0 ||
+          !announcement.ok ||
+          !delivery.ok ||
+          name === null
+        )
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(issues),
           });
+        const reserved = reservedLabelsOf(fields) ?? reservedAccessOf(fields);
+        if (reserved !== null) return reserved;
 
         const credential = newRunnerCredential();
+        // A webhook delivery gets its secret with the runner: sealed for the id the runner will have, shown once in this answer.
+        const runnerId = crypto.randomUUID();
+        const key =
+          delivery.value.mode === "webhook"
+            ? deps.mintDeliveryKey(runnerId)
+            : undefined;
         const outcome = await deps.credentials.redeem(
           hashSecret(token as string),
           {
             ...announcement.value,
             name,
             credentialHash: hashSecret(credential),
+            id: runnerId,
+            ...(delivery.value.mode === "webhook" && key !== undefined
+              ? { delivery: { url: delivery.value.url, key } }
+              : {}),
           },
         );
         if (!outcome.ok)
@@ -159,6 +237,16 @@ export function createRunnerRegistrationApi(
           runnerId: outcome.runner.id,
           credential,
           minBaseVersion: deps.settings().minBaseVersion,
+          ...(delivery.value.mode === "webhook" && key !== undefined
+            ? {
+                delivery: {
+                  mode: "webhook",
+                  url: delivery.value.url,
+                  keyId: key.keyId,
+                  secret: key.secret,
+                },
+              }
+            : {}),
         });
       } catch (error) {
         return unexpected("register", error);
@@ -176,10 +264,34 @@ export function createRunnerRegistrationApi(
           return errorResponse(400, "RUNNER_REQUEST_INVALID", {
             fields: fieldErrors(checked.fields),
           });
+        const delivery = checkDelivery(
+          isRecordBody(body.value) ? body.value.delivery : undefined,
+          deps.deliveryPolicy?.(),
+        );
+        if (!delivery.ok)
+          return errorResponse(400, "RUNNER_REQUEST_INVALID", {
+            fields: fieldErrors(delivery.fields),
+          });
+        const reserved =
+          reservedLabelsOf(body.value) ?? reservedAccessOf(body.value);
+        if (reserved !== null) return reserved;
         const announcement: Announcement = checked.value;
         // A runner revoked between the two statements is the same 401.
         if (!(await deps.credentials.announce(who.runner.id, announcement)))
           return unauthorized();
+        const change = delivery.value;
+        const stored = await deps.credentials.setDelivery(
+          who.runner.id,
+          change.mode === "poll"
+            ? { mode: "poll" }
+            : {
+                mode: "webhook",
+                url: change.url,
+                rotateSecret: change.rotateSecret,
+                mintKey: () => deps.mintDeliveryKey(who.runner.id),
+              },
+        );
+        if (stored === undefined) return unauthorized();
         return jsonResponse(200, {
           version: 1,
           runnerId: who.runner.id,
@@ -188,6 +300,7 @@ export function createRunnerRegistrationApi(
             announcement.baseVersion,
             who.minBaseVersion,
           ),
+          ...deliveryAnswer(stored),
         });
       } catch (error) {
         return unexpected("announce", error);

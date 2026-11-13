@@ -20,17 +20,96 @@
       "type": "string",
       "pattern": "^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}(-[0-9A-Za-z.-]{1,32})?$"
     },
+    "DeliveryUrl": {
+      "description": "Where the app sends the doorbell (`POST <url>`; the stop call goes to the same address with its last path segment `dispatch` replaced by `stop`, as in contracts/dispatch-webhook.v1.json). https without credentials to a public host. An address that names a private, loopback, link-local, reserved or otherwise internal host is refused (a trailing dot on the host is no way round), and so is a name that resolves to such an address when the app connects (checked on every connection, on the address it connects to). No redirect is followed. Only an app that runs with `RUNNER_DELIVERY_ALLOW_LOOPBACK=1` (the fakes, the E2E, local development, never production) also accepts an address on this machine, with plain http.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "DeliveryKeyId": {
+      "description": "Names the signing secret in `X-Dispatch-Key-Id`. Made by the app with the secret.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+    },
+    "DeliverySecret": {
+      "description": "The signing secret of one dispatcher (`crw_` and 43 characters), minted by the app and shown once, in the answer that minted it and nowhere else (the app keeps it encrypted). It signs the doorbell and the stop call of this dispatcher only: a request signed with another dispatcher's secret is refused by the receiver. Secret: never log it.",
+      "type": "string",
+      "pattern": "^crw_[A-Za-z0-9_-]{43}$"
+    },
+    "DeliveryAnnouncement": {
+      "description": "How the dispatcher wants to learn of a job (#972). `poll` (the default, also when `delivery` is left out): it calls POST /claim itself and the app never rings it. `webhook`: the app sends the signed doorbell (a wake-up call without job data) to `url`, to every webhook dispatcher that matches the job's labels, when a job is enqueued and again when a job of its label group ends; the dispatcher then claims the next matching job (no `jobId` needed), and answers 200 ignored with the reason `busy` when it has no free slot. The first announcement of `webhook` makes the signing secret, and so does `rotateSecret: true`; announcing the same mode again keeps the secret that exists (it is never shown twice). Announcing `poll` drops the secret. `PUT /self` replaces what the app holds, so a dispatcher announces its delivery every time. The doorbell is sent only while the deployment runs the dispatch webhook (`RUNNER_DISPATCH=webhook`).",
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["poll", "webhook"] },
+        "url": { "$ref": "#/$defs/DeliveryUrl" },
+        "rotateSecret": {
+          "description": "Only with `webhook`: make a new secret now (the old one stops working at once).",
+          "type": "boolean"
+        }
+      },
+      "if": { "properties": { "mode": { "const": "webhook" } } },
+      "then": { "required": ["url"] }
+    },
+    "DeliveryState": {
+      "description": "What the app holds of the delivery. `secret` is present only in the answer that minted it.",
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["poll", "webhook"] },
+        "url": { "$ref": "#/$defs/DeliveryUrl" },
+        "keyId": { "$ref": "#/$defs/DeliveryKeyId" },
+        "secret": { "$ref": "#/$defs/DeliverySecret" }
+      }
+    },
     "Label": {
       "description": "A label a job can ask for. Lower case; the app lower-cases what it gets.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9._:-]{0,39}$"
     },
     "HarnessName": {
-      "description": "`opencode`, or `custom/name` for a harness the runner describes itself. Only OpenCode is in the platform's catalog; any other name exists for the app only while a runner announces it as ready.",
+      "description": "`opencode`, `claude-code`, or `custom/name` for a harness the runner describes itself. Only OpenCode is in the platform's catalog; any other name exists for the app only while a runner announces an entry for it.",
       "type": "string",
       "pattern": "^[a-z][a-z0-9_-]{0,31}(/[a-z0-9][a-z0-9_-]{0,31})?$"
     },
-    "HarnessAnnouncement": {
+    "HarnessAuth": {
+      "description": "The source of the access an entry has (#973). `managed`: the platform's own keys; only the platform identity has it, so a customer's runner that announces it is refused with 422 `RUNNER_ACCESS_RESERVED` of `contracts/runner-api.v1.json` (`fields`: `manifest.harnesses[<i>].auth`, code `reserved`) and nothing is stored. `app-key`: a key the workspace keeps in the app, which the app hands to the Worker through the Worker API. `local-key`: an API key that exists only on the dispatcher's device. `subscription`: a login (for example Claude Code's `claude setup-token`) that exists only on the device. The manifest says what is possible and never the name of a credential.",
+      "type": "string",
+      "enum": ["managed", "app-key", "local-key", "subscription"]
+    },
+    "ModelName": {
+      "description": "A model as the harness reads it (`sonnet`, `claude-sonnet-5-5`).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]{0,99}$"
+    },
+    "HarnessAccess": {
+      "description": "One entry of the manifest: a harness with ONE source of access. A harness that can run on two sources is two entries (`opencode` with `app-key` and with `local-key`). A job matches a dispatcher when the labels match and one entry has the harness, the auth and the model the job asks for (a job's demand is derived from the harness of its profile and the model it was started with). An entry is announced only while the dispatcher can run it; one that cannot for a while (all its subscriptions are rate limited) is left out of the next announcement, which replaces the last one (`PUT /self`). The same harness and auth twice is 400 (a rule the app holds and this file cannot express).",
+      "type": "object",
+      "required": ["harness", "version", "auth"],
+      "properties": {
+        "harness": { "$ref": "#/$defs/HarnessName" },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$"
+        },
+        "auth": { "$ref": "#/$defs/HarnessAuth" },
+        "models": {
+          "description": "The models this access allows. Only for `local-key` and `subscription` (a key of the app and the platform's are decided by the app's catalog; `models` with them is 400). Left out: the device allows any model the harness reads. An empty list is 400.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/ModelName" }
+        }
+      },
+      "if": {
+        "properties": { "auth": { "enum": ["managed", "app-key"] } },
+        "required": ["auth"]
+      },
+      "then": { "not": { "required": ["models"] } }
+    },
+    "LegacyHarnessAnnouncement": {
+      "description": "The old form of an entry, still read: `{ \"<harness>\": { version, ready } }`. An entry with `ready: true` is read as `auth: app-key` (OpenCode and any harness but Claude Code) or `auth: subscription` (Claude Code); one with `ready: false` is left out. New runners send the list.",
       "type": "object",
       "required": ["version", "ready"],
       "properties": {
@@ -38,21 +117,30 @@
           "type": "string",
           "pattern": "^[0-9A-Za-z][0-9A-Za-z._+-]{0,31}$"
         },
-        "ready": {
-          "description": "Installed, logged in and proven by the runner's self test. Only a ready harness is given a job.",
-          "type": "boolean"
-        }
+        "ready": { "type": "boolean" }
       }
     },
     "RunnerManifest": {
-      "description": "What the runner adds to the base or overrides in the how. It never removes the base.",
+      "description": "What the runner adds to the base or overrides in the how. It never removes the base: a manifest without an `opencode` entry gets no job.",
       "type": "object",
       "properties": {
         "harnesses": {
-          "type": "object",
-          "maxProperties": 16,
-          "propertyNames": { "$ref": "#/$defs/HarnessName" },
-          "additionalProperties": { "$ref": "#/$defs/HarnessAnnouncement" }
+          "oneOf": [
+            {
+              "type": "array",
+              "maxItems": 16,
+              "items": { "$ref": "#/$defs/HarnessAccess" }
+            },
+            {
+              "description": "The old map form (see LegacyHarnessAnnouncement).",
+              "type": "object",
+              "maxProperties": 16,
+              "propertyNames": { "$ref": "#/$defs/HarnessName" },
+              "additionalProperties": {
+                "$ref": "#/$defs/LegacyHarnessAnnouncement"
+              }
+            }
+          ]
         },
         "capabilities": {
           "description": "For example `agent-docker`, announced only when the runner's self test ran a container in a Docker inside Sysbox.",
@@ -74,7 +162,7 @@
       }
     },
     "RunnerAnnouncement": {
-      "description": "What a runner says about itself. The labels are all the routing reads (together with the ready harnesses and the version): a job runs on a runner that has every label its environment asks for.",
+      "description": "What a runner says about itself. The labels and the harness entries (harness, auth, models) are what the routing reads (together with the version): a job runs on a runner that has every label it requires, which is every label its environment asks for, and an entry of its manifest that has the harness, the auth and the model the job asks for (#973). #971: the namespace `cr:` is reserved for the platform identity (`cr:managed`, `cr:size-<vCPUs>`). A runner on a customer's machine that announces such a label, in `POST /register` or in `PUT /self`, is refused with 422 `RUNNER_LABEL_RESERVED` of `contracts/runner-api.v1.json` (`fields` names each label by position, field code `reserved`) and nothing is stored; a body that is malformed in another way keeps its 400 `RUNNER_REQUEST_INVALID`. The check is by identity, not by spelling: no runner credential is the platform. #972: `delivery` says how the dispatcher learns of a job (poll or webhook); a delivery that does not fit, or an address the app will not call, is 400 `RUNNER_REQUEST_INVALID` with the field `delivery`, `delivery.mode`, `delivery.url` or `delivery.rotateSecret`.",
       "type": "object",
       "required": ["labels", "baseVersion"],
       "properties": {
@@ -85,7 +173,8 @@
         },
         "baseVersion": { "$ref": "#/$defs/BaseVersion" },
         "manifest": { "$ref": "#/$defs/RunnerManifest" },
-        "limits": { "$ref": "#/$defs/RunnerLimits" }
+        "limits": { "$ref": "#/$defs/RunnerLimits" },
+        "delivery": { "$ref": "#/$defs/DeliveryAnnouncement" }
       }
     },
     "RegisterRequest": {
@@ -103,7 +192,8 @@
         "labels": { "$ref": "#/$defs/RunnerAnnouncement/properties/labels" },
         "baseVersion": { "$ref": "#/$defs/BaseVersion" },
         "manifest": { "$ref": "#/$defs/RunnerManifest" },
-        "limits": { "$ref": "#/$defs/RunnerLimits" }
+        "limits": { "$ref": "#/$defs/RunnerLimits" },
+        "delivery": { "$ref": "#/$defs/DeliveryAnnouncement" }
       }
     },
     "RegisterResponse": {
@@ -117,6 +207,10 @@
         "minBaseVersion": {
           "description": "The oldest base the app accepts, or null for none.",
           "anyOf": [{ "$ref": "#/$defs/BaseVersion" }, { "type": "null" }]
+        },
+        "delivery": {
+          "description": "Left out for a runner that announced no webhook delivery.",
+          "$ref": "#/$defs/DeliveryState"
         }
       }
     },
@@ -136,7 +230,8 @@
         "updateNeeded": {
           "description": "True when the announced base is older than the minimum: the runner gets no job until it is updated.",
           "type": "boolean"
-        }
+        },
+        "delivery": { "$ref": "#/$defs/DeliveryState" }
       }
     },
     "CredentialResponse": {

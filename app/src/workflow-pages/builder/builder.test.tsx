@@ -410,6 +410,62 @@ describe("errors of the lane as a whole", () => {
   });
 });
 
+describe("warnings of the validator (#973)", () => {
+  const WARNING = {
+    path: "/steps/1/body/1/environment",
+    code: "no_runner_announces",
+    message: "The runners that are online do not announce what this asks for.",
+    severity: "warning" as const,
+  };
+
+  function openWithWarnings(warnings: (typeof WARNING)[]) {
+    const fake = fakeBuilderApi(3);
+    const api: BuilderApi = {
+      ...fake.api,
+      validate: (document) =>
+        Promise.resolve({
+          ok: true as const,
+          data: { ...answerOf(document), warnings },
+        }),
+    };
+    return { ...open({ api }), saved: fake.saved };
+  }
+
+  // #973-T01
+  it("says the lane is valid and counts the warnings, and still saves; the warning is shown on its step, not as an error", async () => {
+    const { card, saved } = openWithWarnings([WARNING]);
+    expect(
+      await screen.findByText("Valid · 10 steps · $20 · 1 warning"),
+    ).toBeTruthy();
+    fireEvent.click(card("/steps/1/body/1"));
+    const list = screen.getByRole("region", { name: "Warnings" });
+    expect(within(list).getByText("no_runner_announces")).toBeTruthy();
+    expect(within(list).getByText(WARNING.message)).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Errors" })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Instruction"), {
+      target: {
+        value: "Review branch {{implement.branch}}. Only report real bugs.",
+      },
+    });
+    const save = screen.getByRole("button", {
+      name: "Save as v4",
+    }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+    fireEvent.click(save);
+    await waitFor(() => expect(saved).toHaveLength(1));
+  });
+
+  // #973-T01
+  it("shows a warning that belongs to no step under the header", async () => {
+    openWithWarnings([{ ...WARNING, path: "/budgetUsd" }]);
+    await screen.findByText(/^Valid/);
+    expect(
+      screen.getByRole("region", { name: "Warnings for the lane as a whole" }),
+    ).toBeTruthy();
+  });
+});
+
 describe("saving and checking", () => {
   // #926-T65
   it("sends one save for two clicks that come before the first answer", async () => {

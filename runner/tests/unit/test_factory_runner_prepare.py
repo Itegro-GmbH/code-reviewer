@@ -3,7 +3,6 @@
 """What a runner decides about its machine (#854, R1b): the runtime to try, the memory, the
 environment of the job processes, the announcement, and the limits it puts on the containers."""
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +19,6 @@ from code_reviewer_runner.factory_runner.limits import (
 )
 from code_reviewer_runner.factory_runner.prepare import (
     announcement_for,
-    baked_agent_image,
     candidate_runtimes,
     job_environment,
     prepare,
@@ -28,6 +26,7 @@ from code_reviewer_runner.factory_runner.prepare import (
     split_reference,
 )
 from code_reviewer_runner.factory_runner.selftest import Check, SelfTestResult
+from code_reviewer_runner.implementer.claude_code.readiness import HarnessStatus
 from code_reviewer_runner.implementer.docker_api import DockerError
 
 pytestmark = pytest.mark.unit
@@ -120,15 +119,6 @@ def test_an_image_reference_splits_into_repository_and_tag_or_digest(
     assert split_reference(reference) == split
 
 
-def test_the_agent_image_baked_into_the_runner_image_is_read_from_its_file(tmp_path: Path) -> None:
-    file = tmp_path / "agent-image.json"
-    file.write_text(json.dumps({"reference": "ghcr.io/x/agent:1"}))
-    assert baked_agent_image(file) == "ghcr.io/x/agent:1"
-    file.write_text(json.dumps({"reference": ""}))
-    assert baked_agent_image(file) is None
-    assert baked_agent_image(tmp_path / "missing.json") is None
-
-
 # -- the environment of the job processes ------------------------------------------------------
 
 
@@ -150,31 +140,37 @@ def test_the_job_environment_names_the_proof_the_memory_and_the_runtime() -> Non
     assert "FACTORY_RUNNER_CREDENTIAL" not in environment  # the credential never leaves the loop
 
 
-# #856-L01
-def test_the_job_environment_hands_the_job_the_path_of_the_token_file_and_not_the_token(
+# #856-L01, #974-T05
+def test_the_job_environment_holds_no_login_of_the_device_whatever_the_source_has(
     tmp_path: Path,
 ) -> None:
-    token = tmp_path / "claude-code-token"
-    token.write_text("sk-" + "ant-" + "oat01-not-a-real-token-0000000000000000")
-    named = job_environment(
-        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(token)}, config(), "runc", 4096
-    )
-    by_default = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path)}, config(), "runc", 4096)
-    none = job_environment({"FACTORY_RUNNER_HOME": str(tmp_path / "empty")}, config(), "runc", 4096)
-
-    assert named["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
-    assert by_default["FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE"] == str(token)
-    assert "FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE" not in none
-    assert "not-a-real-token" not in " ".join(named.values())
-
-
-# #856-L01
-def test_a_login_from_the_runners_environment_is_handed_over_for_the_job_to_use() -> None:
+    """The dispatcher reads the login for the one job that asks for it and hands it on the Worker's
+    standard input (`sandbox.WorkerStart`); the environment of every Worker is without one."""
     token = "sk-" + "ant-" + "oat01-not-a-real-token-0000000000000000"
+    file = tmp_path / "claude-code-token"
+    file.write_text(token)
 
-    environment = job_environment({"CLAUDE_CODE_OAUTH_TOKEN": token}, config(), "runc", 4096)
+    for source in (
+        {"FACTORY_RUNNER_CLAUDE_CODE_TOKEN_FILE": str(file)},
+        {"FACTORY_RUNNER_HOME": str(tmp_path)},
+        {"CLAUDE_CODE_OAUTH_TOKEN": token},
+    ):
+        environment = job_environment(source, config(), "runc", 4096)
 
-    assert environment["CLAUDE_CODE_OAUTH_TOKEN"] == token
+        assert not any("CLAUDE_CODE" in name for name in environment)
+        assert token not in " ".join(environment.values())
+        assert str(file) not in " ".join(environment.values())
+
+
+# #855-T04, #974
+def test_the_job_environment_carries_the_disk_budget_for_the_worker_and_the_timeout() -> None:
+    environment = job_environment(
+        {"RUNNER_JOB_TIMEOUT_SECONDS": "300"}, config(limits=Limits(disk_gb=5)), "runc", 4096
+    )
+
+    assert environment["FACTORY_RUNNER_DISK_BUDGET_BYTES"] == str(5 * 2**30)
+    assert environment["RUNNER_JOB_TIMEOUT_SECONDS"] == "300"
+    assert "FACTORY_RUNNER_DISK_BUDGET_BYTES" not in job_environment({}, config(), "runc", 4096)
 
 
 # #854-R1
@@ -203,6 +199,7 @@ def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
         api=lambda: Daemon({"runc"}),  # type: ignore[arg-type,return-value]
         pull=None,
         machine_mb=lambda: 8000,
+        harnesses=no_harnesses,
     )
 
     assert seen[0]["runner_id"] == "r1" and seen[0]["pull"] is None
@@ -211,14 +208,19 @@ def test_the_self_test_is_told_the_runner_and_can_be_told_not_to_pull() -> None:
 # -- the announcement --------------------------------------------------------------------------
 
 
-def test_the_announcement_says_ready_and_the_capabilities_only_when_they_were_proven() -> None:
+# #973-T05
+def test_the_announcement_lists_opencode_with_its_access_and_capabilities_only_when_proven() -> (
+    None
+):
     ready = announcement_for(config(), passing(nested=True), 4096)
     not_ready = announcement_for(config(), failing("runc"), 4096)
 
     assert ready.base_version == BASE_VERSION and list(ready.labels) == ["linux", "gpu"]
-    assert ready.manifest["harnesses"] == {"opencode": {"version": "1.19.0", "ready": True}}
+    assert ready.manifest["harnesses"] == [
+        {"harness": "opencode", "version": "1.19.0", "auth": "app-key"}
+    ]
     assert ready.manifest["capabilities"] == ["agent-docker"]
-    assert not_ready.manifest["harnesses"]["opencode"]["ready"] is False  # type: ignore[index]
+    assert not_ready.manifest["harnesses"] == []  # a base that is not proven announces no OpenCode
     assert "capabilities" not in not_ready.manifest
 
 
@@ -244,6 +246,15 @@ class Daemon:
         return self._runtimes
 
 
+def passing_selftest(**_options: Any) -> SelfTestResult:
+    return passing()
+
+
+def no_harnesses(*_arguments: Any) -> dict[str, Any]:
+    """These tests are about the base; the daemon they use has no images to look at."""
+    return {}
+
+
 def run_prepare(
     runtimes: set[str], results: dict[str, SelfTestResult], tried: list[str], **changes: Any
 ) -> module.Prepared:
@@ -257,6 +268,7 @@ def run_prepare(
         selftest=selftest,
         api=lambda: Daemon(runtimes),  # type: ignore[arg-type,return-value]
         machine_mb=lambda: 8000,
+        harnesses=no_harnesses,
     )
 
 
@@ -293,7 +305,7 @@ def test_a_machine_that_fails_every_runtime_is_not_ready_and_says_why() -> None:
 
     assert not prepared.ready
     assert prepared.selftest.failed() is not None
-    assert prepared.announcement.manifest["harnesses"]["opencode"]["ready"] is False  # type: ignore[index]
+    assert prepared.announcement.manifest["harnesses"] == []
 
 
 def test_a_memory_limit_below_the_minimum_is_not_ready_and_starts_nothing() -> None:
@@ -312,6 +324,26 @@ def test_the_host_of_a_runner_advertises_the_implementer_engine_and_nothing_else
     assert prepared.settings.implementer_docker is True
     assert prepared.settings.implementer_work_dir == Path("/work")
     assert prepared.settings.diff_job_user is None and prepared.settings.dynamic_engine_user is None
+
+
+# #980-FIX4
+def test_a_device_with_no_credential_yet_is_prepared_for_claude_code_by_its_layer_alone() -> None:
+    def layer_only(*_arguments: Any) -> dict[str, HarnessStatus]:
+        return {"claude-code": HarnessStatus("2.1.311", True, ("no Claude Code login yet",))}
+
+    prepared = prepare(
+        config(),
+        {"PATH": "/usr/bin", "FACTORY_RUNNER_HOME": "/nonexistent-home"},
+        selftest=passing_selftest,
+        api=lambda: Daemon({"runc"}),  # type: ignore[arg-type,return-value]
+        machine_mb=lambda: 8000,
+        harnesses=layer_only,
+    )
+
+    # The service offers the entry once the pool finds a credential, with no restart: it needs the
+    # version from the start, not a login.
+    assert prepared.claude_version == "2.1.311"
+    assert any("no Claude Code login yet" in note for note in prepared.harness_notes)
 
 
 def test_pulling_an_image_is_one_engine_api_pull_and_one_tag() -> None:

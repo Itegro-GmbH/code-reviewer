@@ -88,7 +88,17 @@ _TOP_LEVEL_FIELDS = {
 }
 # The fields of an implementer job (#746): no pull request, so no `prUrl`, `command`, `args`, `base`
 # or `dynamic`, and the `implementer` object instead.
-_IMPLEMENTER_TOP_LEVEL_FIELDS = {"reviewKind", "implementer", "git", "llm", "env"}
+_IMPLEMENTER_TOP_LEVEL_FIELDS = {
+    "reviewKind",
+    "implementer",
+    "git",
+    "llm",
+    "env",
+    # The host's per-VM token for the environment control (#977): only the Worker's job host
+    # writes it, on the stdin of the job process; the app never sends one.
+    "environmentControlToken",
+}
+_CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 _IMPLEMENTER_FIELDS = {
     "repo",
     "baseBranch",
@@ -518,12 +528,16 @@ class ImplementerInput:
     # they came (#745, step 3). The door parses them again with `parse_model_access`, so that it
     # judges them by the very rules the job was judged by. Holds the key: never printed.
     model_access: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    # The host's per-VM token (#977): the environment control sends it in every request.
+    control_token: str | None = field(default=None, repr=False)
 
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every value that must never appear in an output. A subscription turn (#856) has no key of
         ours: its placeholder `llm` holds an empty one, which is not a secret."""
-        return tuple(value for value in (self.git.token, self.llm.api_key) if value)
+        return tuple(
+            value for value in (self.git.token, self.llm.api_key, self.control_token) if value
+        )
 
 
 def _invalid(detail: str) -> JobError:
@@ -1350,8 +1364,18 @@ def _implementer_can_ask(spec: dict[str, Any]) -> bool:
     return flag
 
 
+def _control_token(job: dict[str, Any]) -> str | None:
+    if "environmentControlToken" not in job:
+        return None
+    given = job["environmentControlToken"]
+    if not isinstance(given, str) or not _CONTROL_TOKEN.fullmatch(given):
+        raise _invalid("environmentControlToken is not a control token")
+    return given
+
+
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
+    control_token = _control_token(job)
     git = _git_access(job)
     spec = _implementer_spec(job, git)
     raw_spec = _section(job, "implementer")
@@ -1370,6 +1394,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
             ),
             implementer=spec,
             env=_env(job),
+            control_token=control_token,
         )
     # A native job only: its provider may be a provider of the catalog, and the key goes to the
     # address of the entry and to no other.
@@ -1386,6 +1411,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
             "modelEntry": raw_spec["modelEntry"],
             "cost": raw_spec["cost"],
         },
+        control_token=control_token,
     )
 
 

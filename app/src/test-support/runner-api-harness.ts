@@ -106,6 +106,10 @@ import {
   readEffectiveEntitlements,
   readEntitlements,
 } from "../workspaces/effective-entitlements.ts";
+import {
+  mintDeliverySecret,
+  sealDeliverySecret,
+} from "../runner-identity/delivery.ts";
 import { TEST_APP_SLUG } from "./github-app.ts";
 import { createJobQueueFixture, sha, type TestQueue } from "./jobs.ts";
 import type { NativeSelectionSource } from "../native-providers/catalog.ts";
@@ -635,6 +639,14 @@ export async function startRunnerApiHarness(
         }),
         settings: () => ({ minBaseVersion: fleetSettings.minBaseVersion }),
         logger,
+        // #972: the secret of a webhook delivery, sealed with the harness's own app secret (`TEST_APP_SECRET`).
+        mintDeliveryKey: (runnerId) => {
+          const key = mintDeliverySecret();
+          return {
+            ...key,
+            sealed: sealDeliverySecret(TEST_APP_SECRET, runnerId, key.secret),
+          };
+        },
       }),
       appVersion: TEST_APP_VERSION,
       noteClaimFeatures: (features) =>
@@ -864,57 +876,6 @@ export async function startRunnerApiHarness(
       jobId,
     );
 
-  /**
-   * #879: one part of the session snapshot, through the runner API. `query` is the description of the whole file, `body` the bytes of the
-   * part; the lease token goes in the header `leaseToken` names (none when it is `null`).
-   */
-  const runnerSession = (
-    jobId: string,
-    query: Record<string, string | number>,
-    body: Uint8Array,
-    request: RequestOptions & { leaseToken?: string | null } = {},
-  ) =>
-    api.session(
-      new Request(
-        `${url}/jobs/${jobId}/session?${new URLSearchParams(
-          Object.entries(query).map(([name, value]) => [name, String(value)]),
-        ).toString()}`,
-        {
-          method: "PUT",
-          headers: headers(request, {
-            "content-type": "application/octet-stream",
-            ...(request.leaseToken == null
-              ? {}
-              : { "x-lease-token": request.leaseToken }),
-          }),
-          body: body as BodyInit,
-        },
-      ),
-      jobId,
-    );
-
-  /** #879: one part of the stored session snapshot, through the runner API (`part` left out asks for the first). */
-  const runnerResumeSession = (
-    jobId: string,
-    part?: number | string,
-    request: RequestOptions & { leaseToken?: string | null } = {},
-  ) =>
-    api.resumeSession(
-      new Request(
-        `${url}/jobs/${jobId}/resume-session${part === undefined ? "" : `?part=${String(part)}`}`,
-        {
-          method: "GET",
-          headers: headers(
-            request,
-            request.leaseToken == null
-              ? {}
-              : { "x-lease-token": request.leaseToken },
-          ),
-        },
-      ),
-      jobId,
-    );
-
   /** Every row of the jobs table, for "nothing changed" assertions. */
   const snapshotJobs = () =>
     fixture.db.selectFrom("jobs").selectAll().orderBy("id").execute();
@@ -1105,7 +1066,11 @@ export async function startRunnerApiHarness(
       baseSha: sha("b"),
       branch: `implementer/t${String(turnCounter)}`,
       instruction: "Add a health endpoint.",
-      modelChoice: { entryId: "entry-1" },
+      // A runner works with the workspace's own key: a turn on a runner environment asks for `app-key`, never for a catalog entry (#973).
+      modelChoice:
+        overrides.runnerEnvironment == null
+          ? { entryId: "entry-1" }
+          : { provider: "anthropic", model: "claude-sonnet-5-5" },
       costLimitCents: null,
       createdBy: "turn-user",
       actorLogin: "octocat",
@@ -1261,7 +1226,9 @@ export async function startRunnerApiHarness(
         labels: normalizeLabels(announcement.labels ?? ["linux"]),
         baseVersion: announcement.baseVersion ?? "1.0.0",
         manifest: announcement.manifest ?? {
-          harnesses: { opencode: { version: "1.19.0", ready: true } },
+          harnesses: [
+            { harness: "opencode", version: "1.19.0", auth: "app-key" },
+          ],
           capabilities: [],
         },
         limits: announcement.limits ?? {},
@@ -1290,8 +1257,6 @@ export async function startRunnerApiHarness(
     version,
     heartbeat,
     steps,
-    runnerSession,
-    runnerResumeSession,
     complete,
     post,
     snapshotJobs,

@@ -135,6 +135,37 @@ describe("POST /dispatch", () => {
     expect(launcher.launches).toStrictEqual([]);
   });
 
+  // #972-T06
+  it("refuses a doorbell signed with another dispatcher's secret, under its own key id or under this one's, and makes no claim", async () => {
+    const other = (
+      readContract("dispatch-signing-vectors.json") as {
+        otherDispatcher: { kid: string; secret: string };
+      }
+    ).otherDispatcher;
+    const jobId = fake.enqueue();
+    const { app, launcher, background } = build();
+
+    for (const input of [
+      // Another dispatcher's secret under this dispatcher's key id: a bad signature.
+      { secret: other.secret },
+      // Its own key id and secret: this dispatcher does not know the key.
+      { secret: other.secret, keyId: other.kid },
+    ]) {
+      const response = await app.fetch(
+        signedRequest({
+          body: webhookBody({ jobId }),
+          nowSeconds: NOW,
+          ...input,
+        }),
+      );
+      expect(response.status).toBe(401);
+    }
+
+    await background.drain(100);
+    expect(fake.requests()).toStrictEqual([]);
+    expect(launcher.launches).toStrictEqual([]);
+  });
+
   // #327-T02
   it("refuses an oversize body with 413 before it is read or verified, and makes no claim", async () => {
     const jobId = fake.enqueue();

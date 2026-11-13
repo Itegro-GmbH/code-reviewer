@@ -1,0 +1,120 @@
+{
+  "_comment": "#979, epic #969, ADR 0005: the rule language of the outer network wall, as examples both implementations must answer alike. The hosted Dispatcher's rule code is dispatcher/src/network/rule.ts (the schema `NetworkRuleSchema` and `policyFor`, which makes the second wall's list of names); the local Dispatcher's outer proxy is runner/src/code_reviewer_runner/factory_runner/firecracker/outer_rule.py (the contract's rule read by implementer/network_rule.py `parse_rule`, and `allow_list`, the same list for a VM on a customer's machine). Both suites read this file (dispatcher/src/network/network-examples.test.ts, runner/tests/unit/test_firecracker_outer_rule.py) and must give the answers below. `rules`: whether a rule document is a rule. `allowLists`: the names a narrowed VM may reach for a rule (a set: GitHub, the model provider's host, the app's host and the rule's own hosts; the hosted list also holds the Dispatcher's own host, which a local machine has none of; `null`: the rule `open` is not narrowed, the wide rule stays). `verdicts`: whether the narrowed wall lets a connection to `host`:`port` through by the list of `allowLists` entry `list`, with ONE matching rule written down here and applied by both tests: a name matches an entry that is exactly it, or a `*.suffix` entry when it is strictly below the suffix (`*.pythonhosted.org` matches `files.pythonhosted.org`, never `pythonhosted.org`); only the ports 80 and 443 go through; an IP address (any spelling) is never a name. Names are lower-case ASCII here (the proxy brings a name to that form before it compares).",
+  "rules": [
+    { "name": "off", "rule": { "mode": "off", "hosts": [] }, "valid": true },
+    { "name": "open", "rule": { "mode": "open", "hosts": [] }, "valid": true },
+    {
+      "name": "a list with an exact name and a suffix",
+      "rule": { "mode": "list", "hosts": ["registry.npmjs.org", "*.pythonhosted.org"] },
+      "valid": true
+    },
+    {
+      "name": "a list of one host",
+      "rule": { "mode": "list", "hosts": ["api.anthropic.com"] },
+      "valid": true
+    },
+    {
+      "name": "a list that names a host twice",
+      "rule": { "mode": "list", "hosts": ["a.example.com", "a.example.com"] },
+      "valid": true
+    },
+    { "name": "a list with no host", "rule": { "mode": "list", "hosts": [] }, "valid": false },
+    {
+      "name": "off with a host",
+      "rule": { "mode": "off", "hosts": ["registry.npmjs.org"] },
+      "valid": false
+    },
+    {
+      "name": "open with a host",
+      "rule": { "mode": "open", "hosts": ["registry.npmjs.org"] },
+      "valid": false
+    },
+    { "name": "an unknown mode", "rule": { "mode": "closed", "hosts": [] }, "valid": false },
+    { "name": "a mode in capitals", "rule": { "mode": "List", "hosts": ["a.example.com"] }, "valid": false },
+    { "name": "an IPv4 address", "rule": { "mode": "list", "hosts": ["10.0.0.1"] }, "valid": false },
+    {
+      "name": "an address in the old numeric form",
+      "rule": { "mode": "list", "hosts": ["0x7f.1"] },
+      "valid": false
+    },
+    { "name": "a top-level suffix", "rule": { "mode": "list", "hosts": ["*.com"] }, "valid": false },
+    { "name": "a name of one label", "rule": { "mode": "list", "hosts": ["localhost"] }, "valid": false },
+    { "name": "a name in capitals", "rule": { "mode": "list", "hosts": ["Registry.NPMJS.org"] }, "valid": false },
+    { "name": "a name with a port", "rule": { "mode": "list", "hosts": ["registry.npmjs.org:443"] }, "valid": false },
+    { "name": "a name with a path", "rule": { "mode": "list", "hosts": ["registry.npmjs.org/a"] }, "valid": false },
+    { "name": "a name with a trailing dot", "rule": { "mode": "list", "hosts": ["registry.npmjs.org."] }, "valid": false },
+    { "name": "a name in Unicode", "rule": { "mode": "list", "hosts": ["bücher.example.com"] }, "valid": false },
+    { "name": "two wildcards", "rule": { "mode": "list", "hosts": ["*.*.example.com"] }, "valid": false },
+    { "name": "a wildcard that is not first", "rule": { "mode": "list", "hosts": ["a.*.example.com"] }, "valid": false },
+    { "name": "a label that starts with a hyphen", "rule": { "mode": "list", "hosts": ["-a.example.com"] }, "valid": false },
+    { "name": "a label with an underscore", "rule": { "mode": "list", "hosts": ["a_b.example.com"] }, "valid": false },
+    { "name": "a last label that is a number", "rule": { "mode": "list", "hosts": ["a.example.1"] }, "valid": false },
+    { "name": "an empty label", "rule": { "mode": "list", "hosts": ["a..example.com"] }, "valid": false },
+    { "name": "a host that is no text", "rule": { "mode": "list", "hosts": [1] }, "valid": false },
+    { "name": "a field the contract does not have", "rule": { "mode": "list", "hosts": ["a.example.com"], "extra": 1 }, "valid": false },
+    { "name": "no hosts field", "rule": { "mode": "off" }, "valid": false },
+    { "name": "hosts that are no list", "rule": { "mode": "list", "hosts": "a.example.com" }, "valid": false }
+  ],
+  "allowLists": [
+    {
+      "name": "off keeps GitHub, the model provider and the app",
+      "rule": { "mode": "off", "hosts": [] },
+      "modelHost": "api.anthropic.com",
+      "appHost": "app.example.test",
+      "allow": ["github.com", "api.github.com", "api.anthropic.com", "app.example.test"]
+    },
+    {
+      "name": "a list adds its own hosts, a suffix as it is",
+      "rule": { "mode": "list", "hosts": ["registry.npmjs.org", "*.pythonhosted.org"] },
+      "modelHost": "api.anthropic.com",
+      "appHost": "app.example.test",
+      "allow": [
+        "github.com",
+        "api.github.com",
+        "api.anthropic.com",
+        "app.example.test",
+        "registry.npmjs.org",
+        "*.pythonhosted.org"
+      ]
+    },
+    {
+      "name": "a name that is already there is not there twice",
+      "rule": { "mode": "list", "hosts": ["github.com", "api.anthropic.com"] },
+      "modelHost": "api.anthropic.com",
+      "appHost": "app.example.test",
+      "allow": ["github.com", "api.github.com", "api.anthropic.com", "app.example.test"]
+    },
+    {
+      "name": "open is not narrowed",
+      "rule": { "mode": "open", "hosts": [] },
+      "modelHost": "api.anthropic.com",
+      "appHost": "app.example.test",
+      "allow": null
+    }
+  ],
+  "verdicts": [
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "registry.npmjs.org", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "registry.npmjs.org", "port": 80, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "registry.npmjs.org", "port": 22, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "registry.npmjs.org", "port": 8443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "files.pythonhosted.org", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "a.b.pythonhosted.org", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "pythonhosted.org", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "evilpythonhosted.org", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "registry.npmjs.org.evil.example", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "github.com", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "api.github.com", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "gist.github.com", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "api.anthropic.com", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "app.example.test", "port": 443, "allowed": true },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "example.com", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "93.184.216.34", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "0x5db8d822", "port": 443, "allowed": false },
+    { "list": "a list adds its own hosts, a suffix as it is", "host": "[2606:2800:220:1::1]", "port": 443, "allowed": false },
+    { "list": "off keeps GitHub, the model provider and the app", "host": "github.com", "port": 443, "allowed": true },
+    { "list": "off keeps GitHub, the model provider and the app", "host": "api.anthropic.com", "port": 443, "allowed": true },
+    { "list": "off keeps GitHub, the model provider and the app", "host": "app.example.test", "port": 443, "allowed": true },
+    { "list": "off keeps GitHub, the model provider and the app", "host": "registry.npmjs.org", "port": 443, "allowed": false },
+    { "list": "off keeps GitHub, the model provider and the app", "host": "example.com", "port": 443, "allowed": false }
+  ]
+}

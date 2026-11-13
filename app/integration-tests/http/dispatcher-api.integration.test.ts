@@ -688,7 +688,6 @@ describe("the version call", () => {
       "implementer_steps",
       "pool_cap",
       "release",
-      "runner_session_snapshot",
       "vm_lifecycle",
       "worker_api",
     ]);

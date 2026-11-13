@@ -8,6 +8,7 @@
 // whether it may push and whether it brings a default result schema. A name no list knows is an error with the list of names that
 // exist; it is never accepted unseen, because the push facts and the version cannot be checked for a profile nobody knows.
 import { BUILT_IN_CONNECTORS, type ConnectorSpec } from "./connectors.ts";
+import type { OnlineRunner } from "../runner-identity/announced.ts";
 import type { ResultSchema } from "./result-schema.ts";
 
 /** What a run with one version of a profile is, as far as the validator is concerned. */
@@ -20,6 +21,8 @@ export type ProfileVersionFacts = {
   managedModel?: boolean;
   /** The harness the version runs with (#854, #856); left out: OpenCode. */
   harness?: string;
+  /** The model a harness on a login reads (#973); left out for a model of the catalog or of the workspace's own key. */
+  model?: string;
   /** The environment of the workspace the version runs in (#919); left out or null: a version saved before it, whose step names the environment. */
   environmentId?: string | null;
 };
@@ -41,6 +44,8 @@ export type EnvironmentInfo = {
   name: string;
   /** #854: a runner environment is a customer's runner with labels; left out: a platform VM. */
   kind?: "hosted" | "runner";
+  /** #973: the labels of a runner environment: the runners that can take its turns have all of them. */
+  labels?: readonly string[];
 };
 
 export type WorkflowResolver = {
@@ -49,6 +54,11 @@ export type WorkflowResolver = {
   archivedProfiles?(): readonly string[];
   environments(): readonly EnvironmentInfo[];
   connectors(): readonly ConnectorSpec[];
+  /**
+   * #973: the runners of the workspace that are online now, with what each announces. Left out (a resolver that does not know the runners): no
+   * combination is refused for lacking one. See `no_runner_announces`.
+   */
+  onlineRunners?(): readonly OnlineRunner[];
 };
 
 /** The resolver of the running server: the workspace's profiles and environments, and the built-in connectors. */
@@ -56,8 +66,11 @@ export function createResolver(options: {
   profiles: readonly ProfileInfo[];
   archivedProfiles?: readonly string[];
   environments: readonly EnvironmentInfo[];
+  onlineRunners?: readonly OnlineRunner[];
 }): WorkflowResolver {
+  const runners = options.onlineRunners;
   return {
+    ...(runners === undefined ? {} : { onlineRunners: () => runners }),
     profiles: () => options.profiles,
     archivedProfiles: () => options.archivedProfiles ?? [],
     environments: () => options.environments,

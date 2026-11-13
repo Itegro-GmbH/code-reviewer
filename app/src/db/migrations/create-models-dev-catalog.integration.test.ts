@@ -41,6 +41,7 @@ const LATER_TABLES = [
   "profile_versions",
   "runners",
   "runner_registration_tokens",
+  "job_rings",
 ];
 
 const beforeThisMigration: MigrationProvider = {

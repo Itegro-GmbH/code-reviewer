@@ -1,1082 +1,1389 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""The installer of the Factory-Runner (#855, R2): `runner/install/install.sh` against stand-ins for
-`docker`, `systemctl`, `curl` and the rest, in a directory that plays the machine's root. The
-signature of the release manifest is checked by the real `openssl`, against files that
-`cryptography` signed, so the two implementations that have to agree (the installer's and the
-runner's) do. Nothing
-of the machine running the test is touched: no package, no unit, no daemon. What a real systemd and
-a real daemon do with the files is the job of the first install on a machine (docs/runner.md)."""
+"""The installer, updater and uninstaller of the Factory-Runner on a machine with KVM (#982):
+`runner/install/install.sh` against stand-ins for every command that needs root, in a directory
+that plays the machine's root (`host_install_support.py`). The signatures, digests and unpacking
+are checked by the real `openssl`, `jq`, `zstd`, `tar` and `sha256sum` against releases that are
+signed with a real key. Nothing of the machine that runs the test is touched. What a real systemd,
+a real `nft` and a real kernel do with the files is the job of the first install on a machine
+(docs/runner.md, "First install on a real host") and of the installer lane of CI.
+
+#982-T01 preflight without /dev/kvm; #982-T02 install, then uninstall; #982-T03 an update with a
+bad signature; #982-T04 rollback."""
 
 import fcntl
+import ipaddress
 import json
 import os
-import re
 import select
 import stat
 import subprocess
 import termios
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
-from release_support import DIGEST, REPOSITORY, Release
-
-from code_reviewer_runner.factory_runner import update
+from host_install_support import (
+    FIRST_NETWORK,
+    PROGRAM_BASE,
+    REPOSITORY_ROOT,
+    SCRIPT,
+    TOKEN,
+    VM_BASE,
+    Machine,
+    Release,
+    new_machine,
+)
 
 pytestmark = pytest.mark.unit
 
-RUNNER = Path(__file__).resolve().parents[2]
-REPOSITORY_ROOT = RUNNER.parent
-SCRIPT = RUNNER / "install" / "install.sh"
-TOKEN = "crt_" + "T" * 43
-
-DOCKER = """\
-#!/bin/sh
-printf 'docker %s\\n' "$*" >>"$STUB_LOG"
-last=""
-for last; do :; done
-case "$1" in
-  info) case "$*" in *SecurityOptions*) echo "[name=seccomp,profile=builtin]" ;; esac ;;
-  pull) ;;
-  image)
-    if [ "$2" = inspect ]; then
-      case "$*" in
-        *RepoDigests*) echo "${STUB_REPODIGESTS:-}" ;;
-        *Labels*)
-          if [ "$last" = factory-runner:current ]; then
-            [ -f "$STUB_STATE/current.release" ] && cat "$STUB_STATE/current.release" || exit 1
-          else
-            echo "${STUB_LABEL:-7}"
-          fi ;;
-        *.Id*)
-          if [ "$last" = factory-runner:current ]; then
-            [ -f "$STUB_STATE/current.id" ] && cat "$STUB_STATE/current.id" || exit 1
-          else
-            echo "${STUB_NEW_ID:-id-new}"
-          fi ;;
-        *) [ -f "$STUB_STATE/current" ] || exit 1 ;;
-      esac
-    fi ;;
-  images) [ -f "$STUB_STATE/current" ] && echo abc123 || true ;;
-  tag)
-    # A service that starts prunes the digest reference of a pulled image before it is named.
-    if [ "$3" = factory-runner:current ] && [ -n "${STUB_LOSE_REFERENCE:-}" ]; then
-      if [ "$STUB_LOSE_REFERENCE" = always ] || [ ! -f "$STUB_STATE/lost" ]; then
-        touch "$STUB_STATE/lost"
-        echo "Error: No such image: $2" >&2
-        exit 1
-      fi
-    fi
-    case "$3" in
-      factory-runner:current)
-        touch "$STUB_STATE/current"
-        echo "${STUB_NEW_ID:-id-new}" >"$STUB_STATE/current.id"
-        echo "${STUB_LABEL:-7}" >"$STUB_STATE/current.release" ;;
-      factory-runner:previous)
-        touch "$STUB_STATE/previous"
-        cp "$STUB_STATE/current.id" "$STUB_STATE/previous.id" ;;
-    esac ;;
-  ps) [ -n "${STUB_CONTAINERS:-}" ] && echo "${STUB_CONTAINERS}" || true ;;
-  run)
-    case "$*" in
-      *rejected-release*)
-        # The installer asks for the file with `sh -c`: 3 = there is none, else its content.
-        [ -n "${STUB_REJECTED_STATUS:-}" ] && exit "$STUB_REJECTED_STATUS"
-        [ -n "${STUB_REJECTED+x}" ] || exit 3
-        echo "$STUB_REJECTED" ;;
-      *credential*show*)
-        cat >"$STUB_STATE/credential-stdin"
-        if [ -f "$STUB_STATE/registered" ]; then
-          echo "credential: set"
-        else
-          echo "credential: not set"
-        fi ;;
-      *register*) cat >"$STUB_STATE/register-stdin"; touch "$STUB_STATE/registered" ;;
-      *config*set*) cat >"$STUB_STATE/config-stdin" ;;
-    esac ;;
-esac
-exit 0
-"""
-
-
-@dataclass
-class Machine:
-    root: Path
-    bin: Path
-    state: Path
-    log: Path
-    # What the release addresses answer (the stand-in `curl` copies from here by file name).
-    served: Path
-    channel: Path
-    release: Release
-    # Whether the terminal of the last `run_on_terminal` echoed what is typed when the script ended.
-    echo_after: bool | None = None
-
-    def run(
-        self,
-        *args: str,
-        env: dict[str, str] | None = None,
-        stdin: str | None = None,
-        channel: bool = True,
-    ) -> subprocess.CompletedProcess[str]:
-        variables = {
-            "PATH": f"{self.bin}:/usr/bin:/bin",
-            "HOME": str(self.root),
-            "FACTORY_RUNNER_ROOT": str(self.root),
-            "FACTORY_RUNNER_NO_SYSTEMCTL": "",
-            "STUB_LOG": str(self.log),
-            "STUB_STATE": str(self.state),
-            "STUB_SERVED": str(self.served),
-            **(env or {}),
-        }
-        return subprocess.run(
-            [
-                "/bin/sh",
-                str(SCRIPT),
-                *(["--channel-file", str(self.channel)] if channel else []),
-                *args,
-            ],
-            env=variables,
-            input=stdin if stdin is not None else "",
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-            # No controlling terminal: nothing can be asked, as under `curl | sh` in a cron job.
-            start_new_session=True,
-        )
-
-    def environment(self, env: dict[str, str] | None = None) -> dict[str, str]:
-        return {
-            "PATH": f"{self.bin}:/usr/bin:/bin",
-            "HOME": str(self.root),
-            "FACTORY_RUNNER_ROOT": str(self.root),
-            "FACTORY_RUNNER_NO_SYSTEMCTL": "",
-            "STUB_LOG": str(self.log),
-            "STUB_STATE": str(self.state),
-            "STUB_SERVED": str(self.served),
-            **(env or {}),
-        }
-
-    def run_piped(
-        self, text: str, *args: str, env: dict[str, str] | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        """`curl ... | sh -s -- ARGS`: the shell reads the script from its standard input."""
-        return subprocess.run(
-            ["/bin/sh", "-s", "--", "--channel-file", str(self.channel), *args],
-            env=self.environment(env),
-            input=text,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-            start_new_session=True,
-        )
-
-    def run_on_terminal(
-        self, *args: str, answers: dict[str, str], env: dict[str, str] | None = None
-    ) -> tuple[int, str]:
-        """The script with a controlling terminal, as an administrator runs it. `answers` maps a
-        text the terminal shows (a prompt) to what is typed when it appears. Returns the exit
-        code and everything the terminal showed."""
-        master, slave = os.openpty()
-        process = subprocess.Popen(
-            ["/bin/sh", str(SCRIPT), "--channel-file", str(self.channel), *args],
-            env=self.environment(env),
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            start_new_session=True,
-            preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 1),
-        )
-        os.close(slave)
-        shown = b""
-        pending = dict(answers)
-        deadline = time.monotonic() + 60
-        try:
-            while time.monotonic() < deadline:
-                ready, _, _ = select.select([master], [], [], 1.0)
-                if not ready:
-                    continue
-                try:
-                    chunk = os.read(master, 4096)
-                except OSError:  # the other end is closed: the script has ended
-                    break
-                if not chunk:
-                    break
-                shown += chunk
-                for prompt, typed in list(pending.items()):
-                    if prompt.encode() in shown:
-                        del pending[prompt]
-                        time.sleep(0.3)  # the script switches the echo off right after asking
-                        os.write(master, typed.encode())
-            code = process.wait(timeout=30)
-            self.echo_after = bool(termios.tcgetattr(master)[3] & termios.ECHO)
-        finally:
-            os.close(master)
-        return code, shown.decode(errors="replace")
-
-    def install_image(self, *, release: int, image_id: str) -> None:
-        """An image that is `current` already."""
-        (self.state / "current").touch()
-        (self.state / "current.id").write_text(image_id)
-        (self.state / "current.release").write_text(str(release))
-
-    def calls(self) -> list[str]:
-        return self.log.read_text().splitlines() if self.log.exists() else []
-
-    @property
-    def unit(self) -> Path:
-        return self.root / "etc" / "systemd" / "system" / "factory-runner.service"
-
-    @property
-    def command(self) -> Path:
-        return self.root / "usr" / "local" / "bin" / "factory-runner"
-
-
-def stub(path: Path, body: str) -> None:
-    path.write_text(f"#!/bin/sh\n{body}\n")
-    path.chmod(0o755)
+# What changes the machine; the reads (`nft list`, `ip link show`, the manifests) are not in it.
+MUTATORS = (
+    "useradd",
+    "userdel",
+    "chown",
+    "runuser",
+    "ip tuntap",
+    "ip addr",
+    "ip link set",
+    "ip link delete",
+    "nft -f",
+    "nft delete",
+    "systemctl enable",
+    "systemctl start",
+    "systemctl daemon-reload",
+)
 
 
 @pytest.fixture
 def machine(tmp_path: Path) -> Machine:
-    root, bin_dir, state = tmp_path / "root", tmp_path / "bin", tmp_path / "state"
-    (root / "run" / "systemd" / "system").mkdir(parents=True)
-    bin_dir.mkdir()
-    state.mkdir()
-    (bin_dir / "docker").write_text(DOCKER)
-    (bin_dir / "docker").chmod(0o755)
-    stub(bin_dir / "id", "echo 0")
-    stub(bin_dir / "uname", 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac')
-    stub(
-        bin_dir / "systemctl",
-        'printf "systemctl %s\\n" "$*" >>"$STUB_LOG"; '
-        'case "$1" in is-active) [ -f "$STUB_STATE/active" ] ;; esac',
+    return new_machine(tmp_path)
+
+
+@pytest.fixture
+def installed(machine: Machine) -> Machine:
+    done = machine.install()
+    assert done.returncode == 0, done.stderr
+    return machine
+
+
+def tree_without_locks(machine: Machine) -> dict[str, str]:
+    """The tree of the machine; a lock file that stays after an update is a file, not a change."""
+    return {path: kind for path, kind in machine.tree().items() if not path.endswith(".lock")}
+
+
+def changed_nothing(machine: Machine) -> None:
+    assert machine.tree() == machine.baseline
+    assert not [call for call in machine.calls() if call.startswith(MUTATORS)]
+    assert not machine.table_loaded and not machine.user_exists and not machine.taps
+
+
+def publish(machine: Machine, **changes: object) -> Release:
+    needs_vm = changes.pop("needs_vm", None)
+    release = Release(
+        program=int(str(changes.pop("program", 1))),
+        vm=int(str(changes.pop("vm", 10))),
+        needs_vm=None if needs_vm is None else int(str(needs_vm)),
+        key=machine.release.key,
+        tamper=set(changes.pop("tamper", ())),  # type: ignore[call-overload]
     )
-    stub(
-        bin_dir / "curl",
-        'printf "curl %s\\n" "$*" >>"$STUB_LOG"; out=""; url=""; '
-        'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; https://*) url="$1" ;; esac; '
-        'shift; done; name="${url##*/}"; '
-        '[ -f "$STUB_SERVED/$name" ] && cp "$STUB_SERVED/$name" "$out" || echo junk >"$out"',
-    )
-    stub(bin_dir / "apt-get", 'printf "apt-get %s\\n" "$*" >>"$STUB_LOG"')
-    stub(bin_dir / "jq", "true")
-    served = tmp_path / "served"
-    release = Release(release=7)
-    write_release(release, served)
-    return Machine(
-        root,
-        bin_dir,
-        state,
-        tmp_path / "calls.log",
-        served,
-        served / "release-channel.json",
-        release,
-    )
+    machine.publish(release)
+    return release
 
 
-def write_release(release: Release, folder: Path) -> None:
-    """The files the owner publishes, and the channel that names them."""
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "manifest.json").write_bytes(release.manifest())
-    (folder / "manifest.sig").write_bytes(release.signature())
-    (folder / "release-channel.json").write_text(json.dumps(release.channel_document(), indent=2))
+# -- preflight --
 
 
-def test_the_install_verifies_the_manifest_pulls_its_digest_writes_the_unit_and_starts(
+# #982-T01
+def test_preflight_without_kvm_stops_with_the_documented_message_and_changes_nothing(
     machine: Machine,
 ) -> None:
-    done = machine.run(
-        "--labels", "linux,gpu", "--name", "build box", env={"FACTORY_RUNNER_TOKEN": TOKEN}
-    )
+    (machine.root / "dev" / "kvm").unlink()
+    machine.baseline = machine.tree()
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    for text in (
+        "no /dev/kvm",
+        "NESTED VIRTUALIZATION",
+        "Intel VT-x / AMD-V",
+        "Nothing was changed",
+    ):
+        assert text in done.stderr
+    assert machine.tree() == machine.baseline
+    # Not one command ran: the check comes first.
+    assert machine.calls() == []
+
+
+def without_nft(m: Machine) -> None:
+    (m.bin / "nft").unlink()
+
+
+def without_resize2fs(m: Machine) -> None:
+    (m.bin / "resize2fs").unlink()
+
+
+def without_cgroup2(m: Machine) -> None:
+    (m.root / "sys/fs/cgroup/cgroup.controllers").unlink()
+
+
+def without_systemd(m: Machine) -> None:
+    (m.root / "run/systemd/system").rmdir()
+
+
+@pytest.mark.parametrize(
+    ("break_it", "message"),
+    [
+        (without_nft, "nft is not installed"),
+        (without_resize2fs, "resize2fs is not installed"),
+        (without_cgroup2, "cgroup v2"),
+        (without_systemd, "systemd is not the init"),
+    ],
+)
+def test_preflight_stops_for_a_missing_part_and_changes_nothing(
+    machine: Machine, break_it: Callable[[Machine], None], message: str
+) -> None:
+    break_it(machine)
+    machine.baseline = machine.tree()
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert message in done.stderr
+    changed_nothing(machine)
+
+
+@pytest.mark.parametrize(
+    ("variables", "message"),
+    [
+        ({"STUB_SYSTEMD": "245"}, "systemd 245 is too old"),
+        ({"STUB_UID": "1000"}, "run as root"),
+        ({"STUB_NO_KVM_GROUP": "1"}, "the group kvm does not exist"),
+    ],
+)
+def test_preflight_stops_for_a_machine_that_cannot_run_it(
+    machine: Machine, variables: dict[str, str], message: str
+) -> None:
+    done = machine.install(env=variables)
+
+    assert done.returncode == 1
+    assert message in done.stderr
+    changed_nothing(machine)
+
+
+def test_a_filesystem_without_reflinks_is_a_warning_not_a_stop(machine: Machine) -> None:
+    done = machine.install()
 
     assert done.returncode == 0, done.stderr
+    assert "not on a file system with reflinks" in done.stderr
+    assert "34 ms" in done.stderr
+
+
+def test_a_filesystem_with_reflinks_is_not_warned_about(machine: Machine) -> None:
+    done = machine.install(env={"STUB_REFLINK": "1"})
+
+    assert done.returncode == 0, done.stderr
+    assert "reflinks" not in done.stderr
+
+
+def with_foreign_unit(m: Machine) -> None:
+    m.unit.write_text("[Unit]\n")
+
+
+def with_foreign_user(m: Machine) -> None:
+    (m.state / "users").mkdir()
+    (m.state / "users" / "factory-runner").write_text("x")
+
+
+def with_foreign_table(m: Machine) -> None:
+    (m.state / "nft-table").write_text("x")
+
+
+def with_foreign_tap(m: Machine) -> None:
+    (m.state / "taps").mkdir()
+    (m.state / "taps" / "fctap0").write_text("x")
+
+
+def with_foreign_opt(m: Machine) -> None:
+    (m.root / "opt/code-reviewer").mkdir()
+
+
+def with_foreign_state_dir(m: Machine) -> None:
+    (m.root / "var/lib/code-reviewer").mkdir()
+    (m.root / "var/lib/code-reviewer/x").write_text("")
+
+
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        (with_foreign_unit, "this installer did not make"),
+        (with_foreign_user, "must own nothing else"),
+        (with_foreign_table, "nft table code_reviewer_wall is loaded"),
+        (with_foreign_tap, "TAP devices named fctapN"),
+        (with_foreign_opt, "was not made by this installer"),
+        (with_foreign_state_dir, "is not empty"),
+    ],
+)
+def test_a_second_dispatcher_is_refused_and_what_is_not_ours_is_never_reused(
+    machine: Machine, make: Callable[[Machine], None], message: str
+) -> None:
+    make(machine)
+    before = machine.tree()
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert message in done.stderr
+    assert machine.tree() == before
+    assert not [call for call in machine.calls() if call.startswith(("useradd", "chown", "curl"))]
+
+
+def test_an_install_over_an_install_is_refused_without_refresh(installed: Machine) -> None:
+    before = installed.tree()
+
+    done = installed.install()
+
+    assert done.returncode == 1
+    assert "installed on this machine already" in done.stderr
+    assert installed.tree() == before
+
+
+# -- install --
+
+
+def test_the_install_makes_the_user_the_artifacts_the_taps_the_table_and_the_units(
+    machine: Machine,
+) -> None:
+    done = machine.install("--labels", "linux,gpu", "--name", "build box")
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.rstrip().endswith("install: done")
     calls = machine.calls()
-    # The manifest and its signature were fetched, proved, and only then was the digest pulled.
-    fetched = [call for call in calls if call.startswith("curl")]
-    assert any("manifest.json" in call for call in fetched)
-    assert any("manifest.sig" in call for call in fetched)
-    assert f"docker pull -q {REPOSITORY}@{DIGEST}" in calls
-    assert f"docker tag {REPOSITORY}@{DIGEST} factory-runner:current" in calls
-    assert done.stdout.count("verified release 7") == 1
-    unit = machine.unit.read_text()
-    for part in (
-        "--stop-timeout 150",
-        "-v /var/run/docker.sock:/run/docker.sock",
-        "-v factory-runner-work:/work",
-        "-v factory-runner-home:/var/lib/factory-runner",
-        "-e FACTORY_RUNNER_IMAGE_TAG=factory-runner:current",
-        "factory-runner:current run",
+    # The service user: a system user in kvm, no shell, no login.
+    useradd = next(call for call in calls if call.startswith("useradd"))
+    for part in ("--system", "--user-group", "--groups kvm", "--no-create-home", "factory-runner"):
+        assert part in useradd
+    # The artifacts: root's, read-only for the service (mode and owner).
+    artifacts = machine.state_dir / "artifacts"
+    assert artifacts.is_symlink() and os.readlink(artifacts) == "artifact-releases/10"
+    for name in ("vmlinux", "rootfs.ext4", "dockerdata.ext4"):
+        assert stat.S_IMODE((artifacts / name).stat().st_mode) == 0o644
+    assert stat.S_IMODE(artifacts.stat().st_mode) == 0o755
+    assert "chown -R root:root" in " ".join(calls)
+    assert (
+        artifacts / "vm.env"
+    ).read_text() == f"FACTORY_RUNNER_VM_IMAGE_ID={machine.release.image_id}\n"
+    # The service owns vms/ and its lock and nothing else of the state directory.
+    assert any(
+        call.startswith("chown factory-runner:factory-runner")
+        and str(machine.state_dir / "vms") in call
+        for call in calls
+    )
+    assert stat.S_IMODE((machine.state_dir / "vms").stat().st_mode) == 0o700
+    # The program, a release with its predecessor kept.
+    assert os.readlink(machine.opt / "current") == "releases/1"
+    assert (machine.opt / "releases/1/libexec/host.sh").is_file()
+    # One TAP device, owned by the user, with the /30 of slot 0.
+    assert machine.taps == ["fctap0"]
+    assert "ip tuntap add dev fctap0 mode tap user factory-runner group factory-runner" in calls
+    assert "ip addr replace 10.250.0.1/30 dev fctap0" in calls
+    # The table: checked, loaded, listed; only then is the unit written and started.
+    check = next(index for index, call in enumerate(calls) if call.startswith("nft -c -f "))
+    load = calls.index(f"nft -f {machine.state_dir}/outer-wall.nft")
+    listed = calls.index("nft list table inet code_reviewer_wall", load)
+    enabled = calls.index("systemctl enable factory-runner")
+    assert check < load < listed < enabled < calls.index("systemctl start factory-runner")
+    assert machine.table_loaded
+    assert (machine.conf / "install.state").read_text().splitlines()[:1] == ["version=1"]
+    assert "user_created=1" in (machine.conf / "install.state").read_text()
+    assert "taps=1" in (machine.conf / "install.state").read_text()
+    assert "slot_network=10.250.0.0/24" in (machine.conf / "install.state").read_text()
+
+
+def test_the_unit_is_a_sandboxed_service_of_a_normal_user_with_the_outer_wall_on(
+    installed: Machine,
+) -> None:
+    unit = installed.unit.read_text()
+
+    for line in (
+        "User=factory-runner",
+        "SupplementaryGroups=kvm",
+        "Delegate=yes",
+        "Environment=FACTORY_RUNNER_SANDBOX=firecracker",
+        "Environment=FACTORY_RUNNER_OUTER_WALL=proxy",
+        "ExecStartPre=+/opt/code-reviewer/current/libexec/host.sh prestart",
+        "ExecStart=/opt/code-reviewer/current/libexec/host.sh run-service",
         "RestartPreventExitStatus=4 6 9",
+        "NoNewPrivileges=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "CapabilityBoundingSet=",
+        "DevicePolicy=closed",
+        "DeviceAllow=/dev/kvm rw",
+        "DeviceAllow=/dev/net/tun rw",
+        "ReadWritePaths=/var/lib/code-reviewer/vms /var/lib/code-reviewer/dispatcher.lock "
+        "/var/lib/factory-runner",
     ):
-        assert part in unit
-    assert "--privileged" not in unit and "--network host" not in unit
-    assert "systemctl start factory-runner" in calls
-    assert "systemctl enable factory-runner" in calls
-    assert machine.command.stat().st_mode & stat.S_IXUSR
+        assert line in unit.splitlines(), line
+    limit = next(line for line in unit.splitlines() if line.startswith("LimitNOFILE="))
+    # The vsock listeners (2 x 4 connections per VM) and the proxy's 256 connections (two each).
+    assert int(limit.split("=")[1]) >= 8192
+    assert "docker" not in unit.lower()
+    assert "--privileged" not in unit and "PrivateDevices" not in unit
+    assert "ProtectControlGroups" not in unit.replace(
+        "# ", ""
+    )  # cgroup writes are the service's job
+    env = (installed.conf / "runner.env").read_text()
+    assert (
+        "FACTORY_RUNNER_PARALLEL_RUNS=1" in env
+        and "FACTORY_RUNNER_HOME=/var/lib/factory-runner" in env
+    )
+    assert "OUTER_WALL" not in env and "TOKEN" not in env and "crc_" not in env
+    timer = (installed.unit.parent / "factory-runner-update.timer").read_text()
+    assert "OnUnitActiveSec=6h" in timer
+    service = (installed.unit.parent / "factory-runner-update.service").read_text()
+    assert "host.sh update --scheduled" in service and "Type=oneshot" in service
 
 
-def test_the_token_is_never_in_an_argument_or_in_the_files_only_on_standard_input(
+def test_the_wall_is_in_the_unit_only_after_the_table_was_listed_and_a_failed_listing_fails(
     machine: Machine,
 ) -> None:
-    done = machine.run("--labels", "linux", env={"FACTORY_RUNNER_TOKEN": TOKEN})
+    done = machine.install(env={"STUB_NFT_LIST_FAIL": "1"})
+
+    assert done.returncode == 1
+    assert "is not loaded" in done.stderr
+    calls = machine.calls()
+    # The unit was never written, so never `proxy`; the service never enabled or started.
+    assert not machine.unit.exists()
+    assert (
+        "systemctl enable factory-runner" not in calls
+        and "systemctl start factory-runner" not in calls
+    )
+    assert machine.tree() == machine.baseline
+    assert not machine.table_loaded and not machine.user_exists and not machine.taps
+
+
+def test_a_table_that_does_not_check_on_this_kernel_stops_before_the_network_is_touched(
+    machine: Machine,
+) -> None:
+    done = machine.install(env={"STUB_NFT_CHECK_FAIL": "1"})
+
+    assert done.returncode == 1
+    assert "nft_fib" in done.stderr
+    assert not any(call.startswith(("nft -f", "ip tuntap")) for call in machine.calls())
+    assert machine.tree() == machine.baseline
+
+
+def test_the_token_is_never_in_an_argument_or_a_file_only_on_standard_input(
+    machine: Machine,
+) -> None:
+    done = machine.install("--labels", "linux")
 
     assert done.returncode == 0, done.stderr
     assert (machine.state / "register-stdin").read_text() == TOKEN
-    register = next(call for call in machine.calls() if "register" in call)
-    assert "--token-file -" in register
-    everything = "\n".join(machine.calls()) + machine.unit.read_text() + machine.command.read_text()
-    assert TOKEN not in everything + done.stdout + done.stderr
+    assert not [call for call in machine.calls() if TOKEN in call]
+    assert not [path for path in machine.tree() if TOKEN in path]
+    assert (
+        TOKEN not in machine.unit.read_text()
+        and TOKEN not in (machine.conf / "runner.env").read_text()
+    )
+    register = next(
+        line for line in (machine.state / "cli.log").read_text().splitlines() if "register" in line
+    )
+    assert "register --token-file - --labels linux" in register
+    assert "FACTORY_RUNNER_TOKEN" not in done.stdout
 
 
-@pytest.mark.parametrize("flag", ["--token", "--token=" + TOKEN])
-def test_a_token_as_an_argument_is_refused_and_not_echoed(machine: Machine, flag: str) -> None:
-    arguments = [flag] if "=" in flag else [flag, TOKEN]
+def test_a_token_argument_is_refused(machine: Machine) -> None:
+    done = machine.install("--token", TOKEN, token=False)
 
-    done = machine.run(*arguments)
-
-    assert done.returncode != 0
+    assert done.returncode == 1
     assert "never an argument" in done.stderr
-    assert TOKEN not in done.stdout + done.stderr
-    assert not machine.unit.exists()
+    assert TOKEN not in done.stderr
+    changed_nothing(machine)
 
 
-def test_the_token_comes_from_a_file_or_from_standard_input(
-    machine: Machine, tmp_path: Path
-) -> None:
-    file = tmp_path / "token"
-    file.write_text(TOKEN + "\n")
-    assert machine.run("--token-file", str(file)).returncode == 0
-    assert (machine.state / "register-stdin").read_text() == TOKEN
+def test_the_token_can_come_from_a_file_or_standard_input(machine: Machine, tmp_path: Path) -> None:
+    done = machine.install("--token-file", "-", token=False, stdin=TOKEN)
 
-    (machine.state / "registered").unlink()
-    (machine.state / "register-stdin").unlink()
-    done = machine.run("--token-file", "-", stdin=TOKEN + "\n")
     assert done.returncode == 0, done.stderr
     assert (machine.state / "register-stdin").read_text() == TOKEN
 
 
-def test_a_token_of_the_wrong_form_is_refused_before_anything_is_registered(
+def test_without_a_token_the_machine_is_installed_and_the_service_is_not_started(
     machine: Machine,
 ) -> None:
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": "not-a-token-" + "x" * 10})
-
-    assert done.returncode != 0
-    assert "form of a token" in done.stderr and "x" * 10 not in done.stderr
-    assert not (machine.state / "registered").exists()
-
-
-def test_a_second_run_registers_nothing_again_and_does_not_restart_a_running_service(
-    machine: Machine,
-) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-    (machine.state / "active").touch()
-    machine.log.write_text("")
-    unit_before = machine.unit.stat().st_mtime_ns
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+    done = machine.install(token=False)
 
     assert done.returncode == 0, done.stderr
-    calls = machine.calls()
-    assert not any("register" in call for call in calls)
-    assert "systemctl start factory-runner" not in calls
-    assert not any(call.startswith("systemctl restart") for call in calls)
-    assert machine.unit.stat().st_mtime_ns == unit_before  # the same unit is not written again
-    assert "it is not restarted" in done.stdout
-
-
-def test_a_setting_passed_to_a_registered_machine_is_applied_with_config_set(
-    machine: Machine,
-) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-
-    done = machine.run("--labels", "linux,gpu", "--disk-gb", "40")
-
-    assert done.returncode == 0, done.stderr
-    assert any("config set --labels linux,gpu --disk-gb 40" in call for call in machine.calls())
-
-
-def test_a_manifest_that_somebody_else_signed_installs_nothing_and_pulls_nothing(
-    machine: Machine,
-) -> None:
-    write_release(Release(release=7), machine.served / "forged")
-    for name in ("manifest.json", "manifest.sig"):  # their manifest and signature, our channel
-        (machine.served / name).write_bytes((machine.served / "forged" / name).read_bytes())
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode != 0
-    assert "not our release" in done.stderr
-    assert not machine.unit.exists() and not machine.command.exists()
-    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
-
-
-def test_a_manifest_changed_after_it_was_signed_is_refused(machine: Machine) -> None:
-    manifest = machine.served / "manifest.json"
-    manifest.write_bytes(manifest.read_bytes().replace(b'"release": 7', b'"release": 8'))
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode != 0 and "not our release" in done.stderr
-    assert not any(call.startswith("docker pull") for call in machine.calls())
-
-
-def test_an_image_that_is_not_the_release_its_manifest_names_is_removed(machine: Machine) -> None:
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LABEL": "3"})
-
-    assert done.returncode != 0 and "not the release its manifest names" in done.stderr
-    assert any(call.startswith("docker rmi") for call in machine.calls())
-    assert not any(call.startswith("docker tag") for call in machine.calls())
-    assert not machine.unit.exists()
-
-
-def test_with_the_release_channel_of_the_repository_nothing_is_installed_until_it_is_filled(
-    machine: Machine,
-) -> None:
-    empty = RUNNER / "release-channel.json"
-
-    done = machine.run(
-        "--channel-file", str(empty), channel=False, env={"FACTORY_RUNNER_TOKEN": TOKEN}
-    )
-
-    assert done.returncode != 0
-    assert "no runner image is published yet" in done.stderr
-    assert not machine.unit.exists()
-
-
-def test_without_a_token_the_service_is_installed_and_not_started(machine: Machine) -> None:
-    done = machine.run()
-
-    assert done.returncode == 0, done.stderr
-    assert machine.unit.exists()
+    assert "no registration token: the service is installed but not started" in done.stdout
     assert "systemctl start factory-runner" not in machine.calls()
-    assert "no registration token" in done.stdout
+    assert machine.unit.exists() and machine.table_loaded
 
 
-def test_a_dry_run_says_what_it_would_do_and_changes_nothing(machine: Machine) -> None:
-    done = machine.run("--dry-run", "--sysbox", "--yes", env={"FACTORY_RUNNER_TOKEN": TOKEN})
+def test_a_token_that_does_not_register_leaves_the_install_in_place_and_says_so(
+    machine: Machine,
+) -> None:
+    done = machine.install(env={"FACTORY_RUNNER_TOKEN": "not-a-token"})
+
+    assert done.returncode == 1
+    assert "does not have the form of a token" in done.stderr
+    # Gigabytes were downloaded: a typo does not undo them.
+    assert machine.unit.exists() and (machine.opt / "current").is_symlink()
+    assert "systemctl start factory-runner" not in machine.calls()
+
+
+def test_parallel_runs_make_a_tap_device_and_an_address_per_slot_and_scale_the_limits(
+    machine: Machine,
+) -> None:
+    done = machine.install("--parallel-runs", "3")
 
     assert done.returncode == 0, done.stderr
-    assert "dry run: nothing was changed" in done.stdout
-    assert "would write" in done.stdout and "would run: download the manifest" in done.stdout
-    assert not machine.unit.exists() and not machine.command.exists()
-    changing = ("docker pull", "docker tag", "docker run", "systemctl", "apt-get", "curl")
-    assert not [call for call in machine.calls() if call.startswith(changing)]
+    assert machine.taps == ["fctap0", "fctap1", "fctap2"]
+    calls = machine.calls()
+    assert "ip addr replace 10.250.0.5/30 dev fctap1" in calls
+    assert "ip addr replace 10.250.0.9/30 dev fctap2" in calls
+    assert "FACTORY_RUNNER_PARALLEL_RUNS=3" in (machine.conf / "runner.env").read_text()
+    unit = machine.unit.read_text()
+    assert "LimitNOFILE=8384" in unit and "TasksMax=1156" in unit
 
 
-def test_a_docker_that_does_not_answer_is_told_so(machine: Machine) -> None:
-    stub(machine.bin / "docker", 'case "$1" in info) exit 1 ;; esac')
+def test_a_hundred_slots_are_refused(machine: Machine) -> None:
+    done = machine.install("--parallel-runs", "100")
 
-    done = machine.run()
-
-    assert done.returncode != 0 and "the Docker daemon does not answer" in done.stderr
-
-
-def test_a_machine_that_is_not_systemd_or_is_not_root_is_refused(machine: Machine) -> None:
-    (machine.root / "run" / "systemd" / "system").rmdir()
-    assert "systemd" in machine.run().stderr
-
-    (machine.root / "run" / "systemd" / "system").mkdir()
-    stub(machine.bin / "id", "echo 1000")
-    assert "run as root" in machine.run().stderr
+    assert done.returncode == 1 and "1 to 64" in done.stderr
+    changed_nothing(machine)
 
 
-# -- Sysbox: a step of its own -----------------------------------------------------------------
+def test_the_slot_addresses_are_the_ones_the_launcher_derives() -> None:
+    from code_reviewer_runner.factory_runner.firecracker.slots import Slot
+
+    network = ipaddress.IPv4Network(FIRST_NETWORK)
+    script = SCRIPT.read_text()
+    assert "* 4 + 1" in script and 'int_to_ip $(( $(ip_to_int "${network%/*}")' in script
+    assert Slot(0, network).host_address == "10.250.0.1"
+    assert Slot(63, network).host_address == "10.250.0.253"
 
 
-def test_sysbox_is_never_installed_without_asking_and_says_what_it_does(machine: Machine) -> None:
-    done = machine.run("--sysbox", env={"FACTORY_RUNNER_TOKEN": TOKEN})
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ({"program-bad-signature"}, "signature of the program release manifest is not valid"),
+        ({"vm-bad-signature"}, "signature of the vm release manifest is not valid"),
+    ],
+)
+def test_a_manifest_that_does_not_verify_stops_the_install_before_any_change(
+    machine: Machine, tamper: set[str], message: str
+) -> None:
+    publish(machine, tamper=tamper)
 
-    assert done.returncode != 0
-    for warning in (
-        "daemon.json",
-        "bip 172.20.0.1/16",
-        "default-address-pools",
-        "RESTARTS Docker",
-        "jq",
-    ):
-        assert warning in done.stdout
-    assert "no terminal to ask on" in done.stderr
-    assert not any(call.startswith("apt-get") or "sysbox" in call for call in machine.calls())
+    done = machine.install()
 
-
-def test_without_the_flag_the_warnings_and_the_step_do_not_appear(machine: Machine) -> None:
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert "Sysbox" not in done.stdout
-    assert not any(call.startswith("apt-get") for call in machine.calls())
+    assert done.returncode == 1
+    assert message in done.stderr
+    changed_nothing(machine)
 
 
-def test_sysbox_waits_for_a_machine_with_no_running_container(machine: Machine) -> None:
-    done = machine.run(
-        "--sysbox", "--yes", env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_CONTAINERS": "abc"}
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ({"program-flip-byte"}, "does not match the digest"),
+        ({"vm-flip-kernel"}, "kernel file does not match the digest"),
+        ({"vm-flip-rootfs"}, "rootfs file is not the size"),
+        ({"bundle-escape"}, "path outside its own tree"),
+        ({"bundle-link-out"}, "link that points out of its tree"),
+        ({"bundle-drop:libexec/host.sh"}, "has no libexec/host.sh"),
+    ],
+)
+def test_a_file_that_does_not_match_its_manifest_is_never_installed_and_nothing_is_left(
+    machine: Machine, tamper: set[str], message: str
+) -> None:
+    publish(machine, tamper=tamper)
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert message in done.stderr
+    assert machine.tree() == machine.baseline
+    assert not machine.table_loaded and not machine.user_exists and not machine.taps
+
+
+def test_an_empty_channel_stops_with_no_release_published_and_changes_nothing(
+    machine: Machine,
+) -> None:
+    channel = json.loads(machine.vm_channel.read_text())
+    channel.update(baseUrl="", publicKey="")
+    machine.vm_channel.write_text(json.dumps(channel))
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert "no vm release is published yet" in done.stderr
+    changed_nothing(machine)
+
+
+def test_a_channel_that_is_not_https_is_refused(machine: Machine) -> None:
+    channel = json.loads(machine.program_channel.read_text())
+    channel["baseUrl"] = "http://releases.example/runner/"
+    machine.program_channel.write_text(json.dumps(channel))
+
+    done = machine.install()
+
+    assert done.returncode == 1 and "https" in done.stderr
+    changed_nothing(machine)
+
+
+def test_every_download_is_https_from_the_channel_and_nothing_names_the_app_or_docker(
+    installed: Machine,
+) -> None:
+    urls = [
+        word for call in installed.calls("curl") for word in call.split() if word.startswith("http")
+    ]
+
+    assert urls
+    assert all(url.startswith((PROGRAM_BASE, VM_BASE)) for url in urls)
+    assert all(
+        "--proto =https" in call and "--proto-redir =https" in call
+        for call in installed.calls("curl")
     )
-
-    assert done.returncode != 0 and "containers are running" in done.stderr
-    assert not any(call.startswith("apt-get") for call in machine.calls())
+    assert not [call for call in installed.calls() if call.startswith("docker")]
 
 
-def test_a_sysbox_package_that_is_not_the_pinned_one_is_never_installed(machine: Machine) -> None:
-    done = machine.run("--sysbox", "--yes", env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode != 0 and "not the pinned one" in done.stderr
-    assert any(call.startswith("curl") and "sysbox-ce_0.7.1" in call for call in machine.calls())
-    assert not any(call.startswith("apt-get") for call in machine.calls())
-
-
-# -- uninstall ---------------------------------------------------------------------------------
-
-
-def test_uninstall_removes_the_service_and_keeps_the_configuration_unless_purged(
-    machine: Machine,
-) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-
-    done = machine.run("--uninstall")
-
-    assert done.returncode == 0, done.stderr
-    assert not machine.unit.exists() and not machine.command.exists()
-    assert "revoke this runner in the app" in done.stdout
-    assert not any(call.startswith("docker volume rm") for call in machine.calls())
-
-    machine.run("--uninstall", "--purge")
-    assert "docker volume rm factory-runner-home factory-runner-work" in machine.calls()
-
-
-# -- F1: a download that is cut off, the terminal, the standard input ---------------------------
-
-
-def install_text() -> str:
-    return SCRIPT.read_text()
-
-
-def test_the_last_line_of_the_script_is_the_only_command_that_runs_anything() -> None:
-    assert install_text().splitlines()[-1] == '{ main "$@"; }'
-
-
-# #855-F1 (S1)
-def test_a_script_that_is_cut_off_anywhere_before_its_last_line_changes_nothing(
-    machine: Machine,
-) -> None:
-    text = install_text()
-    final = '{ main "$@"; }'
-    last_line = text.rindex(final)
-    line_starts = [0] + [index + 1 for index, char in enumerate(text[:last_line]) if char == "\n"]
-    middles = [start + 20 for start in line_starts[::5] if start + 20 < last_line]
-    cuts = sorted({*line_starts, *middles, *range(last_line + 1, last_line + len(final))})
-    assert len(cuts) > 100
-
-    for cut in cuts:
-        done = machine.run_piped(text[:cut], env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-        assert machine.calls() == [], f"cut at {cut}: {done.stderr[-200:]}"
-        assert not machine.unit.exists() and not machine.command.exists(), cut
-        assert "install: done" not in done.stdout, cut
-
-
-# #855-F1 (S1)
-def test_the_script_run_from_its_standard_input_installs_and_ends_with_the_marker(
-    machine: Machine,
-) -> None:
-    done = machine.run_piped(install_text(), env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.splitlines()[-1] == "install: done"
-    assert machine.unit.exists() and (machine.state / "register-stdin").read_text() == TOKEN
-
-
-# #855-F1 (S2)
-def test_the_token_is_asked_for_on_the_terminal_and_is_not_shown(machine: Machine) -> None:
-    code, shown = machine.run_on_terminal(
-        "--labels", "linux", answers={"input is hidden): ": TOKEN + "\n"}
-    )
-
-    assert code == 0, shown
-    assert (machine.state / "register-stdin").read_text() == TOKEN
-    assert "Registration token" in shown and TOKEN not in shown
-
-
-# #855-F1 (S2)
-def test_a_token_from_the_environment_works_with_a_warning_that_says_why_not(
-    machine: Machine,
-) -> None:
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode == 0, done.stderr
-    assert "FACTORY_RUNNER_TOKEN" in done.stderr and "history" in done.stderr
-    assert TOKEN not in done.stdout + done.stderr
-
-
-# #855-F1 (S3)
-def test_no_container_command_of_the_installer_reads_the_standard_input_it_was_given(
-    machine: Machine,
-) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-
-    done = machine.run("--labels", "linux,gpu", stdin="the rest of the script or the terminal")
-
-    assert done.returncode == 0, done.stderr
-    assert (machine.state / "config-stdin").read_text() == ""
-    assert (machine.state / "credential-stdin").read_text() == ""
-
-
-# #855-F1 (S11)
-def test_the_hint_to_register_by_hand_is_a_command_that_works_inside_the_container(
-    machine: Machine,
-) -> None:
-    done = machine.run()
-
-    assert "factory-runner register --token-file - < /path/to/token-file" in done.stdout
-    # The command passes the standard input on, so the file the shell opens is read by the runner.
-    assert " run --rm -i " in machine.command.read_text()
-
-
-# #855-F1 (N9)
-def test_a_token_file_that_cannot_be_read_is_an_error_before_anything_is_changed(
+def test_a_curl_configuration_for_a_protected_address_is_kept_for_updates_for_root_only(
     machine: Machine, tmp_path: Path
 ) -> None:
-    done = machine.run("--token-file", str(tmp_path / "missing"))
+    rc = tmp_path / "login.curlrc"
+    rc.write_text('header = "Authorization: Bearer secret-value"\n')
 
-    assert done.returncode != 0 and "does not exist or cannot be read" in done.stderr
-    assert machine.calls() == [] and not machine.unit.exists()
-
-
-# #855-F1 (N9)
-def test_purge_without_uninstall_is_an_error(machine: Machine) -> None:
-    done = machine.run("--purge")
-
-    assert done.returncode != 0 and "--purge only goes with --uninstall" in done.stderr
-    assert not any(call.startswith("docker volume") for call in machine.calls())
-
-
-# -- F1: the installer never goes back --------------------------------------------------------
-
-
-# #855-F1 (S4)
-def test_the_installer_leaves_a_newer_installed_release_alone(machine: Machine) -> None:
-    machine.install_image(release=9, image_id="id-9")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+    done = machine.install("--curl-config", str(rc))
 
     assert done.returncode == 0, done.stderr
-    assert "the installed image stays" in done.stdout
-    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
-    assert (machine.state / "current.id").read_text() == "id-9"
+    kept = machine.conf / "download.curlrc"
+    assert kept.read_text() == rc.read_text() and stat.S_IMODE(kept.stat().st_mode) == 0o600
+    assert f"curl -K {rc}" in " ".join(machine.calls("curl"))
+    # Made readable by root alone from its first byte (a umask, not a chmod afterwards).
+    assert 'umask 077; cat "$CURL_CONFIG"' in SCRIPT.read_text()
+    assert "secret-value" not in done.stdout + done.stderr
+    update = machine.host("update")
+    assert update.returncode == 0, update.stderr
+    assert any(f"curl -K {kept}" in call for call in machine.calls("curl"))
 
 
-# #855-F1 (S4)
-def test_a_newer_release_becomes_current_and_the_one_before_it_previous(machine: Machine) -> None:
-    machine.install_image(release=5, image_id="id-5")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
+def test_the_dry_run_says_what_it_would_do_and_changes_nothing(machine: Machine) -> None:
+    done = machine.install("--dry-run")
 
     assert done.returncode == 0, done.stderr
+    assert "dry run: nothing is changed" in done.stdout
+    assert machine.tree() == machine.baseline
+    assert not [call for call in machine.calls() if call.startswith(MUTATORS)]
+
+
+def test_a_script_that_is_cut_off_anywhere_changes_nothing(machine: Machine) -> None:
+    text = SCRIPT.read_text()
+    lines = text.splitlines(keepends=True)
+    cuts = [sum(map(len, lines[:count])) for count in range(10, len(lines), 90)]
+    cuts += [len(text) - 5, len(text) - 20]
+    for cut in cuts:
+        done = subprocess.run(
+            ["/bin/sh", "-s", "--", "--program-channel-file", str(machine.program_channel)],
+            env=machine.environment({"FACTORY_RUNNER_TOKEN": TOKEN}),
+            input=text[:cut],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+            start_new_session=True,
+        )
+        assert "install: done" not in done.stdout
+    changed_nothing(machine)
+
+
+# -- T02: install, then uninstall --
+
+
+# #982-T02
+def test_install_then_uninstall_leaves_no_table_tap_user_or_file_behind(machine: Machine) -> None:
+    # Things that are not ours stay: another directory in /opt, another file in /etc, another user.
+    (machine.root / "opt/other").mkdir()
+    (machine.root / "opt/other/keep").write_text("mine")
+    (machine.root / "etc/other.conf").write_text("mine")
+    (machine.state / "users").mkdir()
+    (machine.state / "users" / "someone").write_text("x")
+    before = machine.tree()
+    done = machine.install("--parallel-runs", "2")
+    assert done.returncode == 0, done.stderr
+    assert machine.table_loaded and machine.user_exists and machine.taps == ["fctap0", "fctap1"]
+
+    gone = machine.host("uninstall")
+
+    assert gone.returncode == 0, gone.stderr
+    assert not machine.table_loaded and not machine.user_exists and machine.taps == []
+    assert machine.tree() == before
+    assert (machine.root / "opt/other/keep").read_text() == "mine"
+    assert (machine.state / "users" / "someone").exists()
     calls = machine.calls()
-    keep = calls.index("docker tag factory-runner:current factory-runner:previous")
-    take = calls.index(f"docker tag {REPOSITORY}@{DIGEST} factory-runner:current")
-    assert keep < take
-    assert (machine.state / "previous.id").read_text() == "id-5"
-    assert (machine.state / "current.id").read_text().strip() == "id-new"
+    assert "systemctl disable --now factory-runner" in calls
+    assert "nft delete table inet code_reviewer_wall" in calls
+    assert "ip link delete fctap0" in calls and "ip link delete fctap1" in calls
+    assert "userdel factory-runner" in calls
+    assert "revoke this runner in the app" in gone.stdout
 
 
-# #855-F1 (S4)
-def test_previous_is_set_only_when_the_image_changes(machine: Machine) -> None:
-    machine.install_image(release=5, image_id="id-new")  # the very image the manifest names
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode == 0, done.stderr
-    assert not any(call.startswith("docker tag") for call in machine.calls())
-    assert not (machine.state / "previous").exists()
-
-
-# #855-F1 (B1, installer side)
-def test_a_release_that_was_rolled_back_is_not_installed_again_until_a_higher_one_comes(
-    machine: Machine,
-) -> None:
-    machine.install_image(release=6, image_id="id-6")
-
-    rolled_back = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7"})
-
-    assert rolled_back.returncode == 0, rolled_back.stderr
-    assert "was rolled back on this machine" in rolled_back.stdout
-    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
-
-    write_release(Release(release=8), machine.served)
-    higher = machine.run(
-        env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7", "STUB_LABEL": "8"}
+def test_uninstall_removes_the_user_only_when_the_installer_made_it(installed: Machine) -> None:
+    state = installed.conf / "install.state"
+    state.write_text(
+        "".join(
+            line
+            for line in state.read_text().splitlines(keepends=True)
+            if not line.startswith("user_created")
+        )
     )
 
-    assert higher.returncode == 0, higher.stderr
-    assert any(call.startswith("docker pull") for call in machine.calls())
+    gone = installed.host("uninstall")
+
+    assert gone.returncode == 0, gone.stderr
+    assert "userdel" not in " ".join(installed.calls())
+    assert installed.user_exists
 
 
-# -- F1: https only, the unit, the order of the Sysbox step -----------------------------------
+def test_uninstall_of_a_machine_without_the_runner_does_nothing(machine: Machine) -> None:
+    done = machine.run_script(SCRIPT, "--uninstall")
+
+    assert done.returncode == 0 and "nothing to remove" in done.stdout
+    assert machine.tree() == machine.baseline
 
 
-# #855-F1 (N3)
-def test_every_download_is_https_only_and_each_address_of_the_channel_is_checked(
-    machine: Machine,
+def test_uninstall_removes_what_an_update_and_a_rollback_left_too(installed: Machine) -> None:
+    publish(installed, program=2, vm=11)
+    assert installed.host("update").returncode == 0
+    assert installed.host("switch").returncode == 0
+    assert installed.host("rollback").returncode == 0
+
+    gone = installed.host("uninstall")
+
+    assert gone.returncode == 0, gone.stderr
+    assert installed.tree() == installed.baseline
+
+
+def test_uninstall_dry_run_changes_nothing(installed: Machine) -> None:
+    before = installed.tree()
+
+    done = installed.host("uninstall", "--dry-run")
+
+    assert done.returncode == 0 and "would remove" in done.stdout
+    assert installed.tree() == before and installed.table_loaded and installed.user_exists
+
+
+# -- updates --
+
+
+def stage_release_two(machine: Machine) -> None:
+    publish(machine, program=2, vm=11)
+    done = machine.host("update")
+    assert done.returncode == 0, done.stderr
+
+
+def test_an_update_stages_the_newer_release_and_changes_nothing_that_runs(
+    installed: Machine,
 ) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-    fetched = [call for call in machine.calls() if call.startswith("curl")]
-    assert fetched and all("--proto =https --proto-redir =https" in call for call in fetched)
+    publish(installed, program=2, vm=11)
+    restarts = len(installed.calls("systemctl"))
 
-    document = machine.release.channel_document()
-    document["signatureUrl"] = "http://releases.example/runner/manifest.sig"
-    machine.channel.write_text(json.dumps(document))
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode != 0 and "https address for the signature" in done.stderr
-
-
-# #855-F1 (N8, S7)
-def test_the_unit_rotates_the_log_and_names_the_way_back_by_hand(machine: Machine) -> None:
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-
-    unit = machine.unit.read_text()
-
-    assert "--log-opt max-size=10m --log-opt max-file=3" in unit
-    assert "docker tag factory-runner:previous factory-runner:current" in unit
-
-
-# #855-F1 (S6)
-def test_uninstall_removes_the_images_by_name_and_by_the_digest_they_were_pulled_with(
-    machine: Machine,
-) -> None:
-    reference = f"{REPOSITORY}@{DIGEST}"
-    assert machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN}).returncode == 0
-
-    done = machine.run("--uninstall", env={"STUB_REPODIGESTS": f"{reference} "})
+    done = installed.host("update")
 
     assert done.returncode == 0, done.stderr
-    removal = next(call for call in machine.calls() if call.startswith("docker rmi"))
-    assert removal.split() == [
-        "docker",
-        "rmi",
-        reference,
-        "factory-runner:current",
-        "factory-runner:previous",
+    assert (
+        "staged the program release 2" in done.stdout
+        and "staged the VM artifacts release 11" in done.stdout
+    )
+    # What runs is untouched: only the marker says there is something to switch to.
+    assert os.readlink(installed.opt / "current") == "releases/1"
+    assert os.readlink(installed.state_dir / "artifacts") == "artifact-releases/10"
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
+    assert (installed.opt / "releases/2/bin/factory-runner").is_file()
+    assert (installed.state_dir / "artifact-releases/11/vm.env").is_file()
+    assert len(installed.calls("systemctl")) == restarts  # nothing was restarted
+    assert not (installed.state_dir / "staging").exists()
+
+
+# #1002-T21: the pair is the program's own statement (`share/release.json`, `vmArtifacts`), not
+# "the newest of both".
+@pytest.fixture
+def paired(tmp_path: Path) -> Machine:
+    """Installed with release 1 and VM artifacts 10, on a channel with an address per VM release."""
+    machine = new_machine(tmp_path, per_release_vm=True)
+    done = machine.install()
+    assert done.returncode == 0, done.stderr
+    return machine
+
+
+def test_a_program_is_staged_with_the_vm_artifacts_it_names_not_the_newest_ones(
+    paired: Machine,
+) -> None:
+    # Release 12 exists and is the newest; program 2 was made for 11.
+    publish(paired, program=1, vm=12)
+    publish(paired, program=2, vm=11)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "staged the program release 2" in done.stdout
+    assert "staged the VM artifacts release 11" in done.stdout
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
+    assert not (paired.state_dir / "artifact-releases/12").exists()
+    assert "vm/12/" not in " ".join(paired.calls("curl")), "the newest VM release was downloaded"
+    assert paired.host("switch").returncode == 0
+    assert paired.release_of("artifacts", parent=paired.state_dir) == "11"
+
+
+def test_a_fresh_install_takes_the_vm_artifacts_the_program_names(tmp_path: Path) -> None:
+    machine = new_machine(tmp_path, Release(program=3, vm=2), per_release_vm=True)
+    # A newer VM release exists, a program for it does not.
+    machine.publish_vm(Release(vm=5, key=machine.release.key))
+
+    done = machine.install()
+
+    assert done.returncode == 0, done.stderr
+    assert machine.release_of("artifacts", parent=machine.state_dir) == "2"
+    assert machine.release_of("current") == "3"
+    assert not (machine.state_dir / "artifact-releases/5").exists()
+
+
+def test_a_program_published_before_its_vm_artifacts_is_not_taken(paired: Machine) -> None:
+    before = tree_without_locks(paired)
+    publish(paired, program=2, vm=11)
+    for name in (paired.served / "vm/11").iterdir():
+        name.unlink()  # the owner published the program first: its VM release is not there yet
+
+    done = paired.host("update")
+
+    assert done.returncode == 1
+    assert "VM artifacts release 11" in done.stderr and "program release 2" in done.stderr
+    assert "not taken" in done.stderr
+    assert tree_without_locks(paired) == before
+    assert not (paired.state_dir / "pending").exists()
+
+
+def test_a_program_whose_vm_artifacts_do_not_verify_is_not_taken(paired: Machine) -> None:
+    before = tree_without_locks(paired)
+    publish(paired, program=2, vm=11, tamper={"vm-bad-signature"})
+
+    done = paired.host("update")
+
+    assert done.returncode == 1
+    assert "signature of the vm release manifest is not valid" in done.stderr
+    assert tree_without_locks(paired) == before
+    assert not (paired.opt / "releases/2").exists()
+
+
+def test_a_vm_release_alone_is_never_taken(paired: Machine) -> None:
+    # Exact pairing: the current program names VM release 10 and no other, so a newer VM release
+    # changes nothing until a program names it.
+    publish(paired, program=1, vm=11)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert not (paired.state_dir / "pending").exists()
+    assert not (paired.state_dir / "artifact-releases/11").exists()
+    assert "vm/11/" not in " ".join(paired.calls("curl"))
+
+
+def test_a_program_that_names_the_installed_vm_artifacts_is_staged_alone(paired: Machine) -> None:
+    publish(paired, program=2, vm=10)
+    paired.log.write_text("")
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert "staged the program release 2" in done.stdout
+    assert "staged the VM artifacts" not in done.stdout
+    assert (paired.state_dir / "pending").read_text().splitlines() == ["program=2"]
+    assert "vm/10/" not in " ".join(paired.calls("curl")), (
+        "VM artifacts in place were fetched again"
+    )
+
+
+def test_a_newer_program_replaces_a_staged_pair_with_its_own(paired: Machine) -> None:
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    publish(
+        paired, program=3, vm=10
+    )  # needs the VM artifacts that are installed: the staged VM 11 goes
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert (paired.state_dir / "pending").read_text().splitlines() == ["program=3"]
+    assert paired.host("switch").returncode == 0
+    assert paired.release_of("current") == "3"
+    assert paired.release_of("artifacts", parent=paired.state_dir) == "10"
+
+
+def test_a_program_that_names_the_staged_vm_artifacts_keeps_them_as_a_pair(paired: Machine) -> None:
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    publish(paired, program=3, vm=11)
+
+    done = paired.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=11",
+        "pair=1",
     ]
 
 
-# #855-F1 (S10)
-def test_sysbox_that_cannot_be_asked_about_stops_before_the_first_change(
-    machine: Machine,
-) -> None:
-    done = machine.run("--sysbox", env={"FACTORY_RUNNER_TOKEN": TOKEN})
+def test_a_program_that_would_take_the_vm_artifacts_back_is_not_taken(tmp_path: Path) -> None:
+    machine = new_machine(tmp_path, Release(program=1, vm=10), per_release_vm=True)
+    assert machine.install().returncode == 0
+    publish(machine, program=2, vm=9)
 
-    assert done.returncode != 0 and "nothing was changed" in done.stderr
-    assert not any(call.startswith(("docker pull", "docker tag")) for call in machine.calls())
-    assert not machine.unit.exists() and not machine.command.exists()
-    assert not (machine.state / "registered").exists()
-
-
-# #855-F1 (S10)
-def test_a_no_to_sysbox_goes_on_with_the_base_installation(machine: Machine) -> None:
-    code, shown = machine.run_on_terminal(
-        "--sysbox",
-        answers={
-            "anything else continues without it): ": "no\n",
-            "input is hidden): ": TOKEN + "\n",
-        },
-    )
-
-    assert code == 0, shown
-    assert "continues without" in shown or "goes on without it" in shown
-    assert machine.unit.exists() and (machine.state / "registered").exists()
-    assert not any(call.startswith("apt-get") for call in machine.calls())
-    assert not any("sysbox-ce" in call for call in machine.calls())
-
-
-# #855-F1 (S10)
-def test_daemon_json_is_copied_before_the_sysbox_package_is_installed(
-    machine: Machine, tmp_path: Path
-) -> None:
-    daemon_json = tmp_path / "daemon.json"
-    daemon_json.write_text('{"log-driver": "json-file"}')
-    stub(machine.bin / "docker", 'case "$1" in info) echo \'{"sysbox-runc":{}}\' ;; esac')
-    stub(
-        machine.bin / "apt-get",
-        'if [ -f "$DJ.factory-runner-backup" ]; then echo "backup existed" >>"$STUB_LOG"; fi; '
-        'printf "apt-get %s\\n" "$*" >>"$STUB_LOG"',
-    )
-    text = install_text()
-    functions = "\n".join(
-        [
-            re.search(r"^say\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
-            re.search(r"^fail\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
-            re.search(r"^install_sysbox\(\) \{.*?^\}\n", text, re.MULTILINE | re.DOTALL).group(0),  # type: ignore[union-attr]
-        ]
-    )
-    done = subprocess.run(
-        [
-            "/bin/sh",
-            "-c",
-            "set -eu\n"
-            + functions
-            + '\nDOCKER_DAEMON_JSON="$DJ"\nSYSBOX_PACKAGE=/x.deb\ninstall_sysbox',
-        ],
-        env=machine.environment({"DJ": str(daemon_json)}),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    done = machine.host("update")
 
     assert done.returncode == 0, done.stderr
-    assert Path(f"{daemon_json}.factory-runner-backup").read_text() == '{"log-driver": "json-file"}'
-    assert machine.calls()[-2:] == ["backup existed", "apt-get install -y /x.deb"]
+    assert "VM artifacts release 9" in done.stdout and "release 10" in done.stdout
+    assert not (machine.state_dir / "pending").exists()
+    assert not (machine.opt / "releases/2").exists()
 
 
-# -- #890: follow-ups of the review of #887 -----------------------------------------------------
-
-
-# #890 (usage order)
-def test_the_usage_names_the_token_sources_in_the_order_the_installer_checks_them(
-    machine: Machine,
+def test_a_program_that_needs_rolled_back_vm_artifacts_waits_for_a_higher_one(
+    paired: Machine,
 ) -> None:
-    usage = machine.run("--help", channel=False).stdout
+    publish(paired, program=2, vm=11)
+    assert paired.host("update").returncode == 0
+    assert paired.host("switch").returncode == 0
+    assert paired.host("rollback").returncode == 0
+    assert paired.host("prestart").returncode == 0
+    publish(paired, program=3, vm=11)  # a new program for the VM release that was rolled back
 
-    assert usage.index("FACTORY_RUNNER_TOKEN") < usage.index("terminal")
-
-
-# #890 (usage order): the order the usage promises is the order of the code
-def test_a_token_from_the_environment_is_used_before_the_terminal_is_asked(
-    machine: Machine,
-) -> None:
-    code, shown = machine.run_on_terminal(answers={}, env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert code == 0, shown
-    assert "Registration token" not in shown
-    assert (machine.state / "register-stdin").read_text() == TOKEN
-
-
-# #890 (trap)
-def test_a_signal_at_the_token_prompt_gives_the_terminal_its_echo_back(machine: Machine) -> None:
-    code, shown = machine.run_on_terminal(answers={"input is hidden): ": "\x03"})  # Ctrl-C
-
-    assert code != 0, shown
-    assert machine.echo_after is True
-    assert not (machine.state / "register-stdin").exists()
-
-
-# #890 (trap): the EXIT trap does not run on a signal in dash, so the temporary files go with it
-def test_a_signal_at_the_token_prompt_still_removes_the_temporary_files(
-    machine: Machine, tmp_path: Path
-) -> None:
-    temporary = tmp_path / "tmp"
-    temporary.mkdir()
-
-    code, shown = machine.run_on_terminal(
-        answers={"input is hidden): ": "\x03"}, env={"TMPDIR": str(temporary)}
-    )
-
-    assert code != 0, shown
-    assert list(temporary.iterdir()) == []
-
-
-# #890 (daemon.json backup)
-def test_a_second_sysbox_run_keeps_the_first_backup_of_daemon_json(
-    machine: Machine, tmp_path: Path
-) -> None:
-    daemon_json = tmp_path / "daemon.json"
-    daemon_json.write_text('{"log-driver": "json-file", "runtimes": {"sysbox-runc": {}}}')
-    backup = Path(f"{daemon_json}.factory-runner-backup")
-    backup.write_text('{"log-driver": "json-file"}')  # the file as it was before the first run
-    stub(machine.bin / "docker", 'case "$1" in info) echo \'{"sysbox-runc":{}}\' ;; esac')
-    text = install_text()
-    functions = "\n".join(
-        [
-            re.search(r"^say\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
-            re.search(r"^fail\(\) .*$", text, re.MULTILINE).group(0),  # type: ignore[union-attr]
-            re.search(r"^install_sysbox\(\) \{.*?^\}\n", text, re.MULTILINE | re.DOTALL).group(0),  # type: ignore[union-attr]
-        ]
-    )
-
-    done = subprocess.run(
-        [
-            "/bin/sh",
-            "-c",
-            "set -eu\n"
-            + functions
-            + '\nDOCKER_DAEMON_JSON="$DJ"\nSYSBOX_PACKAGE=/x.deb\ninstall_sysbox',
-        ],
-        env=machine.environment({"DJ": str(daemon_json)}),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    done = paired.host("update")
 
     assert done.returncode == 0, done.stderr
-    assert backup.read_text() == '{"log-driver": "json-file"}'
-    assert "is kept" in done.stdout and "apt-get install -y /x.deb" in machine.calls()
+    assert "rolled back" in done.stdout
+    assert not (paired.state_dir / "pending").exists()
+    publish(paired, program=3, vm=12)
+    assert paired.host("update").returncode == 0
+    assert (paired.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=12",
+        "pair=1",
+    ]
 
 
-# #890 (rejected-release)
-def test_a_rejected_release_file_that_cannot_be_read_is_warned_about_and_the_install_goes_on(
-    machine: Machine,
+def test_a_channel_with_one_directory_serves_only_the_release_it_holds(tmp_path: Path) -> None:
+    # No `{release}` in the address: the directory holds one VM release (the newest), and the
+    # program names an older one.
+    machine = new_machine(tmp_path, Release(program=1, vm=10, needs_vm=9))
+
+    done = machine.install()
+
+    assert done.returncode == 1
+    assert "release 10" in done.stderr and "needs release 9" in done.stderr
+    changed_nothing(machine)
+
+
+@pytest.mark.parametrize("tamper", ["bundle-drop:share/release.json", "bundle-vm-not-a-number"])
+def test_a_program_that_does_not_name_a_vm_release_is_not_taken(
+    tmp_path: Path, tamper: str
 ) -> None:
-    machine.install_image(release=6, image_id="id-6")
+    machine = new_machine(tmp_path, Release(tamper={tamper}))
 
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED_STATUS": "1"})
+    done = machine.install()
 
-    assert done.returncode == 0, done.stderr
-    assert "rejected-release" in done.stderr and "cannot be read" in done.stderr
-    assert any(call.startswith("docker pull") for call in machine.calls())  # fail-open
+    assert done.returncode == 1
+    assert "VM artifacts release" in done.stderr or "not a runner release" in done.stderr
+    changed_nothing(machine)
 
 
-# #890 (rejected-release)
-@pytest.mark.parametrize("content", ["", "seven", "7 8", "-3", "1234567890"])
-def test_a_rejected_release_file_with_garbage_is_warned_about_and_the_install_goes_on(
-    machine: Machine, content: str
+# #982-T03
+def test_an_update_with_a_bad_signature_is_refused_and_the_running_version_stays(
+    installed: Machine,
 ) -> None:
-    machine.install_image(release=6, image_id="id-6")
+    before = tree_without_locks(installed)
+    publish(installed, program=2, vm=11, tamper={"program-bad-signature"})
 
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": content})
+    done = installed.host("update")
 
-    assert done.returncode == 0, done.stderr
-    assert "rejected-release" in done.stderr and "not a release number" in done.stderr
-    assert any(call.startswith("docker pull") for call in machine.calls())
-
-
-# #890 (rejected-release): no file is the normal case and says nothing
-def test_without_a_rejected_release_file_the_installer_says_nothing_about_it(
-    machine: Machine,
-) -> None:
-    machine.install_image(release=6, image_id="id-6")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN})
-
-    assert done.returncode == 0, done.stderr
-    assert "rejected-release" not in done.stderr
-
-
-# #890 (rejected-release): a good file is read as before
-def test_a_rejected_release_file_with_a_number_raises_no_warning(machine: Machine) -> None:
-    machine.install_image(release=6, image_id="id-6")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_REJECTED": "7"})
-
-    assert "was rolled back on this machine" in done.stdout
-    assert "rejected-release" not in done.stderr
-
-
-# #890 (rejected-release, reinstall)
-def test_uninstall_without_purge_says_that_the_rolled_back_release_is_forgotten_by_a_new_install(
-    machine: Machine,
-) -> None:
-    done = machine.run("--uninstall", channel=False)
-
-    assert done.returncode == 0, done.stderr
-    assert "rejected-release" in done.stdout and "--purge" in done.stdout
-
-
-# #890 (S6)
-def test_a_digest_reference_that_is_pruned_before_it_is_named_is_pulled_again(
-    machine: Machine,
-) -> None:
-    machine.install_image(release=5, image_id="id-5")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LOSE_REFERENCE": "once"})
-
-    assert done.returncode == 0, done.stderr
-    assert len([call for call in machine.calls() if call.startswith("docker pull")]) == 2
-    assert (machine.state / "current.id").read_text().strip() == "id-new"
-    assert (machine.state / "previous.id").read_text() == "id-5"
-    assert "pulling it again" in done.stderr and "verified release 7" in done.stdout
-
-
-# #890 (S6): one more pull, not a loop
-def test_a_digest_reference_that_is_pruned_again_is_an_error_after_the_second_pull(
-    machine: Machine,
-) -> None:
-    machine.install_image(release=5, image_id="id-5")
-
-    done = machine.run(env={"FACTORY_RUNNER_TOKEN": TOKEN, "STUB_LOSE_REFERENCE": "always"})
-
-    assert done.returncode != 0
-    assert "could not be named" in done.stderr
-    assert len([call for call in machine.calls() if call.startswith("docker pull")]) == 2
-    assert (machine.state / "current.id").read_text() == "id-5"
-
-
-# -- what has to stay equal --------------------------------------------------------------------
-
-
-def shell_value(name: str) -> str:
-    text = SCRIPT.read_text()
-    found = re.search(rf"^{name}=(?:\"([^\"]*)\"|'([^']*)')$", text, re.MULTILINE)
-    assert found is not None, name
-    return found.group(1) if found.group(1) is not None else found.group(2)
-
-
-def test_the_channel_the_installer_downloads_is_the_file_the_image_carries() -> None:
-    channel = json.loads((RUNNER / "release-channel.json").read_text())
-    dockerfile = (RUNNER / "Dockerfile.factory-runner").read_text()
-    ignore = (RUNNER / "Dockerfile.factory-runner.dockerignore").read_text()
-
-    assert set(channel) == {"version", "repository", "manifestUrl", "signatureUrl", "publicKey"}
-    assert shell_value("CHANNEL_URL").endswith("/main/runner/release-channel.json")
+    assert done.returncode == 1
+    assert "signature of the program release manifest is not valid" in done.stderr
+    assert tree_without_locks(installed) == before
+    assert os.readlink(installed.opt / "current") == "releases/1"
     assert (
-        "COPY --chown=0:0 --chmod=0644 release-channel.json " + str(update.CHANNEL_FILE)
-        in dockerfile
+        not (installed.state_dir / "pending").exists()
+        and not (installed.opt / "releases/2").exists()
     )
-    assert "!release-channel.json" in ignore
-    assert shell_value("CURRENT") == update.CURRENT_REFERENCE
-    assert shell_value("PREVIOUS") == update.PREVIOUS_REFERENCE
-    assert "FACTORY_RUNNER_IMAGE_TAG=$CURRENT" in SCRIPT.read_text()
-    assert update.IMAGE_TAG_VARIABLE == "FACTORY_RUNNER_IMAGE_TAG"
+    # And through a signature of the other release: the VM artifacts.
+    publish(installed, program=2, vm=11, tamper={"vm-bad-signature"})
+    done = installed.host("update")
+    assert (
+        done.returncode == 1 and "signature of the vm release manifest is not valid" in done.stderr
+    )
+    assert tree_without_locks(installed) == before
 
 
-def test_the_installer_and_the_runner_read_the_same_channel_file_the_same_way(
-    tmp_path: Path,
+def test_an_update_whose_file_does_not_match_its_digest_stages_nothing(installed: Machine) -> None:
+    before = tree_without_locks(installed)
+    publish(installed, program=2, vm=10, tamper={"program-flip-byte"})
+
+    done = installed.host("update")
+
+    assert done.returncode == 1 and "does not match the digest" in done.stderr
+    assert tree_without_locks(installed) == before
+
+
+def test_an_update_to_the_same_release_downloads_no_file(installed: Machine) -> None:
+    done = installed.host("update")
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.count("nothing to do") == 1
+    downloaded = " ".join(installed.calls("curl")[-4:])
+    assert ".tar.zst" not in downloaded and "vmlinux" not in downloaded
+
+
+def test_an_update_never_takes_an_older_release_than_the_installed_one(installed: Machine) -> None:
+    publish(installed, program=1, vm=9)
+
+    done = installed.host("update")
+
+    assert done.returncode == 0 and "nothing to do" in done.stdout
+    assert not (installed.state_dir / "pending").exists()
+
+
+def test_a_scheduled_update_does_not_look_when_the_operator_turned_updates_off(
+    installed: Machine,
 ) -> None:
-    release = Release(release=7)
-    write_release(release, tmp_path)
+    (installed.root / "var/lib/factory-runner/config.json").write_text('{"autoUpdate": false}')
+    calls = len(installed.calls("curl"))
 
-    channel = update.load_channel(tmp_path / "release-channel.json")
+    done = installed.host("update", "--scheduled")
 
-    assert channel == release.channel()
-    for key, value in (
-        ("repository", REPOSITORY),
-        ("manifestUrl", release.channel().manifest_url),
-        ("signatureUrl", release.channel().signature_url),
-    ):
-        script = f'. /dev/stdin <<"EOF"\n{json_functions()}\njson_value {key} "$1"\nEOF'
-        found = subprocess.run(
-            ["/bin/sh", "-c", script, "sh", str(tmp_path / "release-channel.json")],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        assert found == value, key
+    assert done.returncode == 0 and "automatic updates are off" in done.stdout
+    assert len(installed.calls("curl")) == calls
+    # By hand it still works.
+    assert installed.host("update").returncode == 0
+    assert len(installed.calls("curl")) > calls
 
 
-def json_functions() -> str:
-    text = SCRIPT.read_text()
-    match = re.search(r"^json_value\(\) .*?^}\n", text, re.MULTILINE | re.DOTALL)
-    assert match is not None
-    return match.group(0)
+def test_an_update_needs_root(installed: Machine) -> None:
+    done = installed.host("update", env={"STUB_UID": "1000"})
+
+    assert done.returncode == 1 and "run as root" in done.stderr
 
 
-def test_sysbox_is_the_version_and_package_the_golden_snapshot_installs() -> None:
-    config = (REPOSITORY_ROOT / "dispatcher" / "src" / "snapshot" / "config.ts").read_text()
-    version = re.search(r'sysboxVersion: "([^"]+)"', config)
-    sha = re.search(r'sysboxSha256:\s*"([0-9a-f]{64})"', config)
+def test_an_update_needs_an_installed_runner(tmp_path: Path) -> None:
+    bare = new_machine(tmp_path / "bare")
 
-    assert version is not None and sha is not None
-    assert shell_value("SYSBOX_VERSION") == version.group(1)
-    assert shell_value("SYSBOX_SHA256") == sha.group(1)
+    done = bare.run_script(SCRIPT, "update")
+
+    assert done.returncode == 1 and "not installed" in done.stderr
 
 
-def test_the_script_is_posix_sh_and_never_takes_a_token_from_an_argument() -> None:
-    first = SCRIPT.read_text().splitlines()[0]
-    assert first == "#!/bin/sh"
-    assert "set -eu" in SCRIPT.read_text()
-    assert subprocess.run(["/bin/sh", "-n", str(SCRIPT)], check=False).returncode == 0
-    assert os.access(SCRIPT, os.R_OK)
+def test_the_start_switches_to_the_staged_release_and_keeps_the_one_before(
+    installed: Machine,
+) -> None:
+    stage_release_two(installed)
+
+    done = installed.host("prestart")
+
+    assert done.returncode == 0, done.stderr
+    assert installed.release_of("current") == "2" and installed.release_of("previous") == "1"
+    assert installed.release_of("artifacts", parent=installed.state_dir) == "11"
+    assert installed.release_of("artifacts-previous", parent=installed.state_dir) == "10"
+    assert not (installed.state_dir / "pending").exists()
+    # The one before is kept whole; it is what a rollback goes to.
+    assert (installed.opt / "releases/1/bin/factory-runner").is_file()
+    assert (installed.state_dir / "artifact-releases/10/vmlinux").is_file()
+    # The table is loaded again from the release that is current, and proven.
+    calls = installed.calls()
+    assert calls.count("nft list table inet code_reviewer_wall") >= 2
+
+
+def test_only_the_current_the_previous_and_the_waiting_release_are_kept(installed: Machine) -> None:
+    stage_release_two(installed)
+    assert installed.host("switch").returncode == 0
+    publish(installed, program=3, vm=12)
+    assert installed.host("update").returncode == 0
+    assert installed.host("switch").returncode == 0
+
+    assert sorted(path.name for path in (installed.opt / "releases").iterdir()) == ["2", "3"]
+    assert sorted(path.name for path in (installed.state_dir / "artifact-releases").iterdir()) == [
+        "11",
+        "12",
+    ]
+
+
+def test_a_program_that_does_not_run_is_not_switched_to_and_is_not_taken_again(
+    installed: Machine,
+) -> None:
+    publish(installed, program=2, vm=10, tamper={"program-broken"})
+    assert installed.host("update").returncode == 0
+
+    done = installed.host("switch")
+
+    assert done.returncode == 0
+    assert "does not run on this machine" in done.stderr
+    assert installed.release_of("current") == "1" and not (installed.state_dir / "pending").exists()
+    assert (installed.conf / "rejected-program").read_text() == "2\n"
+    again = installed.host("update")
+    assert "was rolled back" in again.stdout
+    assert (
+        not (installed.opt / "releases/2").exists()
+        or not (installed.state_dir / "pending").exists()
+    )
+
+
+def test_the_start_fails_when_the_table_is_not_loaded_so_the_service_never_runs_without_its_wall(
+    installed: Machine,
+) -> None:
+    done = installed.host("prestart", env={"STUB_NFT_LIST_FAIL": "1"})
+
+    assert done.returncode == 1
+    assert "is not loaded" in done.stderr and "does not start" in done.stderr
+
+
+def test_the_start_makes_the_tap_devices_a_restart_of_the_machine_took(installed: Machine) -> None:
+    (installed.state / "taps" / "fctap0").unlink()
+
+    done = installed.host("prestart")
+
+    assert done.returncode == 0, done.stderr
+    assert installed.taps == ["fctap0"]
+
+
+def test_the_service_is_started_with_the_vm_settings_of_the_current_artifacts(
+    installed: Machine,
+) -> None:
+    done = installed.host("run-service")
+
+    assert done.returncode == 0, done.stderr
+    last = (installed.state / "cli.log").read_text().splitlines()[-1]
+    assert last == f"factory-runner run image={installed.release.image_id} release=1"
+
+
+def test_the_service_without_vm_artifacts_ends_with_the_configuration_exit_code(
+    installed: Machine,
+) -> None:
+    (installed.state_dir / "artifacts").unlink()
+
+    done = installed.host("run-service")
+
+    assert done.returncode == 6
+
+
+# -- T04: rollback --
+
+
+# #982-T04
+def test_a_rollback_returns_to_the_previous_release_and_does_not_take_the_one_it_left(
+    installed: Machine,
+) -> None:
+    stage_release_two(installed)
+    assert installed.host("switch").returncode == 0
+    assert installed.release_of("current") == "2"
+
+    done = installed.host("rollback")
+
+    assert done.returncode == 0, done.stderr
+    assert (installed.state_dir / "pending").read_text().splitlines() == ["program=1", "vm=10"]
+    assert (installed.conf / "rejected-program").read_text() == "2\n"
+    assert (installed.conf / "rejected-vm").read_text() == "11\n"
+    # It goes back between two jobs: at the next start.
+    assert installed.release_of("current") == "2"
+    assert installed.host("prestart").returncode == 0
+    assert installed.release_of("current") == "1"
+    assert installed.release_of("artifacts", parent=installed.state_dir) == "10"
+    # The release left is gone and is not `previous`: a second rollback does not go forward.
+    assert not (installed.opt / "previous").exists() and not (installed.opt / "releases/2").exists()
+    assert installed.host("rollback").returncode == 1
+    # The channel still announces release 2: it is not taken. A higher one is.
+    again = installed.host("update")
+    assert "was rolled back" in again.stdout and not (installed.state_dir / "pending").exists()
+    publish(installed, program=3, vm=12)
+    assert installed.host("update").returncode == 0
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=3",
+        "vm=12",
+        "pair=1",
+    ]
+
+
+def test_a_rollback_with_a_staged_release_cancels_it_instead_of_going_back(
+    installed: Machine,
+) -> None:
+    stage_release_two(installed)
+
+    done = installed.host("rollback")
+
+    assert done.returncode == 0, done.stderr
+    assert "cancelled" in done.stdout
+    assert (
+        not (installed.state_dir / "pending").exists()
+        and not (installed.opt / "releases/2").exists()
+    )
+    assert installed.release_of("current") == "1"
+    assert "was rolled back" in installed.host("update").stdout
+
+
+def test_a_rollback_without_an_earlier_release_says_so(installed: Machine) -> None:
+    done = installed.host("rollback")
+
+    assert done.returncode == 1 and "no earlier release" in done.stderr
+
+
+def test_a_rollback_now_restarts_the_service_and_one_without_it_does_not(
+    installed: Machine,
+) -> None:
+    stage_release_two(installed)
+    assert installed.host("switch").returncode == 0
+    before = installed.calls("systemctl restart")
+
+    assert installed.host("rollback").returncode == 0
+    assert installed.calls("systemctl restart") == before
+    assert installed.host("prestart").returncode == 0
+
+    publish(installed, program=3, vm=12)
+    assert installed.host("update").returncode == 0
+    assert installed.host("switch").returncode == 0
+    assert installed.host("rollback", "--now").returncode == 0
+    assert installed.calls("systemctl restart") == [*before, "systemctl restart factory-runner"]
+
+
+def test_status_names_the_current_the_previous_and_the_staged_release(installed: Machine) -> None:
+    stage_release_two(installed)
+
+    done = installed.host("status")
+
+    assert done.returncode == 0
+    assert "program: current 1, previous none, staged 2, rejected up to 0" in done.stdout
+    assert "vm: current 10, previous none, staged 11, rejected up to 0" in done.stdout
+
+
+# -- the command and a refreshed install --
+
+
+def test_the_command_hands_update_to_the_root_script_and_everything_else_to_the_service_user(
+    installed: Machine,
+) -> None:
+    command = installed.root / "usr/local/bin/factory-runner"
+    assert command.stat().st_mode & stat.S_IXUSR
+
+    config = installed.run_script(command, "config", "show")
+    assert config.returncode == 0, config.stderr
+    assert "runuser -u factory-runner -- " in " ".join(installed.calls("runuser"))
+    assert (
+        (installed.state / "cli.log")
+        .read_text()
+        .splitlines()[-1]
+        .startswith("factory-runner config show")
+    )
+
+    status = installed.run_script(command, "status")
+    assert status.returncode == 0 and "program: current 1" in status.stdout
+
+    someone = installed.run_script(command, "config", "show", env={"STUB_UID": "1000"})
+    assert someone.returncode == 1 and "run it with sudo" in someone.stderr
+
+
+def test_an_install_run_again_with_refresh_is_idempotent_and_never_restarts_a_running_service(
+    installed: Machine,
+) -> None:
+    calls_before = installed.calls()
+    registers = [
+        line
+        for line in (installed.state / "cli.log").read_text().splitlines()
+        if " register " in line
+    ]
+    publish(installed, program=2, vm=11)
+
+    done = installed.install(
+        "--refresh", "--labels", "linux,fast", token=False, env={"STUB_REFLINK": "1"}
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "this machine is registered already" in done.stdout
+    assert "it is not restarted" in done.stdout
+    new_calls = installed.calls()[len(calls_before) :]
+    assert (
+        "systemctl restart factory-runner" not in new_calls
+        and "systemctl start factory-runner" not in new_calls
+    )
+    assert [
+        line
+        for line in (installed.state / "cli.log").read_text().splitlines()
+        if " register " in line
+    ] == registers
+    assert "config set --labels linux,fast" in (installed.state / "cli.log").read_text()
+    # The running service keeps its release: the new one waits for its start.
+    assert installed.release_of("current") == "1"
+    assert (installed.state_dir / "pending").read_text().splitlines() == [
+        "program=2",
+        "vm=11",
+        "pair=1",
+    ]
+    assert machine_user_count(installed) == 1
+
+
+def machine_user_count(machine: Machine) -> int:
+    return len([call for call in machine.calls() if call.startswith("useradd")])
+
+
+def test_a_refresh_with_fewer_slots_removes_the_taps_above(installed: Machine) -> None:
+    assert installed.host("uninstall").returncode == 0
+    assert installed.install("--parallel-runs", "3").returncode == 0
+    assert installed.taps == ["fctap0", "fctap1", "fctap2"]
+
+    done = installed.install("--refresh", "--parallel-runs", "1", token=False)
+
+    assert done.returncode == 0, done.stderr
+    assert installed.taps == ["fctap0"]
+
+
+# -- the interactive prompt (unchanged by this issue; kept proven) --
+
+
+def run_on_terminal(machine: Machine, *args: str, answers: dict[str, str]) -> tuple[int, str, bool]:
+    master, slave = os.openpty()
+    process = subprocess.Popen(
+        [
+            "/bin/sh",
+            str(SCRIPT),
+            "--program-channel-file",
+            str(machine.program_channel),
+            "--vm-channel-file",
+            str(machine.vm_channel),
+            *args,
+        ],
+        env=machine.environment(),
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        start_new_session=True,
+        preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 1),
+    )
+    os.close(slave)
+    shown = b""
+    pending = dict(answers)
+    deadline = time.monotonic() + 60
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 1.0)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            shown += chunk
+            for prompt, typed in list(pending.items()):
+                if prompt.encode() in shown:
+                    del pending[prompt]
+                    time.sleep(0.3)
+                    os.write(master, typed.encode())
+        code = process.wait(timeout=30)
+        echo = bool(termios.tcgetattr(master)[3] & termios.ECHO)
+    finally:
+        os.close(master)
+    return code, shown.decode(errors="replace"), echo
+
+
+def test_the_token_is_asked_for_on_the_terminal_without_echo(machine: Machine) -> None:
+    code, shown, echo = run_on_terminal(
+        machine, answers={'"Add a runner"; input is hidden): ': TOKEN + "\n"}
+    )
+
+    assert code == 0, shown
+    assert (machine.state / "register-stdin").read_text() == TOKEN
+    assert TOKEN not in shown
+    assert echo
+
+
+# -- what the repository holds --
+
+
+def test_the_release_channels_have_the_shape_the_installer_reads_and_hold_no_secret() -> None:
+    program = json.loads((REPOSITORY_ROOT / "runner/release-channel.json").read_text())
+    vm = json.loads((REPOSITORY_ROOT / "docker/vm/release-channel.json").read_text())
+
+    assert sorted(program) == ["baseUrl", "manifestAsset", "publicKey", "signatureAsset", "version"]
+    assert sorted(vm) == [
+        "baseUrl",
+        "manifestAsset",
+        "publicKey",
+        "repository",
+        "signatureAsset",
+        "version",
+    ]
+    for channel in (program, vm):
+        assert channel["baseUrl"] == "" or str(channel["baseUrl"]).startswith("https://")
+        assert (channel["baseUrl"] == "") == (
+            channel["publicKey"] == ""
+        )  # nothing is published without a key
+
+
+def test_the_file_names_the_installer_expects_are_the_ones_of_the_release_and_the_launcher() -> (
+    None
+):
+    from code_reviewer_runner.factory_runner.firecracker.settings import (
+        settings_from_environment,
+    )
+
+    script = SCRIPT.read_text()
+    assemble = (REPOSITORY_ROOT / "docker/vm/assemble.sh").read_text()
+    for name in ("rootfs.ext4.zst", "dockerdata.ext4.zst"):
+        assert name in script and name in assemble
+    settings = settings_from_environment(
+        {"FACTORY_RUNNER_VM_IMAGE_ID": "x", "FACTORY_RUNNER_VM_STATE_DIR": "/s"}
+    )
+    # The launcher reads <state>/artifacts: the link the installer makes; the files are its names.
+    assert (settings.kernel, settings.rootfs, settings.base_disk) == (
+        Path("/s/artifacts/vmlinux"),
+        Path("/s/artifacts/rootfs.ext4"),
+        Path("/s/artifacts/dockerdata.ext4"),
+    )
+    assert 'point_link "artifact-releases/$target" "$STATE/artifacts"' in script
+
+
+def test_the_nft_table_the_program_carries_is_the_one_of_the_repository(installed: Machine) -> None:
+    loaded = (installed.state / "nft-table").read_text()
+    template = (REPOSITORY_ROOT / "docker/vm/host/outer-wall.nft").read_text()
+
+    # Rendered for the machine's network and nothing else.
+    assert loaded == template.replace("@SLOT_NETWORK@", FIRST_NETWORK)
+    assert "@SLOT_NETWORK@" not in loaded
+    assert "table inet code_reviewer_wall" in loaded
+
+
+def shape(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: shape(item) for key, item in sorted(cast("dict[str, object]", value).items())}
+    return type(value).__name__
+
+
+# #982: the sample is also parsed by the verifier's own schema (dispatcher channel.test.ts).
+def test_the_manifest_of_these_tests_has_the_shape_the_typescript_verifier_parses(
+    machine: Machine,
+) -> None:
+    sample = json.loads(
+        (REPOSITORY_ROOT / "dispatcher/src/vm-artifacts/fixtures/sample-manifest.json").read_text()
+    )
+    served = json.loads((machine.served / "vm-artifacts-manifest.json").read_text())
+
+    assert shape(served) == shape(sample)

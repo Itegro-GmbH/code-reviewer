@@ -11,6 +11,7 @@ import {
   readExamples,
 } from "../test-support/runner-contract.ts";
 import { checkAnnouncement } from "./announcement.ts";
+import { checkDelivery } from "./delivery.ts";
 import { RUNNER_API_ERROR_CODES } from "../runner-api/contract.ts";
 import { readContract } from "../test-support/runner-contract.ts";
 
@@ -43,6 +44,16 @@ describe("the runner registration contract", () => {
 
   // #854-T61
   it("gives the verdict the app's reading of an announcement gives", () => {
+    const opencode = {
+      harness: "opencode",
+      version: "1.19.0",
+      auth: "app-key",
+    };
+    const claude = {
+      harness: "claude-code",
+      version: "2.1.311",
+      auth: "subscription",
+    };
     const base = {
       labels: ["linux"],
       baseVersion: "1.0.0",
@@ -74,6 +85,53 @@ describe("the runner registration contract", () => {
       },
       { ...base, manifest: { harnesses: { opencode: { version: "1" } } } },
       { ...base, manifest: { capabilities: ["agent docker"] } },
+      // #973: the list form
+      { ...base, manifest: { harnesses: [opencode] } },
+      { ...base, manifest: { harnesses: [opencode, claude] } },
+      {
+        ...base,
+        manifest: { harnesses: [opencode, { ...claude, models: ["a"] }] },
+      },
+      {
+        ...base,
+        manifest: {
+          harnesses: [{ ...opencode, auth: "local-key", models: ["gpt-5"] }],
+        },
+      },
+      { ...base, manifest: { harnesses: [{ ...opencode, auth: "managed" }] } },
+      { ...base, manifest: { harnesses: [{ ...opencode, auth: "token" }] } },
+      { ...base, manifest: { harnesses: [{ ...opencode, auth: undefined }] } },
+      {
+        ...base,
+        manifest: { harnesses: [{ ...opencode, version: undefined }] },
+      },
+      { ...base, manifest: { harnesses: [{ ...opencode, models: ["a"] }] } },
+      { ...base, manifest: { harnesses: [{ ...claude, models: [] }] } },
+      {
+        ...base,
+        manifest: { harnesses: [{ ...claude, models: ["bad model"] }] },
+      },
+      {
+        ...base,
+        manifest: {
+          harnesses: [
+            {
+              ...claude,
+              models: Array.from({ length: 65 }, (_, i) => `m${String(i)}`),
+            },
+          ],
+        },
+      },
+      {
+        ...base,
+        manifest: {
+          harnesses: Array.from({ length: 17 }, (_, i) => ({
+            ...opencode,
+            harness: `h${String(i)}`,
+          })),
+        },
+      },
+      { ...base, manifest: { harnesses: ["opencode"] } },
       { ...base, limits: { cpus: 0 } },
       { ...base, limits: { memoryMb: 1.5 } },
     ];
@@ -85,6 +143,55 @@ describe("the runner registration contract", () => {
         app: file,
       });
     }
+  });
+
+  // #972-T04
+  it("gives the verdict the app's reading of a delivery gives, and holds its example", () => {
+    const url = "https://dispatcher.example.com/dispatch";
+    const bodies: unknown[] = [
+      { mode: "poll" },
+      { mode: "webhook", url },
+      { mode: "webhook", url, rotateSecret: true },
+      { mode: "webhook", url, rotateSecret: "yes" },
+      { mode: "webhook" },
+      { mode: "webhook", url: 5 },
+      { mode: "push", url },
+      {},
+    ];
+
+    for (const body of bodies) {
+      const file = contract.check("DeliveryAnnouncement", body).valid;
+      expect({ body, app: checkDelivery(body).ok }).toEqual({
+        body,
+        app: file,
+      });
+    }
+    expect(
+      contract.check("RunnerAnnouncement", {
+        labels: ["linux"],
+        baseVersion: "1.0.0",
+        delivery: { mode: "webhook", url },
+      }).valid,
+    ).toBe(true);
+    const response = examples.find(
+      (example) => example.definition === "AnnounceResponse",
+    );
+    expect(response?.document).toMatchObject({
+      delivery: { mode: "webhook", secret: expect.stringMatching(/^crw_/) },
+    });
+  });
+
+  // #973-T04
+  it("is looser than the app in one place: the same harness and auth twice, which a schema cannot say", () => {
+    const entry = { harness: "opencode", version: "1.19.0", auth: "app-key" };
+    const twice = {
+      labels: [],
+      baseVersion: "1.0.0",
+      manifest: { harnesses: [entry, entry] },
+    };
+
+    expect(contract.check("RunnerAnnouncement", twice).valid).toBe(true);
+    expect(checkAnnouncement(twice).ok).toBe(false);
   });
 
   // #854-T63
@@ -105,6 +212,26 @@ describe("the runner registration contract", () => {
     expect(checkAnnouncement(twice)).toMatchObject({
       ok: true,
       value: { manifest: { capabilities: ["a"] } },
+    });
+    // #973: and a repeated model of an entry
+    const models = {
+      labels: [],
+      baseVersion: "1.0.0",
+      manifest: {
+        harnesses: [
+          {
+            harness: "claude-code",
+            version: "2.1.311",
+            auth: "subscription",
+            models: ["opus", "opus"],
+          },
+        ],
+      },
+    };
+    expect(contract.check("RunnerAnnouncement", models).valid).toBe(false);
+    expect(checkAnnouncement(models)).toMatchObject({
+      ok: true,
+      value: { manifest: { harnesses: [{ models: ["opus"] }] } },
     });
   });
 

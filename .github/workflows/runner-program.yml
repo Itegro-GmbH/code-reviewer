@@ -1,0 +1,93 @@
+name: Runner program
+
+# The program of the Factory-Runner (#1002, epic #969): `bin/factory-runner`, Firecracker, the outer wall's nft table, `libexec/host.sh` (the installer) and a
+# standalone Python with the package and its one third-party dependency, as one tarball with a reproducible tar (runner/release/build_program.py; the format is
+# docs/runner.md, "Updates"). One definition for the two callers: ci.yml (a pull request that changes what the program is made of: the lane below,
+# with a throwaway key) and runner-program-release.yml (a tag, which signs and publishes). This workflow never signs for real and never publishes: it
+# holds no secret and has the read-only token, and the one key lives only in the release job, in the environment `runner-program-release`
+# (docs/runner.md, "The program release").
+#
+# A pull request runs the LANE (runner/release/lane.sh) and nothing else: it builds release 1 twice (the bytes must be equal) and release 2, signs
+# them with a key made for the run, checks them with the verifier of the release job, and lets the real `runner/install/install.sh` install, update,
+# switch, roll back and uninstall them on a real systemd and `nft`, with the real program running as the service user. A run for a release
+# (`for_release`) builds the tarball once and hands the files to the signing job through the Actions cache: the cache's key names this run and only a
+# workflow of this repository restores it, and the signing job verifies the files against the manifest it signs before anything is published.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: The release number of the manifest; it only grows (the tag's number, or the run number for a build that is not published)
+        required: true
+        type: number
+      for_release:
+        description: The run feeds a release (runner-program-release.yml). The tarball is built once and goes to the job that signs it through the Actions cache
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      release:
+        description: The release number of the manifest
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  PROGRAM_WORK: /mnt/program
+
+jobs:
+  program:
+    name: "Runner program: build, and for a pull request the installer lane (real systemd)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Work volume
+        run: |
+          sudo mkdir -p "$PROGRAM_WORK"
+          sudo chown "$USER" "$PROGRAM_WORK"
+          df -h / "$PROGRAM_WORK" | cat
+      # What is built is the commit that is checked out, all of it tracked and unchanged: the package goes in as `git ls-files` lists it.
+      - name: The tree is the commit
+        run: |
+          test -z "$(git status --porcelain)" || { git status --short >&2; echo "the working tree is not the commit" >&2; exit 1; }
+          git rev-parse HEAD
+      # For a release only. A pull request's lane below builds its own releases, and says how big the tarball is.
+      - name: Build the program tarball
+        if: ${{ inputs.for_release }}
+        env:
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          python3 runner/release/build_program.py --release "$RELEASE" --commit "$(git rev-parse HEAD)" \
+            --out "$PROGRAM_WORK/release" --cache "$PROGRAM_WORK/cache"
+          ls -l "$PROGRAM_WORK/release"
+          {
+            echo "### Program release $RELEASE"
+            echo
+            echo "| File | Size (MiB) |"
+            echo "|---|---|"
+            for f in "$PROGRAM_WORK"/release/*; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(( $(stat -c %s "$f") / 1048576 ))"
+            done
+            echo
+            echo '```'
+            tar --zstd -xOf "$PROGRAM_WORK/release/factory-runner-$RELEASE-x86_64.tar.zst" share/release.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Not an artifact: see the top. The signing job restores this cache and verifies every file against the manifest before it publishes anything.
+      - name: The release's files, for the job that signs and publishes them (the Actions cache, not an artifact)
+        if: ${{ inputs.for_release }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PROGRAM_WORK }}/release
+          key: program-release-files-${{ github.run_id }}
+      - name: Installer lane (the real tarball, a throwaway key, install, update, rollback, uninstall)
+        if: ${{ !inputs.for_release }}
+        env:
+          PROGRAM_BUILD_CACHE: ${{ env.PROGRAM_WORK }}/cache
+        run: runner/release/lane.sh

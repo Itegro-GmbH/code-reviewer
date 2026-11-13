@@ -5,12 +5,17 @@ and that the next job starts clean."""
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 from loop_support import Harness, make_claim, run, settle
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from fakes.docker_engine.server import FakeDockerEngine, FakeExec
+
+from code_reviewer_runner.factory_runner import disk_budget
 from code_reviewer_runner.factory_runner.config import Limits
 from code_reviewer_runner.factory_runner.disk_budget import (
     GIB,
@@ -25,9 +30,15 @@ from code_reviewer_runner.factory_runner.housekeeping import (
     remove_environment_image,
 )
 from code_reviewer_runner.implementer.docker_api import DockerError
+from code_reviewer_runner.implementer.git_process import Outcome
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _no_inner_size_from_another_test() -> None:
+    disk_budget._last_inner_bytes.clear()  # pyright: ignore[reportPrivateUsage]
 
 
 def test_the_budget_is_the_disk_limit_in_bytes_or_none() -> None:
@@ -72,6 +83,13 @@ class Daemon:
         self.roles = roles or {}
         self.unlistable = False
         self.removed: list[str] = []
+        # The runtime a container was made with (default: `runc`, as a lane without Sysbox).
+        self.runtimes: dict[str, str] = {}
+        self.inspected: list[str] = []
+
+    def inspect_container(self, ref: str) -> dict[str, Any]:
+        self.inspected.append(ref)
+        return {"HostConfig": {"Runtime": self.runtimes.get(ref, "runc")}}
 
     def request(self, method: str, path: str, *args: Any, **kwargs: Any) -> Any:
         assert method == "GET" and path.startswith("/containers/json")
@@ -98,51 +116,162 @@ class Daemon:
         self.removed.append(reference)
 
 
-def test_what_the_job_holds_is_its_work_folders_its_containers_and_its_environment_image(
-    tmp_path: Path,
-) -> None:
+def test_what_the_job_holds_is_its_work_folders_and_its_containers(tmp_path: Path) -> None:
     (tmp_path / "repo").mkdir()
     (tmp_path / "repo" / "f").write_bytes(b"x" * 50_000)
     (tmp_path / "unrelated").mkdir()
     (tmp_path / "unrelated" / "f").write_bytes(b"x" * 9_000_000)  # not the job's
-    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None}, image=500_000, base=0)
+    daemon = Daemon(sizes={"a" * 64: 1_000, "b" * 64: 2_000, "c" * 64: None})
 
     total = used_bytes(daemon, tmp_path, "r1")  # type: ignore[arg-type]
 
-    assert 553_000 <= total < 600_000
+    assert 53_000 <= total < 100_000
 
 
-# #855-F1 (S5)
-def test_a_big_agent_image_under_a_small_commit_counts_only_what_the_commit_added(
+# #855-F1 (S5), #1009: nothing is committed any more, so the one container the script and the agent
+# share is measured by its own layer, once, whatever images an earlier version left on the daemon
+def test_the_container_the_script_ran_in_is_counted_by_its_layer_and_no_image_is_added(
     tmp_path: Path,
 ) -> None:
-    for name in ("reserve", "repo", "result"):
-        (tmp_path / name).mkdir()
-    base = 4 * GIB  # the agent image: the runner's, there before the job
-    daemon = Daemon(sizes={}, image=base + 300_000, base=base)
+    agent = "a" * 64
+    daemon = Daemon(sizes={agent: 700_000}, image=GIB + 700_000, base=GIB)
 
-    assert used_bytes(daemon, tmp_path, "r1") == 300_000  # type: ignore[arg-type]
-
-    # An agent image the daemon cannot size: the part counts as nothing, never as the whole image.
-    unknown = Daemon(sizes={}, image=base + 300_000, base=None)
-    assert used_bytes(unknown, tmp_path, "r1") == 0  # type: ignore[arg-type]
+    assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
 
 
-# #855-F1 (S5)
-def test_the_setup_containers_layer_is_counted_once_not_again_in_its_committed_image(
+# #1009-T36: under Sysbox the inner Docker's data (`/var/lib/docker` of the container) is a mount
+# the runtime manages, not the container's writable layer, so the layer says nothing of what the
+# script pulled or built there: the inner data directory is measured by an exec and counted besides
+def test_the_inner_docker_of_a_sysbox_container_is_counted_beside_its_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = "a" * 64
+    daemon = Daemon(sizes={agent: 700_000})
+    daemon.runtimes[agent] = "sysbox-runc"
+    asked: list[tuple[str, list[str]]] = []
+
+    def run_exec(api: Any, container: str, argv: list[str], **options: Any) -> Outcome:
+        asked.append((container, argv))
+        return Outcome(0, f"{3 * GIB}\t/var/lib/docker\n", "")
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
+
+    assert used_bytes(daemon, tmp_path, "r1") == 700_000 + 3 * GIB  # type: ignore[arg-type]
+    # One fixed command, a constant path, one file system (the inner containers' own mounts are
+    # other file systems and counted once, as the data they come from).
+    assert asked == [
+        (
+            agent,
+            [
+                "/usr/bin/timeout",
+                "-s",
+                "KILL",
+                "50",
+                "/usr/bin/du",
+                "-sx",
+                "-B1",
+                "/var/lib/docker",
+            ],
+        )
+    ]
+
+
+# #1009-T37
+def test_a_container_of_another_runtime_has_no_inner_docker_to_measure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = "a" * 64
+    daemon = Daemon(sizes={agent: 700_000})
+
+    def run_exec(*args: Any, **options: Any) -> Outcome:
+        raise AssertionError("a runc container's /var/lib/docker is in its layer already")
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
+
+    assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
+
+
+# #1009-T38
+@pytest.mark.parametrize(
+    "answer",
+    [
+        Outcome(255, "", "timed out", unanswered=True),  # a frozen container is no exec target
+        Outcome(1, "", "du: cannot access"),
+        Outcome(0, "not a number\t/var/lib/docker\n", ""),
+        Outcome(0, "", ""),
+    ],
+)
+def test_an_inner_size_the_daemon_cannot_say_counts_for_nothing_and_the_layer_still_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: Outcome
+) -> None:
+    agent = "a" * 64
+    daemon = Daemon(sizes={agent: 700_000})
+    daemon.runtimes[agent] = "sysbox-runc"
+
+    def run_exec(*args: Any, **options: Any) -> Outcome:
+        return answer
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
+
+    assert used_bytes(daemon, tmp_path, "r1") == 700_000  # type: ignore[arg-type]
+
+
+# #1009-T50: a `du` that does not answer in time (a huge inner store is where it is slowest)
+# must not make the budget blind when the store is largest: the last size that was measured
+# counts until a new one is, and the `du` is bounded in the container below the exec's own
+# timeout, so slow ones do not pile up from one measure to the next.
+def test_an_inner_size_that_times_out_keeps_the_last_measured_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = "b" * 64
+    daemon = Daemon(sizes={agent: 700_000})
+    daemon.runtimes[agent] = "sysbox-runc"
+    answers = [
+        Outcome(0, f"{3 * GIB}\t/var/lib/docker\n", ""),
+        Outcome(255, "", "timed out", unanswered=True),
+        Outcome(137, "", ""),
+    ]
+    budgets: list[float] = []
+
+    def run_exec(*args: Any, **options: Any) -> Outcome:
+        budgets.append(options["timeout"])
+        return answers.pop(0)
+
+    monkeypatch.setattr(disk_budget, "run_exec", run_exec)
+
+    for _ in range(3):
+        assert used_bytes(daemon, tmp_path, "r1") == 700_000 + 3 * GIB  # type: ignore[arg-type]
+    assert all(budget > 50 for budget in budgets)
+
+
+# #1009-T39
+def test_the_inner_size_is_asked_of_a_real_daemon_by_an_exec_in_the_container(
     tmp_path: Path,
 ) -> None:
-    setup, agent = "s" * 64, "a" * 64
-    sizes: dict[str, int | None] = {setup: 700_000, agent: 1_000}
-    roles = {setup: "setup", agent: "agent"}
+    """Against the fake Engine: the exec's document, and a `du` line read back."""
+    from code_reviewer_runner.implementer.docker_api import DockerApi
 
-    committed = Daemon(sizes=sizes, image=GIB + 700_000, base=GIB, roles=roles)
-    # The image holds the setup container's 700 000; its own layer is not added a second time.
-    assert used_bytes(committed, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
+    engine = FakeDockerEngine(tmp_path / "docker.sock").start()
+    seen: list[list[str]] = []
 
-    # Before the commit there is no image: the container's own layer is the measure.
-    running = Daemon(sizes=sizes, image=None, base=GIB, roles=roles)
-    assert used_bytes(running, tmp_path, "r1") == 701_000  # type: ignore[arg-type]
+    def behave(made: FakeExec, stdin: Any, stdout: Any) -> int:
+        seen.append(made.document["Cmd"])
+        stdout.write("123456789\t/var/lib/docker\n")
+        return 0
+
+    engine.exec_behaviour = behave
+    api = DockerApi(str(tmp_path / "docker.sock"), timeout=5.0)
+    try:
+        identifier = api.create_container(
+            {"Image": "x", "Labels": {}, "HostConfig": {"Runtime": "sysbox-runc"}}, "agent-b04"
+        )
+        api.start_container(identifier)
+        assert disk_budget.inner_docker_bytes(api, identifier) == 123456789
+    finally:
+        engine.stop()
+    assert seen == [
+        ["/usr/bin/timeout", "-s", "KILL", "50", "/usr/bin/du", "-sx", "-B1", "/var/lib/docker"]
+    ]
 
 
 def test_a_daemon_that_cannot_answer_counts_for_nothing_and_ends_no_job(tmp_path: Path) -> None:

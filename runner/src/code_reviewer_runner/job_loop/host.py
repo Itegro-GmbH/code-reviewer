@@ -59,6 +59,8 @@ from code_reviewer_runner.capabilities import (
 )
 from code_reviewer_runner.dynamic_review.engine_user import sweep_user
 from code_reviewer_runner.dynamic_review.netguard import EGRESS_MODE_VARIABLE, EgressMode
+from code_reviewer_runner.implementer.claude_code.login import OAUTH_VARIABLE
+from code_reviewer_runner.implementer.environment_control import ENVIRONMENT_CONTROL_VARIABLE
 from code_reviewer_runner.implementer.runner_profile import RUNNER_PROFILE_NAMES
 from code_reviewer_runner.job import (
     IMPLEMENTER_ENVIRONMENT_NAMES,
@@ -107,6 +109,7 @@ from code_reviewer_runner.job_loop.resume_download import (
 from code_reviewer_runner.job_loop.snapshot_sender import SnapshotApi, SnapshotSender
 from code_reviewer_runner.job_loop.step_sender import StepsApi, StepSender
 from code_reviewer_runner.lease_check import LeaseState
+from code_reviewer_runner.outer_proxy import OUTER_PROXY_VARIABLE, OuterProxy
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 from code_reviewer_runner.result import DISK_BUDGET_REASON, ErrorCode
 from code_reviewer_runner.resume_wire import (
@@ -149,6 +152,13 @@ IMPLEMENTER_PASSTHROUGH_VARIABLES = (
     *IMPLEMENTER_ENVIRONMENT_NAMES,
     # #854: what a customer's runner decided about the runtime and the CPUs of the containers.
     *RUNNER_PROFILE_NAMES,
+    # #975: the session narrows the sandbox's outer wall through this transport; without it a
+    # configured one would read as none and the agent would start under the setup's wide rule.
+    ENVIRONMENT_CONTROL_VARIABLE,
+    # #974: the login of a customer's device that its dispatcher handed the Worker on its standard
+    # input for a job on a subscription (`factory_runner/local_worker.py`). A hosted Worker's
+    # environment never holds it.
+    OAUTH_VARIABLE,
 )
 # The newest bytes of its stdout the host keeps of an Implementer job process: its result line
 # carries the commits and files of the turn, up to the 4 MB the body is held to (`report.py`).
@@ -318,6 +328,16 @@ def _end_of(result: Result, delivery: Delivery, superseded: bool = False) -> Job
     return JobEnd.OK if result["ok"] else JobEnd.FAILED
 
 
+def process_stdin(raw_input: Mapping[str, Any], kind: ReviewKind, control_token: str | None) -> str:
+    """The text a job process reads on its stdin: the job as the app sent it and, for an Implementer
+    turn of a Worker that vm-init started, the host's token for the environment control
+    (`environmentControlToken`, #977). ASCII escapes: a lone surrogate in a text cannot break the
+    encoding, and the job process reads the same JSON."""
+    if kind is ReviewKind.IMPLEMENTER and control_token is not None:
+        return json.dumps({**raw_input, "environmentControlToken": control_token})
+    return json.dumps(raw_input)
+
+
 def _secrets_in(raw_input: Mapping[str, Any]) -> list[str]:
     """The credentials of a job input, found defensively (the input may not be valid)."""
     values: list[str] = []
@@ -343,6 +363,8 @@ class JobHost:
         sweeper: Callable[[int, int], bool] = sweep_user,
         refuse_unadvertised_engine: bool = False,
         guard: Callable[[], Awaitable[str]] | None = None,
+        control_token: str | None = None,
+        outer_proxy: OuterProxy | None = None,
     ) -> None:
         self._settings = settings
         self._api = api
@@ -352,6 +374,9 @@ class JobHost:
         self._log = SafeLog(logger or logging.getLogger("code_reviewer_runner.loop"), masker)
         self._environment = dict(environment or {})
         self._hard_stop = asyncio.Event()
+        # The error code of the last result this host reported (None: none, or a success): the
+        # Worker maps the codes of a refused subscription to an exit code of their own (#980).
+        self.last_error_code: str | None = None
         # Ends everything the engine user runs (uid, gid); it is only called once no Dynamic job
         # process runs, under the lock that also guards the start of one.
         self._sweeper = sweeper
@@ -364,6 +389,13 @@ class JobHost:
         # guard's coroutine returns the text of the failure when it must end, and is otherwise
         # cancelled with the job. None: no budget (the hosted Worker).
         self._guard = guard
+        # The host's per-VM token for the environment control (#977): only an Implementer's job
+        # process gets it, on its stdin like the job's other secrets, never in its environment.
+        self._control_token = control_token
+        # The outer wall's proxy of this VM (#994): the host's, from vm-init's start. An Implementer
+        # job process gets it in its environment (never in its stdin: the job document comes from
+        # the app) so that its clients dial through it.
+        self._outer_proxy = outer_proxy
 
     def request_hard_stop(self) -> None:
         """End the running process now and report `runner_shutdown` (the grace period is over)."""
@@ -425,6 +457,10 @@ class JobHost:
             env[OPENCODE_COMMAND_VARIABLE] = shlex.join(self._settings.dynamic_command)
             if self._settings.dynamic_ripgrep:
                 env[RIPGREP_PATH_VARIABLE] = self._settings.dynamic_ripgrep
+        # Only what the host handed this Worker, whatever the container's own environment says.
+        env.pop(OUTER_PROXY_VARIABLE, None)
+        if self._outer_proxy is not None:
+            env[OUTER_PROXY_VARIABLE] = self._outer_proxy.address
         return env
 
     def _dynamic_environment(self) -> dict[str, str]:
@@ -547,7 +583,7 @@ class JobHost:
                     **self._child_environment(job),
                     **({} if resumed.state is None else {RESUME_STATE_VARIABLE: resumed.state}),
                 },
-                stdin=json.dumps(claimed.input).encode("ascii"),
+                stdin=process_stdin(claimed.input, kind, self._control_token).encode("ascii"),
                 files=resumed.files,
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.
@@ -926,6 +962,8 @@ class JobHost:
     ) -> Delivery:
         """Deliver the result. The heart keeps beating until the app has it (or we give up): a
         lease that lapses meanwhile would let another runner take the job a second time."""
+        code = result.get("errorCode")
+        self.last_error_code = code if isinstance(code, str) else None
         lost = asyncio.Event()
         beating = asyncio.ensure_future(self._heartbeats(claimed, lost))
         try:

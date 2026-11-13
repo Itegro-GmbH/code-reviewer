@@ -12,10 +12,10 @@ This module joins the pieces that already exist and are tested apart:
    `sandbox_size_unsupported`, free, before anything is touched;
 3. the setup (`production_setup`): the reader and the git workspace with the lease gate in front
    of every push, and the agent's container as a thing the session makes when it needs it;
-3b. the environment's setup script (#818, `environment_setup.py`), when the task has one: in a
-   Setup container of its own, before the model door exists. A script that fails ends the turn
+3b. the environment's setup script (#818, `environment_setup.py`), when the task has one: in the
+   agent's own container, before the model door exists (#1009). A script that fails ends the turn
    `environment_setup_failed`, free, with its output on the Runs page; one that succeeds leaves the
-   image the agent's container starts from;
+   container, with everything it started, for the agent, which runs in that same container;
 4. the turn (`ImplementerSession`, #764), in which a SIGTERM is a stop: the engine is ended at once,
    what is committed on all local branches is pushed (if the lease is still held) and the turn ends
    `runner_shutdown`;
@@ -58,7 +58,7 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode, JobResult, Usage
 from code_reviewer_runner.usage_probe import UsageProbe
 
-from .agent_container import OPENCODE, AgentContainer, AgentSeams
+from .agent_container import OPENCODE, Adopted, AgentContainer, AgentSeams
 from .claude_code.gates import subscription_rule
 from .claude_code.login import ClaudeLogin
 from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
@@ -76,7 +76,7 @@ from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
-from .runner_profile import agent_seams, reader_seams, setup_seams
+from .runner_profile import agent_seams, outer_proxy_for_job, reader_seams, setup_seams
 from .session import AgentPlace, ImplementerSession, SessionSeams
 from .snapshot_pump import SnapshotPump
 from .step_pump import StepPump
@@ -115,15 +115,15 @@ class TurnLike(Protocol):
 
 @dataclass(frozen=True)
 class EnvironmentHost:
-    """How a turn runs the environment's setup script and starts the agent from its result (#818):
-    `run` makes the agent's image of what the script left (or the reason it did not), `place` makes
-    the agent's container from that image. A `TurnSetup` without one cannot run a task that names a
-    script."""
+    """How a turn runs the environment's setup script and goes on in the same container (#818,
+    #1009): `run` runs the script in the agent's container and returns that container (or the
+    reason it did not), `place` makes the agent's container object that takes it over. A `TurnSetup`
+    without one cannot run a task that names a script."""
 
     run: Callable[
         [ImplementerInput, Callable[[], float], Callable[[], bool], float], EnvironmentSetup
     ]
-    place: Callable[[str], Callable[[], AgentPlace]]
+    place: Callable[[Adopted], Callable[[], AgentPlace]]
 
 
 @dataclass(frozen=True)
@@ -277,6 +277,9 @@ def production_setup(
         reader,
         before_push=gate,
         guard_secrets=() if harness is None else (harness.login.secret,),
+        # A VM on a customer's machine (#994): the clone, the fetch and the push go through the
+        # host's outer-wall proxy and nowhere else.
+        proxy=outer_proxy_for_job(environment),
     )
 
     def run_environment(
@@ -294,15 +297,19 @@ def production_setup(
             elapsed=elapsed,
             should_stop=should_stop,
             secrets=turn.secrets,
-            seams=setup_seams(environment),
+            seams=replace(setup_seams(environment), result=with_result),
         )
 
     rule = rule_of_turn
     claude = None if harness is None else AgentSeams(image=harness.image, no_new_privileges=True)
 
-    def place_from(image: str) -> Callable[[], AgentPlace]:
+    def place_from(adopted: Adopted) -> Callable[[], AgentPlace]:
         return lambda: AgentContainer(
-            memory, agent_seams(environment, AgentSeams(image=image)), rule, result=with_result
+            memory,
+            agent_seams(environment, AgentSeams()),
+            rule,
+            result=with_result,
+            adopted=adopted,
         )
 
     return TurnSetup(
@@ -513,8 +520,8 @@ def run_implementer_job(
             prepared = _environment(job, setup, started, shutdown, seams, process_timeout)
             if prepared.error is not None:
                 raise prepared.error
-            assert prepared.image is not None and setup.environment is not None
-            setup = replace(setup, place=setup.environment.place(prepared.image))
+            assert prepared.adopted is not None and setup.environment is not None
+            setup = replace(setup, place=setup.environment.place(prepared.adopted))
         session = _session(
             job,
             setup,

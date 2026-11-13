@@ -62,6 +62,8 @@ export type ProfileFactsRow = {
   managedModel: boolean;
   /** The harness the version runs with (#856). */
   harness: string;
+  /** The model a harness on a login reads (#973); null for any other model. */
+  model?: string | null;
   /** The environment the version runs in (#919); null for a version saved before it. */
   environmentId?: string | null;
 };
@@ -108,6 +110,7 @@ export function profileInfosOf(
                 canPush: row.canPush,
                 managedModel: row.managedModel,
                 harness: row.harness,
+                ...(row.model == null ? {} : { model: row.model }),
                 ...(row.environmentId == null
                   ? {}
                   : { environmentId: row.environmentId }),

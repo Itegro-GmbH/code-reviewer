@@ -67,6 +67,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterable, Sequence
@@ -76,6 +77,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from ..job import ImplementerResume, JobError
+from ..outer_proxy import OuterProxy
 from ..result import ErrorCode
 from .git_process import (
     DEFAULT_TIMEOUT,
@@ -226,7 +228,10 @@ class DiskSpace:
 
 def disk_space(path: Path) -> DiskSpace:
     status = os.statvfs(path)
-    return DiskSpace(status.f_bavail * status.f_frsize, status.f_favail)
+    # A file system without a fixed inode table (btrfs, the Incus pool) reports none at all
+    # (`f_files` 0): inodes cannot run out there, and 0 free must not read as a full table.
+    inodes = status.f_favail if status.f_files else sys.maxsize
+    return DiskSpace(status.f_bavail * status.f_frsize, inodes)
 
 
 class RepoAccess(Protocol):
@@ -240,6 +245,14 @@ class RepoAccess(Protocol):
 
     def upload_pack(self) -> str:
         """The command Control's `git fetch --upload-pack=` runs to read the agent's branches."""
+        ...
+
+    @property
+    def protocol_version(self) -> int:
+        """The git wire protocol of that fetch. 2 asks the agent's upload-pack for the one ref only
+        (the advertisement does not grow with the refs the agent made) but its upload-pack ends
+        only when its input ends; 0 ends by itself after the pack, which is what a reader behind a
+        connection that cannot be half-closed needs (`DockerApi.half_close`)."""
         ...
 
     def warm(self) -> bool:
@@ -443,6 +456,7 @@ class GitWorkspace:
         timeout: float = DEFAULT_TIMEOUT,
         before_push: Callable[[], None] | None = None,
         guard_secrets: Sequence[str] = (),
+        proxy: OuterProxy | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         space: Callable[[Path], DiskSpace] = disk_space,
@@ -459,6 +473,9 @@ class GitWorkspace:
         # #856: the values no branch may carry to the provider (the login of the device); none: no
         # branch is read for them.
         self._guard_secrets = tuple(guard_secrets)
+        # The outer wall's proxy of a VM on a customer's machine (#994): the clone, the fetch and
+        # the push go through it and through nothing else. None: git dials the provider itself.
+        self._proxy = proxy
         self.layout = layout
         self.identity = identity
         self._access = access
@@ -1441,7 +1458,7 @@ class GitWorkspace:
                 # Protocol 2 asks the agent's upload-pack for the one ref only (`ref-prefix`): the
                 # advertisement the runner reads does not grow with the refs the agent made.
                 "-c",
-                "protocol.version=2",
+                f"protocol.version={self._access.protocol_version}",
                 "fetch",
                 *_PLAIN_FETCH,
                 f"--upload-pack={self._access.upload_pack()}",
@@ -1614,7 +1631,11 @@ class GitWorkspace:
         """Git as the runner, never with the agent's repository as its directory."""
         environment = self._process.base_environment(protocols)
         if token:
-            environment.update(token_environment(self.spec.token))
+            environment.update(
+                token_environment(
+                    self.spec.token, proxy=None if self._proxy is None else self._proxy.url
+                )
+            )
         return self._process.run(args, env=environment, timeout=timeout or self._timeout)
 
     def _mirror(

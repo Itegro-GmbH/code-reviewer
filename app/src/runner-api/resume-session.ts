@@ -2,8 +2,8 @@
 
 // What a resume-session request does once it is read (#840, follow-up turns): the Worker of a follow-up turn of the Implementer reads
 // back the snapshot the earlier turns stored for the session, one part per request (`GET /api/workers/v1/jobs/:id/resume-session
-// ?part=n`, the credential in the header), and, since #879, a customer's runner (`GET /api/runners/v1/jobs/:id/resume-session?part=n`: the
-// runner credential in `Authorization`, the lease token in `X-Lease-Token`).
+// ?part=n`, the credential in the header). The Worker of a customer's runner reads it the same way (#974: the runner API has no session
+// routes any more, no lease token travels to the runner's Worker).
 //
 // The same rules as the snapshot's write, turned round:
 //  - the call proves the claim and nothing else (a cheap look first, the proof in the repository); it does NOT extend the lease;

@@ -5,6 +5,8 @@ Python code that runs one review job with [PR-Agent](https://github.com/qodo-ai/
 exactly one job from the app with a per-job credential and starts `code-reviewer-run-job`, the entry point of one job,
 as a process of its own. See the repository `README.md` for setup and `TESTING.md` for the tests.
 
+`src/code_reviewer_runner/vm_init/` is not part of the Worker: it is `vm-init`, the program in the root file system of a local Firecracker VM (Runner v2, #977) that takes the job's start over vsock, prepares the VM, runs the Worker's Control container and reports how it ended (standard library only; `vm-init/README.md`, `contracts/vm-init.v1.json`).
+
 ## The Worker's settings
 
 `code-reviewer-runner worker-once` (the container's command in the Sandbox VM) and `code-reviewer-runner probe` read
@@ -217,9 +219,8 @@ guard of git and bakes in no git configuration (git is free in the agent's works
 `docker build -f runner/Dockerfile --target sandbox -t code-reviewer-runner-sandbox .` (`make test-images` builds it and
 runs its smoke test).
 
-`runner/Dockerfile.factory-runner` (#854) is the second Dockerfile: the Factory-Runner image, `FROM` the Worker image with the
-`factory-runner` command as its entry point (`docs/runner.md`). It is a file of its own so that `runner/Dockerfile`, which the golden
-snapshot hashes and whose last stage is pinned to `sandbox`, does not change. CI builds it from the image above, without a push.
+The Factory-Runner has no image of its own since #982: the local Dispatcher is a program the installer puts on a machine with KVM
+(`runner/install/install.sh`, `docs/runner.md`), and the Worker image above is what runs in the VM it starts.
 
 The sizing of a container (memory per process) is in `docs/spike/cr-13-measurements.md`.
 
@@ -643,6 +644,10 @@ and the enum agree. Callers branch on the code, never on the text.
 | `sandbox_unproven` | An implementer job (#745, step 4): the golden snapshot's Sysbox is not proven (`RUNNER_IMPLEMENTER_SANDBOX_PROOF`), so the agent's container does not start; free, before the clone |
 | `sandbox_size_unsupported` | An implementer job (#745, step 4): the VM leaves the agent's container less than 1,024 MB (`RUNNER_IMPLEMENTER_AGENT_MEMORY_MB`); free, before the clone |
 | `environment_setup_failed` | An implementer job whose environment has a setup script (#818): the script exited with a status other than 0, ran out of its time, was killed for the memory of its container, filled the disk, or left a result that could not be saved as the agent's image. It runs in the Setup container before the model door exists, so nothing was used: free. The `setup` block of the report has the exit status, the seconds and the end of the output (`implementer/environment_setup.py`) |
+| `environment_control_failed` | An implementer job (#975) in a VM whose host controls the outer network wall over vsock (`RUNNER_ENVIRONMENT_CONTROL=vsock`, `contracts/environment-control.v1.json`): the host did not answer the `narrow` request in 30 seconds, refused the rule, could not be reached, or answered something the contract does not know. The detail starts with `environment_control_timeout`, `environment_control_refused: <reason>`, `environment_control_unavailable` or `environment_control_protocol`. The agent never started: free |
+| `subscription_auth` | An implementer job on Claude Code with a subscription token of the device (#980): the token was refused (a 401: expired or revoked). The Worker also exits with 20 so that the device's dispatcher puts the credential aside for hours (a hint that expires: the exit code can be forged from inside the job; `factory-runner credential retry` ends it). Free |
+| `subscription_limit` | The same: the subscription's usage limit ended the call (exit 21; the dispatcher puts the credential aside for an hour; the job fails and is not moved to another credential mid-run). Free |
+| `subscription_model_refused` | The same: the subscription does not allow the model of the job (exit 22; that model id leaves the credential's offer for hours; the owner's list is not changed). Free |
 | `runner_shutdown` | A turn of the Implementer was told to stop (SIGTERM, #765): its engine was ended and what is committed was pushed, if the lease was still held; the job host gives the job back to the queue under this code |
 | `timeout` | The command did not finish within `RUNNER_JOB_TIMEOUT_SECONDS` (also reported by the Worker for a process it had to end) |
 | `unknown` | Something failed that no rule recognises |

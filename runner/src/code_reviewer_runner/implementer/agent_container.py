@@ -29,6 +29,16 @@ writes its standard input to a path (`write_files`): the archive call of the Eng
 cp`) puts its files where a Sysbox container does not see them (measured, 2026-11-02: the call
 answers 200 and the directory stays empty).
 
+**An environment's setup script runs in this container (#1009).** A task whose environment has a
+setup script does not get a second container made from the script's result: the container is made
+once (`setup_container.py` starts it on the setup network, with the internet and none of ours, and
+runs the script in it) and the agent runs in the very same one. What the script left is there,
+files, images, containers and volumes of the container's own Docker and the processes that are
+still running, and nothing is reset when the network is narrowed. `AgentContainer(adopted=...)`
+takes such a container over: it puts it on the model network (`create()`), seals it and, when the
+inner `dockerd` has to learn another proxy, restarts that one process (`restart_docker`) under
+`--live-restore`, which leaves the containers it started running.
+
 **How it ends.** Control kills the container (SIGKILL to its init, which takes every process of it,
 the inner `dockerd` and anything the agent left running, with it) before it reads the repository,
 and waits until the daemon says it is gone (`stop()`, at most `KILL_SECONDS + STOP_SECONDS`). It is
@@ -38,6 +48,7 @@ crash) is seen by `wait` and named (`AgentEnd`).
 
 import contextlib
 import logging
+import shlex
 import socket
 import threading
 import time
@@ -68,6 +79,7 @@ from .host_rules import (
 )
 from .netdoor.registries import rule_has_registries
 from .network_rule import MODE_OFF, OFF, NetworkRule
+from .placement import B_WORK_VOLUME, HOSTED, Placement, split_model_network_document
 from .reader import REPO_SUBPATH, work_volume_of
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
 from .role_labels import role_labels
@@ -98,6 +110,27 @@ AGENT_OOM_SCORE_ADJ: Final = 1000
 AGENT_ENTRYPOINT: Final = ["/usr/bin/tini", "--", "/usr/local/bin/agent-init"]
 # The file the image's init writes once the inner Docker answers.
 READY_FILE: Final = "/run/agent-ready"
+# The inner `dockerd` takes its proxy from its process environment at its start and cannot learn
+# another one while it runs (Docker's own documentation: restart the daemon). A container whose
+# environment changes after its start (#1009: the setup's, then the agent's) tells the image's init
+# to start it again: the proxy variables of the new start are in `DOCKER_ENV_FILE` (the init
+# unsets the old ones when the file is there), and `DOCKER_RESTART_FILE` says that the end of the
+# daemon is a restart and not the end of the container. `--live-restore` keeps the containers the
+# daemon started running meanwhile.
+DOCKER_ENV_FILE: Final = "/run/agent-docker-env"
+DOCKER_RESTART_FILE: Final = "/run/agent-docker-restart"
+DOCKER_PID_FILE: Final = "/var/run/docker.pid"
+NO_DOCKER: Final = "no-docker"
+RESTART_DOCKER_SCRIPT: Final = f"""
+pid=$(cat {DOCKER_PID_FILE} 2>/dev/null) || {{ echo {NO_DOCKER}; exit 0; }}
+umask 077
+cat > "$1" || exit 1
+rm -f {READY_FILE}
+touch {DOCKER_RESTART_FILE}
+kill -TERM "$pid" || exit 1
+echo restarting
+"""
+RESTART_DOCKER_SECONDS: Final = 120.0
 PYTHON: Final = "/usr/local/bin/python3"
 OPENCODE: Final = "/usr/local/bin/opencode"
 ENGINE_LOG: Final = "/tmp/opencode.log"
@@ -188,19 +221,22 @@ def trust_environment(rule: NetworkRule) -> dict[str, str]:
     }
 
 
-def proxy_environment(rule: NetworkRule) -> dict[str, str]:
+def proxy_environment(rule: NetworkRule, placement: Placement = HOSTED) -> dict[str, str]:
     """The variables that point the agent's tools at the network door; none for `off`, where there
-    is no door and the container has no variable of any kind."""
+    is no door and the container has no variable of any kind. On the Incus backend the door is in
+    instance A, at its address on the inner bridge (`Placement`)."""
     if rule.mode == MODE_OFF:
         return {}
+    url = placement.network_door_url
+    no_proxy = placement.no_proxy
     return {
         **trust_environment(rule),
-        "HTTP_PROXY": NETWORK_DOOR_URL,
-        "HTTPS_PROXY": NETWORK_DOOR_URL,
-        "http_proxy": NETWORK_DOOR_URL,
-        "https_proxy": NETWORK_DOOR_URL,
-        "NO_PROXY": NO_PROXY,
-        "no_proxy": NO_PROXY,
+        "HTTP_PROXY": url,
+        "HTTPS_PROXY": url,
+        "http_proxy": url,
+        "https_proxy": url,
+        "NO_PROXY": no_proxy,
+        "no_proxy": no_proxy,
         "NODE_USE_ENV_PROXY": "1",
     }
 
@@ -216,6 +252,7 @@ def agent_document(
     result: bool = False,
     nano_cpus: int = 0,
     no_new_privileges: bool = False,
+    placement: Placement = HOSTED,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -242,7 +279,7 @@ def agent_document(
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
-        "Env": [f"{name}={value}" for name, value in proxy_environment(rule).items()],
+        "Env": [f"{name}={value}" for name, value in proxy_environment(rule, placement).items()],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
         "Labels": role_labels("agent"),
@@ -254,7 +291,10 @@ def agent_document(
         "HostConfig": {
             "Runtime": runtime,
             "NetworkMode": MODEL_NETWORK_NAME,
-            "Privileged": False,
+            # Incus (#1017): no Sysbox in an instance, so the container is `runc` and privileged:
+            # its own Docker needs it, and what confines it is instance B (its user namespace, its
+            # cgroup, the inner wall), which is the untrusted side as a whole.
+            "Privileged": placement.split,
             "Memory": memory_bytes,
             "MemorySwap": memory_bytes,
             **limits,
@@ -378,6 +418,31 @@ class Tunnel:
 
 
 @dataclass(frozen=True)
+class Adopted:
+    """A container the environment's setup script ran in (#1009), handed to the agent as it is.
+    `container` is its id. `setup_environment` are the `NAME=value` entries it was made with that
+    held for the setup only (the host's outer-wall proxy on a customer's machine): the daemon
+    inside it still has them, the agent's tools get them emptied. `paused` says the setup's step
+    froze it while it read the repository."""
+
+    container: str
+    setup_environment: tuple[str, ...] = ()
+    paused: bool = False
+    # The network the script's phase was on, which `create()` removes once the container is on the
+    # model network (the daemon refuses to connect a container whose network mode is gone). The
+    # container keeps that name as its network mode for good, and the resolvers it was made with:
+    # the seal check expects exactly those of an adopted container.
+    setup_network: str | None = None
+    dns: tuple[str, ...] = ()
+
+
+def docker_environment_file(environment: Mapping[str, str]) -> str:
+    """The text of `DOCKER_ENV_FILE`: one quoted assignment for each variable, which the image's
+    init reads (`set -a; . file`) before it starts the daemon again."""
+    return "".join(f"{name}={shlex.quote(value)}\n" for name, value in environment.items())
+
+
+@dataclass(frozen=True)
 class AgentSeams:
     """What the tests replace; production leaves the defaults."""
 
@@ -400,6 +465,8 @@ class AgentSeams:
     no_new_privileges: bool = False
     # The file the VM's available memory is read from (`MemoryGuard`).
     meminfo: str = MEMINFO
+    # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend.
+    placement: Placement = HOSTED
 
 
 def unavailable(reason: str) -> JobError:
@@ -419,14 +486,17 @@ class AgentContainer:
         seams: AgentSeams = AgentSeams(),  # noqa: B008
         rule: NetworkRule = OFF,
         result: bool = False,
+        adopted: Adopted | None = None,
     ) -> None:
         self._api = seams.api()
         self._seams = seams
         self._rule = rule
+        # #1009: the container the setup script ran in; `create()` takes it over.
+        self._adopted = adopted
         # #843: the result directory is mounted too (a turn with a result schema).
         self._result = result
         self._memory_bytes = memory_mb * 1024 * 1024
-        self._container: str | None = None
+        self._container: str | None = None if adopted is None else adopted.container
         self._tunnel: Tunnel | None = None
         self._engine_exec: str | None = None
         self._end: AgentEnd | None = None
@@ -440,35 +510,30 @@ class AgentContainer:
     # -- the container -----------------------------------------------------------------------------
 
     def create(self) -> tuple[str, ...]:
-        """Make the container under the Sysbox runtime, start it and wait for its Docker. Returns
-        the notes for the report (a check that did not hold, never a failure). Raises `JobError`
-        (`setup_failed`, free) when it cannot be had; whatever was made is removed."""
+        """Make the container under the Sysbox runtime, start it and wait for its Docker; or, for
+        an adopted one (#1009, the container the setup script ran in), put it on the model network.
+        Returns the notes for the report (a check that did not hold, never a failure). Raises
+        `JobError` (`setup_failed`, free) when it cannot be had; whatever was made is removed."""
         api = self._api
         notes: list[str] = []
         try:
             if self._seams.runtime not in api.runtimes():
                 raise unavailable(f"the daemon has no {self._seams.runtime} runtime")
+            own: dict[str, Any] = {}
+            if self._seams.placement.split:
+                # B's Docker: Control is not in it, there is no VM side to close, and the model
+                # network is B's own (a bridge the agent reaches A's doors through).
+                self._ensure_model_network()
+            else:
+                own = api.inspect_container(self._seams.hostname())
+                self._close_the_model_network(own, notes)
+            if self._adopted is not None:
+                self._adopt(self._adopted)
+                return tuple(notes)
             image = str(api.inspect_image(self._seams.image).get("Id", ""))
-            own = api.inspect_container(self._seams.hostname())
-            volume = work_volume_of(own)
+            volume = B_WORK_VOLUME if self._seams.placement.split else work_volume_of(own)
             if not image:
                 raise unavailable("the agent image is not in this VM")
-            # The VM's side of the model network gets no IPv6 address before the agent exists:
-            # root in the container can switch IPv6 on and would find the bridge's link-local
-            # address and, behind it, the VM's control port (`host_rules.py`).
-            try:
-                close_bridge_ipv6(api, self._seams.helper_image, MODEL_NETWORK_NAME)
-            except HelperFailed as failed:
-                raise unavailable(
-                    f"the model network could not be closed to IPv6 ({failed.reason})"
-                ) from None
-            # Beside it, for a kernel that has the `inet` family, a drop of IPv6 from that bridge
-            # (`nft` is in the Worker's image, which is the image of this container). Not required.
-            control_image = str(own.get("Image", ""))
-            if control_image and (
-                close_bridge_inet(api, control_image, MODEL_NETWORK_NAME, "agent") == INET_FAILED
-            ):
-                notes.append(inet_failure_note("model"))
             container = api.create_container(
                 agent_document(
                     image,
@@ -480,17 +545,13 @@ class AgentContainer:
                     result=self._result,
                     nano_cpus=self._seams.nano_cpus,
                     no_new_privileges=self._seams.no_new_privileges,
+                    placement=self._seams.placement,
                 ),
                 AGENT_CONTAINER_NAME,
             )
             self._container = container
             api.start_container(container)
-            # Before the watch: `_watch_end` reads whether the guard killed the container.
-            self._guard = MemoryGuard(
-                self._vm_memory_low, path=self._seams.meminfo, ended=self._ended
-            )
-            threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
-            self._guard.start()
+            self._watch(container)
             self._wait_ready(container)
             self._seal_check(container)
             return tuple(notes)
@@ -506,8 +567,102 @@ class AgentContainer:
             self._remove()
             raise
 
-    def _wait_ready(self, container: str) -> None:
-        end = self._seams.clock() + self._seams.ready_seconds
+    def _ensure_model_network(self) -> None:
+        """B's model network (split only): a plain bridge of B's Docker at the model network's
+        range, which is what the hand-over's `narrow` puts the container on. It is not internal:
+        the agent reaches A's two doors through B's one NIC, and the inner wall in A is what lets
+        nothing else through. In hosted the model door makes the network instead."""
+        try:
+            self._api.inspect_network(MODEL_NETWORK_NAME)
+        except DockerError as error:
+            if error.status != 404:
+                raise
+            self._api.create_network(split_model_network_document())
+
+    def _close_the_model_network(self, own: dict[str, Any], notes: list[str]) -> None:
+        """The VM's side of the model network gets no IPv6 address before the agent is on it: root
+        in the container can switch IPv6 on and would find the bridge's link-local address and,
+        behind it, the VM's control port (`host_rules.py`)."""
+        api = self._api
+        try:
+            close_bridge_ipv6(api, self._seams.helper_image, MODEL_NETWORK_NAME)
+        except HelperFailed as failed:
+            raise unavailable(
+                f"the model network could not be closed to IPv6 ({failed.reason})"
+            ) from None
+        # Beside it, for a kernel that has the `inet` family, a drop of IPv6 from that bridge
+        # (`nft` is in the Worker's image, which is the image of this container). Not required.
+        control_image = str(own.get("Image", ""))
+        if control_image and (
+            close_bridge_inet(api, control_image, MODEL_NETWORK_NAME, "agent") == INET_FAILED
+        ):
+            notes.append(inet_failure_note("model"))
+
+    def _watch(self, container: str) -> None:
+        # Before the watch: `_watch_end` reads whether the guard killed the container. On the Incus
+        # backend there is none: the memory the guard reads is the VM's, and B's is bounded by
+        # its own cgroup (`limits.memory`), which ends the agent's processes itself (follow-up
+        # in `docs/runner.md`: a guard that reads B's memory).
+        if not self._seams.placement.split:
+            self._guard = MemoryGuard(
+                self._vm_memory_low, path=self._seams.meminfo, ended=self._ended
+            )
+        threading.Thread(target=self._watch_end, args=(container,), daemon=True).start()
+        if self._guard is not None:
+            self._guard.start()
+
+    def _adopt(self, adopted: Adopted) -> None:
+        """Take over the container the setup script ran in (#1009): it has no network of its own
+        any more (`SetupContainer` took it off the setup network when the script ended), so the
+        one change is that it gets the model network, which is the narrowing of the container.
+        Nothing in it is reset: its files, the images, containers and volumes of its Docker and
+        its running processes are what the agent has."""
+        api = self._api
+        container = adopted.container
+        self._watch(container)
+        if adopted.paused:
+            api.unpause_container(container)
+        api.connect_network(
+            MODEL_NETWORK_NAME,
+            {
+                "Container": container,
+                "EndpointConfig": {"IPAMConfig": {"IPv4Address": MODEL_AGENT_ADDRESS}},
+            },
+        )
+        if adopted.setup_network is not None:
+            try:
+                api.remove_network(adopted.setup_network)
+            except DockerError as error:
+                _log.warning("the setup network could not be removed (%s)", error.status)
+        self._wait_ready(container)
+        self._seal_check(container)
+        wanted = proxy_environment(self._rule, self._seams.placement)
+        if wanted or adopted.setup_environment:
+            self.restart_docker(wanted)
+
+    def restart_docker(self, environment: Mapping[str, str]) -> None:
+        """Start the container's own `dockerd` again with `environment`: its proxy is read at its
+        start. Under `--live-restore`, the containers it started keep running. A container without
+        an inner Docker (the test lane under `runc`) has nothing to restart."""
+        container = self._container
+        if container is None:
+            raise unavailable("there is no container")
+        done = run_exec(
+            self._api,
+            container,
+            ["/bin/sh", "-c", RESTART_DOCKER_SCRIPT, "restart", DOCKER_ENV_FILE],
+            stdin=docker_environment_file(environment).encode("utf-8"),
+            timeout=30.0,
+            name="restart the inner Docker",
+        )
+        if done.returncode != 0 or done.unanswered:
+            raise unavailable("the container's Docker could not be told to start again")
+        if NO_DOCKER in done.stdout:
+            return
+        self._wait_ready(container, seconds=RESTART_DOCKER_SECONDS)
+
+    def _wait_ready(self, container: str, seconds: float | None = None) -> None:
+        end = self._seams.clock() + (self._seams.ready_seconds if seconds is None else seconds)
         while True:
             if self._ended.is_set():
                 raise unavailable("the container ended before its Docker was ready")
@@ -528,7 +683,7 @@ class AgentContainer:
         networks = as_object(settings.get("Networks")) or {}
         mounts = document.get("Mounts")
         problems: list[str] = []
-        if host.get("Privileged"):
+        if bool(host.get("Privileged")) != self._seams.placement.split:
             problems.append("privileged")
         if host.get("Runtime") != self._seams.runtime:
             problems.append("runtime")
@@ -541,6 +696,24 @@ class AgentContainer:
             problems.append("host access")
         if set(networks) != {MODEL_NETWORK_NAME}:
             problems.append("networks")
+        # What the daemon keeps of the first definition: the mode and resolvers the container was
+        # made with. A container made for the agent has the model network and no resolver of its
+        # own; an adopted one still has the setup's (a network that is removed by now, and the
+        # public resolvers it was given), and nothing else.
+        adopted = self._adopted
+        mode = MODEL_NETWORK_NAME
+        resolvers: tuple[str, ...] = ()
+        if adopted is not None:
+            mode = adopted.setup_network or MODEL_NETWORK_NAME
+            resolvers = adopted.dns
+        if host.get("NetworkMode") != mode:
+            problems.append("network mode")
+        if tuple(cast("list[Any]", host.get("Dns") or [])) != resolvers:
+            problems.append("resolvers")
+        if ("no-new-privileges" in cast("list[Any]", host.get("SecurityOpt") or [])) != (
+            self._seams.no_new_privileges
+        ):
+            problems.append("no-new-privileges")
         destinations: set[object] = set()
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
@@ -629,6 +802,18 @@ class AgentContainer:
             if done.returncode != 0 or done.unanswered:
                 raise unavailable("a file of the engine's configuration could not be written")
 
+    def _exec_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
+        """The environment of an exec of the engine or of a tool of it. A container made for the
+        agent has the door's variables in its own environment and every exec inherits them. An
+        adopted one (#1009) was made for the setup: what held for the setup alone is emptied here
+        and the door's variables are given, so a tool of the agent sees the same as in any
+        other container."""
+        if self._adopted is None:
+            return dict(environment)
+        base = {entry.partition("=")[0]: "" for entry in self._adopted.setup_environment}
+        base.update(proxy_environment(self._rule, self._seams.placement))
+        return {**base, **environment}
+
     def run_command(
         self, argv: list[str], environment: Mapping[str, str], timeout: float
     ) -> CommandOutcome:
@@ -643,7 +828,7 @@ class AgentContainer:
             self._api,
             container,
             argv,
-            env=environment,
+            env=self._exec_environment(environment),
             workdir=AGENT_REPO,
             timeout=timeout,
             name="a command of the engine",
@@ -671,7 +856,7 @@ class AgentContainer:
             self._api,
             container,
             argv,
-            env=environment,
+            env=self._exec_environment(environment),
             workdir=AGENT_REPO,
             user=user,
             stdin=stdin,
@@ -692,7 +877,9 @@ class AgentContainer:
             exec_id = self._api.create_exec(
                 container,
                 {
-                    **exec_document(command, env=environment, workdir=AGENT_REPO),
+                    **exec_document(
+                        command, env=self._exec_environment(environment), workdir=AGENT_REPO
+                    ),
                     "AttachStdin": False,
                     "AttachStdout": False,
                     "AttachStderr": False,

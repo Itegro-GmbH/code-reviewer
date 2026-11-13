@@ -16,6 +16,7 @@ from .connections import (
     REASON_NOT_LISTED,
     REASON_PORT,
     REASON_REGISTRY,
+    REASON_RULE_CHANGED,
     REASON_TLS,
     REASON_TOO_MANY,
     REASON_UPSTREAM,
@@ -51,6 +52,7 @@ REASON_TEXT: Final = {
     REASON_BAD_REQUEST: "the request is not one this proxy serves",
     REASON_TOO_MANY: "too many connections at once",
     REASON_UPSTREAM: "the host could not be reached",
+    REASON_RULE_CHANGED: "the network rule changed while this connection was being made",
     REASON_METHOD: "package registries are read-only here: only GET and HEAD go through",
     REASON_HOST_MISMATCH: "the Host header is not the registry this connection was made to",
     REASON_REGISTRY: "package registries are reachable over HTTPS (port 443) only, read-only",
@@ -70,11 +72,14 @@ def status_line(code: int) -> str:
     }[code]
 
 
-def respond(sock: socket.socket, code: int, reason: str | None = None) -> None:
+def respond(
+    sock: socket.socket, code: int, reason: str | None = None, voice: str = "network door"
+) -> None:
     """A complete answer; the refusal's body names the reason in plain words, for the person (or
-    the agent) reading a failed `npm install`."""
+    the agent) reading a failed `npm install`. `voice` says who refused (the door, or the outer
+    wall's proxy of a customer's machine)."""
     text = "" if reason is None else REASON_TEXT.get(reason, reason)
-    body = b"" if code == 200 else f"network door: {text}\n".encode("ascii", "replace")
+    body = b"" if code == 200 else f"{voice}: {text}\n".encode("ascii", "replace")
     head = f"HTTP/1.1 {code} {status_line(code)}\r\n"
     if code != 200:
         head += (

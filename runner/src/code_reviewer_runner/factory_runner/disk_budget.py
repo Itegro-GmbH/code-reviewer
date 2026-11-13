@@ -7,14 +7,16 @@ It is measured while the job runs and counts what the job makes:
 
 - the folders of the turn in `/work` (`reserve`, `repo`, `result`; the git mirror, the agent's
   repository, the finish tool's file), by walking them;
-- the writable layer of every container of this runner (the agent's, the setup container's, the
+- the writable layer of every container of this runner (the agent's, which is also the container
+  the environment's setup script ran in since #1009 and holds what the script installed, and the
   door's: what an agent writes into its container, or its session files, are in there), asked from
   the daemon;
-- the image the setup container's result is committed as (`code-reviewer-agent:environment`), but
-  only what the commit **added** to the agent image it was made from (its size minus the agent
-  image's), because the agent image is the runner's, shared and there before the job. Once that
-  image exists, the setup container's own writable layer is not counted any more: it is what the
-  commit wrote into the image, and one copy of it is the job's.
+- the data of the **inner Docker** of a Sysbox container (`/var/lib/docker` in it): the images the
+  script pulled or built, the containers and volumes of the container's own Docker. It is **not** in
+  the writable layer: Sysbox backs that directory with a directory of its own that it mounts in, and
+  the daemon's `SizeRw` is the size of the container's own layer, which that mount is not. It is
+  measured by `du` in the container (one file system, so that the overlay mounts of the inner
+  containers, which show the same data again, are not counted twice).
 
 The Docker images of the runner itself and the images the daemon holds for other things are not the
 job's and not counted. A hosted VM is thrown away with whatever the job wrote; a machine is not, so
@@ -23,8 +25,8 @@ the budget is the one place where a job that fills the disk is stopped instead o
 When the measure passes the budget the job host ends the job (`JobHost` `guard`): the process is
 ended the way a shutdown ends it, the job is reported as failed with the reason
 `disk_budget_exceeded` and a text that says what the budget was and what was in use, and the
-cleaning that follows every job (`housekeeping.tidy`: the containers, the folders of `/work`, the
-environment image) frees all of it. The job is not given back: it would fill the disk again.
+cleaning that follows every job (`housekeeping.tidy`: the containers, the folders of `/work`) frees
+all of it. The job is not given back: it would fill the disk again.
 """
 
 import asyncio
@@ -37,14 +39,10 @@ from typing import Final
 from urllib.parse import quote
 
 from code_reviewer_runner.factory_runner.config import Limits
-from code_reviewer_runner.factory_runner.housekeeping import (
-    ENVIRONMENT_IMAGE,
-    WORK_SUBDIRECTORIES,
-    container_filters,
-)
-from code_reviewer_runner.implementer.agent_container import AGENT_IMAGE_REFERENCE
+from code_reviewer_runner.factory_runner.housekeeping import WORK_SUBDIRECTORIES, container_filters
+from code_reviewer_runner.implementer.agent_container import AGENT_RUNTIME
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
-from code_reviewer_runner.implementer.role_labels import ROLE_LABEL
+from code_reviewer_runner.implementer.exec_run import run_exec
 from code_reviewer_runner.job_loop.jsonvalues import as_object
 
 GIB: Final = 2**30
@@ -52,8 +50,24 @@ GIB: Final = 2**30
 # and a job fills a disk over minutes, not between two looks.
 MEASURE_SECONDS: Final = 20.0
 SIZE_TIMEOUT_SECONDS: Final = 60.0
-# The role label of the setup container (`setup_container.py`).
-SETUP_ROLE: Final = "setup"
+# The inner Docker's data in a Sysbox container, measured by one fixed command.
+INNER_DOCKER_DATA: Final = "/var/lib/docker"
+# The `du` is ended in the container below the exec's own timeout, so that a slow one does not go on
+# running beside the next measure's.
+INNER_DU_SECONDS: Final = 50
+INNER_SIZE_COMMAND: Final = [
+    "/usr/bin/timeout",
+    "-s",
+    "KILL",
+    str(INNER_DU_SECONDS),
+    "/usr/bin/du",
+    "-sx",
+    "-B1",
+    INNER_DOCKER_DATA,
+]
+# The last inner size measured per container: a `du` that does not answer in time (a huge store is
+# where it is slowest) keeps it, so the budget is not blind when the store is largest.
+_last_inner_bytes: dict[str, int] = {}
 
 
 def budget_bytes(limits: Limits) -> int | None:
@@ -90,51 +104,58 @@ def tree_bytes(root: Path) -> int:
     return total
 
 
-def _image_size(api: DockerApi, reference: str) -> int | None:
+def inner_docker_bytes(api: DockerApi, container: str) -> int:
+    """What the Docker inside a Sysbox container holds (`INNER_DOCKER_DATA`), 0 for a container of
+    another runtime (its `/var/lib/docker` is in its layer, counted already) and for a size the
+    daemon cannot say: a container that is frozen takes no exec, and a part that cannot be
+    measured counts as nothing, as the rest of the measure. Once a size was measured, an answer
+    that does not come counts as that size until a new one is measured."""
     try:
-        size = api.inspect_image(reference).get("Size")
+        host = as_object(api.inspect_container(container).get("HostConfig")) or {}
     except DockerError:
-        return None
-    return size if isinstance(size, int) and not isinstance(size, bool) else None
+        return 0
+    if host.get("Runtime") != AGENT_RUNTIME:
+        return 0
+    done = run_exec(
+        api,
+        container,
+        INNER_SIZE_COMMAND,
+        timeout=SIZE_TIMEOUT_SECONDS,
+        name="the inner Docker's size",
+    )
+    first = done.stdout.split(maxsplit=1)[:1]
+    if done.returncode != 0 or done.unanswered or not first or not first[0].isdigit():
+        return _last_inner_bytes.get(container, 0)
+    _last_inner_bytes[container] = int(first[0])
+    return _last_inner_bytes[container]
 
 
-def environment_bytes(api: DockerApi, base_image: str = AGENT_IMAGE_REFERENCE) -> int | None:
-    """What the commit of a setup result added to the agent image: the environment image's size
-    minus the agent image's. None when there is no environment image; 0 when the agent image's size
-    cannot be read (a part the daemon cannot say counts as nothing)."""
-    size = _image_size(api, ENVIRONMENT_IMAGE)
-    if size is None:
-        return None
-    base = _image_size(api, base_image)
-    return 0 if base is None else max(0, size - base)
-
-
-def used_bytes(
-    api: DockerApi, work_dir: Path, runner_id: str, *, base_image: str = AGENT_IMAGE_REFERENCE
-) -> int:
-    """What the job holds now, see the module text (`base_image`: the image the setup container
-    is made from). A part the daemon cannot say counts as 0: a daemon that cannot answer is the
-    loop's problem to find, not a reason to end a job."""
+def used_bytes(api: DockerApi, work_dir: Path, runner_id: str) -> int:
+    """What the job holds now, see the module text. A part the daemon cannot say counts as 0: a
+    daemon that cannot answer is the loop's problem to find, not a reason to end a job."""
     total = sum(tree_bytes(work_dir / name) for name in WORK_SUBDIRECTORIES)
-    environment = environment_bytes(api, base_image)
     selector = quote(json.dumps({"label": container_filters(runner_id)}))
     try:
         listed = api.request("GET", f"/containers/json?all=1&filters={selector}")
     except DockerError:
         listed = []
+    present: set[str] = set()
     for item in listed if isinstance(listed, list) else []:  # pyright: ignore[reportUnknownVariableType]
         entry = as_object(item)  # pyright: ignore[reportUnknownArgumentType]
         identifier = None if entry is None else entry.get("Id")
         if not isinstance(identifier, str):
             continue
-        labels = as_object(entry.get("Labels")) if entry is not None else None
-        if environment is not None and (labels or {}).get(ROLE_LABEL) == SETUP_ROLE:
-            continue  # its layer is in the environment image, counted once below
+        present.add(identifier)
         try:
             total += api.container_rw_bytes(identifier, timeout=SIZE_TIMEOUT_SECONDS) or 0
         except DockerError:
             continue
-    return total + (environment or 0)
+        total += inner_docker_bytes(api, identifier)
+    # A container that is gone has no last size to keep (one the daemon could not list keeps all).
+    if isinstance(listed, list):
+        for gone in set(_last_inner_bytes) - present:
+            del _last_inner_bytes[gone]
+    return total
 
 
 def exceeded_message(limit_bytes: int, used: int) -> str:

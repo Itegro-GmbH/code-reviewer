@@ -1,0 +1,16 @@
+[Unit]
+Description=Docker Application Container Engine (code-reviewer golden image)
+After=network.target
+
+[Service]
+# No containerd.service of our own: dockerd starts and manages its containerd (the containerd image store lives under /var/lib/docker/containerd).
+# A second, separate unit made the images loaded into the image depend on which of the two started first (found in spike #1005).
+ExecStart=/usr/local/bin/dockerd
+Delegate=yes
+KillMode=process
+Restart=on-failure
+LimitNOFILE=1048576
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

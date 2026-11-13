@@ -4,9 +4,16 @@
 // the job it gets has no model, no key, no price and no catalog entry (the login is the device's and never known to the app), it
 // carries the budget and the model name Claude Code reads, and every other claim, hosted or not, leaves it queued. Against a real
 // Postgres with the harness of the runner API.
+import {
+  CLAUDE_CODE_ACCESS,
+  OPENCODE_ACCESS,
+} from "../test-support/runner-access.ts";
 import { describe, expect, it } from "vitest";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
-import type { ClaimResponse } from "./contract.ts";
+import type {
+  SplitClaimResponse,
+  WorkerSubscriptionDetailsResponse,
+} from "./contract.ts";
 
 const NOW_FEATURES = [
   "cost_limit",
@@ -29,27 +36,39 @@ const PROFILE = {
   harness: "claude-code" as const,
 };
 
-const BOTH = {
-  harnesses: {
-    opencode: { version: "1.19.0", ready: true },
-    "claude-code": { version: "2.1.311", ready: true },
-  },
-  capabilities: [],
-};
-const OPENCODE_ONLY = {
-  harnesses: { opencode: { version: "1.19.0", ready: true } },
-  capabilities: [],
-};
-const NOT_READY = {
-  harnesses: {
-    opencode: { version: "1.19.0", ready: true },
-    "claude-code": { version: "2.1.311", ready: false },
-  },
-  capabilities: [],
-};
+const BOTH = { harnesses: [...CLAUDE_CODE_ACCESS], capabilities: [] };
+const OPENCODE_ONLY = { harnesses: [...OPENCODE_ACCESS], capabilities: [] };
+// Claude Code is announced only while it is ready: a device whose login or layer is gone leaves it out (#973).
+const NOT_READY = OPENCODE_ONLY;
 
-function claimOf(credential: string, features = NOW_FEATURES) {
-  return { token: credential, engines: ["implementer"], features };
+function claimOf(credential: string) {
+  return { token: credential, engines: ["implementer"] };
+}
+
+/**
+ * #974: the claim of a customer's runner answers with the credential of the job and nothing else; the Worker that holds it fetches the turn
+ * with the features it reads (`features`), and it is there that the git token is made and a Worker that does not read what the turn carries is refused.
+ */
+async function fetchedTurn(
+  h: Awaited<ReturnType<typeof start>>,
+  credential: string,
+  features = NOW_FEATURES,
+) {
+  const claim = await h.claim(claimOf(credential));
+  expect(claim.status).toBe(200);
+  const { job } = (await claim.json()) as SplitClaimResponse;
+  const response = await h.worker.details(
+    job.id,
+    job.credential,
+    features.join(","),
+  );
+  return { claim: job, response };
+}
+
+async function turnInput(response: Response) {
+  expect(response.status).toBe(200);
+  return ((await response.json()) as WorkerSubscriptionDetailsResponse).job
+    .input;
 }
 
 async function start() {
@@ -69,12 +88,19 @@ describe("the claim of a turn on the harness claude-code", () => {
       costLimitCents: 80,
     });
 
-    const response = await h.claim(claimOf(runner.credential));
+    const { claim, response } = await fetchedTurn(h, runner.credential);
 
-    expect(response.status).toBe(200);
-    const { job } = (await response.json()) as ClaimResponse;
-    expect(job.id).toBe(turn.job.id);
-    const input = job.input as unknown as {
+    // The claim holds nothing of the turn but its credential and what the dispatcher needs to start: no git token, no input.
+    expect(claim.id).toBe(turn.job.id);
+    expect(claim).not.toHaveProperty("input");
+    expect(claim.access).toEqual({
+      harness: "claude-code",
+      auth: "subscription",
+      model: "claude-sonnet-5-5",
+    });
+    // The git token is made by the Worker's fetch, not by the claim.
+    expect(h.issuedJobTokens()).toHaveLength(1);
+    const input = (await turnInput(response)) as unknown as {
       llm?: unknown;
       implementer: Record<string, unknown>;
     };
@@ -111,12 +137,10 @@ describe("the claim of a turn on the harness claude-code", () => {
         costLimitCents,
       });
 
-      const { job } = (await (
-        await h.claim(claimOf(runner.credential))
-      ).json()) as ClaimResponse;
+      const { response } = await fetchedTurn(h, runner.credential);
 
       const subscription = (
-        job.input as unknown as {
+        (await turnInput(response)) as unknown as {
           implementer: { subscription: { maxBudgetUsd: string } };
         }
       ).implementer.subscription;
@@ -191,14 +215,15 @@ describe("the claim of a turn on the harness claude-code", () => {
       profile: PROFILE,
     });
 
-    const response = await h.claim(
-      claimOf(
-        runner.credential,
-        NOW_FEATURES.filter((name) => name !== "implementer_profile"),
-      ),
+    const { response } = await fetchedTurn(
+      h,
+      runner.credential,
+      NOW_FEATURES.filter((name) => name !== "implementer_profile"),
     );
 
-    expect(response.status).toBe(204);
+    // The Worker's fetch is refused (the job is over for it) before any git token is made.
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
       errorCode: "implementer_engine_unavailable",
@@ -216,14 +241,14 @@ describe("the claim of a turn on the harness claude-code", () => {
       startBranch: "feature/start",
     });
 
-    const response = await h.claim(
-      claimOf(
-        runner.credential,
-        NOW_FEATURES.filter((name) => name !== "implementer_start_branch"),
-      ),
+    const { response } = await fetchedTurn(
+      h,
+      runner.credential,
+      NOW_FEATURES.filter((name) => name !== "implementer_start_branch"),
     );
 
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
       errorCode: "implementer_engine_unavailable",
@@ -241,11 +266,9 @@ describe("the claim of a turn on the harness claude-code", () => {
       startBranch: "feature/start",
     });
 
-    const response = await h.claim(claimOf(runner.credential));
+    const { response } = await fetchedTurn(h, runner.credential);
 
-    expect(response.status).toBe(200);
-    const { job } = (await response.json()) as ClaimResponse;
-    expect(job.input).toMatchObject({
+    expect(await turnInput(response)).toMatchObject({
       implementer: { startBranch: "feature/start" },
     });
   });

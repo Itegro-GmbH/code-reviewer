@@ -57,6 +57,15 @@ MAX_LIMIT = 1_000_000
 # network a fixed address (`implementer/agent_container.py`), so a second run on the same daemon
 # would collide. More runs beside each other are R2.
 MAX_PARALLEL_RUNS = 1
+# With the Firecracker sandbox (#978) a job has a VM of its own and the number of jobs at once is
+# the number of slots (a TAP device each, made at install); `FACTORY_RUNNER_SANDBOX` chooses it.
+SANDBOX_VARIABLE = "FACTORY_RUNNER_SANDBOX"
+SANDBOX_FIRECRACKER = "firecracker"
+MAX_FIRECRACKER_PARALLEL_RUNS = 64
+# The one local backend (#1007, Runner v2): two Incus instances per job, a pair of bridges per slot.
+# `firecracker` stays selectable until its code is retired (#1012).
+SANDBOX_INCUS = "incus"
+MAX_INCUS_PARALLEL_RUNS = 32
 
 
 # Where the credential of a loaded configuration came from. Only a credential of the file is the
@@ -186,10 +195,24 @@ def _limit(name: str, raw: object) -> int | None:
     return value
 
 
-def check_limits(raw: Mapping[str, object]) -> Limits:
+def _max_parallel_runs(sandbox: str) -> int:
+    """The most jobs at once the sandbox allows: one per slot (a TAP device, or two bridges)."""
+    if sandbox == SANDBOX_INCUS:
+        return MAX_INCUS_PARALLEL_RUNS
+    if sandbox == SANDBOX_FIRECRACKER:
+        return MAX_FIRECRACKER_PARALLEL_RUNS
+    return MAX_PARALLEL_RUNS
+
+
+def check_limits(raw: Mapping[str, object], *, max_parallel: int = MAX_PARALLEL_RUNS) -> Limits:
     parallel = _limit("parallelRuns", raw.get("parallelRuns")) or MAX_PARALLEL_RUNS
-    if parallel > MAX_PARALLEL_RUNS:
-        raise ConfigError("parallelRuns: this runner takes one job at a time (R2 brings more)")
+    if parallel > max_parallel:
+        raise ConfigError(
+            "parallelRuns: this runner takes one job at a time "
+            f"(the Incus sandbox, {SANDBOX_VARIABLE}={SANDBOX_INCUS}, takes more)"
+            if max_parallel == MAX_PARALLEL_RUNS
+            else f"parallelRuns: at most {max_parallel} jobs at a time"
+        )
     return Limits(
         cpus=_limit("cpus", raw.get("cpus")),
         memory_mb=_limit("memoryMb", raw.get("memoryMb")),
@@ -280,6 +303,7 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         ("FACTORY_RUNNER_CPUS", "cpus"),
         ("FACTORY_RUNNER_MEMORY_MB", "memoryMb"),
         ("FACTORY_RUNNER_DISK_GB", "diskGb"),
+        ("FACTORY_RUNNER_PARALLEL_RUNS", "parallelRuns"),
     ):
         fresh = environment.get(variable, "").strip()
         if fresh:
@@ -305,7 +329,10 @@ def load_config(environment: Mapping[str, str], *, require_url: bool = True) -> 
         labels=check_labels(labels if labels is not None else []),
         credential=None if credential in (None, "") else check_credential(credential),
         runner_id=runner_id,
-        limits=check_limits(limits_raw),
+        limits=check_limits(
+            limits_raw,
+            max_parallel=_max_parallel_runs(environment.get(SANDBOX_VARIABLE, "").strip()),
+        ),
         agent_image=None if image in (None, "") else check_image(image),
         runtime=check_runtime(pick("FACTORY_RUNNER_RUNTIME", "runtime") or "auto"),
         auto_update=check_flag("autoUpdate", pick("FACTORY_RUNNER_AUTO_UPDATE", "autoUpdate")),

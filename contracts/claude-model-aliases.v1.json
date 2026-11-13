@@ -1,0 +1,26 @@
+{
+  "$comment": "#980: which ids a Claude Code model alias stands for. A runner announces the models of its subscription as it was told (the aliases sonnet, opus and haiku by default, or ids); a turn carries the model its profile names (an alias or an id). The app (app/src/runner-identity/model-aliases.ts, and `accessRule` in access.ts for the database) and the runner (runner/src/code_reviewer_runner/implementer/claude_code/model_names.py) each keep a copy and a test compares both with this file. Two names match when they are equal, or one is an alias and the other an id it stands for. Two different ids never match, and nothing else does: `sonnet[1m]` is no alias. Every pattern is a regular expression that JavaScript, Python and PostgreSQL read alike (no lookaround, no named group).",
+  "version": 1,
+  "aliases": [
+    { "alias": "sonnet", "idPattern": "^claude-([0-9]+(-[0-9]+)?-)?sonnet(-|$)" },
+    { "alias": "opus", "idPattern": "^claude-([0-9]+(-[0-9]+)?-)?opus(-|$)" },
+    { "alias": "haiku", "idPattern": "^claude-([0-9]+(-[0-9]+)?-)?haiku(-|$)" }
+  ],
+  "vectors": [
+    { "announced": "opus", "demanded": "claude-opus-5-5", "match": true },
+    { "announced": "claude-opus-5-5", "demanded": "opus", "match": true },
+    { "announced": "sonnet", "demanded": "claude-sonnet-4-5", "match": true },
+    { "announced": "haiku", "demanded": "claude-3-5-haiku-20241022", "match": true },
+    { "announced": "claude-sonnet-5-5", "demanded": "claude-sonnet-5-5", "match": true },
+    { "announced": "opus", "demanded": "opus", "match": true },
+    { "announced": "opus", "demanded": "claude-sonnet-5-5", "match": false },
+    { "announced": "sonnet", "demanded": "claude-opus-5-5", "match": false },
+    { "announced": "claude-opus-5-5", "demanded": "claude-opus-5-4", "match": false },
+    { "announced": "claude-opus-5-5", "demanded": "claude-opus-5-5-fast", "match": false },
+    { "announced": "opus", "demanded": "sonnet", "match": false },
+    { "announced": "opus", "demanded": "claude-opusx-1", "match": false },
+    { "announced": "opus", "demanded": "my-claude-opus-1", "match": false },
+    { "announced": "sonnet[1m]", "demanded": "claude-sonnet-5-5", "match": false },
+    { "announced": "opus", "demanded": "vendor/claude-opus-5-5", "match": false }
+  ]
+}
