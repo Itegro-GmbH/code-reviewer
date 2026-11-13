@@ -22,8 +22,10 @@ v2 (#974).
   its throwaway container is one more on the daemon for as long as it takes.
 - `config show`, `config set`: the configuration without its secret, and changing it
   (`cli_manage.py`); `credential show|renew` (the runner's own), `credential add claude|list|remove|
-  retry` (the Claude Code tokens of this device, #980) are there too. `update`, `rollback`, `status`
-  and `uninstall` belong to the root script the installer puts behind the same command name.
+  retry` (the Claude Code tokens of this device, #980) are there too. `host-wall print|apply|check|
+  status` is the host's static nft table of the Incus outer wall (#1008,
+  `incus/host_wall_cli.py`). `update`, `rollback`, `status` and `uninstall` belong to the root
+  script the installer puts behind the same command name.
 
 The app address, the credential, the labels and the limits can come from the environment instead of
 the file (`config.py`): a VM that runs one job needs no `register`.
@@ -87,6 +89,7 @@ from code_reviewer_runner.factory_runner.config import (
 )
 from code_reviewer_runner.factory_runner.firecracker.factory import firecracker_sandbox_factory
 from code_reviewer_runner.factory_runner.firecracker.prepare import prepare_firecracker
+from code_reviewer_runner.factory_runner.incus import host_wall_cli
 from code_reviewer_runner.factory_runner.incus.factory import incus_sandbox_factory
 from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
 from code_reviewer_runner.factory_runner.prepare import Prepared, prepare
@@ -205,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     cli_manage.add_parsers(commands)
+    host_wall_cli.add_parsers(commands)
     return parser
 
 
@@ -249,6 +253,8 @@ def main(
                     env, stdout, stderr, client=seams.client, now=seams.now
                 )
             return cli_manage.credential_show(env, stdout, seams.now)
+        if arguments.command == "host-wall":
+            return host_wall_cli.run(arguments, env, stdout, stderr)
         if arguments.command == "selftest":
             return _selftest(arguments, env, seams, stdout, stderr)
         return _run(arguments, env, seams, stderr, require_sandbox=require_sandbox)

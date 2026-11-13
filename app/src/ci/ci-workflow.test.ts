@@ -797,6 +797,31 @@ describe("CI workflow path filter", () => {
       expect(touched("program", file), file).toBe(false);
   });
 
+  // #1008
+  it("sends only a change to the Incus launcher, the host's nft table or the lane's own files to the Incus lane", () => {
+    for (const file of [
+      "runner/src/code_reviewer_runner/factory_runner/incus/host_wall.py",
+      "runner/src/code_reviewer_runner/factory_runner/incus/launcher.py",
+      "runner/src/code_reviewer_runner/factory_runner/firecracker/slots.py",
+      "runner/src/code_reviewer_runner/factory_runner/cli.py",
+      "runner/tests/incus/test_host_wall.py",
+      "runner/tests/incus/ci-setup.sh",
+      "runner/uv.lock",
+    ])
+      expect(touched("incus", file), file).toBe(true);
+    for (const file of [
+      "app/src/db/index.ts",
+      "dispatcher/src/app.ts",
+      "runner/src/code_reviewer_runner/cli.py",
+      "runner/src/code_reviewer_runner/factory_runner/service.py",
+      "runner/tests/unit/test_incus_host_wall.py",
+      "docs/runner.md",
+      "README.md",
+      ".github/workflows/ci.yml",
+    ])
+      expect(touched("incus", file), file).toBe(false);
+  });
+
   // #696
   it("sends a change that touches website/ to the website job, whatever else it touches, and a change outside website/ not", () => {
     for (const file of [

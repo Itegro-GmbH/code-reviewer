@@ -107,6 +107,10 @@ class IncusSettings:
     preparation_seconds: float = float(PREPARATION_SECONDS)
     # How long a worker that ended gets before it is killed.
     kill_grace_seconds: float = 5.0
+    # Where root records that the host's nft table is loaded (None: `host_wall.default_status_path`)
+    # and how old that record may be before the dispatcher stops taking jobs (#1008).
+    host_wall_status: Path | None = None
+    host_wall_max_age_seconds: float = 60.0
 
     @property
     def jobs_dir(self) -> Path:
@@ -241,6 +245,12 @@ def settings_from_environment(
         job_timeout_seconds=_whole(job_environment or {}, "RUNNER_JOB_TIMEOUT_SECONDS")
         or DEFAULT_JOB_TIMEOUT_SECONDS,
         outer_wall=mode,
+        host_wall_status=Path(text("FACTORY_RUNNER_HOST_WALL_STATUS"))
+        if text("FACTORY_RUNNER_HOST_WALL_STATUS")
+        else None,
+        host_wall_max_age_seconds=float(
+            _whole(environment, "FACTORY_RUNNER_HOST_WALL_MAX_AGE_SECONDS") or 60
+        ),
     )
     return settings.validated()
 
