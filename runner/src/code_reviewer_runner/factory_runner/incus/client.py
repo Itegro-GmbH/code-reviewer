@@ -117,6 +117,11 @@ class IncusClient(Protocol):
 
     async def image_exists(self, image: str) -> bool: ...
 
+    async def image_properties(self, image: str) -> Mapping[str, str] | None:
+        """The properties of the image with this alias (what `build-golden.sh` recorded in it), or
+        None when there is none."""
+        ...
+
     async def network_exists(self, name: str) -> bool: ...
 
     async def network_info(self, name: str) -> NetworkInfo | None:
@@ -302,6 +307,34 @@ class CliIncusClient:
 
     async def image_exists(self, image: str) -> bool:
         return (await self._run("image info", ["image", "info", image], check=False)).exit_code == 0
+
+    async def image_properties(self, image: str) -> Mapping[str, str] | None:
+        # One call: the images that match the alias (a prefix of a fingerprint or a longer alias
+        # matches too), and the entry that has exactly this alias.
+        result = await self._run(
+            "image list", ["image", "list", image, "--format", "json"], check=False
+        )
+        if result.exit_code != 0:
+            last = result.stderr.strip().splitlines()[-1:] or [f"exit status {result.exit_code}"]
+            raise IncusError("image list", last[0])
+        try:
+            listed = json.loads(result.stdout)
+        except ValueError:
+            raise IncusError("image list", "the answer is not JSON") from None
+        if not isinstance(listed, list):
+            raise IncusError("image list", "the answer is not a list")
+        for entry in cast("list[Any]", listed):
+            if not isinstance(entry, dict):
+                continue
+            fields = cast("dict[str, Any]", entry)
+            aliases = fields.get("aliases")
+            if not isinstance(aliases, list) or not any(
+                isinstance(each, dict) and cast("dict[str, Any]", each).get("name") == image
+                for each in cast("list[Any]", aliases)
+            ):
+                continue
+            return _strings(fields.get("properties"))
+        return None
 
     async def network_exists(self, name: str) -> bool:
         return (

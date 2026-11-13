@@ -105,6 +105,8 @@ class FakeIncus:
         self.foreign: dict[str, InstanceInfo] = {}
         self.pools = {settings.pool}
         self.images = {"code-reviewer-golden"}
+        # The properties an image of the pool carries (`build-golden.sh` records the harnesses).
+        self.image_properties_of: dict[str, dict[str, str]] = {}
         self.networks: set[str] = set()
         self.network_configs: dict[str, dict[str, str]] = {}
         self.network_types: dict[str, str] = {}
@@ -144,6 +146,12 @@ class FakeIncus:
 
     async def image_exists(self, image: str) -> bool:
         return image in self.images
+
+    async def image_properties(self, image: str) -> Mapping[str, str] | None:
+        self._note("image_properties")
+        if image not in self.images:
+            return None
+        return dict(self.image_properties_of.get(image, {}))
 
     async def network_exists(self, name: str) -> bool:
         return name in self.networks

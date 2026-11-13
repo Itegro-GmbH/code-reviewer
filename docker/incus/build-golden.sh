@@ -7,6 +7,7 @@
 #
 #   docker/incus/build-golden.sh [--alias NAME] [--pool POOL] [--prefix PREFIX] [--network-cidr CIDR] [--base IMAGE]
 #                                [--worker TAG] [--agent TAG] [--worker-command CMD] [--agent-command CMD] [--cache-dir DIR] [--replace]
+#                                [--no-claude-code]
 #
 # What it needs: an `incus` the caller may use (a member of `incus-admin`: run it as that user, or put a command such as `sg incus-admin -c` around
 # the whole script), a storage pool (the jobs' own pool, btrfs), a Docker on the caller's side that holds the two images (built from
@@ -14,8 +15,12 @@
 # command whose standard output is the image's archive, for a machine that has no room for the image twice, e.g. `docker buildx build --target sandbox
 # --output type=docker,dest=- .`; the tag is then the one the archive carries) and internet for the base image, the Ubuntu archive and the two downloads.
 # The build instance itself has no way out but a small forward proxy of this directory (build-proxy.py, started on the host's address of the build
-# bridge and allowed to reach the Ubuntu archive only): on the DevBox, whose Docker belongs to other users, a NATed Incus bridge does not reach the
-# internet, and a build that needs a router's help would not be a build any machine can repeat.
+# bridge and allowed to reach the Ubuntu archive, and for Claude Code the npm registry, only): on the DevBox, whose Docker belongs to other users, a
+# NATed Incus bridge does not reach the internet, and a build that needs a router's help would not be a build any machine can repeat.
+# Claude Code (#1023) is Anthropic's proprietary software and is never shipped by us: this script, run on the device, installs it into the agent image
+# there, with the recipe of the Docker mode (runner/scripts/build_claude_layer.py hands over implementer/claude_code/layer.py: the pinned version, the
+# SHA-512 of the npm tarballs checked before anything is installed, the program unmodified; its self-update is off in the agent's environment).
+# `--no-claude-code` leaves it out (the image then has OpenCode only and the runner announces no Claude Code).
 # Nothing else is touched: it makes and removes only objects of its prefix (`<prefix>-bld`: one NAT bridge for the build, one instance), never the
 # `default` pool or profile, `incusbr0`, or the host's Docker images other than reading the two it is told to load. Root is not needed.
 #
@@ -24,12 +29,15 @@
 #   2. makes the build network (a bridge with DHCP, no NAT, no routing; only the build uses it), the proxy on it and the build instance from the base
 #      image on the pool, no profile;
 #   3. installs the packages, the two binaries, docker.service (docker/incus/docker.service) and daemon.json, starts Docker;
-#   4. streams `docker save` of the two images into the instance's `docker load` (no archive on any disk) and records both ids;
-#   5. RESTARTS the instance and checks that both images are still there with the same ids: dockerd and containerd must keep the images across a
-#      boot (an image that is gone after a reboot is the failure of two Docker units that disagree on who owns the store);
+#   4. streams `docker save` of the two images into the instance's `docker load` (no archive on any disk) and records both ids; then builds the
+#      Claude Code layer on the agent image in the instance (R3's recipe, the packages through the proxy) and records what the programs themselves
+#      report (`opencode --version`, `claude --version`);
+#   5. RESTARTS the instance and checks that the images and the layer are still there with the same ids: dockerd and containerd must keep the images
+#      across a boot (an image that is gone after a reboot is the failure of two Docker units that disagree on who owns the store);
 #   6. removes the build network's DHCP file and the caches (an instance of the image has addresses from files the launcher pushes), publishes the
-#      image, deletes the build instance and network, and starts one throwaway instance from the alias so that the first job does not pay the unpack
-#      of the image into the pool (the installer, #1011, does the same).
+#      image with what step 4 found as image properties (`code-reviewer.opencode`, `code-reviewer.claude-code`, ...: the runner reads them to
+#      announce its harnesses, it boots no instance for that), deletes the build instance and network, and starts one throwaway instance from the
+#      alias so that the first job does not pay the unpack of the image into the pool (the installer, #1011, does the same).
 # It prints `FACTORY_RUNNER_VM_IMAGE_ID=<the Worker image's id>`: the value the launcher checks in instance A.
 #
 # After it, `docker rmi` of the two host-side images is up to the caller.
@@ -50,10 +58,12 @@ AGENT="code-reviewer-agent:golden"
 WORKER_COMMAND=""
 AGENT_COMMAND=""
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/code-reviewer/incus-golden"
+CLAUDE_CODE=1
+LAYER="$HERE/../../runner/scripts/build_claude_layer.py"
 REPLACE=0
 KEEP=0
 
-usage() { sed -n '4,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
+usage() { sed -n '4,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-2}"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --alias) ALIAS="$2"; shift 2 ;;
@@ -66,6 +76,7 @@ while [ $# -gt 0 ]; do
     --worker-command) WORKER_COMMAND="$2"; shift 2 ;;
     --agent-command) AGENT_COMMAND="$2"; shift 2 ;;
     --cache-dir) CACHE="$2"; shift 2 ;;
+    --no-claude-code) CLAUDE_CODE=0; shift ;;
     --replace) REPLACE=1; shift ;;
     --keep) KEEP=1; shift ;;
     -h | --help) usage 0 ;;
@@ -110,6 +121,9 @@ if ix image alias list --format csv 2>/dev/null | cut -d, -f1 | grep -qx "$ALIAS
   [ "$REPLACE" = 1 ] || { say "the image alias $ALIAS exists (--replace to replace it)"; exit 1; }
 fi
 ix storage show "$POOL" >/dev/null || { say "no storage pool $POOL"; exit 1; }
+if [ "$CLAUDE_CODE" = 1 ]; then
+  [ -f "$LAYER" ] && command -v python3 >/dev/null || { say "Claude Code needs python3 and $LAYER (--no-claude-code leaves it out)"; exit 1; }
+fi
 for object in "$BUILD"; do
   ix info "$object" >/dev/null 2>&1 && { say "an instance $object exists: not touching it"; exit 1; }
   ix network show "$object" >/dev/null 2>&1 && { say "a network $object exists: not touching it"; exit 1; }
@@ -135,7 +149,9 @@ made_network=1
 HOST_ADDRESS="${CIDR%/*}"
 PROXY_PORT=3128
 proxy_log="$CACHE/build-proxy.log"
-python3 "$HERE/build-proxy.py" "$HOST_ADDRESS" "$PROXY_PORT" archive.ubuntu.com security.ubuntu.com >"$proxy_log" 2>&1 &
+proxy_hosts=(archive.ubuntu.com security.ubuntu.com)
+[ "$CLAUDE_CODE" = 0 ] || proxy_hosts+=(registry.npmjs.org)
+python3 "$HERE/build-proxy.py" "$HOST_ADDRESS" "$PROXY_PORT" "${proxy_hosts[@]}" >"$proxy_log" 2>&1 &
 proxy_pid=$!
 for _ in $(seq 1 50); do
   grep -q ready "$proxy_log" && break
@@ -203,6 +219,29 @@ agent_id="$(id_of "$AGENT")"
 [ -n "$worker_id" ] && [ -n "$agent_id" ] || { say "the images were not loaded"; exit 1; }
 say "loaded: worker $worker_id, agent $agent_id"
 
+# What the programs of the agent's image report, read here and recorded in the image (the runner announces these, never a copy of a pin).
+opencode_version="$(exe docker run --rm --network none --entrypoint /usr/local/bin/opencode "$AGENT" --version | tr -d '\r\n')"
+[[ "$opencode_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say "OpenCode in the agent image does not report a version ($opencode_version)"; exit 1; }
+claude_tag=""
+claude_version=""
+claude_id=""
+if [ "$CLAUDE_CODE" = 1 ]; then
+  # R3's layer on the agent image: the stub and the program of the machine's architecture are fetched as tarballs through the build proxy, each is
+  # accepted only with its pinned SHA-512 (a mismatch fails the build), and the installed program must report the pinned version. The proxy
+  # variables are build arguments only (a predefined argument is not kept in the image).
+  claude_tag="$(python3 "$LAYER" tag --base-id "$agent_id")"
+  say "installing Claude Code $(python3 "$LAYER" version) into the agent image as $claude_tag"
+  python3 "$LAYER" context --base-id "$agent_id" \
+    | "$INCUS" exec "$BUILD" -- docker build --network host \
+      --build-arg "HTTPS_PROXY=http://$HOST_ADDRESS:$PROXY_PORT" --build-arg "HTTP_PROXY=http://$HOST_ADDRESS:$PROXY_PORT" \
+      --tag "$claude_tag" - >&2
+  claude_id="$(id_of "$claude_tag")"
+  [ -n "$claude_id" ] || { say "the Claude Code layer was not built"; exit 1; }
+  claude_version="$(exe docker run --rm --network none --entrypoint claude "$claude_tag" --version | cut -d' ' -f1 | tr -d '\r\n')"
+  [ "$claude_version" = "$(python3 "$LAYER" version)" ] || { say "Claude Code in the layer reports '$claude_version', not the pinned version"; exit 1; }
+  say "Claude Code $claude_version is in the layer ($claude_id)"
+fi
+
 # -- 5. a reboot of the build instance --------------------------------------------------------------------------------------------------------------
 say "restarting the build instance: the images must survive a boot"
 ix restart "$BUILD"
@@ -213,7 +252,10 @@ done
 exe docker info >/dev/null || { say "Docker does not answer after the restart"; exit 1; }
 [ "$(id_of "$WORKER")" = "$worker_id" ] || { say "the Worker image is gone or changed after the restart"; exit 1; }
 [ "$(id_of "$AGENT")" = "$agent_id" ] || { say "the agent image is gone or changed after the restart"; exit 1; }
-say "both images are there after the restart with the same ids"
+if [ -n "$claude_tag" ]; then
+  [ "$(id_of "$claude_tag")" = "$claude_id" ] || { say "the Claude Code layer is gone or changed after the restart"; exit 1; }
+fi
+say "the images${claude_tag:+ and the Claude Code layer} are there after the restart with the same ids"
 
 # -- 6. publish ---------------------------------------------------------------------------------------------------------------------------------------
 say "cleaning and publishing as $ALIAS"
@@ -232,7 +274,9 @@ if [ "$REPLACE" = 1 ]; then
   ix image delete "$ALIAS" >/dev/null 2>&1 || true
 fi
 # zstd: the image file lives on the machine's system disk (the daemon's image store), which is the small one.
-ix publish "$BUILD" --alias "$ALIAS" --compression zstd "description=code-reviewer golden image (Docker $DOCKER_VERSION; worker $worker_id)" >/dev/null
+props=("code-reviewer.opencode=$opencode_version" "code-reviewer.agent-image=$agent_id")
+[ -z "$claude_tag" ] || props+=("code-reviewer.claude-code=$claude_version" "code-reviewer.claude-code.layer=$claude_tag")
+ix publish "$BUILD" --alias "$ALIAS" --compression zstd "description=code-reviewer golden image (Docker $DOCKER_VERSION; worker $worker_id)" "${props[@]}" >/dev/null
 ix delete --force "$BUILD"
 made_instance=0
 ix network delete "$BUILD"
@@ -247,3 +291,4 @@ ix delete --force "$warm"
 echo "FACTORY_RUNNER_INCUS_IMAGE=$ALIAS"
 echo "FACTORY_RUNNER_VM_IMAGE_ID=$worker_id"
 echo "agent image id: $agent_id"
+echo "opencode $opencode_version${claude_tag:+, claude-code $claude_version}"
