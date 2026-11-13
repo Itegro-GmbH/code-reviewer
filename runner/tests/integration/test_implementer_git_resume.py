@@ -168,6 +168,33 @@ def test_the_start_commit_of_a_follow_up_is_the_tip_the_session_branch_has_on_th
     assert workspace.start_tips == {"main": rig.origin.tip("main"), **three}
 
 
+# #965-T10
+def test_the_tip_an_earlier_turn_left_the_session_branch_at_is_known_to_the_workspace(
+    rig: Rig, three: dict[str, str]
+) -> None:
+    workspace = rig.prepared(resume=resume_of_three(three, checkout="feature/x"))
+
+    assert workspace.earlier_head == three[BRANCH]
+
+
+# #965-T11
+def test_a_session_branch_no_earlier_turn_pushed_has_no_earlier_head(rig: Rig) -> None:
+    follow_up = rig.prepared(
+        resume=resume_of(("feature/y", rig.origin.commit_on("feature/y", "y.txt")), checkout=None)
+    )
+
+    assert follow_up.earlier_head is None
+
+
+# #965-T12
+def test_a_first_turn_has_no_earlier_head_even_when_the_provider_has_the_branch_name(
+    rig: Rig,
+) -> None:
+    rig.origin.commit_on(BRANCH, "stale.txt")
+
+    assert rig.prepared().earlier_head is None
+
+
 # #838-T17
 def test_the_commits_and_files_of_the_turn_are_counted_from_the_session_branchs_start(
     rig: Rig, three: dict[str, str]
