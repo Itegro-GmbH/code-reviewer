@@ -67,6 +67,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterable, Sequence
@@ -227,7 +228,10 @@ class DiskSpace:
 
 def disk_space(path: Path) -> DiskSpace:
     status = os.statvfs(path)
-    return DiskSpace(status.f_bavail * status.f_frsize, status.f_favail)
+    # A file system without a fixed inode table (btrfs, the Incus pool) reports none at all
+    # (`f_files` 0): inodes cannot run out there, and 0 free must not read as a full table.
+    inodes = status.f_favail if status.f_files else sys.maxsize
+    return DiskSpace(status.f_bavail * status.f_frsize, inodes)
 
 
 class RepoAccess(Protocol):

@@ -11,12 +11,16 @@
 # What it needs: an `incus` the caller may use (a member of `incus-admin`: run it as that user, or put a command such as `sg incus-admin -c` around
 # the whole script), a storage pool (the jobs' own pool, btrfs), a Docker on the caller's side that holds the two images (built from
 # runner/Dockerfile, targets `sandbox` and `agent`, tagged as below) and internet for the base image, the Ubuntu archive and the two downloads.
+# The build instance itself has no way out but a small forward proxy of this directory (build-proxy.py, started on the host's address of the build
+# bridge and allowed to reach the Ubuntu archive only): on the DevBox, whose Docker belongs to other users, a NATed Incus bridge does not reach the
+# internet, and a build that needs a router's help would not be a build any machine can repeat.
 # Nothing else is touched: it makes and removes only objects of its prefix (`<prefix>-bld`: one NAT bridge for the build, one instance), never the
 # `default` pool or profile, `incusbr0`, or the host's Docker images other than reading the two it is told to load. Root is not needed.
 #
 # What it does, in order (any failure stops it and removes what it made; `--keep` leaves the build instance for a look):
 #   1. downloads Docker and buildx (docker/incus/pins.env, sha256-checked) into the cache directory;
-#   2. makes the build network (a NAT bridge, only the build uses it) and the build instance from the base image on the pool, no profile;
+#   2. makes the build network (a bridge with DHCP, no NAT, no routing; only the build uses it), the proxy on it and the build instance from the base
+#      image on the pool, no profile;
 #   3. installs the packages, the two binaries, docker.service (docker/incus/docker.service) and daemon.json, starts Docker;
 #   4. streams `docker save` of the two images into the instance's `docker load` (no archive on any disk) and records both ids;
 #   5. RESTARTS the instance and checks that both images are still there with the same ids: dockerd and containerd must keep the images across a
@@ -74,12 +78,14 @@ ix() { "$INCUS" "$@" </dev/null; }
 say() { echo "build-golden: $*" >&2; }
 made_network=0
 made_instance=0
+proxy_pid=
 cleanup() {
   local status=$?
   if [ "$KEEP" = 1 ] && [ "$status" -ne 0 ]; then
     say "failed; the build instance $BUILD and its network are left for a look (--keep)"
     return
   fi
+  [ -z "$proxy_pid" ] || kill "$proxy_pid" 2>/dev/null || true
   [ "$made_instance" = 1 ] && ix delete --force "$BUILD" >/dev/null 2>&1 || true
   [ "$made_network" = 1 ] && ix network delete "$BUILD" >/dev/null 2>&1 || true
 }
@@ -116,9 +122,19 @@ fetch "$DOCKER_URL" "$DOCKER_SHA256" "docker-$DOCKER_VERSION.tgz"
 fetch "$BUILDX_URL" "$BUILDX_SHA256" "buildx-$BUILDX_VERSION"
 
 # -- 2. the build instance ----------------------------------------------------------------------------------------------------------------------------
-say "network $BUILD ($CIDR, NAT) and instance $BUILD from $BASE"
-ix network create "$BUILD" "ipv4.address=$CIDR" ipv4.nat=true ipv6.address=none >/dev/null
+say "network $BUILD ($CIDR, no NAT), the archive proxy and instance $BUILD from $BASE"
+ix network create "$BUILD" "ipv4.address=$CIDR" ipv4.nat=false ipv4.routing=false ipv6.address=none >/dev/null
 made_network=1
+HOST_ADDRESS="${CIDR%/*}"
+PROXY_PORT=3128
+proxy_log="$CACHE/build-proxy.log"
+python3 "$HERE/build-proxy.py" "$HOST_ADDRESS" "$PROXY_PORT" archive.ubuntu.com security.ubuntu.com >"$proxy_log" 2>&1 &
+proxy_pid=$!
+for _ in $(seq 1 50); do
+  grep -q ready "$proxy_log" && break
+  sleep 0.1
+done
+grep -q ready "$proxy_log" || { say "the build proxy did not start: $(cat "$proxy_log")"; exit 1; }
 # No profile, like every instance of the launcher; nesting for Docker. The pool is the jobs' own, so the unpack of the base image is the pool's.
 ix init "$BASE" "$BUILD" --no-profiles --storage "$POOL" --network "$BUILD" \
   --config security.nesting=true --config security.privileged=false --config boot.autostart=false >/dev/null
@@ -128,11 +144,15 @@ for _ in $(seq 1 60); do
   exe true >/dev/null 2>&1 && break
   sleep 1
 done
+# The address of the proxy: the bridge's own, reached over the instance's DHCP lease.
 for _ in $(seq 1 60); do
-  exe getent hosts archive.ubuntu.com >/dev/null 2>&1 && break
+  exe ip -4 -o addr show dev eth0 2>/dev/null | grep -q inet && break
   sleep 1
 done
-exe getent hosts archive.ubuntu.com >/dev/null || { say "the build instance has no network (the build bridge's NAT?)"; exit 1; }
+ix exec "$BUILD" -- mkdir -p /etc/apt/apt.conf.d
+printf 'Acquire::http::Proxy "http://%s:%s";\nAcquire::https::Proxy "http://%s:%s";\nAcquire::ForceIPv4 "true";\n' \
+  "$HOST_ADDRESS" "$PROXY_PORT" "$HOST_ADDRESS" "$PROXY_PORT" \
+  | "$INCUS" file push - "$BUILD/etc/apt/apt.conf.d/99-build-proxy"
 
 # -- 3. packages, Docker ------------------------------------------------------------------------------------------------------------------------------
 say "installing Docker $DOCKER_VERSION, buildx $BUILDX_VERSION and the packages"
@@ -152,7 +172,7 @@ rm -rf docker docker.tgz docker-buildx
 # iproute2: the launcher reads the addresses with `ip -4 -o addr show`; nftables: the inner wall; iptables: Docker's bridge networks; git and the
 # rest: what a job's setup and the readers expect to find.
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+apt-get update -qq -o APT::Update::Error-Mode=any
 apt-get install -y -qq --no-install-recommends iptables nftables git xz-utils pigz procps iproute2 ca-certificates psmisc netcat-openbsd
 getent group docker >/dev/null || groupadd --system docker
 systemctl daemon-reload
@@ -188,6 +208,7 @@ say "cleaning and publishing as $ALIAS"
 script <<'EOS'
 set -euo pipefail
 apt-get clean
+rm -f /etc/apt/apt.conf.d/99-build-proxy
 rm -rf /var/lib/apt/lists/* /root/.cache /tmp/* /var/log/journal/* /var/log/apt/* /var/log/dockerd.log
 # A job's addresses come from the files the launcher pushes (05-code-reviewer-*.network): the image's own DHCP of the build must not stay.
 find /etc/systemd/network -type f ! -name '05-code-reviewer-*' -delete
