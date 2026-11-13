@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
-"""`disk_space`: what the push's room check (`git_workspace`) reads from the mirror's file system."""
+"""`disk_space`: what the push's room check (`git_workspace`) reads from the mirror's disk."""
 
 import os
 from pathlib import Path
@@ -25,8 +25,9 @@ def fake_statvfs(*, files: int, favail: int) -> os.statvfs_result:
 def test_a_file_system_without_an_inode_table_has_room_for_inodes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """btrfs (the Incus pool) has no fixed inode table: it reports no inodes at all (`f_files` 0),
-    which the check must not read as a full table, or the job ends `clone_failed` on an empty disk."""
+    """btrfs (the Incus pool) has no fixed inode table: it reports no inodes at all (`f_files`
+    0), which the check must not read as a full table, or the job ends `clone_failed` on an empty
+    disk."""
     monkeypatch.setattr(os, "statvfs", lambda _path: fake_statvfs(files=0, favail=0))
 
     space = disk_space(Path("/"))
