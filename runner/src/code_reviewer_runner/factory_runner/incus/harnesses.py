@@ -74,7 +74,9 @@ def _claude_status(
             ),
         )
     login = load_login(environment, home)
-    return HarnessStatus(spec.version, True, (login.text,) if isinstance(login, LoginProblem) else ())
+    return HarnessStatus(
+        spec.version, True, (login.text,) if isinstance(login, LoginProblem) else ()
+    )
 
 
 def golden_harnesses(

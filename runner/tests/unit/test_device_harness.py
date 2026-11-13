@@ -64,16 +64,14 @@ def test_the_split_placement_asks_b_s_docker_and_the_hosted_one_the_default_sock
 
 
 # #1023-T12
-def test_a_job_in_the_split_placement_finds_the_layer_in_b_and_the_login_in_control_s_environment() -> None:
+def test_a_split_job_finds_the_layer_in_b_and_the_login_in_control_s_environment() -> None:
     asked: list[dict[str, str]] = []
 
     def daemon(environment: Any) -> Daemon:
         asked.append(dict(environment))
         return Daemon(layer=True)
 
-    looked = job_run.device_harness(
-        {**SPLIT, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, daemon=daemon
-    )
+    looked = job_run.device_harness({**SPLIT, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, daemon=daemon)
 
     assert isinstance(looked, ReadyHarness)
     assert looked.login.secret == TOKEN

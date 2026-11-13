@@ -47,7 +47,9 @@ def main(arguments: list[str]) -> int:
         print(CLAUDE_CODE_VERSION)
         return 0
     if not _IMAGE_ID.fullmatch(given.base_id):
-        print("build_claude_layer: --base-id is an image id (sha256:<64 hex digits>)", file=sys.stderr)
+        print(
+            "build_claude_layer: --base-id is an image id (sha256:<64 hex digits>)", file=sys.stderr
+        )
         return 2
     spec = LayerSpec()
     if given.command == "tag":

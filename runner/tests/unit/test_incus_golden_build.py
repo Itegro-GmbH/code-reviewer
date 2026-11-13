@@ -37,7 +37,7 @@ BASE = "sha256:" + "ab" * 32
 
 def run_script(*arguments: str) -> subprocess.CompletedProcess[bytes]:
     """As build-golden.sh runs it: plain python3, from another directory, no virtual environment."""
-    return subprocess.run(  # noqa: S603
+    return subprocess.run(
         [sys.executable, str(SCRIPT), *arguments],
         capture_output=True,
         check=False,
@@ -77,7 +77,9 @@ def test_the_script_names_the_pinned_version_and_refuses_what_is_not_an_image_id
 
 
 # #1023-T16
-def test_build_golden_installs_the_layer_after_the_agent_image_and_checks_it_across_a_restart() -> None:
+def test_build_golden_installs_the_layer_after_the_agent_image_and_checks_it_across_a_restart() -> (
+    None
+):
     text = BUILD_GOLDEN.read_text(encoding="utf-8")
 
     assert "runner/scripts/build_claude_layer.py" in text
@@ -96,10 +98,10 @@ def test_build_golden_has_an_option_to_leave_claude_code_out_and_opens_npm_only_
 
     assert "--no-claude-code)" in text and "CLAUDE_CODE=0" in text
     # The build instance's only way out lists the registry only when the layer is built.
-    assert 'proxy_hosts+=(registry.npmjs.org)' in text
+    assert "proxy_hosts+=(registry.npmjs.org)" in text
     assert text.count("registry.npmjs.org") == 1
     # Every proxy build argument is the build's own host address, never anything else.
-    assert 'HTTPS_PROXY=http://$HOST_ADDRESS:$PROXY_PORT' in text
+    assert "HTTPS_PROXY=http://$HOST_ADDRESS:$PROXY_PORT" in text
 
 
 # #1023-T17
@@ -121,7 +123,7 @@ def test_build_golden_records_what_it_found_in_the_image_under_the_names_the_run
 
 # #1023-T18
 def test_build_golden_is_valid_shell() -> None:
-    checked = subprocess.run(  # noqa: S603
+    checked = subprocess.run(
         ["bash", "-n", str(BUILD_GOLDEN)], capture_output=True, check=False, timeout=30
     )
 

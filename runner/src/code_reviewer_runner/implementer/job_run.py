@@ -60,8 +60,8 @@ from code_reviewer_runner.usage_probe import UsageProbe
 
 from .agent_container import OPENCODE, Adopted, AgentContainer, AgentSeams
 from .claude_code.gates import subscription_rule
-from .claude_code.login import ClaudeLogin
 from .claude_code.layer import LayerDaemon
+from .claude_code.login import ClaudeLogin
 from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
 from .docker_api import DockerApi
 from .environment_setup import EnvironmentSetup, log_output, run_environment_setup

@@ -77,19 +77,25 @@ def entries(announced: Mapping[str, object]) -> dict[str, dict[str, object]]:
     return {each["harness"]: each for each in manifest["harnesses"]}  # type: ignore[index]
 
 
-def announced_by(properties: Mapping[str, str] | None, **extra: str) -> tuple[dict[str, dict[str, object]], str | None, tuple[str, ...]]:
+def announced_by(
+    properties: Mapping[str, str] | None, **extra: str
+) -> tuple[dict[str, dict[str, object]], str | None, tuple[str, ...]]:
     with short_directory() as root:
         incus = FakeIncus(pool="crpool")
         if properties is not None:
             incus.image_properties_of["code-reviewer-golden"] = dict(properties)
-        prepared = prepare_incus(runner_config(), environment(root, **extra), client=incus.provision)
+        prepared = prepare_incus(
+            runner_config(), environment(root, **extra), client=incus.provision
+        )
         announcement = prepared.announcement
         document = {"manifest": announcement.manifest}
         return entries(document), prepared.claude_version, prepared.harness_notes
 
 
 # #1023-T01
-def test_an_image_with_claude_code_announces_it_with_the_subscription_and_opencode_with_its_version() -> None:
+def test_an_image_with_claude_code_announces_it_with_the_subscription_and_opencode_s_version() -> (
+    None
+):
     harnesses, claude_version, _ = announced_by(golden())
 
     assert harnesses["claude-code"] == {
@@ -103,9 +109,7 @@ def test_an_image_with_claude_code_announces_it_with_the_subscription_and_openco
 
 # #1023-T02
 def test_an_image_built_without_claude_code_announces_opencode_only() -> None:
-    properties = golden(
-        **{PROPERTY_CLAUDE_CODE: None, PROPERTY_CLAUDE_CODE_LAYER: None}
-    )
+    properties = golden(**{PROPERTY_CLAUDE_CODE: None, PROPERTY_CLAUDE_CODE_LAYER: None})
 
     harnesses, claude_version, notes = announced_by(properties)
 
@@ -207,9 +211,7 @@ def test_the_log_says_what_the_login_of_the_device_is_without_a_secret() -> None
         assert found.claude is not None and found.claude.ready
         assert any("no Claude Code login" in note for note in found.claude.notes)
 
-        with_login = golden_harnesses(
-            golden(), {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, root / "home"
-        )
+        with_login = golden_harnesses(golden(), {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, root / "home")
         assert with_login.claude is not None and with_login.claude.ready
         assert not any(TOKEN in note for note in with_login.claude.notes)
         assert not with_login.claude.notes
