@@ -494,6 +494,16 @@ def test_the_upload_pack_of_a_split_job_names_b_s_socket_and_the_hosted_one_does
     assert reader_document("i", "v", runtime="runc")["HostConfig"]["Privileged"] is False
 
 
+# #1020-T08
+def test_a_split_job_fetches_with_protocol_0_and_talks_to_b_without_half_closing() -> None:
+    """B's Docker is behind two `proxy` devices that end a connection at a half-close, so the fetch
+    must use the protocol whose upload-pack ends by itself, and B's API never half-closes."""
+    assert ReaderAccess(None, ReaderSeams(placement=SPLIT)).protocol_version == 0
+    assert ReaderAccess(None, ReaderSeams()).protocol_version == 2
+    assert SPLIT.environment_api().half_close is False
+    assert HOSTED.environment_api().half_close is True
+
+
 def test_the_pipe_takes_one_absolute_socket_path_and_refuses_anything_else() -> None:
     from code_reviewer_runner.implementer.reader import CONTROL_REPO
 

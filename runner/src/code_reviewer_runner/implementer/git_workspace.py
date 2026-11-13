@@ -247,6 +247,14 @@ class RepoAccess(Protocol):
         """The command Control's `git fetch --upload-pack=` runs to read the agent's branches."""
         ...
 
+    @property
+    def protocol_version(self) -> int:
+        """The git wire protocol of that fetch. 2 asks the agent's upload-pack for the one ref only
+        (the advertisement does not grow with the refs the agent made) but its upload-pack ends
+        only when its input ends; 0 ends by itself after the pack, which is what a reader behind a
+        connection that cannot be half-closed needs (`DockerApi.half_close`)."""
+        ...
+
     def warm(self) -> bool:
         """Make everything a look needs before the agent runs, so that nothing has to be created
         later, when the VM's disk may be full (a container needs room to be made). False when it
@@ -1450,7 +1458,7 @@ class GitWorkspace:
                 # Protocol 2 asks the agent's upload-pack for the one ref only (`ref-prefix`): the
                 # advertisement the runner reads does not grow with the refs the agent made.
                 "-c",
-                "protocol.version=2",
+                f"protocol.version={self._access.protocol_version}",
                 "fetch",
                 *_PLAIN_FETCH,
                 f"--upload-pack={self._access.upload_pack()}",

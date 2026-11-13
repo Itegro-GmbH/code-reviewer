@@ -69,8 +69,10 @@ class AttachedStreams:
     """The attached standard streams of one container: lines of its stdout to read, bytes of its
     stdin to write. One reader, any number of writers."""
 
-    def __init__(self, sock: socket.socket, buffered: bytes) -> None:
+    def __init__(self, sock: socket.socket, buffered: bytes, *, half_close: bool = True) -> None:
         self._sock = sock
+        # False on a daemon behind a connection that cannot be half-closed (see `DockerApi`).
+        self._half_close = half_close
         self._pending = buffered
         self._stderr = bytearray()
         self._write_closed = False
@@ -79,10 +81,13 @@ class AttachedStreams:
         self._sock.sendall(data)
 
     def close_write(self) -> None:
-        """End the container's stdin (it reads the end of its input)."""
+        """End the container's stdin (it reads the end of its input). Nothing on a daemon that
+        cannot be half-closed: the connection would end with it, answer included."""
         if self._write_closed:
             return
         self._write_closed = True
+        if not self._half_close:
+            return
         with contextlib.suppress(OSError):
             self._sock.shutdown(socket.SHUT_WR)
 
@@ -146,13 +151,23 @@ class AttachedStreams:
 
 
 class DockerApi:
-    """The Engine API of one daemon, at one socket."""
+    """The Engine API of one daemon, at one socket.
+
+    `half_close` is False for a socket that ends the whole connection when one side shuts down its
+    half: B's Docker on the Incus backend is reached through two `proxy` devices, which do (found by
+    the whole-job lane, #1020). Nothing is then ever half-closed: `AttachedStreams.close_write` does
+    nothing, and `run_exec` sends the end of a command's input as its length (`framed_argv`)."""
 
     def __init__(
-        self, socket_path: str = DOCKER_SOCKET, *, timeout: float = DEFAULT_TIMEOUT_SECONDS
+        self,
+        socket_path: str = DOCKER_SOCKET,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        half_close: bool = True,
     ) -> None:
         self._path = socket_path
         self._timeout = timeout
+        self.half_close = half_close
 
     # -- plain calls ----------------------------------------------------------------------------
 
@@ -293,7 +308,7 @@ class DockerApi:
             sock.close()
             raise DockerError(status, "the daemon refused to attach")
         sock.settimeout(None)
-        return AttachedStreams(sock, remainder)
+        return AttachedStreams(sock, remainder, half_close=self.half_close)
 
     # -- the agent container (#745, step 4) -------------------------------------------------------
 

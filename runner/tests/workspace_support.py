@@ -57,6 +57,10 @@ class LocalAccess:
     def upload_pack(self) -> str:
         return f"{self.git} upload-pack"
 
+    @property
+    def protocol_version(self) -> int:
+        return 2
+
     def warm(self) -> bool:
         return True
 

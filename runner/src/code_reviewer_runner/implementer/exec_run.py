@@ -29,11 +29,12 @@ def exec_document(
     env: Mapping[str, str] | None = None,
     workdir: str | None = None,
     user: str | None = None,
+    attach_stdin: bool = True,
 ) -> dict[str, object]:
     """The exec as the daemon takes it: a constant argv, the stated environment and directory."""
     document: dict[str, object] = {
         "Cmd": list(argv),
-        "AttachStdin": True,
+        "AttachStdin": attach_stdin,
         "AttachStdout": True,
         "AttachStderr": True,
         "Tty": False,
@@ -44,6 +45,17 @@ def exec_document(
     if user is not None:
         document["User"] = user
     return document
+
+
+# `head` hands the command exactly `n` bytes of its input and then its end, which is how a command
+# on a daemon that cannot be half-closed reads "the end of the input" (`DockerApi.half_close`). The
+# exit status of the pipeline is the command's.
+FRAME_SCRIPT = 'n=$1; shift; head -c "$n" | "$@"'
+
+
+def framed_argv(argv: Sequence[str], length: int) -> list[str]:
+    """`argv` that reads `length` bytes of its standard input and then sees its end."""
+    return ["/bin/sh", "-c", FRAME_SCRIPT, "sh", str(length), *argv]
 
 
 def exit_status(api: DockerApi, exec_id: str, seconds: float = EXIT_WAIT_SECONDS) -> int | None:
@@ -83,9 +95,20 @@ def run_exec(
     controls how much it reads; a `consume` that raises ends the command's connection, and the
     exception goes to the caller). Without, up to `KEEP_BYTES` of it are returned. The command's
     standard error is dropped. `stdin` is bytes or an iterable of them."""
+    attach_stdin = True
+    if not getattr(api, "half_close", True):
+        # The end of the input cannot be sent as a half-close here: a command without input
+        # attaches none, one with input is told how long it is.
+        if stdin is not None and not isinstance(stdin, bytes):
+            stdin = b"".join(stdin)
+        if stdin:
+            argv = framed_argv(argv, len(stdin))
+        else:
+            stdin, attach_stdin = None, False
     try:
         exec_id = api.create_exec(
-            container, exec_document(argv, env=env, workdir=workdir, user=user)
+            container,
+            exec_document(argv, env=env, workdir=workdir, user=user, attach_stdin=attach_stdin),
         )
         streams = api.attach_exec(exec_id)
     except DockerError:

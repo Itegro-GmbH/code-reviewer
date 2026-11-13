@@ -108,8 +108,9 @@ class Placement:
 
     def environment_api(self) -> DockerApi:
         """The Docker of the setup/agent container and the readers: B's when split, else the VM's
-        (the default socket)."""
-        return DockerApi(self.docker_socket) if self.split else DockerApi()
+        (the default socket). B's is reached through two `proxy` devices, which end a connection
+        that is half-closed: see `DockerApi.half_close`."""
+        return DockerApi(self.docker_socket, half_close=False) if self.split else DockerApi()
 
 
 HOSTED: Final = Placement()
