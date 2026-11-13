@@ -811,7 +811,7 @@ class AgentContainer:
         if self._adopted is None:
             return dict(environment)
         base = {entry.partition("=")[0]: "" for entry in self._adopted.setup_environment}
-        base.update(proxy_environment(self._rule))
+        base.update(proxy_environment(self._rule, self._seams.placement))
         return {**base, **environment}
 
     def run_command(

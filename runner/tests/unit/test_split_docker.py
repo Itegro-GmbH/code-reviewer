@@ -357,6 +357,35 @@ def test_the_agent_takes_over_the_setup_container_in_b_and_puts_it_on_b_s_model_
     container.remove()
 
 
+# #1020-T09
+def test_the_tools_of_an_adopted_container_in_b_are_pointed_at_the_doors_in_a(
+    daemons: TwoDaemons,
+) -> None:
+    """The whole-job lane on Incus found the engine started with the hosted doors' addresses
+    (10.213.77.x): it never reached A's model door and every call ended `APIError`."""
+    api = daemons.api_b()
+    created = api.create_container(
+        agent_document("sha256:agent", B_WORK_VOLUME, 1 << 30, runtime="runc", placement=SPLIT),
+        "code-reviewer-agent",
+    )
+    api.start_container(created)
+    seams = AgentSeams(
+        api=daemons.api_b,
+        hostname=lambda: "never-asked-in-b",
+        ready_seconds=5.0,
+        runtime="runc",
+        placement=daemons.placement,
+    )
+    container = AgentContainer(2048, seams, RULE, adopted=Adopted(created, paused=False))
+
+    environment = container._exec_environment({"HOME": "/root"})  # type: ignore[reportPrivateUsage]
+
+    url = f"http://{DOOR_ADDRESS}:8081"
+    assert environment["HTTP_PROXY"] == environment["https_proxy"] == url
+    assert DOOR_ADDRESS in environment["NO_PROXY"].split(",")
+    assert "10.213.77" not in " ".join(environment.values())
+
+
 # #1017-T02
 @pytest.mark.parametrize("privileged", [False])
 def test_a_container_in_b_that_is_not_privileged_or_has_a_bind_is_not_what_was_asked(
