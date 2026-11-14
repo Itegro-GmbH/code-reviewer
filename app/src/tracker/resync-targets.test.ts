@@ -11,6 +11,8 @@ function entry(
   overrides: {
     status?: ProjectListEntry["status"];
     integrationStatus?: ProjectListEntry["repository"]["integration"]["status"];
+    /** The provider of the project's ticket source (#1038); left out: a project the entry does not describe. */
+    provider?: string;
   } = {},
 ): ProjectListEntry {
   return {
@@ -27,7 +29,19 @@ function entry(
         status: overrides.integrationStatus ?? "active",
       },
     },
-    project: null,
+    project:
+      overrides.provider === undefined
+        ? null
+        : ({
+            id: `p-${id}`,
+            repositoryId: id,
+            active: true,
+            ticketSource: {
+              provider: overrides.provider,
+              repositoryId: id,
+              board: null,
+            },
+          } as ProjectListEntry["project"]),
     status: overrides.status ?? "active",
   };
 }
@@ -98,6 +112,23 @@ describe("the projects of the nightly resync", () => {
     expect(targets.map((t) => [t.workspaceId, t.repositoryId])).toEqual([
       ["w-1", "r-active"],
       ["w-2", "r-other"],
+    ]);
+  });
+
+  // #1038
+  it("leaves out a project whose tickets are not GitHub's: the mirror of the issues is not theirs", async () => {
+    const { run } = setup(
+      {
+        "w-1": [
+          entry("r-github", { provider: "github" }),
+          entry("r-jira", { provider: "jira" }),
+        ],
+      },
+      [{ workspaceId: "w-1", status: "active" }],
+    );
+
+    expect((await run()).map((target) => target.repositoryId)).toEqual([
+      "r-github",
     ]);
   });
 

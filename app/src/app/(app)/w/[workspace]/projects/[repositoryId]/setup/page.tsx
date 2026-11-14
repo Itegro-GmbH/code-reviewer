@@ -59,6 +59,8 @@ export default async function ProjectSetupPage({
 const NO_STATE_CODES: ReadonlySet<string> = new Set([
   "TRACKER_REPOSITORY_NOT_FOUND",
   "TRACKER_PROJECT_NOT_ACTIVE",
+  // A Jira project (#1038): its tickets are not mirrored yet.
+  "TRACKER_SOURCE_NOT_MIRRORED",
 ]);
 
 /**

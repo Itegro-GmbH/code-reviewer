@@ -22,6 +22,8 @@ async function setup(
     /** The board the project chose (#937). */
     board?: { projectV2Id: string; statusFieldId: string };
     repositoryActive?: boolean;
+    /** The provider of the project's ticket source (#1038); GitHub unless said. */
+    provider?: string;
     integration?: Partial<Integration> | undefined;
     sync?: () => Promise<never>;
   } = {},
@@ -105,7 +107,7 @@ async function setup(
           : ({
               id: "p-1",
               ticketSource: {
-                provider: "github",
+                provider: options.provider ?? "github",
                 repositoryId: "r-1",
                 board: options.board ?? null,
               },
@@ -470,5 +472,22 @@ describe("the full sync of a repository", () => {
     });
     expect(error.mock.calls.flat().join(" ")).not.toContain("ghs_secret");
     error.mockRestore();
+  });
+});
+
+describe("a project whose tickets are not GitHub's (#1038)", () => {
+  // #1038
+  it("neither lists, nor reads the state of, nor syncs the issues of its repository: those are not its tickets", async () => {
+    const { service, run } = await setup({ provider: "jira" });
+
+    for (const call of [
+      () => service.listIssues("r-1", { state: "open", limit: 10, offset: 0 }),
+      () => service.syncState("r-1"),
+      () => service.sync("r-1"),
+    ])
+      await expect(call()).rejects.toMatchObject({
+        code: "TRACKER_SOURCE_NOT_MIRRORED",
+      });
+    expect(run).not.toHaveBeenCalled();
   });
 });
