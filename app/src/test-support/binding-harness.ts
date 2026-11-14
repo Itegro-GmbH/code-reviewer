@@ -51,7 +51,7 @@ import type {
   BindingActor,
   CallbackResult,
 } from "../installation-binding/service.ts";
-import { createDefaultIntegrationRegistry } from "../integrations/registry.ts";
+import { createDefaultProviders } from "../integrations/registry.ts";
 import { createIntegrationSync } from "../integrations/sync/service.ts";
 import { createKeyedLock } from "../integrations/sync/keyed-lock.ts";
 import { purposeOfState } from "../signed-state/state.ts";
@@ -122,7 +122,7 @@ export async function createBindingHarness(
         : { kind: "set", value: TEST_CLIENT_SECRET },
   });
 
-  const registry = createDefaultIntegrationRegistry({
+  const { integrations: registry, tickets } = createDefaultProviders({
     loadConfig: async () => {
       const loaded = await credentials.load();
       if (!loaded.app.ok) throw new Error("The GitHub App is not configured.");
@@ -292,6 +292,7 @@ export async function createBindingHarness(
   ) {
     const handler = createGithubAppWebhookHandler({
       registry,
+      tickets,
       integrations: createIntegrationDirectory(db),
       deliveries: createWebhookDeliveriesRepository(db),
       sync,

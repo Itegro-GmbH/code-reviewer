@@ -108,6 +108,7 @@ export async function startWebhookHarness(
   let answers: WorkspaceCollaborators["answers"];
   const handler = createGithubAppWebhookHandler({
     registry,
+    tickets: base.tickets,
     integrations: base.directory,
     deliveries,
     sync: base.sync,

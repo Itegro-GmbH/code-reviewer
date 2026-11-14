@@ -24,6 +24,7 @@ describe("the workspace of a delivery", () => {
     }));
     const handler = createGithubAppWebhookHandler({
       registry: createIntegrationRegistry({ github_app: h.provider }),
+      tickets: h.tickets,
       integrations: h.directory,
       deliveries: h.deliveries,
       sync: h.sync,
@@ -55,6 +56,7 @@ describe("the workspace of a delivery", () => {
     const workspace = vi.fn();
     const handler = createGithubAppWebhookHandler({
       registry: createIntegrationRegistry({ github_app: h.provider }),
+      tickets: h.tickets,
       integrations: h.directory,
       deliveries: h.deliveries,
       sync: h.sync,

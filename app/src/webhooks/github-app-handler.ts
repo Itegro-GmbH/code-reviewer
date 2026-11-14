@@ -194,8 +194,8 @@ export type WorkspaceCollaborators = {
 
 export type GithubAppWebhookDeps = {
   registry: IntegrationRegistry;
-  /** The ticket providers (#1035): where the ticket mirror reads what a delivery changed. Left out, the mirror hears nothing. */
-  tickets?: TicketProviderRegistry;
+  /** The ticket providers (#1035): where the ticket mirror reads what a delivery changed. Required, so a server that forgets it fails the typecheck. */
+  tickets: TicketProviderRegistry;
   /**
    * Finds the integration an installation id belongs to, in any workspace: the delivery names the
    * installation before anybody knows the workspace, and the integration says which one it is.
@@ -379,7 +379,7 @@ export function createGithubAppWebhookHandler(
     strict: boolean,
   ): Promise<boolean> {
     const tracker = deps.workspace(integration.workspaceId).tracker;
-    const provider = deps.tickets?.get(TICKET_PROVIDER);
+    const provider = deps.tickets.get(TICKET_PROVIDER);
     if (tracker === undefined || provider?.parseTrackerChange === undefined)
       return false;
     try {

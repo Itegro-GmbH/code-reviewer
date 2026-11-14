@@ -41,11 +41,8 @@ import {
   type GithubActionTarget,
 } from "./github-connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
-import {
-  DEFAULT_TICKET_PROVIDER,
-  createTicketTargetResolver,
-  type TicketTargetCall,
-} from "./ticket-target.ts";
+import { DEFAULT_TICKET_PROVIDER } from "./ticket-target.ts";
+import { createRunTicketTargets } from "./run-ticket-targets.ts";
 import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
@@ -88,44 +85,28 @@ export async function connectorTargetOf(
   };
 }
 
-/** The project the lane of a run belongs to, whose ticket source says where the tickets of the run are (#922, #1035); undefined for a lane without one. */
-async function projectOfRun(
-  call: Pick<TicketTargetCall, "workspaceId" | "runId">,
-) {
-  const db = getDatabase();
-  const run = await createWorkflowRunsRepository(db, call.workspaceId).getRun(
-    call.runId,
-  );
-  if (run === undefined) return undefined;
-  const workflow = await createWorkflowsRepository(db, call.workspaceId).get(
-    run.workflowId,
-  );
-  if (workflow?.workflow.projectId == null) return undefined;
-  return createProjectsRepository(db, call.workspaceId).getById(
-    workflow.workflow.projectId,
-  );
-}
-
-/**
- * Where the ticket actions of a run act (#1035): the ticket provider the ticket source of the run's project names. The GitHub issues of
- * the run's repository are the one source there is, so the container is that repository, found through its GitHub installation.
- */
-export const ticketTargetOf = createTicketTargetResolver({
+const runTicketTargets = createRunTicketTargets({
   tickets: ticketProviderRegistry,
-  async sourceProviderOf(call) {
-    return (await projectOfRun(call))?.ticketSource.provider;
-  },
-  async scopeOf(provider, call): Promise<TicketScope | undefined> {
-    if (provider !== "github") return undefined;
-    const target = await connectorTargetOf(
-      call.workspaceId,
-      call.repository.id,
-    );
+  runs: (workspaceId) =>
+    createWorkflowRunsRepository(getDatabase(), workspaceId),
+  workflows: (workspaceId) =>
+    createWorkflowsRepository(getDatabase(), workspaceId),
+  projects: (workspaceId) =>
+    createProjectsRepository(getDatabase(), workspaceId),
+  async gitScopeOf(
+    workspaceId,
+    repositoryId,
+  ): Promise<TicketScope | undefined> {
+    const target = await connectorTargetOf(workspaceId, repositoryId);
     return target === undefined
       ? undefined
       : { integration: target.integration, repo: target.repo };
   },
 });
+
+/** Where the ticket actions of a run act (#1035): the ticket provider the ticket source of the run's project names; see `run-ticket-targets.ts`. */
+export const ticketTargetOf = runTicketTargets.ticketTargetOf;
+const projectOfRun = runTicketTargets.projectOfRun;
 
 const connectors = createConnectorRegistry(
   createGithubConnectors({

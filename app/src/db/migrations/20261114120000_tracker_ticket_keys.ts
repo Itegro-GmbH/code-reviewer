@@ -15,11 +15,13 @@
 //
 // Safe for the version that is still running (it never reads the new columns, and what it writes keeps working: the key is filled in by
 // the trigger, the provider by the default) and for the live database:
-//  - the tables of the mirror are small and young (the feature is days old), so the backfill and the index builds are short; they hold their
-//    locks while they run, so a table of millions of rows would need batches and `create index concurrently` outside a transaction. The
-//    wait for the locks is bounded like the other migrations of the batch: after `LOCK_TIMEOUT` the migration gives up, the batch is rolled
-//    back (`MIGRATION_FAILED`) and the deployment can be run again;
-//  - the new CHECK constraint is added `not valid` and validated afterwards, so it does not scan the table under the strong lock.
+//  - every pending migration runs in ONE transaction (`db/migrate.ts`), so the `ACCESS EXCLUSIVE` lock the first `alter table` takes on
+//    `tracker_items` is held through the backfill, the constraint check and the index build below, and no `not valid` / `validate` or
+//    `create index concurrently` split would shorten that (a concurrent index cannot run in a transaction at all). That is acceptable
+//    because the tables are tiny: measured on the live databases on 2026-11-14 (read-only `count(*)`), the code-review app holds 33
+//    `tracker_items` and 0 `tracker_sync_state` rows, the factory app 16 and 1. A table of hundreds of thousands of rows would need
+//    batches and an index built outside the transaction instead. The wait for the locks is bounded like the other migrations of the
+//    batch: after `LOCK_TIMEOUT` the migration gives up, the batch is rolled back (`MIGRATION_FAILED`) and the deployment can be run again.
 //
 // `down` drops the trigger, the indexes, the constraint and the columns; the old keys are untouched, so the rows keep working.
 import { sql } from "kysely";
@@ -63,12 +65,7 @@ export const migration: Migration = {
       db,
     );
     await sql`alter table tracker_items add constraint tracker_items_key_check
-      check (key is null or char_length(key) between 1 and 128) not valid`.execute(
-      db,
-    );
-    await sql`alter table tracker_items validate constraint tracker_items_key_check`.execute(
-      db,
-    );
+      check (key is null or char_length(key) between 1 and 128)`.execute(db);
     await sql`create unique index if not exists tracker_items_key_index
       on tracker_items (repository_id, provider, key)`.execute(db);
 

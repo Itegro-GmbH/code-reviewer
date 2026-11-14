@@ -197,6 +197,7 @@ describe("the events only the ticket mirror reads", () => {
     });
     const handler = createGithubAppWebhookHandler({
       registry: { resolve: () => provider } as never,
+      tickets: createTicketProviderRegistry([]),
       integrations: {
         findByExternalId: async () => ({ ...integration, status: "disabled" }),
       },
