@@ -2,8 +2,8 @@
 
 // The ticket (#916): the work item a run is about, in the words of the platform it lives on. A ticket is named by a reference,
 // `<provider>:<locator>`, like `github:owner/repo#128`; the engine resolves it through the provider when the run starts and the steps
-// read the result as `{{trigger.ticket.…}}`. GitHub is the one provider so far; the reference and the fields are provider neutral, so
-// another one (Jira) fills the same fields. A ticket is named by a text key inside its provider (`15` for a GitHub issue, `PROJ-123`
+// read the result as `{{trigger.ticket.…}}`. GitHub and Jira are the providers; the reference and the fields are provider neutral, so
+// each fills the same fields. A ticket is named by a text key inside its provider (`15` for a GitHub issue, `PROJ-123`
 // for Jira, #1035). Pure: no database, no I/O.
 import { ISSUE_NUMBER_MAX } from "./limits.ts";
 import {
@@ -22,7 +22,7 @@ export const TICKET_INPUT = "ticket";
  * list as `TICKET_PROVIDERS` of `integrations/types.ts`, which the project's ticket source reads (this module may not import it; a test
  * holds the two together).
  */
-export const TICKET_PROVIDERS = ["github"] as const;
+export const TICKET_PROVIDERS = ["github", "jira"] as const;
 export type TicketProviderName = string;
 
 /** The repository a ticket lives in, as the steps read `{{trigger.ticket.repo.…}}` and (for an issue trigger) `{{trigger.repo.…}}`. */

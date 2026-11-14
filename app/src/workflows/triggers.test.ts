@@ -659,11 +659,11 @@ describe("a ticket reference", () => {
     expect(problems("itegro/shop#128")).toEqual([
       expect.objectContaining({ path: "/ticket", code: "invalid_value" }),
     ]);
-    expect(problems("jira:ABC-1")).toEqual([
+    expect(problems("linear:ABC-1")).toEqual([
       expect.objectContaining({
         path: "/ticket",
         code: "invalid_value",
-        available: ["github"],
+        available: ["github", "jira"],
       }),
     ]);
     expect(problems("github:itegro/shop#0")).toEqual([

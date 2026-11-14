@@ -33,15 +33,33 @@ export type ProjectSettings = { [key: string]: JsonValue };
 export type TicketBoard = { projectV2Id: string; statusFieldId: string };
 
 /**
- * What a project is in the factory (#922): the GitHub issues of one repository and, optionally, the GitHub Project that is their board.
- * `repositoryId` is always the repository of the project row (one project per repository), repeated so that a reader of the source
- * needs nothing else.
+ * What a project is in the factory (#922): the GitHub issues of one repository and, optionally, the GitHub Project that is their board,
+ * or (#1038) the tickets of a Jira project. `repositoryId` is always the repository of the project row (one project per repository),
+ * repeated so that a reader of the source needs nothing else: for Jira it is the repository the code lives in. `connectionId` and
+ * `projectKey` are there for `provider` `jira` and only then (a Jira source has no board).
  */
 export type TicketSource = {
   provider: string;
   repositoryId: string;
   board: TicketBoard | null;
+  connectionId?: string;
+  projectKey?: string;
 };
+
+/** The Jira project a source names: the connection of the workspace (its site) and the project's key on that site. */
+export type JiraSourceChoice = { connectionId: string; projectKey: string };
+
+/** The Jira project the source names, or null for any other source. */
+export function jiraSourceOf(source: TicketSource): JiraSourceChoice | null {
+  return source.provider === "jira" &&
+    source.connectionId !== undefined &&
+    source.projectKey !== undefined
+    ? { connectionId: source.connectionId, projectKey: source.projectKey }
+    : null;
+}
+
+/** What a Jira project key can be (upper case letters, digits and underscore; the site's rule is narrower, never wider). */
+const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
 
 /** What a row without a stored source (every project an older version wrote) is: the issues of its repository, no board. */
 export function defaultTicketSource(repositoryId: string): TicketSource {
@@ -67,12 +85,36 @@ export function readTicketSource(
     typeof value === "object" && value !== null && "board" in value
       ? value.board
       : undefined;
-  const wellFormed =
+  const provider =
     typeof value === "object" &&
     value !== null &&
     "provider" in value &&
     typeof value.provider === "string" &&
-    providers.includes(value.provider) &&
+    providers.includes(value.provider)
+      ? value.provider
+      : undefined;
+  if (provider === "jira") {
+    const named = value as { connectionId?: unknown; projectKey?: unknown };
+    if (
+      typeof named.connectionId === "string" &&
+      named.connectionId !== "" &&
+      typeof named.projectKey === "string" &&
+      JIRA_PROJECT_KEY.test(named.projectKey)
+    )
+      return {
+        provider,
+        repositoryId,
+        board: null,
+        connectionId: named.connectionId,
+        projectKey: named.projectKey,
+      };
+    warn(
+      `[db] PROJECT_TICKET_SOURCE_UNREADABLE: the stored ticket source of project ${projectId} is not usable and reads as the issues of its repository without a board.`,
+    );
+    return defaultTicketSource(repositoryId);
+  }
+  const wellFormed =
+    provider !== undefined &&
     (board === null ||
       (typeof board === "object" &&
         board !== null &&
@@ -87,7 +129,7 @@ export function readTicketSource(
     return defaultTicketSource(repositoryId);
   }
   return {
-    provider: (value as { provider: string }).provider,
+    provider,
     repositoryId,
     board:
       board === null
