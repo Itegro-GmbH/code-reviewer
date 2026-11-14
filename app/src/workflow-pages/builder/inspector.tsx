@@ -174,6 +174,13 @@ function TriggerFields({
             hint="Optional: only a move out of this status starts the lane."
             onChange={(from) => patch({ from: from === "" ? undefined : from })}
           />
+          {statuses.length === 0 ? (
+            <p role="note" className="text-sm text-muted-foreground">
+              A move starts no run until the lane&apos;s project has chosen a
+              board: only moves on that board count. Choose one in the
+              project&apos;s settings.
+            </p>
+          ) : null}
         </>
       ) : null}
       {kind === "schedule" ? (

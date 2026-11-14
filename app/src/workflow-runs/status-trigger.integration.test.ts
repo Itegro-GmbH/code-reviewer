@@ -45,6 +45,14 @@ async function startHarness() {
     projects: createProjectsRepository(app.h.db, app.h.workspaceId),
   });
   const tracker = createTrackerRepository(app.h.db, app.h.workspaceId);
+  // Only the board the project chose starts a run: the one the fixtures' deliveries name.
+  await createProjectsRepository(app.h.db, app.h.workspaceId).setTicketBoard(
+    app.project.id,
+    {
+      projectV2Id: "PVT_1",
+      statusFieldId: "PVTSSF_1",
+    },
+  );
   app.h.setTracker(
     createTrackerMirror({
       repositories: app.h.repositories,
@@ -73,8 +81,20 @@ async function startHarness() {
           : {
               provider: item.provider,
               repositoryId: item.repositoryId,
+              integrationId:
+                (await app.h.repositories.get(item.repositoryId))
+                  ?.integrationId ?? "",
               key: item.key,
             };
+      },
+      // The platform is not asked in a test: the item has the status the mirror took from the delivery.
+      async currentStatusOf(_repositoryId, nodeId) {
+        const row = await app.h.db
+          .selectFrom("tracker_items")
+          .select("board_status")
+          .where("node_id", "=", nodeId)
+          .executeTakeFirst();
+        return { available: true, status: row?.board_status ?? null };
       },
       async boardOf(repositoryId) {
         return (await projects.getActiveProjectForRepository(repositoryId))

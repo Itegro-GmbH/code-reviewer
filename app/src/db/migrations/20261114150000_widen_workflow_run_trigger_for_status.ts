@@ -5,8 +5,9 @@
 // person: only a run started by hand or through the API (`manual`, `api`) needs a user, which the check keeps.
 //
 // Safe for the version that is still running (it never writes `ticket.statusChanged`) and for the live database:
-//  - the check is replaced inside one transaction under the lock `drop constraint` takes anyway; it is added `not valid` and validated
-//    afterwards, so the scan runs under a weaker lock, as in `20261107110000_add_workflow_run_trigger_id`;
+//  - the check is replaced inside one transaction: `drop constraint` takes ACCESS EXCLUSIVE and holds it until the commit, so the
+//    `not valid` + `validate` that follows scans the table UNDER that lock, not under a weaker one. That is harmless here (`workflow_runs`
+//    is small, the scan takes moments) and the lock timeout below bounds the wait for it;
 //  - the wait for the lock is bounded: after `LOCK_TIMEOUT` the migration gives up, the whole batch is rolled back
 //    (`MIGRATION_FAILED`) and the deployment can be run again;
 //  - the old version never reads a run of the new kind, but its sweep advances EVERY running run of the workspace, so during the deploy

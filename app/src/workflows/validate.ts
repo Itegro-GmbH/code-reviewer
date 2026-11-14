@@ -238,7 +238,10 @@ type CheckedTrigger = {
   stepsPath: string;
 };
 
-/** The name of a status of a status trigger (`to`, `from`): a text of 1 to `STATUS_NAME_MAX_LENGTH` characters that is not only spaces. */
+/**
+ * The name of a status of a status trigger (`to`, `from`): a text of 1 to `STATUS_NAME_MAX_LENGTH` characters that is not only spaces and
+ * has none at either end. The run compares it exactly with the board's name, so a name with spaces around it would never start anything.
+ */
 function checkStatusName(
   value: unknown,
   where: string,
@@ -264,13 +267,14 @@ function checkStatusName(
   if (
     textLength(value) < 1 ||
     textLength(value) > STATUS_NAME_MAX_LENGTH ||
-    value.trim() === ""
+    value.trim() !== value ||
+    value === ""
   ) {
     report(
       issue(
         where,
         "invalid_value",
-        `'${field}' has 1 to ${STATUS_NAME_MAX_LENGTH} characters and is not only spaces.`,
+        `'${field}' has 1 to ${STATUS_NAME_MAX_LENGTH} characters, is not only spaces and has no spaces at either end.`,
       ),
     );
     return undefined;

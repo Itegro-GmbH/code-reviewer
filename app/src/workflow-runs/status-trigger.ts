@@ -8,9 +8,12 @@
 //  - A workflow starts when one of its triggers is `ticket.statusChanged` with `to` equal to the new status (the board's spelling; case
 //    counts, as it does for `ticket.setStatus`) and, when the trigger names a `from`, the old status equal to it; the ticket is an issue
 //    the ticket mirror holds, in an active repository of the workspace, and the workflow is a lane of the active project whose ticket
-//    source is that repository. A project that chose a board takes the moves of that board only (the mirror's rule); one that chose none
-//    follows every board. A move that clears the status starts nothing. The run starts through that trigger; a workflow with two
-//    triggers for one move starts once, through the first.
+//    source is that repository. A run starts only when the project chose a board AND the delivery names exactly that board: a project
+//    without a board, a delivery without a board and a move on another board (an organisation's roadmap with a status of the same name)
+//    start nothing. This is stricter than the ticket mirror, which applies a delivery without a board; a status that is mirrored wrongly
+//    is corrected by the next sync, a run that starts wrongly costs budget. The ticket's repository must belong to the integration the
+//    delivery came from. A move that clears the status starts nothing. The run starts through that trigger; a workflow with two triggers
+//    for one move starts once, through the first.
 //  - Whoever made the move starts it (owner decision, 2026-11-14): there is NO guard against the factory's own status changes. The
 //    login of the mover is kept as the run's `actor_login`, to be shown, and decides nothing. A lane that moves a ticket into its own
 //    trigger status starts itself again once its run has ended; the validator warns (`status_retriggers_workflow`) and the docs say it.
@@ -19,7 +22,8 @@
 //    started it. A second move into the status while the run goes on starts nothing; when the run has ended the next move starts the
 //    next one. The database holds it (a partial unique index), so two deliveries that race for it write one run.
 //  - The platform is asked only once a workflow matched, once for all of them: the ticket (the webhook of a board item carries none of
-//    its fields) and the repository's default branch. The run's input is `{ ticket, status: { from, to } }`, stored bounded as the
+//    its fields), the repository's default branch and the item's status NOW. A delivery that is late or comes again names a status the
+//    item no longer has (it was moved on, or back): it starts nothing, so a redelivery cannot start a run for a move that is over. The run's input is `{ ticket, status: { from, to } }`, stored bounded as the
 //    run's `trigger_input`; the ticket is the same value a label trigger yields (`ticket.ts`).
 import type {
   RunTriggerKind,
@@ -55,8 +59,10 @@ export type BoardMove = {
   from: string | null;
   /** The status it has now; null when it was cleared (that starts nothing). */
   to: string | null;
-  /** The platform's id of the board; absent when the delivery names none. */
+  /** The platform's id of the board; absent when the delivery names none (that starts nothing). */
   projectId?: string;
+  /** The integration the delivery came from; the ticket's repository must belong to it. */
+  integrationId: string;
   /** Who moved it; absent when the delivery does not say. */
   actor?: { login: string; externalId: string };
 };
@@ -88,13 +94,25 @@ export type StatusTriggerDependencies = {
   /** The lanes of the project whose ticket source is the repository that wait for a status. */
   workflows: Pick<WorkflowsRepository, "listWithStatusTrigger">;
   /** The ticket the board item names, as the ticket mirror holds it; undefined for none and for a pull request. */
-  ticketOfNode(
-    nodeId: string,
-  ): Promise<
-    { provider: string; repositoryId: string; key: string } | undefined
+  ticketOfNode(nodeId: string): Promise<
+    | {
+        provider: string;
+        repositoryId: string;
+        integrationId: string;
+        key: string;
+      }
+    | undefined
   >;
   /** The provider's id of the board the active project of the repository chose; undefined for none. */
   boardOf(repositoryId: string): Promise<string | undefined>;
+  /**
+   * The status the item has on the board now; `available: false` when boards cannot be read. Throws when the platform cannot be asked.
+   */
+  currentStatusOf(
+    repositoryId: string,
+    nodeId: string,
+    board: string,
+  ): Promise<{ available: boolean; status: string | null }>;
   /** The repository when it is an active one of the workspace, with its default branch; undefined otherwise. */
   repositoryOf(
     repositoryId: string,
@@ -159,14 +177,23 @@ export function createStatusTrigger(
         );
         return result;
       }
-      // The project's own board decides: another board's move of a ticket that is on both says nothing about it.
-      const board = await deps.boardOf(ticket.repositoryId);
-      if (
-        board !== undefined &&
-        move.projectId !== undefined &&
-        move.projectId !== board
-      )
+      if (ticket.integrationId !== move.integrationId) {
+        log(
+          `[status-trigger] delivery=${deliveryId} starts no run: the ticket's repository belongs to another integration than the delivery's`,
+        );
         return result;
+      }
+      // Only the board the project chose starts a run, and only a delivery that names it: any other move (another board with a status of
+      // the same name, a delivery that names no board, a project that chose none) says nothing about the lane's ticket.
+      const board = await deps.boardOf(ticket.repositoryId);
+      if (board === undefined || move.projectId !== board) {
+        log(
+          board === undefined
+            ? `[status-trigger] delivery=${deliveryId} starts no run: the project of the repository chose no board`
+            : `[status-trigger] delivery=${deliveryId} starts no run: the delivery does not name the board the project chose`,
+        );
+        return result;
+      }
 
       const matching: {
         workflowId: string;
@@ -221,6 +248,21 @@ export function createStatusTrigger(
         result.skipped += matching.length;
         log(
           `[status-trigger] delivery=${deliveryId} starts no run: the platform has no ticket ${ticket.key.slice(0, 40)} (a pull request is none)`,
+        );
+        return result;
+      }
+
+      // A delivery that is late or comes again: the item must still have the status the delivery names. Boards that cannot be read leave no
+      // proof, so nothing starts.
+      const current = await deps.currentStatusOf(
+        ticket.repositoryId,
+        move.nodeId,
+        board,
+      );
+      if (!current.available || current.status !== to) {
+        result.skipped += matching.length;
+        log(
+          `[status-trigger] delivery=${deliveryId} starts no run: the item no longer has the status of the delivery on the board`,
         );
         return result;
       }

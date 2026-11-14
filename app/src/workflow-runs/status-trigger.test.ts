@@ -26,6 +26,7 @@ const MOVE: BoardMove = {
   from: "Backlog",
   to: "Ready for agent",
   projectId: "PVT_1",
+  integrationId: "int-1",
   actor: { login: "bob", externalId: "1002" },
 };
 
@@ -72,6 +73,10 @@ function harness(
   options: {
     item?: "none";
     board?: string | undefined;
+    /** The integration the ticket's repository belongs to. */
+    integration?: string;
+    /** The status the board gives the item now: a name, null for none, "unavailable" when boards cannot be read. */
+    current?: string | null | "unavailable";
     repository?: "none";
     ticket?: "none";
     failFor?: string[];
@@ -84,6 +89,9 @@ function harness(
   const lines: string[] = [];
   const asked: string[] = [];
   const reads: string[] = [];
+  const statusReads: string[] = [];
+  // The status the item has now is the one the move names, unless a test says otherwise.
+  let movedTo: string | null = null;
   const trigger = createStatusTrigger({
     runs: {
       async createRun(input) {
@@ -130,7 +138,17 @@ function harness(
       return {
         provider: "github",
         repositoryId: "repo-1",
+        integrationId: options.integration ?? "int-1",
         key: "12",
+      };
+    },
+    async currentStatusOf(repositoryId, nodeId, board) {
+      statusReads.push(`${repositoryId}#${nodeId}@${board}`);
+      if (options.current === "unavailable")
+        return { available: false, status: null };
+      return {
+        available: true,
+        status: "current" in options ? (options.current ?? null) : movedTo,
       };
     },
     async boardOf() {
@@ -148,7 +166,21 @@ function harness(
     kick: (runId) => void kicked.push(runId),
     log: (line) => lines.push(line),
   });
-  return { trigger, created, kicked, lines, written, asked, reads };
+  return {
+    trigger: {
+      start(deliveryId: string, move: BoardMove) {
+        movedTo = move.to;
+        return trigger.start(deliveryId, move);
+      },
+    },
+    created,
+    kicked,
+    lines,
+    written,
+    asked,
+    reads,
+    statusReads,
+  };
 }
 
 describe("which workflows a move into a status starts", () => {
@@ -323,7 +355,8 @@ describe("which workflows a move into a status starts", () => {
     }
   });
 
-  it("takes a move on the board the project chose, a move without a named board, and refuses the move on another board", async () => {
+  // #1036: a deliberate decision of the PR (review finding 1): a run starts only for a board the project chose AND the delivery names.
+  it("starts a run only for a move on the board the project chose, and nothing for another board, an unnamed board or a project without a board", async () => {
     const seeds = [{ id: "wf-1", document: workflowDocument(READY) }];
 
     const same = harness(seeds, { board: "PVT_1" });
@@ -336,12 +369,63 @@ describe("which workflows a move into a status starts", () => {
     await other.trigger.start("d", MOVE);
     const unchosen = harness(seeds, { board: undefined });
     await unchosen.trigger.start("d", MOVE);
+    const neither = harness(seeds, { board: undefined });
+    await neither.trigger.start("d", withoutBoard);
 
     expect(same.created).toHaveLength(1);
-    expect(unnamed.created).toHaveLength(1);
+    expect(unnamed.created).toEqual([]);
     expect(other.created).toEqual([]);
-    // A project that chose no board follows every board.
-    expect(unchosen.created).toHaveLength(1);
+    expect(unchosen.created).toEqual([]);
+    expect(neither.created).toEqual([]);
+    for (const left of [unnamed, other, unchosen, neither]) {
+      expect(left.lines.length).toBeGreaterThan(0);
+      // Nothing is asked of GitHub for a move that cannot start anything.
+      expect(left.reads).toEqual([]);
+      expect(left.asked).toEqual([]);
+    }
+  });
+
+  it("starts nothing for a ticket whose repository belongs to another integration than the delivery's", async () => {
+    const { trigger, created, lines, reads } = harness(
+      [{ id: "wf-1", document: workflowDocument(READY) }],
+      { integration: "int-2" },
+    );
+
+    await trigger.start("d", MOVE);
+
+    expect(created).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(lines.length).toBeGreaterThan(0);
+  });
+
+  it("starts nothing when the item's current board status is no longer the one the delivery names (stale or redelivered)", async () => {
+    const seeds = [{ id: "wf-1", document: workflowDocument(READY) }];
+    const current = harness(seeds, { current: "Ready for agent" });
+    await current.trigger.start("d", MOVE);
+    expect(current.created).toHaveLength(1);
+    expect(current.statusReads).toEqual(["repo-1#I_kwDOAAA12@PVT_1"]);
+
+    for (const options of [
+      { current: "Done" },
+      { current: null },
+      { current: "unavailable" },
+    ] as const) {
+      const stale = harness(seeds, options);
+      const result = await stale.trigger.start("d", MOVE);
+      expect(stale.created).toEqual([]);
+      expect(result).toMatchObject({ matched: 1, started: 0, skipped: 1 });
+      expect(stale.lines.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("reads the current status only once a workflow matched", async () => {
+    const { trigger, statusReads } = harness([
+      { id: "wf-1", document: workflowDocument(READY) },
+    ]);
+
+    await trigger.start("d", { ...MOVE, to: "Other" });
+
+    expect(statusReads).toEqual([]);
   });
 
   it("starts the workflow once when two of its triggers match the same move, and each workflow that matches", async () => {

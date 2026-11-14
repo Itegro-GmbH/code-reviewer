@@ -939,4 +939,24 @@ describe("a status trigger (#1036)", () => {
     );
     expect(screen.getByText(/the lane's own moves included/)).toBeTruthy();
   });
+
+  // #1036: a run starts only for the board the project chose, so a lane of a project without a board would never start.
+  it("warns that nothing starts while the project has no board, and not when the board's statuses are offered", () => {
+    const { unmount } = render(
+      <Harness start={lane()} pointer="/triggers/0" />,
+    );
+    expect(screen.getByRole("note").textContent).toMatch(
+      /starts no run until the lane's project has chosen a board/,
+    );
+    unmount();
+
+    render(
+      <Harness
+        start={lane()}
+        pointer="/triggers/0"
+        statuses={["Backlog", "Ready for agent"]}
+      />,
+    );
+    expect(screen.queryByRole("note")).toBeNull();
+  });
 });

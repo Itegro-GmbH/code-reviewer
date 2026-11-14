@@ -379,6 +379,7 @@ describe("a ticket moved into a board status (#1036)", () => {
       from: "Todo",
       to: "In Progress",
       projectId: "PVT_1",
+      integrationId: "integration-1",
       actor: { login: "bob", externalId: "1002" },
     });
     expect(completed).toEqual(["workflow_runs_started"]);

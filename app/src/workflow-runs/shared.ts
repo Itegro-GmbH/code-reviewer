@@ -372,6 +372,7 @@ export function statusTriggerFor(workspaceId: string): StatusTrigger {
   const repositories = createRepositoriesRepository(db, workspaceId);
   const tracker = createTrackerRepository(db, workspaceId);
   const projects = createProjectsRepository(db, workspaceId);
+  const integrations = createIntegrationsRepository(db, workspaceId);
   const reads = githubReads(workspaceId);
   return createStatusTrigger({
     runs: createWorkflowRunsRepository(db, workspaceId),
@@ -384,8 +385,33 @@ export function statusTriggerFor(workspaceId: string): StatusTrigger {
         : {
             provider: item.provider,
             repositoryId: item.repositoryId,
+            integrationId:
+              (await repositories.get(item.repositoryId))?.integrationId ?? "",
             key: item.key,
           };
+    },
+    async currentStatusOf(repositoryId, nodeId, board) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined) return { available: false, status: null };
+      const integration = await integrations.get(repository.integrationId);
+      if (integration === undefined || integration.status !== "active")
+        return { available: false, status: null };
+      const provider = ticketProviderRegistry.get(DEFAULT_TICKET_PROVIDER);
+      if (provider?.readBoardStatus === undefined)
+        return { available: false, status: null };
+      return provider.readBoardStatus(
+        {
+          integration,
+          repo: {
+            integrationId: repository.integrationId,
+            externalId: repository.externalId,
+            fullName: repository.fullName,
+            url: repository.url,
+          },
+        },
+        nodeId,
+        board,
+      );
     },
     async boardOf(repositoryId) {
       return (await projects.findActiveForRepository(repositoryId))

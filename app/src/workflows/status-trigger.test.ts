@@ -123,6 +123,22 @@ describe("the trigger ticket.statusChanged", () => {
     ]);
   });
 
+  // #1036: a name with surrounding spaces would be saved and never match (the compare with the board's name is exact).
+  it("refuses a `to` or `from` with leading or trailing spaces", () => {
+    for (const value of [" Ready", "Ready ", "\tReady\n"]) {
+      expect(codes(workflow([{ ...STATUS, to: value }]))).toEqual([
+        ["/triggers/0/to", "invalid_value"],
+      ]);
+      expect(codes(workflow([{ ...STATUS, from: value }]))).toEqual([
+        ["/triggers/0/from", "invalid_value"],
+      ]);
+    }
+    expect(
+      check(workflow([{ ...STATUS, to: "Ready for agent", from: "In review" }]))
+        .errors,
+    ).toEqual([]);
+  });
+
   it("is read from the single `trigger` of the older form too", () => {
     expect(
       check({

@@ -155,6 +155,7 @@ export type StatusStarter = {
       from: string | null;
       to: string | null;
       projectId?: string;
+      integrationId: string;
       actor?: { login: string; externalId: string };
     },
   ): Promise<{
@@ -459,6 +460,7 @@ export function createGithubAppWebhookHandler(
         nodeId: change.nodeId,
         from: change.from ?? null,
         to: change.status,
+        integrationId: integration.id,
         ...(change.projectId === undefined
           ? {}
           : { projectId: change.projectId }),
