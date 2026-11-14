@@ -50,7 +50,12 @@ function ProjectCard({
               {row.fullName}
             </span>
             <span className="text-sm text-muted-foreground">
-              {PROJECT_COPY.ticketSource(row.fullName)}
+              {row.jira === undefined
+                ? PROJECT_COPY.ticketSource(row.fullName)
+                : PROJECT_COPY.jiraTicketSource(
+                    row.jira.projectKey,
+                    row.fullName,
+                  )}
             </span>
           </span>
           <Badge variant={PROJECT_STATE_BADGE[status]}>

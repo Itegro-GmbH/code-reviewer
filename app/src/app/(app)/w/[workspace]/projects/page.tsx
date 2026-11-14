@@ -8,6 +8,7 @@ import { configAudienceOf } from "@/config-status/status";
 import { getWorkspaceLlm } from "@/llm/shared";
 import { llmAccessAttention } from "@/llm/ui/llm-access-notice";
 import { projectServiceFor } from "@/projects/shared";
+import { jiraConnectionChoicesFor } from "@/projects/jira-connection-choices";
 import { lastRunSourceFor } from "@/runs/shared";
 import {
   loadProjectsPage,
@@ -111,6 +112,7 @@ async function ProjectsContent({
       canStartReview={canStartReview}
       llmNotice={llmNotice}
       cards={cards}
+      jiraConnections={cards ? await jiraConnectionChoicesFor(workspaceId) : []}
       data={data}
     />
   );

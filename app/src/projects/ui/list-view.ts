@@ -41,6 +41,8 @@ export type ProjectRowView = {
   status: ProjectStatus;
   /** Whether the project is switched on (also for a repository that is unavailable). */
   switchedOn: boolean;
+  /** The Jira project the tickets come from (#1038); left out for the issues of the repository and for a repository that is no project. */
+  jira?: { connectionId: string; projectKey: string };
   lastRun: LastRun | null;
 };
 
@@ -50,6 +52,14 @@ function toRowView(
   { repository, project, status }: ProjectListEntry,
   lastRun: LastRun | null,
 ): ProjectRowView {
+  // Read here, not through the repository module (server only): the row is plain data for the pages.
+  const source = project?.ticketSource;
+  const jira =
+    source?.provider === "jira" &&
+    source.connectionId !== undefined &&
+    source.projectKey !== undefined
+      ? { connectionId: source.connectionId, projectKey: source.projectKey }
+      : null;
   return {
     repositoryId: repository.id,
     projectId: project?.id ?? null,
@@ -58,6 +68,7 @@ function toRowView(
     installation: repository.integration.displayName,
     status,
     switchedOn: project?.active ?? false,
+    ...(jira === null ? {} : { jira }),
     lastRun,
   };
 }

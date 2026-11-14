@@ -5,6 +5,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConfigStatusFor } from "@/config-status/shared";
 import { requireImplementerCapability } from "@/implementer/shared";
+import { jiraSetupFor } from "@/projects/jira-setup";
 import { projectServiceFor } from "@/projects/shared";
 import { SETUP_COPY } from "@/projects/ui/cockpit-messages";
 import { loadProjectRow } from "@/projects/ui/list-view";
@@ -25,7 +26,7 @@ import { CockpitFrame } from "../cockpit-frame";
 export const metadata: Metadata = { title: "Project · Setup" };
 
 // The setup of one project (#925): its ticket source (one, in its own words, with the board it takes (#937) and the "Resync" of its tickets
-// with the hint that they may be out of date), the switch that turns the project on, the re-read of the repositories from GitHub and the way
+// with the hint that they may be out of date; for a Jira project (#1038) its site and the statuses of its workflow instead), the switch that turns the project on, the re-read of the repositories from GitHub and the way
 // to the review settings. The switch and the re-read are the ones of the old project list. Only in a deployment with the capability
 // `implementer`: elsewhere the project list has these controls.
 export default async function ProjectSetupPage({
@@ -114,6 +115,11 @@ async function SetupContent({
   ]);
   if (row === undefined) notFound();
   const project = entry?.project ?? null;
+  // A project on a Jira project (#1038): its site and Jira's own statuses, read now; it has no board and no mirror to resync yet.
+  const jira =
+    project === null || row.jira === undefined
+      ? undefined
+      : await jiraSetupFor(workspaceId, project.id);
   const blockedReason =
     row.status === "unavailable"
       ? "The GitHub App can no longer read this repository."
@@ -122,8 +128,8 @@ async function SetupContent({
         : ACTIVATION_BLOCKED_TEXT;
   return (
     <div className="flex flex-col gap-8">
-      <TicketSourceCard row={row}>
-        {project === null ? null : (
+      <TicketSourceCard row={row} {...(jira === undefined ? {} : { jira })}>
+        {project === null || jira !== undefined ? null : (
           <>
             <TicketSourceControls
               key={project.id}

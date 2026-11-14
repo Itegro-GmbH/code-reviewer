@@ -68,6 +68,25 @@ describe("the project cards", () => {
     expect(within(card).getByText("Active")).toBeTruthy();
   });
 
+  // #1038-T01
+  it("says Jira project and its key on the card of a project whose tickets come from Jira, the code staying in the repository", () => {
+    render(
+      <ProjectCards
+        workspaceSlug="acme"
+        canConnect
+        view={{
+          rows: [row({ jira: { connectionId: "c1", projectKey: "PROJ" } })],
+        }}
+      />,
+    );
+
+    const card = screen.getByRole("link", { name: /acme\/widgets/ });
+    expect(
+      within(card).getByText("Jira project PROJ · code in acme/widgets"),
+    ).toBeTruthy();
+    expect(within(card).queryByText("Issues of acme/widgets")).toBeNull();
+  });
+
   // #925
   it("shows a card only for a repository that is switched on, and says so when none is", () => {
     const { rerender } = render(
