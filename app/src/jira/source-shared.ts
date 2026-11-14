@@ -20,15 +20,19 @@ function jiraReaderFor(workspaceId: string) {
 
 /**
  * The projects of the site of a Jira connection of the workspace, for the new-project dialog and the check of a creation. A deployment without
- * the Atlassian settings cannot ask Jira (`unavailable`); a connection of another workspace is none.
+ * the Atlassian settings cannot ask Jira (`unavailable`) for a connection the workspace has; a connection of another workspace is none.
  */
 export function jiraProjectsFor(
   workspaceId: string,
 ): NonNullable<NewProjectDependencies["jiraProjects"]> {
-  if (!isJiraConfigured()) return async () => ({ kind: "unavailable" });
+  // The connection is looked up first, in the workspace, also without the Atlassian settings: another workspace's id is none either way.
   return jiraProjectsVia({
     connections: createJiraConnectionsRepository(getDatabase(), workspaceId),
-    reader: jiraReaderFor(workspaceId),
+    reader: isJiraConfigured()
+      ? jiraReaderFor(workspaceId)
+      : {
+          listProjects: async () => ({ ok: false, error: "jira_unavailable" }),
+        },
   });
 }
 
