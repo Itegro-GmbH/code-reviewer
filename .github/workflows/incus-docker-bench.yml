@@ -1,0 +1,54 @@
+name: Incus Docker bench
+
+# Runner v2 (#1013, epic #969): why does `docker run busybox true` take about 2 s inside an Incus instance? The DevBox measurement ran at load 5 to 20, so
+# this one runs on a quiet, disposable GitHub runner: it installs Incus 7.6 from the Zabbly stable repository (the version of the #1005 re-measure),
+# makes a btrfs loop pool, builds a golden instance with Docker (containerd image store, overlayfs, AppArmor on) and times one `docker run` and its
+# parts in variants that each take one suspect away (tools/incus-docker-bench, docs/runner.md "Incus: the cost of a docker run"). Nothing here is
+# product code, no secret is used, nothing is published: the numbers go to the job summary and, as a small text file, to a workflow artifact.
+# Only the bench's own files start it on a pull request, so it never slows an ordinary change.
+on:
+  pull_request:
+    paths:
+      - 'tools/incus-docker-bench/**'
+      - '.github/workflows/incus-docker-bench.yml'
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: Repetitions of every series (rep 0, the first run, is extra)
+        required: false
+        default: '12'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: incus-docker-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: "Bench: docker run inside Incus 7.6 (btrfs, AppArmor on)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Shellcheck the bench
+        run: shellcheck tools/incus-docker-bench/*.sh
+      # As root, in the runner's own environment: the script installs the package, changes the firewall and starts Incus, and refuses to run anywhere else.
+      - name: Run the bench
+        env:
+          BENCH_N: ${{ inputs.reps || '12' }}
+        run: sudo --preserve-env=BENCH_N,GITHUB_ACTIONS,GITHUB_STEP_SUMMARY tools/incus-docker-bench/bench.sh
+      - name: Keep the numbers
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: incus-docker-bench
+          path: |
+            /mnt/incus-bench/samples.tsv
+            /mnt/incus-bench/summary.md
+            /mnt/incus-bench/facts.txt
+          retention-days: 30
+          if-no-files-found: warn
