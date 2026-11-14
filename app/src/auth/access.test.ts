@@ -24,6 +24,7 @@ describe("which paths are public", () => {
     "/api/operator/v1/workspaces/abc/entitlements",
     "/api/operator/v1/entitlements/default",
     "/api/webhooks/github-app",
+    "/api/webhooks/jira",
     // #497: a payment provider signs its webhooks; the route checks the signature itself.
     "/api/billing/webhook",
     // #319-T10: the platform's cron has no session; CRON_SECRET is its credential.

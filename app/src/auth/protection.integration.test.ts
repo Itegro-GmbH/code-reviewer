@@ -44,6 +44,8 @@ const PUBLIC_ROUTES = [
   "/invitation",
   // GitHub signs its deliveries; the route checks the signature itself (src/webhooks/README.md).
   "/api/webhooks/github-app",
+  // Jira calls the webhooks the factory registered itself; the secret in the address is the credential (#1039).
+  "/api/webhooks/jira",
   // A payment provider signs its webhooks; the route asks the active adapter to check the signature (#497).
   "/api/billing/webhook",
   // The runner sends its own shared token (src/runner-api/README.md).

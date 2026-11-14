@@ -612,15 +612,18 @@ export function createWorkflowRunService(
       if (ref !== undefined && !ref.ok)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_INPUT_INVALID",
-          "The ticket is not a reference like github:owner/repo#128.",
+          "The ticket is not a reference like github:owner/repo#128 or jira:owner/repo#PROJ-128.",
           { errors: [] },
         );
-      // The engine reads and writes the tickets of GitHub only for now: a Jira reference parses (#1035) but is not read as an issue of a
-      // repository of that name (#1039 reads it, #1040 acts on it).
-      if (ref !== undefined && ref.ref.provider !== "github")
+      // A ticket is of the ticket source of the lane's project: GitHub issues, or the Jira project (#1039); a lane without a project takes
+      // GitHub issues. The reference's provider must be that one, or the key would be asked of the wrong platform.
+      const sourceProvider = project?.ticketSource.provider ?? "github";
+      if (ref !== undefined && ref.ref.provider !== sourceProvider)
         throw new WorkflowRunError(
           "WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED",
-          "Only GitHub issues can start a run for now.",
+          project === undefined
+            ? "A lane without a project takes GitHub issues only."
+            : `The tickets of the project of this lane are ${sourceProvider === "jira" ? "Jira issues" : "GitHub issues"}: name one as ${sourceProvider}:owner/repo#key.`,
         );
       const repoName = ref === undefined ? given.repo : ref.ref.repo;
       if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
@@ -700,7 +703,7 @@ export function createWorkflowRunService(
           ? {}
           : {
               ticketRef: formatTicketRef({
-                provider: "github",
+                provider: sourceProvider,
                 repo: ticket.repo.fullName,
                 key: ticket.key,
               }),

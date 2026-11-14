@@ -2385,6 +2385,11 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    name: "workflows.listProjectWithStatusTrigger",
+    run: (a, b) => a.workflows.listProjectWithStatusTrigger(b.project.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
     name: "workflows.getVersion",
     run: (a, b) => a.workflows.getVersion(b.workflow.id, 1),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),

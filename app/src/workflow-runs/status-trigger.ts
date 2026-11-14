@@ -138,6 +138,124 @@ export const statusRequestId = (
   workflowId: string,
 ): string => `gh-${deliveryId}-${workflowId}`;
 
+/** A lane a move starts: the workflow, its current version and the trigger that matched. */
+export type MatchedStatusLane = {
+  workflowId: string;
+  version: number;
+  trigger: { id: string; kind: typeof STATUS_TRIGGER_KIND };
+  budgetMicroUsd: number;
+};
+
+/**
+ * The lanes among `rows` whose `ticket.statusChanged` trigger waits for exactly this move (`to` equal; `from` equal when the trigger names
+ * one). Counts into `result.matched` and, for a lane the engine cannot run, into `result.skipped`. Shared by the GitHub front (a board
+ * item) and the Jira front (#1039, an issue of a Jira project).
+ */
+export function matchStatusLanes(
+  rows: readonly {
+    workflow: { id: string };
+    current: { version: number; document: string };
+  }[],
+  move: { to: string; from: string | null },
+  context: {
+    maxBudgetUsd: number;
+    log: (line: string) => void;
+    result: StatusTriggerResult;
+  },
+): MatchedStatusLane[] {
+  const { result, log } = context;
+  const matching: MatchedStatusLane[] = [];
+  for (const { workflow, current } of rows) {
+    const read = readRunDocument(current.document);
+    const trigger = read?.triggers.find(
+      (candidate) =>
+        candidate.kind === STATUS_TRIGGER_KIND &&
+        candidate.to === move.to &&
+        (candidate.from === undefined || candidate.from === move.from),
+    );
+    const document =
+      read === undefined || trigger === undefined
+        ? undefined
+        : forTrigger(read, { id: trigger.id, kind: trigger.kind });
+    if (document === undefined || trigger === undefined) continue;
+    result.matched += 1;
+    const unsupported = unsupportedStep(document);
+    if (unsupported !== undefined) {
+      result.skipped += 1;
+      log(
+        `[status-trigger] workflow=${workflow.id} starts no run: the step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run`,
+      );
+      continue;
+    }
+    matching.push({
+      workflowId: workflow.id,
+      version: current.version,
+      trigger: { id: trigger.id, kind: STATUS_TRIGGER_KIND },
+      budgetMicroUsd: runBudgetMicroUsd(document, context.maxBudgetUsd),
+    });
+  }
+  return matching;
+}
+
+/**
+ * Writes the run of each matched lane (one per workflow and delivery, at most one running per workflow and ticket) and tells the engine.
+ * The other lanes still start when one cannot be written; the failure is thrown after all were tried, so the delivery is tried again and
+ * each lane finds its own run. Shared by both fronts.
+ */
+export async function writeStatusRuns(
+  deps: Pick<StatusTriggerDependencies, "runs" | "kick" | "log">,
+  input: {
+    matching: readonly MatchedStatusLane[];
+    result: StatusTriggerResult;
+    repository: { id: string; defaultBranch: string };
+    triggerInput: string;
+    triggerKey: string;
+    ticketRef: string;
+    actorLogin: string;
+    ticketKey: string;
+    requestId(workflowId: string): string;
+  },
+): Promise<void> {
+  const log = deps.log ?? ((line) => console.info(line));
+  const { result, repository } = input;
+  let failure: { error: unknown } | undefined;
+  for (const workflow of input.matching) {
+    try {
+      const created = await deps.runs.createRun({
+        workflowId: workflow.workflowId,
+        workflowVersion: workflow.version,
+        repositoryId: repository.id,
+        baseBranch: bounded(repository.defaultBranch, BRANCH_MAX_CHARS, false),
+        triggerInput: input.triggerInput,
+        budgetMicroUsd: workflow.budgetMicroUsd,
+        clientRequestId: input.requestId(workflow.workflowId),
+        triggerKind: STATUS_TRIGGER_KIND,
+        triggerId: workflow.trigger.id,
+        triggerKey: input.triggerKey,
+        ticketRef: input.ticketRef,
+        createdBy: null,
+        actorLogin: input.actorLogin,
+      });
+      if (created.status === "busy") {
+        result.busy += 1;
+        log(
+          `[status-trigger] workflow=${workflow.workflowId} starts no run: run=${created.run.id} is still running for ticket ${input.ticketKey.slice(0, 40)}`,
+        );
+        continue;
+      }
+      if (created.status === "created") result.started += 1;
+      else result.existing += 1;
+      // A run an earlier try wrote may have lost its first push (the process ended between the write and the kick): `advance` does
+      // nothing for a run that is moving, and takes it on where it stopped otherwise.
+      if (created.status === "created" || created.run.status === "running")
+        deps.kick(created.run.id);
+    } catch (error) {
+      failure ??= { error };
+    }
+  }
+  if (failure !== undefined) throw failure.error;
+}
+
 /** What the steps of a run a move started read: `trigger.ticket` and `trigger.status.from`, `.to`. All bounded. */
 export function statusTriggerInput(
   ticket: StatusTicket,
@@ -195,44 +313,11 @@ export function createStatusTrigger(
         return result;
       }
 
-      const matching: {
-        workflowId: string;
-        version: number;
-        trigger: { id: string; kind: typeof STATUS_TRIGGER_KIND };
-        budgetMicroUsd: number;
-      }[] = [];
-      for (const {
-        workflow,
-        current,
-      } of await deps.workflows.listWithStatusTrigger(ticket.repositoryId)) {
-        const read = readRunDocument(current.document);
-        const trigger = read?.triggers.find(
-          (candidate) =>
-            candidate.kind === STATUS_TRIGGER_KIND &&
-            candidate.to === to &&
-            (candidate.from === undefined || candidate.from === move.from),
-        );
-        const document =
-          read === undefined || trigger === undefined
-            ? undefined
-            : forTrigger(read, { id: trigger.id, kind: trigger.kind });
-        if (document === undefined || trigger === undefined) continue;
-        result.matched += 1;
-        const unsupported = unsupportedStep(document);
-        if (unsupported !== undefined) {
-          result.skipped += 1;
-          log(
-            `[status-trigger] workflow=${workflow.id} starts no run: the step ${unsupported.id.slice(0, 64)} is of the kind ${unsupported.kind.slice(0, 20)}, which the engine does not run`,
-          );
-          continue;
-        }
-        matching.push({
-          workflowId: workflow.id,
-          version: current.version,
-          trigger: { id: trigger.id, kind: STATUS_TRIGGER_KIND },
-          budgetMicroUsd: runBudgetMicroUsd(document, maxBudgetUsd),
-        });
-      }
+      const matching = matchStatusLanes(
+        await deps.workflows.listWithStatusTrigger(ticket.repositoryId),
+        { to, from: move.from },
+        { maxBudgetUsd, log, result },
+      );
       if (matching.length === 0) return result;
 
       const repository = await deps.repositoryOf(ticket.repositoryId);
@@ -284,47 +369,17 @@ export function createStatusTrigger(
         repo: repository.fullName,
         key: ticket.key,
       });
-      let failure: { error: unknown } | undefined;
-      for (const workflow of matching) {
-        // The other workflows still start when one of them cannot be written; the delivery is tried again and each finds its own run.
-        try {
-          const created = await deps.runs.createRun({
-            workflowId: workflow.workflowId,
-            workflowVersion: workflow.version,
-            repositoryId: repository.id,
-            baseBranch: bounded(
-              repository.defaultBranch,
-              BRANCH_MAX_CHARS,
-              false,
-            ),
-            triggerInput,
-            budgetMicroUsd: workflow.budgetMicroUsd,
-            clientRequestId: statusRequestId(deliveryId, workflow.workflowId),
-            triggerKind: STATUS_TRIGGER_KIND,
-            triggerId: workflow.trigger.id,
-            triggerKey,
-            ticketRef,
-            createdBy: null,
-            actorLogin,
-          });
-          if (created.status === "busy") {
-            result.busy += 1;
-            log(
-              `[status-trigger] workflow=${workflow.workflowId} starts no run: run=${created.run.id} is still running for ticket ${ticket.key.slice(0, 40)}`,
-            );
-            continue;
-          }
-          if (created.status === "created") result.started += 1;
-          else result.existing += 1;
-          // A run an earlier try wrote may have lost its first push (the process ended between the write and the kick): `advance` does
-          // nothing for a run that is moving, and takes it on where it stopped otherwise.
-          if (created.status === "created" || created.run.status === "running")
-            deps.kick(created.run.id);
-        } catch (error) {
-          failure ??= { error };
-        }
-      }
-      if (failure !== undefined) throw failure.error;
+      await writeStatusRuns(deps, {
+        matching,
+        result,
+        repository,
+        triggerInput,
+        triggerKey,
+        ticketRef,
+        actorLogin,
+        ticketKey: ticket.key,
+        requestId: (workflowId) => statusRequestId(deliveryId, workflowId),
+      });
       return result;
     },
   };

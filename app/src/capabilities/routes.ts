@@ -286,6 +286,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   { route: "/api/workers/v1/jobs/[id]/resume-session", class: "implementer" },
   // The Jira Cloud connection of a workspace (#1037, epic #1034): the callback of the Atlassian app, the start of a connect or reconnect,
   // the list of the connections, the choice of a site and the removal. The page is the Integrations tab of the settings.
+  // #1039: the dynamic webhooks the factory registers at a Jira site call this; public, the secret in the address is its credential.
+  { route: "/api/webhooks/jira", class: "implementer" },
   { route: "/api/jira/callback", class: "implementer" },
   { route: "/api/w/[workspace]/jira/connect", class: "implementer" },
   { route: "/api/w/[workspace]/jira/connections", class: "implementer" },

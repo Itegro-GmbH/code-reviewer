@@ -9,7 +9,10 @@ import { createImplementerRepository } from "../db/repositories/implementer-repo
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
-import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
+import {
+  createProjectsRepository,
+  jiraSourceOf,
+} from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
@@ -50,6 +53,11 @@ import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
 import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
 import { createStatusTrigger, type StatusTrigger } from "./status-trigger.ts";
+import {
+  createJiraStatusTrigger,
+  jiraProjectView,
+  type JiraStatusTrigger,
+} from "./jira-status-trigger.ts";
 import { latestRunSamples } from "./samples.ts";
 import {
   createWorkflowRunService,
@@ -212,6 +220,7 @@ function githubReads(
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
   const integrations = createIntegrationsRepository(db, workspaceId);
+  const projects = createProjectsRepository(db, workspaceId);
   return {
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();
@@ -249,8 +258,19 @@ function githubReads(
       const integration = await integrations.get(repository.integrationId);
       if (integration === undefined || integration.status !== "active")
         return undefined;
-      // The tickets of a repository are read through the ticket provider of its source: the GitHub issues, the one there is (#1035).
-      const provider = ticketProviderRegistry.get(DEFAULT_TICKET_PROVIDER);
+      // The tickets of a repository are read through the ticket provider of its project's source: the GitHub issues of the repository, or
+      // the Jira project (#1039; the repository is then where the code lives).
+      const jira = jiraSourceOf(
+        (await projects.findActiveForRepository(repositoryId))
+          ?.ticketSource ?? {
+          provider: "github",
+          repositoryId,
+          board: null,
+        },
+      );
+      const provider = ticketProviderRegistry.get(
+        jira === null ? DEFAULT_TICKET_PROVIDER : "jira",
+      );
       if (provider?.readTicket === undefined) return undefined;
       try {
         return (
@@ -263,6 +283,7 @@ function githubReads(
                 fullName: repository.fullName,
                 url: repository.url,
               },
+              ...(jira === null ? {} : { jira }),
             },
             key,
           )) ?? undefined
@@ -270,7 +291,7 @@ function githubReads(
       } catch {
         throw new WorkflowRunError(
           "WORKFLOW_RUN_GITHUB_UNAVAILABLE",
-          "GitHub could not be asked, or answered with something unusable.",
+          "The ticket platform (GitHub or Jira) could not be asked, or answered with something unusable.",
         );
       }
     },
@@ -423,6 +444,34 @@ export function statusTriggerFor(workspaceId: string): StatusTrigger {
       return reads.resolveRepository(repository.fullName);
     },
     readTicket: reads.readTicket,
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The status trigger of a Jira project in one workspace (#1039): the webhook hands it an issue whose status changed; it finds the lanes of
+ * the registration's project, asks Jira for the issue's status NOW (the stale guard) and writes the runs. The first steps run after the
+ * response, as for a label.
+ */
+export function jiraStatusTriggerFor(workspaceId: string): JiraStatusTrigger {
+  const db = getDatabase();
+  const projects = createProjectsRepository(db, workspaceId);
+  const reads = githubReads(workspaceId);
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  return createJiraStatusTrigger({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async projectOf(projectId) {
+      const project = await projects.getById(projectId);
+      return project === undefined ? undefined : jiraProjectView(project);
+    },
+    async repositoryOf(repositoryId) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined || !repository.active) return undefined;
+      return reads.resolveRepository(repository.fullName);
+    },
+    readTicket: (source, key) => reads.readTicket(source.repositoryId, key),
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });
