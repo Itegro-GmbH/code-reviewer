@@ -77,6 +77,18 @@ export const JIRA_READ_ERROR_CODES = [
 ] as const;
 export type JiraReadErrorCode = (typeof JIRA_READ_ERROR_CODES)[number];
 
+/** What registering, extending and deleting the webhooks of a site (#1039) can fail with: a failed call, or what Jira answered. */
+export const JIRA_WEBHOOK_ERROR_CODES = [
+  ...JIRA_CALL_ERROR_CODES,
+  /** Jira refused the call: the app lacks `manage:jira-webhook`, or the account may not register webhooks (401 after a renewed token, 403). */
+  "jira_forbidden",
+  /** Jira allows 5 webhooks per OAuth app and user on a site; this connection has them all. */
+  "jira_webhook_limit",
+  /** Jira refused the registration for another reason (a rejected address or filter, an answer that holds no webhook id). */
+  "jira_webhook_rejected",
+] as const;
+export type JiraWebhookErrorCode = (typeof JIRA_WEBHOOK_ERROR_CODES)[number];
+
 /** What a page can be told about a flow that ended: a refusal, or one of these. */
 export const JIRA_RESULT_CODES = [
   "connected",

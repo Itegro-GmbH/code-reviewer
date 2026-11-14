@@ -44,6 +44,7 @@ import { implementerDeliveryId } from "../implementer-job-shape.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
+import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
@@ -84,6 +85,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     agentProfiles: createProfilesRepository(db, workspaceId),
     runners: createRunnersRepository(db, workspaceId),
     jira: createJiraConnectionsRepository(db, workspaceId),
+    jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -638,7 +640,17 @@ async function seed(
     accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
     connectedBy: null,
   });
+  // A Jira webhook (#1039) in every workspace: the other workspace's is there to be read, changed and removed.
+  await repos.jiraWebhooks.create({
+    id: `jira-webhook-${tag}`,
+    projectId: `jira-project-${tag}`,
+    connectionId: `jira-${tag}`,
+    projectKey: "PROJ",
+    secretHash: `hash-${tag}`,
+  });
   return {
+    jiraWebhookId: `jira-webhook-${tag}`,
+    jiraWebhookProjectId: `jira-project-${tag}`,
     jiraConnectionId: `jira-${tag}`,
     jiraCloudId: `cloud-${tag}`,
     runnerId: `runner-${tag}`,
@@ -870,6 +882,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .execute(),
     jiraConnections: await db
       .selectFrom("jira_connections")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    jiraWebhooks: await db
+      .selectFrom("jira_webhooks")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
@@ -2925,6 +2943,69 @@ const CASES: Case[] = [
     run: (a, b) => a.jira.removeUnlessUsed(b.jiraConnectionId),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // Jira webhooks (#1039): B's registrations are not A's to read, change or remove, and A cannot register one on B's connection
+  {
+    name: "jiraWebhooks.getByProject",
+    run: (a, b) => a.jiraWebhooks.getByProject(b.jiraWebhookProjectId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jiraWebhooks.list",
+    run: (a) => a.jiraWebhooks.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.jiraWebhookId }),
+      ]),
+  },
+  {
+    name: "jiraWebhooks.create",
+    run: (a, b) =>
+      a.jiraWebhooks.create({
+        id: "jira-webhook-a-second",
+        projectId: "jira-project-a-second",
+        connectionId: b.jiraConnectionId,
+        projectKey: "PROJ",
+        secretHash: "x",
+      }),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jiraWebhooks.markRegistered",
+    run: (a, b) =>
+      a.jiraWebhooks.markRegistered(
+        b.jiraWebhookId,
+        "1000",
+        "2026-12-14T00:00:00.000Z",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markExtended",
+    run: (a, b) =>
+      a.jiraWebhooks.markExtended(b.jiraWebhookId, "2026-12-14T00:00:00.000Z"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markError",
+    run: (a, b) =>
+      a.jiraWebhooks.markError(b.jiraWebhookId, "jira_unavailable"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.reset",
+    run: (a, b) => a.jiraWebhooks.reset(b.jiraWebhookId, "other"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markRemoving",
+    run: (a, b) => a.jiraWebhooks.markRemoving(b.jiraWebhookProjectId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.remove",
+    run: (a, b) => a.jiraWebhooks.remove(b.jiraWebhookId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // runs
   {

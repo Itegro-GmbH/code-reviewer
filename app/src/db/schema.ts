@@ -1685,6 +1685,31 @@ export interface JiraConnectionsTable {
   updated_at: string;
 }
 
+/**
+ * The dynamic webhook the factory registered at a Jira site for a project's Jira ticket source (#1039): one row per project
+ * (src/db/repositories/jira-webhooks-repository.ts, src/jira/). Only the hash of the secret in the webhook's address is kept.
+ */
+export interface JiraWebhooksTable {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  connection_id: string;
+  /** The key of the Jira project the webhook watches (`project = KEY`). */
+  project_key: string;
+  /** SHA-256 (hex) of the secret in the address Jira calls. */
+  secret_hash: string;
+  /** `pending`, `active` or `removing` (JIRA_WEBHOOK_STATUSES). */
+  status: string;
+  /** Jira's id of the registered webhook; null until it is registered. */
+  jira_webhook_id: string | null;
+  /** When Jira ends the webhook unless it is extended; null until it is registered. */
+  expires_at: string | null;
+  /** Why the last registration or extension failed; null after a success. */
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1707,6 +1732,7 @@ export interface Database {
   secrets: SecretsTable;
   workspace_secrets: WorkspaceSecretsTable;
   jira_connections: JiraConnectionsTable;
+  jira_webhooks: JiraWebhooksTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

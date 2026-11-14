@@ -114,6 +114,7 @@ import { migration as rewriteRunnerManifests } from "./20261110180000_rewrite_ru
 import { migration as trackerTicketKeys } from "./20261114120000_tracker_ticket_keys.ts";
 import { migration as widenWorkflowRunTriggerForStatus } from "./20261114150000_widen_workflow_run_trigger_for_status.ts";
 import { migration as createJiraConnections } from "./20261114160000_create_jira_connections.ts";
+import { migration as createJiraWebhooks } from "./20261114180000_create_jira_webhooks.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -256,6 +257,7 @@ const migrations: Record<string, Migration> = {
   "20261114150000_widen_workflow_run_trigger_for_status":
     widenWorkflowRunTriggerForStatus,
   "20261114160000_create_jira_connections": createJiraConnections,
+  "20261114180000_create_jira_webhooks": createJiraWebhooks,
 };
 
 export const migrationProvider: MigrationProvider = {

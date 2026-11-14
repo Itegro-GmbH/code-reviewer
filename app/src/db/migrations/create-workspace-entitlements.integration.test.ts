@@ -58,6 +58,7 @@ async function snapshot(
       table.name === "runners" ||
       table.name === "runner_registration_tokens" ||
       table.name === "jira_connections" ||
+      table.name === "jira_webhooks" ||
       table.name === "job_rings" ||
       table.name === "implementer_turn_steps" ||
       table.name === "implementer_session_snapshots" ||
