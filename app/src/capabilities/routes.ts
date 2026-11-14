@@ -61,6 +61,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // The nightly full sync of the ticket mirror (#932). Core on purpose: the cron entry is in `vercel.json` of every deployment, and a
   // route that answers 404 would show as a failed cron; the handler answers `skipped` where there is no factory.
   { route: "/api/internal/tracker-resync", class: "core" },
+  // The nightly extension of the Jira webhooks the factory registered (#1039). Core on purpose, for the same reason as the resync above.
+  { route: "/api/internal/jira-webhooks", class: "core" },
   { route: "/api/invitations/accept", class: "core" },
   { route: "/api/operator/v1/[...path]", class: "core" },
   { route: "/api/operator/v1/entitlements/default", class: "core" },

@@ -26,6 +26,13 @@ export interface ProjectHooks {
   onProjectActivated?(event: ProjectActivatedEvent): Promise<void>;
 
   /**
+   * Called after a project was switched off (the transaction committed, nothing is rolled back by it): what it does must never fail the
+   * deactivation, so a rejection is logged and dropped. The Jira webhook of a project that had a Jira source is deleted here (#1039); a
+   * deletion that fails is repeated by the nightly job.
+   */
+  afterProjectDeactivated?(event: ProjectDeactivatedEvent): Promise<void>;
+
+  /**
    * Called in the transaction that switched the project off, so everything it writes commits or
    * rolls back together with the deactivation. Use `executor` for every query, never the outer
    * connection (see src/db/README.md). A rejection rolls the deactivation back: the project stays

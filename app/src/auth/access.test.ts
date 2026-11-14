@@ -33,6 +33,7 @@ describe("which paths are public", () => {
     "/api/internal/dispatch-sweep",
     // #932: the nightly resync of the ticket mirror, with the same credential.
     "/api/internal/tracker-resync",
+    "/api/internal/jira-webhooks",
   ])("lets %s through without a session", (pathname) => {
     expect(isPublicPath(pathname)).toBe(true);
   });
@@ -118,6 +119,7 @@ describe("which paths are public", () => {
       { path: "/api/internal/repository-sync", match: "exact" },
       { path: "/api/internal/dispatch-sweep", match: "exact" },
       { path: "/api/internal/tracker-resync", match: "exact" },
+      { path: "/api/internal/jira-webhooks", match: "exact" },
     ]);
   });
 });

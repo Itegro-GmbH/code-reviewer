@@ -89,6 +89,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/dispatch-sweep",
   // The nightly resync of the ticket mirror (#932): the same credential.
   "/api/internal/tracker-resync",
+  // The nightly extension of the Jira webhooks (#1039): the same credential.
+  "/api/internal/jira-webhooks",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",

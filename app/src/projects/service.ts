@@ -206,6 +206,14 @@ export function createProjectService(deps: {
           "PROJECT_REPOSITORY_NOT_FOUND",
           "There is no repository with this id.",
         );
+      // What follows a deactivation never fails it (the hook's own contract); a throw is dropped.
+      if (result.project !== undefined)
+        await Promise.resolve(
+          hooks.afterProjectDeactivated?.({
+            projectId: result.project.id,
+            repositoryId: result.project.repositoryId,
+          }),
+        ).catch(() => undefined);
       return { project: result.project, changed: result.changed };
     },
 

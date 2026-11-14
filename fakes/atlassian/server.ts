@@ -13,12 +13,20 @@
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/search          the projects of a site, paged as Jira pages (`startAt`, `maxResults`, `isLast`)
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>          one project by key or id (404 for an unknown one, as Jira also answers for a project the account cannot browse)
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>/statuses  the workflow statuses of a project, by issue type (404 for an unknown key)
+//   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>            one issue (REST shape, `fields` is not filtered); 404 for an unknown key (#1039)
+//   POST /ex/jira/<cloudId>/rest/api/3/webhook                registers dynamic webhooks (`url`, `webhooks[].jqlFilter`, `events`): a grant with
+//                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, 30 days of life
+//   PUT  /ex/jira/<cloudId>/rest/api/3/webhook/refresh        extends the life of known webhooks by 30 days (`{ expirationDate }`); 404 when none is known
+//   DELETE /ex/jira/<cloudId>/rest/api/3/webhook              deletes webhooks by `webhookIds` (unknown ids are ignored)
+//   GET  /ex/jira/<cloudId>/rest/api/3/webhook                the webhooks of the app, paged (`values`, `isLast`)
+// A test can also make the fake CALL a registered webhook (`deliver`): it posts the payload of an issue event to the registered address with the
+// `X-Atlassian-Webhook-Identifier` header and, as Atlassian documents for OAuth 2.0 apps, a bearer token signed with the client secret.
 // What a test may do to it (`AtlassianFake`): choose the sites a consent covers, deny a consent, expire every access token, revoke every grant
 // (the next refresh is refused, as when the person removed the app in their Atlassian account), and script the next answer of a path (a status,
 // or a hang). It records every request but never a secret: whether the client credentials were right, and which grant type, yes; the secret and
 // the tokens, no. `issuedTokens()` is the one way to read the tokens, for a test that looks for them in the app's answers, rows and logs.
 // Dummy values only. Started by a test through `startAtlassianFake`.
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
@@ -62,6 +70,55 @@ export type FakeJiraProject = {
   name: string;
   projectTypeKey?: string;
   issueTypes?: FakeIssueType[];
+};
+
+/** An issue of a fake site, in the fields the factory reads. */
+export type FakeJiraIssue = {
+  id: string;
+  key: string;
+  summary: string;
+  /** An ADF document or a plain string; default: none. */
+  description?: unknown;
+  status: { name: string; category?: "new" | "indeterminate" | "done" };
+  issueType?: string;
+  assignee?: { accountId: string; displayName: string };
+  labels?: string[];
+  parentKey?: string;
+  /** ISO time of the last change; default: when it was set. */
+  updated?: string;
+};
+
+/** A webhook a test finds registered at the fake. */
+export type FakeRegisteredWebhook = {
+  id: number;
+  cloudId: string;
+  url: string;
+  jql: string;
+  events: string[];
+  /** ISO. */
+  expiresAt: string;
+};
+
+/** What `deliver` posts: an event of Jira about an issue of the site. */
+export type FakeDelivery = {
+  webhookEvent:
+    | "jira:issue_created"
+    | "jira:issue_updated"
+    | "jira:issue_deleted"
+    | "comment_created";
+  issueKey: string;
+  /** The changelog items of an update (`field`, `fromString`, `toString`). */
+  changelog?: { field: string; fromString: string | null; toString: string }[];
+  /** `X-Atlassian-Webhook-Identifier`; default: a new one for each delivery. */
+  identifier?: string;
+  /** `valid` (default): a JWT signed with the client secret; `none`: no Authorization header; `wrong`: signed with another secret. */
+  bearer?: "valid" | "none" | "wrong";
+  /** The address to call instead of the registered one (a test with a wrong secret). */
+  url?: string;
+  /** Milliseconds since the epoch; default: now. */
+  timestamp?: number;
+  /** The person who made the change. */
+  user?: { accountId: string; displayName: string };
 };
 
 export type AtlassianFakeOptions = {
@@ -110,6 +167,28 @@ export type AtlassianFake = {
   setSites(sites: FakeSite[]): void;
   /** The projects of a site (all of them, not only the ones the account may browse: the fake has no permissions per project). */
   setProjects(cloudId: string, projects: FakeJiraProject[]): void;
+  /** The issues of a site (replaces them). */
+  setIssues(cloudId: string, issues: FakeJiraIssue[]): void;
+  /** Changes the status of an issue of a site (and its `updated`), as a person's transition would. */
+  setIssueStatus(
+    cloudId: string,
+    key: string,
+    status: FakeJiraIssue["status"],
+  ): void;
+  /** The webhooks registered at the fake, in the order they were registered. */
+  webhooks(): FakeRegisteredWebhook[];
+  /** Changes when a webhook ends (ISO), for the test of the nightly extension. */
+  setWebhookExpiry(id: number, expiresAt: string): void;
+  /** Forgets a webhook, as when Jira lost it after three months without an extension. */
+  dropWebhook(id: number): void;
+  /**
+   * Calls the registered webhook as Jira does (`POST`, JSON, the identifier header, the bearer token); answers what the receiver answered.
+   * The body of the answer is read as JSON when it is.
+   */
+  deliver(
+    webhookId: number,
+    delivery: FakeDelivery,
+  ): Promise<{ status: number; body: unknown; identifier: string }>;
   /** The next consent ends with `error=access_denied`. */
   denyNextConsent(): void;
   /** Every access token issued so far stops working (it "expired"); a refresh token still works. */
@@ -195,6 +274,15 @@ export async function startAtlassianFake(
     Object.entries(options.projects ?? {}),
   );
   const projectPageSize = options.projectPageSize ?? 50;
+  const issuesOfSite = new Map<string, Map<string, FakeJiraIssue>>();
+  const registeredWebhooks = new Map<
+    number,
+    FakeRegisteredWebhook & { grantId: string }
+  >();
+  let nextWebhookId = 1000;
+  let nextIdentifier = 1;
+  const WEBHOOK_LIFE_MS = 30 * 24 * 60 * 60 * 1000;
+  const WEBHOOKS_PER_GRANT = 5;
   let denyNext = false;
   const recorded: RecordedRequest[] = [];
   const scripted = new Map<string, ScriptedAnswer[]>();
@@ -249,6 +337,186 @@ export async function startAtlassianFake(
     return grant === undefined || grant.revoked ? null : grant;
   }
 
+  const SUPPORTED_CLAUSES = [
+    "issuekey",
+    "project",
+    "issuetype",
+    "status",
+    "priority",
+    "assignee",
+    "reporter",
+  ];
+
+  /** The REST shape of an issue, without `expand`. */
+  function issueJson(issue: FakeJiraIssue, origin: string, cloudId: string) {
+    const category = issue.status.category ?? "indeterminate";
+    return {
+      id: issue.id,
+      key: issue.key,
+      self: `${origin}/ex/jira/${cloudId}/rest/api/3/issue/${issue.id}`,
+      fields: {
+        summary: issue.summary,
+        description: issue.description ?? null,
+        status: {
+          name: issue.status.name,
+          statusCategory: { key: category, name: CATEGORY_NAMES[category] },
+        },
+        issuetype: { name: issue.issueType ?? "Task" },
+        assignee: issue.assignee ?? null,
+        labels: issue.labels ?? [],
+        ...(issue.parentKey === undefined
+          ? {}
+          : { parent: { key: issue.parentKey } }),
+        updated: (issue.updated ?? new Date().toISOString()).replace(
+          /Z$/,
+          "+0000",
+        ),
+      },
+    };
+  }
+
+  function handleWebhookApi(
+    method: string,
+    cloudId: string,
+    path: string,
+    url: URL,
+    body: string,
+    grant: Grant,
+    response: ServerResponse,
+    entry: RecordedRequest,
+  ) {
+    if (!grant.sites.some((site) => site.id === cloudId))
+      return json(response, 404, { message: "no such site" }, entry);
+    if (!grant.scopes.includes("manage:jira-webhook"))
+      return json(response, 403, { message: "Forbidden" }, entry);
+    let input: Record<string, unknown> = {};
+    if (body !== "") {
+      try {
+        input = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        return json(
+          response,
+          400,
+          { errorMessages: ["Invalid JSON"], errors: {} },
+          entry,
+        );
+      }
+    }
+    const ids = Array.isArray(input.webhookIds)
+      ? input.webhookIds.filter((id): id is number => typeof id === "number")
+      : [];
+    const mine = () =>
+      [...registeredWebhooks.values()].filter(
+        (hook) => hook.grantId === grant.id,
+      );
+    const expiry = (hook: FakeRegisteredWebhook) =>
+      hook.expiresAt.replace(/Z$/, "+0000");
+
+    if (method === "POST" && path === "/webhook") {
+      const address = typeof input.url === "string" ? input.url : "";
+      if (!/^https?:\/\//.test(address))
+        return json(
+          response,
+          400,
+          { errorMessages: ["The url must be https"], errors: {} },
+          entry,
+        );
+      const results: Record<string, unknown>[] = [];
+      for (const webhook of Array.isArray(input.webhooks)
+        ? input.webhooks
+        : []) {
+        const jql =
+          typeof webhook?.jqlFilter === "string" ? webhook.jqlFilter : "";
+        const events: string[] = Array.isArray(webhook?.events)
+          ? webhook.events
+          : [];
+        const clause = /^\s*([A-Za-z.]+)\s*(=|!=|IN|NOT IN)\s*\S+/i.exec(jql);
+        if (
+          clause === null ||
+          !SUPPORTED_CLAUSES.includes((clause[1] ?? "").toLowerCase())
+        ) {
+          results.push({
+            errors: [`The clause ${clause?.[1] ?? jql} is unsupported`],
+          });
+          continue;
+        }
+        if (mine().length >= WEBHOOKS_PER_GRANT) {
+          results.push({
+            errors: [
+              `You can only register ${String(WEBHOOKS_PER_GRANT)} webhooks per app and user on a site`,
+            ],
+          });
+          continue;
+        }
+        nextWebhookId += 1;
+        registeredWebhooks.set(nextWebhookId, {
+          id: nextWebhookId,
+          cloudId,
+          url: address,
+          jql,
+          events,
+          expiresAt: new Date(Date.now() + WEBHOOK_LIFE_MS).toISOString(),
+          grantId: grant.id,
+        });
+        results.push({ createdWebhookId: nextWebhookId });
+      }
+      return json(response, 200, { webhookRegistrationResult: results }, entry);
+    }
+    if (method === "PUT" && path === "/webhook/refresh") {
+      const known = ids.filter(
+        (id) => registeredWebhooks.get(id)?.grantId === grant.id,
+      );
+      if (known.length === 0)
+        return json(
+          response,
+          404,
+          { errorMessages: ["No such webhook"], errors: {} },
+          entry,
+        );
+      let expirationDate = "";
+      for (const id of known) {
+        const hook = registeredWebhooks.get(id);
+        if (hook === undefined) continue;
+        hook.expiresAt = new Date(Date.now() + WEBHOOK_LIFE_MS).toISOString();
+        expirationDate = expiry(hook);
+      }
+      return json(response, 200, { expirationDate }, entry);
+    }
+    if (method === "DELETE" && path === "/webhook") {
+      for (const id of ids)
+        if (registeredWebhooks.get(id)?.grantId === grant.id)
+          registeredWebhooks.delete(id);
+      return json(response, 202, {}, entry);
+    }
+    if (method === "GET" && path === "/webhook") {
+      const startAt = Math.max(0, Number(url.searchParams.get("startAt") ?? 0));
+      const maxResults = Math.max(
+        1,
+        Number(url.searchParams.get("maxResults") ?? 100),
+      );
+      const all = mine();
+      const page = all.slice(startAt, startAt + maxResults);
+      return json(
+        response,
+        200,
+        {
+          values: page.map((hook) => ({
+            id: hook.id,
+            jqlFilter: hook.jql,
+            events: hook.events,
+            expirationDate: expiry(hook),
+          })),
+          startAt,
+          maxResults,
+          total: all.length,
+          isLast: startAt + page.length >= all.length,
+        },
+        entry,
+      );
+    }
+    return json(response, 404, { error: "not_found" }, entry);
+  }
+
   async function handle(request: IncomingMessage, response: ServerResponse) {
     const url = new URL(request.url ?? "/", "http://fake");
     const entry: RecordedRequest = {
@@ -263,7 +531,9 @@ export async function startAtlassianFake(
     recorded.push(entry);
     open.add(response);
     response.on("close", () => open.delete(response));
-    const body = request.method === "POST" ? await readBody(request) : "";
+    const body = ["POST", "PUT", "DELETE"].includes(request.method ?? "")
+      ? await readBody(request)
+      : "";
 
     const script = scripted.get(url.pathname)?.shift();
     if (script !== undefined) {
@@ -400,11 +670,46 @@ export async function startAtlassianFake(
         entry,
       );
     const jira = /^\/ex\/jira\/([^/]+)\/rest\/api\/3(\/.*)$/.exec(url.pathname);
+    if (jira !== null && url.pathname.includes("/webhook"))
+      return handleWebhookApi(
+        request.method ?? "GET",
+        jira[1] ?? "",
+        jira[2] ?? "",
+        url,
+        body,
+        grant,
+        response,
+        entry,
+      );
     if (request.method === "GET" && jira !== null) {
       const cloudId = jira[1] ?? "";
       const path = jira[2] ?? "";
       if (!grant.sites.some((site) => site.id === cloudId))
         return json(response, 404, { message: "no such site" }, entry);
+      const issueMatch = /^\/issue\/([^/]+)$/.exec(path);
+      if (issueMatch !== null) {
+        const issue = issuesOfSite
+          .get(cloudId)
+          ?.get(decodeURIComponent(issueMatch[1] ?? ""));
+        if (issue === undefined)
+          return json(
+            response,
+            404,
+            {
+              errorMessages: [
+                "Issue does not exist or you do not have permission to see it.",
+              ],
+              errors: {},
+            },
+            entry,
+          );
+        return json(
+          response,
+          200,
+          issueJson(issue, url.origin, cloudId),
+          entry,
+        );
+      }
       if (path === "/myself")
         return json(
           response,
@@ -535,6 +840,99 @@ export async function startAtlassianFake(
     },
     setProjects(cloudId, next) {
       projectsOfSite.set(cloudId, [...next]);
+    },
+    setIssues(cloudId, issues) {
+      issuesOfSite.set(
+        cloudId,
+        new Map(issues.map((issue) => [issue.key, { ...issue }])),
+      );
+    },
+    setIssueStatus(cloudId, key, status) {
+      const issue = issuesOfSite.get(cloudId)?.get(key);
+      if (issue === undefined) throw new Error(`No issue ${key} in the fake.`);
+      issue.status = status;
+      issue.updated = new Date().toISOString();
+    },
+    webhooks: () =>
+      [...registeredWebhooks.values()].map(
+        ({ grantId: _grantId, ...hook }) => ({
+          ...hook,
+          events: [...hook.events],
+        }),
+      ),
+    setWebhookExpiry(id, expiresAt) {
+      const hook = registeredWebhooks.get(id);
+      if (hook === undefined)
+        throw new Error(`No webhook ${String(id)} in the fake.`);
+      hook.expiresAt = expiresAt;
+    },
+    dropWebhook(id) {
+      registeredWebhooks.delete(id);
+    },
+    async deliver(webhookId, delivery) {
+      const hook = registeredWebhooks.get(webhookId);
+      if (hook === undefined)
+        throw new Error(`No webhook ${String(webhookId)} in the fake.`);
+      const issue = issuesOfSite.get(hook.cloudId)?.get(delivery.issueKey);
+      if (issue === undefined)
+        throw new Error(`No issue ${delivery.issueKey} in the fake.`);
+      const timestamp = delivery.timestamp ?? Date.now();
+      const identifier =
+        delivery.identifier ?? `fake-delivery-${String(nextIdentifier++)}`;
+      const payload = {
+        timestamp,
+        webhookEvent: delivery.webhookEvent,
+        issue_event_type_name: "issue_generic",
+        user: delivery.user ?? {
+          accountId: account.id,
+          displayName: account.name,
+        },
+        issue: issueJson(issue, `http://${host}`, hook.cloudId),
+        ...(delivery.webhookEvent === "jira:issue_updated"
+          ? { changelog: { id: "1", items: delivery.changelog ?? [] } }
+          : {}),
+        ...(delivery.webhookEvent === "comment_created"
+          ? { comment: { id: "1", body: "a comment" } }
+          : {}),
+        matchedWebhookIds: [webhookId],
+      };
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        "x-atlassian-webhook-identifier": identifier,
+        "x-atlassian-webhook-flow": "Primary",
+      };
+      const bearer = delivery.bearer ?? "valid";
+      if (bearer !== "none") {
+        const head = Buffer.from(
+          JSON.stringify({ alg: "HS256", typ: "JWT" }),
+        ).toString("base64url");
+        const claims = Buffer.from(
+          JSON.stringify({
+            iat: Math.floor(Date.now() / 1000),
+            exp: Math.floor(Date.now() / 1000) + 300,
+          }),
+        ).toString("base64url");
+        const signature = createHmac(
+          "sha256",
+          bearer === "wrong" ? "another-secret" : clientSecret,
+        )
+          .update(`${head}.${claims}`)
+          .digest("base64url");
+        headers.authorization = `Bearer ${head}.${claims}.${signature}`;
+      }
+      const result = await fetch(delivery.url ?? hook.url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+      const text = await result.text();
+      let parsed: unknown = text;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        // not JSON: the text stays
+      }
+      return { status: result.status, body: parsed, identifier };
     },
     denyNextConsent() {
       denyNext = true;
