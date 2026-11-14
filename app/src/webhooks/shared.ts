@@ -19,6 +19,7 @@ import {
   type WebhookHandler,
   type TicketAnswerTaker,
   type TrackerWriter,
+  type StatusStarter,
   type WorkflowStarter,
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
@@ -50,6 +51,8 @@ export function getJobQueueReviewTriggerIntake(
 export function getGithubAppWebhookHandler(
   options: {
     workflowsFor?: (workspaceId: string) => WorkflowStarter;
+    /** #1036: what starts the workflows a move of a ticket into a board status starts in one workspace. */
+    statusesFor?: (workspaceId: string) => StatusStarter;
     /** #920: what takes the answer of a comment `/answer ...` in one workspace. */
     answersFor?: (workspaceId: string) => TicketAnswerTaker;
     /** What writes the changes of tickets of one workspace into the ticket mirror (#923); the route passes it in like `workflowsFor`. */
@@ -77,6 +80,9 @@ export function getGithubAppWebhookHandler(
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),
+      ...(options.statusesFor === undefined
+        ? {}
+        : { statuses: options.statusesFor(workspaceId) }),
       ...(options.answersFor === undefined
         ? {}
         : { answers: options.answersFor(workspaceId) }),

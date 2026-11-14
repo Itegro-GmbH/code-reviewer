@@ -37,7 +37,17 @@ import { describeFailure } from "./messages.ts";
 export type NewProjectChoice = { repositoryId: string; fullName: string };
 
 /** The built-in lanes a new project can copy, by the key the route takes. */
-const LANE_KEYS = ["issue-to-pr", "review-a-pull-request"] as const;
+const LANE_KEYS = [
+  "issue-to-pr",
+  "issue-to-pr-status",
+  "review-a-pull-request",
+] as const;
+
+/** The lanes ticked at the start: the status variant needs the board to have its statuses (#1036), so it is the project's choice. */
+const LANES_BY_DEFAULT: readonly string[] = [
+  "issue-to-pr",
+  "review-a-pull-request",
+];
 
 type BoardsState =
   | { kind: "none_chosen" }
@@ -77,7 +87,7 @@ export function NewProjectDialog({
   const [problem, setProblem] = useState<string | null>(null);
   const [boards, setBoards] = useState<BoardsState>({ kind: "none_chosen" });
   const [boardPick, setBoardPick] = useState("");
-  const [lanes, setLanes] = useState<readonly string[]>(LANE_KEYS);
+  const [lanes, setLanes] = useState<readonly string[]>(LANES_BY_DEFAULT);
   // Set when the project exists but some lanes could not be copied: the dialog stays to say so.
   const [createdAt, setCreatedAt] = useState<string | null>(null);
 

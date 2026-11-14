@@ -47,6 +47,7 @@ export const NEW_PROJECT_COPY = {
     "Copies of the built-in lanes; the project owns them and you change them without changing the built-in.",
   laneNames: {
     "issue-to-pr": "Issue to PR",
+    "issue-to-pr-status": "Issue to PR (status)",
     "review-a-pull-request": "Review a pull request",
   } as Record<string, string>,
   laneProblem: (names: string) =>

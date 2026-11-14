@@ -16,7 +16,7 @@ write-back come on top and call Jira through `JiraTokens.request`. How an owner 
 | `rate-limits.ts`                      | The shared counters of "Connect Jira" (`start`, `callback`; per person and for the instance)                                                                                                                                                                |
 | `ui/`                                 | The Jira card of the Integrations tab (`jira-section.tsx`), its data (`jira-page.ts`), the calls (`api.ts`) and the words (`messages.ts`)                                                                                                                   |
 
-The table is `jira_connections` (`src/db/migrations/20261114150000_create_jira_connections.ts`), read and written only through
+The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_connections.ts`), read and written only through
 `src/db/repositories/jira-connections-repository.ts`, created for one workspace.
 
 ## The flow

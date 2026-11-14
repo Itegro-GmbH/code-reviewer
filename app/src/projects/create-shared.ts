@@ -8,6 +8,8 @@ import { createIntegrationsRepository } from "../db/repositories/integrations-re
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { ticketProviderRegistry } from "../integrations/registry.ts";
+import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
+import { boardStatusNames } from "./board-statuses.ts";
 import type { NewProjectDependencies } from "./create-http.ts";
 
 /** The boards of a repository of the workspace, asked at GitHub with a token that may read boards and nothing else. */
@@ -51,6 +53,28 @@ export function boardsFor(
           : "unknown",
       );
       return { kind: "failed" };
+    }
+  };
+}
+
+/**
+ * The status names of the board of a project (#1036), for the lane builder's status trigger: the options of the Status field of the board the
+ * project chose. Empty when the project has no board, or GitHub cannot be asked: the page still loads and the names are typed. Never throws.
+ */
+export function boardStatusNamesFor(
+  workspaceId: string,
+): (projectId: string) => Promise<string[]> {
+  const projects = createProjectsRepository(getDatabase(), workspaceId);
+  const boards = boardsFor(workspaceId);
+  return async (projectId) => {
+    try {
+      const project = await projects.getById(projectId);
+      const chosen = project?.ticketSource.board?.projectV2Id;
+      // A project without a board has nothing to offer, so GitHub is not asked.
+      if (project === undefined || chosen === undefined) return [];
+      return boardStatusNames(await boards(project.repositoryId), chosen);
+    } catch {
+      return [];
     }
   };
 }

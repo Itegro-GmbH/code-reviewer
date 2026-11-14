@@ -32,6 +32,7 @@ function Harness({
   pointer,
   problems = [],
   profiles = PROFILES,
+  statuses,
   seen,
   samples,
   onRemove,
@@ -41,6 +42,7 @@ function Harness({
   pointer: string;
   problems?: Problem[];
   profiles?: ProfileOption[];
+  statuses?: string[];
   seen?: (doc: Doc) => void;
   samples?: ReachSamples;
   onRemove?: () => void;
@@ -54,6 +56,7 @@ function Harness({
       pointer={pointer}
       problems={sorted.byNode.get(pointer) ?? []}
       profiles={profiles}
+      {...(statuses === undefined ? {} : { statuses })}
       lookup={(request) => reachLookupFor(doc, samples)(request)}
       headingRef={{ current: null }}
       onChange={(next) => {
@@ -848,5 +851,112 @@ describe("references in the fields (#927)", () => {
     expect(add.value).toBe("z");
     fireEvent.click(screen.getByRole("button", { name: "elsewhere a b" }));
     expect(add.value).toBe("a\nb");
+  });
+});
+
+describe("a status trigger (#1036)", () => {
+  const lane = (): Doc =>
+    ({
+      version: 1,
+      name: "Status lane",
+      triggers: [
+        {
+          id: "ready",
+          kind: "ticket.statusChanged",
+          to: "Ready for agent",
+          steps: [],
+        },
+      ],
+      steps: [],
+    }) as Doc;
+
+  it("offers the status names of the project's board for `to` and `from`, keeps a name the board does not have, and writes the choice", () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={lane()}
+        pointer="/triggers/0"
+        statuses={["Backlog", "Ready for agent", "In progress"]}
+        seen={seen}
+      />,
+    );
+
+    expect(value("Kind")).toBe("ticket.statusChanged");
+    expect(value("Moved into")).toBe("Ready for agent");
+    expect(value("Moved out of")).toBe("");
+    const names = within(screen.getByLabelText("Moved into"))
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+    expect(names).toEqual(["Backlog", "Ready for agent", "In progress"]);
+
+    fireEvent.change(screen.getByLabelText("Moved out of"), {
+      target: { value: "Backlog" },
+    });
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/triggers/0/from")).toBe(
+      "Backlog",
+    );
+    fireEvent.change(screen.getByLabelText("Moved out of"), {
+      target: { value: "" },
+    });
+    expect(
+      getAt(seen.mock.lastCall?.[0] as Doc, "/triggers/0"),
+    ).not.toHaveProperty("from");
+    fireEvent.change(screen.getByLabelText("Moved into"), {
+      target: { value: "In progress" },
+    });
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/triggers/0/to")).toBe(
+      "In progress",
+    );
+  });
+
+  it("keeps a `to` the board does not have as an option of its own, so that nothing is rewritten", () => {
+    render(
+      <Harness
+        start={lane()}
+        pointer="/triggers/0"
+        statuses={["Backlog", "Done"]}
+      />,
+    );
+
+    expect(value("Moved into")).toBe("Ready for agent");
+    expect(
+      within(screen.getByLabelText("Moved into"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Ready for agent", "Backlog", "Done"]);
+  });
+
+  it("takes the names typed when the project has no board to offer, and says that a status trigger is no place for the lane's own status", () => {
+    const seen = vi.fn();
+    render(<Harness start={lane()} pointer="/triggers/0" seen={seen} />);
+
+    expect(value("Moved into")).toBe("Ready for agent");
+    fireEvent.change(screen.getByLabelText("Moved into"), {
+      target: { value: "Agent please" },
+    });
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/triggers/0/to")).toBe(
+      "Agent please",
+    );
+    expect(screen.getByText(/the lane's own moves included/)).toBeTruthy();
+  });
+
+  // #1036: a run starts only for the board the project chose, so a lane of a project without a board would never start.
+  it("warns that nothing starts while the project has no board, and not when the board's statuses are offered", () => {
+    const { unmount } = render(
+      <Harness start={lane()} pointer="/triggers/0" />,
+    );
+    expect(screen.getByRole("note").textContent).toMatch(
+      /starts no run until the lane's project has chosen a board/,
+    );
+    unmount();
+
+    render(
+      <Harness
+        start={lane()}
+        pointer="/triggers/0"
+        statuses={["Backlog", "Ready for agent"]}
+      />,
+    );
+    expect(screen.queryByRole("note")).toBeNull();
   });
 });

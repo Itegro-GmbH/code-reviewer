@@ -91,6 +91,7 @@ export const TRIGGER_COPY = {
   manual: "Started by hand",
   api: "Started through the API",
   "ticket.labeled": "A label on a ticket",
+  "ticket.statusChanged": "A ticket moved into a status",
   "github.issueLabeled": "A label on an issue",
   "pullRequest.pushed": "A push to a pull request",
   schedule: "On a schedule",

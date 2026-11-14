@@ -120,14 +120,12 @@ describe("ticket.setStatus", () => {
     ]);
   });
 
-  // #917-T305
-  it("is not allowed after a failure: it is no comment and no label", () => {
+  // #917-T305, changed by #1036: the status variant of "Issue to PR" puts the ticket back on the board after a failure
+  it("is allowed after a failure: it changes the ticket like a comment or a label does, and costs nothing", () => {
     const document = afterPullRequest([]);
     document.onFailure = [setStatus()];
 
-    expect(codes(document)).toEqual([
-      ["/onFailure/0/connector", "on_failure_step_not_allowed"],
-    ]);
+    expect(codes(document)).toEqual([]);
   });
 
   // #917-T307

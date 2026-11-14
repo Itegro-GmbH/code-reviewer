@@ -268,6 +268,8 @@ describe("what a delivery says about the ticket mirror", () => {
         kind: "board_status_changed",
         nodeId: "I_kwDOAAA12",
         status: "In Progress",
+        from: "Todo",
+        actor: { login: "bob", externalId: "1002" },
         projectId: "PVT_1",
       },
     });
@@ -275,6 +277,38 @@ describe("what a delivery says about the ticket mirror", () => {
       parse("projects_v2_item.edited.other-field", "projects_v2_item"),
     ).toMatchObject({
       kind: "ignored",
+    });
+  });
+
+  // #1036-T01
+  it("says the status the item had before and who moved it, and names none of them when the delivery does not", () => {
+    const edited = webhookFixture("projects_v2_item.edited") as {
+      changes: { field_value: Record<string, unknown> };
+      sender?: unknown;
+    };
+    const { from: _from, ...withoutFrom } = edited.changes.field_value;
+    void _from;
+    const { sender: _sender, ...withoutSender } = edited;
+    void _sender;
+
+    expect(
+      parseTrackerChange({
+        integrationId: "i-1",
+        eventName: "projects_v2_item",
+        payload: {
+          ...withoutSender,
+          changes: { field_value: withoutFrom },
+        },
+      }),
+    ).toEqual({
+      kind: "change",
+      change: {
+        kind: "board_status_changed",
+        nodeId: "I_kwDOAAA12",
+        status: "In Progress",
+        from: null,
+        projectId: "PVT_1",
+      },
     });
   });
 

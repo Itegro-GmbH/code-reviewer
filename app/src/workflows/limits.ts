@@ -29,6 +29,8 @@ export const DOCUMENT_MAX_BYTES = 256 * 1024;
 export const NAME_MAX_LENGTH = 100;
 /** The label that starts a workflow. */
 export const LABEL_MAX_LENGTH = 100;
+/** The longest name of a status of a status trigger (#1036): what a board names an option; GitHub's own bound is far below. */
+export const STATUS_NAME_MAX_LENGTH = 100;
 export const ID_MAX_LENGTH = 64;
 export const DESCRIPTION_MAX_LENGTH = 1000;
 export const TEMPLATE_MAX_LENGTH = 20_000;

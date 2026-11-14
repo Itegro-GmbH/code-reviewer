@@ -18,6 +18,7 @@ import {
   DESCRIPTION_MAX_LENGTH,
   ERRORS_MAX,
   LABEL_MAX_LENGTH,
+  STATUS_NAME_MAX_LENGTH,
   NAME_MAX_LENGTH,
   NESTING_DEPTH_MAX,
   STEPS_MAX,
@@ -229,10 +230,57 @@ type CheckedTrigger = {
   input?: ResultSchema;
   inputInvalid?: boolean;
   label?: string;
+  /** `to` and `from` of a status trigger (#1036), when well formed. */
+  to?: string;
+  from?: string;
   /** The pre-steps as written (not checked yet) and where they are. */
   steps: unknown;
   stepsPath: string;
 };
+
+/**
+ * The name of a status of a status trigger (`to`, `from`): a text of 1 to `STATUS_NAME_MAX_LENGTH` characters that is not only spaces and
+ * has none at either end. The run compares it exactly with the board's name, so a name with spaces around it would never start anything.
+ */
+function checkStatusName(
+  value: unknown,
+  where: string,
+  required: boolean,
+  report: Report,
+): string | undefined {
+  const field = where.slice(where.lastIndexOf("/") + 1);
+  if (value === undefined) {
+    if (required)
+      report(
+        issue(
+          where,
+          "missing_field",
+          `'${field}' is required: the status a ticket must be moved into to start the workflow, as the board names it.`,
+        ),
+      );
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    report(issue(where, "wrong_type", `'${field}' is a text.`));
+    return undefined;
+  }
+  if (
+    textLength(value) < 1 ||
+    textLength(value) > STATUS_NAME_MAX_LENGTH ||
+    value.trim() !== value ||
+    value === ""
+  ) {
+    report(
+      issue(
+        where,
+        "invalid_value",
+        `'${field}' has 1 to ${STATUS_NAME_MAX_LENGTH} characters, is not only spaces and has no spaces at either end.`,
+      ),
+    );
+    return undefined;
+  }
+  return value;
+}
 
 /**
  * One trigger node. `legacy` is the single `trigger` of a document written before #916: it has no `id` and no `steps`, and its pointers
@@ -332,6 +380,18 @@ function checkTrigger(
         ),
       );
     else checked.label = label;
+    return checked;
+  }
+  if (trigger === "ticket.statusChanged") {
+    const to = checkStatusName(value.to, pointer(path, "to"), true, report);
+    if (to !== undefined) checked.to = to;
+    const from = checkStatusName(
+      value.from,
+      pointer(path, "from"),
+      false,
+      report,
+    );
+    if (from !== undefined) checked.from = from;
     return checked;
   }
   if (trigger === "schedule") {
@@ -734,10 +794,16 @@ export function validateWorkflow(
   const retriggerLabels = triggers.flatMap((trigger) =>
     trigger.label === undefined ? [] : [trigger.label.trim().toLowerCase()],
   );
+  // The statuses that start the workflow: a step may not move a ticket into one of them, except in the pre-steps of a trigger that is no
+  // status trigger (#1036). Only a warning: nothing here guards against the factory's own moves, so the lane would start itself again.
+  const retriggerStatuses = triggers.flatMap((trigger) =>
+    trigger.to === undefined ? [] : [trigger.to.trim().toLowerCase()],
+  );
   const checker: Checker = {
     resolver,
     index,
     report,
+    retriggerStatuses,
     halted:
       options.done === undefined
         ? sink.halted
@@ -775,6 +841,11 @@ export function validateWorkflow(
                 : [trigger.label.trim().toLowerCase()],
           }
         : { ...checker, retriggerLabels: [] };
+    own.retriggerStatuses =
+      canonicalOf(trigger) === "ticket.statusChanged" &&
+      trigger.to !== undefined
+        ? [trigger.to.trim().toLowerCase()]
+        : [];
     checkSteps(
       trigger.steps,
       trigger.stepsPath,

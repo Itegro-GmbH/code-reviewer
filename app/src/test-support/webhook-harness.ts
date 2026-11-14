@@ -106,6 +106,9 @@ export async function startWebhookHarness(
   let workflows: WorkspaceCollaborators["workflows"];
   // #920: what takes the answer of a comment `/answer ...`, set the same way.
   let answers: WorkspaceCollaborators["answers"];
+  // #923, #1036: the ticket mirror and what starts the workflows of a move into a board status, set the same way.
+  let tracker: WorkspaceCollaborators["tracker"];
+  let statuses: WorkspaceCollaborators["statuses"];
   const handler = createGithubAppWebhookHandler({
     registry,
     tickets: base.tickets,
@@ -118,6 +121,8 @@ export async function startWebhookHarness(
       intake,
       ...(workflows === undefined ? {} : { workflows }),
       ...(answers === undefined ? {} : { answers }),
+      ...(tracker === undefined ? {} : { tracker }),
+      ...(statuses === undefined ? {} : { statuses }),
     }),
     automatic,
     logger,
@@ -240,6 +245,14 @@ export async function startWebhookHarness(
     /** Hands the taker of `/answer` comments to the route's handler (#920). */
     setTicketAnswers(taker: WorkspaceCollaborators["answers"]) {
       answers = taker;
+    },
+    /** Hands the ticket mirror to the route's handler (#923). */
+    setTracker(writer: WorkspaceCollaborators["tracker"]) {
+      tracker = writer;
+    },
+    /** Hands the status trigger to the route's handler (#1036). */
+    setStatusTrigger(starter: WorkspaceCollaborators["statuses"]) {
+      statuses = starter;
     },
     infoLines,
     errorLines,

@@ -66,8 +66,10 @@ const FAILURE_TEXT_FIELDS: ReadonlySet<string> = new Set(["code", "message"]);
 function isOutsiderText(path: readonly string[]): boolean {
   if (path[0] === "failure")
     return path[1] !== undefined && FAILURE_TEXT_FIELDS.has(path[1]);
+  if (path[0] !== "trigger") return false;
+  // The names of the board statuses a status trigger carries (#1036) are the organisation's own settings.
+  if (path[1] === "status") return path[2] === "from" || path[2] === "to";
   return (
-    path[0] === "trigger" &&
     (path[1] === "issue" || path[1] === "ticket") &&
     path[2] !== undefined &&
     OUTSIDER_TRIGGER_FIELDS.has(path[2])

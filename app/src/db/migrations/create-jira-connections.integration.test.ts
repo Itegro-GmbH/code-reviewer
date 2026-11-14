@@ -12,7 +12,7 @@ import { migrationProvider } from "./index.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 import { withoutColumnsAddedLater } from "../../test-support/columns-added-later.ts";
 
-const THIS = "20261114150000_create_jira_connections";
+const THIS = "20261114160000_create_jira_connections";
 const T = "2026-11-14T08:00:00.000Z";
 
 function upTo(include: (name: string) => boolean): MigrationProvider {

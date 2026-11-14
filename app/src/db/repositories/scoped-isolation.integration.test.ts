@@ -2354,6 +2354,12 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.listWithIssueTrigger(b.repository.id),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // #1036-T01: the workflows a move into a board status starts are read in the workspace of the installation only
+  {
+    name: "workflows.listWithStatusTrigger",
+    run: (a, b) => a.workflows.listWithStatusTrigger(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   {
     name: "workflows.getVersion",
     run: (a, b) => a.workflows.getVersion(b.workflow.id, 1),
