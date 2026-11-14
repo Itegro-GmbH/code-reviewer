@@ -191,8 +191,14 @@ const PROTECTED_DATA_ROUTES = [
   // Not about one workspace: creating one, accepting an invitation (src/auth/access.ts, NO_WORKSPACE_PATHS).
   "/api/workspaces",
   "/api/invitations/accept",
+  // Where Atlassian sends the browser after the consent page of a Jira connection (#1037, src/jira/): a signed in person only.
+  "/api/jira/callback",
   // The data routes of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/api/w/[workspace]",
+  "/api/w/[workspace]/jira/choose",
+  "/api/w/[workspace]/jira/connect",
+  "/api/w/[workspace]/jira/connections",
+  "/api/w/[workspace]/jira/connections/[connectionId]",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",

@@ -12,6 +12,7 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createJiraHarness } from "../test-support/jira-harness.ts";
 import { JIRA_SCOPES, jiraCallbackUrl } from "./config.ts";
+import { loadJiraSection } from "./ui/jira-page.ts";
 import { PENDING_GRANT_TTL_MS } from "./service.ts";
 import { createJiraTokens, REFRESH_MARGIN_MS } from "./tokens.ts";
 
@@ -722,5 +723,64 @@ describe("secrets", () => {
     for (const secret of secretsOfTheRun) expect(text).not.toContain(secret);
     // The start of the address of a state is ours to show, the value of a use of a connection prints as a placeholder.
     expect(seen.join("")).toContain("[secret]");
+  });
+});
+
+describe("the Jira card's data", () => {
+  // #1037
+  it("holds the connections, the waiting choice for the person who made it, and the notice of the flow that just ended", async () => {
+    const { h, ws, owner } = await setup({
+      atlassian: { sites: [SITE_A, SITE_B] },
+    });
+    const admin = await h.person("admin", {
+      workspaceId: ws.id,
+      role: "admin",
+    });
+    await h.walk(owner, ws, "owner");
+    const load = (
+      actor: typeof owner | null,
+      canManage: boolean,
+      jira?: string,
+    ) =>
+      loadJiraSection({
+        service: h.jira.service,
+        workspaceId: ws.id,
+        actor,
+        canManage,
+        query: { jira },
+      });
+
+    const mine = await load(owner, true, "site_choice_ready");
+    expect(mine.configured).toBe(true);
+    expect(mine.connections).toEqual([]);
+    expect(mine.choices?.map((c) => c.siteName)).toEqual(["acme", "beta"]);
+    expect(mine.notice?.tone).toBe("info");
+    // Another admin, a member and a page without a session see no choice; an unknown code says nothing.
+    expect((await load(admin, true)).choices).toBeNull();
+    expect((await load(owner, false)).choices).toBeNull();
+    expect((await load(null, true)).choices).toBeNull();
+    expect((await load(owner, true, "<script>")).notice).toBeNull();
+    // Nothing in the data is a token.
+    expect(JSON.stringify(mine)).not.toMatch(/token/i);
+  });
+
+  // #1037
+  it("says the feature is not configured where the Atlassian settings are missing", async () => {
+    const off = await createJiraHarness({ unconfigured: true });
+    const ws = await off.workspace("off");
+
+    const data = await loadJiraSection({
+      service: off.jira.service,
+      workspaceId: ws.id,
+      actor: null,
+      canManage: true,
+      query: {},
+    });
+
+    expect(data).toMatchObject({
+      configured: false,
+      connections: [],
+      choices: null,
+    });
   });
 });

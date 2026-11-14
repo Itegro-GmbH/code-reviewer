@@ -41,7 +41,7 @@ export const JIRA_ERROR_STATUS: Record<JiraErrorCode, number> = {
   state_invalid: 400,
   access_denied: 400,
   jira_authorization_refused: 400,
-  jira_unreachable: 502,
+  jira_unreachable: 503,
   jira_no_site: 400,
   jira_site_mismatch: 400,
   jira_choice_invalid: 400,

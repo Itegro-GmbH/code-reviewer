@@ -222,7 +222,7 @@ export function createJiraTokens({
     };
   }
 
-  async function use(
+  async function acquire(
     connectionId: string,
     force = false,
     rejected: string | null = null,
@@ -237,12 +237,12 @@ export function createJiraTokens({
   }
 
   return {
-    use: (connectionId) => use(connectionId),
+    use: (connectionId) => acquire(connectionId),
 
     async request(connectionId, path, init) {
       if (!path.startsWith("/"))
         throw new Error("A Jira path starts with a slash.");
-      let result = await use(connectionId);
+      let result = await acquire(connectionId);
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (!result.ok) return result;
         const response = await client.send(
@@ -253,7 +253,7 @@ export function createJiraTokens({
         if (response === null) return { ok: false, error: "jira_unavailable" };
         if (response.status !== 401 || attempt === 1)
           return { ok: true, response };
-        result = await use(connectionId, true, result.accessToken.reveal());
+        result = await acquire(connectionId, true, result.accessToken.reveal());
       }
       return { ok: false, error: "jira_unavailable" };
     },

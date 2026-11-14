@@ -148,6 +148,8 @@ connection (`integration`) and the container of the tickets (`repo`: GitHub's re
 `ticket.setStatus`, the question of an agent on its ticket) acts through the provider the ticket source of the run's project names and not through
 `connectorTargetOf(repositoryId)`, which stays the way to the git provider (pull requests, reviews, the question on a pull request): `workflow-runs/ticket-target.ts`
 resolves the provider, `workflow-runs/shared.ts` finds the container. A lane without a project acts through GitHub on the repository of the run.
+
+The connection of a workspace to Jira Cloud (#1037, OAuth 2.0 3LO, `src/jira/`) is not a git integration and has no row in `integrations`: it has its own table, `jira_connections`, and `src/jira/README.md`; the Jira ticket provider (#1038 onwards) will reach a site through `JiraTokens.request`.
 `commentOnIssue`, `updateIssueComment` and `changeIssueLabels` stay on the git provider for the conversation below a pull request (GitHub numbers it like an issue); the
 GitHub ticket provider shares their implementation (`providers/github-app/issue-actions.ts`).
 

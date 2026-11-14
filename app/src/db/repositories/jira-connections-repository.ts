@@ -80,9 +80,7 @@ export type JiraConnectionsRepository = {
   get(id: string): Promise<StoredJiraConnection | undefined>;
   findBySite(cloudId: string): Promise<StoredJiraConnection | undefined>;
   /** The connection with its sealed pair and the version of the pair. */
-  readTokens(
-    id: string,
-  ): Promise<
+  readTokens(id: string): Promise<
     | {
         connection: StoredJiraConnection;
         sealed: SealedTokens;

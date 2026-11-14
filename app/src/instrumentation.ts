@@ -45,6 +45,8 @@ export async function register(): Promise<void> {
   warnAboutRunnerToken(process.env);
   const { logOperatorApiState } = await import("./operator-api/startup.ts");
   logOperatorApiState(process.env);
+  const { jiraStateLine } = await import("./jira/config.ts");
+  console.info(jiraStateLine(process.env));
   const { warnAboutDebounce } = await import("./webhooks/debounce-config.ts");
   warnAboutDebounce(process.env);
 }

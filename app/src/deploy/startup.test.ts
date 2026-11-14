@@ -128,6 +128,30 @@ describe("checking the operator API token when the server starts", () => {
     expect(log).not.toHaveBeenCalled();
   });
 
+  // #1037
+  it("lets a deployment without the Atlassian settings start, and stops one that has only one of the two, naming the variable", async () => {
+    const without = await run({ ...validEnv });
+    const half = await run({
+      ...validEnv,
+      ATLASSIAN_CLIENT_ID: "client-id-value",
+    });
+    const both = await run({
+      ...validEnv,
+      ATLASSIAN_CLIENT_ID: "client-id-value",
+      ATLASSIAN_CLIENT_SECRET: "client-secret-value",
+    });
+
+    expect(without.exit).not.toHaveBeenCalled();
+    expect(both.exit).not.toHaveBeenCalled();
+    expect(half.exit).toHaveBeenCalledWith(1);
+    expect(String(half.log.mock.calls[0]?.[0])).toContain(
+      "ATLASSIAN_CLIENT_SECRET is not set",
+    );
+    expect(String(half.log.mock.calls[0]?.[0])).not.toContain(
+      "client-id-value",
+    );
+  });
+
   // #275-T02
   it("stops the start when the operator token equals RUNNER_TOKEN or APP_SECRET, naming only the variables", async () => {
     const same = await run({

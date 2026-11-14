@@ -10,6 +10,9 @@ import { createIntegrationsRepository } from "@/db/repositories/integrations-rep
 import { createRepositoriesRepository } from "@/db/repositories/repositories-repository";
 import { getDatabase } from "@/db/startup";
 import { getInstallationBinding } from "@/installation-binding/shared";
+import { loadJiraSection } from "@/jira/ui/jira-page";
+import { JiraSection } from "@/jira/ui/jira-section";
+import { getJira } from "@/jira/shared";
 import {
   ConnectionsPageContent,
   loadConnectionsPage,
@@ -41,7 +44,7 @@ export default async function ConnectionsPage({
       workspaceSlug={workspace.slug}
       canManage={can(role, "manage_connections")}
       userId={user.id}
-      query={{ github: query.github, picker: query.picker }}
+      query={{ github: query.github, picker: query.picker, jira: query.jira }}
     />
   );
 }
@@ -57,7 +60,7 @@ async function ConnectionsContent({
   workspaceSlug: string;
   canManage: boolean;
   userId: string;
-  query: { github?: unknown; picker?: unknown };
+  query: { github?: unknown; picker?: unknown; jira?: unknown };
 }) {
   const db = getDatabase();
   const sessionId = await lookupSessionId();
@@ -76,6 +79,15 @@ async function ConnectionsContent({
     query,
     actor: sessionId === null ? null : { id: userId, sessionId },
   });
+  // The Jira connection (#1037, epic #1034): the card is there where the Atlassian app is set up, or while the workspace still has a
+  // connection (it can then be seen and removed).
+  const jira = await loadJiraSection({
+    service: getJira().service,
+    workspaceId,
+    actor: sessionId === null ? null : { id: userId, sessionId },
+    canManage,
+    query: { jira: query.jira },
+  });
   return (
     <SettingsScreen
       workspaceSlug={workspaceSlug}
@@ -89,6 +101,15 @@ async function ConnectionsContent({
         data={data}
         heading={false}
       />
+      {jira.configured || jira.connections.length > 0 ? (
+        <div className="mt-6">
+          <JiraSection
+            workspaceSlug={workspaceSlug}
+            canManage={canManage}
+            data={jira}
+          />
+        </div>
+      ) : null}
     </SettingsScreen>
   );
 }
