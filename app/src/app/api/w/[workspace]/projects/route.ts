@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // POST /api/w/:workspace/projects (#922): creates the project of a repository in the factory: its one ticket source (the GitHub issues of
-// the repository) with the optional GitHub Project that is its board, and the built-in lanes it starts with. Switching a repository on or
+// the repository, or since #1038 a Jira project) with the optional GitHub Project that is its board, and the built-in lanes it starts with. Switching a repository on or
 // off for review stays `PUT .../repositories/:repositoryId/project`; this is the factory's "New project". Admins and Owners only
 // (`manage_projects`), like that route, and only in a deployment with the capability `implementer`. The logic is in
 // src/projects/create-http.ts. A project that was created starts the first full sync of its tickets after the response (#923).
 import { after, connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { boardsFor } from "@/projects/create-shared";
+import { boardsFor, jiraProjectsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
@@ -35,7 +35,9 @@ export async function POST(
       requireUser: () => Promise.resolve(access.user),
       service: projectServiceFor(
         access.workspace.id,
-        async ({ repositoryId }) => {
+        async ({ repositoryId, ticketProvider }) => {
+          // The first sync reads the GitHub issues of the repository: a Jira project's tickets are not those (#1038).
+          if (ticketProvider !== "github") return;
           after(() =>
             trackerServiceFor(access.workspace.id)
               .sync(repositoryId, {
@@ -52,6 +54,7 @@ export async function POST(
         },
       ),
       boards: boardsFor(access.workspace.id),
+      jiraProjects: jiraProjectsFor(access.workspace.id),
       laneKeys: BUILT_IN_LANE_KEYS,
       copyLanes: (user, projectId, keys) =>
         workflowServiceFor(access.workspace.id).copyBuiltIn(

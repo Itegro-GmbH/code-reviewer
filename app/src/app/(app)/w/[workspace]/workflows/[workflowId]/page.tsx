@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { profileServiceFor } from "@/profiles/shared";
-import { boardStatusNamesFor } from "@/projects/create-shared";
+import { statusNamesFor } from "@/projects/create-shared";
 import { loadWorkflowPage, WorkflowPageContent } from "@/workflow-pages/pages";
 import { workflowRunServiceFor } from "@/workflow-runs/shared";
 import { workflowServiceFor } from "@/workflows/shared";
@@ -47,7 +47,7 @@ async function WorkflowContent({
     workflows: workflowServiceFor(workspaceId),
     runs: workflowRunServiceFor(workspaceId),
     profiles: profileServiceFor(workspaceId),
-    statuses: boardStatusNamesFor(workspaceId),
+    statuses: statusNamesFor(workspaceId),
   });
   if (data.kind === "not_found") notFound();
   return (
