@@ -185,10 +185,14 @@ export type ProjectListEntry = {
 };
 
 /**
- * What a project created in the factory says beyond the switch (#922): `board` is the GitHub Project that is its board, or `null` for none.
- * Left out (the review switch of every other deployment), the stored ticket source is not touched.
+ * What a project created in the factory says beyond the switch (#922): `board` is the GitHub Project that is its board, or `null` for none;
+ * `jira` (#1038) makes the tickets those of a Jira project of a connection of the workspace (the code stays in the repository; a Jira source
+ * has no board, so `board` is not read with it). Left out (the review switch of every other deployment), the stored ticket source is not touched.
  */
-export type ActivateOptions = { board?: TicketBoard | null };
+export type ActivateOptions = {
+  board?: TicketBoard | null;
+  jira?: JiraSourceChoice;
+};
 
 export type ActivateResult =
   | {
@@ -203,7 +207,9 @@ export type ActivateResult =
   | { kind: "repository_not_found" }
   | { kind: "repository_unavailable" }
   /** The repository is listed, but its integration is suspended or removed (status `disabled`). */
-  | { kind: "integration_unavailable" };
+  | { kind: "integration_unavailable" }
+  /** `jira` names a connection the workspace does not have (another workspace's, or one removed meanwhile); nothing was written. */
+  | { kind: "jira_connection_not_found" };
 
 export type DeactivateResult =
   | {
@@ -264,7 +270,7 @@ export type ProjectsRepository = {
   /**
    * Sets, changes or clears the board of the ticket source of a project (#937; `null` clears it) and moves `updatedAt`; the rest of the
    * source stays. Works for a project that is switched off too. Returns the project after the change, or undefined (nothing written)
-   * for an id of another workspace.
+   * for an id of another workspace, or for a project whose tickets are not GitHub's (#1038: a Jira source has no board).
    */
   setTicketBoard(
     projectId: string,
@@ -617,12 +623,26 @@ export function createProjectsRepository(
             "repositories.id",
             "projects.repository_id",
           )
-          .select(["projects.id", "projects.repository_id"])
+          .select([
+            "projects.id",
+            "projects.repository_id",
+            "projects.ticket_source",
+          ])
           .where("repositories.workspace_id", "=", workspaceId)
           .where("projects.id", "=", projectId)
           .forUpdate("projects")
           .executeTakeFirst();
         if (current === undefined) return undefined;
+        // A Jira source has no board: the board of a GitHub Project would turn it into the issues of the repository.
+        if (
+          readTicketSource(
+            current.ticket_source,
+            current.repository_id,
+            current.id,
+            warn,
+          ).provider !== "github"
+        )
+          return undefined;
         const row = await trx
           .updateTable("projects")
           .set({
@@ -682,6 +702,21 @@ export function createProjectsRepository(
         if (repository.integration_status !== "active")
           return { kind: "integration_unavailable" };
 
+        // A Jira source takes the connection's row `for share` until this transaction ends: a removal of the connection (`for update`,
+        // src/jira/README.md) waits for the write below and then finds a project that uses it, and an assignment that comes after a
+        // removal finds no row. The workspace is in the query, so another workspace's connection is none.
+        if (options.jira !== undefined) {
+          const connection = await trx
+            .selectFrom("jira_connections")
+            .select("id")
+            .where("workspace_id", "=", workspaceId)
+            .where("id", "=", options.jira.connectionId)
+            .forShare()
+            .executeTakeFirst();
+          if (connection === undefined)
+            return { kind: "jira_connection_not_found" };
+        }
+
         const timestamp = formatTimestamp(now());
         const existing = await trx
           .selectFrom("projects")
@@ -689,13 +724,20 @@ export function createProjectsRepository(
           .where("repository_id", "=", repositoryId)
           .executeTakeFirst();
         const ticketSource =
-          options.board === undefined
-            ? undefined
-            : encodeJson({
-                provider: "github",
+          options.jira !== undefined
+            ? encodeJson({
+                provider: "jira",
                 repositoryId,
-                board: options.board,
-              });
+                connectionId: options.jira.connectionId,
+                projectKey: options.jira.projectKey,
+              })
+            : options.board === undefined
+              ? undefined
+              : encodeJson({
+                  provider: "github",
+                  repositoryId,
+                  board: options.board,
+                });
 
         if (existing === undefined) {
           const row = await trx

@@ -8,8 +8,12 @@ import { sql } from "kysely";
 import { describe, expect, it, vi } from "vitest";
 import type { RepoRef } from "../../integrations/types.ts";
 import { createTestDatabase } from "../../test-support/test-database.ts";
-import { defaultWorkspaceId } from "../../test-support/workspaces.ts";
 import { createIntegrationsRepository } from "./integrations-repository.ts";
+import {
+  addWorkspace,
+  defaultWorkspaceId,
+} from "../../test-support/workspaces.ts";
+import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createProjectsRepository } from "./projects-repository.ts";
 import { createRepositoriesRepository } from "./repositories-repository.ts";
 
@@ -928,3 +932,212 @@ describe("the ticket source of a project (#922)", () => {
     ).toBeUndefined();
   });
 });
+
+describe("a Jira project as the ticket source (#1038)", () => {
+  const SEALED = { ciphertext: "c1", nonce: "n1", keyVersion: 1 };
+  const JIRA = { connectionId: "conn-a", projectKey: "PROJ" };
+
+  async function withConnection() {
+    const world = await setup();
+    const workspaceId = await defaultWorkspaceId(world.db);
+    const connections = createJiraConnectionsRepository(world.db, workspaceId);
+    await connections.save({
+      id: "conn-a",
+      cloudId: "cloud-a",
+      siteUrl: "https://acme.atlassian.net",
+      siteName: "acme",
+      accountId: "acct",
+      accountName: "Ada",
+      scopes: ["read:jira-work"],
+      sealed: SEALED,
+      accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+      connectedBy: null,
+    });
+    return { ...world, workspaceId, connections };
+  }
+
+  // #1038-T01
+  it("writes the Jira source with the connection and the project key, the code staying in the repository, and reads it back", async () => {
+    const { projects, first, db } = await withConnection();
+
+    const result = await projects.activate(first.id, { jira: JIRA });
+
+    if (result.kind !== "activated") throw new Error("seeding failed");
+    const expected = {
+      provider: "jira",
+      repositoryId: first.id,
+      board: null,
+      connectionId: "conn-a",
+      projectKey: "PROJ",
+    };
+    expect(result.project.ticketSource).toEqual(expected);
+    expect(await projects.getById(result.project.id)).toEqual(result.project);
+    expect(await projects.get(first.id)).toMatchObject({
+      ticketSource: expected,
+    });
+    const [row] = await db.selectFrom("projects").selectAll().execute();
+    // The stored text is the source of the issue's contract: no board.
+    expect(JSON.parse(row?.ticket_source ?? "null")).toEqual({
+      provider: "jira",
+      repositoryId: first.id,
+      connectionId: "conn-a",
+      projectKey: "PROJ",
+    });
+  });
+
+  // #1038-T01
+  it("refuses a connection of another workspace and one that does not exist, and writes no project", async () => {
+    const { projects, first, db } = await withConnection();
+    const otherWorkspace = await addWorkspace(db, "other");
+    await createJiraConnectionsRepository(db, otherWorkspace).save({
+      id: "conn-b",
+      cloudId: "cloud-b",
+      siteUrl: "https://beta.atlassian.net",
+      siteName: "beta",
+      accountId: "acct",
+      accountName: "Bob",
+      scopes: ["read:jira-work"],
+      sealed: SEALED,
+      accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+      connectedBy: null,
+    });
+
+    expect(
+      await projects.activate(first.id, {
+        jira: { connectionId: "conn-b", projectKey: "PROJ" },
+      }),
+    ).toEqual({ kind: "jira_connection_not_found" });
+    expect(
+      await projects.activate(first.id, {
+        jira: { connectionId: "no-such", projectKey: "PROJ" },
+      }),
+    ).toEqual({ kind: "jira_connection_not_found" });
+    expect(await db.selectFrom("projects").selectAll().execute()).toEqual([]);
+  });
+
+  // #1038-T01
+  it("takes the connection's row for share in the transaction that writes the source: a removal that starts meanwhile waits and is then refused", async () => {
+    const world = await withConnection();
+    const { db, first, workspaceId, connections } = world;
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    let reached: () => void = () => undefined;
+    const inside = new Promise<void>((resolve) => (reached = resolve));
+    // The settings of a new project are read inside the activation's transaction, after the connection was locked: the pause holds it there.
+    const slow = createProjectsRepository(
+      db,
+      workspaceId,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        reached();
+        await gate;
+        return {};
+      },
+    );
+
+    const activation = slow.activate(first.id, { jira: JIRA });
+    await inside;
+    let removed = false;
+    const removal = connections.removeUnlessUsed("conn-a").then((result) => {
+      removed = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(removed).toBe(false);
+    open();
+
+    expect(await activation).toMatchObject({ kind: "activated" });
+    expect(await removal).toMatchObject({
+      removed: false,
+      reason: "in_use",
+      projects: [{ name: first.fullName }],
+    });
+    expect(await connections.get("conn-a")).toBeDefined();
+  });
+
+  // #1038-T01
+  it("is refused when a removal holds the connection: the activation waits for it and finds the connection gone", async () => {
+    const { db, projects, first, workspaceId } = await withConnection();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let locked: () => void = () => undefined;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+    // A removal in progress: the row is locked for update, then deleted.
+    const removal = db.transaction().execute(async (trx) => {
+      await trx
+        .selectFrom("jira_connections")
+        .select("id")
+        .where("workspace_id", "=", workspaceId)
+        .where("id", "=", "conn-a")
+        .forUpdate()
+        .executeTakeFirst();
+      locked();
+      await held;
+      await trx
+        .deleteFrom("jira_connections")
+        .where("id", "=", "conn-a")
+        .execute();
+    });
+    await lockTaken;
+
+    let settled = false;
+    const activation = projects.activate(first.id, { jira: JIRA }).then((r) => {
+      settled = true;
+      return r;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(settled).toBe(false);
+    release();
+    await removal;
+
+    expect(await activation).toEqual({ kind: "jira_connection_not_found" });
+    expect(await db.selectFrom("projects").selectAll().execute()).toEqual([]);
+  });
+
+  // #1038
+  it("does not change the provider of a Jira project through the board, and activating it again without a source keeps the Jira source", async () => {
+    const { projects, first } = await withConnection();
+    const created = await projects.activate(first.id, { jira: JIRA });
+    if (created.kind !== "activated") throw new Error("seeding failed");
+
+    expect(
+      await projects.setTicketBoard(created.project.id, {
+        projectV2Id: "PVT_b",
+        statusFieldId: "PVTSSF_b",
+      }),
+    ).toBeUndefined();
+    await projects.deactivate(first.id);
+    const again = await projects.activate(first.id);
+
+    expect(again).toMatchObject({
+      kind: "activated",
+      project: { ticketSource: { provider: "jira", connectionId: "conn-a" } },
+    });
+  });
+
+  // #1038
+  it("lets a project that was a GitHub source become a Jira source when it is activated again with one, and back", async () => {
+    const { projects, first } = await withConnection();
+    await projects.activate(first.id, { board: BOARD_FOR_SWITCH });
+    await projects.deactivate(first.id);
+
+    const toJira = await projects.activate(first.id, { jira: JIRA });
+    await projects.deactivate(first.id);
+    const toGithub = await projects.activate(first.id, { board: null });
+
+    expect(toJira).toMatchObject({
+      project: { ticketSource: { provider: "jira", projectKey: "PROJ" } },
+    });
+    expect(toGithub).toMatchObject({
+      project: { ticketSource: { provider: "github", board: null } },
+    });
+    expect(
+      (toGithub.kind === "activated" ? toGithub.project : undefined)
+        ?.ticketSource,
+    ).not.toHaveProperty("connectionId");
+  });
+});
+
+const BOARD_FOR_SWITCH = { projectV2Id: "PVT_x", statusFieldId: "PVTSSF_x" };
