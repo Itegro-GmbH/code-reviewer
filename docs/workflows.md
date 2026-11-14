@@ -7,7 +7,7 @@ workspace with versions.
 
 **Status (milestones 1 to 5 of epic #833).** The format, the validator, the storage, the [profiles](profiles.md) they refer to, the
 **engine**, the three GitHub actions, the **label trigger** and the **control steps** `if` and `loop` exist: a workflow with the manual trigger can be started through the API, and a
-workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger));
+workflow with a `ticket.labeled` trigger (`github.issueLabeled` before #916) starts when somebody puts its label on an issue (see [Engine](#engine), [Control at run time](#control-at-run-time) and [The label trigger](#the-label-trigger)), and one with a `ticket.statusChanged` trigger (#1036) starts when a ticket is moved into its status on the project's board ([The status trigger](#the-status-trigger));
 either runs its steps in the order the document says, in rounds where there is a loop. A member can [discard a run](#discarding-a-run) and [pause it after its current step](#pausing-a-run), and a workflow can clean up after a failed run with [`onFailure`](#after-a-failure-onfailure). The [lane builder](#the-lane-builder) (#926) reads and edits a workflow and saves versions.
 The finish tool exists (see [Result schemas](#result-schemas)). The workflows exist only in
 a deployment with the capability `implementer` (the factory); the routes below, the [lane builder](#the-lane-builder) and, for the runs, [pages](#the-run-page). Every member of a workspace may
@@ -103,6 +103,7 @@ may only read what **every** trigger yields.
 | `kind` | Other fields | What the steps can read (`{{trigger.<field>}}`) |
 | --- | --- | --- |
 | `ticket.labeled` | `label` (needed, not only spaces): the label that starts the workflow | `trigger.ticket` (below), and, as workflows written before #916 read them, `trigger.issue.number` (an integer), `.title`, `.body`, `.url`, `.labels` and `trigger.repo.fullName`, `.owner`, `.name`, `.defaultBranch`. `github.issueLabeled` is the old name of this kind and is accepted wherever it was |
+| `ticket.statusChanged` | `to` (needed, not only spaces): the status a ticket must be moved into; `from` (optional): only a move out of that status starts it. The names are the provider's own: for GitHub the options of the Status field of the project's board, spelled as the board spells them (case counts). **A lane must not move a ticket into its own `to`** ([The status trigger](#the-status-trigger)) | `trigger.ticket` (as for `ticket.labeled`) and `trigger.status.from`, `trigger.status.to` (texts; `from` is empty when the item had no status). It has no `trigger.issue` or `trigger.repo`: the old fields are for lanes written before #916 |
 | `manual` | `input` (needed): a [result schema](#result-schemas) that declares what the caller hands in. It must declare **`ticket`** (type `ticket`, required: the run works in the repository of the ticket) or **`repo`**, a required text (`owner/name`) (`repo_required`) | `trigger.input.<field>` (without `ticket`), and `trigger.ticket` when the input requires one |
 | `api` | the same as `manual` | the same. It is started through the API only; the start form of the web app offers `manual` triggers |
 | `pullRequest.pushed` | none | reserved: the format validates it, the engine starts no run from it yet |
@@ -154,7 +155,7 @@ start the workflow, and the pre-step of a label trigger may not add its own. Two
 (`duplicate_trigger_label`, case does not matter): one label would start two runs. The JSON Schema cannot say that, the validator does, and
 reports it at the `label` of the second trigger, naming the first.
 
-Other triggers (Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger).
+Other triggers (Jira) come later. Who may set the label is decided by GitHub, not by the workflow. How a label starts a run: [The label trigger](#the-label-trigger); how a move on the board does: [The status trigger](#the-status-trigger).
 
 ### One repository per run, and targets
 
@@ -278,7 +279,7 @@ refuses them with `kind_not_supported`; their other fields are not defined yet a
 `onFailure` is a list of steps beside `steps`. They run **once, after the run ended `failed` or `cancelled`**, and never after `succeeded`. The run keeps the final status it was going to have
 (`failed` with its error code, or `cancelled`); the steps only clean up. A document without `onFailure` is valid and behaves as before.
 
-- **What they may be.** An `action` of `ticket.comment`, `ticket.labels` or `pullRequest.comment` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
+- **What they may be.** An `action` of `ticket.comment`, `ticket.labels`, `ticket.setStatus` (#1036: the lane puts the ticket back on the board) or `pullRequest.comment` (or the older `github.issue.comment` and `github.issue.labels`), and an `if` over such actions (to tell a cancel from a failure, for example). No agent step, no `loop`, no
   `github.pullRequest.open` (`on_failure_step_not_allowed`): after a failure nothing starts an agent or opens a pull request.
 - **What they can read.** `{{trigger.…}}` as in any step, the facts of the failure, and the `onFailure` steps before them. **Not the steps of the workflow**: after a failure any of them may not have run
   (`reference_not_in_scope`). The id `failure` is taken in `onFailure`; ids are unique in the document as a whole.
@@ -650,11 +651,12 @@ hint when the last full sync is **older than 3 days** and no delivery has writte
 
 ### Built-in lanes
 
-A new project may copy two lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
+A new project may copy three lanes (`lanes` of `POST /projects`; the documents are `src/workflows/built-in-lanes.ts`). Each copy is a lane of the project like any other, validated and versioned; changing it never changes the built-in. Both need the profile versions `implementer@1` (may push) and `reviewer@1` (may not) and run in the first environment of the workspace by name.
 
 | Key | Lane | Starts | Does | Budget |
 |---|---|---|---|---|
 | `issue-to-pr` | Issue to PR | label `agent implement` on a ticket of the project's repository, or by hand with `input.ticket` | The first workflow below: implement, review, fix (3 rounds at most), open the pull request, otherwise comment on the ticket | 20 USD |
+| `issue-to-pr-status` | Issue to PR (status) | the ticket is moved on the project's board into the status `Ready for agent` (whoever moves it), or by hand with `input.ticket` | The same as `issue-to-pr`, and it reports on the board: `In progress` at the start, `In review` when the pull request is open, back to `Backlog` plus the comment when it stopped without one (`onFailure` does the same). The four status names are literals of the document: change them in the lane builder, whose picker offers the options of the project's board (a name the board does not have fails the step with `board_status_unknown`, which lists the options). A caller that copies the lane may pass its own names (`LaneStatuses` of `built-in-lanes.ts`). It is not ticked by default in the new project dialog | 20 USD |
 | `review-a-pull-request` | Review a pull request | by hand: `input.pullRequest` (the number); `input.repo` may be left out | The `reviewer` reads the pull request (`git fetch origin pull/<n>/head`) against its base and changes nothing; the findings (at most 20: `type` bug, risk or nit, `name`, `description`) are written as one comment on the pull request (`pullRequest.comment`) | 5 USD |
 
 **The repository of a lane of a project is the project's** (#937). The input of "Review a pull request" still declares `repo` (a manual trigger must declare `ticket` or `repo`), but a start of a lane that belongs to a project and declares `repo` may **leave it out**: the run is given
@@ -1192,6 +1194,44 @@ works as written.
   (the pull request), and **Contents: Read and write** for the agent's branch ([GitHub actions](#github-actions));
 - every installation has to accept a changed permission (GitHub asks the account that installed the App).
 
+### The status trigger
+
+*Sub-issue 2 of epic #1034 (#1036).* A ticket moved into a status starts the workflows that wait for it. For GitHub the status is the **Status of the project board** (Projects v2); the
+webhook of the GitHub App takes the event `projects_v2_item` that [the ticket mirror](ticket-mirror.md) already follows and, once the mirror holds the new status, hands the move to
+[`status-trigger.ts`](../app/src/workflow-runs/status-trigger.ts). The names are the provider's own (the factory has no status model of its own): the lane editor offers the options of the
+Status field of the board the project chose, and a name that was typed is kept as typed.
+
+**What starts a workflow.** All of these hold:
+
+- the delivery is `projects_v2_item` with the action `edited` and the field `Status` changed **to a status** (a move that clears the status starts nothing); the item is an **issue** the ticket mirror holds, in an
+  **active repository of the workspace** (a pull request on a board is no ticket; an issue the mirror does not hold yet starts nothing and the log says so: press Resync of the project);
+- the project the workflow is a lane of is switched on and its **ticket source is that repository**. A project that chose a board takes the moves of **that board** only (the rule of the mirror: the delivery names its board); a project that chose none follows every board;
+- the workflow is **not archived**, its **current version** has a trigger `ticket.statusChanged` whose `to` is **exactly** the new status (case and spaces count, as for `ticket.setStatus`) and, when the trigger has a `from`, the
+  status the item had is exactly `from` (an item that had none never matches a `from`). The run starts through **that trigger**: its [pre-steps](#the-triggers-and-their-pre-steps) run first, then the shared steps. A workflow with two triggers for one move starts one run, through the first;
+- every step is one the engine runs (as for a label; the log names the step that keeps a workflow out);
+- the workflow has **no running run for this ticket**: at most one running run of a workflow for one ticket, whichever of its triggers started it (the rule and the index of the label trigger: `<repository id>#<ticket key>`). A second
+  move into the status while the run goes on starts nothing and the log says why; when the run has ended the next move starts the next one. The delivery that started nothing is answered `tracker_updated` (the mirror took the status) or `ignored`.
+
+**Whoever moved it starts it. There is no guard against the factory's own moves** (owner decision, 2026-11-14): a move by a person, by a script, by the GitHub App or by a lane of this factory starts a run like any other; GitHub
+decides who may move a ticket. The login of the mover is kept as the run's `actorLogin`, to be shown, and decides nothing (`unknown` when the delivery names none).
+
+> **Warning: a lane must not move a ticket into its own trigger status.** A lane that ends by setting the status that starts it starts itself again as soon as its run has ended (while the run is still running the second start is refused as above, so the loop runs
+> one round per run and costs a full budget each time). The validator **warns** about a `ticket.setStatus` with a literal `status` equal to the trigger's `to`
+> (`status_retriggers_workflow`, a warning that does not stop a save). It cannot see a status set by a person or by another lane: keep the statuses of different lanes apart. Moving a ticket **out of** the trigger status, or into a status
+> another lane waits for, is how lanes hand a ticket on; that is meant.
+
+**Facts of the run.** `workflow_runs.created_by` is empty, `triggerKind` is `ticket.statusChanged`, `triggerId` is the id of the trigger, `ticket_ref` is `github:<owner>/<repo>#<key>` as for a label. The run's input is
+`{ ticket, status: { from, to } }` stored bounded (`trigger_input`): `trigger.ticket` is the same value a label trigger yields (`key`, `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo`; the webhook of a board item
+carries none of it, so the ticket is **read from GitHub once a workflow matched**, with the repository's default branch, which the run's agent steps start from), `trigger.status.to` is the status moved into and `trigger.status.from` the status the
+item had, **an empty text when it had none**. The texts of the ticket are those of whoever opened it: data, defused where they go into the text of an action, as for a label.
+
+**At most one run per delivery and workflow.** The run is started under the request id `gh-<delivery id>-<workflow id>`: GitHub's "Redeliver", or a second request that raced the first, finds the runs the first one made. If the runs
+cannot be written the answer is `503` and the delivery is not completed, so that a redelivery finds the runs that were written. The delivery id is not signed (see the label trigger); the rule of one running run per ticket is what limits a replay.
+
+**What the GitHub App needs.** The event **Projects** subscribed and the organization permission **Projects: Read** (the mirror's board status already needs them; [`github-app.md`](github-app.md#the-project-board)), and for the lane's own steps
+**Projects: Read and write** (`ticket.setStatus`), Issues and Pull requests as for the label trigger. **Known limits:** the trigger follows the move of an item that is **already on the board**; an item **added** to the board with a status
+(`projects_v2_item` `created`) carries no status in the delivery and starts nothing (follow-up); and a status set while the app was not subscribed is not seen (the next full sync corrects the mirror, it starts no run).
+
 ### Failure codes
 
 A run that ends failed has `errorCode`; a step that failed has `errorCode` and a short `errorMessage`.
@@ -1411,7 +1451,8 @@ Beyond the form:
 | `target_from_untrusted_value` | An input that decides a target (`issue`, `head`, `base`, `add`, `remove`, `environment`) holds more than a literal or one reference of the kind the input takes (see the table under "targets": a field of the trigger such as the title or the body of the issue is not one). | Use a literal, or exactly one reference the message names. |
 | `duplicate_trigger_label` | Two `ticket.labeled` triggers wait for the same label (compared without regard to case). Reported at the `label` of the second, which names the first. | Give one of them another label, or merge them. |
 | `label_retriggers_workflow` | A shared step, or a pre-step of a label trigger, adds the label that starts the workflow. A pre-step of a trigger that is no label trigger may. | Remove the label instead, or add another one. |
-| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`) or an `if` over them. | Only comment and change labels after a failure. |
+| `status_retriggers_workflow` | A step `ticket.setStatus` with a literal `status` that is the `to` of a status trigger of the workflow (compared without regard to case or surrounding spaces): in a shared step, or a pre-step of that status trigger itself. A pre-step of a trigger that is no status trigger may. It is a **warning** (`severity: "warning"`, listed in `warnings`, never in `errors`; the workflow is `valid` and saves): no change of status is left out of a trigger, the factory's own included, so the move would start the workflow again once this run has ended. | Move the ticket into another status. |
+| `on_failure_step_not_allowed` | A step of `onFailure` that is not a comment (`ticket.comment`, `pullRequest.comment`, `github.issue.comment`), a label change (`ticket.labels`, `github.issue.labels`), a status change (`ticket.setStatus`) or an `if` over them. | Only comment and change labels or the status after a failure. |
 | `too_many_steps` | More than 50 steps. | Split the workflow. |
 | `nesting_too_deep` | `if`/`loop` too deep, a loop in a loop in a loop, conditions or a result schema nested too deep. | Flatten it. |
 | `result_schema_too_large` | A result schema with more than 100 fields in all. | Make it smaller. |

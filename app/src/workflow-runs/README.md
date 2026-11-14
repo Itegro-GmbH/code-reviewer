@@ -15,6 +15,7 @@ member may use them (`start_implementer_task`: a run starts tasks).
 | `templates.ts`                       | `{{ref}}` at run time: one pass, values are data, bounded, a missing value fails the step                                                                                                                                           |
 | `connectors.ts`                      | The interface of an action, the registry, `ConnectorError` (a step ends with its code), and the inputs of an action node resolved and held to the connector's spec                                                                  |
 | `github-connectors.ts`               | The three GitHub actions through the GitHub App of the workspace: cleaned and bounded inputs, GitHub's refusals as stable codes (`docs/workflows.md`, "GitHub actions")                                                             |
+| `status-trigger.ts`                  | The status trigger (#1036): a ticket moved into a board status starts the lanes of the active project whose ticket source is its repository and whose `ticket.statusChanged` has this `to` (and `from`); one run per workflow and ticket (the label trigger's `trigger_key`), `{ ticket, status }` as run's input, the ticket read from the platform once a workflow matched |
 | `label-trigger.ts`                   | The label trigger (#845): the lanes of the active project whose ticket source is the issue's repository (#922), one run each under `gh-<delivery id>-<workflow id>`, via `ticket.labeled` (#916), the bounded ticket as run's input |
 | `ticket.ts`                          | The ticket a run is about (#916): `{{trigger.ticket}}` as the steps read it, bounded, whether the webhook or the start API handed it over                                                                                           |
 | `ask.ts`                             | The question an agent step ended its turn with (#920): what is stored with the step (`workflow_step_runs.ask`), the answer to it (an option by number, a text, a note) and the instruction the turn that goes on gets               |
@@ -28,7 +29,7 @@ not touched for a minute), classified in `scoping.test.ts`.
 
 ## Runs of a label (#845)
 
-A run is started by hand or through the API (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook): `workflow_runs.trigger_kind` says which (`manual`, `api`,
+A run is started by hand or through the API (`service.ts`) or by a label on an issue (`label-trigger.ts`, called by the webhook) or a move into a board status (`status-trigger.ts`): `workflow_runs.trigger_kind` says which (`manual`, `api`,
 `ticket.labeled`, and `github.issueLabeled` on rows written before #916) and `trigger_id` which trigger of the document (#916: a workflow has several, each with pre-steps). The engine runs the
 pre-steps of that trigger and then the shared steps: `forTrigger` (`document.ts`) puts the pre-steps in front of the shared steps and the state machine walks the one list. A run of a label has
 no `created_by` (the table holds that: only `manual` and `api` need a user), its `actor_login` is the login of whoever put the label on (display only), and its `trigger_input` is

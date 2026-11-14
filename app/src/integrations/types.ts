@@ -368,6 +368,10 @@ export type TrackerChange =
       nodeId: string;
       status: string | null;
       projectId?: string;
+      /** The status the item had before (`null`: none); absent when the delivery does not say (#1036: the status trigger reads it). */
+      from?: string | null;
+      /** Who moved it, when the delivery names them (#1036: shown as the actor of a run the move starts, decides nothing). */
+      actor?: { login: string; externalId: string };
     }
   /**
    * An item was added to a board, restored on it, archived or deleted: the delivery names no status, and the ticket may be on other boards,

@@ -21,6 +21,8 @@ import {
 /**
  * - `manual`: started by hand, `input` declares what the caller hands in. `api`: the same, started through the API only.
  * - `ticket.labeled`: a label put on a ticket (an issue of a repository of the workspace).
+ * - `ticket.statusChanged` (#1036): a ticket moved into the status `to` (optionally from `from`), in the provider's own status names: the
+ *   Status of the project board for GitHub. Whoever moved it, the factory's own moves included.
  * - `pullRequest.pushed`, `schedule`: reserved. The format knows and validates them, the engine starts no run from them yet.
  * - `github.issueLabeled`: the name `ticket.labeled` had before #916, accepted everywhere it was.
  */
@@ -28,6 +30,7 @@ export const TRIGGER_KINDS = [
   "manual",
   "api",
   "ticket.labeled",
+  "ticket.statusChanged",
   "pullRequest.pushed",
   "schedule",
   "github.issueLabeled",
@@ -53,6 +56,7 @@ export const TRIGGER_FIELDS: Record<TriggerKind, readonly string[]> = {
   manual: ["input"],
   api: ["input"],
   "ticket.labeled": ["label"],
+  "ticket.statusChanged": ["to", "from"],
   "github.issueLabeled": ["label"],
   "pullRequest.pushed": [],
   schedule: ["cron"],
@@ -63,9 +67,11 @@ export function legacyTriggerId(kind: TriggerKind): string {
   const canonical = canonicalTriggerKind(kind);
   return canonical === "ticket.labeled"
     ? "labeled"
-    : canonical === "pullRequest.pushed"
-      ? "pushed"
-      : canonical;
+    : canonical === "ticket.statusChanged"
+      ? "statusChanged"
+      : canonical === "pullRequest.pushed"
+        ? "pushed"
+        : canonical;
 }
 
 const ISSUE = objectOf({
@@ -94,10 +100,10 @@ export function declaresTicket(input: ResultSchema | undefined): boolean {
   );
 }
 
-/** Whether a trigger yields `{{trigger.ticket}}`: a label trigger always, a manual or api one when its input requires one. */
+/** Whether a trigger yields `{{trigger.ticket}}`: a label or status trigger always, a manual or api one when its input requires one. */
 export function yieldsTicket(trigger: TriggerInfo): boolean {
   const kind = canonicalTriggerKind(trigger.kind);
-  if (kind === "ticket.labeled") return true;
+  if (kind === "ticket.labeled" || kind === "ticket.statusChanged") return true;
   return (
     (kind === "manual" || kind === "api") &&
     declaresTicket(trigger.input) &&
@@ -120,6 +126,7 @@ function inputFieldsOf(input: ResultSchema): ObjectType {
 /**
  * What `trigger.*` holds for one trigger: `id` and `kind` always; then, by kind,
  * - `ticket.labeled`: `ticket`, and `issue` and `repo` as workflows written before #916 read them;
+ * - `ticket.statusChanged`: `ticket` and `status.from`, `status.to` (texts; `from` is empty when the ticket had no status);
  * - `manual`, `api`: `input` (what the schema declares, without the ticket) and, when the input requires one, `ticket`;
  * - the reserved kinds: nothing more.
  */
@@ -132,6 +139,12 @@ export function triggerOutput(trigger: TriggerInfo): ObjectType {
       ticket: TICKET_TYPE,
       issue: ISSUE,
       repo: TICKET_REPO_TYPE,
+    });
+  if (kind === "ticket.statusChanged")
+    return objectOf({
+      ...facts,
+      ticket: TICKET_TYPE,
+      status: objectOf({ from: STRING, to: STRING }),
     });
   if (kind === "manual" || kind === "api") {
     const input =

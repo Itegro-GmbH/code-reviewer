@@ -11,6 +11,7 @@ import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
+import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -48,6 +49,7 @@ import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
 import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
+import { createStatusTrigger, type StatusTrigger } from "./status-trigger.ts";
 import { latestRunSamples } from "./samples.ts";
 import {
   createWorkflowRunService,
@@ -197,18 +199,20 @@ function lazyAnswerEngine(
   };
 }
 
-/** The run service of one workspace. */
-export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
+/**
+ * What a run reads from GitHub before it exists: the repository of the workspace with its default branch, and a ticket of it (the
+ * texts are those of whoever opened it). Shared by the run service (a start by hand) and the status trigger (#1036).
+ */
+function githubReads(
+  workspaceId: string,
+): Pick<
+  Parameters<typeof createWorkflowRunService>[0],
+  "resolveRepository" | "readTicket"
+> {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
   const integrations = createIntegrationsRepository(db, workspaceId);
-  return createWorkflowRunService({
-    runs: createWorkflowRunsRepository(db, workspaceId),
-    // #920: the engine that takes an answer from the page of the run.
-    engine: lazyAnswerEngine(workspaceId),
-    workflows: createWorkflowsRepository(db, workspaceId),
-    projects: createProjectsRepository(db, workspaceId),
-    repositoryName: async (id) => (await repositories.get(id))?.fullName,
+  return {
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();
       const repository = (await repositories.list({ active: true })).find(
@@ -270,6 +274,22 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
         );
       }
     },
+  };
+}
+
+/** The run service of one workspace. */
+export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  const integrations = createIntegrationsRepository(db, workspaceId);
+  return createWorkflowRunService({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    // #920: the engine that takes an answer from the page of the run.
+    engine: lazyAnswerEngine(workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    projects: createProjectsRepository(db, workspaceId),
+    repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    ...githubReads(workspaceId),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
@@ -338,6 +358,46 @@ export function labelTriggerFor(workspaceId: string): LabelTrigger {
       );
       return repository?.active === true ? { id: repository.id } : undefined;
     },
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The status trigger of one workspace (#1036): the webhook hands it a board item that got another Status once the ticket mirror took it; it
+ * writes the runs of the workflows that wait for that status. The ticket and the repository are read from GitHub only when a workflow
+ * matched. The first steps run after the response, as for a label.
+ */
+export function statusTriggerFor(workspaceId: string): StatusTrigger {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  const tracker = createTrackerRepository(db, workspaceId);
+  const projects = createProjectsRepository(db, workspaceId);
+  const reads = githubReads(workspaceId);
+  return createStatusTrigger({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async ticketOfNode(nodeId) {
+      const item = await tracker.findItemByNode(nodeId);
+      // A pull request on a board is no ticket a lane starts for.
+      return item === undefined || item.kind !== "issue"
+        ? undefined
+        : {
+            provider: item.provider,
+            repositoryId: item.repositoryId,
+            key: item.key,
+          };
+    },
+    async boardOf(repositoryId) {
+      return (await projects.findActiveForRepository(repositoryId))
+        ?.ticketSource.board?.projectV2Id;
+    },
+    async repositoryOf(repositoryId) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined || !repository.active) return undefined;
+      return reads.resolveRepository(repository.fullName);
+    },
+    readTicket: reads.readTicket,
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });

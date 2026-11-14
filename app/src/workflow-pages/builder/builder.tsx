@@ -78,6 +78,7 @@ export function LaneBuilder({
   versions,
   document,
   profiles,
+  statuses = [],
   startPanel,
   api,
   validateDelayMs = VALIDATE_DEBOUNCE_MS,
@@ -90,6 +91,8 @@ export function LaneBuilder({
   document: unknown;
   /** The profiles of the workspace a step may run. */
   profiles: readonly ProfileOption[];
+  /** The status names of the project's board (#1036): what a status trigger offers. Left out: none, the names are typed. */
+  statuses?: readonly string[];
   /** The start form(s) of the lane: what "Run now" opens. */
   startPanel: ReactNode;
   /** Only tests pass this. */
@@ -382,6 +385,7 @@ export function LaneBuilder({
             pointer={effective}
             problems={sorted.byNode.get(effective) ?? []}
             profiles={profiles}
+            statuses={statuses}
             lookup={lookup}
             headingRef={inspectorHeading}
             onChange={edit}

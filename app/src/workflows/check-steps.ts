@@ -96,6 +96,11 @@ export type Checker = ScopeContext & {
    */
   retriggerLabels?: readonly string[];
   /**
+   * The statuses (trimmed, lower case) a step here should not move a ticket into, because they start the workflow (#1036): those of its
+   * status triggers that are well formed. A warning, not an error. The pre-steps of a trigger that is no status trigger have none.
+   */
+  retriggerStatuses?: readonly string[];
+  /**
    * Called with where a node sits and what it can reach, before the node is checked (and for the `until` of a loop, with the scope of
    * the body). The scope lookup of the lane builder (`reach.ts`) reads the reach here, so it is the validator's own and not a copy.
    */
@@ -951,7 +956,10 @@ function checkAction(
     spec.name === TICKET_LABELS.name
   )
     checkNoRetrigger(node, path, c);
-  if (spec.name === TICKET_SET_STATUS.name) checkBoardInputs(node, path, c);
+  if (spec.name === TICKET_SET_STATUS.name) {
+    checkBoardInputs(node, path, c);
+    checkNoStatusRetrigger(node, path, c);
+  }
   if (spec.name === TICKET_REQUEST_REVIEW.name) checkReviewers(node, path, c);
 }
 
@@ -1055,6 +1063,29 @@ function checkNoRetrigger(
         ),
       );
   });
+}
+
+/**
+ * Moving a ticket into the status that starts the workflow starts it again once this run is over: no move is left out of the trigger,
+ * the factory's own included (owner decision, #1036). A warning (`status_retriggers_workflow`): it does not stop a save.
+ */
+function checkNoStatusRetrigger(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+): void {
+  const statuses = c.retriggerStatuses;
+  if (statuses === undefined || statuses.length === 0) return;
+  if (typeof node.status !== "string") return;
+  const literal = literalText(parseTemplate(node.status))?.trim().toLowerCase();
+  if (literal === undefined || !statuses.includes(literal)) return;
+  c.report(
+    warning(
+      pointer(path, "status"),
+      "status_retriggers_workflow",
+      `Moving the ticket into ${shown(literal)} is the status that starts this workflow: once this run has ended, the move starts it again (no change of status is left out of a trigger, the factory's own included). Use another status.`,
+    ),
+  );
 }
 
 function describeInput(type: FieldType["type"]): string {

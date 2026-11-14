@@ -406,6 +406,8 @@ export function triggerFields(kind: string): Doc {
     case "ticket.labeled":
     case "github.issueLabeled":
       return { label: "agent implement" };
+    case "ticket.statusChanged":
+      return { to: "Ready for agent" };
     case "manual":
     case "api":
       return {

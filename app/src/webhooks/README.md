@@ -205,6 +205,11 @@ a closed issue and every other action are `ignored`. No project is needed. The h
 redelivery is a `duplicate`) and `no_workflow_matched` otherwise (the id can be claimed again). What a run is made of and why the title and the body of the issue are
 defused in the text of an action: [`docs/workflows.md`](../../../docs/workflows.md#the-label-trigger). A server without a workflow engine leaves `workflows` out; a label is then `ignored`.
 
+**A ticket moved into a board status (workflow trigger, #1036).** The event `projects_v2_item` is read by the ticket mirror (`parseTrackerChange`); when it is an `edited` of the Status field, the change carries the status it moved to, the one it moved from and
+the sender. After the mirror took it the handler hands it to `WorkspaceCollaborators.statuses` (`StatusTrigger.start`, `src/workflow-runs/status-trigger.ts`), which starts the lanes of the project that wait for exactly this status, one run each under the request id
+`gh-<delivery id>-<workflow id>`, and no workflow that already has a running run for the ticket. Nobody is asked who moved it (no guard against the factory's own moves). The outcome is `workflow_runs_started` when at least one workflow has a run for the delivery, else
+`tracker_updated` or `ignored` as for any board delivery; a failure writing the runs is a `503` and the delivery is released. A server without a workflow engine leaves `statuses` out. [`docs/workflows.md`](../../../docs/workflows.md#the-status-trigger).
+
 **A comment `/answer <n>` or `/answer <text>` (#920).** An `issue_comment` on an issue or a pull request that starts with `/answer` is the answer to the question a workflow run waits for
 ([`docs/workflows.md`](../../../docs/workflows.md#a-question-done-or-ask-920)). The parser reads it like `/review`: not from a bot, and only from a commenter whose association can have write access (`OWNER`, `MEMBER`,
 `COLLABORATOR`) and who really has it (one more GitHub call); anybody else is `ignored`. On an issue and on a pull request the state does not matter (a run that waits is answered on a closed or merged pull request too; `/review` there still needs an open one). The handler gives the answer to `answers`

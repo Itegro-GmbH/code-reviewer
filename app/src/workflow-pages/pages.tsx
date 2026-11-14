@@ -63,6 +63,8 @@ export type WorkflowPageData =
       runs: RunSummaryView[];
       /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
       profiles: ProfileOption[];
+      /** The status names of the board of the lane's project (#1036): what a status trigger offers; empty when the project has no board. */
+      statuses: string[];
     };
 
 export async function loadWorkflowPage(
@@ -72,6 +74,8 @@ export async function loadWorkflowPage(
     runs: Pick<WorkflowRunService, "list">;
     /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
     profiles?: Pick<ProfileService, "list">;
+    /** #1036: the status names of the board of a project; never throws. Left out, the builder offers none and the names are typed. */
+    statuses?: (projectId: string) => Promise<string[]>;
   },
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
@@ -82,6 +86,10 @@ export async function loadWorkflowPage(
   const { workflow, runs } = found;
   const listed =
     deps.profiles === undefined ? [] : (await deps.profiles.list()).profiles;
+  const statuses =
+    deps.statuses === undefined || workflow.projectId === null
+      ? []
+      : await deps.statuses(workflow.projectId);
   return {
     kind: "ready",
     workflow: {
@@ -97,6 +105,7 @@ export async function loadWorkflowPage(
     profiles: listed
       .filter((profile) => profile.archivedAt === null)
       .map((profile) => ({ name: profile.name, version: profile.version })),
+    statuses,
   };
 }
 
@@ -198,6 +207,7 @@ export function WorkflowPageContent({
         versions={workflow.versions}
         document={workflow.document}
         profiles={data.profiles}
+        statuses={data.statuses}
         startPanel={
           <StartSection
             workspaceSlug={workspaceSlug}
