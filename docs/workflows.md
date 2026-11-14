@@ -122,7 +122,8 @@ it through the provider when the run starts, and the steps read it as `{{trigger
 
 | Field | What |
 | --- | --- |
-| `number` | the number (an integer) |
+| `key` | the text key of the ticket in its provider (`15` for a GitHub issue, `PROJ-123` for Jira): the field every provider fills |
+| `number` | the number (an integer), for a platform that numbers its tickets (GitHub lanes) |
 | `title`, `body` | free text from whoever opened the ticket: read in texts, never a [target](#one-repository-per-run-and-targets) |
 | `labels` | the names of its labels (a list; free text too) |
 | `type` | the kind of ticket the platform reports (GitHub's issue type, `Bug`), empty when it has none |
@@ -1159,7 +1160,7 @@ the issue and the repository:
 
 | Value | What |
 | --- | --- |
-| `trigger.ticket` | `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo` ([The ticket](#the-triggers-and-their-pre-steps)), the same bounds as `trigger.issue`; `type` and `assignees` come from the payload of the webhook when it has them, else empty. |
+| `trigger.ticket` | `key`, `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo` ([The ticket](#the-triggers-and-their-pre-steps)), the same bounds as `trigger.issue`; `type` and `assignees` come from the payload of the webhook when it has them, else empty. |
 | `trigger.issue.number` | The number of the issue (an integer). |
 | `trigger.issue.title` | The title, at most 256 characters (a longer one ends in `…`). |
 | `trigger.issue.body` | The description, at most 8,000 characters (a longer one is cut with a note that says how long it was); empty when the issue has none. |

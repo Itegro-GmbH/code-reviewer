@@ -646,7 +646,7 @@ describe("a ticket reference", () => {
     expect(problems("github:itegro/shop#128")).toEqual([]);
     expect(parseTicketRef("github:itegro/shop#128")).toEqual({
       ok: true,
-      ref: { provider: "github", repo: "itegro/shop", number: 128 },
+      ref: { provider: "github", repo: "itegro/shop", key: "128" },
     });
   });
 

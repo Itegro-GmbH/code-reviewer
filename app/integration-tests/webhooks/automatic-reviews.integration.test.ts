@@ -113,6 +113,7 @@ async function startHarness(
   });
   const handler = createGithubAppWebhookHandler({
     registry: createIntegrationRegistry({ github_app: h.provider }),
+    tickets: h.tickets,
     integrations: h.integrations,
     deliveries: h.deliveries,
     sync: h.sync,

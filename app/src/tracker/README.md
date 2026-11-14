@@ -18,7 +18,7 @@ Where the rest lives: the tables and the only SQL are in `src/db/repositories/tr
 `20261107160000_create_tracker_mirror.ts`); what a GitHub payload means is in `src/integrations/providers/github-app/`
 (`tracker-events.ts` turns a delivery into a `TrackerChange`, `tracker-map.ts` turns issue and pull request JSON into
 `TrackerItemFields` and the check suites into one state, `client.ts` has the three reads of the sync). This folder knows no GitHub: it
-talks to the provider through `IntegrationProvider.parseTrackerChange`, `readTrackerPage` and `readChecksState`.
+talks to the provider through `TicketProvider.parseTrackerChange`, `readTrackerPage`, `readBoardStatus` and `readChecksState` (`src/integrations/ticket-provider.ts`, #1035).
 
 Rules that hold here:
 

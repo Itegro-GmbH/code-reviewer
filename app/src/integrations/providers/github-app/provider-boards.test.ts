@@ -12,7 +12,8 @@ import {
   fakeGithubAppClient,
   type FakeGithubAppClientData,
 } from "./fake-client.ts";
-import { createGithubAppProvider } from "./provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
 
 const integration = fakeIntegration({
   id: "integration-1",
@@ -27,10 +28,12 @@ const widgets: RepoRef = {
 
 function setup(data: FakeGithubAppClientData = {}) {
   const client = fakeGithubAppClient(data);
-  const provider = createGithubAppProvider({
-    config: loadGithubAppConfig(testGithubAppEnv()),
-    client,
-  });
+  const provider = createGithubTicketProvider(
+    createGithubClientSource({
+      config: loadGithubAppConfig(testGithubAppEnv()),
+      client,
+    }),
+  );
   return { client, provider };
 }
 
@@ -50,7 +53,7 @@ describe("the boards of a repository", () => {
       repositoryBoards: { "acme/widgets": boards },
     });
 
-    const answer = await provider.listBoards?.(integration, widgets);
+    const answer = await provider.listBoards?.({ integration, repo: widgets });
 
     expect(answer).toEqual({ available: true, boards });
     const [call] = client.calls.filter(
@@ -70,10 +73,12 @@ describe("the boards of a repository", () => {
   it("is not available for a repository whose boards the App may not read", async () => {
     const { provider } = setup();
 
-    expect(await provider.listBoards?.(integration, widgets)).toEqual({
-      available: false,
-      boards: [],
-    });
+    expect(await provider.listBoards?.({ integration, repo: widgets })).toEqual(
+      {
+        available: false,
+        boards: [],
+      },
+    );
   });
 
   // #922-T45
@@ -82,14 +87,14 @@ describe("the boards of a repository", () => {
     const failing = setup({ trackerFailure: new Error("GitHub is down") });
 
     await expect(
-      refused.provider.listBoards?.(integration, {
-        ...widgets,
-        integrationId: "another",
+      refused.provider.listBoards?.({
+        integration,
+        repo: { ...widgets, integrationId: "another" },
       }),
     ).rejects.toMatchObject({ code: "INTEGRATION_ACCESS_SCOPE_REFUSED" });
     expect(refused.client.calls).toEqual([]);
     await expect(
-      failing.provider.listBoards?.(integration, widgets),
+      failing.provider.listBoards?.({ integration, repo: widgets }),
     ).rejects.toBeInstanceOf(IntegrationError);
   });
 });

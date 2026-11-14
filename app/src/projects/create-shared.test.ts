@@ -18,7 +18,7 @@ vi.mock("../db/repositories/integrations-repository.ts", () => ({
   createIntegrationsRepository: () => ({ get: mocks.integration }),
 }));
 vi.mock("../integrations/registry.ts", () => ({
-  integrationRegistry: { resolve: mocks.resolve },
+  ticketProviderRegistry: { get: mocks.resolve },
 }));
 
 import { boardsFor } from "./create-shared.ts";
@@ -58,15 +58,15 @@ describe("the boards of a repository", () => {
     const answer = await boardsFor("ws-1")("repo-1");
 
     expect(answer).toEqual({ kind: "boards", available: true, boards: [] });
-    expect(listBoards).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "int-1" }),
-      {
+    expect(listBoards).toHaveBeenCalledWith({
+      integration: expect.objectContaining({ id: "int-1" }),
+      repo: {
         integrationId: "int-1",
         externalId: "42",
         fullName: "acme/widgets",
         url: "https://github.test/acme/widgets",
       },
-    );
+    });
   });
 
   // #937-T61

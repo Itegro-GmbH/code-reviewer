@@ -94,6 +94,7 @@ describe("the tickets of the mirror", () => {
       projectId: null,
       provider: "github",
       repo: "acme/repo-1",
+      key: "12",
       number: 12,
       nodeId: "N_12",
       kind: "issue",
@@ -114,6 +115,27 @@ describe("the tickets of the mirror", () => {
       updatedAt: "2026-11-06T10:02:00.000Z",
       syncedAt: expect.any(String),
     });
+  });
+
+  // #1035-T01
+  it("identifies a ticket by repository, provider and text key: the same key replaces the row, the key of another provider is another row", async () => {
+    const { tracker, first } = await setup();
+
+    await tracker.upsertItem(first.id, item(12, { title: "First" }));
+    await tracker.upsertItem(first.id, item(12, { title: "Second" }));
+    await tracker.upsertItem(
+      first.id,
+      item(500, { provider: "fake", key: "12", title: "Other provider" }),
+    );
+
+    const rows = await tracker.listItems(first.id, { limit: 10 });
+    expect(
+      rows.map((row) => [row.provider, row.key, row.title]).sort(),
+    ).toEqual([
+      ["fake", "12", "Other provider"],
+      ["github", "12", "Second"],
+    ]);
+    expect((await tracker.getItem(first.id, 12))?.key).toBe("12");
   });
 
   // #924-T80

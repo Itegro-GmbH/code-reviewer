@@ -27,6 +27,7 @@ import {
 } from "./limits.ts";
 import { PROJECT_MEMBERS } from "../workflows/connectors.ts";
 import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
+import type { TicketTarget } from "./ticket-target.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
 export type GithubActionTarget = {
@@ -38,6 +39,12 @@ export type GithubActionTarget = {
 export type GithubConnectorDeps = {
   /** The target of a run's repository; undefined when the repository or its connection is gone. */
   targetOf(call: ActionCall): Promise<GithubActionTarget | undefined>;
+  /**
+   * The ticket provider and the container of its tickets for a run (#1035): what the ticket source of the run's project names; undefined
+   * when there is none. The ticket actions (`ticket.comment`, `ticket.labels`, `ticket.setStatus`) act through it, the pull request actions
+   * through `targetOf`.
+   */
+  ticketTargetOf(call: ActionCall): Promise<TicketTarget | undefined>;
   /**
    * The GitHub logins of the members of the project the run belongs to (`reviewers: "project members"` of `ticket.requestReview`, #917);
    * left out where nothing says who they are, which makes that value an `action_input_invalid` of the step.
@@ -185,6 +192,21 @@ function wholeNumber(value: unknown, name: string): number {
 
 function issueNumber(value: unknown): number {
   return wholeNumber(value, "issue");
+}
+
+/** What a text key of a ticket may be made of: `PROJ-123`, `15`. The provider decides whether it can name a ticket of its own (`isTicketKey`). */
+const TICKET_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The text key of the ticket an action names: a whole number (a GitHub issue, as before) or the text key of another provider's ticket. */
+function ticketKey(value: unknown): string {
+  if (typeof value === "string") {
+    if (!TICKET_KEY.test(value))
+      throw new ActionInputError(
+        "ticket must be the key of a ticket: letters, digits, dots, hyphens and underscores, up to 64 characters.",
+      );
+    return value;
+  }
+  return String(issueNumber(value));
 }
 
 /** What GitHub allows in a user name: letters, digits and single hyphens, up to 39 characters. */
@@ -358,6 +380,24 @@ async function targetOrFail(
   return target;
 }
 
+async function ticketTargetOrFail(
+  deps: GithubConnectorDeps,
+  call: ActionCall,
+  key: string,
+): Promise<TicketTarget> {
+  const target = await deps.ticketTargetOf(call);
+  if (target === undefined)
+    throw new ConnectorError(
+      "github_not_found",
+      "The repository of the run has no active GitHub connection.",
+    );
+  if (target.provider.isTicketKey?.(key) === false)
+    throw new ActionInputError(
+      "ticket must be the key of a ticket of the ticket source of the project.",
+    );
+  return target;
+}
+
 /** The clocks of GitHub and of this server need not agree to the second: the search for an earlier comment starts this much before the step. */
 const CLOCK_SKEW_MS = 5 * 60_000;
 
@@ -471,25 +511,30 @@ export function createGithubConnectors(
     },
   };
 
+  /** The marker of one step of one run: a call that is made again for the same step finds its comment instead of writing a second one. */
+  const commentBody = (call: ActionCall) => {
+    const body = cleanBody(call.inputs.body, "body");
+    if (body.trim() === "")
+      throw new ActionInputError("body must not be empty.");
+    // An invisible marker of this step of this run. It holds within one run; a new run is a new comment.
+    const marker = `<!-- ${call.idempotencyKey} -->`;
+    return { body: `${body}\n\n${marker}`, marker };
+  };
+
   const issueComment: ActionConnector = {
     name: "github.issue.comment",
     async run(call) {
       const name = "github.issue.comment";
       const issue = issueNumber(call.inputs.issue);
-      const body = cleanBody(call.inputs.body, "body");
-      if (body.trim() === "")
-        throw new ActionInputError("body must not be empty.");
+      const { body, marker } = commentBody(call);
       const { provider, integration, repo } = await targetOrFail(deps, call);
       if (provider.commentOnIssue === undefined) throw unavailable(name);
-      // An invisible marker of this step of this run: a call that is made again for the same step finds its comment instead of
-      // writing a second one. It holds within one run; a new run is a new comment.
-      const marker = `<!-- ${call.idempotencyKey} -->`;
       try {
         const { url, existing } = await provider.commentOnIssue(
           integration,
           repo,
           issue,
-          `${body}\n\n${marker}`,
+          body,
           { signal: call.signal, marker, ...searchSince(call) },
         );
         return {
@@ -502,18 +547,49 @@ export function createGithubConnectors(
     },
   };
 
+  const ticketComment: ActionConnector = {
+    name: "ticket.comment",
+    async run(call) {
+      // The messages of a failure name the GitHub action that `ticket.comment` was before #1035.
+      const name = "github.issue.comment";
+      const key = ticketKey(call.inputs.ticket);
+      const { body, marker } = commentBody(call);
+      const { provider, scope } = await ticketTargetOrFail(deps, call, key);
+      if (provider.commentOnTicket === undefined) throw unavailable(name);
+      try {
+        const { url, existing } = await provider.commentOnTicket(
+          scope,
+          key,
+          body,
+          { signal: call.signal, marker, ...searchSince(call) },
+        );
+        return {
+          url: pageOfRepository(url, scope.repo, `/issues/${key}`),
+          existing,
+        };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  const labelChange = (call: ActionCall) => {
+    const add = labelNames(call.inputs.add, "add");
+    const remove = labelNames(call.inputs.remove, "remove");
+    if (add.length === 0 && remove.length === 0)
+      throw new ActionInputError(
+        "At least one label to add or remove is needed.",
+      );
+    return { add, remove };
+  };
+
   const issueLabels: ActionConnector = {
     name: "github.issue.labels",
     idempotent: true,
     async run(call) {
       const name = "github.issue.labels";
       const issue = issueNumber(call.inputs.issue);
-      const add = labelNames(call.inputs.add, "add");
-      const remove = labelNames(call.inputs.remove, "remove");
-      if (add.length === 0 && remove.length === 0)
-        throw new ActionInputError(
-          "At least one label to add or remove is needed.",
-        );
+      const change = labelChange(call);
       const { provider, integration, repo } = await targetOrFail(deps, call);
       if (provider.changeIssueLabels === undefined) throw unavailable(name);
       try {
@@ -521,7 +597,30 @@ export function createGithubConnectors(
           integration,
           repo,
           issue,
-          { add, remove },
+          change,
+          call.signal,
+        );
+        return { labels };
+      } catch (error) {
+        throw toConnectorError(name, error);
+      }
+    },
+  };
+
+  const ticketLabels: ActionConnector = {
+    name: "ticket.labels",
+    idempotent: true,
+    async run(call) {
+      const name = "github.issue.labels";
+      const key = ticketKey(call.inputs.ticket);
+      const change = labelChange(call);
+      const { provider, scope } = await ticketTargetOrFail(deps, call, key);
+      if (provider.changeTicketLabels === undefined) throw unavailable(name);
+      try {
+        const { labels } = await provider.changeTicketLabels(
+          scope,
+          key,
+          change,
           call.signal,
         );
         return { labels };
@@ -536,7 +635,7 @@ export function createGithubConnectors(
     idempotent: true,
     async run(call) {
       const name = "ticket.setStatus";
-      const issue = issueNumber(call.inputs.ticket);
+      const key = ticketKey(call.inputs.ticket);
       // The board of the project, unless the step names one (an override that stays accepted).
       const named = call.inputs.board;
       const projectBoard =
@@ -547,13 +646,12 @@ export function createGithubConnectors(
         );
       const board = boardReference(named ?? projectBoard);
       const status = statusName(call.inputs.status);
-      const { provider, integration, repo } = await targetOrFail(deps, call);
+      const { provider, scope } = await ticketTargetOrFail(deps, call, key);
       if (provider.setTicketStatus === undefined) throw unavailable(name);
       try {
         const moved = await provider.setTicketStatus(
-          integration,
-          repo,
-          issue,
+          scope,
+          key,
           { board, status },
           call.signal,
         );
@@ -640,8 +738,9 @@ export function createGithubConnectors(
     },
   };
 
-  // The provider-neutral names of the actions (#916, #917): the same action under another name, with the input that names the target
-  // renamed to the one the GitHub action calls it. The target is the issue or pull request of the repository of the run.
+  // The provider-neutral names of the actions that stay with the git provider (#916): the same action under another name, with the input that
+  // names the target renamed to the one the GitHub action calls it. The target is the issue or pull request of the repository of the run.
+  // `ticket.comment` and `ticket.labels` are not aliases any more (#1035): they act through the ticket provider of the project's source.
   const alias = (
     neutral: string,
     connector: ActionConnector,
@@ -663,8 +762,8 @@ export function createGithubConnectors(
     issueLabels,
     alias("pullRequest.open", pullRequestOpen),
     alias("pullRequest.comment", issueComment, "pullRequest"),
-    alias("ticket.comment", issueComment, "ticket"),
-    alias("ticket.labels", issueLabels, "ticket"),
+    ticketComment,
+    ticketLabels,
     setStatus,
     requestReview,
   ];

@@ -37,10 +37,13 @@ import {
 import type { AskChannel } from "./engine.ts";
 import type { GithubActionTarget } from "./github-connectors.ts";
 import { placeOf, type Place } from "./ask-place.ts";
+import type { TicketTarget } from "./ticket-target.ts";
 
 export type AskChannelDependencies = {
-  /** The GitHub connection and repository of the run; undefined when it is gone or has no active connection. */
+  /** The GitHub connection and repository of the run, for a question that sits on its pull request; undefined when it is gone or has no active connection. */
   targetOf(run: StoredWorkflowRun): Promise<GithubActionTarget | undefined>;
+  /** The ticket provider and container of the run (#1035), for a question that sits on its ticket; undefined when there is none. */
+  ticketTargetOf(run: StoredWorkflowRun): Promise<TicketTarget | undefined>;
   /** The steps of the run, for a pull request an earlier step opened. */
   listSteps(runId: string): Promise<readonly StoredStepRun[]>;
   /** The GitHub logins of the members of the workspace, to ask them. */
@@ -65,15 +68,75 @@ export function createGithubAskChannel(
     n: ask.n,
   });
 
+  /**
+   * What a question can do where it is shown: write and edit a comment, and change labels. The ticket of the run is written through the ticket
+   * provider of its project's source, a pull request through the git provider (#1035). A call the provider has not got is undefined.
+   */
+  type Surface = {
+    comment?: (
+      body: string,
+      options: { marker: string },
+    ) => Promise<{ id?: string }>;
+    edit?: (commentId: string, body: string) => Promise<void>;
+    labels?: (change: { add: string[]; remove: string[] }) => Promise<unknown>;
+  };
+
+  async function surfaceOf(
+    run: StoredWorkflowRun,
+    place: Place | undefined,
+  ): Promise<Surface | undefined> {
+    if (place?.kind === "ticket") {
+      const target = await deps.ticketTargetOf(run);
+      if (target === undefined) return undefined;
+      const { provider, scope } = target;
+      const { key } = place;
+      const comment = provider.commentOnTicket?.bind(provider);
+      const edit = provider.updateTicketComment?.bind(provider);
+      const change = provider.changeTicketLabels?.bind(provider);
+      return {
+        ...(comment === undefined
+          ? {}
+          : { comment: (body, options) => comment(scope, key, body, options) }),
+        ...(edit === undefined
+          ? {}
+          : { edit: (commentId, body) => edit(scope, commentId, body) }),
+        ...(change === undefined
+          ? {}
+          : { labels: (labels) => change(scope, key, labels) }),
+      };
+    }
+    const target = await deps.targetOf(run);
+    if (target === undefined) return undefined;
+    const { provider, integration, repo } = target;
+    const number = Number(place?.key);
+    const comment = provider.commentOnIssue?.bind(provider);
+    const edit = provider.updateIssueComment?.bind(provider);
+    const change = provider.changeIssueLabels?.bind(provider);
+    return {
+      ...(comment === undefined
+        ? {}
+        : {
+            comment: (body, options) =>
+              comment(integration, repo, number, body, options),
+          }),
+      ...(edit === undefined
+        ? {}
+        : {
+            edit: (commentId, body) => edit(integration, repo, commentId, body),
+          }),
+      ...(change === undefined
+        ? {}
+        : { labels: (labels) => change(integration, repo, number, labels) }),
+    };
+  }
+
   async function labels(
-    target: GithubActionTarget,
-    place: Place,
+    surface: Surface,
     change: { add: string[]; remove: string[] },
   ): Promise<void> {
-    const { provider, integration, repo } = target;
-    if (provider.changeIssueLabels === undefined) return;
+    if (surface.labels === undefined) return;
     try {
-      await provider.changeIssueLabels(integration, repo, place.number, change);
+      await surface.labels(change);
     } catch {
       // A label is a hint for people; the question does not depend on it.
     }
@@ -91,10 +154,10 @@ export function createGithubAskChannel(
   return {
     async asked(run, step, ask) {
       const place = placeOf(run, await deps.listSteps(run.id));
-      const target = place === undefined ? undefined : await deps.targetOf(run);
-      if (place === undefined || target === undefined) return undefined;
-      const { provider, integration, repo } = target;
-      if (provider.commentOnIssue === undefined) return undefined;
+      const surface =
+        place === undefined ? undefined : await surfaceOf(run, place);
+      if (place === undefined || surface?.comment === undefined)
+        return undefined;
       const identity = identityOf(run, step, ask);
       const body = questionComment({
         identity,
@@ -102,52 +165,37 @@ export function createGithubAskChannel(
         link: await deps.runLink(run),
         mentions: mentionsOf(await deps.memberLogins()),
       });
-      const posted = await provider.commentOnIssue(
-        integration,
-        repo,
-        place.number,
-        body,
-        {
-          marker: markerOf("ask", identity),
-        },
-      );
-      await labels(target, place, {
-        add: [LABEL_WAITING],
-        remove: [LABEL_WORKING],
+      const posted = await surface.comment(body, {
+        marker: markerOf("ask", identity),
       });
+      await labels(surface, { add: [LABEL_WAITING], remove: [LABEL_WORKING] });
       return posted.id === undefined ? undefined : { commentId: posted.id };
     },
 
     async answered(run, step, ask) {
       const place = placeOf(run, await deps.listSteps(run.id));
-      const target = place === undefined ? undefined : await deps.targetOf(run);
-      if (place === undefined || target === undefined) return;
-      const { provider, integration, repo } = target;
+      const surface =
+        place === undefined ? undefined : await surfaceOf(run, place);
+      if (place === undefined || surface === undefined) return;
       const identity = identityOf(run, step, ask);
       if (step.waitingOnCommentId !== null) {
         // The comment of the question says it was answered, and by whom.
-        if (provider.updateIssueComment !== undefined)
+        if (surface.edit !== undefined)
           try {
-            await provider.updateIssueComment(
-              integration,
-              repo,
+            await surface.edit(
               step.waitingOnCommentId,
               answeredComment({ identity, ask }),
             );
           } catch {
             // The answer is stored; a comment that cannot be edited stays as it is.
           }
-      } else if (provider.commentOnIssue !== undefined) {
+      } else if (surface.comment !== undefined) {
         // A question that was never posted is written down as answered (the marker keeps a repeat from writing it twice); that comment is
         // the whole record, so the one in the name of the person below is not written as well.
         try {
-          await provider.commentOnIssue(
-            integration,
-            repo,
-            place.number,
-            answeredComment({ identity, ask }),
-            { marker: markerOf("answered", identity) },
-          );
+          await surface.comment(answeredComment({ identity, ask }), {
+            marker: markerOf("answered", identity),
+          });
         } catch {
           // As above.
         }
@@ -156,24 +204,18 @@ export function createGithubAskChannel(
       if (
         ask.answer?.via === "ui" &&
         step.waitingOnCommentId !== null &&
-        provider.commentOnIssue !== undefined
+        surface.comment !== undefined
       )
         try {
-          await provider.commentOnIssue(
-            integration,
-            repo,
-            place.number,
-            answerRecordComment({ identity, ask }),
-            {
-              marker: `<!-- factory answer run=${run.id} step=${step.stepId} q=${String(ask.n)} -->`,
-            },
-          );
+          await surface.comment(answerRecordComment({ identity, ask }), {
+            marker: `<!-- factory answer run=${run.id} step=${step.stepId} q=${String(ask.n)} -->`,
+          });
         } catch {
           // As above.
         }
       // Looked at last: a discard that came while the comment was edited has taken the labels off, and none is put back for it.
       if (!(await isDiscarded(run)))
-        await labels(target, place, {
+        await labels(surface, {
           add: [LABEL_WORKING],
           remove: [LABEL_WAITING],
         });
@@ -181,17 +223,12 @@ export function createGithubAskChannel(
 
     async cancelled(run, step, ask) {
       const place = placeOf(run, await deps.listSteps(run.id));
-      const target = place === undefined ? undefined : await deps.targetOf(run);
-      if (place === undefined || target === undefined) return;
-      const { provider, integration, repo } = target;
-      if (
-        step.waitingOnCommentId !== null &&
-        provider.updateIssueComment !== undefined
-      )
+      const surface =
+        place === undefined ? undefined : await surfaceOf(run, place);
+      if (place === undefined || surface === undefined) return;
+      if (step.waitingOnCommentId !== null && surface.edit !== undefined)
         try {
-          await provider.updateIssueComment(
-            integration,
-            repo,
+          await surface.edit(
             step.waitingOnCommentId,
             cancelledComment({ identity: identityOf(run, step, ask), ask }),
           );
@@ -199,23 +236,21 @@ export function createGithubAskChannel(
           // The run is over either way; a comment that cannot be edited stays as it is.
         }
       // Nobody works on the ticket any more, so only the one that said somebody had to answer goes.
-      await labels(target, place, { add: [], remove: [LABEL_WAITING] });
+      await labels(surface, { add: [], remove: [LABEL_WAITING] });
     },
 
     async discarded(run, open, { freeTicket }) {
       const place = placeOf(run, await deps.listSteps(run.id));
-      const target = place === undefined ? undefined : await deps.targetOf(run);
-      if (place === undefined || target === undefined) return;
-      const { provider, integration, repo } = target;
+      const surface =
+        place === undefined ? undefined : await surfaceOf(run, place);
+      if (place === undefined || surface === undefined) return;
       if (
         open !== undefined &&
         open.step.waitingOnCommentId !== null &&
-        provider.updateIssueComment !== undefined
+        surface.edit !== undefined
       )
         try {
-          await provider.updateIssueComment(
-            integration,
-            repo,
+          await surface.edit(
             open.step.waitingOnCommentId,
             discardedComment({
               identity: identityOf(run, open.step, open.ask),
@@ -227,21 +262,18 @@ export function createGithubAskChannel(
         }
       // Nobody works on the ticket any more, and nobody has to answer: both labels go, unless another run holds the ticket.
       if (freeTicket)
-        await labels(target, place, {
+        await labels(surface, {
           add: [],
           remove: [LABEL_WAITING, LABEL_WORKING],
         });
     },
 
     async superseded(run, step, ask, commentId) {
-      const target = await deps.targetOf(run);
-      if (target === undefined) return;
-      const { provider, integration, repo } = target;
-      if (provider.updateIssueComment === undefined) return;
+      const place = placeOf(run, await deps.listSteps(run.id));
+      const surface = await surfaceOf(run, place);
+      if (surface?.edit === undefined) return;
       try {
-        await provider.updateIssueComment(
-          integration,
-          repo,
+        await surface.edit(
           commentId,
           supersededComment({ identity: identityOf(run, step, ask) }),
         );

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it, vi } from "vitest";
-import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { TicketProvider } from "../integrations/ticket-provider.ts";
 import type {
   Integration,
   TrackerItemFields,
@@ -113,11 +113,7 @@ function provider(github: GitHub) {
   const steps: TrackerPageStep[] = [];
   const failures: (Error | undefined)[] = [];
   const readTrackerPage = vi.fn(
-    async (
-      _integration: Integration,
-      _repo: unknown,
-      step: TrackerPageStep,
-    ): Promise<TrackerPage> => {
+    async (_scope: unknown, step: TrackerPageStep): Promise<TrackerPage> => {
       steps.push(step);
       const failure = failures.shift();
       if (failure !== undefined) throw failure;
@@ -177,7 +173,7 @@ function provider(github: GitHub) {
     steps,
     failures,
     readTrackerPage,
-    port: { readTrackerPage } as Pick<IntegrationProvider, "readTrackerPage">,
+    port: { readTrackerPage } as Pick<TicketProvider, "readTrackerPage">,
   };
 }
 

@@ -147,7 +147,7 @@ export function createTicketAnswers(
           formatTicketRef({
             provider: "github",
             repo: answer.repo.fullName,
-            number: answer.number,
+            key: String(answer.number),
           }),
         )),
         ...(await deps.listWaitingWithoutTicket(repository.id)),
@@ -159,7 +159,7 @@ export function createTicketAnswers(
         const ask = parseStepAsk(waiting?.ask ?? null);
         if (waiting === undefined || ask === undefined || ask.state !== "open")
           continue;
-        if (placeOf(run, steps)?.number !== answer.number) continue;
+        if (placeOf(run, steps)?.key !== String(answer.number)) continue;
         // A comment from before the question is none to it; another run on the ticket may still be the one it was meant for.
         if (
           isOlderThanQuestion(answer, {

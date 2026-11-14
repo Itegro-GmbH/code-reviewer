@@ -120,9 +120,12 @@ const MICRO = 1_000_000;
 /** The most numbers one `listItemsByNumbers` call looks at. */
 const NUMBERS_PER_READ = 200;
 
-/** `github:owner/repo#128`: the form of `workflow_runs.ticket_ref`. */
-export const ticketRefOf = (repo: string, number: number): string =>
-  `${TRACKER_PROVIDER}:${repo}#${number}`;
+/** `github:owner/repo#128`: the form of `workflow_runs.ticket_ref` (`<provider>:<repo>#<key>`). */
+export const ticketRefOf = (
+  repo: string,
+  key: string | number,
+  provider: string = TRACKER_PROVIDER,
+): string => `${provider}:${repo}#${key}`;
 
 export function createTrackerService(
   deps: TrackerServiceDependencies,

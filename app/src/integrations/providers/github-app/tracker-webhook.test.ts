@@ -11,6 +11,9 @@ import {
 import { fakeGithubAppClient } from "./fake-client.ts";
 import { loadGithubAppConfig } from "./config.ts";
 import { createGithubAppProvider } from "./provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
+import { createTicketProviderRegistry } from "../../ticket-provider.ts";
 import type { TrackerChange } from "../../types.ts";
 import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import {
@@ -44,6 +47,14 @@ function setup(
   const logs: string[] = [];
   const handler = createGithubAppWebhookHandler({
     registry: { resolve: () => provider } as never,
+    tickets: createTicketProviderRegistry([
+      createGithubTicketProvider(
+        createGithubClientSource({
+          config: loadGithubAppConfig(testGithubAppEnv()),
+          client: fakeGithubAppClient({}),
+        }),
+      ),
+    ]),
     integrations: { findByExternalId: async () => integration },
     deliveries: {
       claim: async () => ({ status: "claimed", token: "claim-1" }),
@@ -186,6 +197,7 @@ describe("the events only the ticket mirror reads", () => {
     });
     const handler = createGithubAppWebhookHandler({
       registry: { resolve: () => provider } as never,
+      tickets: createTicketProviderRegistry([]),
       integrations: {
         findByExternalId: async () => ({ ...integration, status: "disabled" }),
       },

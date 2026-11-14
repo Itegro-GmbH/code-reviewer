@@ -86,7 +86,7 @@ export function StartLaneDialog({
     const ticket = formatTicketRef({
       provider: "github",
       repo,
-      number: issueNumber,
+      key: String(issueNumber),
     });
     const key = `${lane.workflowId}:${ticket}`;
     const clientRequestId = requestIds.current.get(key) ?? newClientRequestId();

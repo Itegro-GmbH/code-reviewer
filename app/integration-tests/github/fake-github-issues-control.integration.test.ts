@@ -18,9 +18,9 @@ async function setup() {
   const repository = (await h.repositories.list())[0];
   if (integration === undefined || repository === undefined)
     throw new Error("seeding failed");
-  const provider = h.registry.resolve("github_app");
-  if (provider.readIssue === undefined) throw new Error("seeding failed");
-  const read = provider.readIssue.bind(provider);
+  const provider = h.tickets.get("github");
+  if (provider?.readTicket === undefined) throw new Error("seeding failed");
+  const read = provider.readTicket.bind(provider);
   const repo = {
     integrationId: integration.id,
     externalId: repository.externalId,
@@ -28,7 +28,7 @@ async function setup() {
     url: repository.url,
   };
   return {
-    readIssue: (number: number) => read(integration, repo, number),
+    readIssue: (number: number) => read({ integration, repo }, String(number)),
     post: (body: unknown) =>
       fetch(`${h.fake.baseUrl}/__fake/issues`, {
         method: "POST",

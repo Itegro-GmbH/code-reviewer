@@ -167,6 +167,8 @@ export function createTrackerMirror(
           const written = await tracker.upsertItem(repositoryId, {
             provider: TRACKER_PROVIDER,
             repo: change.repo.fullName,
+            // The key of a GitHub issue is its number as text (#1035).
+            key: String(item.number),
             ...item,
           });
           if (!written) return "not_mirrored";
