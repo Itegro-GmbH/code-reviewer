@@ -13,6 +13,7 @@ import { sessionOfRequest } from "../github-signin/shared.ts";
 import { assembleJira, type AssembledJira } from "./assemble.ts";
 import { readAtlassianConfig, type AtlassianConfig } from "./config.ts";
 import { createJiraIssueReader, type JiraIssueReader } from "./issue-reader.ts";
+import { createJiraTicketProvider } from "./ticket-provider.ts";
 import { createJiraRouteHandlers, type JiraRouteHandlers } from "./http.ts";
 
 function appSecret(): string {
@@ -64,3 +65,8 @@ export function jiraIssueReaderFor(workspaceId: string): JiraIssueReader {
       (await connections.get(connectionId))?.siteUrl,
   });
 }
+
+/** The Jira ticket provider of the running server (#1039): reads a ticket of a project's Jira source through the workspace's connection. */
+export const jiraTicketProvider = createJiraTicketProvider({
+  readerFor: async (workspaceId) => jiraIssueReaderFor(workspaceId),
+});

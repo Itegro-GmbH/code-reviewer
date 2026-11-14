@@ -14,6 +14,11 @@ import {
   jiraSourceOf,
 } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
+import { JIRA_ISSUE_KEY } from "../workflows/ticket-ref.ts";
+import type {
+  TicketProvider,
+  TicketProviderRegistry,
+} from "../integrations/ticket-provider.ts";
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
@@ -95,8 +100,35 @@ export async function connectorTargetOf(
   };
 }
 
+/**
+ * The Jira ticket provider as the engine's wiring knows it without importing `jira` (the `workflow-runs` module may not: a cycle through
+ * `projects`): it can name a key and has NO method, so a ticket action of a run of a Jira project finds a target and ends with
+ * `ticket_provider_unsupported` (#1039; the write-back is #1040). A route that reads Jira tickets (the start of a run, the Jira webhook)
+ * hands in the real provider of `jira/` (`ticketProvidersWith`).
+ */
+export const WRITELESS_JIRA_PROVIDER: TicketProvider = {
+  id: "jira",
+  isTicketKey: (key) => JIRA_ISSUE_KEY.test(key),
+};
+
+/** The ticket providers of the app's registry (GitHub issues), the Jira stand-in above and, taking its place, the providers a caller hands in. */
+export function ticketProvidersWith(
+  extra: readonly TicketProvider[] = [],
+): TicketProviderRegistry {
+  const byId = new Map<string, TicketProvider>(
+    [WRITELESS_JIRA_PROVIDER, ...extra].map((provider) => [
+      provider.id,
+      provider,
+    ]),
+  );
+  return {
+    get: (id) => byId.get(id) ?? ticketProviderRegistry.get(id),
+    ids: () => [...new Set([...ticketProviderRegistry.ids(), ...byId.keys()])],
+  };
+}
+
 const runTicketTargets = createRunTicketTargets({
-  tickets: ticketProviderRegistry,
+  tickets: ticketProvidersWith(),
   runs: (workspaceId) =>
     createWorkflowRunsRepository(getDatabase(), workspaceId),
   workflows: (workspaceId) =>
@@ -213,6 +245,7 @@ function lazyAnswerEngine(
  */
 function githubReads(
   workspaceId: string,
+  tickets: TicketProviderRegistry = ticketProvidersWith(),
 ): Pick<
   Parameters<typeof createWorkflowRunService>[0],
   "resolveRepository" | "readTicket"
@@ -268,7 +301,7 @@ function githubReads(
           board: null,
         },
       );
-      const provider = ticketProviderRegistry.get(
+      const provider = tickets.get(
         jira === null ? DEFAULT_TICKET_PROVIDER : "jira",
       );
       if (provider?.readTicket === undefined) return undefined;
@@ -299,7 +332,11 @@ function githubReads(
 }
 
 /** The run service of one workspace. */
-export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
+export function workflowRunServiceFor(
+  workspaceId: string,
+  /** The ticket providers the route can read tickets with that this module may not import (the Jira provider, #1039). */
+  extraTicketProviders: readonly TicketProvider[] = [],
+): WorkflowRunService {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
   return createWorkflowRunService({
@@ -309,7 +346,7 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
     workflows: createWorkflowsRepository(db, workspaceId),
     projects: createProjectsRepository(db, workspaceId),
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
-    ...githubReads(workspaceId),
+    ...githubReads(workspaceId, ticketProvidersWith(extraTicketProviders)),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
@@ -454,10 +491,14 @@ export function statusTriggerFor(workspaceId: string): StatusTrigger {
  * the registration's project, asks Jira for the issue's status NOW (the stale guard) and writes the runs. The first steps run after the
  * response, as for a label.
  */
-export function jiraStatusTriggerFor(workspaceId: string): JiraStatusTrigger {
+export function jiraStatusTriggerFor(
+  workspaceId: string,
+  /** The Jira ticket provider (`jira/shared.ts`): the route that wires the Jira webhook hands it in. */
+  jira: TicketProvider,
+): JiraStatusTrigger {
   const db = getDatabase();
   const projects = createProjectsRepository(db, workspaceId);
-  const reads = githubReads(workspaceId);
+  const reads = githubReads(workspaceId, ticketProvidersWith([jira]));
   const repositories = createRepositoriesRepository(db, workspaceId);
   return createJiraStatusTrigger({
     runs: createWorkflowRunsRepository(db, workspaceId),

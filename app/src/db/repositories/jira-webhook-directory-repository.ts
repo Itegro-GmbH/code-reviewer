@@ -5,7 +5,7 @@
 // read; every answer carries `workspaceId` (and the site of the connection), and everything done next goes through repositories created
 // for that workspace. Writing webhook rows is the job of jira-webhooks-repository.ts, which is always scoped.
 import "server-only";
-import type { Kysely } from "kysely";
+import { sql, type Kysely } from "kysely";
 import type { Database } from "../schema.ts";
 import {
   toStoredJiraWebhook,
@@ -21,7 +21,10 @@ export type DirectoryJiraWebhook = StoredJiraWebhook & {
 export type JiraWebhookDirectory = {
   /** The row an address names by its id, whatever its workspace; undefined for none. */
   findById(id: string): Promise<DirectoryJiraWebhook | undefined>;
-  /** The projects that have a webhook row, of every workspace: what the nightly job walks. At most `limit`, oldest first. */
+  /**
+   * The projects the nightly job walks, of every workspace: those that have a webhook row, and the active projects whose ticket source is a
+   * Jira project and that have none (a registration that never got as far as its row). At most `limit`, those with a row first.
+   */
   listProjects(
     limit: number,
   ): Promise<{ workspaceId: string; projectId: string }[]>;
@@ -53,13 +56,19 @@ export function createJiraWebhookDirectory(
     },
 
     async listProjects(limit) {
-      const rows = await db
-        .selectFrom("jira_webhooks")
-        .select(["workspace_id", "project_id"])
-        .orderBy("created_at")
-        .orderBy("id")
-        .limit(limit)
-        .execute();
+      const { rows } = await sql<{ workspace_id: string; project_id: string }>`
+        select workspace_id, project_id from (
+          select workspace_id, project_id, 0 as rank, created_at as at, id as tie from jira_webhooks
+          union all
+          select r.workspace_id, p.id, 1, p.created_at, p.id
+          from projects p
+          join repositories r on r.id = p.repository_id
+          where p.active = 1
+            and json_or_null(p.ticket_source) ->> 'provider' = 'jira'
+            and not exists (select 1 from jira_webhooks w where w.project_id = p.id)
+        ) walked
+        order by rank, at, tie
+        limit ${limit}`.execute(db);
       return rows.map((row) => ({
         workspaceId: row.workspace_id,
         projectId: row.project_id,

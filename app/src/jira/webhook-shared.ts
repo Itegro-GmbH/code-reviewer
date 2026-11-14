@@ -9,18 +9,18 @@ import { createRepositoriesRepository } from "../db/repositories/repositories-re
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-deliveries-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import type { JiraStatusTrigger } from "../workflow-runs/jira-status-trigger.ts";
 import { createJiraMirror } from "./mirror.ts";
 import { getAtlassianConfig } from "./shared.ts";
 import {
   createJiraWebhookHandler,
+  type JiraStatusStarter,
   type JiraWebhookHandler,
 } from "./webhook-handler.ts";
 
 export function getJiraWebhookHandler(
   options: {
     /** What starts the lanes a status change in Jira starts in one workspace; the route passes it in. */
-    statusesFor?: (workspaceId: string) => JiraStatusTrigger;
+    statusesFor?: (workspaceId: string) => JiraStatusStarter;
   } = {},
 ): JiraWebhookHandler {
   const db = getDatabase();

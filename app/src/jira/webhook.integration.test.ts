@@ -401,6 +401,29 @@ describe("registering the webhook of a Jira source", () => {
   });
 
   // #1039
+  it("walks an active Jira project that has no webhook row at all, and registers it in the nightly job", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    // The row never came to exist (the activation hook failed before it): the project is found by its source.
+    await w.h.db
+      .deleteFrom("jira_webhooks")
+      .where("project_id", "=", project.id)
+      .execute();
+    const lost = await w.hook();
+    w.h.atlassian.dropWebhook(lost.id);
+    expect(await w.directory.listProjects(10)).toEqual([
+      { workspaceId: w.workspace.id, projectId: project.id },
+    ]);
+
+    expect(await w.registrar.reconcile(project.id)).toEqual({
+      outcome: "registered",
+    });
+    expect(w.h.atlassian.webhooks()).toHaveLength(1);
+    // Listed once, whether it has a row or not.
+    expect(await w.directory.listProjects(10)).toHaveLength(1);
+  });
+
+  // #1039
   it("keeps a failed registration on the row and registers it the next night", async () => {
     const w = await world();
     w.h.atlassian.failNext("/ex/jira/" + SITE.id + "/rest/api/3/webhook", {

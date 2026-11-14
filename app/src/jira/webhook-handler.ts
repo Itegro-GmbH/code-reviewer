@@ -29,7 +29,6 @@ import type {
   WebhookDeliveriesRepository,
   WebhookDeliveryOutcome,
 } from "../db/repositories/webhook-deliveries-repository.ts";
-import type { JiraStatusTrigger } from "../workflow-runs/jira-status-trigger.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
 import {
   consoleWebhookLogger,
@@ -67,6 +66,31 @@ export type JiraWebhookOutcome =
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const REGISTRATION_ID = /^[A-Za-z0-9-]{1,64}$/;
 
+/**
+ * What starts the lanes a change of status in Jira starts: `JiraStatusTrigger` of `src/workflow-runs/`, which this module does not import
+ * (the engine's wiring reaches this folder; the route wires the two together), as for the GitHub webhook.
+ */
+export type JiraStatusStarter = {
+  start(
+    deliveryId: string,
+    move: {
+      projectId: string;
+      connectionId: string;
+      projectKey: string;
+      issueKey: string;
+      from: string | null;
+      to: string;
+      actor?: { accountId: string; name: string };
+    },
+  ): Promise<{
+    matched: number;
+    started: number;
+    existing: number;
+    skipped: number;
+    busy: number;
+  }>;
+};
+
 /** What acts inside the workspace of the registration. */
 export type JiraWorkspaceCollaborators = {
   projects: { getById(projectId: string): Promise<StoredProject | undefined> };
@@ -74,7 +98,7 @@ export type JiraWorkspaceCollaborators = {
   repositoryName(repositoryId: string): Promise<string | undefined>;
   mirror: JiraMirror;
   /** Left out where a server has no workflow engine: a status change is then only written into the ticket mirror. */
-  statuses?: JiraStatusTrigger;
+  statuses?: JiraStatusStarter;
 };
 
 export type JiraWebhookDeps = {

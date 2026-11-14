@@ -11,7 +11,6 @@ import type { GithubAppConfig } from "./providers/github-app/config.ts";
 import { createGithubAppProvider } from "./providers/github-app/provider.ts";
 import { createGithubClientSource } from "./providers/github-app/client-source.ts";
 import { createGithubTicketProvider } from "./providers/github-app/ticket-provider.ts";
-import { createJiraTicketProvider } from "../jira/ticket-provider.ts";
 import {
   createTicketProviderRegistry,
   type TicketProviderRegistry,
@@ -138,15 +137,6 @@ async function loadServerGithubAppConfig(): Promise<GithubAppConfig> {
 }
 
 /**
- * The reader of the Jira issues of a workspace's connections as the running server has it (#1039). Imported here, not at the top: the Jira
- * wiring builds on the database and the server's settings, which a registry built for a test must not pull in.
- */
-async function loadServerJiraIssueReader(workspaceId: string) {
-  const { jiraIssueReaderFor } = await import("../jira/shared.ts");
-  return jiraIssueReaderFor(workspaceId);
-}
-
-/**
  * The providers of this app, built from one set of GitHub App settings and one client (#1035): the GitHub App as a git provider and as
  * the ticket provider of GitHub issues. The settings are read every time GitHub is used, not when the app loads and not once: a missing
  * setting fails that call with GITHUB_APP_CONFIG_INVALID and breaks nothing else, and a webhook secret or key that was replaced counts
@@ -176,10 +166,7 @@ export function createDefaultProviders(options: DefaultRegistryOptions = {}): {
         source,
       ),
     }),
-    tickets: createTicketProviderRegistry([
-      createGithubTicketProvider(source),
-      createJiraTicketProvider({ readerFor: loadServerJiraIssueReader }),
-    ]),
+    tickets: createTicketProviderRegistry([createGithubTicketProvider(source)]),
   };
 }
 
@@ -190,7 +177,7 @@ export function createDefaultIntegrationRegistry(
   return createDefaultProviders(options).integrations;
 }
 
-// The MVP has exactly one git provider, the GitHub App, and two ticket providers, GitHub issues through the same App and (read-only until #1040) Jira Cloud. A new provider adds its
+// The MVP has exactly one git provider, the GitHub App, and one ticket provider, GitHub issues through the same App. (The read-only ticket provider of Jira Cloud, #1039, lives with the workflow engine's wiring, `workflow-runs/shared.ts`: `integrations` may not import `jira`, an import cycle.) A new provider adds its
 // entry above and nowhere else.
 const defaults = createDefaultProviders();
 export const integrationRegistry = defaults.integrations;

@@ -3,10 +3,10 @@
 // A Jira issue as the factory's neutral ticket (#1039): what the webhook payload and `GET /rest/api/3/issue/{key}` carry, mapped to the
 // fields every ticket source fills (key, title = summary, body = description as plain text, status name, type, assignees, labels, parent,
 // address). The texts are those of whoever wrote the issue: untrusted. Jira's own status names are kept, never mapped (epic #1034).
+import { JIRA_ISSUE_KEY } from "../workflows/ticket-ref.ts";
 import { adfToText } from "./adf.ts";
 
-/** A Jira issue key: the project key, a dash, the number (upper case letters, digits and underscore; the number starts at 1). */
-const ISSUE_KEY = /^([A-Z][A-Z0-9_]{1,99})-([1-9]\d{0,9})$/;
+const ISSUE_KEY = JIRA_ISSUE_KEY;
 
 export const isJiraIssueKey = (key: string): boolean => ISSUE_KEY.test(key);
 

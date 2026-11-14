@@ -405,7 +405,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
     "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
-    "GitHub or Jira could not be asked right now. Try again in a moment.",
+    "GitHub could not be asked right now (or Jira, for a Jira project). Try again in a moment.",
 };
 
 /** The sentence for a failed start or read: the route's code, or a transport code, or a status the page cannot read. */
