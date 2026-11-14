@@ -1,20 +1,21 @@
 # Jira Cloud connection
 
 A workspace connects Jira Cloud sites to the factory with OAuth 2.0 (3LO) and the factory's own Atlassian app (epic #1034,
-issue #1037). This folder is the connection only: Jira as a project's ticket source (#1038), the inbound webhook (#1039) and the
-write-back come on top and call Jira through `JiraTokens.request`. How an owner registers the Atlassian app:
+issue #1037). This folder is the connection and, since #1038, the reads a project's ticket source needs (the projects and the workflow statuses of a
+site, `projects.ts`); the inbound webhook (#1039) and the write-back come on top and call Jira through `JiraTokens.request`. How an owner registers the Atlassian app:
 [`docs/jira-cloud-setup.md`](../../../docs/jira-cloud-setup.md).
 
-| File                                  | Role                                                                                                                                                                                                                                                        |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config.ts`                           | `readAtlassianConfig(env)` (`ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`, both or the feature is off; the test-only addresses need `ALLOW_TEST_ATLASSIAN_ENDPOINTS`), `JIRA_SCOPES`, `jiraCallbackUrl`, the start-up problems and the one start line |
-| `errors.ts`                           | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`), what a call can fail with, what a flow can end with                                                                                                                        |
-| `client.ts`                           | The calls to Atlassian (consent address, code exchange, refresh, accessible resources, the account): values, never exceptions; a failure holds nothing of the answer                                                                                        |
-| `tokens.ts`                           | `createJiraTokens`: seals and opens the pair, refreshes before a call, `request` (a call to a site's Jira API that renews on 401 and repeats once)                                                                                                          |
-| `service.ts`                          | `createJiraService`: `startConnect`, `completeCallback`, the choice among several sites (`readChoice`, `choose`), `remove`, `list`                                                                                                                          |
-| `http.ts`, `shared.ts`, `assemble.ts` | The handlers of the routes below, the wiring of the running server, the wiring over a database (tests)                                                                                                                                                      |
-| `rate-limits.ts`                      | The shared counters of "Connect Jira" (`start`, `callback`; per person and for the instance)                                                                                                                                                                |
-| `ui/`                                 | The Jira card of the Integrations tab (`jira-section.tsx`), its data (`jira-page.ts`), the calls (`api.ts`) and the words (`messages.ts`)                                                                                                                   |
+| File                                  | Role                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.ts`                           | `readAtlassianConfig(env)` (`ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`, both or the feature is off; the test-only addresses need `ALLOW_TEST_ATLASSIAN_ENDPOINTS`), `JIRA_SCOPES`, `jiraCallbackUrl`, the start-up problems and the one start line                                                                                                                            |
+| `errors.ts`                           | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`), what a call can fail with, what a flow can end with                                                                                                                                                                                                                                                   |
+| `client.ts`                           | The calls to Atlassian (consent address, code exchange, refresh, accessible resources, the account): values, never exceptions; a failure holds nothing of the answer                                                                                                                                                                                                                   |
+| `projects.ts`                         | `createJiraProjectReader` (#1038): `listProjects` (the projects of the connection's site, page by page, cut at `MAX_PROJECT_PAGES`, `complete` says so) and `listStatuses` (the workflow statuses of one project, all issue types together, each name once, Jira's own spelling and order); values, never exceptions (`jira_forbidden`, `jira_project_not_found`, plus the call codes) |
+| `tokens.ts`                           | `createJiraTokens`: seals and opens the pair, refreshes before a call, `request` (a call to a site's Jira API that renews on 401 and repeats once)                                                                                                                                                                                                                                     |
+| `service.ts`                          | `createJiraService`: `startConnect`, `completeCallback`, the choice among several sites (`readChoice`, `choose`), `remove`, `list`                                                                                                                                                                                                                                                     |
+| `http.ts`, `shared.ts`, `assemble.ts` | The handlers of the routes below, the wiring of the running server, the wiring over a database (tests)                                                                                                                                                                                                                                                                                 |
+| `rate-limits.ts`                      | The shared counters of "Connect Jira" (`start`, `callback`; per person and for the instance)                                                                                                                                                                                                                                                                                           |
+| `ui/`                                 | The Jira card of the Integrations tab (`jira-section.tsx`), its data (`jira-page.ts`), the calls (`api.ts`) and the words (`messages.ts`)                                                                                                                                                                                                                                              |
 
 The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_connections.ts`), read and written only through
 `src/db/repositories/jira-connections-repository.ts`, created for one workspace.
@@ -58,8 +59,24 @@ The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_c
 - No answer, page, state, log line or error holds a token, the authorization code or the client secret (`#1037-T04` searches the
   answers, redirects, rows and logs of a whole life of a connection for the tokens the fake issued).
 
-## For the ticket source (#1038)
+## The ticket source (#1038)
 
-A project that uses a connection stores `{ "provider": "jira", "connectionId": "<id>", ... }` in `projects.ticket_source`;
-`removeUnlessUsed` reads exactly these two keys. The code that sets such a source must take the connection's row lock
-(`select ... for share` on `jira_connections`) in the transaction that writes the source, so a removal cannot slip in between.
+A project whose tickets are a Jira project stores `{ "provider": "jira", "repositoryId", "connectionId", "projectKey" }` in `projects.ticket_source`
+(`repositoryId` is the GitHub repository the code lives in; there is no board). `removeUnlessUsed` reads exactly `provider` and `connectionId`.
+
+- **The lock.** The one code that writes such a source is `ProjectsRepository.activate(repositoryId, { jira })`. It takes the connection's row
+  `select ... for share` (in the workspace of the repository, so another workspace's connection is none) in the transaction that writes the
+  source, after the repository's own lock. A removal (`for update`, then the check of the projects) therefore waits for the write and finds
+  the project; an assignment that comes after a removal finds no row (`jira_connection_not_found`). Both orders are tested
+  (`projects-repository.integration.test.ts`, "takes the connection's row for share…", "is refused when a removal holds the connection…").
+- **What the dialog and the route check** before that: `POST /api/w/:workspace/projects` with `ticketSource: { provider: "jira", connectionId,
+projectKey }` reads the projects of the connection's site now and refuses a key the site does not have (`unknown_jira_project`, with the keys
+  it has), a connection the workspace does not have (`unknown_connection`; another workspace's is none), a broken one
+  (`PROJECT_JIRA_CONNECTION_BROKEN`, 409) and a site that cannot be asked (`PROJECT_JIRA_UNAVAILABLE`, 503). The projects are also
+  `GET /api/w/:workspace/jira/connections/:connectionId/projects` (`manage_projects`), for the dialog.
+- **The statuses** are `JiraProjectReader.listStatuses`, read when a page is built: the lane editor's picker for `ticket.statusChanged`
+  (`statusNamesFor` in `src/projects/create-shared.ts`) and the Setup tab of the project. Jira's own names, never mapped; a site that cannot be
+  asked, or a broken connection, offers none and the editor takes a typed name.
+- **What a Jira project does not have yet:** the ticket mirror (the webhook, #1039), tickets in the cockpit's Issues tab, and any write-back
+  (#1040). `TrackerService` answers `TRACKER_SOURCE_NOT_MIRRORED` for it, the nightly resync leaves it out, and the first sync after creating it
+  is not started; the issues of the code repository are not that project's tickets.

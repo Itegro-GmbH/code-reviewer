@@ -1199,7 +1199,8 @@ works as written.
 *Sub-issue 2 of epic #1034 (#1036).* A ticket moved into a status starts the workflows that wait for it. For GitHub the status is the **Status of the project board** (Projects v2); the
 webhook of the GitHub App takes the event `projects_v2_item` that [the ticket mirror](ticket-mirror.md) already follows and, once the mirror holds the new status, hands the move to
 [`status-trigger.ts`](../app/src/workflow-runs/status-trigger.ts). The names are the provider's own (the factory has no status model of its own): the lane editor offers the options of the
-Status field of the board the project chose, and a name that was typed is kept as typed.
+Status field of the board the project chose (for a project whose tickets are a Jira project, #1038: the names of the workflow statuses of that Jira
+project, all issue types together, spelled as Jira spells them), and a name that was typed is kept as typed.
 
 **What starts a workflow.** All of these hold:
 

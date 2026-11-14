@@ -230,3 +230,19 @@ reads when it is asked again. `TRACKER_INTEGRATION_UNAVAILABLE` (409) says the i
 
 Code: `app/src/tracker/` (the mirror, the sync, the list and its routes), `app/src/db/repositories/tracker-repository.ts` (the only SQL),
 `app/src/integrations/providers/github-app/` (`tracker-events.ts`, `tracker-map.ts` and the three reads of the client).
+
+## A project on a Jira project (#1038)
+
+A project's ticket source can be a Jira project (`{ provider: "jira", repositoryId, connectionId, projectKey }`, [`src/jira/README.md`](../app/src/jira/README.md)).
+**The mirror is not touched by that issue.** `repositoryId` of such a source is the GitHub repository the code lives in, and the mirror is keyed by
+`(repository_id, provider, key)` since #1035, so a Jira ticket can be stored under that repository with `provider = 'jira'` and the key `PROJ-123`
+without a new column and without the `repository_id` question that #1035 left open (a Jira container with no repository does not exist: a Jira source
+always names the repository of the code). What the mirror has to learn is #1039's work: the inbound webhook, reading a Jira page (`readTrackerPage`), and
+the sync state per `(repository_id, provider)`, which already exists.
+
+Until then the mirror leaves such a project alone: the issues of its repository are not its tickets. `TrackerService` (`listIssues`, `syncState`, `sync`)
+answers `TRACKER_SOURCE_NOT_MIRRORED` (409), the nightly resync (`listResyncTargets`) skips it and the route that creates a project does not start the
+first sync for it. **Not decided here, for #1039:** the GitHub `issues` webhook of the code repository still reaches the mirror for a project whose
+tickets are Jira's (the handler resolves the provider of the repository's project; it has no Jira provider yet), and a lane with a `ticket.labeled` trigger
+in such a project still starts from GitHub labels.
+
