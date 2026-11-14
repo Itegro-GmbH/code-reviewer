@@ -25,6 +25,10 @@ from door_support import implementer_job_text
 from jsonschema import Draft202012Validator
 
 from code_reviewer_runner import worker_cli
+from code_reviewer_runner.factory_runner.firecracker.wire import (
+    NarrowMessage,
+    parse_control_request,
+)
 from code_reviewer_runner.implementer import environment_control as control
 from code_reviewer_runner.implementer.environment_control import (
     ENVIRONMENT_CONTROL_VARIABLE,
@@ -288,6 +292,19 @@ def test_the_rule_off_is_narrowed_too(host_factory: Any) -> None:
     vsock_control(host).narrow(OFF, MODEL_HOST)
 
     assert host.requests[0]["network"] == {"mode": "off", "hosts": []}
+
+
+# #1032-T01
+def test_narrow_sends_the_contracts_rule_without_the_doors_ports(host_factory: Any) -> None:
+    host = host_factory(ACK)
+    rule = NetworkRule(MODE_LIST, ("api.anthropic.com",), ports=(443,))
+
+    vsock_control(host).narrow(rule, "api.anthropic.com")
+
+    assert host.requests[0]["network"] == {"mode": "list", "hosts": ["api.anthropic.com"]}
+    parsed = parse_control_request(host.requests[0])
+    assert isinstance(parsed, NarrowMessage)
+    assert parsed.rule.hosts == ("api.anthropic.com",)
 
 
 # #975-T02

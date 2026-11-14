@@ -143,11 +143,12 @@ def _connect_for(transport: str, connect: Connect) -> Connect:
 
 def narrow_request(rule: NetworkRule, model_host: str, token: str | None = None) -> dict[str, Any]:
     """`NarrowRequest` of the contract. `token` is the host's per-VM token: a host that serves a VM
-    of vm-init refuses a request without it."""
+    of vm-init refuses a request without it. `network` is the contract's rule, `mode` and `hosts`:
+    the ports of a door's rule (a subscription turn's, #1032) stay with the network door."""
     request: dict[str, Any] = {
         "version": PROTOCOL_VERSION,
         "type": REQUEST_NARROW,
-        "network": rule.to_json(),
+        "network": {"mode": rule.mode, "hosts": list(rule.hosts)},
         "modelHost": model_host,
     }
     if token is not None:
