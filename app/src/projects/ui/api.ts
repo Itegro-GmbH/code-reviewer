@@ -31,10 +31,18 @@ export type BoardChoice = {
 
 export type BoardsAnswer = { available: boolean; boards: BoardChoice[] };
 
+/** The projects of the Jira site of a connection (#1038), as the dialog lists them. */
+export type JiraProjectsAnswer = {
+  complete: boolean;
+  projects: { key: string; name: string }[];
+};
+
 /** The body of a new project (#922): the repository, the board of its GitHub Project, and the built-in lanes to copy. */
 export type NewProjectBody = {
   repositoryId: string;
   board: { projectV2Id: string } | null;
+  /** The tickets of a Jira project (#1038); the repository is the one the code lives in. Left out: the issues of the repository. */
+  ticketSource?: { provider: "jira"; connectionId: string; projectKey: string };
   lanes: string[];
 };
 
@@ -58,6 +66,10 @@ export type ProjectsApi = {
 export type NewProjectApi = {
   /** `GET .../repositories/:id/boards`: the boards the project of that repository could take. */
   boards(repositoryId: string): Promise<RequestResult<BoardsAnswer>>;
+  /** `GET .../jira/connections/:id/projects` (#1038): the projects of the Jira site of a connection of the workspace. */
+  jiraProjects(
+    connectionId: string,
+  ): Promise<RequestResult<JiraProjectsAnswer>>;
   /** `POST .../projects`: creates the project of a repository in the factory. */
   createProject(
     body: NewProjectBody,
@@ -100,6 +112,15 @@ export function createNewProjectApi(
         workspaceApiPath(
           workspaceSlug,
           `/repositories/${encodeURIComponent(repositoryId)}/boards`,
+        ),
+      ),
+    jiraProjects: (connectionId) =>
+      requestJson<JiraProjectsAnswer>(
+        fetchImpl,
+        "GET",
+        workspaceApiPath(
+          workspaceSlug,
+          `/jira/connections/${encodeURIComponent(connectionId)}/projects`,
         ),
       ),
     createProject: (body) =>

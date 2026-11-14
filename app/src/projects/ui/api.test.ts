@@ -120,6 +120,32 @@ describe("the new project dialog's calls (#922)", () => {
     ]);
   });
 
+  // #1038
+  it("reads the projects of a Jira connection with GET on its route, the id escaped", async () => {
+    const calls: Array<{ url: string; method: string; body: string | null }> =
+      [];
+    const api = createNewProjectApi(async (url, init) => {
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : null,
+      });
+      return new Response(JSON.stringify({ complete: true, projects: [] }), {
+        status: 200,
+      });
+    }, "acme");
+
+    await api.jiraProjects("a/b");
+
+    expect(calls).toEqual([
+      {
+        url: "/api/w/acme/jira/connections/a%2Fb/projects",
+        method: "GET",
+        body: null,
+      },
+    ]);
+  });
+
   // #922-T35
   it("creates a project with POST on the projects route and the body as given", async () => {
     const calls: Array<{ url: string; method: string; body: string | null }> =

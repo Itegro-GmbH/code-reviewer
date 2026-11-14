@@ -179,8 +179,22 @@ describe("the New project dialog", () => {
       }),
     );
     const boardsCall = vi.fn<NewProjectApi["boards"]>(() => boards);
-    const api: NewProjectApi = { boards: boardsCall, createProject };
-    return { api, createProject, boardsCall };
+    const jiraProjects = vi.fn<NewProjectApi["jiraProjects"]>(async () => ({
+      ok: true,
+      data: {
+        complete: true,
+        projects: [
+          { key: "PROJ", name: "Project" },
+          { key: "OPS", name: "Operations" },
+        ],
+      },
+    }));
+    const api: NewProjectApi = {
+      boards: boardsCall,
+      createProject,
+      jiraProjects,
+    };
+    return { api, createProject, boardsCall, jiraProjects };
   }
 
   async function openAndChoose(
@@ -226,7 +240,7 @@ describe("the New project dialog", () => {
     ).toEqual([
       "Choose a repository",
       "GitHub issues of acme/api",
-      "Jira project (later)",
+      "Jira project (connect a Jira site in the settings first)",
     ]);
     const board = within(dialog).getByLabelText("Board (optional)");
     expect((board as HTMLSelectElement).disabled).toBe(true);
@@ -428,5 +442,242 @@ describe("the New project dialog", () => {
         "Every repository of the GitHub App already is a project.",
       ),
     ).toBeTruthy();
+  });
+});
+
+describe("the New project dialog with a Jira project (#1038)", () => {
+  const CONNECTIONS = [
+    {
+      id: "conn-1",
+      siteName: "acme",
+      siteUrl: "https://acme.atlassian.net",
+      broken: false,
+    },
+    {
+      id: "conn-2",
+      siteName: "beta",
+      siteUrl: "https://beta.atlassian.net",
+      broken: true,
+    },
+  ];
+
+  function fakeApi(
+    jiraProjects: NewProjectApi["jiraProjects"] = async () => ({
+      ok: true,
+      data: {
+        complete: true,
+        projects: [
+          { key: "PROJ", name: "Project" },
+          { key: "OPS", name: "Operations" },
+        ],
+      },
+    }),
+  ) {
+    const createProject = vi.fn<NewProjectApi["createProject"]>(
+      async (body) => ({
+        ok: true,
+        data: {
+          project: { id: "p1", repositoryId: body.repositoryId, active: true },
+          lanes: body.lanes.map((key) => ({ key, ok: true, workflowId: key })),
+        },
+      }),
+    );
+    const jira = vi.fn<NewProjectApi["jiraProjects"]>(jiraProjects);
+    const boards = vi.fn<NewProjectApi["boards"]>(async () => ({
+      ok: true,
+      data: { available: true, boards: [] },
+    }));
+    const api: NewProjectApi = { boards, createProject, jiraProjects: jira };
+    return { api, createProject, jira, boards };
+  }
+
+  async function openAsJira(api: NewProjectApi) {
+    const user = userEvent.setup();
+    render(
+      <NewProjectDialog
+        workspaceSlug="acme"
+        choices={[{ repositoryId: "repo-2", fullName: "acme/api" }]}
+        jiraConnections={CONNECTIONS}
+        api={api}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "New project" }));
+    const dialog = screen.getByRole("dialog", { name: "New project" });
+    await user.selectOptions(
+      within(dialog).getByLabelText("Ticket source (one)"),
+      "Jira project",
+    );
+    return { user, dialog };
+  }
+
+  // #1038-T01
+  it("enables the Jira project option when the workspace has a connection, and shows its three choices only then", async () => {
+    const { dialog } = await openAsJira(fakeApi().api);
+
+    const source = within(dialog).getByLabelText("Ticket source (one)");
+    expect(
+      within(source as HTMLElement)
+        .getAllByRole("option")
+        .map((option) => [
+          option.textContent,
+          (option as HTMLOptionElement).disabled,
+        ]),
+    ).toEqual([
+      ["Choose a repository", false],
+      ["GitHub issues of acme/api", false],
+      ["Jira project", false],
+    ]);
+    expect(within(dialog).getByLabelText("Jira site")).toBeTruthy();
+    expect(within(dialog).getByLabelText("Jira project")).toBeTruthy();
+    expect(
+      within(dialog).getByLabelText("Repository for the code"),
+    ).toBeTruthy();
+    // A Jira project has no GitHub board.
+    expect(within(dialog).queryByLabelText("Board (optional)")).toBeNull();
+  });
+
+  // #1038-T01
+  it("reads the projects of the chosen site, offers a site that needs reconnecting disabled, and creates the project with the Jira source", async () => {
+    const { api, createProject, jira } = fakeApi();
+    const { user, dialog } = await openAsJira(api);
+    const site = within(dialog).getByLabelText(
+      "Jira site",
+    ) as HTMLSelectElement;
+    expect(
+      within(site)
+        .getAllByRole("option")
+        .map((option) => [
+          option.textContent,
+          (option as HTMLOptionElement).disabled,
+        ]),
+    ).toEqual([
+      ["Choose a site", false],
+      ["acme (https://acme.atlassian.net)", false],
+      ["beta (https://beta.atlassian.net) · needs reconnecting", true],
+    ]);
+
+    await user.selectOptions(site, "conn-1");
+    const project = (await within(dialog).findByLabelText(
+      "Jira project",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(project.disabled).toBe(false));
+    expect(jira).toHaveBeenCalledWith("conn-1");
+    expect(
+      within(project)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["Choose a project", "PROJ · Project", "OPS · Operations"]);
+    await user.selectOptions(project, "OPS");
+    await user.selectOptions(
+      within(dialog).getByLabelText("Repository for the code"),
+      "repo-2",
+    );
+    await user.click(
+      within(dialog).getByRole("button", { name: "Create the project" }),
+    );
+
+    await waitFor(() =>
+      expect(createProject).toHaveBeenCalledWith({
+        repositoryId: "repo-2",
+        board: null,
+        ticketSource: {
+          provider: "jira",
+          connectionId: "conn-1",
+          projectKey: "OPS",
+        },
+        lanes: ["review-a-pull-request"],
+      }),
+    );
+    await waitFor(() =>
+      expect(navigation.push).toHaveBeenCalledWith("/w/acme/projects/repo-2"),
+    );
+  });
+
+  // #1038
+  it("cannot create before a site, a project and a repository are chosen, and offers only the lane that needs no write-back", async () => {
+    const { dialog, user } = await openAsJira(fakeApi().api);
+
+    const create = within(dialog).getByRole("button", {
+      name: "Create the project",
+    }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    await user.selectOptions(
+      within(dialog).getByLabelText("Repository for the code"),
+      "repo-2",
+    );
+    expect(create.disabled).toBe(true);
+    const lanes = ["Issue to PR", "Issue to PR (status)"].map(
+      (name) => within(dialog).getByLabelText(name) as HTMLInputElement,
+    );
+    expect(lanes.map((lane) => lane.disabled)).toEqual([true, true]);
+    expect(
+      (
+        within(dialog).getByLabelText("Review a pull request") as HTMLElement
+      ).getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  // #1038
+  it("says when the site cannot be asked, or its connection is broken, and offers no project", async () => {
+    const broken = fakeApi(async () => ({
+      ok: false,
+      status: 409,
+      code: "PROJECT_JIRA_CONNECTION_BROKEN",
+      issues: [],
+    }));
+    const first = await openAsJira(broken.api);
+    await first.user.selectOptions(
+      within(first.dialog).getByLabelText("Jira site"),
+      "conn-1",
+    );
+    expect(
+      await within(first.dialog).findByText(
+        "This Jira connection is broken. Connect it again in the settings.",
+      ),
+    ).toBeTruthy();
+    cleanup();
+
+    const down = fakeApi(async () => ({
+      ok: false,
+      status: 503,
+      code: "PROJECT_JIRA_UNAVAILABLE",
+      issues: [],
+    }));
+    const second = await openAsJira(down.api);
+    await second.user.selectOptions(
+      within(second.dialog).getByLabelText("Jira site"),
+      "conn-1",
+    );
+    expect(
+      await within(second.dialog).findByText(
+        "Jira could not be asked for its projects right now. Try again in a moment.",
+      ),
+    ).toBeTruthy();
+    expect(
+      (
+        within(second.dialog).getByLabelText(
+          "Jira project",
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  // #1038
+  it("goes back to the GitHub choices, with the board and both lanes, when a repository is chosen again", async () => {
+    const { api, boards } = fakeApi();
+    const { user, dialog } = await openAsJira(api);
+
+    await user.selectOptions(
+      within(dialog).getByLabelText("Ticket source (one)"),
+      "repo-2",
+    );
+
+    expect(boards).toHaveBeenCalledWith("repo-2");
+    expect(within(dialog).getByLabelText("Board (optional)")).toBeTruthy();
+    expect(within(dialog).queryByLabelText("Jira site")).toBeNull();
+    expect(
+      (within(dialog).getByLabelText("Issue to PR") as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
   });
 });
