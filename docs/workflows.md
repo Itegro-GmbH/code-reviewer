@@ -1223,7 +1223,7 @@ decides who may move a ticket. The login of the mover is kept as the run's `acto
 **Facts of the run.** `workflow_runs.created_by` is empty, `triggerKind` is `ticket.statusChanged`, `triggerId` is the id of the trigger, `ticket_ref` is `github:<owner>/<repo>#<key>` as for a label. The run's input is
 `{ ticket, status: { from, to } }` stored bounded (`trigger_input`): `trigger.ticket` is the same value a label trigger yields (`key`, `number`, `title`, `body`, `url`, `labels`, `type`, `assignees`, `repo`; the webhook of a board item
 carries none of it, so the ticket is **read from GitHub once a workflow matched**, with the repository's default branch, which the run's agent steps start from), `trigger.status.to` is the status moved into and `trigger.status.from` the status the
-item had, **an empty text when it had none**. The texts of the ticket are those of whoever opened it: data, defused where they go into the text of an action, as for a label.
+item had, **an empty text when it had none**. The texts of the ticket are those of whoever opened it, and the status names are the organisation's own settings: data, defused where they go into the text of an action, as for a label.
 
 **At most one run per delivery and workflow.** The run is started under the request id `gh-<delivery id>-<workflow id>`: GitHub's "Redeliver", or a second request that raced the first, finds the runs the first one made. If the runs
 cannot be written the answer is `503` and the delivery is not completed, so that a redelivery finds the runs that were written. The delivery id is not signed (see the label trigger); the rule of one running run per ticket is what limits a replay.

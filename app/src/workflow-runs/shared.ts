@@ -281,7 +281,6 @@ function githubReads(
 export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
-  const integrations = createIntegrationsRepository(db, workspaceId);
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
     // #920: the engine that takes an answer from the page of the run.

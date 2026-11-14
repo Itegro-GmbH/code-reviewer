@@ -272,6 +272,33 @@ describe("a board move starts the workflows that wait for the status", () => {
     expect(await runsOf(app, lane.id)).toHaveLength(1);
   });
 
+  it("starts only the lanes that wait for this status: not a label lane, not a lane of another status", async () => {
+    const { app } = await startHarness();
+    const waiting = await app.saveWorkflow(statusLane(READY, "Waiting lane"));
+    const other = await app.saveWorkflow(statusLane("Done", "Other lane"));
+    const labeled = await app.saveWorkflow({
+      ...statusLane(),
+      name: "Label lane",
+      triggers: [{ id: "labeled", kind: "ticket.labeled", label: "go" }],
+      steps: [
+        {
+          id: "implement",
+          kind: "agent",
+          profile: "worker",
+          environment: "Python",
+          instruction: "{{trigger.ticket.title}}",
+          result: SUMMARY_RESULT,
+        },
+      ],
+    });
+
+    await app.h.deliver("projects_v2_item.edited", { deliveryId: "move-1" });
+
+    expect(await runsOf(app, waiting.id)).toHaveLength(1);
+    expect(await runsOf(app, other.id)).toHaveLength(0);
+    expect(await runsOf(app, labeled.id)).toHaveLength(0);
+  });
+
   it("starts nothing for a lane whose project is switched off", async () => {
     const { app } = await startHarness();
     const lane = await app.saveWorkflow(statusLane());
