@@ -209,15 +209,16 @@ export type WorkflowRunServiceDependencies = {
     { id: string; fullName: string; defaultBranch: string } | undefined
   >;
   /**
-   * #916: the issue `number` of the repository (as `resolveRepository` answered it) as a ticket, or undefined when there is none (or it is
-   * a pull request). The texts are those of whoever opened it. Throws `WORKFLOW_RUN_GITHUB_UNAVAILABLE` when the platform cannot be asked.
+   * #916: the ticket with this text `key` (#1035: the issue number as text for GitHub) of the repository (as `resolveRepository` answered it), or
+   * undefined when there is none (or it is a pull request). The texts are those of whoever opened it. Throws `WORKFLOW_RUN_GITHUB_UNAVAILABLE` when the platform cannot be asked.
    */
   readTicket(
     repositoryId: string,
-    number: number,
+    key: string,
   ): Promise<
     | {
-        number: number;
+        key?: string;
+        number?: number;
         title: string;
         body: string;
         url: string;
@@ -449,13 +450,13 @@ export function createWorkflowRunService(
         : handedIn;
     const resolved = readStoredInput(jsonOrNull(earlier.triggerInput)).ticket;
     const earlierName = isRecord(resolved?.repo)
-      ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.number)}`
+      ? `${String(resolved.repo.fullName).toLowerCase()}#${String(resolved.key ?? resolved.number)}`
       : undefined;
     const parsed =
       typeof ticket === "string" ? parseTicketRef(ticket) : undefined;
     const name =
       parsed?.ok === true
-        ? `${parsed.ref.repo.toLowerCase()}#${String(parsed.ref.number)}`
+        ? `${parsed.ref.repo.toLowerCase()}#${parsed.ref.key}`
         : undefined;
     if (
       earlier.workflowId !== workflowId ||
@@ -661,7 +662,7 @@ export function createWorkflowRunService(
       }
       let ticket: TicketValue | undefined;
       if (ref !== undefined) {
-        const issue = await deps.readTicket(repository.id, ref.ref.number);
+        const issue = await deps.readTicket(repository.id, ref.ref.key);
         if (issue === undefined)
           throw new WorkflowRunError(
             "WORKFLOW_RUN_TICKET_NOT_FOUND",
@@ -694,7 +695,7 @@ export function createWorkflowRunService(
               ticketRef: formatTicketRef({
                 provider: "github",
                 repo: ticket.repo.fullName,
-                number: ticket.number,
+                key: ticket.key,
               }),
             }),
         createdBy: user.id,

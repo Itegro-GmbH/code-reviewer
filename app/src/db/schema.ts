@@ -1462,6 +1462,11 @@ export interface TrackerItemsTable {
   /** "owner/name". */
   repo: string;
   number: number;
+  /**
+   * #1035: the text key of the ticket inside its provider (`15` for a GitHub issue, `PROJ-123` for Jira); with `repository_id` and `provider` the
+   * identity of the row. Null only for a row the version before #1035 wrote and the trigger has not reached: it reads as the number.
+   */
+  key: string | null;
   /** The provider's global id; how a board item finds its row. */
   node_id: string;
   /** `issue` or `pull_request`. */
@@ -1503,6 +1508,8 @@ export interface TrackerItemsTable {
 /** #923: where the full sync of a repository's tickets stands. */
 export interface TrackerSyncStateTable {
   repository_id: string;
+  /** #1035: the provider whose tickets this is the sync state of; `github` by default. */
+  provider: ColumnType<string, string | undefined, string>;
   workspace_id: string;
   project_id: string | null;
   /** JSON text: the phase and position of the sync under way; null when none is. */

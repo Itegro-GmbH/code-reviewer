@@ -3,8 +3,6 @@
 // The GitHub App as an IntegrationProvider: one installation of our own app is one integration.
 // Everything GitHub specific stays in this folder; the rest of the app sees normalized types only.
 // See ../../README.md.
-import { createHash } from "node:crypto";
-import type { CapabilitySet } from "../../../capabilities/capability.ts";
 import {
   validateConfigAgainstSchema,
   type ConfigSchema,
@@ -17,18 +15,9 @@ import type {
   Integration,
   RepoRef,
 } from "../../types.ts";
-import {
-  createGithubAppClient,
-  type GithubAppClient,
-  type GithubAppClientOptions,
-  type InstallationPermissions,
-  type JobTokenScope,
-  type RemoteInstallation,
-} from "./client.ts";
-import type { GithubAppConfig } from "./config.ts";
+import type { RemoteInstallation } from "./client.ts";
 import { GithubAppError } from "./errors.ts";
 import { parseGithubEvent } from "./events.ts";
-import { parseTrackerChange } from "./tracker-events.ts";
 import {
   BRANCH_READ_TOKEN_PERMISSIONS,
   CHECK_TOKEN_PERMISSIONS,
@@ -36,13 +25,9 @@ import {
   IMPLEMENTER_TOKEN_PERMISSIONS,
   JOB_TOKEN_PERMISSIONS,
   COMMENT_READ_TOKEN_PERMISSIONS,
-  BOARD_STATUS_TOKEN_PERMISSIONS,
-  ISSUE_ACTION_TOKEN_PERMISSIONS,
   NOTICE_TOKEN_PERMISSIONS,
   PULL_REQUEST_ACTION_TOKEN_PERMISSIONS,
   REVIEW_REQUEST_TOKEN_PERMISSIONS,
-  TRACKER_BOARD_TOKEN_PERMISSIONS,
-  TRACKER_READ_TOKEN_PERMISSIONS,
   VERDICT_TOKEN_PERMISSIONS,
   jobTokenRepositoryIds,
   toImplementerAccessError,
@@ -51,6 +36,13 @@ import {
   toActionError,
   toWriteError,
 } from "./job-access.ts";
+import { actionScope } from "./action-scope.ts";
+import {
+  createGithubClientSource,
+  type GithubAppProviderOptions,
+  type GithubClientSource,
+} from "./client-source.ts";
+import { createIssueActions } from "./issue-actions.ts";
 import { isValidSignature } from "./webhook-signature.ts";
 import { field, payloadProblems } from "./webhook-fields.ts";
 
@@ -59,44 +51,6 @@ const CONFIG_SCHEMA: ConfigSchema = {
   accountId: { type: "number" },
   accountType: { type: "string" },
 };
-
-export type GithubAppProviderOptions = {
-  /**
-   * The settings, or a function that reads them. The provider is created when the app loads, so a
-   * missing setting must not break anything else: it fails the call that needs GitHub, with
-   * GITHUB_APP_CONFIG_INVALID, and works again once the settings are fixed. A function is asked on
-   * every call and its answer is not remembered: a webhook secret or a key that the admin replaced
-   * counts from the next request on, on every app instance (docs/decisions/0001-editions-setup-and-
-   * accounts.md, section 2.10). Only the HTTP client is kept, for as long as the settings it was made
-   * for are the settings in force.
-   */
-  config: GithubAppConfig | (() => GithubAppConfig | Promise<GithubAppConfig>);
-  /** Replaces the HTTP client; for unit tests. */
-  client?: GithubAppClient;
-  /** Passed to the default client (a different fetch, clock or timeout). */
-  clientOptions?: Omit<GithubAppClientOptions, "config">;
-  /**
-   * The capabilities of the deployment (#753), asked on every call. The token of the Implementer is made only where
-   * `allowsReviewKind("implementer")` holds; left out, none is: the default is closed, so a provider wired without it, or a
-   * deployment of another product (code-review.com) whose App was set to write by hand, can never mint a write token.
-   */
-  capabilities?: () => CapabilitySet;
-};
-
-/** The token scope of a workflow action (#844): exactly this repository, and the permissions the action needs. */
-function actionScope(
-  integration: Integration,
-  repo: RepoRef,
-  permissions: InstallationPermissions,
-): JobTokenScope {
-  const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-  if (repo.integrationId !== integration.id || repositoryIds === null)
-    throw new IntegrationError(
-      "INTEGRATION_ACCESS_SCOPE_REFUSED",
-      "The repository does not belong to this integration or has no usable id.",
-    );
-  return { repositoryIds, permissions };
-}
 
 function toDiscovered(installation: RemoteInstallation): DiscoveredConnection {
   return {
@@ -132,38 +86,10 @@ function branchReadScope(integration: Integration, repo: RepoRef) {
 
 export function createGithubAppProvider(
   options: GithubAppProviderOptions,
+  source: GithubClientSource = createGithubClientSource(options),
 ): IntegrationProvider {
-  let resolvedClient:
-    { fingerprint: string; client: GithubAppClient } | undefined;
-
-  async function getConfig(): Promise<GithubAppConfig> {
-    return typeof options.config === "function"
-      ? await options.config()
-      : options.config;
-  }
-
-  // What the client was made from. The key is hashed, so nothing secret is kept as a string.
-  function fingerprintOf(config: GithubAppConfig): string {
-    return [
-      config.appId,
-      config.slug,
-      config.apiBaseUrl,
-      createHash("sha256").update(config.privateKey).digest("hex"),
-    ].join("\n");
-  }
-
-  async function getClient(): Promise<GithubAppClient> {
-    // Reading the settings first makes an injected client fail like the real one when they are bad.
-    const config = await getConfig();
-    if (options.client) return options.client;
-    const fingerprint = fingerprintOf(config);
-    if (resolvedClient?.fingerprint !== fingerprint)
-      resolvedClient = {
-        fingerprint,
-        client: createGithubAppClient({ ...options.clientOptions, config }),
-      };
-    return resolvedClient.client;
-  }
+  const { getConfig, getClient } = source;
+  const issueActions = createIssueActions(source);
 
   async function hasWriteAccess(
     installationId: string,
@@ -415,104 +341,7 @@ export function createGithubAppProvider(
       }
     },
 
-    async commentOnIssue(integration, repo, issueNumber, body, options = {}) {
-      try {
-        const { signal, marker, since } = options;
-        const client = await getClient();
-        const scope = actionScope(
-          integration,
-          repo,
-          ISSUE_ACTION_TOKEN_PERMISSIONS,
-        );
-        if (marker !== undefined) {
-          const botLogin = `${(await getConfig()).slug}[bot]`;
-          const earlier = await client.listIssueComments(
-            integration.externalId,
-            scope,
-            repo.fullName,
-            issueNumber,
-            {
-              ...(since === undefined ? {} : { since }),
-              ...(signal === undefined ? {} : { signal }),
-            },
-          );
-          // Only the app's own comment counts: anybody can copy a marker into theirs.
-          const found = earlier.find(
-            (comment) =>
-              comment.authorLogin === botLogin && comment.body.includes(marker),
-          );
-          if (found !== undefined)
-            return {
-              url: `${repo.url}/issues/${String(issueNumber)}#issuecomment-${found.id}`,
-              existing: true,
-              id: found.id,
-            };
-        }
-        const { url, id } = await client.createIssueComment(
-          integration.externalId,
-          scope,
-          repo.fullName,
-          issueNumber,
-          body,
-          signal,
-        );
-        return { url, existing: false, id };
-      } catch (error) {
-        throw toActionError(error);
-      }
-    },
-
-    async updateIssueComment(integration, repo, commentId, body, signal) {
-      try {
-        await (
-          await getClient()
-        ).updateIssueComment(
-          integration.externalId,
-          actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
-          repo.fullName,
-          commentId,
-          body,
-          signal,
-        );
-      } catch (error) {
-        throw toActionError(error);
-      }
-    },
-
-    async readIssue(integration, repo, issueNumber, signal) {
-      try {
-        return await (
-          await getClient()
-        ).getIssue(
-          integration.externalId,
-          actionScope(integration, repo, COMMENT_READ_TOKEN_PERMISSIONS),
-          repo.fullName,
-          issueNumber,
-          signal,
-        );
-      } catch (error) {
-        throw toReadError(error);
-      }
-    },
-
-    async changeIssueLabels(integration, repo, issueNumber, change, signal) {
-      try {
-        return {
-          labels: await (
-            await getClient()
-          ).changeIssueLabels(
-            integration.externalId,
-            actionScope(integration, repo, ISSUE_ACTION_TOKEN_PERMISSIONS),
-            repo.fullName,
-            issueNumber,
-            change,
-            signal,
-          ),
-        };
-      } catch (error) {
-        throw toActionError(error);
-      }
-    },
+    ...issueActions,
 
     async requestReviewers(integration, repo, prNumber, reviewers, options) {
       try {
@@ -547,23 +376,6 @@ export function createGithubAppProvider(
             signal,
           ),
         };
-      } catch (error) {
-        throw toActionError(error);
-      }
-    },
-
-    async setTicketStatus(integration, repo, issueNumber, move, signal) {
-      try {
-        return await (
-          await getClient()
-        ).moveIssueOnBoard(
-          integration.externalId,
-          actionScope(integration, repo, BOARD_STATUS_TOKEN_PERMISSIONS),
-          repo.fullName,
-          issueNumber,
-          move,
-          signal,
-        );
       } catch (error) {
         throw toActionError(error);
       }
@@ -854,144 +666,6 @@ export function createGithubAppProvider(
         return await (
           await getClient()
         ).listOpenPullRequests(integration.externalId, repo.fullName, signal);
-      } catch (error) {
-        throw toReadError(error);
-      }
-    },
-
-    async parseTrackerChange(integration, request) {
-      const payload = await readJson(request);
-      if (payload === undefined)
-        return { kind: "ignored", reason: "the body is not valid JSON" };
-      return parseTrackerChange({
-        integrationId: integration.id,
-        eventName: request.headers.get("x-github-event") ?? "",
-        payload,
-      });
-    },
-
-    async readTrackerPage(integration, repo, step, signal) {
-      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-      if (repo.integrationId !== integration.id || repositoryIds === null)
-        throw new IntegrationError(
-          "INTEGRATION_ACCESS_SCOPE_REFUSED",
-          "The repository does not belong to this integration or has no usable id.",
-        );
-      const scope = (permissions: InstallationPermissions): JobTokenScope => ({
-        repositoryIds,
-        permissions,
-      });
-      try {
-        const client = await getClient();
-        if (step.phase === "issues") {
-          const page = await client.readTrackerIssues(
-            integration.externalId,
-            scope(TRACKER_READ_TOKEN_PERMISSIONS),
-            repo.fullName,
-            step.page,
-            step.since,
-            signal,
-          );
-          return {
-            phase: "issues",
-            items: page.items,
-            last: page.last,
-            skipped: page.skipped,
-          };
-        }
-        if (step.phase === "checks") {
-          const page = await client.readTrackerChecks(
-            integration.externalId,
-            scope(TRACKER_READ_TOKEN_PERMISSIONS),
-            repo.fullName,
-            step.after,
-            signal,
-          );
-          return {
-            phase: "checks",
-            pullRequests: page.pullRequests,
-            last: page.last,
-            lastNumber: page.lastNumber,
-          };
-        }
-        const page = await client.readTrackerBoard(
-          integration.externalId,
-          scope(TRACKER_BOARD_TOKEN_PERMISSIONS),
-          repo.fullName,
-          step.after,
-          step.boardId,
-          signal,
-        );
-        return { phase: "board", ...page };
-      } catch (error) {
-        throw toReadError(error);
-      }
-    },
-
-    async readBoardStatus(integration, repo, nodeId, boardId, signal) {
-      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-      if (repo.integrationId !== integration.id || repositoryIds === null)
-        throw new IntegrationError(
-          "INTEGRATION_ACCESS_SCOPE_REFUSED",
-          "The repository does not belong to this integration or has no usable id.",
-        );
-      try {
-        return await (
-          await getClient()
-        ).readTrackerBoardStatus(
-          integration.externalId,
-          { repositoryIds, permissions: TRACKER_BOARD_TOKEN_PERMISSIONS },
-          nodeId,
-          boardId,
-          signal,
-        );
-      } catch (error) {
-        throw toReadError(error);
-      }
-    },
-
-    async listBoards(integration, repo, signal) {
-      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-      if (repo.integrationId !== integration.id || repositoryIds === null)
-        throw new IntegrationError(
-          "INTEGRATION_ACCESS_SCOPE_REFUSED",
-          "The repository does not belong to this integration or has no usable id.",
-        );
-      try {
-        const answer = await (
-          await getClient()
-        ).listRepositoryBoards(
-          integration.externalId,
-          {
-            repositoryIds,
-            permissions: TRACKER_BOARD_TOKEN_PERMISSIONS,
-          },
-          repo.fullName,
-          signal,
-        );
-        return answer;
-      } catch (error) {
-        throw toReadError(error);
-      }
-    },
-
-    async readChecksState(integration, repo, headSha, signal) {
-      const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-      if (repo.integrationId !== integration.id || repositoryIds === null)
-        throw new IntegrationError(
-          "INTEGRATION_ACCESS_SCOPE_REFUSED",
-          "The repository does not belong to this integration or has no usable id.",
-        );
-      try {
-        return await (
-          await getClient()
-        ).readChecksState(
-          integration.externalId,
-          { repositoryIds, permissions: TRACKER_READ_TOKEN_PERMISSIONS },
-          repo.fullName,
-          headSha,
-          signal,
-        );
       } catch (error) {
         throw toReadError(error);
       }

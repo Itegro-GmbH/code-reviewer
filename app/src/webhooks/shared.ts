@@ -9,7 +9,10 @@ import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-de
 import { getDatabase } from "../db/startup.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import { getGithubCredentialStore } from "../github-config/shared.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import {
+  integrationRegistry,
+  ticketProviderRegistry,
+} from "../integrations/registry.ts";
 import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
@@ -56,6 +59,7 @@ export function getGithubAppWebhookHandler(
   const db = getDatabase();
   return createGithubAppWebhookHandler({
     registry: integrationRegistry,
+    tickets: ticketProviderRegistry,
     integrations: createIntegrationDirectory(db),
     deliveries: createWebhookDeliveriesRepository(db),
     sync: getIntegrationSync(),

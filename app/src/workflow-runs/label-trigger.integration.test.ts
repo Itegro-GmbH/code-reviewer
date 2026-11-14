@@ -19,6 +19,7 @@ import { addUser } from "../test-support/workspace-deletion-fixture.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
 import { WORKFLOW_OWNER_GONE_TEXT } from "./errors.ts";
 import { createGithubConnectors } from "./github-connectors.ts";
+import { withGithubTickets } from "../test-support/github-ticket-target.ts";
 import { createLabelTrigger, labelRequestId } from "./label-trigger.ts";
 
 const READY = "ready for agent";
@@ -71,29 +72,34 @@ function issueToPullRequest(
 async function startHarness() {
   // The connectors need the harness (its database and registry), the harness needs the connectors: the target is asked per call.
   const holder: { app?: EngineHarness } = {};
-  const connectors = createGithubConnectors({
-    async targetOf(call) {
-      const app = holder.app;
-      if (app === undefined) return undefined;
-      const repository = await app.h.repositories.get(call.repository.id);
-      if (repository === undefined) return undefined;
-      const integration = await createIntegrationsRepository(
-        app.h.db,
-        app.h.workspaceId,
-      ).get(repository.integrationId);
-      if (integration === undefined) return undefined;
-      return {
-        provider: app.h.registry.resolve(integration.type),
-        integration,
-        repo: {
-          integrationId: repository.integrationId,
-          externalId: repository.externalId,
-          fullName: repository.fullName,
-          url: repository.url,
+  const connectors = createGithubConnectors(
+    withGithubTickets(
+      {
+        async targetOf(call) {
+          const app = holder.app;
+          if (app === undefined) return undefined;
+          const repository = await app.h.repositories.get(call.repository.id);
+          if (repository === undefined) return undefined;
+          const integration = await createIntegrationsRepository(
+            app.h.db,
+            app.h.workspaceId,
+          ).get(repository.integrationId);
+          if (integration === undefined) return undefined;
+          return {
+            provider: app.h.registry.resolve(integration.type),
+            integration,
+            repo: {
+              integrationId: repository.integrationId,
+              externalId: repository.externalId,
+              fullName: repository.fullName,
+              url: repository.url,
+            },
+          };
         },
-      };
-    },
-  });
+      },
+      () => holder.app?.h.tickets,
+    ),
+  );
   const app = await startEngineHarness({ connectors });
   holder.app = app;
   const kicked: string[] = [];

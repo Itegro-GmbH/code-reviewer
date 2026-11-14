@@ -9,6 +9,7 @@
 // for settings. A repository the platform stopped listing keeps its row too; it is "unavailable" and
 // cannot be activated (the repositories table says so, not this one).
 import "server-only";
+import { TICKET_PROVIDERS } from "../../workflows/ticket-ref.ts";
 import { lockDynamicReviewGate } from "../dynamic-review-lock.ts";
 import { sql, type Kysely } from "kysely";
 import type {
@@ -37,7 +38,7 @@ export type TicketBoard = { projectV2Id: string; statusFieldId: string };
  * needs nothing else.
  */
 export type TicketSource = {
-  provider: "github";
+  provider: string;
   repositoryId: string;
   board: TicketBoard | null;
 };
@@ -51,11 +52,13 @@ export function defaultTicketSource(repositoryId: string): TicketSource {
  * The ticket source of a row. Damaged or foreign text reads as the default with a warning that names the project (never the text), like
  * damaged settings; the repository is always the row's.
  */
-function readTicketSource(
+export function readTicketSource(
   text: string | null,
   repositoryId: string,
   projectId: string,
   warn: (message: string) => void,
+  /** The ticket providers a source may name (#1035); a source that names another one is not usable. Left out: the providers of `ticket-ref.ts`. */
+  providers: readonly string[] = TICKET_PROVIDERS,
 ): TicketSource {
   if (text === null) return defaultTicketSource(repositoryId);
   const decoded = tryDecodeJson<unknown>(text);
@@ -68,7 +71,8 @@ function readTicketSource(
     typeof value === "object" &&
     value !== null &&
     "provider" in value &&
-    value.provider === "github" &&
+    typeof value.provider === "string" &&
+    providers.includes(value.provider) &&
     (board === null ||
       (typeof board === "object" &&
         board !== null &&
@@ -83,7 +87,7 @@ function readTicketSource(
     return defaultTicketSource(repositoryId);
   }
   return {
-    provider: "github",
+    provider: (value as { provider: string }).provider,
     repositoryId,
     board:
       board === null

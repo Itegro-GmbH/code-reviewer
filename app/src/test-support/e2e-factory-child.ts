@@ -80,7 +80,7 @@ try {
     const ticket = formatTicketRef({
       provider: "github",
       repo: fullName,
-      number: Number(input.ticket),
+      key: String(Number(input.ticket)),
     });
     const created = await runs.createRun({
       workflowId: String(input.workflowId),

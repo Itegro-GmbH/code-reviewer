@@ -14,7 +14,8 @@ import { createRepositoriesRepository } from "../../../db/repositories/repositor
 import { createTrackerRepository } from "../../../db/repositories/tracker-repository.ts";
 import { loadGithubAppConfig } from "./config.ts";
 import { fakeGithubAppClient } from "./fake-client.ts";
-import { createGithubAppProvider } from "./provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
 import { createProjectService } from "../../../projects/service.ts";
 import {
   TEST_WEBHOOK_SECRET,
@@ -57,12 +58,14 @@ async function setup() {
   });
   await projects.activateProject(repository.id);
 
-  const provider = createGithubAppProvider({
-    config: loadGithubAppConfig(testGithubAppEnv()),
-    client: fakeGithubAppClient({
-      trackerChecks: { [`acme/widgets@${SHA}`]: "failure" },
+  const provider = createGithubTicketProvider(
+    createGithubClientSource({
+      config: loadGithubAppConfig(testGithubAppEnv()),
+      client: fakeGithubAppClient({
+        trackerChecks: { [`acme/widgets@${SHA}`]: "failure" },
+      }),
     }),
-  });
+  );
   const tracker = createTrackerRepository(db, workspaceId);
   const mirror = createTrackerMirror({
     repositories,
@@ -74,14 +77,21 @@ async function setup() {
     },
     async boardStatusOf(i, repo, nodeId, boardId) {
       return (
-        (await provider.readBoardStatus?.(i, repo, nodeId, boardId)) ?? {
+        (await provider.readBoardStatus?.(
+          { integration: i, repo },
+          nodeId,
+          boardId,
+        )) ?? {
           available: false,
           status: null,
         }
       );
     },
     async checksStateOf(i, repo, headSha) {
-      return (await provider.readChecksState?.(i, repo, headSha)) ?? null;
+      return (
+        (await provider.readChecksState?.({ integration: i, repo }, headSha)) ??
+        null
+      );
     },
   });
 

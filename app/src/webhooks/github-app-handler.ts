@@ -41,6 +41,7 @@ import { hasSafeMessage } from "../integrations/errors.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 import type { IntegrationSyncService } from "../integrations/sync/service.ts";
 import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { TicketProviderRegistry } from "../integrations/ticket-provider.ts";
 import type {
   Integration,
   IntegrationEvent,
@@ -73,6 +74,9 @@ import type { ReviewTriggerIntake } from "./review-trigger-intake.ts";
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
 
 const TYPE: IntegrationType = "github_app";
+
+/** The ticket provider whose events the GitHub webhook carries (#1035): the issues, projects and checks of the installation. */
+const TICKET_PROVIDER = "github";
 
 /** The events that can start a review or change what the app knows about the installation. */
 const REVIEW_EVENTS: ReadonlySet<string> = new Set([
@@ -190,6 +194,8 @@ export type WorkspaceCollaborators = {
 
 export type GithubAppWebhookDeps = {
   registry: IntegrationRegistry;
+  /** The ticket providers (#1035): where the ticket mirror reads what a delivery changed. Left out, the mirror hears nothing. */
+  tickets?: TicketProviderRegistry;
   /**
    * Finds the integration an installation id belongs to, in any workspace: the delivery names the
    * installation before anybody knows the workspace, and the integration says which one it is.
@@ -366,7 +372,6 @@ export function createGithubAppWebhookHandler(
    * otherwise it is logged by its code and the delivery goes on with what else it does.
    */
   async function mirrorTickets(
-    provider: IntegrationProvider,
     integration: Integration,
     eventName: string,
     deliveryId: string,
@@ -374,7 +379,8 @@ export function createGithubAppWebhookHandler(
     strict: boolean,
   ): Promise<boolean> {
     const tracker = deps.workspace(integration.workspaceId).tracker;
-    if (tracker === undefined || provider.parseTrackerChange === undefined)
+    const provider = deps.tickets?.get(TICKET_PROVIDER);
+    if (tracker === undefined || provider?.parseTrackerChange === undefined)
       return false;
     try {
       const parsed = await provider.parseTrackerChange(integration, request);
@@ -432,7 +438,6 @@ export function createGithubAppWebhookHandler(
     let mirrored = false;
     if (integration !== undefined && TRACKER_EVENTS.has(eventName)) {
       mirrored = await mirrorTickets(
-        provider,
         integration,
         eventName,
         deliveryId,

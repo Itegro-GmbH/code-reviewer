@@ -98,6 +98,7 @@ export function createFakeTrackerRepository(
         repositoryId,
         provider: item.provider,
         repo: item.repo,
+        key: item.key ?? String(item.number),
         number: item.number,
         nodeId: item.nodeId,
         kind: item.kind,

@@ -626,6 +626,7 @@ describe("what a run of a label holds", () => {
     };
     expect(labelTriggerInput(LABELED)).toEqual({
       ticket: {
+        key: "12",
         number: 12,
         title: "Cache the widget list",
         body: "Rebuilt on every request.",

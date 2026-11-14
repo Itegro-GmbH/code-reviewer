@@ -7,7 +7,7 @@ import "server-only";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import { ticketProviderRegistry } from "../integrations/registry.ts";
 import type { NewProjectDependencies } from "./create-http.ts";
 
 /** The boards of a repository of the workspace, asked at GitHub with a token that may read boards and nothing else. */
@@ -24,16 +24,20 @@ export function boardsFor(
     const integration = await integrations.get(repository.integrationId);
     if (integration === undefined || integration.status !== "active")
       return { kind: "integration_unavailable" };
-    const provider = integrationRegistry.resolve(integration.type);
+    // The tickets of a new project are GitHub issues so far (#1035: the ticket provider, not the git provider, knows boards).
+    const provider = ticketProviderRegistry.get("github");
     // A platform without boards has none to offer, which is not an error.
-    if (provider.listBoards === undefined)
+    if (provider?.listBoards === undefined)
       return { kind: "boards", available: true, boards: [] };
     try {
-      const answer = await provider.listBoards(integration, {
-        integrationId: repository.integrationId,
-        externalId: repository.externalId,
-        fullName: repository.fullName,
-        url: repository.url,
+      const answer = await provider.listBoards({
+        integration,
+        repo: {
+          integrationId: repository.integrationId,
+          externalId: repository.externalId,
+          fullName: repository.fullName,
+          url: repository.url,
+        },
       });
       return { kind: "boards", ...answer };
     } catch (error) {

@@ -55,7 +55,7 @@ import {
   type AnswerInput,
   type StepAsk,
 } from "./ask.ts";
-import { placeOf, ticketNumberOf } from "./ask-place.ts";
+import { placeOf, ticketKeyOf } from "./ask-place.ts";
 import { conditionHolds } from "./conditions.ts";
 import { readStoredInput } from "./ticket.ts";
 import {
@@ -1925,12 +1925,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       );
       for (const other of active) {
         if (other.id === run.id) continue;
-        const ticket = ticketNumberOf(other);
+        const ticket = ticketKeyOf(other);
         const otherPlace =
           ticket !== undefined
-            ? { number: ticket }
+            ? { key: ticket }
             : placeOf(other, await deps.runs.listSteps(other.id));
-        if (otherPlace?.number === place.number) return true;
+        if (otherPlace?.key === place.key) return true;
       }
       return false;
     } catch {

@@ -178,7 +178,7 @@ function DrawerBody({
   const ticketRef = formatTicketRef({
     provider: "github",
     repo: list.repo,
-    number: item.number,
+    key: String(item.number),
   });
   return (
     <>

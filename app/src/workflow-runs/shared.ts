@@ -23,7 +23,11 @@ import {
   implementerServiceFor,
   implementerTurnPricer,
 } from "../implementer/shared.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import {
+  integrationRegistry,
+  ticketProviderRegistry,
+} from "../integrations/registry.ts";
+import type { TicketScope } from "../integrations/ticket-provider.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { loadAuthConfig } from "../auth/config.ts";
@@ -37,6 +41,11 @@ import {
   type GithubActionTarget,
 } from "./github-connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
+import {
+  DEFAULT_TICKET_PROVIDER,
+  createTicketTargetResolver,
+  type TicketTargetCall,
+} from "./ticket-target.ts";
 import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
@@ -79,27 +88,52 @@ export async function connectorTargetOf(
   };
 }
 
+/** The project the lane of a run belongs to, whose ticket source says where the tickets of the run are (#922, #1035); undefined for a lane without one. */
+async function projectOfRun(
+  call: Pick<TicketTargetCall, "workspaceId" | "runId">,
+) {
+  const db = getDatabase();
+  const run = await createWorkflowRunsRepository(db, call.workspaceId).getRun(
+    call.runId,
+  );
+  if (run === undefined) return undefined;
+  const workflow = await createWorkflowsRepository(db, call.workspaceId).get(
+    run.workflowId,
+  );
+  if (workflow?.workflow.projectId == null) return undefined;
+  return createProjectsRepository(db, call.workspaceId).getById(
+    workflow.workflow.projectId,
+  );
+}
+
+/**
+ * Where the ticket actions of a run act (#1035): the ticket provider the ticket source of the run's project names. The GitHub issues of
+ * the run's repository are the one source there is, so the container is that repository, found through its GitHub installation.
+ */
+export const ticketTargetOf = createTicketTargetResolver({
+  tickets: ticketProviderRegistry,
+  async sourceProviderOf(call) {
+    return (await projectOfRun(call))?.ticketSource.provider;
+  },
+  async scopeOf(provider, call): Promise<TicketScope | undefined> {
+    if (provider !== "github") return undefined;
+    const target = await connectorTargetOf(
+      call.workspaceId,
+      call.repository.id,
+    );
+    return target === undefined
+      ? undefined
+      : { integration: target.integration, repo: target.repo };
+  },
+});
+
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    ticketTargetOf,
     // #922: the board of the project the run's lane belongs to.
     async projectBoard(call) {
-      const db = getDatabase();
-      const run = await createWorkflowRunsRepository(
-        db,
-        call.workspaceId,
-      ).getRun(call.runId);
-      if (run === undefined) return undefined;
-      const workflow = await createWorkflowsRepository(
-        db,
-        call.workspaceId,
-      ).get(run.workflowId);
-      if (workflow?.workflow.projectId == null) return undefined;
-      const project = await createProjectsRepository(
-        db,
-        call.workspaceId,
-      ).getById(workflow.workflow.projectId);
-      return project?.ticketSource.board?.projectV2Id;
+      return (await projectOfRun(call))?.ticketSource.board?.projectV2Id;
     },
     // The members of the workspace are the people of its projects until a project has members of its own (#922).
     projectMembers: (call) =>
@@ -121,6 +155,12 @@ function askChannelFor(workspaceId: string) {
     async targetOf(run) {
       return connectorTargetOf(workspaceId, run.repositoryId);
     },
+    ticketTargetOf: (run) =>
+      ticketTargetOf({
+        workspaceId,
+        runId: run.id,
+        repository: { id: run.repositoryId },
+      }),
     listSteps: (runId) => runs.listSteps(runId),
     isDiscarded: async (runId) =>
       (await runs.getRun(runId))?.status === "discarded",
@@ -218,25 +258,28 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
         );
       }
     },
-    async readTicket(repositoryId, number) {
+    async readTicket(repositoryId, key) {
       const repository = await repositories.get(repositoryId);
       if (repository === undefined) return undefined;
       const integration = await integrations.get(repository.integrationId);
       if (integration === undefined || integration.status !== "active")
         return undefined;
-      const provider = integrationRegistry.resolve(integration.type);
-      if (provider.readIssue === undefined) return undefined;
+      // The tickets of a repository are read through the ticket provider of its source: the GitHub issues, the one there is (#1035).
+      const provider = ticketProviderRegistry.get(DEFAULT_TICKET_PROVIDER);
+      if (provider?.readTicket === undefined) return undefined;
       try {
         return (
-          (await provider.readIssue(
-            integration,
+          (await provider.readTicket(
             {
-              integrationId: repository.integrationId,
-              externalId: repository.externalId,
-              fullName: repository.fullName,
-              url: repository.url,
+              integration,
+              repo: {
+                integrationId: repository.integrationId,
+                externalId: repository.externalId,
+                fullName: repository.fullName,
+                url: repository.url,
+              },
             },
-            number,
+            key,
           )) ?? undefined
         );
       } catch {

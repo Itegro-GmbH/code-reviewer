@@ -12,7 +12,7 @@ import { createIntegrationsRepository } from "../db/repositories/integrations-re
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createGithubCredentialStore } from "../github-config/credentials.ts";
 import type { GithubAppConfig } from "../integrations/registry.ts";
-import { createDefaultIntegrationRegistry } from "../integrations/registry.ts";
+import { createDefaultProviders } from "../integrations/registry.ts";
 import { loadGithubAppConfig } from "../integrations/registry.ts";
 import {
   createIntegrationSync,
@@ -80,13 +80,14 @@ export async function startSyncHarness(
       return loaded.app.config;
     };
   }
-  const registry = createDefaultIntegrationRegistry({
+  const providers = createDefaultProviders({
     loadConfig: loadConfig ?? (() => loadGithubAppConfig(github.env)),
     githubClient: {
       now: github.clock.now,
       requestTimeoutMs: options.requestTimeoutMs ?? 5000,
     },
   });
+  const registry = providers.integrations;
   const logged: string[] = [];
   const workspaceId = await defaultWorkspaceId(db);
   const sync = createIntegrationSync({
@@ -151,6 +152,8 @@ export async function startSyncHarness(
     ...github,
     db,
     registry,
+    /** The ticket providers built from the same settings and client (#1035). */
+    tickets: providers.tickets,
     sync,
     workspaceId,
     integrations,

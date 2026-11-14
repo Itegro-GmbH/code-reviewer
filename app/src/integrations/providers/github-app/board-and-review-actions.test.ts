@@ -13,6 +13,9 @@ import { loadGithubAppConfig } from "./config.ts";
 import { GithubAppError } from "./errors.ts";
 import { WORKFLOW_ACTION_TOKEN_PERMISSIONS } from "./job-access.ts";
 import { createGithubAppProvider } from "./provider.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { withGithubTickets } from "../../../test-support/github-ticket-target.ts";
 import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import { testGithubAppEnv } from "../../../test-support/github-app.ts";
 import type { RepoRef } from "../../types.ts";
@@ -45,11 +48,22 @@ function setup(
     config: loadGithubAppConfig(testGithubAppEnv()),
     client,
   });
-  const connectors = createGithubConnectors({
-    targetOf: async () => ({ provider, integration, repo: widgets }),
-    ...(projectMembers === undefined ? {} : { projectMembers }),
-    ...(projectBoard === undefined ? {} : { projectBoard }),
-  });
+  const tickets = createGithubTicketProvider(
+    createGithubClientSource({
+      config: loadGithubAppConfig(testGithubAppEnv()),
+      client,
+    }),
+  );
+  const connectors = createGithubConnectors(
+    withGithubTickets(
+      {
+        targetOf: async () => ({ provider, integration, repo: widgets }),
+        ...(projectMembers === undefined ? {} : { projectMembers }),
+        ...(projectBoard === undefined ? {} : { projectBoard }),
+      },
+      tickets,
+    ),
+  );
   const connector = (name: string) => {
     const found = connectors.find((candidate) => candidate.name === name);
     if (found === undefined) throw new Error(`no connector ${name}`);

@@ -10,6 +10,9 @@ import {
 import { loadGithubAppConfig } from "./config.ts";
 import { GithubAppError } from "./errors.ts";
 import { createGithubAppProvider } from "./provider.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { withGithubTickets } from "../../../test-support/github-ticket-target.ts";
 import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import { testGithubAppEnv } from "../../../test-support/github-app.ts";
 import type { RepoRef } from "../../types.ts";
@@ -50,9 +53,18 @@ function setup(data: FakeGithubAppClientData = {}, repo: RepoRef = widgets) {
     config: loadGithubAppConfig(testGithubAppEnv()),
     client,
   });
-  const connectors = createGithubConnectors({
-    targetOf: async () => ({ provider, integration, repo }),
-  });
+  const tickets = createGithubTicketProvider(
+    createGithubClientSource({
+      config: loadGithubAppConfig(testGithubAppEnv()),
+      client,
+    }),
+  );
+  const connectors = createGithubConnectors(
+    withGithubTickets(
+      { targetOf: async () => ({ provider, integration, repo }) },
+      tickets,
+    ),
+  );
   const connector = (name: string) => {
     const found = connectors.find((candidate) => candidate.name === name);
     if (found === undefined) throw new Error(`no connector ${name}`);
@@ -881,6 +893,7 @@ describe("the codes of a connector", () => {
   it("end a step with a connector's own code in the engine's report (a repository with no active connection is github_not_found)", async () => {
     const connectors = createGithubConnectors({
       targetOf: async () => undefined,
+      ticketTargetOf: async () => undefined,
     });
     const error = await failure(
       (connectors[1] as { run(c: ActionCall): Promise<unknown> }).run(

@@ -63,6 +63,8 @@ export type TrackerItem = {
   provider: string;
   /** "owner/name". */
   repo: string;
+  /** #1035: the text key of the ticket inside its provider (`15` for a GitHub issue): with the repository and the provider the identity of the row. */
+  key: string;
   number: number;
   nodeId: string;
   kind: TrackerItemKind;
@@ -116,6 +118,8 @@ export type TrackerItemWrite = Pick<
   | "closes"
   | "updatedAt"
 > & {
+  /** The text key of the ticket (#1035); left out: the number as text, the key of a GitHub issue. */
+  key?: string;
   /**
    * The parent issue, or null for none; `undefined` leaves what the row has (a payload that does not carry the field says nothing about
    * it).
@@ -149,6 +153,12 @@ export type TrackerSyncState = {
   lastFullSyncAt: string | null;
   updatedAt: string;
 };
+
+/**
+ * The provider whose sync state this repository holds (`tracker_sync_state` is keyed by `(repository_id, provider)`, #1035). GitHub is
+ * the one ticket provider whose tickets are mirrored per repository; the second provider passes its own with each call.
+ */
+const SYNC_PROVIDER = "github";
 
 /** How long a tombstone (an item the provider deleted) is kept after the last time it was written: long enough for a late delivery. */
 export const TOMBSTONE_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
@@ -306,6 +316,8 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     projectId: row.project_id,
     provider: row.provider,
     repo: row.repo,
+    // A row the version before #1035 wrote and the trigger has not reached has no key yet: it reads as its number.
+    key: row.key ?? String(row.number),
     number: row.number,
     nodeId: row.node_id,
     kind: row.kind as TrackerItemKind,
@@ -444,6 +456,7 @@ export function createTrackerRepository(
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
+      .where("provider", "=", SYNC_PROVIDER)
       .executeTakeFirst();
     return row === undefined ? undefined : syncStateFrom(row);
   };
@@ -471,21 +484,21 @@ export function createTrackerRepository(
           ? sql`case when excluded.updated_at > tracker_items.updated_at then null else tracker_items.review_acted_by end`
           : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
-          workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
+          workspace_id, repository_id, project_id, provider, repo, key, number, node_id, kind, state, state_reason, type, title,
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
           deleted_at, board_seen_at, review_requested_from
         )
-        select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
+        select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.key ?? String(item.number)}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
           ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
           null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id, number) do update set
+        on conflict (repository_id, provider, key) do update set
           project_id = coalesce(excluded.project_id, tracker_items.project_id),
-          provider = excluded.provider,
           repo = excluded.repo,
+          number = excluded.number,
           node_id = excluded.node_id,
           kind = excluded.kind,
           state = excluded.state,
@@ -778,11 +791,11 @@ export function createTrackerRepository(
       // condition. A repository that is not in the workspace is never inserted.
       const claimed = await sql<
         Selectable<TrackerSyncStateTable>
-      >`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
+      >`insert into tracker_sync_state (repository_id, provider, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, ${SYNC_PROVIDER}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id) do update set
+        on conflict (repository_id, provider) do update set
           project_id = coalesce(excluded.project_id, tracker_sync_state.project_id),
           "cursor" = excluded."cursor",
           started_at = excluded.started_at,
@@ -816,12 +829,12 @@ export function createTrackerRepository(
           : [sql`last_full_sync_at = excluded.last_full_sync_at`]),
         sql`updated_at = excluded.updated_at`,
       ];
-      await sql`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
+      await sql`insert into tracker_sync_state (repository_id, provider, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, ${SYNC_PROVIDER}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
           ${state.lastFullSyncAt ?? null}::text, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id) do update set ${sql.join(columns)}
+        on conflict (repository_id, provider) do update set ${sql.join(columns)}
         where tracker_sync_state.workspace_id = ${workspaceId}`.execute(db);
     },
   };
