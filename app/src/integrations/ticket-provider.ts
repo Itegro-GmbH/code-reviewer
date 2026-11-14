@@ -21,6 +21,11 @@ import type {
 export type TicketScope = {
   integration: Integration;
   repo: RepoRef;
+  /**
+   * Where the tickets are when they are not the repository's issues (#1039): the Jira project of the project's ticket source, on the
+   * connection of the workspace. `repo` is then the repository the code lives in (where a mirror row and a pull request go).
+   */
+  jira?: { connectionId: string; projectKey: string };
 };
 
 /** One ticket as a provider reads it: the fields a workflow reads as `{{trigger.ticket.…}}`. The texts are those of whoever opened it: untrusted. */
@@ -35,6 +40,8 @@ export type TicketRead = {
   labels: string[];
   assignees: string[];
   type: string;
+  /** The status of the ticket as its platform names it (Jira's own status name, #1039); absent where the platform gives none (GitHub issues). */
+  status?: string;
 };
 
 /** A board of a ticket container as the picker of a new project needs it (#922). */

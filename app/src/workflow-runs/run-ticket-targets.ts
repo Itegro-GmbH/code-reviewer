@@ -4,9 +4,10 @@
 // the provider. Every missing link (no run, no lane, a lane without a project, a deleted project) means GitHub on the run's repository, as it
 // was before the ticket provider existed. The repositories are handed in so the chain is tested without a database; `shared.ts` wires the
 // real ones.
-import type {
-  ProjectsRepository,
-  StoredProject,
+import {
+  jiraSourceOf,
+  type ProjectsRepository,
+  type StoredProject,
 } from "../db/repositories/projects-repository.ts";
 import type { WorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -48,10 +49,18 @@ export function createRunTicketTargets(deps: RunTicketTargetDependencies) {
     async sourceProviderOf(call) {
       return (await projectOfRun(call))?.ticketSource.provider;
     },
-    // The GitHub issues of the run's repository are the one source there is, so the container is that repository.
+    // The GitHub issues of the run's repository, or the Jira project of the project's source (#1039): there the repository stays the one the
+    // code lives in, and `jira` names where the tickets are.
     async scopeOf(provider, call) {
-      if (provider !== "github") return undefined;
-      return deps.gitScopeOf(call.workspaceId, call.repository.id);
+      if (provider === "github")
+        return deps.gitScopeOf(call.workspaceId, call.repository.id);
+      if (provider !== "jira") return undefined;
+      const project = await projectOfRun(call);
+      const jira =
+        project === undefined ? null : jiraSourceOf(project.ticketSource);
+      if (jira === null) return undefined;
+      const git = await deps.gitScopeOf(call.workspaceId, call.repository.id);
+      return git === undefined ? undefined : { ...git, jira };
     },
   });
 

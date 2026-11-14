@@ -126,6 +126,11 @@ export type TrackerItemWrite = Pick<
    */
   parentNumber?: number | null;
   /**
+   * The status of the ticket as its platform names it (#1039: a Jira issue's status name, which the mirror keeps where GitHub keeps the
+   * board's Status); `undefined` leaves what the row has (GitHub's board status comes from the board's own deliveries), null or a name sets it.
+   */
+  boardStatus?: string | null;
+  /**
    * #924: who a review of the pull request is asked from; `undefined` leaves what the row has (an issue, a comment event and the list of
    * the issues say nothing about it).
    */
@@ -283,6 +288,12 @@ export type TrackerRepository = {
    * `TOMBSTONE_KEPT_MS` before `before`.
    */
   removeNotWrittenSince(repositoryId: string, before: string): Promise<number>;
+  /**
+   * Removes every cached item and sync state of the repository that belongs to another provider than `keep` (#1039): a project that
+   * switches its tickets from GitHub issues to a Jira project (or back) must not show, or collide on the numbers with, the other provider's
+   * rows. Answers how many items went. The cache is rebuilt from the provider, so nothing is lost that cannot be read again.
+   */
+  clearOtherProviders(repositoryId: string, keep: string): Promise<number>;
   getSyncState(repositoryId: string): Promise<TrackerSyncState | undefined>;
   /**
    * Starts a sync in one atomic step, unless one is under way: the state is written (this cursor and start, nothing else changes) only
@@ -471,6 +482,10 @@ export function createTrackerRepository(
         item.parentNumber === undefined
           ? sql`tracker_items.parent_number`
           : sql`excluded.parent_number`;
+      const boardStatus =
+        item.boardStatus === undefined
+          ? sql`tracker_items.board_status`
+          : sql`excluded.board_status`;
       const requested =
         item.reviewRequestedFrom === undefined
           ? sql`tracker_items.review_requested_from`
@@ -490,7 +505,7 @@ export function createTrackerRepository(
         )
         select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.key ?? String(item.number)}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
-          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
+          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, ${item.boardStatus ?? null}::text,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
           null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
@@ -509,6 +524,7 @@ export function createTrackerRepository(
           labels = excluded.labels,
           assignees = excluded.assignees,
           closes = excluded.closes,
+          board_status = ${boardStatus},
           parent_number = ${parent},
           review_requested_from = ${requested},
           review_acted_by = ${acted},
@@ -754,6 +770,22 @@ export function createTrackerRepository(
           eb.or([eb("kind", "<>", "pull_request"), eb("state", "<>", "open")]),
         )
         .execute();
+    },
+
+    async clearOtherProviders(repositoryId, keep) {
+      const items = await db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .executeTakeFirst();
+      await db
+        .deleteFrom("tracker_sync_state")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .execute();
+      return Number(items.numDeletedRows);
     },
 
     async removeNotWrittenSince(repositoryId, before) {

@@ -634,6 +634,7 @@ describe("what a run of a label holds", () => {
         labels: ["enhancement", "ready for agent"],
         type: "",
         assignees: [],
+        status: "",
         repo,
       },
       issue: {

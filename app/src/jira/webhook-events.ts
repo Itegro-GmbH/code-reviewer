@@ -22,8 +22,6 @@ export type JiraChange =
       issue: JiraIssue;
       /** The move the changelog names; absent when the delivery moves no status (a creation moves none). */
       status?: { from: string | null; to: string };
-      /** The key the issue had before, when the changelog says the key changed (a move to another project). */
-      keyFrom?: string;
       actor?: { accountId: string; name: string };
       matchedWebhookIds: number[];
     }
@@ -59,6 +57,17 @@ function actorOf(
   };
 }
 
+/** An own property of the payload when it is a text. */
+function ownString(
+  record: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  const value: unknown = Object.hasOwn(record, name)
+    ? Reflect.get(record, name)
+    : undefined;
+  return typeof value === "string" ? value : undefined;
+}
+
 type ChangelogItem = {
   field: string;
   fromString: string | null;
@@ -73,8 +82,9 @@ function changelogOf(body: Record<string, unknown>): ChangelogItem[] {
     if (!isRecord(item) || typeof item.field !== "string") continue;
     items.push({
       field: item.field,
-      fromString: typeof item.fromString === "string" ? item.fromString : null,
-      toString: typeof item.toString === "string" ? item.toString : "",
+      fromString: ownString(item, "fromString") ?? null,
+      // `toString` is the name Jira gives the new value; read as data, so a payload without it does not find Object's method.
+      toString: ownString(item, "toString") ?? "",
     });
   }
   return items;
@@ -116,7 +126,6 @@ export function parseJiraDelivery(
   const items = event === "jira:issue_updated" ? changelogOf(body) : [];
   // The last status item is the state the issue ended in.
   const statusItem = items.filter((item) => item.field === "status").pop();
-  const keyItem = items.find((item) => item.field === "Key");
   const actor = actorOf(body);
   return {
     kind: "issue_changed",
@@ -130,7 +139,6 @@ export function parseJiraDelivery(
     ...(statusItem === undefined || statusItem.toString === ""
       ? {}
       : { status: { from: statusItem.fromString, to: statusItem.toString } }),
-    ...(keyItem?.fromString ? { keyFrom: keyItem.fromString } : {}),
     ...(actor === undefined ? {} : { actor }),
     matchedWebhookIds,
   };

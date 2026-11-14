@@ -146,6 +146,8 @@ const STEP_FAILURE_TEXT: Record<
   github_rate_limited:
     "GitHub's rate limit was reached. The action was not repeated; wait a while and run the workflow again.",
   github_unavailable: "GitHub could not be reached or did not answer in time.",
+  ticket_provider_unsupported:
+    "The ticket source of this project cannot do this yet: a Jira project can start a run, but comments, labels and status changes on its tickets are not supported yet.",
   action_timeout:
     "The action did not answer in time. It is not repeated, because it may have happened.",
   action_interrupted:

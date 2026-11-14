@@ -48,6 +48,8 @@ export const TICKET_TYPE: ObjectType = objectOf({
   labels: listOf(STRING),
   type: STRING,
   assignees: listOf(STRING),
+  /** The status of the ticket as its platform names it (Jira's own status name, #1039); empty where the platform has none (a GitHub issue: its board status is `trigger.status.to`). */
+  status: STRING,
   repo: TICKET_REPO_TYPE,
 });
 

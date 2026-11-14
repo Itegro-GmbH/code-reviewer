@@ -85,22 +85,6 @@ describe("parseJiraDelivery", () => {
   });
 
   // #1039
-  it("notes the old key when the key of the issue changed", () => {
-    const change = parseJiraDelivery(
-      {
-        timestamp: 1,
-        webhookEvent: "jira:issue_updated",
-        issue: issue("To Do", "NEW-3"),
-        changelog: {
-          items: [{ field: "Key", fromString: "OLD-5", toString: "NEW-3" }],
-        },
-      },
-      SITE,
-    );
-    expect(change).toMatchObject({ kind: "issue_changed", keyFrom: "OLD-5" });
-  });
-
-  // #1039
   it("reads a deleted issue with the time of the deletion", () => {
     expect(
       parseJiraDelivery(

@@ -1268,6 +1268,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
 | `github_rate_limited` | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated. |
 | `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
+| `ticket_provider_unsupported` | step | `ticket.comment`, `ticket.labels` or `ticket.setStatus` on a run of a project whose ticket source is a Jira project: Jira's tickets can be read and start runs, but writing to them (comments, labels, transitions) is not supported yet (#1040). |
 | `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 | `cancelled` | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code. |

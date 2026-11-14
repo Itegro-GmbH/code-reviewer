@@ -70,6 +70,7 @@ export const CONNECTOR_FAILURE_CODES = [
   "github_validation",
   "github_rate_limited",
   "github_unavailable",
+  "ticket_provider_unsupported",
 ] as const;
 export type ConnectorFailureCode = (typeof CONNECTOR_FAILURE_CODES)[number];
 

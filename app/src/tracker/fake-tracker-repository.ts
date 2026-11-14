@@ -72,7 +72,10 @@ export function createFakeTrackerRepository(
       }
       items.set(key(repositoryId, item.number), {
         projectId: before?.projectId ?? null,
-        boardStatus: before?.boardStatus ?? null,
+        boardStatus:
+          item.boardStatus === undefined
+            ? (before?.boardStatus ?? null)
+            : item.boardStatus,
         boardSeenAt: before?.boardSeenAt ?? null,
         deletedAt: null,
         pullRequests: before?.pullRequests ?? [],
@@ -295,6 +298,16 @@ export function createFakeTrackerRepository(
             ...item,
             checksState: null,
           });
+    },
+    async clearOtherProviders(repositoryId, keep) {
+      let removed = 0;
+      for (const item of [...items.values()]) {
+        if (item.repositoryId !== repositoryId || item.provider === keep)
+          continue;
+        items.delete(key(repositoryId, item.number));
+        removed += 1;
+      }
+      return removed;
     },
     async removeNotWrittenSince(repositoryId, before) {
       let removed = 0;
