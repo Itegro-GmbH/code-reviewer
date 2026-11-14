@@ -81,6 +81,8 @@ type Ids = {
   workflowRunId: string;
   profileId: string;
   runnerId: string;
+  /** #1037: a Jira connection of the workspace. */
+  jiraConnectionId: string;
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -948,6 +950,55 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1037: an Owner or an Admin starts "Connect Jira" for their own workspace (without the Atlassian settings the answer is `jira_not_configured`).
+    name: "POST jira/connect",
+    route: "/api/w/[workspace]/jira/connect",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_connections,
+    path: () => "/jira/connect",
+    body: () => ({}),
+    params: () => ({}),
+    file: "jira/connect/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #1037: every member reads the Jira connections of their own workspace, never a token.
+    name: "GET jira/connections",
+    route: "/api/w/[workspace]/jira/connections",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/jira/connections",
+    params: () => ({}),
+    file: "jira/connections/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #1037: an Owner or an Admin removes a Jira connection of their own workspace; the other workspace's is not reachable.
+    name: "DELETE jira/connections/[connectionId]",
+    route: "/api/w/[workspace]/jira/connections/[connectionId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.manage_connections,
+    path: (ids) => `/jira/connections/${ids.jiraConnectionId}`,
+    params: (ids) => ({ connectionId: ids.jiraConnectionId }),
+    file: "jira/connections/[connectionId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #1037: an Owner or an Admin chooses a site of their grant; with no grant waiting the answer is `jira_choice_invalid`.
+    name: "POST jira/choose",
+    route: "/api/w/[workspace]/jira/choose",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_connections,
+    path: () => "/jira/choose",
+    body: () => ({ cloudId: "none" }),
+    params: () => ({}),
+    file: "jira/choose/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",
@@ -1413,6 +1464,29 @@ async function seedWorkspace(
       revoked_at: null,
     })
     .execute();
+  // A Jira connection (#1037): the other workspace's must not be removable through this one's address.
+  await db
+    .insertInto("jira_connections")
+    .values({
+      id: `jira-${slug}`,
+      workspace_id: workspace.id,
+      cloud_id: `cloud-${slug}`,
+      site_url: `https://${slug}.atlassian.net`,
+      site_name: slug,
+      account_id: `account-${slug}`,
+      account_name: `Account ${slug}`,
+      scopes: "read:jira-work",
+      status: "connected",
+      error_code: null,
+      tokens_ciphertext: "c",
+      tokens_nonce: "n",
+      tokens_key_version: 1,
+      access_expires_at: "2026-11-14T10:00:00.000Z",
+      connected_by: null,
+      created_at: "2026-11-14T08:00:00.000Z",
+      updated_at: "2026-11-14T08:00:00.000Z",
+    })
+    .execute();
   return {
     workspace,
     owner,
@@ -1423,6 +1497,7 @@ async function seedWorkspace(
       workflowRunId: workflowRun.run.id,
       profileId: profile.profile.id,
       runnerId: `runner-${slug}`,
+      jiraConnectionId: `jira-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
       projectId: activated.project.id,
@@ -1569,7 +1644,8 @@ async function start() {
         | "workflow_runs"
         | "workflow_step_runs"
         | "profiles"
-        | "profile_versions",
+        | "profile_versions"
+        | "jira_connections",
     ) =>
       db
         .selectFrom(table)
@@ -1597,6 +1673,7 @@ async function start() {
       workflowStepRuns: await select("workflow_step_runs"),
       profiles: await select("profiles"),
       profileVersions: await select("profile_versions"),
+      jiraConnections: await select("jira_connections"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

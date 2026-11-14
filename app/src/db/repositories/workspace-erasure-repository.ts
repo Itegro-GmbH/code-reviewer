@@ -237,6 +237,8 @@ export function createWorkspaceErasureRepository(
         "workspace_members",
         "app_settings",
         "workspace_secrets",
+        // The Jira connections and their sealed tokens (#1037).
+        "jira_connections",
         "workspace_entitlements",
         "plan_handoff_tokens",
         "billing_workspace_settings",

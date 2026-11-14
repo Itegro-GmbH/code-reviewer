@@ -1652,6 +1652,39 @@ export interface ProfileVersionsTable {
   created_at: string;
 }
 
+/**
+ * A Jira Cloud connection of a workspace (#1037): one OAuth grant to one site (src/db/repositories/jira-connections-repository.ts,
+ * src/jira/). The token pair is sealed in the three `tokens_*` columns and never leaves the server.
+ */
+export interface JiraConnectionsTable {
+  id: string;
+  workspace_id: string;
+  /** The Atlassian id of the site (`cloudId`); the address of its API is `/ex/jira/<cloud_id>`. */
+  cloud_id: string;
+  site_url: string;
+  site_name: string;
+  /** The Atlassian account that granted the app, by id and the name Atlassian shows. */
+  account_id: string;
+  account_name: string;
+  /** The scopes Atlassian granted, separated by a space. */
+  scopes: string;
+  /** `connected` or `broken` (JIRA_CONNECTION_STATUSES). */
+  status: string;
+  /** The stable code of why the connection is broken; null while it is connected. */
+  error_code: string | null;
+  /** The sealed JSON of the access and refresh token: the encrypted value and its tag (base64), the nonce (base64), the key version. */
+  tokens_ciphertext: string;
+  tokens_nonce: string;
+  tokens_key_version: number;
+  /** Counts the writes of the token pair; a refresh replaces only the version it read. */
+  token_version: ColumnType<number, number | undefined, number>;
+  /** When the access token ends (not secret). */
+  access_expires_at: string;
+  connected_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1673,6 +1706,7 @@ export interface Database {
   setup_codes: SetupCodesTable;
   secrets: SecretsTable;
   workspace_secrets: WorkspaceSecretsTable;
+  jira_connections: JiraConnectionsTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

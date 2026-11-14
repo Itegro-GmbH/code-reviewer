@@ -161,6 +161,7 @@ describe("the migrations of both epics", () => {
       "20261110180000_rewrite_runner_manifests",
       "20261114120000_tracker_ticket_keys",
       "20261114150000_widen_workflow_run_trigger_for_status",
+      "20261114160000_create_jira_connections",
     ]);
   });
 
@@ -215,6 +216,7 @@ describe("starting the database", () => {
       "instance_settings",
       "integrations",
       "invitations",
+      "jira_connections",
       "job_check_runs",
       "job_claimed_keys",
       "job_comments",

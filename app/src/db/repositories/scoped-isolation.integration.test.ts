@@ -43,6 +43,7 @@ import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
 import { implementerDeliveryId } from "../implementer-job-shape.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
+import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
@@ -82,6 +83,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     tracker: createTrackerRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
     runners: createRunnersRepository(db, workspaceId),
+    jira: createJiraConnectionsRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -623,7 +625,22 @@ async function seed(
       revoked_at: null,
     })
     .execute();
+  // A Jira Cloud connection (#1037) in every workspace: the other workspace's is there to be read, broken and removed.
+  await repos.jira.save({
+    id: `jira-${tag}`,
+    cloudId: `cloud-${tag}`,
+    siteUrl: `https://${tag}.atlassian.net`,
+    siteName: tag,
+    accountId: `account-${tag}`,
+    accountName: `Account ${tag}`,
+    scopes: ["read:jira-work"],
+    sealed: { ciphertext: `c-${tag}`, nonce: `n-${tag}`, keyVersion: 1 },
+    accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+    connectedBy: null,
+  });
   return {
+    jiraConnectionId: `jira-${tag}`,
+    jiraCloudId: `cloud-${tag}`,
     runnerId: `runner-${tag}`,
     environment: created.environment,
     workflow: secondVersion.workflow,
@@ -847,6 +864,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .execute(),
     runners: await db
       .selectFrom("runners")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    jiraConnections: await db
+      .selectFrom("jira_connections")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
@@ -1416,6 +1439,12 @@ const CASES: Case[] = [
     run: (a) => a.workspaceSecrets.names(),
     expectAnswer: (answer) =>
       expect(answer).toEqual(["llm_api_key", "llm_api_key.fakeai"]),
+  },
+  {
+    name: "workspaceSecrets.take",
+    run: (a) => a.workspaceSecrets.take("llm_api_key"),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ binding: "binding-a" }),
   },
   {
     name: "workspaceSecrets.remove",
@@ -2819,6 +2848,83 @@ const CASES: Case[] = [
     name: "runners.revoke",
     run: (a, b) => a.runners.revoke(b.runnerId),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // Jira connections (#1037-T04): B's connections are not A's to read, mend, break or remove, and a pair of A's is A's alone
+  {
+    name: "jira.list",
+    run: (a) => a.jira.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.jiraConnectionId }),
+      ]),
+  },
+  {
+    name: "jira.get",
+    run: (a, b) => a.jira.get(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.findBySite",
+    run: (a, b) => a.jira.findBySite(b.jiraCloudId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.readTokens",
+    run: (a, b) => a.jira.readTokens(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // The same site as B's row: this workspace gets a row of its own, the row of B is not saved over.
+    name: "jira.save",
+    run: (a, b) =>
+      a.jira.save({
+        id: "jira-a-second",
+        cloudId: b.jiraCloudId,
+        siteUrl: "https://elsewhere.atlassian.net",
+        siteName: "elsewhere",
+        accountId: "account-a",
+        accountName: "Account a",
+        scopes: ["read:jira-work"],
+        sealed: { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+        connectedBy: null,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ status: "connected" }),
+  },
+  {
+    name: "jira.replaceTokens",
+    run: (a, b) =>
+      a.jira.replaceTokens(
+        b.jiraConnectionId,
+        1,
+        { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        new Date("2026-11-14T11:00:00.000Z"),
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jira.withLockedTokens",
+    run: (a, b) =>
+      a.jira.withLockedTokens(b.jiraConnectionId, async (locked) => locked),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.markBroken",
+    run: (a, b) =>
+      a.jira.markBroken(b.jiraConnectionId, 1, "jira_refresh_refused"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jira.projectsUsing",
+    run: (a, b) => a.jira.projectsUsing(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "jira.removeUnlessUsed",
+    run: (a, b) => a.jira.removeUnlessUsed(b.jiraConnectionId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ removed: false, reason: "not_found" }),
   },
   // runs
   {

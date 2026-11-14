@@ -108,6 +108,8 @@ export function addressesOf(
         route.pattern.startsWith("/w/:workspace/workflows") ||
         route.pattern.startsWith("/api/w/:workspace/profiles") ||
         route.pattern.startsWith("/api/w/:workspace/runners") ||
+        // The Jira connection of a workspace (#1037) is the factory's.
+        route.pattern.startsWith("/api/w/:workspace/jira/") ||
         route.pattern === "/w/:workspace/runners" ||
         // The shell of the factory (#925): the ToDos and the profiles, the tabs of a project's cockpit, the settings tabs that moved from
         // `/connections` and `/members`, and the review settings below a project.

@@ -41,6 +41,25 @@ describe("starting an instance", () => {
     expect(forbidden).toEqual([]);
   });
 
+  // #1037
+  it("says in one line whether the Jira connection is on, naming variables and never a value", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    await register();
+    expect(info).toHaveBeenCalledWith(
+      "[jira] off: ATLASSIAN_CLIENT_ID, ATLASSIAN_CLIENT_SECRET not set.",
+    );
+
+    vi.stubEnv("ATLASSIAN_CLIENT_ID", "client-id-value");
+    vi.stubEnv("ATLASSIAN_CLIENT_SECRET", "client-secret-value");
+    info.mockClear();
+    await register();
+    expect(info).toHaveBeenCalledWith("[jira] on.");
+    expect(JSON.stringify(info.mock.calls)).not.toContain(
+      "client-secret-value",
+    );
+  });
+
   // CR-26-T03
   it("warns about a wrong LLM option and still starts", async () => {
     vi.stubEnv("LLM_MODEL", "a model with spaces");

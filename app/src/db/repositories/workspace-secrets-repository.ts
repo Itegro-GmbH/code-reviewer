@@ -30,6 +30,8 @@ export type WorkspaceSecretsRepository = {
   put(secret: Omit<WorkspaceSecretRow, "updatedAt">): Promise<void>;
   /** Removes the secret; false when there was none. */
   remove(name: string): Promise<boolean>;
+  /** Removes the secret and hands it out in the same statement: of two callers only one gets it. Undefined when there was none. */
+  take(name: string): Promise<WorkspaceSecretRow | undefined>;
   /** The names of the secrets this workspace holds, sorted; never a value. */
   names(): Promise<string[]>;
 };
@@ -100,6 +102,16 @@ export function createWorkspaceSecretsRepository(
         .orderBy("name")
         .execute();
       return rows.map((row) => row.name);
+    },
+
+    async take(name) {
+      const row = await db
+        .deleteFrom("workspace_secrets")
+        .where("workspace_id", "=", workspaceId)
+        .where("name", "=", name)
+        .returningAll()
+        .executeTakeFirst();
+      return row === undefined ? undefined : toRow(row);
     },
 
     async remove(name) {
