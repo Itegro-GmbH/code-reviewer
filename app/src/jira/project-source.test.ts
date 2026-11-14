@@ -8,8 +8,8 @@ import type {
   TicketSource,
 } from "../db/repositories/projects-repository.ts";
 import type { StoredJiraConnection } from "../db/repositories/jira-connections-repository.ts";
-import type { JiraProjectReader } from "../jira/projects.ts";
-import { jiraProjectsVia, statusNamesVia } from "./jira-projects.ts";
+import type { JiraProjectReader } from "./projects.ts";
+import { jiraProjectsVia, statusNamesVia } from "./project-source.ts";
 
 const connection = (status: "connected" | "broken" = "connected") =>
   ({ id: "conn-1", status }) as StoredJiraConnection;

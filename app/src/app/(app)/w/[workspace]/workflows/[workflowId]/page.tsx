@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { profileServiceFor } from "@/profiles/shared";
-import { statusNamesFor } from "@/projects/create-shared";
+import { statusNamesFor } from "@/jira/source-shared";
 import { loadWorkflowPage, WorkflowPageContent } from "@/workflow-pages/pages";
 import { workflowRunServiceFor } from "@/workflow-runs/shared";
 import { workflowServiceFor } from "@/workflows/shared";

@@ -11,10 +11,10 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type { RepoRef } from "../integrations/types.ts";
 import { createJiraProjectReader } from "../jira/projects.ts";
+import { jiraProjectsVia, statusNamesVia } from "../jira/project-source.ts";
 import { createJiraHarness } from "../test-support/jira-harness.ts";
 import { sessionUser } from "../test-support/session-lookup.ts";
 import { createNewProjectHandlers } from "./create-http.ts";
-import { jiraProjectsVia, statusNamesVia } from "./jira-projects.ts";
 import { createProjectService } from "./service.ts";
 
 const SITE = {

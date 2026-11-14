@@ -5,7 +5,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getConfigStatusFor } from "@/config-status/shared";
 import { requireImplementerCapability } from "@/implementer/shared";
-import { jiraSetupFor } from "@/projects/jira-setup";
+import { jiraSetupFor } from "@/jira/source-setup";
 import { projectServiceFor } from "@/projects/shared";
 import { SETUP_COPY } from "@/projects/ui/cockpit-messages";
 import { loadProjectRow } from "@/projects/ui/list-view";

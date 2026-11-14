@@ -8,13 +8,9 @@ import { createIntegrationsRepository } from "../db/repositories/integrations-re
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { ticketProviderRegistry } from "../integrations/registry.ts";
-import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
-import { createJiraProjectReader } from "../jira/projects.ts";
-import { getJira, isJiraConfigured } from "../jira/shared.ts";
 import { boardStatusNames } from "./board-statuses.ts";
 import type { NewProjectDependencies } from "./create-http.ts";
-import { jiraProjectsVia, statusNamesVia } from "./jira-projects.ts";
 
 /** The boards of a repository of the workspace, asked at GitHub with a token that may read boards and nothing else. */
 export function boardsFor(
@@ -81,42 +77,4 @@ export function boardStatusNamesFor(
       return [];
     }
   };
-}
-
-/** The Jira reader of a workspace's connections (#1038): the token handling of the running server behind two reads. */
-function jiraReaderFor(workspaceId: string) {
-  return createJiraProjectReader({ tokens: getJira().tokensFor(workspaceId) });
-}
-
-/**
- * The projects of the site of a Jira connection of the workspace, for the new-project dialog and the check of a creation (#1038). A
- * deployment without the Atlassian settings cannot ask Jira (`unavailable`); a connection of another workspace is none.
- */
-export function jiraProjectsFor(
-  workspaceId: string,
-): NonNullable<NewProjectDependencies["jiraProjects"]> {
-  if (!isJiraConfigured()) return async () => ({ kind: "unavailable" });
-  return jiraProjectsVia({
-    connections: createJiraConnectionsRepository(getDatabase(), workspaceId),
-    reader: jiraReaderFor(workspaceId),
-  });
-}
-
-/**
- * The status names of the tickets of a project (#1036, #1038), for the lane builder's status trigger: the options of the Status field of
- * the project's GitHub board, or Jira's own names of the workflow statuses of its Jira project. Empty when there is nothing to offer or the
- * platform cannot be asked: the page still loads and the names are typed. Never throws.
- */
-export function statusNamesFor(
-  workspaceId: string,
-): (projectId: string) => Promise<string[]> {
-  return statusNamesVia({
-    projects: createProjectsRepository(getDatabase(), workspaceId),
-    reader: isJiraConfigured()
-      ? jiraReaderFor(workspaceId)
-      : {
-          listStatuses: async () => ({ ok: false, error: "jira_unavailable" }),
-        },
-    boardNames: boardStatusNamesFor(workspaceId),
-  });
 }

@@ -8,7 +8,7 @@ import { configAudienceOf } from "@/config-status/status";
 import { getWorkspaceLlm } from "@/llm/shared";
 import { llmAccessAttention } from "@/llm/ui/llm-access-notice";
 import { projectServiceFor } from "@/projects/shared";
-import { jiraConnectionChoicesFor } from "@/projects/jira-connection-choices";
+import { jiraConnectionChoicesFor } from "@/jira/connection-choices";
 import { lastRunSourceFor } from "@/runs/shared";
 import {
   loadProjectsPage,

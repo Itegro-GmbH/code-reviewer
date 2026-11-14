@@ -8,7 +8,8 @@
 import { after, connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { boardsFor, jiraProjectsFor } from "@/projects/create-shared";
+import { jiraProjectsFor } from "@/jira/source-shared";
+import { boardsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";

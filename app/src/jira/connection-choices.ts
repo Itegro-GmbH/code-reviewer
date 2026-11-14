@@ -5,8 +5,8 @@
 import "server-only";
 import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { isJiraConfigured } from "../jira/shared.ts";
-import type { JiraConnectionChoice } from "./ui/new-project-dialog.tsx";
+import type { JiraConnectionChoice } from "../projects/ui/new-project-dialog.tsx";
+import { isJiraConfigured } from "./shared.ts";
 
 export async function jiraConnectionChoicesFor(
   workspaceId: string,

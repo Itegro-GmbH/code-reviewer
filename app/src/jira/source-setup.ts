@@ -7,7 +7,7 @@ import "server-only";
 import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { statusNamesFor } from "./create-shared.ts";
+import { statusNamesFor } from "./source-shared.ts";
 
 export async function jiraSetupFor(
   workspaceId: string,
