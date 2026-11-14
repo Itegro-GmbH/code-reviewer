@@ -73,7 +73,7 @@ export function createGithubTicketProvider(
       }
     },
 
-    commentOnTicket({ integration, repo }, key, body, options) {
+    async commentOnTicket({ integration, repo }, key, body, options) {
       return issues.commentOnIssue(
         integration,
         repo,
@@ -93,7 +93,7 @@ export function createGithubTicketProvider(
       );
     },
 
-    changeTicketLabels({ integration, repo }, key, change, signal) {
+    async changeTicketLabels({ integration, repo }, key, change, signal) {
       return issues.changeIssueLabels(
         integration,
         repo,

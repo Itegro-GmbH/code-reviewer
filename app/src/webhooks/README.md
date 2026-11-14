@@ -261,7 +261,7 @@ job queue intake.
 
 The events `issues`, `issue_comment`, `pull_request`, `sub_issues`, `projects_v2_item` and `check_suite` also update the ticket mirror
 (`src/tracker/`, [`docs/ticket-mirror.md`](../../../docs/ticket-mirror.md)). Between the claim of the delivery and `parseEvent` the handler asks the
-provider what the delivery changes in the cache (`parseTrackerChange`) and hands the change to the mirror of the delivery's workspace
+ticket provider what the delivery changes in the cache (`TicketProvider.parseTrackerChange`, #1035) and hands the change to the mirror of the delivery's workspace
 (`tracker` of `WorkspaceCollaborators`, wired in by the route like the workflows):
 
 - an event only the mirror reads (`sub_issues`, `projects_v2_item`, `check_suite`) is answered `tracker_updated` when a row changed and

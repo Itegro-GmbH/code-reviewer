@@ -9,13 +9,13 @@
 // for settings. A repository the platform stopped listing keeps its row too; it is "unavailable" and
 // cannot be activated (the repositories table says so, not this one).
 import "server-only";
-import { TICKET_PROVIDERS } from "../../workflows/ticket-ref.ts";
 import { lockDynamicReviewGate } from "../dynamic-review-lock.ts";
 import { sql, type Kysely } from "kysely";
-import type {
-  IntegrationStatus,
-  IntegrationType,
-  JsonValue,
+import {
+  TICKET_PROVIDERS,
+  type IntegrationStatus,
+  type IntegrationType,
+  type JsonValue,
 } from "../../integrations/types.ts";
 import {
   decodeBoolean,

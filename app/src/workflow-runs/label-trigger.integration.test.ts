@@ -277,7 +277,13 @@ describe("the webhook: a label on an issue starts the workflows that wait for it
       labels: ["enhancement", READY],
     };
     expect(JSON.parse(run?.triggerInput ?? "null")).toEqual({
-      ticket: { ...issue, type: "", assignees: [], repo },
+      ticket: {
+        ...issue,
+        key: String(issue.number),
+        type: "",
+        assignees: [],
+        repo,
+      },
       issue,
       repo,
     });

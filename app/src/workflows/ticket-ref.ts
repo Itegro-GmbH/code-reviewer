@@ -17,7 +17,11 @@ import {
 /** The name of the input that holds the ticket: `{{trigger.ticket}}` reads it. */
 export const TICKET_INPUT = "ticket";
 
-/** The providers a ticket reference may name; a caller that has registered another one (a test, later Jira) passes its own list. */
+/**
+ * The providers a ticket reference may name; a caller that has registered another one (a test, later Jira) passes its own list. The same
+ * list as `TICKET_PROVIDERS` of `integrations/types.ts`, which the project's ticket source reads (this module may not import it; a test
+ * holds the two together).
+ */
 export const TICKET_PROVIDERS = ["github"] as const;
 export type TicketProviderName = string;
 

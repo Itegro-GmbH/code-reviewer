@@ -516,3 +516,9 @@ export type IntegrationEvent =
   | { kind: "invalid_payload"; reason: string }
   /** Genuine but of no interest for reviews; `reason` is for logs, never for branching. */
   | { kind: "ignored"; reason: string };
+
+/**
+ * The ticket providers a ticket reference and a project's ticket source may name (#1035). GitHub (its issues) is the one so far; Jira
+ * Cloud comes with the later issues of epic #1034. A caller that has registered another provider (a test) passes its own list.
+ */
+export const TICKET_PROVIDERS = ["github"] as const;
