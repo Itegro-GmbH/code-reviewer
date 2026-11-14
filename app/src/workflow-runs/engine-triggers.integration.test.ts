@@ -153,6 +153,7 @@ describe("the pre-steps of the trigger that fired, then the shared steps", () =>
       ticket: {
         ...TICKET,
         key: String(TICKET.number),
+        status: "",
         repo: {
           fullName: "acme/widgets",
           owner: "acme",

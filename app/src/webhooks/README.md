@@ -5,6 +5,8 @@ changes, pull requests, comment commands and labels on issues (#845) of every in
 (`src/app/api/webhooks/github-app/route.ts`) only calls `getGithubAppWebhookHandler()` (and hands it `labelTriggerFor` of the workflow engine, see below); the logic is a
 function of its collaborators in this folder, so tests wire fakes in.
 
+The inbound webhook of Jira Cloud (#1039) is a second, separate route, `POST /api/webhooks/jira`: it lives in `src/jira/` (`webhook-handler.ts`, see its README) and is verified by the secret in its address instead of a signature.
+
 The route is **public**: it needs no session, and the auth guard must keep letting `/api/webhooks/**`
 through. The signature of the delivery is its authentication.
 

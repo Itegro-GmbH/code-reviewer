@@ -81,6 +81,58 @@ only renews it when it calls Jira). Press **Reconnect** and accept again; the co
 refused while a project still uses the connection (the answer names the projects). Removing does not end the grant at
 Atlassian: do that at <https://id.atlassian.com/manage-profile/apps> if you want it gone there too.
 
+## 5. Webhooks: nothing to do in Jira
+
+When a project is set up on a Jira project (or switched on again), **the factory registers its own webhook** at the site with the
+connection's access: one dynamic webhook per project for the JQL filter `project = KEY` and the events `jira:issue_created`,
+`jira:issue_updated`, `jira:issue_deleted` and `comment_created`. Nobody opens the webhook page of Jira, and the webhook is not an
+_admin_ webhook (Atlassian does not list the webhooks of an OAuth 2.0 app on that page; they belong to the app).
+
+- **They expire.** Atlassian ends a webhook registered through the REST API 30 days after it was registered or extended. The nightly job
+  (`GET /api/internal/jira-webhooks`, `vercel.json`, 03:29 UTC) extends every webhook that ends within ten days, registers again one that
+  Jira lost (Atlassian keeps an expired webhook for three months) or that failed to register, and deletes one whose project is off or has
+  another source. The `jira_webhooks` table says where each stands (`status`, `expires_at`, `error_code`). Without a working cron a Jira
+  source stops delivering after at most 30 days.
+- **They are deleted** when the project is switched off, when its ticket source changes, and when the project is switched to GitHub
+  issues. A deletion that fails is repeated by the nightly job.
+- **Limit: five webhooks per connection.** Atlassian allows 5 webhooks per OAuth 2.0 app and user on a site. The factory uses one per
+  Jira project, so one connection (one person's grant) can serve **five projects**; the sixth gets the code `jira_webhook_limit` on its
+  row (the project is created, no status change reaches it). Connect the site again with another person's grant to serve more.
+- **Address.** The webhook calls `<BETTER_AUTH_URL>/api/webhooks/jira?w=<registration>&s=<secret>`. Atlassian requires https and the
+  base address of the app; the address has to be reachable from the internet (not a laptop's `localhost`).
+
+### How a delivery is verified
+
+Atlassian documents one mechanism for webhooks that an OAuth 2.0 (3LO) app registers through the REST API: _"Webhooks for OAuth 2.0 apps are
+secured by bearer authentication. The token is present in the `Authorization` header and is signed with the app's client secret."_ It
+names neither the algorithm nor the claims, and it documents **no HMAC signature** (`X-Hub-Signature`) for these webhooks: the `secret`
+field of that signature belongs to _admin_ webhooks, and Atlassian's developer community reports that OAuth-registered webhooks carry
+neither a secret nor, in practice, always the token (a feature request, JRACLOUD-96162, is open). The factory therefore does **not rely on
+the bearer token alone**:
+
+1. **The address carries an unguessable secret of its own, one per registration** (256 random bits; only its SHA-256 is stored). A
+   delivery without it, with another one, or for a registration that is unknown or being removed is refused `401` with one and the same
+   answer. **This is the check that always applies, and it is a shared secret in the URL, not a signature of Atlassian's**: whoever learns
+   the address (Atlassian's delivery log, an access log of a proxy in front of the app, a screenshot) can post deliveries until the
+   webhook is registered again. The deliveries only carry the factory to re-read the issue from Jira (the status that starts a lane is read
+   again from Jira before a run starts, so a forged status change cannot start a run Jira does not stand behind), but a forged delivery
+   could write a made-up issue into the mirror. Keep the address out of logs you share.
+2. **When a delivery carries a bearer token it must verify**: a JWT signed with the app's client secret (HS256, HS384 or HS512; never
+   `none` or an asymmetric algorithm) that is not expired. A token that does not verify refuses the delivery. A delivery without a token
+   is accepted on the secret alone. Because Atlassian does not document the claims, only the signature and `exp` are checked.
+
+Deliveries are **de-duplicated** by registration and Jira's `X-Atlassian-Webhook-Identifier` (the same across retries, unique per
+tenant): a delivery that succeeded is answered `duplicate` and does nothing; one that another request is handling answers `409` (Jira retries
+408, 409, 425, 429 and 5xx up to five times); one that failed after its claim releases it and answers `503`.
+
+### What a delivery does
+
+- **Every event** writes the issue into the ticket mirror (`tracker_items`, `provider = 'jira'`, [`docs/ticket-mirror.md`](ticket-mirror.md)).
+- **A change of the status** in an `jira:issue_updated` (the `status` item of the changelog) starts the lanes of the project that wait for the
+  new status (trigger `ticket.statusChanged`, [`docs/workflows.md`](workflows.md#the-status-trigger)). **Whoever made the change starts
+  it**, the factory's own transitions included. A creation is no change of status and starts nothing. Before a run starts the factory
+  asks Jira for the issue and checks that it **still has that status** (a late or repeated delivery starts nothing).
+
 ## What the factory keeps, and what it never shows
 
 - Per connection: the site (cloud id, address, name), the Atlassian account id and display name of the person who connected
@@ -113,3 +165,16 @@ connection of a site must keep working through all of it:
       right secret makes them work again without reconnecting.
 - [ ] **Removed in Atlassian.** Remove the app in the Atlassian account (<https://id.atlassian.com/manage-profile/apps>): the
       next call turns the connection to **Needs reconnecting**, and **Reconnect** mends it.
+- [ ] **A webhook of its own (#1039).** Set up a project on a Jira project of the test site and check that **no step in Jira** was needed:
+      the row of the project in `jira_webhooks` is `active` with an `expires_at` about 30 days away, and the `X-Atlassian-Webhook-Identifier`
+      of the first change shows in the log of the deliveries of the app. Note whether the delivery carries an `Authorization` bearer token and
+      whether its signature verifies with the client secret (the factory refuses a delivery whose token does not verify; if real deliveries
+      are refused for that reason the documentation of Atlassian and its behaviour disagree, and the check of the token needs another look
+      before the release).
+- [ ] **Status into a lane.** A lane with `ticket.statusChanged` to a Jira status: move an issue into it in Jira (person, then an automation
+      rule): one run each, `trigger.ticket` has key, title, description as text, status, type, labels, assignee, link.
+- [ ] **Extension and expiry.** Call `GET /api/internal/jira-webhooks` with the cron secret: a young webhook is `unchanged`; set `expires_at`
+      of the row to a date within ten days and call again: `extended`, and Jira's `GET /rest/api/3/webhook` shows the later end. Delete the
+      webhook in Jira's API and call the job: it registers a new one. Find out what `PUT /rest/api/3/webhook/refresh` answers for a webhook
+      that does not exist (the factory takes 404 as gone and registers a new one; any other 4xx is kept as `jira_webhook_rejected`).
+- [ ] **Fifth and sixth project.** Five projects on one connection work; the sixth shows `jira_webhook_limit` on its row.

@@ -320,6 +320,7 @@ describe("the webhook: a label on an issue starts the workflows that wait for it
         key: String(issue.number),
         type: "",
         assignees: [],
+        status: "",
         repo,
       },
       issue,

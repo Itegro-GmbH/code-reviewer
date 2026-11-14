@@ -2728,6 +2728,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBe(0),
   },
   {
+    // #1039: B's rows of another provider are not A's to clear
+    name: "tracker.clearOtherProviders",
+    run: (a, b) => a.tracker.clearOtherProviders(b.repository.id, "jira"),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
     name: "tracker.getSyncState",
     run: (a, b) => a.tracker.getSyncState(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
