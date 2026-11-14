@@ -110,17 +110,45 @@ describe("the ticket source in the body of a new project (#1038)", () => {
       readNewProjectRequest({
         repositoryId: "r1",
         ticketSource: JIRA,
-        lanes: ["issue-to-pr"],
+        lanes: ["review-a-pull-request"],
       }),
     ).toEqual({
       ok: true,
       request: {
         repositoryId: "r1",
         board: null,
-        lanes: ["issue-to-pr"],
+        lanes: ["review-a-pull-request"],
         jira: { connectionId: "conn-1", projectKey: "PROJ" },
       },
     });
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("refuses the lanes that read and write GitHub issues for a Jira project, naming the lane that is allowed, and still takes them for the issues of a repository", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: JIRA,
+        lanes: ["review-a-pull-request", "issue-to-pr"],
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        {
+          path: "lanes/1",
+          code: "lane_not_for_jira",
+          message: expect.stringContaining("issue-to-pr"),
+          available: ["review-a-pull-request"],
+        },
+      ],
+    });
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { provider: "github" },
+        lanes: ["issue-to-pr"],
+      }),
+    ).toMatchObject({ ok: true });
   });
 
   // #1038

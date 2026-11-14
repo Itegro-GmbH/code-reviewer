@@ -8,9 +8,10 @@
 import { after, connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { jiraProjectsFor } from "@/jira/source-shared";
+import { jiraProjectFor, jiraProjectsFor } from "@/jira/source-shared";
 import { boardsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
+import { firstSyncAfterActivation } from "@/tracker/first-sync";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
 import {
@@ -36,26 +37,16 @@ export async function POST(
       requireUser: () => Promise.resolve(access.user),
       service: projectServiceFor(
         access.workspace.id,
-        async ({ repositoryId, ticketProvider }) => {
-          // The first sync reads the GitHub issues of the repository: a Jira project's tickets are not those (#1038).
-          if (ticketProvider !== "github") return;
-          after(() =>
-            trackerServiceFor(access.workspace.id)
-              .sync(repositoryId, {
-                deadline: Date.now() + FIRST_SYNC_BUDGET_MS,
-              })
-              .then(
-                () => undefined,
-                (error: unknown) =>
-                  console.error(
-                    `[tracker] the first sync of repository=${repositoryId} did not finish (${error instanceof Error ? error.name : "unknown"})`,
-                  ),
-              ),
-          );
-        },
+        firstSyncAfterActivation({
+          sync: (repositoryId, options) =>
+            trackerServiceFor(access.workspace.id).sync(repositoryId, options),
+          schedule: (work) => after(work),
+          budgetMs: FIRST_SYNC_BUDGET_MS,
+        }),
       ),
       boards: boardsFor(access.workspace.id),
       jiraProjects: jiraProjectsFor(access.workspace.id),
+      jiraProject: jiraProjectFor(access.workspace.id),
       laneKeys: BUILT_IN_LANE_KEYS,
       copyLanes: (user, projectId, keys) =>
         workflowServiceFor(access.workspace.id).copyBuiltIn(

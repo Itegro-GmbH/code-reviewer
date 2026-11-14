@@ -11,7 +11,7 @@ site, `projects.ts`); the inbound webhook (#1039) and the write-back come on top
 | `errors.ts`                                                    | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`), what a call can fail with, what a flow can end with                                                                                                                                                                                                                                                   |
 | `client.ts`                                                    | The calls to Atlassian (consent address, code exchange, refresh, accessible resources, the account): values, never exceptions; a failure holds nothing of the answer                                                                                                                                                                                                                   |
 | `projects.ts`                                                  | `createJiraProjectReader` (#1038): `listProjects` (the projects of the connection's site, page by page, cut at `MAX_PROJECT_PAGES`, `complete` says so) and `listStatuses` (the workflow statuses of one project, all issue types together, each name once, Jira's own spelling and order); values, never exceptions (`jira_forbidden`, `jira_project_not_found`, plus the call codes) |
-| `project-source.ts`                                            | `jiraProjectsVia` (the projects of a connection's site for the dialog and the check of a creation; a connection of another workspace is none, a broken one asks nothing of Atlassian) and `statusNamesVia` (the status names the lane editor offers: Jira's own for a Jira source, the board's for GitHub)                                                                             |
+| `project-source.ts`                                            | `jiraProjectsVia` (the projects of a connection's site for the dialog; `jiraProjectVia`, one project by its key for the check of a creation; a connection of another workspace is none, a broken one asks nothing of Atlassian) and `statusNamesVia` (the status names the lane editor offers: Jira's own for a Jira source, the board's for GitHub)                                   |
 | `source-shared.ts`, `source-setup.ts`, `connection-choices.ts` | The wiring on the running server: `jiraProjectsFor`, `statusNamesFor`, the Setup tab's site name and statuses, the connections the dialog offers. They live here because the `projects` module may not import `jira` (an import cycle; `src/ci/import-cycles`)                                                                                                                         |
 | `tokens.ts`                                                    | `createJiraTokens`: seals and opens the pair, refreshes before a call, `request` (a call to a site's Jira API that renews on 401 and repeats once)                                                                                                                                                                                                                                     |
 | `service.ts`                                                   | `createJiraService`: `startConnect`, `completeCallback`, the choice among several sites (`readChoice`, `choose`), `remove`, `list`                                                                                                                                                                                                                                                     |
@@ -49,9 +49,10 @@ The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_c
   and swap).
 - `tokens.use(id)` / `tokens.request(id, path)`: renew when the access token ends within 5 minutes; a 401 renews and repeats once.
 - Atlassian rotates the refresh token on every refresh, so the refresh of a connection is serialized: the row is locked
-  (`withLockedTokens`, `select ... for update`) from the read of the pair to its write. A request that needs a refresh while
+  (`withLockedTokens`, `select ... for no key update`) from the read of the pair to its write. A request that needs a refresh while
   another one runs waits, then reads the pair the first stored and uses it; it never sends a refresh token that is used up.
-  The lock is held across the one call to the token endpoint (10 s timeout).
+  The lock is held across the one call to the token endpoint (10 s timeout). It is `for no key update` on purpose: a removal
+  (`for update`) and another refresh wait for it, a project that is pointed at the connection (`for key share`, below) does not.
 - Only `error: "invalid_grant"` from the token endpoint (the refresh token is revoked, expired or used) makes the connection
   `broken` with `jira_refresh_refused`. `invalid_client`, `unauthorized_client`, any other 400/401/403, a timeout and a 5xx are
   `jira_unavailable`: nothing is marked and the operator's log has `JIRA_TOKEN_ENDPOINT_REJECTED` (status and a short code, never
@@ -67,18 +68,27 @@ A project whose tickets are a Jira project stores `{ "provider": "jira", "reposi
 (`repositoryId` is the GitHub repository the code lives in; there is no board). `removeUnlessUsed` reads exactly `provider` and `connectionId`.
 
 - **The lock.** The one code that writes such a source is `ProjectsRepository.activate(repositoryId, { jira })`. It takes the connection's row
-  `select ... for share` (in the workspace of the repository, so another workspace's connection is none) in the transaction that writes the
+  `select ... for key share` (in the workspace of the repository, so another workspace's connection is none) in the transaction that writes the
   source, after the repository's own lock. A removal (`for update`, then the check of the projects) therefore waits for the write and finds
-  the project; an assignment that comes after a removal finds no row (`jira_connection_not_found`). Both orders are tested
-  (`projects-repository.integration.test.ts`, "takes the connection's row for share…", "is refused when a removal holds the connection…").
+  the project; an assignment that comes after a removal finds no row (`jira_connection_not_found`). `for key share` is the weakest lock that
+  `for update` waits for, and a token refresh (`for no key update` across the call to Atlassian) does not conflict with it: an activation never
+  waits behind a refresh while it holds the repository's lock. The orders are tested (`projects-repository.integration.test.ts`: "takes the
+  connection's row for share…", "is refused when a removal holds the connection…", "does not wait for a token refresh…", "lets a removal and a
+  second refresh wait for a refresh in flight…").
 - **What the dialog and the route check** before that: `POST /api/w/:workspace/projects` with `ticketSource: { provider: "jira", connectionId,
-projectKey }` reads the projects of the connection's site now and refuses a key the site does not have (`unknown_jira_project`, with the keys
-  it has), a connection the workspace does not have (`unknown_connection`; another workspace's is none), a broken one
-  (`PROJECT_JIRA_CONNECTION_BROKEN`, 409) and a site that cannot be asked (`PROJECT_JIRA_UNAVAILABLE`, 503). The projects are also
-  `GET /api/w/:workspace/jira/connections/:connectionId/projects` (`manage_projects`), for the dialog.
+projectKey }` looks at the repository first (unknown, unavailable, or a project that is on already: `PROJECT_REPOSITORY_NOT_FOUND`,
+  `PROJECT_REPOSITORY_UNAVAILABLE`, `PROJECT_INTEGRATION_UNAVAILABLE`, `PROJECT_ALREADY_EXISTS`, and no call to Jira), then asks Jira for that one
+  project (`GET /rest/api/3/project/{key}`, `JiraProjectReader.getProject`: one call, never the site's list) and refuses a key the site
+  does not have or the account cannot see (`unknown_jira_project`, no key of the site in the answer), a connection the workspace does not have
+  (`unknown_connection`; another workspace's is none), a broken one (`PROJECT_JIRA_CONNECTION_BROKEN`, 409) and a site that cannot be asked
+  (`PROJECT_JIRA_UNAVAILABLE`, 503). The body may name the review lane only (`lane_not_for_jira` for the lanes that read and write GitHub issues,
+  until #1040). The projects are also `GET /api/w/:workspace/jira/connections/:connectionId/projects` (`manage_projects`), for the dialog.
+- **What GitHub does not do for such a project:** the label and the status of a GitHub issue or board start none of its lanes (also not one it
+  kept from when its tickets were GitHub issues), the mirror writes none of the code repository's issues, no first sync is started, and a run
+  does not start from a `jira:` ticket reference (`WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED`) until #1039/#1040.
 - **The statuses** are `JiraProjectReader.listStatuses`, read when a page is built: the lane editor's picker for `ticket.statusChanged`
   (`statusNamesFor` in `source-shared.ts`) and the Setup tab of the project. Jira's own names, never mapped; a site that cannot be
   asked, or a broken connection, offers none and the editor takes a typed name.
 - **What a Jira project does not have yet:** the ticket mirror (the webhook, #1039), tickets in the cockpit's Issues tab, and any write-back
   (#1040). `TrackerService` answers `TRACKER_SOURCE_NOT_MIRRORED` for it, the nightly resync leaves it out, and the first sync after creating it
-  is not started; the issues of the code repository are not that project's tickets.
+  is not started (neither by `POST /projects` nor by `PUT .../repositories/:id/project`); the issues of the code repository are not that project's tickets.

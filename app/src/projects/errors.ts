@@ -71,7 +71,8 @@ export type NewProjectIssue = {
     | "board_without_status"
     | "board_unavailable"
     | "unknown_connection"
-    | "unknown_jira_project";
+    | "unknown_jira_project"
+    | "lane_not_for_jira";
   message: string;
   available?: string[];
 };

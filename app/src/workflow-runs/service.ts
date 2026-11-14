@@ -615,6 +615,13 @@ export function createWorkflowRunService(
           "The ticket is not a reference like github:owner/repo#128.",
           { errors: [] },
         );
+      // The engine reads and writes the tickets of GitHub only for now: a Jira reference parses (#1035) but is not read as an issue of a
+      // repository of that name (#1039 reads it, #1040 acts on it).
+      if (ref !== undefined && ref.ref.provider !== "github")
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED",
+          "Only GitHub issues can start a run for now.",
+        );
       const repoName = ref === undefined ? given.repo : ref.ref.repo;
       if (typeof repoName !== "string" || !REPO_NAME.test(repoName))
         throw new WorkflowRunError(

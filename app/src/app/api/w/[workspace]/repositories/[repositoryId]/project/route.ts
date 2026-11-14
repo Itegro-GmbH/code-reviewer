@@ -8,6 +8,7 @@
 import { after, connection } from "next/server";
 import { createProjectRouteHandler } from "@/projects/http";
 import { projectServiceFor } from "@/projects/shared";
+import { firstSyncAfterActivation } from "@/tracker/first-sync";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
 
@@ -26,21 +27,12 @@ export async function PUT(
       requireUser: () => Promise.resolve(access.user),
       service: projectServiceFor(
         access.workspace.id,
-        async ({ repositoryId }) => {
-          after(() =>
-            trackerServiceFor(access.workspace.id)
-              .sync(repositoryId, {
-                deadline: Date.now() + FIRST_SYNC_BUDGET_MS,
-              })
-              .then(
-                () => undefined,
-                (error: unknown) =>
-                  console.error(
-                    `[tracker] the first sync of repository=${repositoryId} did not finish (${error instanceof Error ? error.name : "unknown"})`,
-                  ),
-              ),
-          );
-        },
+        firstSyncAfterActivation({
+          sync: (repositoryId, options) =>
+            trackerServiceFor(access.workspace.id).sync(repositoryId, options),
+          schedule: (work) => after(work),
+          budgetMs: FIRST_SYNC_BUDGET_MS,
+        }),
       ),
     })(request, repositoryId),
   );

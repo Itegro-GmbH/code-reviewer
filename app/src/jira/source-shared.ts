@@ -10,7 +10,11 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { getDatabase } from "../db/startup.ts";
 import type { NewProjectDependencies } from "../projects/create-http.ts";
 import { boardStatusNamesFor } from "../projects/create-shared.ts";
-import { jiraProjectsVia, statusNamesVia } from "./project-source.ts";
+import {
+  jiraProjectVia,
+  jiraProjectsVia,
+  statusNamesVia,
+} from "./project-source.ts";
 import { createJiraProjectReader } from "./projects.ts";
 import { getJira, isJiraConfigured } from "./shared.ts";
 
@@ -32,6 +36,20 @@ export function jiraProjectsFor(
       ? jiraReaderFor(workspaceId)
       : {
           listProjects: async () => ({ ok: false, error: "jira_unavailable" }),
+        },
+  });
+}
+
+/** One project of the site of a Jira connection of the workspace, by its key: the check of a creation, one call to Jira. */
+export function jiraProjectFor(
+  workspaceId: string,
+): NonNullable<NewProjectDependencies["jiraProject"]> {
+  return jiraProjectVia({
+    connections: createJiraConnectionsRepository(getDatabase(), workspaceId),
+    reader: isJiraConfigured()
+      ? jiraReaderFor(workspaceId)
+      : {
+          getProject: async () => ({ ok: false, error: "jira_unavailable" }),
         },
   });
 }

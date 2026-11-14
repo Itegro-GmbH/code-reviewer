@@ -544,7 +544,7 @@ describe("the rebuild rule", () => {
         findByExternalId: async () => ({ id: "r-1", active: true }) as never,
         get: async () => undefined,
       },
-      projects: { hasActiveProject: async () => true },
+      projects: { activeTicketProvider: async () => "github" },
       tracker: kept,
       boardOf: async () => undefined,
       boardStatusOf: async () => ({ available: false, status: null }),

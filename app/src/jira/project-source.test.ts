@@ -9,7 +9,11 @@ import type {
 } from "../db/repositories/projects-repository.ts";
 import type { StoredJiraConnection } from "../db/repositories/jira-connections-repository.ts";
 import type { JiraProjectReader } from "./projects.ts";
-import { jiraProjectsVia, statusNamesVia } from "./project-source.ts";
+import {
+  jiraProjectVia,
+  jiraProjectsVia,
+  statusNamesVia,
+} from "./project-source.ts";
 
 const connection = (status: "connected" | "broken" = "connected") =>
   ({ id: "conn-1", status }) as StoredJiraConnection;
@@ -20,6 +24,10 @@ function readerOf(overrides: Partial<JiraProjectReader> = {}) {
       ok: true as const,
       complete: true,
       projects: [{ id: "1", key: "PROJ", name: "Project" }],
+    })),
+    getProject: vi.fn(async () => ({
+      ok: true as const,
+      project: { id: "1", key: "PROJ", name: "Project" },
     })),
     listStatuses: vi.fn(async () => ({
       ok: true as const,
@@ -89,6 +97,70 @@ describe("the projects of a connection's site", () => {
         }),
       })("conn-1");
 
+    expect(await via("jira_connection_broken")).toEqual({
+      kind: "connection_broken",
+    });
+    expect(await via("jira_connection_not_found")).toEqual({
+      kind: "connection_not_found",
+    });
+    expect(await via("jira_unavailable")).toEqual({ kind: "unavailable" });
+    expect(await via("jira_forbidden")).toEqual({ kind: "unavailable" });
+  });
+});
+
+describe("the one project of a creation (#1038)", () => {
+  // #1038 (finding of the review of #1044)
+  it("asks the site for that project only, for a connection of the workspace, and gives its key", async () => {
+    const reader = readerOf();
+    const answer = await jiraProjectVia({
+      connections: { get: async () => connection() },
+      reader,
+    })("conn-1", "PROJ");
+
+    expect(answer).toEqual({ kind: "project", project: { key: "PROJ" } });
+    expect(reader.getProject).toHaveBeenCalledWith("conn-1", "PROJ");
+    expect(reader.listProjects).not.toHaveBeenCalled();
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("asks Jira nothing for a connection the workspace does not have, nor for a broken one", async () => {
+    const reader = readerOf();
+
+    expect(
+      await jiraProjectVia({
+        connections: { get: async () => undefined },
+        reader,
+      })("other-workspaces", "PROJ"),
+    ).toEqual({ kind: "connection_not_found" });
+    expect(
+      await jiraProjectVia({
+        connections: { get: async () => connection("broken") },
+        reader,
+      })("conn-1", "PROJ"),
+    ).toEqual({ kind: "connection_broken" });
+    expect(reader.getProject).not.toHaveBeenCalled();
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("names what the call failed with: no such project, a connection that broke or vanished meanwhile, anything else is unavailable", async () => {
+    const via = (
+      error:
+        | "jira_project_not_found"
+        | "jira_connection_broken"
+        | "jira_connection_not_found"
+        | "jira_unavailable"
+        | "jira_forbidden",
+    ) =>
+      jiraProjectVia({
+        connections: { get: async () => connection() },
+        reader: readerOf({
+          getProject: async () => ({ ok: false, error }),
+        }),
+      })("conn-1", "PROJ");
+
+    expect(await via("jira_project_not_found")).toEqual({
+      kind: "project_not_found",
+    });
     expect(await via("jira_connection_broken")).toEqual({
       kind: "connection_broken",
     });

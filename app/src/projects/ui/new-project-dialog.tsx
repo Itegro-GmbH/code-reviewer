@@ -35,6 +35,7 @@ import {
 import { NEW_PROJECT_COPY, PROJECT_COPY } from "./cockpit-messages.ts";
 import { projectPath } from "./project-cards.tsx";
 import { describeFailure } from "./messages.ts";
+import { LANES_FOR_JIRA } from "../new-project-request.ts";
 
 export type NewProjectChoice = { repositoryId: string; fullName: string };
 
@@ -48,9 +49,6 @@ export type JiraConnectionChoice = {
 
 /** The value of the ticket source choice that stands for "a Jira project" (a repository id is a UUID, never this). */
 const JIRA_SOURCE = "jira";
-
-/** The lanes a Jira project starts with: the review lane needs no ticket; the others read and write tickets through GitHub (#1038). */
-const LANES_FOR_JIRA: readonly string[] = ["review-a-pull-request"];
 
 /** The built-in lanes a new project can copy, by the key the route takes. */
 const LANE_KEYS = [

@@ -64,7 +64,12 @@ function setup(
   const requireUser = vi.fn(async () => USER);
   const handlers = createNewProjectHandlers({
     requireUser,
-    service: { createProject: vi.fn(), getProject, setBoard },
+    service: {
+      createProject: vi.fn(),
+      findProject: vi.fn(),
+      getProject,
+      setBoard,
+    },
     boards,
     laneKeys: [],
     copyLanes: async () => [],

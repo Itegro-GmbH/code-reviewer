@@ -11,7 +11,11 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type { RepoRef } from "../integrations/types.ts";
 import { createJiraProjectReader } from "../jira/projects.ts";
-import { jiraProjectsVia, statusNamesVia } from "../jira/project-source.ts";
+import {
+  jiraProjectVia,
+  jiraProjectsVia,
+  statusNamesVia,
+} from "../jira/project-source.ts";
 import { createJiraHarness } from "../test-support/jira-harness.ts";
 import { sessionUser } from "../test-support/session-lookup.ts";
 import { createNewProjectHandlers } from "./create-http.ts";
@@ -78,11 +82,13 @@ async function world() {
   });
   const connections = createJiraConnectionsRepository(h.db, acme.workspace.id);
   const jiraProjects = jiraProjectsVia({ connections, reader });
+  const jiraProject = jiraProjectVia({ connections, reader });
   const handlers = createNewProjectHandlers({
     requireUser: async () => sessionUser(acme.owner.id),
     service: createProjectService({ projects }),
     boards: async () => ({ kind: "boards", available: true, boards: [] }),
     jiraProjects,
+    jiraProject,
     laneKeys: [],
     copyLanes: async () => [],
   });
@@ -107,6 +113,7 @@ async function world() {
     reader,
     connections,
     jiraProjects,
+    jiraProject,
     handlers,
     post,
     projectCalls,
@@ -128,6 +135,10 @@ describe("a project on a Jira project", () => {
     });
 
     expect(response.status).toBe(201);
+    // The key is checked with one call for that project, not by reading the list of the site (which has two pages here).
+    expect(w.projectCalls().map((request) => request.path)).toEqual([
+      `/ex/jira/${SITE.id}/rest/api/3/project/OPS`,
+    ]);
     const stored = await w.projects.get(w.repository.id);
     expect(stored).toMatchObject({
       active: true,
@@ -180,8 +191,8 @@ describe("a project on a Jira project", () => {
     expect(w.projectCalls()).toEqual([]);
   });
 
-  // #1038-T01
-  it("refuses a project key the site does not have, naming the keys it has", async () => {
+  // #1038-T01 (finding of the review of #1044)
+  it("refuses a project key the site does not have with one call, naming no key of the site", async () => {
     const w = await world();
 
     const response = await w.post({
@@ -194,16 +205,43 @@ describe("a project on a Jira project", () => {
     });
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
+    const body = (await response.json()) as {
+      issues: Record<string, unknown>[];
+    };
+    expect(body).toMatchObject({
       issues: [
-        {
-          path: "ticketSource.projectKey",
-          code: "unknown_jira_project",
-          available: ["PROJ", "OPS", "WEB"],
-        },
+        { path: "ticketSource.projectKey", code: "unknown_jira_project" },
       ],
     });
+    expect(JSON.stringify(body)).not.toMatch(/"(?:PROJ|OPS|WEB)"|available/);
     expect(await w.projects.get(w.repository.id)).toBeUndefined();
+    expect(w.projectCalls()).toHaveLength(1);
+  });
+
+  // #1038-T01 (finding of the review of #1044)
+  it("asks Jira nothing for a repository that is not there, nor for a project the repository has already", async () => {
+    const w = await world();
+    const ticketSource = {
+      provider: "jira",
+      connectionId: w.acme.connection.id,
+      projectKey: "PROJ",
+    };
+
+    const unknown = await w.post({ repositoryId: "no-such", ticketSource });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toEqual({
+      error: "PROJECT_REPOSITORY_NOT_FOUND",
+    });
+    expect(w.projectCalls()).toEqual([]);
+
+    expect(
+      (await w.post({ repositoryId: w.repository.id, ticketSource })).status,
+    ).toBe(201);
+    const callsBefore = w.projectCalls().length;
+    const again = await w.post({ repositoryId: w.repository.id, ticketSource });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: "PROJECT_ALREADY_EXISTS" });
+    expect(w.projectCalls()).toHaveLength(callsBefore);
   });
 
   // #1038

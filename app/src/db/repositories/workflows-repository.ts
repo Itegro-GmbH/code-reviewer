@@ -14,6 +14,7 @@ import { encodeBoolean, formatTimestamp } from "../codecs.ts";
 import { UNIQUE_VIOLATION, errorCode } from "../errors.ts";
 import type { Database, WorkflowsTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import { readTicketSource } from "./projects-repository.ts";
 
 export type StoredWorkflow = {
   id: string;
@@ -174,7 +175,12 @@ export function createWorkflowsRepository(
     run: (trx: Kysely<Database>) => Promise<T>,
   ): Promise<T> => (db.isTransaction ? run(db) : db.transaction().execute(run));
 
-  /** The not archived workflows of the active project whose ticket source is the repository, with their current version, whose document contains one of the patterns. */
+  /**
+   * The not archived workflows of the active project whose ticket source is the GitHub issues of the repository, with their current
+   * version, whose document contains one of the patterns. A project whose tickets are another provider's (a Jira project, #1038) has no
+   * lane that a label on a GitHub issue or a status on a GitHub board starts, whatever its lanes say: the repository it names is where its
+   * code lives.
+   */
   async function listWithTrigger(
     repositoryId: string,
     patterns: readonly string[],
@@ -189,6 +195,8 @@ export function createWorkflowsRepository(
       )
       .selectAll("workflows")
       .select([
+        "projects.id as source_project_id",
+        "projects.ticket_source as source_ticket_source",
         "workflow_versions.workflow_id as version_workflow_id",
         "workflow_versions.version as version_number",
         "workflow_versions.document as version_document",
@@ -211,16 +219,27 @@ export function createWorkflowsRepository(
       .orderBy("workflows.created_at")
       .orderBy("workflows.id")
       .execute();
-    return rows.map((row) => ({
-      workflow: workflowFrom(row),
-      current: versionFrom({
-        workflow_id: row.version_workflow_id,
-        version: row.version_number,
-        document: row.version_document,
-        created_by: row.version_created_by,
-        created_at: row.version_created_at,
-      }),
-    }));
+    return rows
+      .filter(
+        (row) =>
+          readTicketSource(
+            row.source_ticket_source,
+            repositoryId,
+            row.source_project_id,
+            // The project list and the claim warn about a damaged source already; a lane list stays quiet.
+            () => undefined,
+          ).provider === "github",
+      )
+      .map((row) => ({
+        workflow: workflowFrom(row),
+        current: versionFrom({
+          workflow_id: row.version_workflow_id,
+          version: row.version_number,
+          document: row.version_document,
+          created_by: row.version_created_by,
+          created_at: row.version_created_at,
+        }),
+      }));
   }
 
   return {

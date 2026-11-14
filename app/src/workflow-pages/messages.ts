@@ -388,6 +388,8 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: "This workflow is not started by hand.",
   WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT:
     "That ticket is not in the repository this project takes its tickets from.",
+  WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED:
+    "Runs cannot start from a ticket of that tracker yet: only GitHub issues can.",
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
     "That repository is not the one this project takes its tickets from.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:

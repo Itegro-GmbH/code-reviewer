@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// What a project's ticket source (#1038) asks of a Jira site: the projects the connection's account can browse (the new-project dialog) and
-// the workflow statuses of one project (the status picker of `ticket.statusChanged`, the setup tab). Both are plain reads through
+// What a project's ticket source (#1038) asks of a Jira site: the projects the connection's account can browse (the new-project dialog), one
+// project by its key (the check of a creation) and the workflow statuses of one project (the status picker of `ticket.statusChanged`, the setup tab). Both are plain reads through
 // `JiraTokens.request`, so the token is refreshed, renewed on a 401 and never seen here. Answers are values, never exceptions, and a
 // failure holds nothing of what Jira said. The names are Jira's own: the factory has no status model of its own (epic #1034).
 import type { JiraReadErrorCode } from "./errors.ts";
@@ -30,6 +30,14 @@ export type JiraProjectReader = {
   ): Promise<
     { ok: true; projects: JiraProject[]; complete: boolean } | JiraReadFailure
   >;
+  /**
+   * One project of the site by its key, in one call: how a key a person typed is checked, whatever the number of projects the site
+   * has. `jira_project_not_found` is what Jira answers for a key it has not, and also for a project the account may not browse.
+   */
+  getProject(
+    connectionId: string,
+    projectKey: string,
+  ): Promise<{ ok: true; project: JiraProject } | JiraReadFailure>;
   /** The statuses of the project's workflows, all issue types together, each name once, in the order Jira lists them. */
   listStatuses(
     connectionId: string,
@@ -130,6 +138,30 @@ export function createJiraProjectReader({
           return { ok: true, projects, complete: true };
       }
       return { ok: true, projects, complete: false };
+    },
+
+    async getProject(connectionId, projectKey) {
+      // The key is part of the path: only what can be a key goes in.
+      if (!JIRA_PROJECT_KEY.test(projectKey))
+        return { ok: false, error: "jira_project_not_found" };
+      const result = await read(
+        connectionId,
+        `/rest/api/3/project/${projectKey}`,
+      );
+      if (!result.ok) return result;
+      const { body } = result;
+      // The answer must be the project that was asked for (Jira also takes a project id where a key is).
+      if (
+        !isRecord(body) ||
+        typeof body.id !== "string" ||
+        typeof body.name !== "string" ||
+        body.key !== projectKey
+      )
+        return { ok: false, error: "jira_unavailable" };
+      return {
+        ok: true,
+        project: { id: body.id, key: projectKey, name: body.name },
+      };
     },
 
     async listStatuses(connectionId, projectKey) {

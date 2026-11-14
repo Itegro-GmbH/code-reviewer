@@ -240,9 +240,9 @@ without a new column and without the `repository_id` question that #1035 left op
 always names the repository of the code). What the mirror has to learn is #1039's work: the inbound webhook, reading a Jira page (`readTrackerPage`), and
 the sync state per `(repository_id, provider)`, which already exists.
 
-Until then the mirror leaves such a project alone: the issues of its repository are not its tickets. `TrackerService` (`listIssues`, `syncState`, `sync`)
-answers `TRACKER_SOURCE_NOT_MIRRORED` (409), the nightly resync (`listResyncTargets`) skips it and the route that creates a project does not start the
-first sync for it. **Not decided here, for #1039:** the GitHub `issues` webhook of the code repository still reaches the mirror for a project whose
-tickets are Jira's (the handler resolves the provider of the repository's project; it has no Jira provider yet), and a lane with a `ticket.labeled` trigger
-in such a project still starts from GitHub labels.
-
+Until then the mirror leaves such a project alone: the issues of its repository are not its tickets. The webhook (`mirroredRepository`) writes only for a
+repository whose active project has a GitHub source (`ProjectService.activeTicketProvider`), `TrackerService` (`listIssues`, `syncState`, `sync`)
+answers `TRACKER_SOURCE_NOT_MIRRORED` (409), the nightly resync (`listResyncTargets`) skips it, and neither route that creates or switches on a project
+(`POST .../projects`, `PUT .../repositories/:id/project`) starts the first sync for it (`firstSyncAfterActivation`). The label and the status of a GitHub issue
+or board start no lane of such a project either (`WorkflowsRepository.listWithIssueTrigger` / `listWithStatusTrigger`). **Not decided here, for #1039:** GitHub
+rows that the repository held while the project's tickets were its issues stay in the cache until the mirror clears or rewrites them.

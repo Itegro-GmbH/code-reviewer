@@ -18,6 +18,12 @@ const SOURCE_FIELDS = ["provider", "connectionId", "projectKey"] as const;
 const SOURCE_PROVIDERS = ["github", "jira"] as const;
 /** What can be a Jira project key (the same rule as the stored source: `projects-repository.ts`). */
 const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
+/**
+ * The built-in lanes a project on a Jira project may start with: the review lane needs no ticket; the others read and write the GitHub
+ * issues of the repository, which are not that project's tickets (a Jira lane needs the write-back to Jira, #1040). The dialog offers
+ * these only; the route refuses the rest.
+ */
+export const LANES_FOR_JIRA: readonly string[] = ["review-a-pull-request"];
 const MAX_ID_LENGTH = 128;
 /** A node id of a GitHub Project (`PVT_…`); anything else cannot name a board. */
 const BOARD_ID = /^PVT_[A-Za-z0-9_-]{1,200}$/;
@@ -252,6 +258,17 @@ export function readNewProjectRequest(
         else lanesRead.push(lane);
       });
   }
+
+  if (jira !== undefined)
+    lanesRead.forEach((lane, index) => {
+      if (!LANES_FOR_JIRA.includes(lane))
+        issues.push({
+          path: `lanes/${String(index)}`,
+          code: "lane_not_for_jira",
+          message: `The lane ${lane} reads and writes GitHub issues, so it cannot be a lane of a Jira project yet.`,
+          available: [...LANES_FOR_JIRA],
+        });
+    });
 
   if (issues.length > 0) return { ok: false, issues };
   return {

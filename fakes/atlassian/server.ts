@@ -11,6 +11,7 @@
 //   GET  /me                                     the account that granted
 //   GET  /ex/jira/<cloudId>/rest/api/3/myself    a Jira call: only a live access token of a grant that covers the site
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/search          the projects of a site, paged as Jira pages (`startAt`, `maxResults`, `isLast`)
+//   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>          one project by key or id (404 for an unknown one, as Jira also answers for a project the account cannot browse)
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>/statuses  the workflow statuses of a project, by issue type (404 for an unknown key)
 // What a test may do to it (`AtlassianFake`): choose the sites a consent covers, deny a consent, expire every access token, revoke every grant
 // (the next refresh is refused, as when the person removed the app in their Atlassian account), and script the next answer of a path (a status,
@@ -439,6 +440,36 @@ export async function startAtlassianFake(
               simplified: false,
               style: "classic",
             })),
+          },
+          entry,
+        );
+      }
+      const single = /^\/project\/([^/]+)$/.exec(path);
+      if (single !== null && single[1] !== "search") {
+        const key = decodeURIComponent(single[1] ?? "");
+        const project = projects.find(
+          (candidate) => candidate.key === key || candidate.id === key,
+        );
+        if (project === undefined)
+          return json(
+            response,
+            404,
+            {
+              errorMessages: ["No project could be found with key."],
+              errors: {},
+            },
+            entry,
+          );
+        return json(
+          response,
+          200,
+          {
+            id: project.id,
+            key: project.key,
+            name: project.name,
+            projectTypeKey: project.projectTypeKey ?? "software",
+            simplified: false,
+            style: "classic",
           },
           entry,
         );

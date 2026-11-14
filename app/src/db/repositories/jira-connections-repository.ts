@@ -7,13 +7,14 @@
 //
 // A token write is a compare and swap on `token_version` (`replaceTokens`, `markBroken`): Atlassian rotates the refresh token on every
 // refresh, so of two requests that refresh at once only the first may store its pair. `withLockedTokens` goes further for the refresh
-// itself: it holds the row lock (`for update`) from the read to the write, so a second refresh of the same connection waits for the first
-// and then reads the pair the first stored, instead of sending Atlassian a refresh token that is already used up.
+// itself: it holds the row lock (`for no key update`) from the read to the write, so a second refresh of the same connection waits for the
+// first and then reads the pair the first stored, instead of sending Atlassian a refresh token that is already used up. It is the lock that
+// a pair's writes take anyway, and the one `for key share` (a project that is pointed at the connection) does not wait for.
 //
 // `removeUnlessUsed` is the one way to delete a connection: it locks the row and refuses while a project's ticket source names it
 // (`projects.ticket_source` is JSON text `{ "provider": "jira", "connectionId", ... }`, set by #1038; a project that names the connection
-// is named in the refusal). #1038, which points a project at a connection, must take that row lock (`for share`) in the transaction that writes the source,
-// so the check and the delete cannot interleave with it.
+// is named in the refusal). #1038, which points a project at a connection, takes that row lock (`for key share`, which `for update` waits for)
+// in the transaction that writes the source, so the check and the delete cannot interleave with it.
 import "server-only";
 import { sql, type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
@@ -290,7 +291,7 @@ export function createJiraConnectionsRepository(
           .selectAll()
           .where("workspace_id", "=", workspaceId)
           .where("id", "=", id)
-          .forUpdate()
+          .forNoKeyUpdate()
           .executeTakeFirst();
         return work(row === undefined ? undefined : toTokens(row), {
           replaceTokens: (expectedVersion, sealed, accessExpiresAt) =>

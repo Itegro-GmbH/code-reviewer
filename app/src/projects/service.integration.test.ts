@@ -409,6 +409,27 @@ describe("a project on a Jira project (#1038)", () => {
     expect(await projects.get(first.id)).toBeUndefined();
   });
 
+  // #1038 (finding of the review of #1044)
+  it("names the provider of the ticket source of the active project of a repository, for the mirror: none for a project that is off", async () => {
+    const { service, integration, first, second } = await withConnection();
+    await service.createProject(first.id, null, JIRA);
+    await service.activateProject(second.id);
+
+    expect(
+      await service.activeTicketProvider(integration.id, first.externalId),
+    ).toBe("jira");
+    expect(
+      await service.activeTicketProvider(integration.id, second.externalId),
+    ).toBe("github");
+    await service.deactivateProject(first.id);
+    expect(
+      await service.activeTicketProvider(integration.id, first.externalId),
+    ).toBeUndefined();
+    expect(
+      await service.activeTicketProvider(integration.id, "no-such-id"),
+    ).toBeUndefined();
+  });
+
   // #1038
   it("does not give a Jira project a GitHub board, and says so with a stable code", async () => {
     const { service, first } = await withConnection();

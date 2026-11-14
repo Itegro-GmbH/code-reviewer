@@ -4,7 +4,8 @@
 // source, with the optional GitHub Project that is its board, and the built-in lanes it starts with) and
 // `GET /api/w/:workspace/repositories/:repositoryId/boards` lists the boards a project can take, read from GitHub, and (#1038)
 // `GET /api/w/:workspace/jira/connections/:connectionId/projects` lists the projects of a Jira site. A project's ticket source may be a Jira
-// project (`ticketSource` in the body of the creation): the connection must be the workspace's and the key a project of its site, read now.
+// project (`ticketSource` in the body of the creation): the connection must be the workspace's and the key a project of its site, asked of
+// Jira now with one call for that project (never by reading the site's list), after the repository was looked at.
 // Collaborators are passed in so the route files wire the real ones and tests wire fakes.
 //
 // Order, as for the other routes: the user first, then where the request comes from, the content type and size of the body, its JSON,
@@ -61,16 +62,35 @@ export type LaneCopy =
   | { key: string; ok: true; workflow: { id: string; name: string } }
   | { key: string; ok: false; code: string };
 
+/** What asking a Jira site for ONE project by its key came to (#1038). `connection_not_found` is also what another workspace's connection is. */
+export type JiraProjectAnswer =
+  | { kind: "project"; project: { key: string } }
+  | { kind: "project_not_found" }
+  | { kind: "connection_not_found" }
+  | { kind: "connection_broken" }
+  | { kind: "unavailable" };
+
 export type NewProjectDependencies = {
   /** The signed in user, or a throw that ends the request. Called first, on every request. */
   requireUser: () => Promise<SessionUser>;
-  service: Pick<ProjectService, "createProject" | "getProject" | "setBoard">;
+  service: Pick<
+    ProjectService,
+    "createProject" | "findProject" | "getProject" | "setBoard"
+  >;
   boards(repositoryId: string): Promise<BoardsAnswer>;
   /**
    * The projects of the site of a Jira connection of the workspace (#1038). Left out where the deployment has no Jira: a Jira project
    * cannot be named then (`PROJECT_JIRA_UNAVAILABLE`).
    */
   jiraProjects?(connectionId: string): Promise<JiraProjectsAnswer>;
+  /**
+   * One project of a Jira site by its key (#1038), the check of a creation: one call to Jira, never the list of the site's projects.
+   * Left out where the deployment has no Jira: a Jira project cannot be named then (`PROJECT_JIRA_UNAVAILABLE`).
+   */
+  jiraProject?(
+    connectionId: string,
+    projectKey: string,
+  ): Promise<JiraProjectAnswer>;
   /** The names of the built-in lanes a new project may copy (the workflows module owns them). */
   laneKeys: readonly string[];
   copyLanes(
@@ -137,6 +157,7 @@ export function createNewProjectHandlers({
   service,
   boards,
   jiraProjects,
+  jiraProject,
   laneKeys,
   copyLanes,
 }: NewProjectDependencies): NewProjectHandlers {
@@ -168,22 +189,62 @@ export function createNewProjectHandlers({
   }
 
   /**
-   * The Jira source a body names, against the projects the site has now: the choice, or the refusal that says why not (with `available`, the
-   * keys that would have been accepted). Another workspace's connection is none, so the answer for it is the one for an unknown id.
+   * The repository of a creation, looked at before Jira is asked anything: it must be there, available, and have no project that is on.
+   * Throws the `ProjectError` the service would have thrown for it (so a creation that cannot succeed costs Jira no call).
+   */
+  async function checkRepository(repositoryId: string): Promise<void> {
+    const entry = await service.findProject(repositoryId);
+    if (entry === undefined)
+      throw new ProjectError(
+        "PROJECT_REPOSITORY_NOT_FOUND",
+        "There is no repository with this id.",
+      );
+    if (!entry.repository.available)
+      throw entry.repository.integration.status === "active"
+        ? new ProjectError(
+            "PROJECT_REPOSITORY_UNAVAILABLE",
+            "The repository is no longer available on the platform and cannot be activated.",
+          )
+        : new ProjectError(
+            "PROJECT_INTEGRATION_UNAVAILABLE",
+            "The installation of the repository is suspended or removed, so the repository cannot be activated.",
+          );
+    if (entry.project?.active === true)
+      throw new ProjectError(
+        "PROJECT_ALREADY_EXISTS",
+        "The repository has a project that is switched on already.",
+      );
+  }
+
+  /**
+   * The Jira source a body names, against the project the site has now (one call for that project): the choice, or the refusal that says
+   * why not. The refusal names no key of the site. Another workspace's connection is none, so the answer for it is the one for an unknown id.
    */
   async function resolveJira(
     choice: JiraSourceChoice,
   ): Promise<
     { ok: true; choice: JiraSourceChoice } | { ok: false; response: Response }
   > {
-    let known;
-    try {
-      known = await jiraProjectsOf(choice.connectionId);
-    } catch (error) {
-      if (
-        error instanceof ProjectError &&
-        error.code === "PROJECT_JIRA_CONNECTION_NOT_FOUND"
-      )
+    const answer =
+      jiraProject === undefined
+        ? ({ kind: "unavailable" } as const)
+        : await jiraProject(choice.connectionId, choice.projectKey);
+    switch (answer.kind) {
+      case "project":
+        return { ok: true, choice };
+      case "project_not_found":
+        return {
+          ok: false,
+          response: refusal("PROJECT_REQUEST_INVALID", [
+            {
+              path: "ticketSource.projectKey",
+              code: "unknown_jira_project",
+              message:
+                "The Jira site has no project with this key, or the connected account cannot see it.",
+            },
+          ]),
+        };
+      case "connection_not_found":
         return {
           ok: false,
           response: refusal("PROJECT_REQUEST_INVALID", [
@@ -195,22 +256,17 @@ export function createNewProjectHandlers({
             },
           ]),
         };
-      throw error;
+      case "connection_broken":
+        throw new ProjectError(
+          "PROJECT_JIRA_CONNECTION_BROKEN",
+          "The Jira connection is broken: a person has to connect it again.",
+        );
+      case "unavailable":
+        throw new ProjectError(
+          "PROJECT_JIRA_UNAVAILABLE",
+          "Jira could not be asked for the project.",
+        );
     }
-    if (!known.projects.some((entry) => entry.key === choice.projectKey))
-      return {
-        ok: false,
-        response: refusal("PROJECT_REQUEST_INVALID", [
-          {
-            path: "ticketSource.projectKey",
-            code: "unknown_jira_project",
-            message:
-              "The Jira site has no project with this key. Choose one of the projects it has.",
-            available: known.projects.map((entry) => entry.key),
-          },
-        ]),
-      };
-    return { ok: true, choice };
   }
 
   /** The boards of a repository, or the `ProjectError` that says why there are none to look at. */
@@ -310,6 +366,7 @@ export function createNewProjectHandlers({
         }
         let jiraChoice: JiraSourceChoice | undefined;
         if (jira !== undefined) {
+          await checkRepository(repositoryId);
           const resolved = await resolveJira(jira);
           if (!resolved.ok) return resolved.response;
           jiraChoice = resolved.choice;

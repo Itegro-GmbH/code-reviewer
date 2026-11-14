@@ -140,6 +140,61 @@ describe("reading the projects of a site", () => {
   });
 });
 
+describe("reading one project of a site", () => {
+  // #1038 (finding of the review of #1044)
+  it("asks for the one project by its key, in one call, and never for the list", async () => {
+    const { reader, paths } = readerOver(() =>
+      answer(200, { id: "10000", key: "PROJ", name: "Project", style: "x" }),
+    );
+
+    expect(await reader.getProject("conn-1", "PROJ")).toEqual({
+      ok: true,
+      project: { id: "10000", key: "PROJ", name: "Project" },
+    });
+    expect(paths).toEqual(["/rest/api/3/project/PROJ"]);
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("refuses a key that is not one before any call, names an unknown project and an answer that is no project, and names every failure", async () => {
+    const { reader, paths } = readerOver(() => answer(404, {}));
+
+    expect(await reader.getProject("conn-1", "../myself")).toEqual({
+      ok: false,
+      error: "jira_project_not_found",
+    });
+    expect(await reader.getProject("conn-1", "")).toEqual({
+      ok: false,
+      error: "jira_project_not_found",
+    });
+    expect(paths).toEqual([]);
+    expect(await reader.getProject("conn-1", "NOPE")).toEqual({
+      ok: false,
+      error: "jira_project_not_found",
+    });
+    const result = (respond: Parameters<typeof readerOver>[0]) =>
+      readerOver(respond).reader.getProject("conn-1", "PROJ");
+    // The answer must be the project that was asked for: Jira also takes an id where a key is, and a site may answer anything.
+    expect(await result(() => answer(200, { not: "a project" }))).toEqual({
+      ok: false,
+      error: "jira_unavailable",
+    });
+    expect(
+      await result(() => answer(200, { id: "1", key: "OTHER", name: "x" })),
+    ).toEqual({ ok: false, error: "jira_unavailable" });
+    expect(await result(() => answer(403, {}))).toEqual({
+      ok: false,
+      error: "jira_forbidden",
+    });
+    expect(await result(() => answer(500, {}))).toEqual({
+      ok: false,
+      error: "jira_unavailable",
+    });
+    expect(
+      await result(() => ({ ok: false, error: "jira_connection_broken" })),
+    ).toEqual({ ok: false, error: "jira_connection_broken" });
+  });
+});
+
 describe("reading the statuses of a project", () => {
   const statuses = (name: string, ids: [string, string][]) => ({
     id: "t",

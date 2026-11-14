@@ -702,16 +702,18 @@ export function createProjectsRepository(
         if (repository.integration_status !== "active")
           return { kind: "integration_unavailable" };
 
-        // A Jira source takes the connection's row `for share` until this transaction ends: a removal of the connection (`for update`,
+        // A Jira source takes the connection's row `for key share` until this transaction ends: a removal of the connection (`for update`,
         // src/jira/README.md) waits for the write below and then finds a project that uses it, and an assignment that comes after a
-        // removal finds no row. The workspace is in the query, so another workspace's connection is none.
+        // removal finds no row. The weakest lock that conflicts with `for update` is the one taken, so that the activation does not wait
+        // behind a token refresh (`for no key update` across the call to Atlassian, `withLockedTokens`) while it holds the repository's
+        // lock. The workspace is in the query, so another workspace's connection is none.
         if (options.jira !== undefined) {
           const connection = await trx
             .selectFrom("jira_connections")
             .select("id")
             .where("workspace_id", "=", workspaceId)
             .where("id", "=", options.jira.connectionId)
-            .forShare()
+            .forKeyShare()
             .executeTakeFirst();
           if (connection === undefined)
             return { kind: "jira_connection_not_found" };

@@ -70,6 +70,14 @@ export type ProjectService = {
     integrationId: string,
     repositoryExternalId: string,
   ): Promise<boolean>;
+  /**
+   * The provider of the ticket source (`github`, `jira`, #1038) of the active project of the repository a webhook names, or undefined
+   * when it has none. The ticket mirror holds the GitHub issues of a repository only when the answer is `github`.
+   */
+  activeTicketProvider(
+    integrationId: string,
+    repositoryExternalId: string,
+  ): Promise<string | undefined>;
   /** Every repository with its integration, project and status, for the project list. */
   listProjects(): Promise<ProjectListEntry[]>;
   /** One entry of the list by the id of its repository; undefined for an id the list does not have. */
@@ -212,6 +220,15 @@ export function createProjectService(deps: {
           repositoryExternalId,
         )) !== undefined
       );
+    },
+
+    async activeTicketProvider(integrationId, repositoryExternalId) {
+      return (
+        await projects.findActiveForExternalRepository(
+          integrationId,
+          repositoryExternalId,
+        )
+      )?.ticketSource.provider;
     },
 
     listProjects() {

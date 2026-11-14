@@ -1015,6 +1015,62 @@ describe("a Jira project as the ticket source (#1038)", () => {
     expect(await db.selectFrom("projects").selectAll().execute()).toEqual([]);
   });
 
+  // #1038-T01 (finding of the review of #1044)
+  it("does not wait for a token refresh that holds the connection's row: the activation takes the row's key only", async () => {
+    const { projects, first, connections } = await withConnection();
+    let finish: () => void = () => undefined;
+    const refreshing = new Promise<void>((resolve) => (finish = resolve));
+    let started: () => void = () => undefined;
+    const holding = new Promise<void>((resolve) => (started = resolve));
+    // A refresh in flight: the row is locked from the read of the pair to its write, with the call to Atlassian between.
+    const refresh = connections.withLockedTokens("conn-a", async () => {
+      started();
+      await refreshing;
+    });
+    await holding;
+
+    const outcome = await Promise.race([
+      projects.activate(first.id, { jira: JIRA }),
+      new Promise<"waited">((resolve) =>
+        setTimeout(() => resolve("waited"), 3000),
+      ),
+    ]);
+    finish();
+    await refresh;
+
+    expect(outcome).toMatchObject({ kind: "activated" });
+  });
+
+  // #1038-T01 (finding of the review of #1044)
+  it("lets a removal and a second refresh wait for a refresh in flight: only the activation is let through", async () => {
+    const { connections } = await withConnection();
+    let finish: () => void = () => undefined;
+    const refreshing = new Promise<void>((resolve) => (finish = resolve));
+    let started: () => void = () => undefined;
+    const holding = new Promise<void>((resolve) => (started = resolve));
+    const refresh = connections.withLockedTokens("conn-a", async () => {
+      started();
+      await refreshing;
+    });
+    await holding;
+    let removed = false;
+    const removal = connections.removeUnlessUsed("conn-a").then((result) => {
+      removed = true;
+      return result;
+    });
+    let second = false;
+    const next = connections
+      .withLockedTokens("conn-a", async () => undefined)
+      .then(() => (second = true));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(removed).toBe(false);
+    expect(second).toBe(false);
+
+    finish();
+    await refresh;
+    await Promise.all([removal, next]);
+  });
+
   // #1038-T01
   it("takes the connection's row for share in the transaction that writes the source: a removal that starts meanwhile waits and is then refused", async () => {
     const world = await withConnection();
