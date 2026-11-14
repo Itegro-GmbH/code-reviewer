@@ -4,11 +4,16 @@
 // of the body, the board against the boards GitHub has, then the service and the lanes. The collaborators are fakes.
 import { describe, expect, it, vi } from "vitest";
 import type { SessionUser } from "../auth/access-policy.ts";
-import type { StoredProject } from "../db/repositories/projects-repository.ts";
+import type {
+  ProjectListEntry,
+  StoredProject,
+} from "../db/repositories/projects-repository.ts";
 import type { BoardInfo } from "../integrations/provider.ts";
 import {
   createNewProjectHandlers,
   type BoardsAnswer,
+  type JiraProjectAnswer,
+  type JiraProjectsAnswer,
   type LaneCopy,
   type NewProjectDependencies,
 } from "./create-http.ts";
@@ -47,11 +52,45 @@ function projectOf(
   };
 }
 
+/** The repository "repo-1" as the list of projects has it. */
+function entryOf(
+  over: {
+    available?: boolean;
+    integrationStatus?: "active" | "disabled";
+    project?: StoredProject | null;
+  } = {},
+): ProjectListEntry {
+  const available = over.available ?? true;
+  return {
+    repository: {
+      id: "repo-1",
+      externalId: "1",
+      fullName: "acme/shop",
+      url: "https://github.test/acme/shop",
+      available,
+      integration: {
+        id: "int-1",
+        type: "github_app",
+        displayName: "acme",
+        status: over.integrationStatus ?? "active",
+      },
+    },
+    project: over.project ?? null,
+    status: available ? "inactive" : "unavailable",
+  };
+}
+
 function setup(
   options: {
     boards?: BoardsAnswer;
     createProject?: NewProjectDependencies["service"]["createProject"];
     lanes?: LaneCopy[];
+    /** What the Jira site answers to the list of its projects; left out: the handlers are wired without Jira. */
+    jira?: JiraProjectsAnswer;
+    /** What the Jira site answers to the question for the one project of a creation. */
+    jiraProject?: JiraProjectAnswer;
+    /** The repository as the list of projects has it; left out: a repository that can be switched on, without a project. */
+    entry?: ProjectListEntry | undefined | null;
   } = {},
 ) {
   const createProject = vi.fn<
@@ -68,10 +107,22 @@ function setup(
     async () => options.lanes ?? [],
   );
   const requireUser = vi.fn(async () => USER);
+  const jiraProjects = vi.fn<
+    NonNullable<NewProjectDependencies["jiraProjects"]>
+  >(async () => options.jira ?? { kind: "unavailable" });
+  const jiraProject = vi.fn<NonNullable<NewProjectDependencies["jiraProject"]>>(
+    async () =>
+      options.jiraProject ?? { kind: "project", project: { key: "PROJ" } },
+  );
+  const findProject = vi.fn<NewProjectDependencies["service"]["findProject"]>(
+    async () =>
+      options.entry === null ? undefined : (options.entry ?? entryOf()),
+  );
   const handlers = createNewProjectHandlers({
     requireUser,
     service: {
       createProject,
+      findProject,
       getProject: async () => undefined,
       setBoard: async () => {
         throw new Error("not under test");
@@ -80,6 +131,10 @@ function setup(
     boards,
     laneKeys: ["issue-to-pr", "review-a-pull-request"],
     copyLanes,
+    ...(options.jira === undefined ? {} : { jiraProjects }),
+    ...(options.jiraProject === undefined && options.jira === undefined
+      ? {}
+      : { jiraProject }),
   });
   const post = (body: unknown, headers: Record<string, string> = {}): Request =>
     new Request("https://app.test/api/w/default/projects", {
@@ -87,7 +142,17 @@ function setup(
       headers: { "content-type": "application/json", ...headers },
       body: typeof body === "string" ? body : JSON.stringify(body),
     });
-  return { handlers, createProject, boards, copyLanes, requireUser, post };
+  return {
+    handlers,
+    createProject,
+    boards,
+    copyLanes,
+    requireUser,
+    post,
+    jiraProjects,
+    jiraProject,
+    findProject,
+  };
 }
 
 describe("creating a project", () => {
@@ -385,5 +450,265 @@ describe("the boards of a repository", () => {
     expect(await refused.json()).toEqual({
       error: "PROJECT_REPOSITORY_NOT_FOUND",
     });
+  });
+});
+
+describe("creating a project on a Jira project (#1038)", () => {
+  const jiraBody = (over: Record<string, unknown> = {}) => ({
+    repositoryId: "repo-1",
+    ticketSource: {
+      provider: "jira",
+      connectionId: "conn-1",
+      projectKey: "PROJ",
+    },
+    ...over,
+  });
+
+  // #1038-T01
+  it("creates the project with the Jira source after the site has the project, and asks GitHub for no board", async () => {
+    const { handlers, createProject, boards, jiraProject, jiraProjects, post } =
+      setup({
+        jira: { kind: "unavailable" },
+        createProject: async (repositoryId, _board, jira) => ({
+          ...projectOf(null),
+          repositoryId,
+          ticketSource: {
+            provider: "jira",
+            repositoryId,
+            board: null,
+            ...(jira ?? { connectionId: "?", projectKey: "?" }),
+          },
+        }),
+      });
+
+    const response = await handlers.create(post(jiraBody()));
+
+    expect(response.status).toBe(201);
+    expect(((await response.json()) as { project: unknown }).project).toEqual({
+      id: "project-1",
+      repositoryId: "repo-1",
+      active: true,
+      ticketSource: {
+        provider: "jira",
+        repositoryId: "repo-1",
+        board: null,
+        connectionId: "conn-1",
+        projectKey: "PROJ",
+      },
+    });
+    // One question for the one project, never the list of the site's projects (a site can have thousands of them).
+    expect(jiraProject).toHaveBeenCalledExactlyOnceWith("conn-1", "PROJ");
+    expect(jiraProjects).not.toHaveBeenCalled();
+    expect(createProject).toHaveBeenCalledWith("repo-1", null, {
+      connectionId: "conn-1",
+      projectKey: "PROJ",
+    });
+    expect(boards).not.toHaveBeenCalled();
+  });
+
+  // #1038-T01 (finding of the review of #1044)
+  it("refuses a project the site does not have without naming any key of the site, and writes nothing", async () => {
+    const { handlers, createProject, post } = setup({
+      jiraProject: { kind: "project_not_found" },
+    });
+
+    const response = await handlers.create(
+      post(
+        jiraBody({
+          ticketSource: {
+            provider: "jira",
+            connectionId: "conn-1",
+            projectKey: "NOPE",
+          },
+        }),
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as {
+      error: string;
+      issues: Record<string, unknown>[];
+    };
+    expect(body).toEqual({
+      error: "PROJECT_REQUEST_INVALID",
+      issues: [
+        expect.objectContaining({
+          path: "ticketSource.projectKey",
+          code: "unknown_jira_project",
+        }),
+      ],
+    });
+    // The keys of a site are its business: whoever may create a project may not read the list of the projects the account sees here.
+    expect(body.issues[0]).not.toHaveProperty("available");
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
+  // #1038-T01 (finding of the review of #1044)
+  it("looks at the repository before it asks Jira: an unknown, an unavailable one and one with a project already ask nothing", async () => {
+    const cases = [
+      { entry: null, error: "PROJECT_REPOSITORY_NOT_FOUND", status: 404 },
+      {
+        entry: entryOf({ available: false }),
+        error: "PROJECT_REPOSITORY_UNAVAILABLE",
+        status: 409,
+      },
+      {
+        entry: entryOf({ available: false, integrationStatus: "disabled" }),
+        error: "PROJECT_INTEGRATION_UNAVAILABLE",
+        status: 409,
+      },
+      {
+        entry: entryOf({ project: projectOf(null) }),
+        error: "PROJECT_ALREADY_EXISTS",
+        status: 409,
+      },
+    ] as const;
+    for (const { entry, error, status } of cases) {
+      const { handlers, jiraProject, createProject, post } = setup({
+        jiraProject: { kind: "project", project: { key: "PROJ" } },
+        entry,
+      });
+
+      const response = await handlers.create(post(jiraBody()));
+
+      expect(response.status, error).toBe(status);
+      expect(await response.json()).toEqual({ error });
+      expect(jiraProject, error).not.toHaveBeenCalled();
+      expect(createProject, error).not.toHaveBeenCalled();
+    }
+  });
+
+  // #1038-T01
+  it("refuses a connection the workspace does not have, a broken one, and a site that cannot be asked, each with its own answer", async () => {
+    const unknown = setup({ jiraProject: { kind: "connection_not_found" } });
+    const refused = await unknown.handlers.create(unknown.post(jiraBody()));
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({
+      error: "PROJECT_REQUEST_INVALID",
+      issues: [
+        { path: "ticketSource.connectionId", code: "unknown_connection" },
+      ],
+    });
+
+    const broken = setup({ jiraProject: { kind: "connection_broken" } });
+    const brokenAnswer = await broken.handlers.create(broken.post(jiraBody()));
+    expect(brokenAnswer.status).toBe(409);
+    expect(await brokenAnswer.json()).toEqual({
+      error: "PROJECT_JIRA_CONNECTION_BROKEN",
+    });
+
+    const down = setup({ jiraProject: { kind: "unavailable" } });
+    const downAnswer = await down.handlers.create(down.post(jiraBody()));
+    expect(downAnswer.status).toBe(503);
+    expect(await downAnswer.json()).toEqual({
+      error: "PROJECT_JIRA_UNAVAILABLE",
+    });
+
+    // Wired without Jira (a deployment that has none): a Jira project cannot be named.
+    const none = setup();
+    const noneAnswer = await none.handlers.create(none.post(jiraBody()));
+    expect(noneAnswer.status).toBe(503);
+    expect(none.createProject).not.toHaveBeenCalled();
+    for (const each of [unknown, broken, down])
+      expect(each.createProject).not.toHaveBeenCalled();
+  });
+
+  // #1038-T01
+  it("answers a connection that was removed between the check and the write with the code of the service", async () => {
+    const { handlers, post } = setup({
+      jiraProject: { kind: "project", project: { key: "PROJ" } },
+      createProject: async () => {
+        throw new ProjectError(
+          "PROJECT_JIRA_CONNECTION_NOT_FOUND",
+          "The workspace has no Jira connection with this id.",
+        );
+      },
+    });
+
+    const response = await handlers.create(post(jiraBody()));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: "PROJECT_JIRA_CONNECTION_NOT_FOUND",
+    });
+  });
+
+  // #1038
+  it("refuses a GitHub board next to a Jira project before anybody is asked", async () => {
+    const { handlers, jiraProject, boards, findProject, post } = setup({
+      jiraProject: { kind: "project", project: { key: "PROJ" } },
+    });
+
+    const response = await handlers.create(
+      post(jiraBody({ board: { projectV2Id: "PVT_board1" } })),
+    );
+
+    expect(response.status).toBe(400);
+    expect(jiraProject).not.toHaveBeenCalled();
+    expect(findProject).not.toHaveBeenCalled();
+    expect(boards).not.toHaveBeenCalled();
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("refuses the lanes that read and write GitHub issues for a Jira project before anybody is asked", async () => {
+    const { handlers, jiraProject, createProject, copyLanes, post } = setup({
+      jiraProject: { kind: "project", project: { key: "PROJ" } },
+    });
+
+    const response = await handlers.create(
+      post(jiraBody({ lanes: ["issue-to-pr"] })),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: "PROJECT_REQUEST_INVALID",
+      issues: [{ path: "lanes/0", code: "lane_not_for_jira" }],
+    });
+    expect(jiraProject).not.toHaveBeenCalled();
+    expect(createProject).not.toHaveBeenCalled();
+    expect(copyLanes).not.toHaveBeenCalled();
+  });
+});
+
+describe("the projects of a Jira connection (#1038)", () => {
+  const get = () =>
+    new Request(
+      "https://app.test/api/w/default/jira/connections/conn-1/projects",
+    );
+
+  // #1038-T01
+  it("lists the key and the name of the projects of the site, for the dialog", async () => {
+    const { handlers, jiraProjects, requireUser } = setup({
+      jira: {
+        kind: "projects",
+        complete: false,
+        projects: [{ key: "PROJ", name: "Project" }],
+      },
+    });
+
+    const response = await handlers.jiraProjects(get(), "conn-1");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      complete: false,
+      projects: [{ key: "PROJ", name: "Project" }],
+    });
+    expect(requireUser).toHaveBeenCalled();
+    expect(jiraProjects).toHaveBeenCalledWith("conn-1");
+  });
+
+  // #1038
+  it("answers an unknown connection with 404, a broken one with 409, and a site that cannot be asked with 503", async () => {
+    for (const [kind, status, error] of [
+      ["connection_not_found", 404, "PROJECT_JIRA_CONNECTION_NOT_FOUND"],
+      ["connection_broken", 409, "PROJECT_JIRA_CONNECTION_BROKEN"],
+      ["unavailable", 503, "PROJECT_JIRA_UNAVAILABLE"],
+    ] as const) {
+      const { handlers } = setup({ jira: { kind } });
+      const response = await handlers.jiraProjects(get(), "conn-1");
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error });
+    }
   });
 });

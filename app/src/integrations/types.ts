@@ -522,7 +522,7 @@ export type IntegrationEvent =
   | { kind: "ignored"; reason: string };
 
 /**
- * The ticket providers a ticket reference and a project's ticket source may name (#1035). GitHub (its issues) is the one so far; Jira
- * Cloud comes with the later issues of epic #1034. A caller that has registered another provider (a test) passes its own list.
+ * The ticket providers a ticket reference and a project's ticket source may name (#1035): GitHub (its issues) and, since #1038, Jira
+ * Cloud (epic #1034). A caller that has registered another provider (a test) passes its own list.
  */
-export const TICKET_PROVIDERS = ["github"] as const;
+export const TICKET_PROVIDERS = ["github", "jira"] as const;

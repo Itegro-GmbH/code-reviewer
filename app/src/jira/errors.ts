@@ -67,6 +67,16 @@ export const JIRA_CALL_ERROR_CODES = [
 ] as const;
 export type JiraCallErrorCode = (typeof JIRA_CALL_ERROR_CODES)[number];
 
+/** What reading projects and statuses of a site (#1038) can fail with: a failed call, or what Jira answered. */
+export const JIRA_READ_ERROR_CODES = [
+  ...JIRA_CALL_ERROR_CODES,
+  /** Jira refused the call (401 after a renewed token, or 403): the account may not browse the projects. */
+  "jira_forbidden",
+  /** The site has no project with this key (or the text is no project key). */
+  "jira_project_not_found",
+] as const;
+export type JiraReadErrorCode = (typeof JIRA_READ_ERROR_CODES)[number];
+
 /** What a page can be told about a flow that ended: a refusal, or one of these. */
 export const JIRA_RESULT_CODES = [
   "connected",

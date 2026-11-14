@@ -49,6 +49,8 @@ type BoardRead = { available: boolean; status: string | null };
 function setup(
   options: {
     project?: boolean;
+    /** The provider of the project's ticket source; default `github`. */
+    provider?: string;
     active?: boolean;
     board?: BoardRead;
     /** The board the project chose (#937). */
@@ -85,7 +87,10 @@ function setup(
           : undefined;
       },
     },
-    projects: { hasActiveProject: async () => options.project ?? true },
+    projects: {
+      activeTicketProvider: async () =>
+        options.project === false ? undefined : (options.provider ?? "github"),
+    },
     tracker,
     boardOf: async () => options.chosenBoard,
     boardStatusOf,
@@ -718,6 +723,34 @@ describe("applying a change of a ticket to the mirror", () => {
 
     expect(await changed(issue(12))).toBe("not_mirrored");
     expect(tracker.rows()).toEqual([]);
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("mirrors nothing of the GitHub issues of the code repository of a Jira project, whatever the delivery is about", async () => {
+    const { tracker, mirror, changed, boardStatusOf, checksStateOf } = setup({
+      provider: "jira",
+    });
+
+    expect(await changed(issue(12))).toBe("not_mirrored");
+    expect(await changed(pullRequest(13, [12]))).toBe("not_mirrored");
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "board_item_reread",
+        nodeId: "I_12",
+        removed: false,
+      }),
+    ).toBe("not_mirrored");
+    expect(
+      await mirror.apply(INTEGRATION, {
+        kind: "checks_changed",
+        repo: REPO,
+        headSha: "abc1234",
+        pullRequests: [13],
+      }),
+    ).toBe("not_mirrored");
+    expect(tracker.rows()).toEqual([]);
+    expect(boardStatusOf).not.toHaveBeenCalled();
+    expect(checksStateOf).not.toHaveBeenCalled();
   });
 
   // #923-T31

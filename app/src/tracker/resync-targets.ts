@@ -47,6 +47,12 @@ export async function listResyncTargets(
           entry.repository.integration.status !== "active"
         )
           continue;
+        // The mirror holds GitHub issues: a project whose tickets come from elsewhere (Jira, #1038) has nothing to resync yet.
+        if (
+          entry.project !== null &&
+          entry.project.ticketSource.provider !== "github"
+        )
+          continue;
         const state = await deps.syncStateOf(workspaceId, entry.repository.id);
         targets.push({
           workspaceId,

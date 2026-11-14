@@ -618,7 +618,7 @@ repositories of its own, and a lane belongs to exactly one project (`workflows.p
 `/w/<slug>/workflows` leads to the projects). The ticket source is stored on the project as `{ "provider": "github", "repositoryId", "board": { "projectV2Id", "statusFieldId" } | null }`; a project
 that was written before has no stored source and reads as the issues of its repository without a board.
 
-- **The label trigger** starts a lane only when the label is put on an issue of the **repository of its project**, and the project is switched on. A lane of another project, and a lane without a project, wait for no label.
+- **The label trigger** starts a lane only when the label is put on an issue of the **repository of its project**, and the project is switched on **and its tickets are that repository's GitHub issues**. A lane of another project, and a lane without a project, wait for no label; a lane of a project whose tickets are a Jira project's (#1038: the repository is where the code lives) waits for no GitHub label either, whatever its triggers say (the status trigger likewise), and `POST /projects` starts such a project with the review lane only until #1040 (`PROJECT_REQUEST_INVALID`, `lane_not_for_jira`).
 - **A manual or api start** is held to the same repository: the `ticket` input must be an issue of it (`422 WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT`), and so must `input.repo` for a lane that names a repository instead
   (`422 WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT`). Both answer `issues: [{ path, code: "ticket_outside_project" | "repository_outside_project", message, available }]`, `available` naming the repository the project takes
   its tickets from. A lane without a project (archived, or written by an older version) is not held to it.
@@ -1199,7 +1199,8 @@ works as written.
 *Sub-issue 2 of epic #1034 (#1036).* A ticket moved into a status starts the workflows that wait for it. For GitHub the status is the **Status of the project board** (Projects v2); the
 webhook of the GitHub App takes the event `projects_v2_item` that [the ticket mirror](ticket-mirror.md) already follows and, once the mirror holds the new status, hands the move to
 [`status-trigger.ts`](../app/src/workflow-runs/status-trigger.ts). The names are the provider's own (the factory has no status model of its own): the lane editor offers the options of the
-Status field of the board the project chose, and a name that was typed is kept as typed.
+Status field of the board the project chose (for a project whose tickets are a Jira project, #1038: the names of the workflow statuses of that Jira
+project, all issue types together, spelled as Jira spells them), and a name that was typed is kept as typed.
 
 **What starts a workflow.** All of these hold:
 
@@ -1291,6 +1292,7 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `WORKFLOW_RUN_CONTENT_TYPE_UNSUPPORTED` | 415 | The body is not `application/json`. |
 | `WORKFLOW_RUN_TRIGGER_NOT_MANUAL` | 422 | Only a trigger of the kind `manual` or `api` is started by hand or through the API. |
 | `WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT` | 422 | The `ticket` is not an issue of the repository the lane's project takes its tickets from (`issues[].available` names it). |
+| `WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED` | 422 | The `ticket` names a provider the engine cannot read tickets of yet (`jira:…` parses, #1035, but a run starts from a GitHub issue only until #1039/#1040). |
 | `WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT` | 422 | `input.repo` is not that repository. |
 | `WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED` | 422 | A node is of a kind the engine does not run (`step` names it). |
 | `WORKFLOW_RUN_INPUT_INVALID` | 422 | The input does not fit the trigger's `input`; `errors` lists every problem. |

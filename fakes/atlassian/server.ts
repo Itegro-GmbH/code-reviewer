@@ -10,6 +10,9 @@
 //   GET  /oauth/token/accessible-resources       the sites the grant covers
 //   GET  /me                                     the account that granted
 //   GET  /ex/jira/<cloudId>/rest/api/3/myself    a Jira call: only a live access token of a grant that covers the site
+//   GET  /ex/jira/<cloudId>/rest/api/3/project/search          the projects of a site, paged as Jira pages (`startAt`, `maxResults`, `isLast`)
+//   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>          one project by key or id (404 for an unknown one, as Jira also answers for a project the account cannot browse)
+//   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>/statuses  the workflow statuses of a project, by issue type (404 for an unknown key)
 // What a test may do to it (`AtlassianFake`): choose the sites a consent covers, deny a consent, expire every access token, revoke every grant
 // (the next refresh is refused, as when the person removed the app in their Atlassian account), and script the next answer of a path (a status,
 // or a hang). It records every request but never a secret: whether the client credentials were right, and which grant type, yes; the secret and
@@ -37,6 +40,30 @@ export type FakeSite = {
   scopes?: string[];
 };
 
+/** A status of a Jira workflow, as `project/<key>/statuses` lists it. */
+export type FakeJiraStatus = {
+  id: string;
+  name: string;
+  /** `new`, `indeterminate` or `done`; default `indeterminate`. */
+  category?: "new" | "indeterminate" | "done";
+};
+
+/** One issue type of a project with the statuses of its workflow. */
+export type FakeIssueType = {
+  id: string;
+  name: string;
+  statuses: FakeJiraStatus[];
+};
+
+/** A Jira project of a fake site. Without `issueTypes` it has one (Task) with To Do, In Progress and Done. */
+export type FakeJiraProject = {
+  id: string;
+  key: string;
+  name: string;
+  projectTypeKey?: string;
+  issueTypes?: FakeIssueType[];
+};
+
 export type AtlassianFakeOptions = {
   clientId?: string;
   clientSecret?: string;
@@ -48,6 +75,10 @@ export type AtlassianFakeOptions = {
   account?: { id: string; name: string; email: string };
   /** Seconds an access token lives, as `expires_in` says. Default 3600. */
   accessTokenSeconds?: number;
+  /** The projects of each site by its id (changeable with `setProjects`). Default: none. */
+  projects?: Record<string, FakeJiraProject[]>;
+  /** How many projects one page of `project/search` holds at most. Default 50, as Jira's own default. */
+  projectPageSize?: number;
   port?: number;
   host?: string;
 };
@@ -77,6 +108,8 @@ export type AtlassianFake = {
   requests(): RecordedRequest[];
   /** The sites the next consents cover. */
   setSites(sites: FakeSite[]): void;
+  /** The projects of a site (all of them, not only the ones the account may browse: the fake has no permissions per project). */
+  setProjects(cloudId: string, projects: FakeJiraProject[]): void;
   /** The next consent ends with `error=access_denied`. */
   denyNextConsent(): void;
   /** Every access token issued so far stops working (it "expired"); a refresh token still works. */
@@ -104,6 +137,24 @@ type Grant = {
   revoked: boolean;
   refreshToken: string;
 };
+
+const DEFAULT_ISSUE_TYPES: FakeIssueType[] = [
+  {
+    id: "10001",
+    name: "Task",
+    statuses: [
+      { id: "10100", name: "To Do", category: "new" },
+      { id: "10101", name: "In Progress", category: "indeterminate" },
+      { id: "10102", name: "Done", category: "done" },
+    ],
+  },
+];
+
+const CATEGORY_NAMES = {
+  new: "To Do",
+  indeterminate: "In Progress",
+  done: "Done",
+} as const;
 
 const TOKEN_FORMAT = (kind: string) =>
   `fake-${kind}-${randomBytes(12).toString("hex")}`;
@@ -140,6 +191,10 @@ export async function startAtlassianFake(
       name: "acme",
     },
   ];
+  const projectsOfSite = new Map<string, FakeJiraProject[]>(
+    Object.entries(options.projects ?? {}),
+  );
+  const projectPageSize = options.projectPageSize ?? 50;
   let denyNext = false;
   const recorded: RecordedRequest[] = [];
   const scripted = new Map<string, ScriptedAnswer[]>();
@@ -344,18 +399,116 @@ export async function startAtlassianFake(
         { account_id: account.id, name: account.name, email: account.email },
         entry,
       );
-    const jira = /^\/ex\/jira\/([^/]+)\/rest\/api\/3\/myself$/.exec(
-      url.pathname,
-    );
+    const jira = /^\/ex\/jira\/([^/]+)\/rest\/api\/3(\/.*)$/.exec(url.pathname);
     if (request.method === "GET" && jira !== null) {
-      if (!grant.sites.some((site) => site.id === jira[1]))
+      const cloudId = jira[1] ?? "";
+      const path = jira[2] ?? "";
+      if (!grant.sites.some((site) => site.id === cloudId))
         return json(response, 404, { message: "no such site" }, entry);
-      return json(
-        response,
-        200,
-        { accountId: account.id, displayName: account.name },
-        entry,
-      );
+      if (path === "/myself")
+        return json(
+          response,
+          200,
+          { accountId: account.id, displayName: account.name },
+          entry,
+        );
+      const projects = projectsOfSite.get(cloudId) ?? [];
+      if (path === "/project/search") {
+        const startAt = Math.max(
+          0,
+          Number(url.searchParams.get("startAt") ?? 0),
+        );
+        const asked = Number(
+          url.searchParams.get("maxResults") ?? projectPageSize,
+        );
+        const size = Math.max(1, Math.min(asked, projectPageSize));
+        const page = projects.slice(startAt, startAt + size);
+        return json(
+          response,
+          200,
+          {
+            self: `${url.origin}${url.pathname}`,
+            startAt,
+            maxResults: size,
+            total: projects.length,
+            isLast: startAt + page.length >= projects.length,
+            values: page.map((project) => ({
+              id: project.id,
+              key: project.key,
+              name: project.name,
+              projectTypeKey: project.projectTypeKey ?? "software",
+              simplified: false,
+              style: "classic",
+            })),
+          },
+          entry,
+        );
+      }
+      const single = /^\/project\/([^/]+)$/.exec(path);
+      if (single !== null && single[1] !== "search") {
+        const key = decodeURIComponent(single[1] ?? "");
+        const project = projects.find(
+          (candidate) => candidate.key === key || candidate.id === key,
+        );
+        if (project === undefined)
+          return json(
+            response,
+            404,
+            {
+              errorMessages: ["No project could be found with key."],
+              errors: {},
+            },
+            entry,
+          );
+        return json(
+          response,
+          200,
+          {
+            id: project.id,
+            key: project.key,
+            name: project.name,
+            projectTypeKey: project.projectTypeKey ?? "software",
+            simplified: false,
+            style: "classic",
+          },
+          entry,
+        );
+      }
+      const statuses = /^\/project\/([^/]+)\/statuses$/.exec(path);
+      if (statuses !== null) {
+        const key = decodeURIComponent(statuses[1] ?? "");
+        const project = projects.find(
+          (candidate) => candidate.key === key || candidate.id === key,
+        );
+        if (project === undefined)
+          return json(
+            response,
+            404,
+            {
+              errorMessages: ["No project could be found with key."],
+              errors: {},
+            },
+            entry,
+          );
+        return json(
+          response,
+          200,
+          (project.issueTypes ?? DEFAULT_ISSUE_TYPES).map((type) => ({
+            id: type.id,
+            name: type.name,
+            subtask: false,
+            statuses: type.statuses.map((status) => ({
+              id: status.id,
+              name: status.name,
+              statusCategory: {
+                key: status.category ?? "indeterminate",
+                name: CATEGORY_NAMES[status.category ?? "indeterminate"],
+              },
+            })),
+          })),
+          entry,
+        );
+      }
     }
     return json(response, 404, { error: "not_found" }, entry);
   }
@@ -379,6 +532,9 @@ export async function startAtlassianFake(
     requests: () => structuredClone(recorded),
     setSites(next) {
       sites = [...next];
+    },
+    setProjects(cloudId, next) {
+      projectsOfSite.set(cloudId, [...next]);
     },
     denyNextConsent() {
       denyNext = true;

@@ -986,6 +986,17 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1038: the projects of the Jira site of a connection, for the people who create projects; the other workspace's connection is none.
+    name: "GET jira/connections/[connectionId]/projects",
+    route: "/api/w/[workspace]/jira/connections/[connectionId]/projects",
+    method: "GET",
+    minRole: MINIMUM_ROLE.manage_projects,
+    path: (ids) => `/jira/connections/${ids.jiraConnectionId}/projects`,
+    params: (ids) => ({ connectionId: ids.jiraConnectionId }),
+    file: "jira/connections/[connectionId]/projects/route.ts",
+    implementer: true,
+  },
+  {
     // #1037: an Owner or an Admin chooses a site of their grant; with no grant waiting the answer is `jira_choice_invalid`.
     name: "POST jira/choose",
     route: "/api/w/[workspace]/jira/choose",

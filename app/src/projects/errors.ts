@@ -23,6 +23,14 @@ export const PROJECT_ERROR_CODES = [
   "PROJECT_BOARDS_UNAVAILABLE",
   /** Setting the board of a project (#937): the workspace has no project with this id. 404. */
   "PROJECT_NOT_FOUND",
+  /** A Jira source (#1038): the workspace has no Jira connection with this id (another workspace's, or removed meanwhile). 404. */
+  "PROJECT_JIRA_CONNECTION_NOT_FOUND",
+  /** A Jira source (#1038): the connection is broken, so Jira cannot be asked until a person connects it again. 409. */
+  "PROJECT_JIRA_CONNECTION_BROKEN",
+  /** A Jira source (#1038): Jira could not be asked, or refused. 503. */
+  "PROJECT_JIRA_UNAVAILABLE",
+  /** The board of a project whose tickets are a Jira project's (#1038): a Jira project has none. 409. */
+  "PROJECT_BOARD_NOT_SUPPORTED",
 ] as const;
 export type ProjectErrorCode = (typeof PROJECT_ERROR_CODES)[number];
 
@@ -42,6 +50,11 @@ export const PROJECT_ERROR_STATUS: Record<
   // Never a 502: a proxy swaps its body (#690).
   PROJECT_BOARDS_UNAVAILABLE: 503,
   PROJECT_NOT_FOUND: 404,
+  PROJECT_JIRA_CONNECTION_NOT_FOUND: 404,
+  PROJECT_JIRA_CONNECTION_BROKEN: 409,
+  // Never a 502, as above.
+  PROJECT_JIRA_UNAVAILABLE: 503,
+  PROJECT_BOARD_NOT_SUPPORTED: 409,
 };
 
 /** A value of the body of a new project that cannot be used (#922), with the values that would have been accepted. */
@@ -56,7 +69,10 @@ export type NewProjectIssue = {
     | "duplicate_lane"
     | "unknown_board"
     | "board_without_status"
-    | "board_unavailable";
+    | "board_unavailable"
+    | "unknown_connection"
+    | "unknown_jira_project"
+    | "lane_not_for_jira";
   message: string;
   available?: string[];
 };

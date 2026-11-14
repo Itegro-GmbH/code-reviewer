@@ -412,8 +412,11 @@ describe("starting a run through the API with a ticket", () => {
       expect.objectContaining({ path: "/ticket", code: "invalid_value" }),
     ]);
     expect(
-      (await refusedWith(attempt("jira:ABC-1", "b"))).errors[0],
-    ).toMatchObject({ code: "invalid_value", available: ["github"] });
+      (await refusedWith(attempt("linear:ABC-1", "b"))).errors[0],
+    ).toMatchObject({
+      code: "invalid_value",
+      available: ["github", "jira"],
+    });
     expect((await refusedWith(attempt(128, "c"))).errors[0]).toMatchObject({
       code: "wrong_type",
     });

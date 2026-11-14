@@ -236,6 +236,44 @@ describe("a label starts only the lanes of the project whose ticket source is th
   });
 });
 
+describe("a label on a GitHub issue of the code repository of a Jira project (#1038)", () => {
+  // #1038
+  it("starts nothing for a Jira project, also for a lane it kept from when its tickets were GitHub issues, and starts again when they are", async () => {
+    const { app } = await startHarness();
+    const workflow = await app.saveWorkflow(issueToPullRequest());
+    const project = await app.h.projects.getActiveProjectForRepository(
+      app.repository.id,
+    );
+    if (project === undefined) throw new Error("seeding failed");
+    const setSource = (source: Record<string, unknown>) =>
+      app.h.db
+        .updateTable("projects")
+        .set({ ticket_source: JSON.stringify(source) })
+        .where("id", "=", project.id)
+        .execute();
+    await setSource({
+      provider: "jira",
+      repositoryId: app.repository.id,
+      connectionId: "conn-a",
+      projectKey: "PROJ",
+    });
+
+    const refused = await app.h.deliver("issues.labeled", {
+      deliveryId: "delivery-1",
+    });
+    expect(refused.status).toBe(202);
+    expect(await runsOf(app, workflow.id)).toHaveLength(0);
+
+    await setSource({
+      provider: "github",
+      repositoryId: app.repository.id,
+      board: null,
+    });
+    await app.h.deliver("issues.labeled", { deliveryId: "delivery-2" });
+    expect(await runsOf(app, workflow.id)).toHaveLength(1);
+  });
+});
+
 describe("the webhook: a label on an issue starts the workflows that wait for it", () => {
   // #845-T30
   it("starts exactly one run for a signed delivery, as a run of a label without a person", async () => {

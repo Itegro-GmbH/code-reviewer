@@ -76,6 +76,14 @@ const FAILURE_COPY: Record<ProjectErrorCode | SyncErrorCode, string> = {
   PROJECT_BOARDS_UNAVAILABLE:
     "GitHub could not be asked for the boards of this repository right now. Try again in a moment.",
   PROJECT_NOT_FOUND: "This project does not exist any more. Reload the page.",
+  PROJECT_JIRA_CONNECTION_NOT_FOUND:
+    "This Jira connection does not exist any more. Reload the page.",
+  PROJECT_JIRA_CONNECTION_BROKEN:
+    "This Jira connection is broken. Connect it again in the settings.",
+  PROJECT_JIRA_UNAVAILABLE:
+    "Jira could not be asked right now. Try again in a moment.",
+  PROJECT_BOARD_NOT_SUPPORTED:
+    "The tickets of this project are not GitHub issues, so it has no GitHub board.",
   SYNC_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,
 };
 

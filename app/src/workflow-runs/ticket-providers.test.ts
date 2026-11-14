@@ -227,8 +227,8 @@ describe("the ticket source of a project", () => {
 
 describe("the list of ticket providers", () => {
   // #1035-T01
-  it("is the same for a ticket reference and for a project's ticket source, and is GitHub only for now", () => {
+  it("is the same for a ticket reference and for a project's ticket source, and names GitHub and Jira", () => {
     expect([...REFERENCE_PROVIDERS]).toEqual([...SOURCE_PROVIDERS]);
-    expect([...SOURCE_PROVIDERS]).toEqual(["github"]);
+    expect([...SOURCE_PROVIDERS]).toEqual(["github", "jira"]);
   });
 });

@@ -25,7 +25,10 @@ import {
   type LastRunSource,
   type ProjectListView,
 } from "./list-view.ts";
-import { NewProjectDialog } from "./new-project-dialog.tsx";
+import {
+  NewProjectDialog,
+  type JiraConnectionChoice,
+} from "./new-project-dialog.tsx";
 import { ProjectCards } from "./project-cards.tsx";
 import { ProjectList } from "./project-list.tsx";
 
@@ -62,6 +65,7 @@ export function ProjectsPageContent({
   canStartReview = true,
   llmNotice = null,
   cards = false,
+  jiraConnections,
   data,
   api,
   newProjectApi,
@@ -83,6 +87,8 @@ export function ProjectsPageContent({
   llmNotice?: AttentionNotice | null;
   /** The factory's page (#925): the projects as cards with a "New project" dialog, instead of the table with the review switches. */
   cards?: boolean;
+  /** The Jira connections of the workspace for the dialog (#1038); left out where the deployment has no Jira. */
+  jiraConnections?: readonly JiraConnectionChoice[];
   data: ProjectsPageData;
   api?: ProjectsApi;
   /** Only tests pass this: the calls of the "New project" dialog (#922). */
@@ -119,6 +125,7 @@ export function ProjectsPageContent({
                     fullName,
                   }))}
                 {...(newProjectApi === undefined ? {} : { api: newProjectApi })}
+                {...(jiraConnections === undefined ? {} : { jiraConnections })}
                 blockedReason={activationBlocked}
               />
             </div>

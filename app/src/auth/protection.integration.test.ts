@@ -199,6 +199,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/jira/connect",
   "/api/w/[workspace]/jira/connections",
   "/api/w/[workspace]/jira/connections/[connectionId]",
+  // The projects of the Jira site of a connection, for the new-project dialog (#1038).
+  "/api/w/[workspace]/jira/connections/[connectionId]/projects",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",

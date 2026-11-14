@@ -14,6 +14,8 @@ export type ProjectDeactivatedEvent = {
 export type ProjectActivatedEvent = {
   projectId: string;
   repositoryId: string;
+  /** The provider of the project's ticket source (`github`, `jira`, #1038): what the mirror starts a sync for is the GitHub issues. */
+  ticketProvider: string;
 };
 
 export interface ProjectHooks {

@@ -154,6 +154,12 @@ export function createTrackerService(
         "TRACKER_PROJECT_NOT_ACTIVE",
         "The repository has no active project, so its tickets are not mirrored.",
       );
+    // The mirror holds GitHub issues; the issues of the repository of a Jira project are not that project's tickets (#1038).
+    if (project.ticketSource.provider !== TRACKER_PROVIDER)
+      throw new TrackerError(
+        "TRACKER_SOURCE_NOT_MIRRORED",
+        "The tickets of this project do not come from GitHub issues, so there is nothing of them to mirror yet.",
+      );
     return { repository, project };
   }
 

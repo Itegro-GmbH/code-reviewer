@@ -447,4 +447,79 @@ describe("the workflows repository", () => {
       a.create({ ...NEW, document: "x".repeat(262145) }, 100),
     ).rejects.toThrow(/workflow_versions_document_check/);
   });
+
+  // #1038: the label and the status of a GitHub issue or board mean nothing to a project whose tickets are a Jira project's.
+  it("finds the lanes that wait for a label or a status only in projects whose tickets are GitHub issues", async () => {
+    const { db, a, idA } = await setup();
+    const projects = createProjectsRepository(db, idA);
+    const seeded = await seedImplementerRepository(db, idA, "one");
+    const project = (await projects.get(seeded.repositoryId))!;
+    const doc = (kind: string) =>
+      JSON.stringify({
+        version: 1,
+        name: "Lane",
+        triggers: [{ id: "t", kind, label: "ready", status: "Done" }],
+      });
+    const labelLane = await a.create(
+      {
+        ...NEW,
+        name: "Label",
+        document: doc("ticket.labeled"),
+        projectId: project.id,
+      },
+      100,
+    );
+    const statusLane = await a.create(
+      {
+        ...NEW,
+        name: "Status",
+        document: doc("ticket.statusChanged"),
+        projectId: project.id,
+      },
+      100,
+    );
+    if (!labelLane.ok || !statusLane.ok) throw new Error("setup");
+    const ids = async () => ({
+      label: (await a.listWithIssueTrigger(seeded.repositoryId)).map(
+        (found) => found.workflow.id,
+      ),
+      status: (await a.listWithStatusTrigger(seeded.repositoryId)).map(
+        (found) => found.workflow.id,
+      ),
+    });
+    expect(await ids()).toEqual({
+      label: [labelLane.workflow.id],
+      status: [statusLane.workflow.id],
+    });
+
+    await db
+      .updateTable("projects")
+      .set({
+        ticket_source: JSON.stringify({
+          provider: "jira",
+          repositoryId: seeded.repositoryId,
+          connectionId: "conn-a",
+          projectKey: "PROJ",
+        }),
+      })
+      .where("id", "=", project.id)
+      .execute();
+    expect(await ids()).toEqual({ label: [], status: [] });
+
+    await db
+      .updateTable("projects")
+      .set({
+        ticket_source: JSON.stringify({
+          provider: "github",
+          repositoryId: seeded.repositoryId,
+          board: null,
+        }),
+      })
+      .where("id", "=", project.id)
+      .execute();
+    expect(await ids()).toEqual({
+      label: [labelLane.workflow.id],
+      status: [statusLane.workflow.id],
+    });
+  });
 });

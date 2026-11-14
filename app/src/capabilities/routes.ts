@@ -293,6 +293,11 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     route: "/api/w/[workspace]/jira/connections/[connectionId]",
     class: "implementer",
   },
+  // The projects of a connection's Jira site, for the new-project dialog (#1038).
+  {
+    route: "/api/w/[workspace]/jira/connections/[connectionId]/projects",
+    class: "implementer",
+  },
   { route: "/api/w/[workspace]/jira/choose", class: "implementer" },
   // The page of the form (#756).
   { route: "/w/[workspace]/implementer", class: "implementer" },

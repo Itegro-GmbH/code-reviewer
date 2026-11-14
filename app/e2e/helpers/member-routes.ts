@@ -172,6 +172,7 @@ export function addressesOf(
         case "runId":
         case "runnerId":
         case "integrationId":
+        case "connectionId":
         case "invitationId":
         case "userId":
           return [{ value: "no-such-record", refused: true }];

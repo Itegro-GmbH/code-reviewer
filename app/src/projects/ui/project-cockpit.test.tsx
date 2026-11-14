@@ -155,4 +155,60 @@ describe("the tabs", () => {
     rerender(<TicketSourceCard row={{ ...ROW, status: "unavailable" }} />);
     expect(screen.getByText("Unavailable")).toBeTruthy();
   });
+
+  // #1038-T02
+  it("shows a Jira project as the ticket source with its site, where the code lives and Jira's own status names", () => {
+    render(
+      <TicketSourceCard
+        row={{ ...ROW, jira: { connectionId: "c1", projectKey: "PROJ" } }}
+        jira={{
+          siteName: "acme",
+          statuses: ["To Do", "Ready for agent", "Done"],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Jira project")).toBeTruthy();
+    expect(screen.queryByText("GitHub issues")).toBeNull();
+    expect(screen.getByText("PROJ")).toBeTruthy();
+    expect(screen.getByText("Site acme")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "The code lives in acme/widgets, a repository of the GitHub App installation acme.",
+      ),
+    ).toBeTruthy();
+    const statuses = screen.getByRole("list", {
+      name: "Statuses of the project's workflow",
+    });
+    expect(
+      within(statuses)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual(["To Do", "Ready for agent", "Done"]);
+    expect(screen.getByText(/not mirrored yet/)).toBeTruthy();
+  });
+
+  // #1038
+  it("says the statuses could not be read, instead of an empty list, and renders a hostile name as text", () => {
+    const { rerender } = render(
+      <TicketSourceCard
+        row={{ ...ROW, jira: { connectionId: "c1", projectKey: "PROJ" } }}
+        jira={{ siteName: null, statuses: [] }}
+      />,
+    );
+    expect(screen.getByText(/could not be read just now/)).toBeTruthy();
+    expect(screen.queryByRole("list")).toBeNull();
+
+    rerender(
+      <TicketSourceCard
+        row={{ ...ROW, jira: { connectionId: "c1", projectKey: "PROJ" } }}
+        jira={{
+          siteName: "<b>x</b>",
+          statuses: ["<img src=x onerror=alert(1)>"],
+        }}
+      />,
+    );
+    expect(screen.getByText("Site <b>x</b>")).toBeTruthy();
+    expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeTruthy();
+  });
 });

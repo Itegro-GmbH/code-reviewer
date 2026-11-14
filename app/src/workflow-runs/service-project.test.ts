@@ -188,6 +188,22 @@ describe("a manual start within the project of the lane (#922)", () => {
     expect(created).toEqual([]);
   });
 
+  // #1038
+  it("refuses a ticket of the Jira provider, which the engine does not read yet, before anything is asked and writes no run", async () => {
+    const { service, created, readTicket } = harness(BY_TICKET);
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", {
+        input: { ticket: "jira:acme/widgets#PROJ-12" },
+        clientRequestId: "r-1",
+      }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED");
+    expect(readTicket).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
   // #922-T25
   it("refuses input.repo of another repository the same way", async () => {
     const { service, created } = harness(BY_REPO);
