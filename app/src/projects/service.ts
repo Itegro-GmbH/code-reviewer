@@ -5,6 +5,7 @@
 // the jobs module hook into a deactivation. All SQL is in the projects repository.
 import type {
   ActivateOptions,
+  JiraSourceChoice,
   ProjectListEntry,
   ProjectsRepository,
   StoredProject,
@@ -28,18 +29,21 @@ export type ProjectService = {
   }>;
   /**
    * Creates the project of a repository in the factory (#922): switches it on and writes its ticket source (the GitHub issues of the
-   * repository and `board`, or none). Throws what `activateProject` throws and `PROJECT_ALREADY_EXISTS` for a repository whose project is
-   * on already: the board of an existing project is not changed by creating it again.
+   * repository and `board`, or none; with `jira` (#1038) the tickets of that Jira project, `board` is not read, the code stays in the
+   * repository). Throws what `activateProject` throws and `PROJECT_ALREADY_EXISTS` for a repository whose project is on already: the
+   * source of an existing project is not changed by creating it again.
    */
   createProject(
     repositoryId: string,
     board: ActivateOptions["board"],
+    jira?: JiraSourceChoice,
   ): Promise<StoredProject>;
   /** A project by its own id, or undefined when the workspace has none with it (#922). */
   getProject(projectId: string): Promise<StoredProject | undefined>;
   /**
    * Sets, changes or clears (`null`) the board of the ticket source of a project (#937). The board is taken as it is: the caller has
-   * checked it against the boards of the repository. Throws `PROJECT_NOT_FOUND` for an id the workspace does not have.
+   * checked it against the boards of the repository. Throws `PROJECT_NOT_FOUND` for an id the workspace does not have and
+   * `PROJECT_BOARD_NOT_SUPPORTED` for a project whose tickets are a Jira project's (#1038).
    */
   setBoard(
     projectId: string,
@@ -109,6 +113,7 @@ export function createProjectService(deps: {
               hooks.onProjectActivated?.({
                 projectId: result.project.id,
                 repositoryId: result.project.repositoryId,
+                ticketProvider: result.project.ticketSource.provider,
               }),
             ).catch(() => undefined);
           return { project: result.project, outcome: result.outcome };
@@ -127,10 +132,15 @@ export function createProjectService(deps: {
             "PROJECT_INTEGRATION_UNAVAILABLE",
             "The installation of the repository is suspended or removed, so the repository cannot be activated.",
           );
+        case "jira_connection_not_found":
+          throw new ProjectError(
+            "PROJECT_JIRA_CONNECTION_NOT_FOUND",
+            "The workspace has no Jira connection with this id.",
+          );
       }
     },
 
-    async createProject(repositoryId, board) {
+    async createProject(repositoryId, board, jira) {
       const id = checkRepositoryId(repositoryId);
       const existing = await projects.get(id);
       if (existing?.active === true)
@@ -138,7 +148,12 @@ export function createProjectService(deps: {
           "PROJECT_ALREADY_EXISTS",
           "The repository has a project that is switched on already.",
         );
-      return (await service.activateProject(id, { board })).project;
+      return (
+        await service.activateProject(
+          id,
+          jira === undefined ? { board } : { jira },
+        )
+      ).project;
     },
 
     async getProject(projectId) {
@@ -152,8 +167,14 @@ export function createProjectService(deps: {
     },
 
     async setBoard(projectId, board) {
+      const current = await service.getProject(projectId);
+      if (current !== undefined && current.ticketSource.provider !== "github")
+        throw new ProjectError(
+          "PROJECT_BOARD_NOT_SUPPORTED",
+          "The tickets of this project are not GitHub issues, so it has no GitHub board.",
+        );
       const found =
-        (await service.getProject(projectId)) === undefined
+        current === undefined
           ? undefined
           : await projects.setTicketBoard(projectId, board);
       if (found === undefined)

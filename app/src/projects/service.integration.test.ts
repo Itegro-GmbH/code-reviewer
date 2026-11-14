@@ -5,6 +5,7 @@
 // deactivation's transaction, and the lookups the webhook intake and the list use.
 import { describe, expect, it } from "vitest";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
+import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type { RepoRef } from "../integrations/types.ts";
@@ -342,6 +343,91 @@ describe("creating a project in the factory (#922)", () => {
     await service.deactivateProject(first.id);
     expect(await codeOf(service.createProject(first.id, null))).toBe(
       "PROJECT_REPOSITORY_UNAVAILABLE",
+    );
+  });
+});
+
+describe("a project on a Jira project (#1038)", () => {
+  const JIRA = { connectionId: "conn-1", projectKey: "PROJ" };
+
+  async function withConnection(hooks?: ProjectHooks) {
+    const world = await setup(hooks);
+    await createJiraConnectionsRepository(
+      world.db,
+      await defaultWorkspaceId(world.db),
+    ).save({
+      id: "conn-1",
+      cloudId: "cloud-1",
+      siteUrl: "https://acme.atlassian.net",
+      siteName: "acme",
+      accountId: "acct",
+      accountName: "Ada",
+      scopes: ["read:jira-work"],
+      sealed: { ciphertext: "c", nonce: "n", keyVersion: 1 },
+      accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+      connectedBy: null,
+    });
+    return world;
+  }
+
+  // #1038-T01
+  it("creates the project with the Jira source, finds it by its id and tells the hook which provider it is", async () => {
+    const events: { repositoryId: string; ticketProvider: string }[] = [];
+    const { service, first } = await withConnection({
+      ...noopProjectHooks,
+      onProjectActivated: async (event) => void events.push(event),
+    });
+
+    const project = await service.createProject(first.id, null, JIRA);
+
+    expect(project.active).toBe(true);
+    expect(project.ticketSource).toEqual({
+      provider: "jira",
+      repositoryId: first.id,
+      board: null,
+      connectionId: "conn-1",
+      projectKey: "PROJ",
+    });
+    expect(await service.getProject(project.id)).toEqual(project);
+    expect(events).toEqual([
+      { repositoryId: first.id, ticketProvider: "jira", projectId: project.id },
+    ]);
+  });
+
+  // #1038-T01
+  it("refuses a connection the workspace does not have with a stable code and creates nothing", async () => {
+    const { service, first, projects } = await withConnection();
+
+    expect(
+      await codeOf(
+        service.createProject(first.id, null, {
+          connectionId: "someone-elses",
+          projectKey: "PROJ",
+        }),
+      ),
+    ).toBe("PROJECT_JIRA_CONNECTION_NOT_FOUND");
+    expect(await projects.get(first.id)).toBeUndefined();
+  });
+
+  // #1038
+  it("does not give a Jira project a GitHub board, and says so with a stable code", async () => {
+    const { service, first } = await withConnection();
+    const project = await service.createProject(first.id, null, JIRA);
+
+    expect(
+      await codeOf(
+        service.setBoard(project.id, {
+          projectV2Id: "PVT_b",
+          statusFieldId: "PVTSSF_b",
+        }),
+      ),
+    ).toBe("PROJECT_BOARD_NOT_SUPPORTED");
+    expect((await service.getProject(project.id))?.ticketSource.provider).toBe(
+      "jira",
+    );
+    // Clearing is no way round it either.
+    expect(await codeOf(service.setBoard(project.id, null))).toBe(
+      "PROJECT_BOARD_NOT_SUPPORTED",
     );
   });
 });
