@@ -33,12 +33,13 @@ export type StepRunStatus =
 export type StepRunKind = "agent" | "action" | "if" | "loop";
 /**
  * What started a run: a person by hand (`manual`) or through the API (`api`), a label on a ticket (`ticket.labeled`; rows written before
- * #916 say `github.issueLabeled`, the same trigger under its old name), or one of the reserved kinds no engine starts yet (#845, #916).
+ * #916 say `github.issueLabeled`, the same trigger under its old name), a move of a ticket into a status (`ticket.statusChanged`, #1036), or one of the reserved kinds no engine starts yet (#845, #916).
  */
 export type RunTriggerKind =
   | "manual"
   | "api"
   | "ticket.labeled"
+  | "ticket.statusChanged"
   | "github.issueLabeled"
   | "pullRequest.pushed"
   | "schedule";

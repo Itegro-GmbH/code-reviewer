@@ -2,7 +2,7 @@
 
 // POST /api/webhooks/github-app: the one webhook URL of the GitHub App (installations, repositories,
 // pull requests and comment commands of every installation). Public: no session, the signature of
-// the delivery is the authentication. All logic is in src/webhooks/; see its README. A label on an issue starts workflows (#845):
+// the delivery is the authentication. All logic is in src/webhooks/; see its README. A label on an issue starts workflows (#845), and so does a move of a ticket into a board status (#1036):
 // the engine is wired in here, because it depends on src/webhooks/ and not the other way round; so is the ticket mirror (#923).
 import { touched } from "../../../../dispatch/maintenance-shared.ts";
 import { deliveryTouchedTheQueue } from "../../../../webhooks/touch-policy.ts";
@@ -10,12 +10,14 @@ import { getGithubAppWebhookHandler } from "../../../../webhooks/shared.ts";
 import { trackerMirrorFor } from "../../../../tracker/shared.ts";
 import {
   labelTriggerFor,
+  statusTriggerFor,
   ticketAnswersFor,
 } from "../../../../workflow-runs/shared.ts";
 
 export async function POST(request: Request): Promise<Response> {
   const response = await getGithubAppWebhookHandler({
     workflowsFor: labelTriggerFor,
+    statusesFor: statusTriggerFor,
     answersFor: ticketAnswersFor,
     trackerFor: trackerMirrorFor,
   })(request);

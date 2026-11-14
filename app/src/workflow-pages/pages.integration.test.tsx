@@ -100,6 +100,34 @@ describe("a workflow or run of another workspace", () => {
   });
 });
 
+describe("the status names a lane's page offers (#1036)", () => {
+  it("asks for the names of the board of the lane's project, and offers none for a lane without a project", async () => {
+    const app = await startEngineHarness();
+    const { workflow } = await startedRun(app);
+    const asked: string[] = [];
+    const own = {
+      ...servicesOf(app, app.workspaceId),
+      statuses: async (projectId: string) => {
+        asked.push(projectId);
+        return ["Todo", "In Progress"];
+      },
+    };
+
+    const page = await loadWorkflowPage(workflow.id, own);
+
+    if (page.kind !== "ready") throw new Error("not ready");
+    expect(page.statuses).toEqual(["Todo", "In Progress"]);
+    expect(asked).toEqual([app.project.id]);
+    // Left out, the builder offers none and the names are typed.
+    const plain = await loadWorkflowPage(
+      workflow.id,
+      servicesOf(app, app.workspaceId),
+    );
+    if (plain.kind !== "ready") throw new Error("not ready");
+    expect(plain.statuses).toEqual([]);
+  });
+});
+
 describe("the pages with real data", () => {
   // #873-T72
   it("shows the Start form and the runs of a workflow", async () => {

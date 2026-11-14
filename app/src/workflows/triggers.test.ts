@@ -489,6 +489,7 @@ describe("triggers with pre-steps", () => {
         "manual",
         "api",
         "ticket.labeled",
+        "ticket.statusChanged",
         "pullRequest.pushed",
         "schedule",
         "github.issueLabeled",

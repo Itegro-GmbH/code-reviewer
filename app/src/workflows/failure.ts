@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The failure a run ended with, as the steps of `onFailure` read it (#902): `{{failure.status}}`, `.stepId`, `.code` and `.message`.
-// They run after a run ended `failed` or `cancelled` and may only comment on an issue and change its labels, so the connectors they
+// They run after a run ended `failed` or `cancelled` and may only comment on an issue and change its labels and its status (#1036), so the connectors they
 // may name are listed here. The engine (src/workflow-runs/) fills the facts in; the validator only knows their types.
 import {
   GITHUB_ISSUE_COMMENT,
@@ -9,6 +9,7 @@ import {
   PULL_REQUEST_COMMENT,
   TICKET_COMMENT,
   TICKET_LABELS,
+  TICKET_SET_STATUS,
 } from "./connectors.ts";
 import { enumOf, objectOf, STRING, type ObjectType } from "./value-type.ts";
 
@@ -28,6 +29,7 @@ export const ON_FAILURE_CONNECTORS: readonly string[] = [
   GITHUB_ISSUE_LABELS.name,
   TICKET_COMMENT.name,
   TICKET_LABELS.name,
+  TICKET_SET_STATUS.name,
   PULL_REQUEST_COMMENT.name,
 ];
 

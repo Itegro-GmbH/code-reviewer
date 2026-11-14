@@ -106,15 +106,26 @@ function boardStatusChange(
     return ignored(
       `the board change is not one of the field ${BOARD_STATUS_FIELD}`,
     );
-  const to = (fieldChange as { to?: unknown }).to;
-  const name =
-    typeof to === "object" && to !== null
-      ? (to as { name?: unknown }).name
-      : undefined;
+  const statusName = (side: unknown): string | null => {
+    const name =
+      typeof side === "object" && side !== null
+        ? (side as { name?: unknown }).name
+        : undefined;
+    return typeof name === "string" && name !== "" ? name : null;
+  };
+  const sender = rawField(payload, "sender");
+  const { login, id } =
+    typeof sender === "object" && sender !== null
+      ? (sender as { login?: unknown; id?: unknown })
+      : { login: undefined, id: undefined };
   return change({
     kind: "board_status_changed",
     nodeId,
-    status: typeof name === "string" && name !== "" ? name : null,
+    status: statusName((fieldChange as { to?: unknown }).to),
+    from: statusName((fieldChange as { from?: unknown }).from),
+    ...(typeof login === "string" && login !== ""
+      ? { actor: { login, externalId: String(id ?? "") } }
+      : {}),
     ...projectId,
   });
 }

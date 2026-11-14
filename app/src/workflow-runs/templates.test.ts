@@ -250,6 +250,26 @@ describe("workflow templates at run time", () => {
     );
   });
 
+  // #1036
+  it("defuses the board statuses of a status trigger in a comment body: their names are the organisation's, and reach a text as they are in an instruction", () => {
+    const run: RunValues = {
+      trigger: { status: { from: "@acme/team", to: "Ready #5" } },
+      steps: {},
+    };
+
+    expect(
+      renderText(
+        "{{trigger.status.from}} -> {{trigger.status.to}}",
+        run,
+        undefined,
+        {
+          defuse: true,
+        },
+      ),
+    ).toBe("@\u200bacme/team -> Ready #\u200b5");
+    expect(renderText("{{trigger.status.to}}", run)).toBe("Ready #5");
+  });
+
   // #844-T311
   it("defuses a list and a whole reference of an agent step, and text only (the type of a number or a list is not touched)", () => {
     const run: RunValues = {

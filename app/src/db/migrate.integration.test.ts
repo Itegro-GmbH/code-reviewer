@@ -160,6 +160,7 @@ describe("the migrations of both epics", () => {
       "20261110170000_create_json_or_null",
       "20261110180000_rewrite_runner_manifests",
       "20261114120000_tracker_ticket_keys",
+      "20261114150000_widen_workflow_run_trigger_for_status",
     ]);
   });
 

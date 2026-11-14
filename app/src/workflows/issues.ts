@@ -98,6 +98,8 @@ export const SEMANTIC_ISSUE_CODES = [
   "target_from_untrusted_value",
   /** A step adds the label that starts the workflow, which would start it again. */
   "label_retriggers_workflow",
+  /** A step moves the ticket into the status that starts the workflow (#1036). A WARNING: no move is left out of the trigger, the factory's own included. */
+  "status_retriggers_workflow",
   /** Two `ticket.labeled` triggers wait for the same label (the JSON Schema cannot say it). */
   "duplicate_trigger_label",
   /** A `required` entry of a result schema that names no property (the schema language cannot say it). */

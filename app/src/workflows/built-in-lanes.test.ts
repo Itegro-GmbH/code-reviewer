@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BUILT_IN_LANE_KEYS,
+  DEFAULT_LANE_STATUSES,
   builtInLaneDocument,
   isBuiltInLaneKey,
 } from "./built-in-lanes.ts";
@@ -80,5 +81,58 @@ describe("the built-in lanes", () => {
     expect(isBuiltInLaneKey("issue-to-pr")).toBe(true);
     expect(isBuiltInLaneKey("nothing")).toBe(false);
     expect(isBuiltInLaneKey(3)).toBe(false);
+  });
+
+  // #1036
+  it("Issue to PR (status) starts on a move into its status, reports on the board and never moves a ticket into the status that starts it", () => {
+    const document = builtInLaneDocument("issue-to-pr-status", "node") as {
+      name: string;
+      triggers: { kind: string; to?: string }[];
+    };
+    const text = JSON.stringify(document);
+    const statuses = [
+      ...text.matchAll(
+        /"connector":"ticket\.setStatus","ticket":"[^"]*","status":"([^"]+)"/g,
+      ),
+    ].map((match) => match[1]);
+
+    expect(document.name).toBe("Issue to PR (status)");
+    expect(document.triggers[0]).toMatchObject({
+      kind: "ticket.statusChanged",
+      to: DEFAULT_LANE_STATUSES.ready,
+    });
+    expect(statuses).toEqual([
+      DEFAULT_LANE_STATUSES.inProgress,
+      DEFAULT_LANE_STATUSES.inReview,
+      DEFAULT_LANE_STATUSES.back,
+      DEFAULT_LANE_STATUSES.back,
+    ]);
+    expect(statuses).not.toContain(DEFAULT_LANE_STATUSES.ready);
+    const result = validateWorkflow(document, FAKE_RESOLVER, {
+      maxBudgetUsd: 100,
+    });
+    expect(result.warnings ?? []).toEqual([]);
+  });
+
+  // #1036
+  it("takes the names of the board statuses it is given", () => {
+    const statuses = {
+      ready: "Agent please",
+      inProgress: "Working",
+      inReview: "Review",
+      back: "Todo",
+    };
+    const document = builtInLaneDocument(
+      "issue-to-pr-status",
+      "node",
+      statuses,
+    );
+
+    expect(
+      validateWorkflow(document, FAKE_RESOLVER, { maxBudgetUsd: 100 }).errors,
+    ).toEqual([]);
+    const text = JSON.stringify(document);
+    for (const name of Object.values(statuses)) expect(text).toContain(name);
+    expect(text).not.toContain(DEFAULT_LANE_STATUSES.ready);
   });
 });

@@ -32,6 +32,9 @@ export type RunTrigger = {
   kind: CanonicalTriggerKind;
   /** `label` of a label trigger. */
   label?: string;
+  /** `to` and `from` of a status trigger (#1036): the status a ticket is moved into, and optionally the one it is moved out of. */
+  to?: string;
+  from?: string;
   /** `input` of a manual or api trigger, the result schema as written. */
   input?: unknown;
   /** The steps that run first when this trigger started the run, before the shared ones. */
@@ -62,6 +65,8 @@ function readTrigger(raw: unknown, legacy: boolean): RunTrigger | undefined {
     id,
     kind: canonicalTriggerKind(kind),
     ...(typeof raw.label === "string" ? { label: raw.label } : {}),
+    ...(typeof raw.to === "string" ? { to: raw.to } : {}),
+    ...(typeof raw.from === "string" ? { from: raw.from } : {}),
     ...(raw.input === undefined ? {} : { input: raw.input }),
     steps,
   };
