@@ -79,13 +79,14 @@ async function ConnectionsContent({
     query,
     actor: sessionId === null ? null : { id: userId, sessionId },
   });
-  // The Jira connection (#1037, epic #1034): the card is there where the Atlassian app is set up, or while the workspace still has a
-  // connection (it can then be seen and removed).
+  // The Jira connection (#1037, epic #1034): the card is there where the deployment has the capability `implementer` and the Atlassian
+  // app is set up; elsewhere nothing of it is read.
   const jira = await loadJiraSection({
     service: getJira().service,
     workspaceId,
     actor: sessionId === null ? null : { id: userId, sessionId },
     canManage,
+    implementer: getCapabilities().has("implementer"),
     query: { jira: query.jira },
   });
   return (
@@ -101,7 +102,7 @@ async function ConnectionsContent({
         data={data}
         heading={false}
       />
-      {jira.configured || jira.connections.length > 0 ? (
+      {jira.configured ? (
         <div className="mt-6">
           <JiraSection
             workspaceSlug={workspaceSlug}

@@ -47,7 +47,8 @@ export async function createJiraHarness(options: JiraHarnessOptions = {}) {
   const now = () => new Date(clock.time);
   const logs: string[] = [];
   const log = (line: string) => logs.push(line);
-  const env =
+  // Mutable: a test changes a variable (a wrong client secret) and the next call reads it.
+  const env: Record<string, string> =
     options.unconfigured === true
       ? {}
       : {
@@ -167,6 +168,7 @@ export async function createJiraHarness(options: JiraHarnessOptions = {}) {
   return {
     db,
     atlassian,
+    env,
     clock,
     now,
     logs,

@@ -57,6 +57,7 @@ export function assembleJira({
       apiBaseUrl: current.apiBaseUrl,
       ...(fetchImpl === undefined ? {} : { fetchImpl }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      ...(log === undefined ? {} : { log }),
     });
   };
   const lateClient: AtlassianClient = {

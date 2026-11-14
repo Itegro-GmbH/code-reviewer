@@ -8,7 +8,7 @@ write-back come on top and call Jira through `JiraTokens.request`. How an owner 
 | File                                  | Role                                                                                                                                                                                                                                                        |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `config.ts`                           | `readAtlassianConfig(env)` (`ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`, both or the feature is off; the test-only addresses need `ALLOW_TEST_ATLASSIAN_ENDPOINTS`), `JIRA_SCOPES`, `jiraCallbackUrl`, the start-up problems and the one start line |
-| `errors.ts`                           | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`, `jira_tokens_unreadable`), what a call can fail with, what a flow can end with                                                                                              |
+| `errors.ts`                           | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`), what a call can fail with, what a flow can end with                                                                                                                        |
 | `client.ts`                           | The calls to Atlassian (consent address, code exchange, refresh, accessible resources, the account): values, never exceptions; a failure holds nothing of the answer                                                                                        |
 | `tokens.ts`                           | `createJiraTokens`: seals and opens the pair, refreshes before a call, `request` (a call to a site's Jira API that renews on 401 and repeats once)                                                                                                          |
 | `service.ts`                          | `createJiraService`: `startConnect`, `completeCallback`, the choice among several sites (`readChoice`, `choose`), `remove`, `list`                                                                                                                          |
@@ -31,10 +31,11 @@ The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_c
    - one site: the connection is saved (the same site again renews that row in place);
    - several: the sealed grant waits in the workspace's secrets (`jira_pending_grant`, 15 minutes, for that person) and
      `POST /api/w/:workspace/jira/choose { cloudId }` connects one; one round makes one connection, because the tokens of a grant
-     are one rotating pair;
+     are one rotating pair. `choose` takes the waiting grant in one statement (`delete ... returning`), so a double click stores
+     the pair once; an expired grant is removed when it is read (there is no sweep of grants nobody reads yet);
    - none: `jira_no_site`; a reconnect whose grant does not cover the connection's site: `jira_site_mismatch`.
      The browser always lands on a fixed page: `/w/<slug>/settings/integrations?jira=<code>`, or `/` when no workspace can be named.
-3. `GET /api/w/:workspace/jira/connections` (any member): the connections as `JiraConnectionView`, never a token.
+3. `GET /api/w/:workspace/jira/connections` (the action `start_implementer_task`, today every member): the connections as `JiraConnectionView`, never a token.
 4. `DELETE /api/w/:workspace/jira/connections/:id` (Owner or Admin): removes the connection unless a project's ticket source names
    it, then `409 jira_connection_in_use` with the projects (`{ id, name }`; the name is the repository's full name).
 
@@ -44,11 +45,16 @@ The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_c
   refresh replaces both in one statement. `token_version` counts the writes; a write replaces only the version it read (compare
   and swap).
 - `tokens.use(id)` / `tokens.request(id, path)`: renew when the access token ends within 5 minutes; a 401 renews and repeats once.
-- Atlassian rotates the refresh token on every refresh. Two requests that refresh at once: the first pair wins, the other request
-  finds a newer version (its own refresh was refused because the first used the token up) and uses that. Only a refusal for the
-  pair that is still the current one makes the connection `broken` with `jira_refresh_refused`; a timeout or a 5xx changes nothing
-  (`jira_unavailable`). A pair that cannot be decrypted is `broken` with `jira_tokens_unreadable`. A broken connection makes no
-  call to Atlassian; a person connects it again (the settings page offers Reconnect).
+- Atlassian rotates the refresh token on every refresh, so the refresh of a connection is serialized: the row is locked
+  (`withLockedTokens`, `select ... for update`) from the read of the pair to its write. A request that needs a refresh while
+  another one runs waits, then reads the pair the first stored and uses it; it never sends a refresh token that is used up.
+  The lock is held across the one call to the token endpoint (10 s timeout).
+- Only `error: "invalid_grant"` from the token endpoint (the refresh token is revoked, expired or used) makes the connection
+  `broken` with `jira_refresh_refused`. `invalid_client`, `unauthorized_client`, any other 400/401/403, a timeout and a 5xx are
+  `jira_unavailable`: nothing is marked and the operator's log has `JIRA_TOKEN_ENDPOINT_REJECTED` (status and a short code, never
+  a body), so a wrong client id or secret cannot break every connection for good. A pair this process cannot decrypt (another
+  `APP_SECRET`) is `jira_unavailable` too, with `JIRA_TOKENS_UNREADABLE` in the log. A broken connection makes no call to
+  Atlassian; a person connects it again (the settings page offers Reconnect).
 - No answer, page, state, log line or error holds a token, the authorization code or the client secret (`#1037-T04` searches the
   answers, redirects, rows and logs of a whole life of a connection for the tokens the fake issued).
 

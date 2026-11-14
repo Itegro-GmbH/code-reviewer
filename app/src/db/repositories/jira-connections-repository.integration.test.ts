@@ -197,6 +197,58 @@ describe("the Jira connections repository", () => {
   });
 
   // #1037
+  it("holds the row while a locked write runs: a second one waits, then reads what the first stored", async () => {
+    const { a } = await setup();
+    await a.save(site("jc-1"));
+    const next = { ciphertext: "c2", nonce: "n2", keyVersion: 1 };
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let inside: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => (inside = resolve));
+    const order: string[] = [];
+
+    const first = a.withLockedTokens("jc-1", async (locked, writes) => {
+      expect(locked?.tokenVersion).toBe(1);
+      inside();
+      await held;
+      order.push("first writes");
+      return writes.replaceTokens(1, next, EXPIRES);
+    });
+    await entered;
+    const second = a.withLockedTokens("jc-1", async (locked, writes) => {
+      order.push("second reads");
+      return {
+        sealed: locked?.sealed,
+        version: locked?.tokenVersion,
+        stale: await writes.markBroken(1, "jira_refresh_refused"),
+      };
+    });
+    // The second one cannot read while the first holds the row.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(order).toEqual([]);
+    release();
+
+    expect(await first).toBe(true);
+    expect(await second).toEqual({ sealed: next, version: 2, stale: false });
+    expect(order).toEqual(["first writes", "second reads"]);
+    expect(await a.get("jc-1")).toMatchObject({ status: "connected" });
+  });
+
+  // #1037
+  it("hands a locked write of a missing or foreign connection nothing", async () => {
+    const { idB, b, a } = await setup();
+    await b.save(site("jc-b"));
+    expect(idB).toBeDefined();
+
+    expect(await a.withLockedTokens("jc-b", async (locked) => locked)).toBe(
+      undefined,
+    );
+    expect(await a.withLockedTokens("nope", async (locked) => locked)).toBe(
+      undefined,
+    );
+  });
+
+  // #1037
   it("does not see or change the connections of another workspace", async () => {
     const { db, idB, a, b } = await setup();
     await b.save(site("jc-b"));

@@ -229,6 +229,51 @@ describe("one workspace and another", () => {
     });
   });
 
+  it("hands a secret out once: of two takes at the same time only one gets it", async () => {
+    const { db, a, storeOf } = await start();
+    await storeOf(a).save("one_use", "the-pending-value", {
+      binding: "jira_pending",
+      updatedBy: null,
+    });
+
+    const taken = await Promise.all([
+      storeOf(a).take("one_use"),
+      storeOf(a).take("one_use"),
+      storeOf(a).take("one_use"),
+    ]);
+
+    expect(taken.filter((t) => t.ok)).toHaveLength(1);
+    const winner = taken.find((t) => t.ok);
+    expect(winner?.ok && winner.value.reveal()).toBe("the-pending-value");
+    expect(winner?.ok && winner.binding).toBe("jira_pending");
+    expect(taken.filter((t) => !t.ok)).toEqual([
+      { ok: false, error: "secret_not_configured" },
+      { ok: false, error: "secret_not_configured" },
+    ]);
+    expect(
+      await db.selectFrom("workspace_secrets").selectAll().execute(),
+    ).toEqual([]);
+  });
+
+  it("takes a secret of its own workspace only, and a secret that cannot be read is gone too", async () => {
+    const { a, b, storeOf } = await start();
+    await storeOf(a).save("one_use", "value", {
+      binding: "x",
+      updatedBy: null,
+    });
+
+    expect(await storeOf(b).take("one_use")).toEqual({
+      ok: false,
+      error: "secret_not_configured",
+    });
+    expect(
+      await storeOf(a, "another-app-secret-0123456789-0123456789").take(
+        "one_use",
+      ),
+    ).toMatchObject({ ok: false, error: "secret_undecryptable" });
+    expect((await storeOf(a).status("one_use")).state).toBe("not_configured");
+  });
+
   it("goes away with its workspace", async () => {
     const { db, a, storeOf } = await start();
     await storeOf(a).save("llm_api_key", KEY, {

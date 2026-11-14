@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // GET /api/w/:workspace/jira/connections: the Jira connections of the workspace (site, account, status, why a broken one is broken),
-// for every member. Never a token. Only in a deployment with the capability `implementer`. The logic is in src/jira/.
+// for whoever may do the action `start_implementer_task` (the minimum role today is Member, so every member; a stricter minimum there
+// narrows this route too). Never a token. Only in a deployment with the capability `implementer`. The logic is in src/jira/.
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { getJiraRouteHandlers } from "@/jira/shared";

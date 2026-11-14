@@ -54,8 +54,6 @@ export const JIRA_ERROR_STATUS: Record<JiraErrorCode, number> = {
 export const JIRA_BROKEN_CODES = [
   /** Atlassian refused the refresh token: the person removed the app, the grant ran out, or the token was used twice. */
   "jira_refresh_refused",
-  /** The stored tokens cannot be decrypted (another `APP_SECRET`, or the row was changed). */
-  "jira_tokens_unreadable",
 ] as const;
 export type JiraBrokenCode = (typeof JIRA_BROKEN_CODES)[number];
 

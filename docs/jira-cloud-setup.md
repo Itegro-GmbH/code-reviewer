@@ -40,7 +40,7 @@ Plan for about ten minutes. What you need:
    The console takes one callback URL per app. For local development register a second app (a development app with its own
    client id and secret) and keep the factory's callback on the first.
 
-4. **Settings**: copy the **Client ID** and the **Secret**. Leave *Rotating refresh tokens* on (the default): Atlassian then hands out a
+4. **Settings**: copy the **Client ID** and the **Secret**. Leave _Rotating refresh tokens_ on (the default): Atlassian then hands out a
    new refresh token with every renewal, which the factory stores; it also works with an app that does not rotate.
 
 ## 2. Give the values to the deployment
@@ -75,7 +75,7 @@ consent page. Check the console for the current wording of these steps; Atlassia
    choose one. One round of consent makes **one** connection (the access of a grant is one token pair that Atlassian
    rotates); for another site press **Connect another site** and choose it there.
 
-**Needs reconnecting** means Atlassian refuses the stored access: the app was removed in the Atlassian account, or the grant
+**Needs reconnecting** means Atlassian refuses the stored refresh token (`invalid_grant`): the app was removed in the Atlassian account, or the grant
 ran out (Atlassian lets a refresh token expire when it is not used for a long time, 90 days at the time of writing; the factory
 only renews it when it calls Jira). Press **Reconnect** and accept again; the connection keeps its place. **Remove** deletes the stored access and is
 refused while a project still uses the connection (the answer names the projects). Removing does not end the grant at
@@ -91,3 +91,25 @@ Atlassian: do that at <https://id.atlassian.com/manage-profile/apps> if you want
   new refresh token with every renewal and the old one dies, so the pair is stored in one step.
 - The `state` of the round trip is signed, single-use, ten minutes old at most and bound to the person and the browser
   session. Atlassian's 3LO flow for a web app documents no PKCE; the client secret protects the exchange of the code.
+
+## Live test checklist
+
+Run this once against the real Atlassian app after the first deployment of a change to the connection or the token handling. The
+connection of a site must keep working through all of it:
+
+- [ ] **Two sites, one user.** Connect site A, then connect site B with the same Atlassian user (a second round of **Connect
+      Jira**), then use A again (a call through the connection of A, for example the connection's page after the access token
+      ended or a project that reads its tickets). Both connections show **Connected**. If A now needs reconnecting, Atlassian
+      revoked the first grant when the second one was made, and the one-connection-per-grant design needs another look before
+      the release.
+- [ ] **Two workspaces, one user.** Connect the same site (or two sites) from two workspaces with the same Atlassian user, then
+      use the first workspace's connection again. Both stay **Connected**.
+- [ ] **Refresh token reuse window.** Let an access token end (an hour) and make two calls through the same connection at the
+      same moment (two browser tabs, or two requests of a project). Both succeed and the connection stays **Connected**. The
+      server's log has no `JIRA_CONNECTION_BROKEN` and at most one refresh for that moment. Atlassian documents a short grace
+      period in which a used refresh token is still accepted; note what you see, the factory does not rely on it.
+- [ ] **Wrong client secret.** In a throwaway deployment set a wrong `ATLASSIAN_CLIENT_SECRET`: calls fail with
+      `jira_unavailable`, the log says `JIRA_TOKEN_ENDPOINT_REJECTED`, no connection turns to **Needs reconnecting**, and the
+      right secret makes them work again without reconnecting.
+- [ ] **Removed in Atlassian.** Remove the app in the Atlassian account (<https://id.atlassian.com/manage-profile/apps>): the
+      next call turns the connection to **Needs reconnecting**, and **Reconnect** mends it.

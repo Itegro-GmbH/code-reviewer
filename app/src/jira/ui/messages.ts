@@ -83,8 +83,6 @@ export function describeJiraResult(
 const BROKEN_COPY: Record<string, string> = {
   jira_refresh_refused:
     "Atlassian no longer accepts this connection (the app was removed in the Atlassian account, or the access ran out). Connect it again.",
-  jira_tokens_unreadable:
-    "The stored access cannot be read any more. Connect it again.",
 };
 
 /** Why a connection is broken, for a code of the row. */

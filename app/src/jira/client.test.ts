@@ -9,6 +9,7 @@ const SECRET = "the-client-secret-of-the-test";
 
 function clientWith(
   answer: (url: string, init?: RequestInit) => Response | Error,
+  options: { log?: (line: string) => void } = {},
 ) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const fetchImpl: FetchLike = async (url, init) => {
@@ -25,6 +26,7 @@ function clientWith(
       authBaseUrl: "https://auth.example.test/",
       apiBaseUrl: "https://api.example.test",
       fetchImpl,
+      ...options,
     }),
   };
 }
@@ -79,7 +81,7 @@ describe("the Atlassian client", () => {
   });
 
   // #1037
-  it("tells a refusal from a failure to reach Atlassian, and returns nothing of the answer", async () => {
+  it("takes only invalid_grant for a refusal of the grant, and returns nothing of the answer", async () => {
     for (const status of [400, 401, 403])
       expect(
         await clientWith(() =>
@@ -129,6 +131,65 @@ describe("the Atlassian client", () => {
       ok: false,
       kind: "unavailable",
     });
+  });
+
+  // #1037
+  it("takes a wrong client id or secret for Atlassian being unusable, not for a refused grant, and tells the operator without a body", async () => {
+    const lines: string[] = [];
+    const answers: [number, unknown][] = [
+      [401, { error: "invalid_client", error_description: "tok-123" }],
+      [403, { error: "unauthorized_client" }],
+      [403, { error: "access_denied", error_description: "Unauthorized" }],
+      [401, "<html>tok-123</html>"],
+      [400, { error: "Not A Code; tok-123" }],
+    ];
+    for (const [status, body] of answers) {
+      const { client } = clientWith(() => reply(status, body), {
+        log: (line) => lines.push(line),
+      });
+      expect(await client.refresh("r")).toEqual({
+        ok: false,
+        kind: "unavailable",
+      });
+      expect(
+        await client.exchangeCode("c", "https://app.test/api/jira/callback"),
+      ).toEqual({ ok: false, kind: "unavailable" });
+    }
+
+    expect(lines).toHaveLength(answers.length * 2);
+    expect(lines[0]).toContain("JIRA_TOKEN_ENDPOINT_REJECTED");
+    expect(lines[0]).toContain("401");
+    expect(lines[0]).toContain("invalid_client");
+    // The status and a code of Atlassian's own short list, never a body, a token or the secret.
+    expect(lines.join("\n")).not.toMatch(/tok-123|html|Not A Code/);
+    expect(lines.join("\n")).not.toContain(SECRET);
+  });
+
+  // #1037
+  it("keeps the caller's abort signal and header objects of a call through the connection", async () => {
+    const { client, calls } = clientWith(() => reply(200, {}));
+    const abort = new AbortController();
+
+    await client.send("https://api.example.test/x", "tok", {
+      headers: new Headers({ "X-Trace": "1", Authorization: "Bearer other" }),
+      signal: abort.signal,
+    });
+    await client.send("https://api.example.test/x", "tok", {
+      headers: [["x-list", "2"]],
+    });
+
+    expect(calls[0]?.init?.headers).toEqual({
+      "x-trace": "1",
+      authorization: "Bearer tok",
+      accept: "application/json",
+    });
+    expect(calls[1]?.init?.headers).toMatchObject({ "x-list": "2" });
+    const signal = calls[0]?.init?.signal;
+    expect(signal?.aborted).toBe(false);
+    abort.abort();
+    expect(signal?.aborted).toBe(true);
+    // The timeout still ends a call whose caller never aborts.
+    expect(calls[1]?.init?.signal?.aborted).toBe(false);
   });
 
   // #1037

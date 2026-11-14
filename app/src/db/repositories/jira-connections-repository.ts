@@ -6,7 +6,9 @@
 // that unseals it.
 //
 // A token write is a compare and swap on `token_version` (`replaceTokens`, `markBroken`): Atlassian rotates the refresh token on every
-// refresh, so of two requests that refresh at once only the first may store its pair.
+// refresh, so of two requests that refresh at once only the first may store its pair. `withLockedTokens` goes further for the refresh
+// itself: it holds the row lock (`for update`) from the read to the write, so a second refresh of the same connection waits for the first
+// and then reads the pair the first stored, instead of sending Atlassian a refresh token that is already used up.
 //
 // `removeUnlessUsed` is the one way to delete a connection: it locks the row and refuses while a project's ticket source names it
 // (`projects.ticket_source` is JSON text `{ "provider": "jira", "connectionId", ... }`, set by #1038; a project that names the connection
@@ -69,6 +71,23 @@ export type ProjectUsingConnection = {
   name: string;
 };
 
+/** What a connection's row holds for the code that unseals it: the connection, the sealed pair and the version of the pair. */
+export type StoredJiraTokens = {
+  connection: StoredJiraConnection;
+  sealed: SealedTokens;
+  tokenVersion: number;
+};
+
+/** The token writes of the row a `withLockedTokens` call holds; each one is a compare and swap on the version, like the plain ones. */
+export type LockedJiraTokenWrites = {
+  replaceTokens(
+    expectedVersion: number,
+    sealed: SealedTokens,
+    accessExpiresAt: Date,
+  ): Promise<boolean>;
+  markBroken(expectedVersion: number, errorCode: string): Promise<boolean>;
+};
+
 export type RemoveJiraConnectionResult =
   | { removed: true }
   | { removed: false; reason: "not_found" }
@@ -80,14 +99,19 @@ export type JiraConnectionsRepository = {
   get(id: string): Promise<StoredJiraConnection | undefined>;
   findBySite(cloudId: string): Promise<StoredJiraConnection | undefined>;
   /** The connection with its sealed pair and the version of the pair. */
-  readTokens(id: string): Promise<
-    | {
-        connection: StoredJiraConnection;
-        sealed: SealedTokens;
-        tokenVersion: number;
-      }
-    | undefined
-  >;
+  readTokens(id: string): Promise<StoredJiraTokens | undefined>;
+  /**
+   * Runs `work` in a transaction that holds the connection's row lock: it gets the row as it is now (undefined when there is none) and
+   * writes for that row. Anything else that writes the row (a second refresh, a reconnect, a removal) waits until `work` is done, so
+   * `work` may call Atlassian: keep it to the one refresh, which has its own timeout.
+   */
+  withLockedTokens<T>(
+    id: string,
+    work: (
+      locked: StoredJiraTokens | undefined,
+      writes: LockedJiraTokenWrites,
+    ) => Promise<T>,
+  ): Promise<T>;
   /**
    * Makes the connection to a site, or connects the site again: a row of the same site is replaced (new tokens, connected, no error)
    * when it has the id the tokens were sealed for. Undefined when the site has a row under another id (somebody connected it in the
@@ -132,6 +156,18 @@ function toStored(row: Selectable<JiraConnectionsTable>): StoredJiraConnection {
   };
 }
 
+function toTokens(row: Selectable<JiraConnectionsTable>): StoredJiraTokens {
+  return {
+    connection: toStored(row),
+    sealed: {
+      ciphertext: row.tokens_ciphertext,
+      nonce: row.tokens_nonce,
+      keyVersion: row.tokens_key_version,
+    },
+    tokenVersion: row.token_version,
+  };
+}
+
 /** The projects of the workspace whose ticket source is the connection; `executor` is the database or the transaction it runs in. */
 async function projectsOf(
   executor: Kysely<Database>,
@@ -147,6 +183,57 @@ async function projectsOf(
       and json_or_null(projects.ticket_source) ->> 'connectionId' = ${id}
     order by repositories.full_name, projects.id`.execute(executor);
   return rows;
+}
+
+/** The compare and swap of a refreshed pair; `executor` is the database or the transaction that holds the row. */
+async function writeTokens(
+  executor: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  id: string,
+  expectedVersion: number,
+  sealed: SealedTokens,
+  accessExpiresAt: Date,
+  at: Date,
+): Promise<boolean> {
+  const result = await executor
+    .updateTable("jira_connections")
+    .set((eb) => ({
+      tokens_ciphertext: sealed.ciphertext,
+      tokens_nonce: sealed.nonce,
+      tokens_key_version: sealed.keyVersion,
+      token_version: eb("token_version", "+", 1),
+      access_expires_at: formatTimestamp(accessExpiresAt),
+      status: "connected",
+      error_code: null,
+      updated_at: formatTimestamp(at),
+    }))
+    .where("workspace_id", "=", workspaceId)
+    .where("id", "=", id)
+    .where("token_version", "=", expectedVersion)
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows) > 0;
+}
+
+async function writeBroken(
+  executor: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  id: string,
+  expectedVersion: number,
+  errorCode: string,
+  at: Date,
+): Promise<boolean> {
+  const result = await executor
+    .updateTable("jira_connections")
+    .set({
+      status: "broken",
+      error_code: errorCode,
+      updated_at: formatTimestamp(at),
+    })
+    .where("workspace_id", "=", workspaceId)
+    .where("id", "=", id)
+    .where("token_version", "=", expectedVersion)
+    .executeTakeFirst();
+  return Number(result.numUpdatedRows) > 0;
 }
 
 export function createJiraConnectionsRepository(
@@ -193,16 +280,40 @@ export function createJiraConnectionsRepository(
         .where("workspace_id", "=", workspaceId)
         .where("id", "=", id)
         .executeTakeFirst();
-      if (row === undefined) return undefined;
-      return {
-        connection: toStored(row),
-        sealed: {
-          ciphertext: row.tokens_ciphertext,
-          nonce: row.tokens_nonce,
-          keyVersion: row.tokens_key_version,
-        },
-        tokenVersion: row.token_version,
-      };
+      return row === undefined ? undefined : toTokens(row);
+    },
+
+    withLockedTokens(id, work) {
+      return db.transaction().execute(async (trx) => {
+        const row = await trx
+          .selectFrom("jira_connections")
+          .selectAll()
+          .where("workspace_id", "=", workspaceId)
+          .where("id", "=", id)
+          .forUpdate()
+          .executeTakeFirst();
+        return work(row === undefined ? undefined : toTokens(row), {
+          replaceTokens: (expectedVersion, sealed, accessExpiresAt) =>
+            writeTokens(
+              trx,
+              workspaceId,
+              id,
+              expectedVersion,
+              sealed,
+              accessExpiresAt,
+              now(),
+            ),
+          markBroken: (expectedVersion, errorCode) =>
+            writeBroken(
+              trx,
+              workspaceId,
+              id,
+              expectedVersion,
+              errorCode,
+              now(),
+            ),
+        });
+      });
     },
 
     async save(input) {
@@ -255,40 +366,19 @@ export function createJiraConnectionsRepository(
       return row === undefined ? undefined : toStored(row);
     },
 
-    async replaceTokens(id, expectedVersion, sealed, accessExpiresAt) {
-      const result = await db
-        .updateTable("jira_connections")
-        .set((eb) => ({
-          tokens_ciphertext: sealed.ciphertext,
-          tokens_nonce: sealed.nonce,
-          tokens_key_version: sealed.keyVersion,
-          token_version: eb("token_version", "+", 1),
-          access_expires_at: formatTimestamp(accessExpiresAt),
-          status: "connected",
-          error_code: null,
-          updated_at: formatTimestamp(now()),
-        }))
-        .where("workspace_id", "=", workspaceId)
-        .where("id", "=", id)
-        .where("token_version", "=", expectedVersion)
-        .executeTakeFirst();
-      return Number(result.numUpdatedRows) > 0;
-    },
+    replaceTokens: (id, expectedVersion, sealed, accessExpiresAt) =>
+      writeTokens(
+        db,
+        workspaceId,
+        id,
+        expectedVersion,
+        sealed,
+        accessExpiresAt,
+        now(),
+      ),
 
-    async markBroken(id, expectedVersion, errorCode) {
-      const result = await db
-        .updateTable("jira_connections")
-        .set({
-          status: "broken",
-          error_code: errorCode,
-          updated_at: formatTimestamp(now()),
-        })
-        .where("workspace_id", "=", workspaceId)
-        .where("id", "=", id)
-        .where("token_version", "=", expectedVersion)
-        .executeTakeFirst();
-      return Number(result.numUpdatedRows) > 0;
-    },
+    markBroken: (id, expectedVersion, errorCode) =>
+      writeBroken(db, workspaceId, id, expectedVersion, errorCode, now()),
 
     projectsUsing: (id) => projectsOf(db, workspaceId, id),
 

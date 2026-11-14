@@ -4,21 +4,24 @@
 // that calls Jira as a `SecretValue` (prints as a placeholder) or not at all (`request` makes the call itself).
 //
 // Atlassian rotates the refresh token on every refresh. So:
-//  - the pair is ONE sealed value, replaced in ONE statement that only succeeds for the version it read (compare and swap,
-//    `replaceTokens`): two requests that refresh at once cannot overwrite each other's pair;
-//  - a refresh that Atlassian refused is not yet a broken connection: when the pair changed in the meantime (the other request won and
-//    used up the token this one sent) the connection is fine and the newer pair is used. Only a refusal for the pair that is still the
-//    current one marks the connection `broken` with `jira_refresh_refused`;
-//  - a refresh that could not be made (a timeout, a 5xx) changes nothing: `jira_unavailable`, try again.
-// A pair that cannot be decrypted (another `APP_SECRET`) is `broken` with `jira_tokens_unreadable`. A broken connection makes no call to
-// Atlassian at all.
+//  - the refresh of a connection is SERIALIZED: the row is locked (`withLockedTokens`, `for update`) from the read of the pair to its
+//    write, so a second request that needs a refresh waits, then finds the pair the first one stored and uses it. It never sends a
+//    refresh token that the first request already used up. The lock is held across the one call to the token endpoint (10 s at most);
+//  - the pair is ONE sealed value, replaced in ONE statement that only succeeds for the version it read (compare and swap);
+//  - only `invalid_grant` from the token endpoint (the refresh token is revoked, expired or used) marks the connection `broken` with
+//    `jira_refresh_refused`. Anything else that goes wrong (a timeout, a 5xx, the app's own client id or secret rejected, a pair this
+//    process cannot decrypt because it has another `APP_SECRET`) changes nothing: `jira_unavailable`, and the operator's log says why.
+//    One wrong setting of the operator must not break every connection for good.
+// A broken connection makes no call to Atlassian at all.
 //
 // Nothing here logs a token or puts one in a result; the logs hold a code and the connection id.
+import "server-only";
 import { decryptSecret, encryptSecret } from "../crypto/secret-box.ts";
 import type {
   JiraConnectionsRepository,
   SealedTokens,
   StoredJiraConnection,
+  StoredJiraTokens,
 } from "../db/repositories/jira-connections-repository.ts";
 import { SecretValue } from "../secrets/secret-value.ts";
 import type { AtlassianClient } from "./client.ts";
@@ -126,17 +129,6 @@ export function createJiraTokens({
   now = () => new Date(),
   log = (line) => console.error(line),
 }: JiraTokensOptions): JiraTokens {
-  async function breakConnection(
-    connection: StoredJiraConnection,
-    version: number,
-    code: JiraBrokenCode,
-  ): Promise<void> {
-    if (await repository.markBroken(connection.id, version, code))
-      log(
-        `[jira] JIRA_CONNECTION_BROKEN: ${code} (connection ${connection.id})`,
-      );
-  }
-
   function ended(connection: StoredJiraConnection): boolean {
     return (
       Date.parse(connection.accessExpiresAt) - now().getTime() <=
@@ -144,43 +136,94 @@ export function createJiraTokens({
     );
   }
 
-  /** The connection and its opened pair, or the failure; `force` renews the token even though it still looks good. */
-  async function current(
-    connectionId: string,
+  type Checked =
+    | { kind: "done"; result: Current }
+    | {
+        kind: "renew";
+        connection: StoredJiraConnection;
+        pair: Pair;
+        tokenVersion: number;
+      };
+  type Current =
+    | { ok: true; connection: StoredJiraConnection; pair: Pair }
+    | Extract<UseTokenResult, { ok: false }>;
+
+  /** What a read of the row says: a failure, a pair that is good, or a pair that has to be renewed (`force`: the caller was told its token is no good). */
+  function check(
+    read: StoredJiraTokens | undefined,
     force: boolean,
     rejected: string | null,
-  ): Promise<
-    | { ok: true; connection: StoredJiraConnection; pair: Pair }
-    | Extract<UseTokenResult, { ok: false }>
-  > {
-    const read = await repository.readTokens(connectionId);
+  ): Checked {
     if (read === undefined)
-      return { ok: false, error: "jira_connection_not_found" };
+      return {
+        kind: "done",
+        result: { ok: false, error: "jira_connection_not_found" },
+      };
     const { connection, sealed, tokenVersion } = read;
     if (connection.status === "broken")
       return {
-        ok: false,
-        error: "jira_connection_broken",
-        ...(connection.errorCode === null
-          ? {}
-          : { brokenCode: connection.errorCode }),
+        kind: "done",
+        result: {
+          ok: false,
+          error: "jira_connection_broken",
+          ...(connection.errorCode === null
+            ? {}
+            : { brokenCode: connection.errorCode }),
+        },
       };
     const pair = openPair(appSecret, connection.id, sealed);
     if (pair === null) {
-      await breakConnection(connection, tokenVersion, "jira_tokens_unreadable");
+      // This process cannot read the pair: most likely it has another APP_SECRET than the one that sealed it. The row is fine for the
+      // process that has the right key, so it is not marked broken.
+      log(
+        `[jira] JIRA_TOKENS_UNREADABLE: check APP_SECRET (connection ${connection.id})`,
+      );
       return {
-        ok: false,
-        error: "jira_connection_broken",
-        brokenCode: "jira_tokens_unreadable",
+        kind: "done",
+        result: { ok: false, error: "jira_unavailable" },
       };
     }
     // A caller that was told its token is no good gets a new one, unless another request replaced the pair since.
     const mustRenew =
       ended(connection) || (force && pair.accessToken === rejected);
-    if (!mustRenew) return { ok: true, connection, pair };
+    return mustRenew
+      ? { kind: "renew", connection, pair, tokenVersion }
+      : { kind: "done", result: { ok: true, connection, pair } };
+  }
 
-    const grant = await client.refresh(pair.refreshToken);
-    if (grant.ok) {
+  /** The connection and its opened pair, or the failure; `force` renews the token even though it still looks good. */
+  async function current(
+    connectionId: string,
+    force: boolean,
+    rejected: string | null,
+  ): Promise<Current> {
+    const first = check(
+      await repository.readTokens(connectionId),
+      force,
+      rejected,
+    );
+    if (first.kind === "done") return first.result;
+    // A renewal: one at a time per connection. Whoever gets the lock reads the row again; a request that waited finds the pair of the
+    // one before it and has nothing left to renew.
+    return repository.withLockedTokens(connectionId, async (locked, writes) => {
+      const checked = check(locked, force, rejected);
+      if (checked.kind === "done") return checked.result;
+      const { connection, pair, tokenVersion } = checked;
+      const grant = await client.refresh(pair.refreshToken);
+      if (!grant.ok) {
+        if (grant.kind === "unavailable")
+          return { ok: false, error: "jira_unavailable" } as const;
+        // Refused: the pair the row holds NOW is the one that was sent (the row is locked), so it really is dead.
+        if (await writes.markBroken(tokenVersion, "jira_refresh_refused"))
+          log(
+            `[jira] JIRA_CONNECTION_BROKEN: jira_refresh_refused (connection ${connection.id})`,
+          );
+        return {
+          ok: false,
+          error: "jira_connection_broken",
+          brokenCode: "jira_refresh_refused",
+        } as const;
+      }
       // Atlassian answers with the rotated refresh token; an answer without one keeps the one that was sent.
       const renewed: Pair = {
         accessToken: grant.accessToken,
@@ -189,37 +232,19 @@ export function createJiraTokens({
       const expiresAt = new Date(
         now().getTime() + grant.expiresInSeconds * 1000,
       );
-      if (
-        await repository.replaceTokens(
-          connection.id,
-          tokenVersion,
-          sealPair(appSecret, connection.id, renewed),
-          expiresAt,
-        )
-      )
-        return {
-          ok: true,
-          connection: {
-            ...connection,
-            accessExpiresAt: expiresAt.toISOString(),
-          },
-          pair: renewed,
-        };
-      // Another request refreshed first and stored its pair: use that one (ours is dropped; its refresh token was rotated away).
-      return current(connectionId, false, null);
-    }
-    if (grant.kind === "unavailable")
-      return { ok: false, error: "jira_unavailable" };
-    // Refused. If the pair is no longer the one this request sent, a concurrent refresh used the token up and the connection is fine.
-    const again = await repository.readTokens(connectionId);
-    if (again !== undefined && again.tokenVersion !== tokenVersion)
-      return current(connectionId, false, null);
-    await breakConnection(connection, tokenVersion, "jira_refresh_refused");
-    return {
-      ok: false,
-      error: "jira_connection_broken",
-      brokenCode: "jira_refresh_refused",
-    };
+      const stored = await writes.replaceTokens(
+        tokenVersion,
+        sealPair(appSecret, connection.id, renewed),
+        expiresAt,
+      );
+      // The row is locked since the read, so the version cannot have moved; if it did anyway the pair is lost and the call can be repeated.
+      if (!stored) return { ok: false, error: "jira_unavailable" } as const;
+      return {
+        ok: true,
+        connection: { ...connection, accessExpiresAt: expiresAt.toISOString() },
+        pair: renewed,
+      } as const;
+    });
   }
 
   async function acquire(
@@ -253,6 +278,8 @@ export function createJiraTokens({
         if (response === null) return { ok: false, error: "jira_unavailable" };
         if (response.status !== 401 || attempt === 1)
           return { ok: true, response };
+        // The answer is not used: let go of the connection it holds before the call is repeated.
+        await response.body?.cancel().catch(() => undefined);
         result = await acquire(connectionId, true, result.accessToken.reveal());
       }
       return { ok: false, error: "jira_unavailable" };

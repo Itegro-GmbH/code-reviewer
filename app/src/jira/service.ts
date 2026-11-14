@@ -19,6 +19,7 @@
 //
 // Tokens are sealed in the connection's row (src/jira/tokens.ts) and never leave the server: no answer, page, state, log line or error
 // holds one. A state never carries an address; where the browser lands is a fixed page (http.ts).
+import "server-only";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
@@ -441,15 +442,40 @@ export function createJiraService({
           : undefined;
       if (waiting === null || site === undefined)
         return { ok: false, error: "jira_choice_invalid" };
-      const saved = await saveConnection(workspaceId, actor.id, site, {
-        accessToken: waiting.accessToken,
-        refreshToken: waiting.refreshToken,
-        expiresAt: new Date(waiting.expiresAt),
-        scopes: waiting.scopes,
-        account: waiting.account,
-      });
-      if (saved === undefined) return { ok: false, error: "unavailable" };
-      await pendingStore(workspaceId).remove(PENDING_NAME);
+      // The grant is one rotating token pair: it may be stored ONCE. It is taken in one statement, so of two clicks (or two tabs) only
+      // one gets it; the other finds none. What was read above only decided that the choice is the person's and worth taking.
+      const store = pendingStore(workspaceId);
+      const taken = await store.take(PENDING_NAME);
+      const grant = taken.ok ? parsePending(taken.value.reveal()) : null;
+      if (
+        grant === null ||
+        grant.userId !== actor.id ||
+        !grant.sites.some((s) => s.id === site.id)
+      )
+        return { ok: false, error: "jira_choice_invalid" };
+      const keep = () =>
+        store.save(PENDING_NAME, JSON.stringify(grant), {
+          binding: PENDING_BINDING,
+          updatedBy: actor.id,
+        });
+      let saved: StoredJiraConnection | undefined;
+      try {
+        saved = await saveConnection(workspaceId, actor.id, site, {
+          accessToken: grant.accessToken,
+          refreshToken: grant.refreshToken,
+          expiresAt: new Date(grant.expiresAt),
+          scopes: grant.scopes,
+          account: grant.account,
+        });
+      } catch (error) {
+        // Nothing was stored: the grant waits again for the next try.
+        await keep();
+        throw error;
+      }
+      if (saved === undefined) {
+        await keep();
+        return { ok: false, error: "unavailable" };
+      }
       return { ok: true };
     },
 

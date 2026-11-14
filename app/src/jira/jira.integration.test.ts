@@ -228,16 +228,63 @@ describe("Connect Jira", () => {
 
     h.clock.time += PENDING_GRANT_TTL_MS + 1000;
 
+    // Reading it removes it: nothing stays behind in the secrets.
     expect(await h.jira.service.readChoice(owner, ws.id)).toBeNull();
+    expect(
+      await h.db.selectFrom("workspace_secrets").select("name").execute(),
+    ).toEqual([]);
     expect(
       await h.jira.service.choose(owner, ws.id, { cloudId: SITE_A.id }),
     ).toEqual({
       ok: false,
       error: "jira_choice_invalid",
     });
+  });
+
+  // #1037-T01
+  it("stores the rotating pair of a grant in one connection only when the choice is sent twice at once", async () => {
+    const { h, ws, owner } = await setup({
+      atlassian: { sites: [SITE_A, SITE_B] },
+    });
+    await h.walk(owner, ws, "owner");
+
+    const answers = await Promise.all([
+      h.jira.service.choose(owner, ws.id, { cloudId: SITE_A.id }),
+      h.jira.service.choose(owner, ws.id, { cloudId: SITE_B.id }),
+      h.jira.service.choose(owner, ws.id, { cloudId: SITE_A.id }),
+    ]);
+
+    expect(answers.filter((a) => a.ok)).toHaveLength(1);
+    expect(answers.filter((a) => !a.ok)).toEqual([
+      { ok: false, error: "jira_choice_invalid" },
+      { ok: false, error: "jira_choice_invalid" },
+    ]);
+    // One pair, one row: the other site would have shared a refresh token that dies with the first use.
+    expect(await h.jira.service.list(ws.id)).toHaveLength(1);
     expect(
       await h.db.selectFrom("workspace_secrets").select("name").execute(),
     ).toEqual([]);
+  });
+
+  // #1037-T01
+  it("keeps the waiting grant when the connection could not be stored", async () => {
+    const { h, ws, owner } = await setup({
+      atlassian: { sites: [SITE_A, SITE_B] },
+    });
+    await h.walk(owner, ws, "owner");
+    const failing = vi.spyOn(h.db, "insertInto").mockImplementationOnce(() => {
+      throw new Error("database down");
+    });
+
+    await expect(
+      h.jira.service.choose(owner, ws.id, { cloudId: SITE_A.id }),
+    ).rejects.toThrow("database down");
+    failing.mockRestore();
+
+    expect(await h.jira.service.readChoice(owner, ws.id)).toHaveLength(2);
+    expect(
+      await h.jira.service.choose(owner, ws.id, { cloudId: SITE_A.id }),
+    ).toEqual({ ok: true });
   });
 
   // #1037-T01
@@ -469,8 +516,8 @@ describe("a connection's tokens", () => {
   });
 
   // #1037-T02
-  it("marks a connection whose tokens cannot be decrypted broken, with its own code", async () => {
-    const { h, ws, connection } = await connected();
+  it("does not break a connection a process with another APP_SECRET cannot read, and says so to the operator", async () => {
+    const { h, ws, connection, tokens } = await connected();
     const other = createJiraTokens({
       repository: createJiraConnectionsRepository(h.db, ws.id),
       client: {} as never,
@@ -481,12 +528,92 @@ describe("a connection's tokens", () => {
 
     expect(await other.use(connection.id)).toEqual({
       ok: false,
-      error: "jira_connection_broken",
-      brokenCode: "jira_tokens_unreadable",
+      error: "jira_unavailable",
     });
-    expect((await h.jira.service.list(ws.id))[0]?.errorCode).toBe(
-      "jira_tokens_unreadable",
+
+    expect((await h.jira.service.list(ws.id))[0]).toMatchObject({
+      status: "connected",
+      errorCode: null,
+    });
+    expect(h.logs.join("\n")).toContain("JIRA_TOKENS_UNREADABLE");
+    expect(h.logs.join("\n")).not.toContain("JIRA_CONNECTION_BROKEN");
+    // The process with the right key still uses it.
+    expect((await tokens.use(connection.id)).ok).toBe(true);
+  });
+
+  // #1037-T02
+  it("does not break any connection when the operator set a wrong client secret, and tells the operator", async () => {
+    const { h, ws, connection, tokens } = await connected();
+    h.clock.time += 2 * HOUR;
+    h.env.ATLASSIAN_CLIENT_SECRET = "a-wrong-secret-of-the-operator";
+
+    for (let attempt = 0; attempt < 2; attempt += 1)
+      expect(await tokens.request(connection.id, "/rest/api/3/myself")).toEqual(
+        { ok: false, error: "jira_unavailable" },
+      );
+
+    expect((await h.jira.service.list(ws.id))[0]).toMatchObject({
+      status: "connected",
+      errorCode: null,
+    });
+    const log = h.logs.join("\n");
+    expect(log).toContain("JIRA_TOKEN_ENDPOINT_REJECTED");
+    expect(log).not.toContain("JIRA_CONNECTION_BROKEN");
+    expect(log).not.toContain("a-wrong-secret-of-the-operator");
+    // The setting is mended: the same pair works, nothing had been used up.
+    h.env.ATLASSIAN_CLIENT_SECRET = h.atlassian.clientSecret;
+    expect((await tokens.request(connection.id, "/rest/api/3/myself")).ok).toBe(
+      true,
     );
+  });
+
+  // #1037-T02
+  it("refreshes one at a time: a call that waits for the refresh in progress uses the pair it stored", async () => {
+    const { h, ws, connection, tokens } = await connected();
+    h.clock.time += 2 * HOUR;
+    const hold = h.atlassian.holdNextRefresh();
+    const refreshRequests = () =>
+      h.atlassian.requests().filter((r) => r.grantType === "refresh_token");
+    const waitingForRowLock = async () =>
+      (
+        await sql<{ n: number }>`
+          select count(*)::int as n from pg_stat_activity
+          where pid <> pg_backend_pid() and datname = current_database()
+            and wait_event_type = 'Lock' and query like '%jira_connections%'`.execute(
+          h.db,
+        )
+      ).rows[0]?.n ?? 0;
+
+    // The first call refreshes; Atlassian has used its refresh token up but its answer is held back.
+    const winner = tokens.request(connection.id, "/rest/api/3/myself");
+    await hold.arrived;
+    // The second call needs a refresh too: it waits for the first (without the lock it would send the used-up token, be refused, and
+    // the connection would be marked broken).
+    const loser = tokens.request(connection.id, "/rest/api/3/myself");
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await waitingForRowLock()) > 0 || refreshRequests().length > 1,
+        ).toBe(true),
+      { timeout: 5000, interval: 25 },
+    );
+    hold.release();
+
+    const [first, second] = await Promise.all([winner, loser]);
+
+    expect(first.ok && first.response.status).toBe(200);
+    expect(second.ok && second.response.status).toBe(200);
+    expect(refreshRequests()).toHaveLength(1);
+    expect((await h.jira.service.list(ws.id))[0]).toMatchObject({
+      status: "connected",
+      errorCode: null,
+    });
+    expect(h.logs.join("\n")).not.toContain("JIRA_CONNECTION_BROKEN");
+    const calls = h.atlassian
+      .requests()
+      .filter((r) => r.path.startsWith("/ex/jira/"));
+    expect(calls.map((r) => r.status)).toEqual([200, 200]);
+    expect(h.atlassian.refreshes()).toBe(1);
   });
 
   // #1037-T02
@@ -747,6 +874,7 @@ describe("the Jira card's data", () => {
         workspaceId: ws.id,
         actor,
         canManage,
+        implementer: true,
         query: { jira },
       });
 
@@ -774,6 +902,7 @@ describe("the Jira card's data", () => {
       workspaceId: ws.id,
       actor: null,
       canManage: true,
+      implementer: true,
       query: {},
     });
 
@@ -782,5 +911,45 @@ describe("the Jira card's data", () => {
       connections: [],
       choices: null,
     });
+  });
+
+  // #1037
+  it("reads nothing where the deployment has no implementer capability or no Atlassian settings", async () => {
+    const { h, ws, owner } = await setup({
+      atlassian: { sites: [SITE_A, SITE_B] },
+    });
+    await h.walk(owner, ws, "owner");
+    const list = vi.spyOn(h.jira.service, "list");
+    const readChoice = vi.spyOn(h.jira.service, "readChoice");
+
+    const withoutCapability = await loadJiraSection({
+      service: h.jira.service,
+      workspaceId: ws.id,
+      actor: owner,
+      canManage: true,
+      implementer: false,
+      query: { jira: "site_choice_ready" },
+    });
+    expect(withoutCapability).toEqual({
+      configured: false,
+      connections: [],
+      choices: null,
+      notice: null,
+    });
+
+    const off = await createJiraHarness({ unconfigured: true });
+    const offList = vi.spyOn(off.jira.service, "list");
+    await loadJiraSection({
+      service: off.jira.service,
+      workspaceId: ws.id,
+      actor: owner,
+      canManage: true,
+      implementer: true,
+      query: {},
+    });
+
+    expect(list).not.toHaveBeenCalled();
+    expect(readChoice).not.toHaveBeenCalled();
+    expect(offList).not.toHaveBeenCalled();
   });
 });

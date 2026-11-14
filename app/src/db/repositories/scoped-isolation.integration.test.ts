@@ -1441,6 +1441,12 @@ const CASES: Case[] = [
       expect(answer).toEqual(["llm_api_key", "llm_api_key.fakeai"]),
   },
   {
+    name: "workspaceSecrets.take",
+    run: (a) => a.workspaceSecrets.take("llm_api_key"),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ binding: "binding-a" }),
+  },
+  {
     name: "workspaceSecrets.remove",
     run: (a) => a.workspaceSecrets.remove("llm_api_key"),
     expectAnswer: (answer) => expect(answer).toBe(true),
@@ -2896,6 +2902,12 @@ const CASES: Case[] = [
         new Date("2026-11-14T11:00:00.000Z"),
       ),
     expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jira.withLockedTokens",
+    run: (a, b) =>
+      a.jira.withLockedTokens(b.jiraConnectionId, async (locked) => locked),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
     name: "jira.markBroken",

@@ -4,7 +4,7 @@
 // ones and tests wire the real service over a test database:
 //
 //   POST   /api/w/:workspace/jira/connect                 {} or { connectionId }  the address of Atlassian's consent page (a new connection, or a reconnect)
-//   GET    /api/w/:workspace/jira/connections                                    the connections of the workspace, never a token (any member)
+//   GET    /api/w/:workspace/jira/connections                                    the connections of the workspace, never a token (the action `start_implementer_task`: today every member)
 //   POST   /api/w/:workspace/jira/choose                  { cloudId }              connects one site of a grant that covers several
 //   DELETE /api/w/:workspace/jira/connections/:id                                 forgets a connection; refused while a project uses it (409, the projects named)
 //   GET    /api/jira/callback                             ?code&state             where Atlassian sends the browser

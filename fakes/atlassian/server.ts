@@ -85,6 +85,11 @@ export type AtlassianFake = {
   revokeGrants(): void;
   /** The next request to `path` (for example `/oauth/token`) gets this answer instead of the normal one. */
   failNext(path: string, answer: ScriptedAnswer): void;
+  /**
+   * The next accepted refresh is carried out (the token rotates) but its answer is held back until `release()`: another refresh that
+   * arrives meanwhile sends a token that is already used up. `arrived` resolves when the held refresh has been carried out.
+   */
+  holdNextRefresh(): { arrived: Promise<void>; release(): void };
   /** Every access and refresh token handed out so far, for a test that looks for them somewhere they must not be. */
   issuedTokens(): string[];
   /** How many times a refresh token was accepted. */
@@ -149,6 +154,7 @@ export async function startAtlassianFake(
   /** refresh token -> grant id, while it is the current one of the grant. */
   const issued: string[] = [];
   let refreshCount = 0;
+  const holds: { arrive: () => void; released: Promise<void> }[] = [];
   const open = new Set<ServerResponse>();
 
   function issue(grant: Grant, rotate: boolean) {
@@ -299,7 +305,13 @@ export async function startAtlassianFake(
             entry,
           );
         refreshCount += 1;
-        return json(response, 200, issue(grant, true), entry);
+        const answer = issue(grant, true);
+        const held = holds.shift();
+        if (held !== undefined) {
+          held.arrive();
+          await held.released;
+        }
+        return json(response, 200, answer, entry);
       }
       return json(response, 400, { error: "unsupported_grant_type" }, entry);
     }
@@ -379,6 +391,14 @@ export async function startAtlassianFake(
     },
     failNext(path, answer) {
       scripted.set(path, [...(scripted.get(path) ?? []), answer]);
+    },
+    holdNextRefresh() {
+      let arrive: () => void = () => undefined;
+      let release: () => void = () => undefined;
+      const arrived = new Promise<void>((resolve) => (arrive = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      holds.push({ arrive, released });
+      return { arrived, release };
     },
     issuedTokens: () => [...issued],
     refreshes: () => refreshCount,
