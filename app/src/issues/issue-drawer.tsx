@@ -32,6 +32,7 @@ import {
   pullRequestState,
   pullRequestUrl,
   subIssuesOf,
+  ticketLabel,
   ticketUrl,
 } from "./view.ts";
 import { formatTicketRef } from "../workflows/ticket-ref.ts";
@@ -173,19 +174,19 @@ function DrawerBody({
   item: TicketListItem;
   run: RunState;
 }) {
-  const address = ticketUrl(list.repo, item);
+  const address = ticketUrl(list.repo, item, list.provider);
   const subIssues = subIssuesOf(list, item.number);
   const ticketRef = formatTicketRef({
-    provider: "github",
+    provider: list.provider,
     repo: list.repo,
-    key: String(item.number),
+    key: item.key,
   });
   return (
     <>
       <SheetHeader className="pr-14">
         <SheetTitle className="text-lg leading-7 break-words">
           <span className="font-mono text-muted-foreground">
-            #{item.number}
+            {ticketLabel(list.provider, item)}
           </span>{" "}
           {item.title}
         </SheetTitle>

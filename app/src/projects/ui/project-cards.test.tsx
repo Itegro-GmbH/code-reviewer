@@ -604,7 +604,7 @@ describe("the New project dialog with a Jira project (#1038)", () => {
           connectionId: "conn-1",
           projectKey: "OPS",
         },
-        lanes: ["review-a-pull-request"],
+        lanes: ["issue-to-pr-status", "review-a-pull-request"],
       }),
     );
     await waitFor(() =>
@@ -613,7 +613,7 @@ describe("the New project dialog with a Jira project (#1038)", () => {
   });
 
   // #1038
-  it("cannot create before a site, a project and a repository are chosen, and offers only the lane that needs no write-back", async () => {
+  it("cannot create before a site, a project and a repository are chosen, and offers the lanes a Jira project can start (not the label lane)", async () => {
     const { dialog, user } = await openAsJira(fakeApi().api);
 
     const create = within(dialog).getByRole("button", {
@@ -628,7 +628,8 @@ describe("the New project dialog with a Jira project (#1038)", () => {
     const lanes = ["Issue to PR", "Issue to PR (status)"].map(
       (name) => within(dialog).getByLabelText(name) as HTMLInputElement,
     );
-    expect(lanes.map((lane) => lane.disabled)).toEqual([true, true]);
+    // #1040: the label lane is off for Jira, the status lane works with Jira's transitions.
+    expect(lanes.map((lane) => lane.disabled)).toEqual([true, false]);
     expect(
       (
         within(dialog).getByLabelText("Review a pull request") as HTMLElement

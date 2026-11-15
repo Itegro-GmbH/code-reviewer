@@ -83,7 +83,7 @@ export function createGithubTicketProvider(
       );
     },
 
-    updateTicketComment({ integration, repo }, commentId, body, signal) {
+    updateTicketComment({ integration, repo }, _key, commentId, body, signal) {
       return issues.updateIssueComment(
         integration,
         repo,
@@ -106,6 +106,8 @@ export function createGithubTicketProvider(
     async setTicketStatus({ integration, repo }, key, move, signal) {
       const number = ticketNumberOfKey(key);
       if (number === undefined) return { kind: "issue_not_found" };
+      // A move on a board names the board; a call without one finds none.
+      if (move.board === undefined) return { kind: "board_not_found" };
       try {
         return await (
           await getClient()
@@ -114,7 +116,7 @@ export function createGithubTicketProvider(
           actionScope(integration, repo, BOARD_STATUS_TOKEN_PERMISSIONS),
           repo.fullName,
           number,
-          move,
+          { board: move.board, status: move.status },
           signal,
         );
       } catch (error) {

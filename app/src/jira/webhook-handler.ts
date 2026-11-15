@@ -22,6 +22,8 @@
 //   8. mirror    the issue is written into the ticket mirror (`mirror.ts`); a failure is logged and never stops the trigger
 //   9. trigger   a change of the status starts the lanes that wait for the new status (`workflow-runs/jira-status-trigger.ts`); a failure
 //                releases the claim and answers 503 (Jira retries up to five times)
+//  10. answer    a comment that starts with `/answer` (a person's, not an app's) answers the question the run that waits on this issue asks
+//                (#1040, `workflow-runs/ticket-answers.ts`); an answer that was not taken is not final: a redelivery looks at it again
 //
 // Everything is answered 200 except a refusal or a failure: Jira retries 408, 409, 425, 429 and 5xx and treats everything else as final.
 // Nothing here logs the secret, the address, a token or a body: lines name the delivery, the event and the outcome.
@@ -34,13 +36,14 @@ import type {
   WebhookDeliveriesRepository,
   WebhookDeliveryOutcome,
 } from "../db/repositories/webhook-deliveries-repository.ts";
+import { parseAnswerCommand } from "../integrations/comment-command.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
 import {
   consoleWebhookLogger,
   type WebhookLogger,
 } from "../webhooks/logger.ts";
 import type { JiraMirror } from "./mirror.ts";
-import { parseJiraDelivery } from "./webhook-events.ts";
+import { parseJiraDelivery, type JiraComment } from "./webhook-events.ts";
 import { verifyJiraDelivery } from "./webhook-verify.ts";
 
 /** 1 MiB: a Jira payload is a few kilobytes (the issue without `expand`, a changelog). */
@@ -64,7 +67,12 @@ export type JiraWebhookErrorCode = (typeof JIRA_WEBHOOK_ERROR_CODES)[number];
 
 /** What the route answers with 200: it only names what happened, for Jira's delivery log. */
 export type JiraWebhookOutcome =
-  "duplicate" | "ignored" | "tracker_updated" | "workflow_runs_started";
+  | "duplicate"
+  | "ignored"
+  | "tracker_updated"
+  | "workflow_runs_started"
+  | "ticket_answered"
+  | "no_answer_taken";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const REGISTRATION_ID = /^[A-Za-z0-9-]{1,64}$/;
@@ -94,6 +102,28 @@ export type JiraStatusStarter = {
   }>;
 };
 
+/**
+ * What takes the answer a comment `/answer …` gives to the question a run waits for (#1040): `TicketAnswers` of `src/workflow-runs/`, which
+ * this module does not import (the route wires the two together), in the shape of a Jira comment.
+ */
+export type JiraAnswerTaker = {
+  answer(
+    deliveryId: string,
+    answer: {
+      repositoryId: string;
+      issueKey: string;
+      comment: JiraComment;
+      choice?: number;
+      text?: string;
+      raw: string;
+    },
+  ): Promise<
+    | { outcome: "answered"; runId: string }
+    | { outcome: "no_run" }
+    | { outcome: "not_taken"; reason: string }
+  >;
+};
+
 /** What acts inside the workspace of the registration. */
 export type JiraWorkspaceCollaborators = {
   /** Notes that a bearer token that verified came with a delivery of the registration (the first time stays). */
@@ -104,6 +134,8 @@ export type JiraWorkspaceCollaborators = {
   mirror: JiraMirror;
   /** Left out where a server has no workflow engine: a status change is then only written into the ticket mirror. */
   statuses?: JiraStatusStarter;
+  /** Left out where a server has no workflow engine: a comment `/answer …` is then only written into the ticket mirror's issue. */
+  answers?: JiraAnswerTaker;
 };
 
 export type JiraWebhookDeps = {
@@ -311,15 +343,50 @@ export function createJiraWebhookHandler(
         started = result.started + result.existing;
       }
 
-      // A delivery that only the mirror uses is tried again by Jira when the mirror failed; one that started a run goes on.
-      if (mirrorFailure !== undefined && started === 0)
+      // A comment that begins with `/answer` answers the question of the run that waits on this issue. Whoever can comment on the issue in
+      // Jira can answer (Jira's own permission to comment is the access check, as write access is for GitHub). The factory writes its comments
+      // as the person who connected Jira (OAuth 3LO has no author of its own of an app), so they look like that person's: the writer never
+      // lets one begin with the command (`markdown-adf.ts`, `defuseAnswer`), and that keeps the factory's questions and records from
+      // answering. Only a comment of an account of another type (an app) is skipped here.
+      let answer: "answered" | "not_taken" | undefined;
+      if (
+        change.kind === "issue_changed" &&
+        change.event === "commented" &&
+        change.comment !== undefined &&
+        workspace.answers !== undefined &&
+        (change.comment.author.accountType === "" ||
+          change.comment.author.accountType === "atlassian")
+      ) {
+        const command = parseAnswerCommand(change.comment.text);
+        if (command !== null) {
+          const taken = await workspace.answers.answer(deliveryId, {
+            repositoryId: project.repositoryId,
+            issueKey: change.issue.key,
+            comment: change.comment,
+            ...(command.choice === undefined ? {} : { choice: command.choice }),
+            ...(command.text === undefined ? {} : { text: command.text }),
+            raw: command.raw,
+          });
+          logger.info(
+            `[jira-webhook] delivery=${deliveryId} answer: ${taken.outcome}${taken.outcome === "not_taken" ? ` (${taken.reason})` : ""}`,
+          );
+          answer = taken.outcome === "answered" ? "answered" : "not_taken";
+        }
+      }
+
+      // A delivery that only the mirror uses is tried again by Jira when the mirror failed; one that started a run or took an answer goes on.
+      if (mirrorFailure !== undefined && started === 0 && answer !== "answered")
         throw mirrorFailure.error;
       const outcome: Exclude<JiraWebhookOutcome, "duplicate"> =
-        started > 0
-          ? "workflow_runs_started"
-          : mirrored
-            ? "tracker_updated"
-            : "ignored";
+        answer === "answered"
+          ? "ticket_answered"
+          : started > 0
+            ? "workflow_runs_started"
+            : answer === "not_taken"
+              ? "no_answer_taken"
+              : mirrored
+                ? "tracker_updated"
+                : "ignored";
       await finish(outcome);
       return accepted(outcome);
     } catch (error) {

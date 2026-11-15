@@ -135,8 +135,22 @@ export const STEP_FAILURE_CODES = [
   "github_rate_limited",
   /** GitHub could not be reached or answered with an error of its own. */
   "github_unavailable",
-  /** A ticket action (`ticket.comment`, `ticket.labels`, `ticket.setStatus`): the project's ticket source (Jira, until #1040) cannot do it yet. */
+  /** A ticket action (`ticket.comment`, `ticket.labels`, `ticket.setStatus`): the provider of the project's ticket source has no such method (a Jira provider that is not registered in this process). */
   "ticket_provider_unsupported",
+  /** The ticket (or comment) of a Jira project is not there for the connection's account (#1040). */
+  "ticket_not_found",
+  /** Jira refused the account of the connection: it may not see the ticket or write to it. */
+  "ticket_forbidden",
+  /** The Jira connection of the workspace is broken: a person connects it again. */
+  "ticket_connection_broken",
+  /** Jira could not be reached or did not answer in time. */
+  "ticket_unavailable",
+  /** Jira refused what was asked (a label it does not take, a transition that needs a field the factory cannot fill). */
+  "ticket_rejected",
+  /** The workflow of the Jira project has no status of that name (`ticket.setStatus`); the message names the statuses it has. */
+  "ticket_status_unknown",
+  /** The workflow has the status, but no transition leads there from the ticket's current status; the message names the ones that do. */
+  "ticket_status_unreachable",
   /** The connector did not answer within `ACTION_TIMEOUT_MS`; whether the action happened is not known, and it is not repeated. */
   "action_timeout",
   /** The engine was interrupted while an action ran; whether it happened is not known, and it is not repeated. */

@@ -40,7 +40,7 @@ export const TICKET_REPO_TYPE: ObjectType = objectOf({
 export const TICKET_TYPE: ObjectType = objectOf({
   /** The text key of the ticket (`15` for GitHub, `PROJ-123` for Jira): the one field every provider fills. */
   key: STRING,
-  /** The number of the ticket where the platform numbers its tickets (GitHub lanes); `key` is the field for all providers. */
+  /** The number of the ticket where the platform numbers its tickets (GitHub lanes); 0 for a ticket of a platform that does not (Jira, #1040): `key` is the field for all providers. Always filled, not optional: a reference to an optional field needs a `default` in every lane (`{{trigger.ticket.number | default 0}}`), which would break the lanes that write `Closes #{{trigger.ticket.number}}`. */
   number: INTEGER,
   title: STRING,
   body: STRING,

@@ -199,7 +199,7 @@ function harness(
     ...(edit === undefined
       ? {}
       : {
-          updateTicketComment: (scope, commentId, body) =>
+          updateTicketComment: (scope, _key, commentId, body) =>
             edit(scope.integration, scope.repo, commentId, body),
         }),
     ...(label === undefined

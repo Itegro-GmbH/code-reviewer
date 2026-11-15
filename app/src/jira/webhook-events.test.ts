@@ -117,6 +117,76 @@ describe("parseJiraDelivery", () => {
     expect(change).toMatchObject({ kind: "issue_changed", event: "commented" });
   });
 
+  // #1040-T03
+  it("reads the text, the author and the time of a comment, whether Jira sends it as ADF or as text", () => {
+    const adf = {
+      version: 1,
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "/answer 2" }] },
+      ],
+    };
+    const read = (body: unknown) =>
+      parseJiraDelivery(
+        {
+          timestamp: 1,
+          webhookEvent: "comment_created",
+          comment: {
+            id: "20001",
+            body,
+            author: {
+              accountId: "acc-1",
+              displayName: "Ada",
+              accountType: "atlassian",
+            },
+            created: "2026-11-14T10:30:00.000+0100",
+          },
+          issue: issue(),
+        },
+        SITE,
+      );
+    for (const body of [adf, "/answer 2"])
+      expect(read(body)).toMatchObject({
+        kind: "issue_changed",
+        event: "commented",
+        comment: {
+          id: "20001",
+          text: "/answer 2",
+          author: { accountId: "acc-1", name: "Ada", accountType: "atlassian" },
+          createdAt: "2026-11-14T09:30:00.000Z",
+        },
+      });
+    // A payload without an id, or a body that is neither, gives no comment; the issue is still read.
+    const bare = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "comment_created",
+        comment: { body: "x" },
+        issue: issue(),
+      },
+      SITE,
+    );
+    expect(bare).toMatchObject({ kind: "issue_changed" });
+    expect("comment" in bare).toBe(false);
+    expect(read(42)).toMatchObject({ comment: { text: "" } });
+  });
+
+  // #1040-T03
+  it("bounds the text of a comment and reads it as data, whatever it holds", () => {
+    const change = parseJiraDelivery(
+      {
+        timestamp: 1,
+        webhookEvent: "comment_created",
+        comment: { id: "1", body: "x".repeat(50_000) },
+        issue: issue(),
+      },
+      SITE,
+    );
+    expect(change.kind === "issue_changed" && change.comment?.text.length).toBe(
+      20_000,
+    );
+  });
+
   // #1039
   it("ignores an event the factory does not follow and a payload that is none", () => {
     for (const body of [

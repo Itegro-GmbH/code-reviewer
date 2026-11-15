@@ -6,7 +6,7 @@ import { checkBranchName } from "../implementer/branch-name.ts";
 import { ID_PATTERN } from "../workflows/check-steps.ts";
 import { sessionBranchOf } from "./engine.ts";
 
-const run = { id: "7f0c1b3e-aaaa-4bbb-8ccc-0123456789ab" };
+const run = { id: "7f0c1b3e-aaaa-4bbb-8ccc-0123456789ab", ticketRef: null };
 
 describe("the branch of a session", () => {
   // #846-T142
@@ -17,6 +17,41 @@ describe("the branch of a session", () => {
     expect(sessionBranchOf(run, { stepId: "review", round: 2 })).toBe(
       `workflow/${run.id}/review.r2`,
     );
+  });
+
+  // #1040-T02
+  it("carries the key of a Jira ticket, so that Jira's GitHub integration links the branch to the issue", () => {
+    const jira = { ...run, ticketRef: "jira:acme/shop#PROJ-12" };
+    expect(sessionBranchOf(jira, { stepId: "implement", round: 1 })).toBe(
+      `workflow/PROJ-12/${run.id}/implement`,
+    );
+    expect(sessionBranchOf(jira, { stepId: "implement", round: 2 })).toBe(
+      `workflow/PROJ-12/${run.id}/implement.r2`,
+    );
+    // GitHub tickets and runs without a ticket keep the name they always had.
+    expect(
+      sessionBranchOf(
+        { ...run, ticketRef: "github:acme/shop#12" },
+        { stepId: "implement", round: 1 },
+      ),
+    ).toBe(`workflow/${run.id}/implement`);
+    expect(
+      sessionBranchOf(
+        { ...run, ticketRef: null },
+        { stepId: "implement", round: 1 },
+      ),
+    ).toBe(`workflow/${run.id}/implement`);
+  });
+
+  // #1040-T02
+  it("leaves the key out when the name would be too long for a branch", () => {
+    const jira = { ...run, ticketRef: `jira:acme/shop#${"K".repeat(99)}-1` };
+    const name = sessionBranchOf(jira, {
+      stepId: "a".repeat(64),
+      round: 10,
+    });
+    expect(name).toBe(`workflow/${run.id}/${"a".repeat(64)}.r10`);
+    expect(checkBranchName(name, "main")).toMatchObject({ ok: true });
   });
 
   // #846-T143

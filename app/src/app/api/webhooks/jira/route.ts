@@ -6,11 +6,15 @@
 // the workflow engine is wired in here, because it depends on that folder and not the other way round.
 import { jiraTicketProvider } from "../../../../jira/shared.ts";
 import { getJiraWebhookHandler } from "../../../../jira/webhook-shared.ts";
-import { jiraStatusTriggerFor } from "../../../../workflow-runs/shared.ts";
+import {
+  jiraAnswersFor,
+  jiraStatusTriggerFor,
+} from "../../../../workflow-runs/shared.ts";
 
 export async function POST(request: Request): Promise<Response> {
   return getJiraWebhookHandler({
     statusesFor: (workspaceId) =>
       jiraStatusTriggerFor(workspaceId, jiraTicketProvider),
+    answersFor: jiraAnswersFor,
   })(request);
 }

@@ -8,7 +8,11 @@
 import { after, connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createNewProjectHandlers } from "@/projects/create-http";
-import { jiraProjectFor, jiraProjectsFor } from "@/jira/source-shared";
+import {
+  jiraProjectFor,
+  jiraProjectsFor,
+  jiraStatusNamesFor,
+} from "@/jira/source-shared";
 import { boardsFor } from "@/projects/create-shared";
 import { projectServiceFor } from "@/projects/shared";
 import {
@@ -21,6 +25,7 @@ import { withWorkspace } from "@/workspaces/access-runtime";
 import {
   BUILT_IN_LANE_KEYS,
   isBuiltInLaneKey,
+  laneStatusesFromNames,
 } from "@/workflows/built-in-lanes";
 import { workflowServiceFor } from "@/workflows/shared";
 
@@ -59,12 +64,18 @@ export async function POST(
       boards: boardsFor(access.workspace.id),
       jiraProjects: jiraProjectsFor(access.workspace.id),
       jiraProject: jiraProjectFor(access.workspace.id),
+      jiraStatuses: jiraStatusNamesFor(access.workspace.id),
       laneKeys: BUILT_IN_LANE_KEYS,
-      copyLanes: (user, projectId, keys) =>
+      copyLanes: (user, projectId, keys, jira) =>
         workflowServiceFor(access.workspace.id).copyBuiltIn(
           user,
           projectId,
           keys.filter(isBuiltInLaneKey),
+          // A Jira project's status lane uses the names of its own workflow and words its pull request for Jira (#1040).
+          jira === undefined
+            ? undefined
+            : laneStatusesFromNames(jira.statusNames),
+          jira === undefined ? undefined : "jira",
         ),
     }).create(request),
   );

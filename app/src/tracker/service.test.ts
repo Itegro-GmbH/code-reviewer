@@ -5,7 +5,11 @@ import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import { TrackerError } from "./errors.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
-import { createTrackerService, ticketRefOf } from "./service.ts";
+import {
+  createTrackerService,
+  ticketRefOf,
+  type JiraMirrorSync,
+} from "./service.ts";
 
 const REPOSITORY = {
   id: "r-1",
@@ -26,6 +30,8 @@ async function setup(
     provider?: string;
     integration?: Partial<Integration> | undefined;
     sync?: () => Promise<never>;
+    /** What reads a Jira project into the mirror (#1040); left out: the service is wired without Jira. */
+    jira?: JiraMirrorSync;
   } = {},
 ) {
   const tracker = createFakeTrackerRepository();
@@ -110,12 +116,16 @@ async function setup(
                 provider: options.provider ?? "github",
                 repositoryId: "r-1",
                 board: options.board ?? null,
+                ...(options.provider === "jira"
+                  ? { connectionId: "conn-1", projectKey: "PROJ" }
+                  : {}),
               },
             } as never),
     },
     tracker,
     runs: { summarizeTickets },
     sync: { run: options.sync ?? run },
+    ...(options.jira === undefined ? {} : { jira: options.jira }),
   });
   return { service, run, summarizeTickets, tracker };
 }
@@ -166,6 +176,7 @@ describe("the list of the tickets of a project's repository", () => {
     });
     expect(list.items.map((item) => item.number)).toEqual([3, 1]);
     expect(list.items[1]).toEqual({
+      key: "1",
       number: 1,
       kind: "issue",
       state: "open",
@@ -475,9 +486,9 @@ describe("the full sync of a repository", () => {
   });
 });
 
-describe("a project whose tickets are not GitHub's (#1038)", () => {
+describe("a project whose tickets the mirror cannot read (#1038, #1040)", () => {
   // #1038
-  it("neither lists, nor reads the state of, nor syncs the issues of its repository: those are not its tickets", async () => {
+  it("neither lists, nor reads the state of, nor syncs the issues of its repository when no Jira sync is wired: those are not its tickets", async () => {
     const { service, run } = await setup({ provider: "jira" });
 
     for (const call of [
@@ -489,5 +500,124 @@ describe("a project whose tickets are not GitHub's (#1038)", () => {
         code: "TRACKER_SOURCE_NOT_MIRRORED",
       });
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("the tickets of a project on a Jira project (#1040)", () => {
+  const jiraSync = (sync?: JiraMirrorSync["sync"]): JiraMirrorSync => ({
+    siteUrlOf: async () => "https://acme.atlassian.net/",
+    sync:
+      sync ??
+      (async () => ({
+        status: "done" as const,
+        next: null,
+        written: 2,
+        removed: 1,
+        skipped: 0,
+        boardAvailable: false,
+      })),
+  });
+
+  // #1040-T04
+  it("reads the project through its Jira connection, never through the installation or the GitHub sync", async () => {
+    const calls: unknown[] = [];
+    const { service, run } = await setup({
+      provider: "jira",
+      integration: undefined,
+      jira: jiraSync(async (target, options) => {
+        calls.push([target, options]);
+        return {
+          status: "done",
+          next: null,
+          written: 2,
+          removed: 1,
+          skipped: 0,
+          boardAvailable: false,
+        };
+      }),
+    });
+
+    const progress = await service.sync("r-1", { resume: true });
+
+    expect(progress).toMatchObject({ status: "done", written: 2, removed: 1 });
+    expect(calls).toEqual([
+      [
+        {
+          repositoryId: "r-1",
+          repoFullName: "acme/widgets",
+          connectionId: "conn-1",
+          projectKey: "PROJ",
+        },
+        { resume: true },
+      ],
+    ]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  // #1040-T04
+  it("lists the Jira issues with their key, their site address and the lane that is on them, by the ticket reference of the Jira provider", async () => {
+    const { service, tracker, summarizeTickets } = await setup({
+      provider: "jira",
+      jira: jiraSync(),
+    });
+    await tracker.upsertItem("r-1", {
+      provider: "jira",
+      repo: "acme/widgets",
+      key: "PROJ-7",
+      number: 7,
+      nodeId: "jira:10007",
+      kind: "issue",
+      state: "open",
+      stateReason: null,
+      type: "Task",
+      title: "Jira issue",
+      bodyExcerpt: "",
+      labels: [],
+      assignees: [],
+      closes: [],
+      updatedAt: "2026-11-14T10:00:00.000Z",
+      boardStatus: "Ready for agent",
+    });
+
+    const list = await service.listIssues("r-1", {
+      state: "open",
+      limit: 10,
+      offset: 0,
+    });
+
+    expect(list.provider).toBe("jira");
+    const item = list.items.find((entry) => entry.key === "PROJ-7");
+    expect(item).toMatchObject({
+      key: "PROJ-7",
+      number: 7,
+      boardStatus: "Ready for agent",
+      url: "https://acme.atlassian.net/browse/PROJ-7",
+    });
+    expect(summarizeTickets.mock.calls[0]?.[0]).toContain(
+      "jira:acme/widgets#PROJ-7",
+    );
+  });
+
+  // #1040-T04
+  it("fails a sync Jira cannot do with the stable code of the failure and never what Jira said", async () => {
+    const failure = Object.assign(new Error("secret detail"), {
+      providerCode: "jira_unavailable",
+    });
+    const { service } = await setup({
+      provider: "jira",
+      jira: jiraSync(async () => {
+        throw failure;
+      }),
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const error = await service.sync("r-1").catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TrackerError);
+    expect(error).toMatchObject({
+      code: "TRACKER_SYNC_FAILED",
+      providerCode: "jira_unavailable",
+    });
+    expect(String((error as Error).message)).not.toContain("secret detail");
   });
 });

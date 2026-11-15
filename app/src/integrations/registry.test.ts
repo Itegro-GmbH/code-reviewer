@@ -113,3 +113,18 @@ describe("the default registry", () => {
     });
   });
 });
+
+describe("the ticket providers registered for the process (#1040)", () => {
+  // #1040
+  it("finds the provider registered under an id, and the last registration of an id wins", async () => {
+    const { registerTicketProvider, registeredTicketProvider } =
+      await import("./ticket-provider.ts");
+    expect(registeredTicketProvider("registry-test")).toBeUndefined();
+    const first = { id: "registry-test" };
+    const second = { id: "registry-test" };
+    registerTicketProvider(first);
+    expect(registeredTicketProvider("registry-test")).toBe(first);
+    registerTicketProvider(second);
+    expect(registeredTicketProvider("registry-test")).toBe(second);
+  });
+});

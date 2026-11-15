@@ -12,6 +12,7 @@ import type { TrackerService } from "./service.ts";
 
 const USER = { id: "u-1" } as SessionUser;
 const LIST = {
+  provider: "github",
   repositoryId: "r-1",
   repo: "acme/widgets",
   items: [],

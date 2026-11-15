@@ -49,5 +49,11 @@ async function LanesContent({
     projectId === undefined
       ? []
       : (await workflowServiceFor(workspaceId).list(projectId)).workflows;
-  return <LanesTab workspaceSlug={workspaceSlug} lanes={workflows} />;
+  return (
+    <LanesTab
+      workspaceSlug={workspaceSlug}
+      lanes={workflows}
+      provider={entry?.project?.ticketSource.provider ?? "github"}
+    />
+  );
 }

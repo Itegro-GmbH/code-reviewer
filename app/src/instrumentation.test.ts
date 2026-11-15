@@ -60,6 +60,24 @@ describe("starting an instance", () => {
     );
   });
 
+  // #1040
+  it("registers the Jira provider for the ticket actions of the engine and the Jira read of the mirror, and opens no database for it", async () => {
+    const { registeredTicketProvider } =
+      await import("./integrations/ticket-provider.ts");
+    const { registeredJiraMirrorSync } =
+      await import("./tracker/jira-mirror-sync.ts");
+
+    await register();
+
+    const provider = registeredTicketProvider("jira");
+    expect(provider?.commentOnTicket).toBeDefined();
+    expect(provider?.setTicketStatus).toBeDefined();
+    expect(provider?.boardless).toBe(true);
+    expect(forbidden).toEqual([]);
+    // The factory only runs with a workspace's database: `registeredJiraMirrorSync` hands out one per call.
+    expect(typeof registeredJiraMirrorSync).toBe("function");
+  });
+
   // CR-26-T03
   it("warns about a wrong LLM option and still starts", async () => {
     vi.stubEnv("LLM_MODEL", "a model with spaces");

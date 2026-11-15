@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// What a route that creates or switches on a project starts after its response (#923, #1038): the first full sync of the GitHub issues of
-// the repository. A project whose tickets are a Jira project's has none (its tickets are not those issues), and a sync that fails is
-// logged without the details of the error.
+// What a route that creates or switches on a project starts after its response (#923, #1040): the first full sync of the project's
+// tickets (the GitHub issues of the repository, or the issues of its Jira project). A source the mirror does not read has none, and a sync
+// that fails is logged without the details of the error.
 import { describe, expect, it, vi } from "vitest";
 import { firstSyncAfterActivation } from "./first-sync.ts";
 
@@ -39,11 +39,25 @@ describe("the first sync after a project was created or switched on", () => {
     expect(syncFn).toHaveBeenCalledExactlyOnceWith("r1", { deadline: 21_000 });
   });
 
-  // #1038 (finding of the review of #1044)
-  it("starts none for a project whose tickets are a Jira project's, so that no sync fails for them", async () => {
-    const { hook, scheduled, syncFn, log } = setup();
+  // #1040-T04
+  it("starts the first read of a project's Jira project the same way", async () => {
+    const { hook, scheduled, syncFn } = setup();
 
     await hook({ projectId: "p1", repositoryId: "r1", ticketProvider: "jira" });
+    await scheduled[0]?.();
+
+    expect(syncFn).toHaveBeenCalledExactlyOnceWith("r1", { deadline: 21_000 });
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("starts none for a source the mirror does not read, so that no sync fails for it", async () => {
+    const { hook, scheduled, syncFn, log } = setup();
+
+    await hook({
+      projectId: "p1",
+      repositoryId: "r1",
+      ticketProvider: "linear",
+    });
 
     expect(scheduled).toEqual([]);
     expect(syncFn).not.toHaveBeenCalled();

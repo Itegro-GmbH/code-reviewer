@@ -99,7 +99,7 @@ export function createGithubAskChannel(
           : { comment: (body, options) => comment(scope, key, body, options) }),
         ...(edit === undefined
           ? {}
-          : { edit: (commentId, body) => edit(scope, commentId, body) }),
+          : { edit: (commentId, body) => edit(scope, key, commentId, body) }),
         ...(change === undefined
           ? {}
           : { labels: (labels) => change(scope, key, labels) }),

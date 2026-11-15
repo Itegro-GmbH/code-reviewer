@@ -1022,7 +1022,7 @@
       ]
     },
     "TicketTarget": {
-      "description": "As `IssueInput`, for the action on a ticket: a positive whole number up to 2147483647, or exactly one reference to the ticket of the trigger (`{{trigger.ticket}}`, `{{trigger.ticket.number}}`, or the issue of a label trigger, `{{trigger.issue}}`) or to an input of a manual trigger that is declared `integer`. A trigger that does not yield a ticket makes the reference `reference_not_in_scope`.",
+      "description": "As `IssueInput`, for the action on a ticket: a positive whole number up to 2147483647, or exactly one reference to the ticket of the trigger (`{{trigger.ticket}}`, `{{trigger.ticket.number}}` (#1040: for a ticket of a platform that does not number its tickets, Jira, the action takes the text key `PROJ-12` of `{{trigger.ticket}}`), or the issue of a label trigger, `{{trigger.issue}}`) or to an input of a manual trigger that is declared `integer`. A trigger that does not yield a ticket makes the reference `reference_not_in_scope`.",
       "$ref": "#/$defs/IssueInput"
     }
   }

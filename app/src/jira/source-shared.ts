@@ -72,3 +72,24 @@ export function statusNamesFor(
     boardNames: boardStatusNamesFor(workspaceId),
   });
 }
+
+/**
+ * The names of the workflow statuses of a Jira project, for the defaults of the status lane of a new project (#1040). Empty when they cannot
+ * be read (the lane keeps its default names). Never throws.
+ */
+export function jiraStatusNamesFor(
+  workspaceId: string,
+): NonNullable<NewProjectDependencies["jiraStatuses"]> {
+  return async (connectionId, projectKey) => {
+    if (!isJiraConfigured()) return [];
+    try {
+      const read = await jiraReaderFor(workspaceId).listStatuses(
+        connectionId,
+        projectKey,
+      );
+      return read.ok ? read.statuses.map((status) => status.name) : [];
+    } catch {
+      return [];
+    }
+  };
+}

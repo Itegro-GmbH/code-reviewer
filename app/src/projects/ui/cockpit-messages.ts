@@ -57,7 +57,7 @@ export const NEW_PROJECT_COPY = {
   jiraRepositoryHint:
     "The tickets come from Jira; the code, the branches and the pull requests stay in this GitHub repository.",
   jiraLanesHint:
-    "Lanes that work on a ticket need the write-back to Jira and follow with it; a review lane works already.",
+    'A ticket starts a lane by moving into a status (the lane "Issue to PR (status)"); a lane that starts from a label is not offered for Jira. The status names are taken from the Jira project\'s workflow where they fit and can be changed in the lane.',
   board: "Board (optional)",
   boardHint: "Choose a repository first: its boards are read from GitHub.",
   boardsLoading: "Reading the boards of the repository…",
@@ -104,6 +104,8 @@ export const LANES_COPY = {
   emptyDescription:
     "A new project copies the built-in lanes it is asked to; others are written through the API with the project's id (docs/workflows.md).",
   note: "A lane starts from a label on a ticket of this project's repository, or by hand with a ticket of it.",
+  noteJira:
+    "A lane starts when a ticket of this project's Jira project moves into the status the lane waits for, or by hand with a ticket of it (jira:owner/repo#PROJ-12).",
   taskNote:
     "Until a lane can be started from an issue, a task goes to the agent by hand:",
   taskLink: "send a task",
