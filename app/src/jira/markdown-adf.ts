@@ -8,7 +8,14 @@
 //
 // The hidden markers the factory puts in its comments (`<!-- factory ask run=… -->`, an HTML comment on a line of its own) are not
 // written into the document (ADF cannot hide text); `extractMarkers` returns them so that the provider can keep them in a comment
-// property of Jira instead, where the factory finds its own comment again.
+// property of Jira instead, where the factory finds its own comment again. The factory writes its markers first, so only the lines at the
+// start of the comment are markers (and only a few, none long); the same line further down is text of an agent and stays text.
+//
+// A comment of the factory is written as the person who connected Jira, so the webhook sees it as that person's comment: it must never begin
+// with `/answer` (`defuseAnswer`), or a factory comment could answer a question. And the result is valid for Jira's schema (a blockquote holds
+// paragraphs, lists and code only; the depth of quotes is bounded), because Jira answers a document it does not take with a 400.
+import { parseAnswerCommand } from "../integrations/comment-command.ts";
+import { adfToText } from "./adf.ts";
 
 /** A node of an ADF document: the shapes this converter writes. */
 export type AdfNode = {
@@ -25,16 +32,44 @@ export const ADF_TEXT_MAX_CHARS = 30_000;
 
 const MARKER_LINE = /^[ \t]*<!--[^\n]*?-->[ \t]*$/;
 
-/** The HTML-comment markers of a Markdown text (one per line of their own, in order) and the text without those lines. */
-export function extractMarkers(markdown: string): {
+/** How many marker lines at the start of a comment count (the factory writes one), and how long one may be: the property stays small. */
+export const MARKERS_MAX = 3;
+export const MARKER_MAX_CHARS = 300;
+
+/**
+ * The HTML-comment markers at the start of a Markdown text (one per line of their own, in order) and the text without those lines. A line
+ * of the same shape further down is text. `own` is the marker of the step that wrote the comment (the connectors of GitHub put it at the
+ * end of the body): that line is taken from the end too.
+ */
+export function extractMarkers(
+  markdown: string,
+  own?: string,
+): {
   markers: string[];
   text: string;
 } {
+  const lines = markdown.split(/\r?\n/);
   const markers: string[] = [];
-  const kept: string[] = [];
-  for (const line of markdown.split(/\r?\n/)) {
-    if (MARKER_LINE.test(line)) markers.push(line.trim());
-    else kept.push(line);
+  let at = 0;
+  while (
+    at < lines.length &&
+    markers.length < MARKERS_MAX &&
+    MARKER_LINE.test(lines[at] ?? "") &&
+    (lines[at] ?? "").trim().length <= MARKER_MAX_CHARS
+  ) {
+    markers.push((lines[at] ?? "").trim());
+    at += 1;
+  }
+  const kept = lines.slice(at);
+  if (own !== undefined) {
+    let end = kept.length;
+    while (end > 0 && (kept[end - 1] ?? "").trim() === "") end -= 1;
+    if (end > 0 && (kept[end - 1] ?? "").trim() === own.trim()) {
+      markers.push(own.trim());
+      kept.length = end - 1;
+      while (kept.length > 0 && (kept[kept.length - 1] ?? "").trim() === "")
+        kept.pop();
+    }
   }
   return { markers, text: kept.join("\n") };
 }
@@ -174,7 +209,13 @@ function isBlockStart(line: string): boolean {
   );
 }
 
-function blocks(lines: readonly string[]): AdfNode[] {
+/** Quotes inside quotes: Jira's blockquote holds no quote, so what is deeper than this is text of the paragraph it is in. */
+const QUOTE_DEPTH_MAX = 5;
+const QUOTE_PREFIX = /^(?: {0,3}>[ ]?)+/;
+
+/** `depth` is the number of quotes the lines are in; inside a quote only paragraphs, lists and code are written (Jira's schema). */
+function blocks(lines: readonly string[], depth = 0): AdfNode[] {
+  const inQuote = depth > 0;
   const out: AdfNode[] = [];
   let at = 0;
   while (at < lines.length) {
@@ -205,16 +246,20 @@ function blocks(lines: readonly string[]): AdfNode[] {
     const heading = HEADING.exec(line);
     if (heading !== null) {
       const content = inline((heading[2] ?? "").trim());
-      out.push({
-        type: "heading",
-        attrs: { level: (heading[1] ?? "#").length },
-        content,
-      });
+      out.push(
+        inQuote
+          ? { type: "paragraph", content }
+          : {
+              type: "heading",
+              attrs: { level: (heading[1] ?? "#").length },
+              content,
+            },
+      );
       at += 1;
       continue;
     }
     if (RULE.test(line)) {
-      out.push({ type: "rule" });
+      if (!inQuote) out.push({ type: "rule" });
       at += 1;
       continue;
     }
@@ -224,11 +269,18 @@ function blocks(lines: readonly string[]): AdfNode[] {
         quoted.push(QUOTE.exec(lines[at] ?? "")?.[1] ?? "");
         at += 1;
       }
-      const inner = blocks(quoted);
-      out.push({
-        type: "blockquote",
-        content: inner.length === 0 ? [paragraph([""])] : inner,
-      });
+      if (depth >= QUOTE_DEPTH_MAX) {
+        out.push(paragraph(quoted.map((q) => q.replace(QUOTE_PREFIX, ""))));
+        continue;
+      }
+      const inner = blocks(quoted, depth + 1);
+      // A quote in a quote is not nested (Jira refuses that): its blocks are the blocks of the quote around it.
+      if (inQuote) out.push(...inner);
+      else
+        out.push({
+          type: "blockquote",
+          content: inner.length === 0 ? [paragraph([""])] : inner,
+        });
       continue;
     }
     const ordered = ORDERED.test(line);
@@ -270,18 +322,63 @@ function blocks(lines: readonly string[]): AdfNode[] {
   return out;
 }
 
+/** The text cut at the limit of a comment (counted in characters, not in UTF-16 units). */
+function bounded(text: string): string {
+  const characters = Array.from(text);
+  return characters.length > ADF_TEXT_MAX_CHARS
+    ? `${characters.slice(0, ADF_TEXT_MAX_CHARS - 1).join("")}…`
+    : text;
+}
+
+const ZERO_WIDTH_SPACE = "\u200b";
+
+/**
+ * Makes sure the text of the document does not begin with `/answer` (the way the webhook reads a comment, whatever the formatting around
+ * it): an invisible character goes in front of the first word. The document is changed in place.
+ */
+function defuseAnswer(doc: AdfDocument): AdfDocument {
+  if (parseAnswerCommand(adfToText(doc)) === null) return doc;
+  const first = (nodes: readonly AdfNode[]): AdfNode | undefined => {
+    for (const node of nodes) {
+      if (node.type === "text" && (node.text ?? "").trim() !== "") return node;
+      const inner = first(node.content ?? []);
+      if (inner !== undefined) return inner;
+    }
+    return undefined;
+  };
+  const node = first(doc.content);
+  if (node?.text !== undefined)
+    node.text = node.text.replace(/^(\s*)/, `$1${ZERO_WIDTH_SPACE}`);
+  return doc;
+}
+
 /** The ADF document of a Markdown text (markers already taken out with `extractMarkers`). Never empty: Jira refuses a document without content. */
 export function markdownToAdf(markdown: string): AdfDocument {
-  const bounded =
-    Array.from(markdown).length > ADF_TEXT_MAX_CHARS
-      ? `${Array.from(markdown)
-          .slice(0, ADF_TEXT_MAX_CHARS - 1)
-          .join("")}…`
-      : markdown;
-  const content = blocks(bounded.replace(/\r\n?/g, "\n").split("\n"));
-  return {
+  const content = blocks(bounded(markdown).replace(/\r\n?/g, "\n").split("\n"));
+  return defuseAnswer({
     version: 1,
     type: "doc",
     content: content.length === 0 ? [paragraph(["(empty)"])] : content,
-  };
+  });
+}
+
+/** The text as it is, no Markdown: paragraphs at the blank lines, a line break between lines. What a comment falls back to when Jira refuses the formatted one. */
+export function plainTextToAdf(text: string): AdfDocument {
+  const paragraphs = bounded(text)
+    .replace(/\r\n?/g, "\n")
+    .split(/\n[ \t]*\n/)
+    .map((part) => part.split("\n").filter((line) => line.trim() !== ""))
+    .filter((lines) => lines.length > 0)
+    .map((lines): AdfNode => ({
+      type: "paragraph",
+      content: lines.flatMap((line, index) => [
+        ...(index === 0 ? [] : [{ type: "hardBreak" }]),
+        { type: "text", text: line.trim() },
+      ]),
+    }));
+  return defuseAnswer({
+    version: 1,
+    type: "doc",
+    content: paragraphs.length === 0 ? [paragraph(["(empty)"])] : paragraphs,
+  });
 }

@@ -18,7 +18,11 @@ import {
   type TicketProviderErrorCode,
 } from "../integrations/ticket-provider.ts";
 import { isJiraIssueKey } from "./issue.ts";
-import { extractMarkers, markdownToAdf } from "./markdown-adf.ts";
+import {
+  extractMarkers,
+  markdownToAdf,
+  plainTextToAdf,
+} from "./markdown-adf.ts";
 import type { JiraProjectReader } from "./projects.ts";
 import type { JiraTokens } from "./tokens.ts";
 
@@ -157,17 +161,54 @@ export function createJiraTicketWriter(
   const commentPath = (key: string) =>
     `/rest/api/3/issue/${encodeURIComponent(key)}/comment`;
 
-  /** The ADF and the properties of a Markdown comment: the markers are kept as a property, not written into the document. */
-  function commentPayload(body: string, extra: readonly string[] = []) {
-    const { markers, text } = extractMarkers(body);
-    const all = [...new Set([...markers, ...extra])];
-    return {
-      body: markdownToAdf(text),
-      properties:
-        all.length === 0
-          ? []
-          : [{ key: MARKER_PROPERTY, value: { markers: all } }],
-    };
+  /**
+   * The ADF and the properties of a Markdown comment: the markers are kept as a property, not written into the document. `own` is the
+   * marker of the step (also put into the property). A converter that fails is a `ticket_rejected`, never an exception of its own;
+   * `plain` writes the text as it is (the second try when Jira refuses the formatted body).
+   */
+  function commentPayload(
+    body: string,
+    own: string | undefined,
+    plain = false,
+  ) {
+    try {
+      const { markers, text } = extractMarkers(body, own);
+      const all = [...new Set(own === undefined ? markers : [...markers, own])];
+      return {
+        body: plain ? plainTextToAdf(text) : markdownToAdf(text),
+        properties:
+          all.length === 0
+            ? []
+            : [{ key: MARKER_PROPERTY, value: { markers: all } }],
+      };
+    } catch {
+      throw fail("ticket_rejected");
+    }
+  }
+
+  /**
+   * A comment (a POST, or a PUT of a comment's id) with its body as ADF. Jira answers a document it does not take with a 400: the comment
+   * is then sent once more as plain text, so that what the factory has to say reaches the ticket.
+   */
+  async function writeComment(
+    connectionId: string,
+    path: string,
+    method: "POST" | "PUT",
+    body: string,
+    own: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<Response> {
+    const send = (plain: boolean) =>
+      call(
+        connectionId,
+        path,
+        jsonInit(method, commentPayload(body, own, plain), signal),
+      );
+    const first = await send(false);
+    if (failureOf(first.status).code !== "ticket_rejected" || first.ok)
+      return first;
+    await first.body?.cancel().catch(() => undefined);
+    return send(true);
   }
 
   const linkOf = async (connectionId: string, key: string, id: string) => {
@@ -254,14 +295,13 @@ export function createJiraTicketWriter(
             id: existing,
           };
       }
-      const response = await call(
+      const response = await writeComment(
         connectionId,
         commentPath(key),
-        jsonInit(
-          "POST",
-          commentPayload(body, marker === undefined ? [] : [marker]),
-          signal,
-        ),
+        "POST",
+        body,
+        marker,
+        signal,
       );
       if (response.status !== 201 && response.status !== 200) {
         await response.body?.cancel().catch(() => undefined);
@@ -281,10 +321,13 @@ export function createJiraTicketWriter(
       if (!isJiraIssueKey(key) || !/^\d{1,19}$/.test(commentId))
         throw fail("ticket_not_found");
       // The properties are replaced with the markers of the new body: `answered` takes the place of `ask`.
-      const response = await call(
+      const response = await writeComment(
         connectionId,
         `${commentPath(key)}/${commentId}?notifyUsers=false`,
-        jsonInit("PUT", commentPayload(body), signal),
+        "PUT",
+        body,
+        undefined,
+        signal,
       );
       await response.body?.cancel().catch(() => undefined);
       if (!response.ok) throw failureOf(response.status);

@@ -344,8 +344,10 @@ export function createJiraWebhookHandler(
       }
 
       // A comment that begins with `/answer` answers the question of the run that waits on this issue. Whoever can comment on the issue in
-      // Jira can answer (Jira's own permission to comment is the access check, as write access is for GitHub); an app's comment, the
-      // factory's own question and records included, never does (they never begin with the command either).
+      // Jira can answer (Jira's own permission to comment is the access check, as write access is for GitHub). The factory writes its comments
+      // as the person who connected Jira (OAuth 3LO has no author of its own of an app), so they look like that person's: the writer never
+      // lets one begin with the command (`markdown-adf.ts`, `defuseAnswer`), and that keeps the factory's questions and records from
+      // answering. Only a comment of an account of another type (an app) is skipped here.
       let answer: "answered" | "not_taken" | undefined;
       if (
         change.kind === "issue_changed" &&

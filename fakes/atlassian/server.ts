@@ -14,7 +14,7 @@
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>          one project by key or id (404 for an unknown one, as Jira also answers for a project the account cannot browse)
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>/statuses  the workflow statuses of a project, by issue type (404 for an unknown key)
 //   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>            one issue (REST shape, `fields` is not filtered); 404 for an unknown key (#1039)
-//   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment    adds a comment (`body` is ADF; `properties`), authored by the account that granted (#1040)
+//   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment    adds a comment (`body` is ADF, a blockquote that holds more than paragraphs, lists and code is refused with 400; `properties`), authored by the account that granted (#1040)
 //   PUT  /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment/<id>  replaces the body (and the properties, when given) of a comment; 404 for an unknown one
 //   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment    the comments, paged (`startAt`, `maxResults`, `orderBy=-created`, `expand=properties`)
 //   PUT  /ex/jira/<cloudId>/rest/api/3/issue/<key>            `update.labels` (`add`, `remove`) and `fields.labels`: a label with a space is refused (400) as Jira does
@@ -525,6 +525,31 @@ export async function startAtlassianFake(
       entry,
     );
 
+  /** Jira's schema: a blockquote holds paragraphs, lists, code and media only; a body that breaks it is answered with a 400. */
+  function breaksBlockquoteRule(node: unknown): boolean {
+    if (typeof node !== "object" || node === null) return false;
+    const { type, content } = node as { type?: unknown; content?: unknown };
+    const children: unknown[] = Array.isArray(content) ? content : [];
+    if (
+      type === "blockquote" &&
+      children.some(
+        (child) =>
+          typeof child !== "object" ||
+          child === null ||
+          ![
+            "paragraph",
+            "bulletList",
+            "orderedList",
+            "codeBlock",
+            "mediaSingle",
+            "mediaGroup",
+          ].includes(String((child as { type?: unknown }).type)),
+      )
+    )
+      return true;
+    return children.some(breaksBlockquoteRule);
+  }
+
   /** What Jira offers below an issue (comments, labels, transitions) and the JQL search; true when the request was answered here. */
   function handleIssueApi(
     method: string,
@@ -766,6 +791,18 @@ export async function startAtlassianFake(
       updated: comment.updated.replace(/Z$/, "+0000"),
       ...(withProperties ? { properties: comment.properties } : {}),
     });
+    if (
+      (method === "POST" || method === "PUT") &&
+      breaksBlockquoteRule(input.body)
+    ) {
+      json(
+        response,
+        400,
+        { errorMessages: ["INVALID_INPUT"], errors: {} },
+        entry,
+      );
+      return true;
+    }
     if (id === undefined && method === "POST") {
       const created = newComment(cloudId, key, {
         body: input.body,

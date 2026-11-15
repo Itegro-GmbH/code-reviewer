@@ -14,12 +14,14 @@ import { createProjectsRepository } from "../db/repositories/projects-repository
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-deliveries-repository.ts";
+import { parseAnswerCommand } from "../integrations/comment-command.ts";
 import type { RepoRef } from "../integrations/types.ts";
 import { createProjectService } from "../projects/service.ts";
 import { createJiraHarness } from "../test-support/jira-harness.ts";
 import { startWebhookReceiver } from "../test-support/jira-webhook-receiver.ts";
 import type { ActionCall } from "../workflow-runs/connectors.ts";
 import { createGithubConnectors } from "../workflow-runs/github-connectors.ts";
+import { adfToText } from "./adf.ts";
 import { createJiraIssueReader } from "./issue-reader.ts";
 import { createJiraIssueSearch } from "./issue-search.ts";
 import { createJiraMirror } from "./mirror.ts";
@@ -328,6 +330,24 @@ describe("the ticket actions of a lane on a Jira ticket", () => {
     await expect(
       w.provider.updateTicketComment?.(w.jiraScope, "PROJ-7", "999999", "x"),
     ).rejects.toMatchObject({ code: "ticket_not_found" });
+  });
+
+  // #1040-T01
+  it("writes hostile Markdown that Jira's schema accepts (no heading, rule or quote in a quote), and a comment that begins with /answer is no answer", async () => {
+    const w = await world();
+    const { atlassian } = w.h;
+    atlassian.setIssues(SITE.id, [issue(7)]);
+
+    await w.run("ticket.comment", {
+      ticket: "PROJ-7",
+      body: `> # Heading\n> ---\n> > deep\n${">".repeat(5000)}x`,
+    });
+    await w.run("ticket.comment", { ticket: "PROJ-7", body: "/answer 1" });
+
+    const [quoted, command] = atlassian.comments(SITE.id, "PROJ-7");
+    expect(adfToText(quoted?.body)).toContain("Heading");
+    expect(parseAnswerCommand(adfToText(command?.body))).toBeNull();
+    expect(adfToText(command?.body)).toContain("answer 1");
   });
 
   // #1040-T01
