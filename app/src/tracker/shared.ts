@@ -11,6 +11,7 @@ import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-r
 import { getDatabase } from "../db/startup.ts";
 import { ticketProviderRegistry } from "../integrations/registry.ts";
 import { projectServiceFor } from "../projects/shared.ts";
+import { registeredJiraMirrorSync } from "./jira-mirror-sync.ts";
 import { createTrackerMirror, type TrackerMirror } from "./mirror.ts";
 import { listResyncTargets, type ResyncTarget } from "./resync-targets.ts";
 import { createTrackerService, type TrackerService } from "./service.ts";
@@ -71,6 +72,7 @@ export function trackerMirrorFor(workspaceId: string): TrackerMirror {
 /** The list of the tickets and the full sync of one workspace. */
 export function trackerServiceFor(workspaceId: string): TrackerService {
   const db = getDatabase();
+  const jira = registeredJiraMirrorSync(workspaceId);
   return createTrackerService({
     repositories: createRepositoriesRepository(db, workspaceId),
     integrations: createIntegrationsRepository(db, workspaceId),
@@ -78,6 +80,7 @@ export function trackerServiceFor(workspaceId: string): TrackerService {
     tracker: createTrackerRepository(db, workspaceId),
     runs: createWorkflowRunsRepository(db, workspaceId),
     sync: trackerSyncFor(workspaceId),
+    ...(jira === undefined ? {} : { jira }),
   });
 }
 
@@ -87,7 +90,10 @@ export function resyncTargets(): Promise<ResyncTarget[]> {
   return listResyncTargets({
     integrations: () => createIntegrationDirectory(db).list(),
     projectsOf: (workspaceId) => projectServiceFor(workspaceId).listProjects(),
-    syncStateOf: (workspaceId, repositoryId) =>
-      createTrackerRepository(db, workspaceId).getSyncState(repositoryId),
+    syncStateOf: (workspaceId, repositoryId, provider) =>
+      createTrackerRepository(db, workspaceId).getSyncState(
+        repositoryId,
+        provider,
+      ),
   });
 }

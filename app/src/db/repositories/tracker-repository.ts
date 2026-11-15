@@ -295,7 +295,12 @@ export type TrackerRepository = {
    * Removes the items not written since `before`; answers how many. Tombstones go only when they were written last more than
    * `TOMBSTONE_KEPT_MS` before `before`.
    */
-  removeNotWrittenSince(repositoryId: string, before: string): Promise<number>;
+  removeNotWrittenSince(
+    repositoryId: string,
+    before: string,
+    /** Only the rows of this provider (#1040: the Jira resync); left out: every row of the repository, as before. */
+    provider?: string,
+  ): Promise<number>;
   /**
    * Removes every cached item and sync state of the repository that belongs to another provider than `keep` (#1039): a project that
    * switches its tickets from GitHub issues to a Jira project (or back) must not show, or collide on the numbers with, the other provider's
@@ -311,7 +316,11 @@ export type TrackerRepository = {
     repositoryId: string,
     projectKey: string | null,
   ): Promise<number>;
-  getSyncState(repositoryId: string): Promise<TrackerSyncState | undefined>;
+  /** The sync state of the repository for `provider` (default GitHub; the Jira resync keeps its own, #1040). */
+  getSyncState(
+    repositoryId: string,
+    provider?: string,
+  ): Promise<TrackerSyncState | undefined>;
   /**
    * Starts a sync in one atomic step, unless one is under way: the state is written (this cursor and start, nothing else changes) only
    * when the repository has no sync, the last one ended, it has not moved since `staleBefore` (its `updatedAt` is bumped with every
@@ -335,6 +344,8 @@ export type TrackerRepository = {
       startedAt?: string | null;
       lastFullSyncAt?: string | null;
     },
+    /** The provider the state belongs to; default GitHub. */
+    provider?: string,
   ): Promise<void>;
 };
 
@@ -482,13 +493,14 @@ export function createTrackerRepository(
 
   const getSyncState: TrackerRepository["getSyncState"] = async (
     repositoryId,
+    provider = SYNC_PROVIDER,
   ) => {
     const row = await db
       .selectFrom("tracker_sync_state")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
-      .where("provider", "=", SYNC_PROVIDER)
+      .where("provider", "=", provider)
       .executeTakeFirst();
     return row === undefined ? undefined : syncStateFrom(row);
   };
@@ -826,14 +838,15 @@ export function createTrackerRepository(
       return Number(result.numDeletedRows);
     },
 
-    async removeNotWrittenSince(repositoryId, before) {
-      const result = await db
+    async removeNotWrittenSince(repositoryId, before, provider) {
+      let live = db
         .deleteFrom("tracker_items")
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("synced_at", "<", before)
-        .where("deleted_at", "is", null)
-        .executeTakeFirst();
+        .where("deleted_at", "is", null);
+      if (provider !== undefined) live = live.where("provider", "=", provider);
+      const result = await live.executeTakeFirst();
       // A tombstone is not counted: it is an item that was already gone. It stays for a while for the deliveries that come late.
       await db
         .deleteFrom("tracker_items")
@@ -884,7 +897,7 @@ export function createTrackerRepository(
       return { claimed: false, state: await getSyncState(repositoryId) };
     },
 
-    async saveSyncState(repositoryId, state) {
+    async saveSyncState(repositoryId, state, provider = SYNC_PROVIDER) {
       const at = formatTimestamp(now());
       const columns = [
         sql`project_id = coalesce(excluded.project_id, tracker_sync_state.project_id)`,
@@ -900,7 +913,7 @@ export function createTrackerRepository(
         sql`updated_at = excluded.updated_at`,
       ];
       await sql`insert into tracker_sync_state (repository_id, provider, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, ${SYNC_PROVIDER}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
+        select r.id, ${provider}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
           ${state.lastFullSyncAt ?? null}::text, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}

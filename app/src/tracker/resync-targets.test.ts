@@ -116,12 +116,13 @@ describe("the projects of the nightly resync", () => {
   });
 
   // #1038
-  it("leaves out a project whose tickets are not GitHub's: the mirror of the issues is not theirs", async () => {
-    const { run } = setup(
+  it("takes a project on a Jira project (#1040) and leaves out one whose tickets the mirror cannot read", async () => {
+    const { run, getSyncState } = setup(
       {
         "w-1": [
           entry("r-github", { provider: "github" }),
           entry("r-jira", { provider: "jira" }),
+          entry("r-other", { provider: "linear" }),
         ],
       },
       [{ workspaceId: "w-1", status: "active" }],
@@ -129,6 +130,12 @@ describe("the projects of the nightly resync", () => {
 
     expect((await run()).map((target) => target.repositoryId)).toEqual([
       "r-github",
+      "r-jira",
+    ]);
+    // The sync state of a Jira project is its own (provider `jira`), not GitHub's.
+    expect(getSyncState.mock.calls).toEqual([
+      ["w-1", "r-github", undefined],
+      ["w-1", "r-jira", "jira"],
     ]);
   });
 
@@ -148,9 +155,9 @@ describe("the projects of the nightly resync", () => {
 
     expect(listProjects.mock.calls.map(([w]) => w)).toEqual(["w-1", "w-2"]);
     expect(getSyncState.mock.calls).toEqual([
-      ["w-1", "r-1"],
-      ["w-1", "r-2"],
-      ["w-2", "r-3"],
+      ["w-1", "r-1", undefined],
+      ["w-1", "r-2", undefined],
+      ["w-2", "r-3", undefined],
     ]);
   });
 

@@ -25,6 +25,8 @@ export type ResyncTargetDependencies = {
   syncStateOf: (
     workspaceId: string,
     repositoryId: string,
+    /** The provider whose sync state is wanted (`jira` for a project on a Jira project, #1040); GitHub's otherwise. */
+    provider?: string,
   ) => Promise<TrackerSyncState | undefined>;
   logFailure?: (line: string) => void;
 };
@@ -47,13 +49,14 @@ export async function listResyncTargets(
           entry.repository.integration.status !== "active"
         )
           continue;
-        // The mirror holds GitHub issues: a project whose tickets come from elsewhere (Jira, #1038) has nothing to resync yet.
-        if (
-          entry.project !== null &&
-          entry.project.ticketSource.provider !== "github"
-        )
-          continue;
-        const state = await deps.syncStateOf(workspaceId, entry.repository.id);
+        // The mirror holds GitHub issues and, since #1040, the issues of a project's Jira project; no other source is mirrored.
+        const provider = entry.project?.ticketSource.provider ?? "github";
+        if (provider !== "github" && provider !== "jira") continue;
+        const state = await deps.syncStateOf(
+          workspaceId,
+          entry.repository.id,
+          provider === "jira" ? "jira" : undefined,
+        );
         targets.push({
           workspaceId,
           repositoryId: entry.repository.id,

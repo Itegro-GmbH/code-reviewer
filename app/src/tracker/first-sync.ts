@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // What a route that creates or switches on a project does after its response (#923): the first full sync of the tickets of the repository.
-// The sync reads the GitHub issues, so a project whose tickets are another provider's (a Jira project, #1038) has none: its repository is
-// where the code lives, and a sync of it would only fail. The ticket mirror depends on the projects module, so the hook is handed to the
-// project service by the routes and never imported there.
+// The sync reads the GitHub issues, or since #1040 the issues of the project's Jira project (`TrackerService.sync` picks the source). A
+// source the mirror does not read has none. The ticket mirror depends on the projects module, so the hook is handed to the project
+// service by the routes and never imported there.
 import type { ProjectActivatedEvent } from "../projects/hooks.ts";
 
 export type FirstSyncDependencies = {
@@ -25,7 +25,7 @@ export function firstSyncAfterActivation({
   log = (line) => console.error(line),
 }: FirstSyncDependencies): (event: ProjectActivatedEvent) => Promise<void> {
   return async ({ repositoryId, ticketProvider }) => {
-    if (ticketProvider !== "github") return;
+    if (ticketProvider !== "github" && ticketProvider !== "jira") return;
     schedule(() =>
       sync(repositoryId, { deadline: now() + budgetMs }).then(
         () => undefined,

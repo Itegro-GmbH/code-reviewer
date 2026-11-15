@@ -166,6 +166,7 @@ describe("the list of the tickets of a project's repository", () => {
     });
     expect(list.items.map((item) => item.number)).toEqual([3, 1]);
     expect(list.items[1]).toEqual({
+      key: "1",
       number: 1,
       kind: "issue",
       state: "open",

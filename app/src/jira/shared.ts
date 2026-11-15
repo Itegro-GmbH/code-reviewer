@@ -6,6 +6,8 @@ import "server-only";
 import { loadAuthConfig } from "../auth/config.ts";
 import { lookupSessionId } from "../auth/session.ts";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
+import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
+import type { JiraMirrorSync } from "../tracker/service.ts";
 import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createWorkspacesRepository } from "../db/repositories/workspaces-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -13,7 +15,10 @@ import { sessionOfRequest } from "../github-signin/shared.ts";
 import { assembleJira, type AssembledJira } from "./assemble.ts";
 import { readAtlassianConfig, type AtlassianConfig } from "./config.ts";
 import { createJiraIssueReader, type JiraIssueReader } from "./issue-reader.ts";
+import { createJiraIssueSearch } from "./issue-search.ts";
+import { createJiraMirror } from "./mirror.ts";
 import { createJiraProjectReader } from "./projects.ts";
+import { createJiraResync } from "./resync.ts";
 import { createJiraTicketProvider } from "./ticket-provider.ts";
 import {
   createJiraTicketWriter,
@@ -93,3 +98,24 @@ export const jiraTicketProvider = createJiraTicketProvider({
   readerFor: async (workspaceId) => jiraIssueReaderFor(workspaceId),
   writerFor: async (workspaceId) => jiraTicketWriterFor(workspaceId),
 });
+
+/**
+ * The full read of a Jira project into the ticket mirror of one workspace (#1040): the first read after a project is set up, the nightly
+ * resync and the "Resync" button. Registered for the process at its start (`instrumentation.ts`, `tracker/jira-mirror-sync.ts`).
+ */
+export function jiraMirrorSyncFor(workspaceId: string): JiraMirrorSync {
+  const db = getDatabase();
+  const connections = createJiraConnectionsRepository(db, workspaceId);
+  const tracker = createTrackerRepository(db, workspaceId);
+  const siteUrlOf = async (connectionId: string) =>
+    (await connections.get(connectionId))?.siteUrl;
+  const resync = createJiraResync({
+    tracker,
+    search: createJiraIssueSearch({
+      tokens: getJira().tokensFor(workspaceId),
+      siteUrlOf,
+    }),
+    mirror: createJiraMirror({ tracker }),
+  });
+  return { siteUrlOf, sync: (target, options) => resync.run(target, options) };
+}

@@ -51,8 +51,13 @@ export async function register(): Promise<void> {
   // `jira` (an import cycle), so the provider is registered once here. It opens nothing: the connection is looked up with each call.
   const { registerTicketProvider } =
     await import("./integrations/ticket-provider.ts");
-  const { jiraTicketProvider } = await import("./jira/shared.ts");
+  const { jiraMirrorSyncFor, jiraTicketProvider } =
+    await import("./jira/shared.ts");
   registerTicketProvider(jiraTicketProvider);
+  // The same for the full read of a Jira project into the ticket mirror (the first read, the nightly resync and the button).
+  const { registerJiraMirrorSync } =
+    await import("./tracker/jira-mirror-sync.ts");
+  registerJiraMirrorSync(jiraMirrorSyncFor);
   const { warnAboutDebounce } = await import("./webhooks/debounce-config.ts");
   warnAboutDebounce(process.env);
 }

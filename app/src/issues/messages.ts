@@ -19,7 +19,7 @@ export const BOARD_COPY = {
   noneOpenDescription:
     "Every issue of this repository is closed. Show all issues to see them.",
   footnote:
-    "Nothing is translated: state, type, labels and board status are GitHub's own words. The factory only adds which lane is on an issue and at which step.",
+    "Nothing is translated: state, type, labels and board status are the ticket source's own words (GitHub's, or Jira's status names). The factory only adds which lane is on an issue and at which step.",
   filterLabel: "Show",
   filterOpen: "Open issues",
   filterAll: "All issues",
