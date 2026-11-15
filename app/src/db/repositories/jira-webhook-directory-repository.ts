@@ -23,7 +23,8 @@ export type JiraWebhookDirectory = {
   findById(id: string): Promise<DirectoryJiraWebhook | undefined>;
   /**
    * The projects the nightly job walks, of every workspace: those that have a webhook row, and the active projects whose ticket source is a
-   * Jira project and that have none (a registration that never got as far as its row). At most `limit`, those with a row first.
+   * Jira project and that have none (a registration that never got as far as its row). At most `limit`: those with a row first, and of
+   * those the ones that are not registered yet, then the ones that end first, so a run that is cut short leaves the ones with most time left.
    */
   listProjects(
     limit: number,
@@ -58,7 +59,7 @@ export function createJiraWebhookDirectory(
     async listProjects(limit) {
       const { rows } = await sql<{ workspace_id: string; project_id: string }>`
         select workspace_id, project_id from (
-          select workspace_id, project_id, 0 as rank, created_at as at, id as tie from jira_webhooks
+          select workspace_id, project_id, 0 as rank, coalesce(expires_at, '') as at, id as tie from jira_webhooks
           union all
           select r.workspace_id, p.id, 1, p.created_at, p.id
           from projects p

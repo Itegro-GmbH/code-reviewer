@@ -8,8 +8,10 @@
 //
 //  - One webhook's failure never stops the others: each is tried on its own and logged by its project id and the code of its failure.
 //  - A deployment without the factory (`implementer`), or without the Atlassian settings, touches nothing and answers `skipped`.
-//  - The run has a budget (the function's time limit is longer); the webhooks it does not reach are counted `deferred` and come first
-//    the next night (the list is oldest first, and one that failed is retried at the next run anyway).
+//  - The run has a budget (the function's time limit is longer); the webhooks it does not reach are counted `deferred`. The list is
+//    ordered by what is most urgent: the ones that are not registered yet, then the ones that end first. A webhook that was deferred is
+//    still not extended the next night, so it is then ahead of the ones that were. (A site with so many projects that the budget
+//    is not enough would need more than one run a night; five webhooks per connection make that remote.)
 //  - Overlapping runs are safe: a webhook that was extended is not extended again, and two registrations of one project leave the row at
 //    the last one.
 // The answer carries counts only.

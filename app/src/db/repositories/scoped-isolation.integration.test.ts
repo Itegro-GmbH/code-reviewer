@@ -2734,6 +2734,12 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBe(0),
   },
   {
+    // #1039: B's Jira rows are not A's to clear
+    name: "tracker.clearJiraItemsOutside",
+    run: (a, b) => a.tracker.clearJiraItemsOutside(b.repository.id, null),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
     name: "tracker.getSyncState",
     run: (a, b) => a.tracker.getSyncState(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
@@ -2988,6 +2994,7 @@ const CASES: Case[] = [
         b.jiraWebhookId,
         "1000",
         "2026-12-14T00:00:00.000Z",
+        "other",
       ),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
@@ -3004,8 +3011,14 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {
-    name: "jiraWebhooks.reset",
-    run: (a, b) => a.jiraWebhooks.reset(b.jiraWebhookId, "other"),
+    name: "jiraWebhooks.beginRegistration",
+    run: (a, b) =>
+      a.jiraWebhooks.beginRegistration(b.jiraWebhookId, "other", null),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markBearerSeen",
+    run: (a, b) => a.jiraWebhooks.markBearerSeen(b.jiraWebhookId),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   {

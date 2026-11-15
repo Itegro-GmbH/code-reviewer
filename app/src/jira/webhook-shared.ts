@@ -3,6 +3,7 @@
 // The wiring of `POST /api/webhooks/jira` on the running server (#1039): the real database, the Atlassian settings read on every request,
 // and for each workspace its projects, repositories, ticket mirror and (handed in by the route) the status trigger of the workflow engine.
 import "server-only";
+import { createJiraWebhooksRepository } from "../db/repositories/jira-webhooks-repository.ts";
 import { createJiraWebhookDirectory } from "../db/repositories/jira-webhook-directory-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
@@ -35,6 +36,7 @@ export function getJiraWebhookHandler(
     workspace: (workspaceId) => {
       const repositories = createRepositoriesRepository(db, workspaceId);
       return {
+        registrations: createJiraWebhooksRepository(db, workspaceId),
         projects: createProjectsRepository(db, workspaceId),
         repositoryName: async (repositoryId) =>
           (await repositories.get(repositoryId))?.fullName,

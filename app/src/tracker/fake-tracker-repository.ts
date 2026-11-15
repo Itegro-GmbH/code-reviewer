@@ -42,9 +42,13 @@ export function createFakeTrackerRepository(
     [...items.values()].filter(
       (item) => item.repositoryId === repositoryId && item.deletedAt === null,
     );
-  const visible = (repositoryId: string, number: number) => {
+  const visible = (repositoryId: string, number: number, provider?: string) => {
     const row = items.get(key(repositoryId, number));
-    return row === undefined || row.deletedAt !== null ? undefined : row;
+    return row === undefined ||
+      row.deletedAt !== null ||
+      (provider !== undefined && row.provider !== provider)
+      ? undefined
+      : row;
   };
   const strip = (row: Row): TrackerItem => {
     const copy: Partial<Row> = { ...row };
@@ -118,8 +122,8 @@ export function createFakeTrackerRepository(
       });
       return true;
     },
-    async getItem(repositoryId, number) {
-      const row = visible(repositoryId, number);
+    async getItem(repositoryId, number, provider) {
+      const row = visible(repositoryId, number, provider);
       return row === undefined ? undefined : strip(row);
     },
     async findItemByNode(nodeId) {
@@ -156,8 +160,8 @@ export function createFakeTrackerRepository(
         .slice(filter.offset ?? 0, (filter.offset ?? 0) + filter.limit)
         .map(strip);
     },
-    async deleteItem(repositoryId, number, at) {
-      const row = visible(repositoryId, number);
+    async deleteItem(repositoryId, number, at, provider) {
+      const row = visible(repositoryId, number, provider);
       if (row === undefined || row.updatedAt > at) return false;
       items.set(key(repositoryId, number), {
         ...row,
@@ -181,8 +185,8 @@ export function createFakeTrackerRepository(
         }
       return changed;
     },
-    async setParent(repositoryId, number, parent, at) {
-      const item = visible(repositoryId, number);
+    async setParent(repositoryId, number, parent, at, provider) {
+      const item = visible(repositoryId, number, provider);
       if (item === undefined || item.updatedAt > at) return false;
       items.set(key(repositoryId, number), {
         ...item,
@@ -303,6 +307,18 @@ export function createFakeTrackerRepository(
       let removed = 0;
       for (const item of [...items.values()]) {
         if (item.repositoryId !== repositoryId || item.provider === keep)
+          continue;
+        items.delete(key(repositoryId, item.number));
+        removed += 1;
+      }
+      return removed;
+    },
+    async clearJiraItemsOutside(repositoryId, projectKey) {
+      let removed = 0;
+      for (const item of [...items.values()]) {
+        if (item.repositoryId !== repositoryId || item.provider !== "jira")
+          continue;
+        if (projectKey !== null && item.key.startsWith(`${projectKey}-`))
           continue;
         items.delete(key(repositoryId, item.number));
         removed += 1;

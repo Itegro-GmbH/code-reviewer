@@ -180,3 +180,62 @@ describe("extending and deleting webhooks", () => {
     });
   });
 });
+
+describe("listing the webhooks of the app", () => {
+  // #1039
+  it("reads every page and answers the id, the filter and the end of each webhook", async () => {
+    const { api, calls } = apiAnswering((call) =>
+      call.path.includes("startAt=0")
+        ? reply(200, {
+            values: [
+              {
+                id: 1000,
+                jqlFilter: "project = A",
+                expirationDate: "2026-12-14T10:00:00.000+0000",
+              },
+            ],
+            isLast: false,
+          })
+        : reply(200, {
+            values: [
+              {
+                id: 1001,
+                jqlFilter: "project = B",
+                expirationDate: "2026-12-15T10:00:00.000+0000",
+              },
+              { id: "no", jqlFilter: 3 },
+            ],
+            isLast: true,
+          }),
+    );
+    expect(await api.list("conn-1")).toEqual({
+      ok: true,
+      webhooks: [
+        {
+          id: "1000",
+          jql: "project = A",
+          expiresAt: "2026-12-14T10:00:00.000Z",
+        },
+        {
+          id: "1001",
+          jql: "project = B",
+          expiresAt: "2026-12-15T10:00:00.000Z",
+        },
+      ],
+    });
+    expect(calls.map((call) => call.init?.method)).toEqual(["GET", "GET"]);
+    expect(calls[0]?.path).toBe("/rest/api/3/webhook?startAt=0&maxResults=100");
+  });
+
+  // #1039
+  it("is a failure when Jira refuses or is not reachable", async () => {
+    expect(await apiAnswering(() => reply(403)).api.list("c")).toEqual({
+      ok: false,
+      error: "jira_forbidden",
+    });
+    expect(await apiAnswering(() => reply(503)).api.list("c")).toEqual({
+      ok: false,
+      error: "jira_unavailable",
+    });
+  });
+});

@@ -1698,6 +1698,12 @@ export interface JiraWebhooksTable {
   project_key: string;
   /** SHA-256 (hex) of the secret in the address Jira calls. */
   secret_hash: string;
+  /** SHA-256 (hex) of the secret of a registration under way, accepted next to `secret_hash`; null otherwise. */
+  pending_secret_hash: string | null;
+  /** When the webhook was registered; null until it is. */
+  registered_at: string | null;
+  /** When a bearer token that verified was first seen on a delivery; null while none was (trust on first use). */
+  bearer_seen_at: string | null;
   /** `pending`, `active` or `removing` (JIRA_WEBHOOK_STATUSES). */
   status: string;
   /** Jira's id of the registered webhook; null until it is registered. */

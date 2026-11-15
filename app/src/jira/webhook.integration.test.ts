@@ -83,7 +83,12 @@ async function world() {
   const h = await createJiraHarness({
     atlassian: {
       sites: [SITE],
-      projects: { [SITE.id]: [{ id: "10000", key: "PROJ", name: "Project" }] },
+      projects: {
+        [SITE.id]: [
+          { id: "10000", key: "PROJ", name: "Project" },
+          { id: "10001", key: "NEW", name: "Next project" },
+        ],
+      },
     },
   });
   const workspace = await h.workspace("acme");
@@ -188,13 +193,15 @@ async function world() {
     deliveries: createWebhookDeliveriesRepository(h.db),
     clientSecret: () => h.atlassian.clientSecret,
     workspace: () => ({
+      registrations: webhooks,
       projects,
       repositoryName: async (id) => (await repositories.get(id))?.fullName,
       mirror: createJiraMirror({ tracker }),
       statuses,
     }),
     logger,
-    now: h.now,
+    // The fake signs its bearer tokens with the wall clock, the harness clock is the one the tests move: a token is judged by the first.
+    now: () => new Date(),
   });
 
   const service = createProjectService({
@@ -203,6 +210,8 @@ async function world() {
       async onProjectDeactivated() {},
       onProjectActivated: createJiraActivationHook({
         tracker,
+        projects,
+        webhooks,
         registrar,
         log: h.logs.push.bind(h.logs),
       }),
@@ -715,5 +724,225 @@ describe("a delivery of Jira", () => {
     expect(await w.tracker.getItem(w.repository.id, 7)).toMatchObject({
       provider: "jira",
     });
+  });
+});
+
+describe("switching a project from one Jira project to another", () => {
+  // #1039
+  it("clears the rows of the first, so that NEW-7 is written although OLD-7 held the number 7, and registers a webhook for the second", async () => {
+    const w = await world();
+    w.h.atlassian.setIssues(SITE.id, [
+      ISSUE,
+      { ...ISSUE, id: "10099", key: "NEW-7" },
+    ]);
+    const project = await w.createJiraProject();
+    const first = await w.hook();
+    await w.h.atlassian.deliver(first.id, w.moveTo("Ready for agent"));
+    expect(await w.tracker.getItem(w.repository.id, 7)).toMatchObject({
+      key: "PROJ-7",
+    });
+
+    // Switched off (the webhook goes) and on again with the other Jira project.
+    await w.service.deactivateProject(w.repository.id);
+    await w.service.createProject(w.repository.id, null, {
+      connectionId: w.connection.id,
+      projectKey: "NEW",
+    });
+    expect(await w.tracker.getItem(w.repository.id, 7)).toBeUndefined();
+    const [second] = w.h.atlassian.webhooks();
+    expect(w.h.atlassian.webhooks()).toHaveLength(1);
+    expect(second).toMatchObject({ jql: "project = NEW" });
+
+    const answer = await w.h.atlassian.deliver(second?.id ?? 0, {
+      ...w.moveTo("Ready for agent"),
+      issueKey: "NEW-7",
+    });
+    expect(answer.status).toBe(200);
+    expect(await w.tracker.getItem(w.repository.id, 7)).toMatchObject({
+      provider: "jira",
+      key: "NEW-7",
+    });
+    expect((await w.webhooks.getByProject(project.id))?.projectKey).toBe("NEW");
+  });
+});
+
+describe("trust on first use of the bearer token", () => {
+  // #1039
+  it("refuses a delivery without a token once a token that verified was seen, and still refuses a wrong one", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const hook = await w.hook();
+    expect(
+      (await w.webhooks.getByProject(project.id))?.bearerSeenAt,
+    ).toBeNull();
+
+    // Before any token was seen the secret alone is enough.
+    const early = await w.h.atlassian.deliver(hook.id, {
+      ...w.moveTo("Ready for agent"),
+      bearer: "none",
+    });
+    expect(early.status).toBe(200);
+    expect(
+      (await w.webhooks.getByProject(project.id))?.bearerSeenAt,
+    ).toBeNull();
+
+    const signed = await w.h.atlassian.deliver(
+      hook.id,
+      w.moveTo("Ready for agent"),
+    );
+    expect(signed.status).toBe(200);
+    expect(
+      (await w.webhooks.getByProject(project.id))?.bearerSeenAt,
+    ).not.toBeNull();
+
+    const bare = await w.h.atlassian.deliver(hook.id, {
+      ...w.moveTo("Ready for agent"),
+      bearer: "none",
+    });
+    expect(bare.status).toBe(401);
+    expect(w.h.logs.join("\n")).toContain("bearer_missing");
+    const wrong = await w.h.atlassian.deliver(hook.id, {
+      ...w.moveTo("Ready for agent"),
+      bearer: "wrong",
+    });
+    expect(wrong.status).toBe(401);
+    const again = await w.h.atlassian.deliver(
+      hook.id,
+      w.moveTo("Ready for agent"),
+    );
+    expect(again.status).toBe(200);
+  });
+});
+
+describe("rotating the secret in the nightly job", () => {
+  const cron = (w: Awaited<ReturnType<typeof world>>) =>
+    handleJiraWebhooksCron(
+      new Request("https://factory.example.test/api/internal/jira-webhooks", {
+        headers: { authorization: `Bearer ${CRON_SECRET}` },
+      }),
+      {
+        env: { CRON_SECRET },
+        enabled: () => true,
+        targets: (limit) => w.directory.listProjects(limit),
+        reconcile: (_workspaceId, projectId) =>
+          w.registrar.reconcile(projectId),
+        now: () => w.h.clock.time,
+        log: () => undefined,
+      },
+    ).then((response) => response.json() as Promise<Record<string, unknown>>);
+
+  // #1039
+  it("registers a new webhook with a new secret after 25 days, deletes the old one, and the old address is refused", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const old = await w.hook();
+    expect(
+      await w.h.atlassian.deliver(old.id, w.moveTo("Ready for agent")),
+    ).toMatchObject({ status: 200 });
+    const before = await w.webhooks.getByProject(project.id);
+    expect(before?.bearerSeenAt).not.toBeNull();
+
+    w.h.clock.time += 26 * DAY;
+    expect(await cron(w)).toMatchObject({ registered: 1, failed: 0 });
+
+    const [fresh] = w.h.atlassian.webhooks();
+    expect(w.h.atlassian.webhooks()).toHaveLength(1);
+    expect(fresh?.id).not.toBe(old.id);
+    const after = await w.webhooks.getByProject(project.id);
+    expect(after).toMatchObject({
+      status: "active",
+      jiraWebhookId: String(fresh?.id),
+      pendingSecretHash: null,
+    });
+    expect(after?.secretHash).not.toBe(before?.secretHash);
+    // What a token proved stays proven: the rotation did not start trust over.
+    expect(after?.bearerSeenAt).toBe(before?.bearerSeenAt);
+
+    const viaNew = await w.h.atlassian.deliver(fresh?.id ?? 0, {
+      ...w.moveTo("Ready for agent"),
+      identifier: "after-rotation",
+    });
+    expect(viaNew.status).toBe(200);
+    // The address of the old webhook, secret included, is refused although the registration is the same.
+    const viaOld = await w.h.atlassian.deliver(fresh?.id ?? 0, {
+      ...w.moveTo("Ready for agent"),
+      url: old.url,
+    });
+    expect(viaOld.status).toBe(401);
+    // And the next night it is young.
+    expect(await cron(w)).toMatchObject({ registered: 0, unchanged: 1 });
+  });
+});
+
+describe("the compare-and-set of a registration, against the real table", () => {
+  // #1039
+  it("lets only the registration whose pending secret is still the row's mark it done, and not one that began over a changed Jira id", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    const row = await w.webhooks.getByProject(project.id);
+    if (row === undefined) throw new Error("no row");
+
+    // Two registrations began on the row they both read (Jira id as it is): the second one's secret is the pending one.
+    expect(
+      await w.webhooks.beginRegistration(row.id, "hash-a", row.jiraWebhookId),
+    ).toBe(true);
+    expect(
+      await w.webhooks.beginRegistration(row.id, "hash-b", row.jiraWebhookId),
+    ).toBe(true);
+    expect(
+      await w.webhooks.markRegistered(
+        row.id,
+        "7001",
+        new Date(w.h.clock.time + 30 * DAY).toISOString(),
+        "hash-a",
+      ),
+    ).toBe(false);
+    expect(
+      await w.webhooks.markRegistered(
+        row.id,
+        "7002",
+        new Date(w.h.clock.time + 30 * DAY).toISOString(),
+        "hash-b",
+      ),
+    ).toBe(true);
+    expect(await w.webhooks.getByProject(project.id)).toMatchObject({
+      jiraWebhookId: "7002",
+      secretHash: "hash-b",
+      pendingSecretHash: null,
+    });
+    // A registration that read the row before that (it expected the old Jira id) does not begin over it.
+    expect(
+      await w.webhooks.beginRegistration(row.id, "hash-c", row.jiraWebhookId),
+    ).toBe(false);
+    // A row that is being removed is not registered or begun.
+    await w.webhooks.markRemoving(project.id);
+    expect(await w.webhooks.beginRegistration(row.id, "hash-d", "7002")).toBe(
+      false,
+    );
+    expect(
+      await w.webhooks.markRegistered(
+        row.id,
+        "7003",
+        new Date(w.h.clock.time + 30 * DAY).toISOString(),
+        "hash-d",
+      ),
+    ).toBe(false);
+    // The first token is noted once.
+    expect(await w.webhooks.markBearerSeen(row.id)).toBe(true);
+    expect(await w.webhooks.markBearerSeen(row.id)).toBe(false);
+  });
+});
+
+describe("a deletion Jira refuses", () => {
+  // #1039
+  it("removes the row after a 403, so that the project is not stuck, although the webhook stays at Jira until it ends", async () => {
+    const w = await world();
+    const project = await w.createJiraProject();
+    w.h.atlassian.failNext("/ex/jira/" + SITE.id + "/rest/api/3/webhook", {
+      status: 403,
+    });
+    await w.service.deactivateProject(w.repository.id);
+    expect(await w.webhooks.getByProject(project.id)).toBeUndefined();
+    expect(w.h.atlassian.webhooks()).toHaveLength(1);
   });
 });

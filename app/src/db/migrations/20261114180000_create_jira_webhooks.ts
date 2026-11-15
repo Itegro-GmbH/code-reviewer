@@ -42,6 +42,14 @@ export const migration: Migration = {
       .addColumn("project_key", "text", (column) => column.notNull())
       // SHA-256 (hex) of the secret in the address the webhook calls.
       .addColumn("secret_hash", "text", (column) => column.notNull())
+      // SHA-256 (hex) of the secret of a registration that is under way (a first one, a new one after Jira lost the webhook, or a rotation):
+      // a delivery with it is accepted too, until `mark registered` makes it the secret and clears this; null otherwise.
+      .addColumn("pending_secret_hash", "text")
+      // When the webhook was registered (what the nightly job rotates the secret by); null until it is registered.
+      .addColumn("registered_at", "text")
+      // When a delivery of this registration first carried a bearer token that verified: from then on a delivery without one is refused
+      // (trust on first use, `src/jira/webhook-verify.ts`); null while none has.
+      .addColumn("bearer_seen_at", "text")
       .addColumn("status", "text", (column) => column.notNull())
       // Jira's id of the registered webhook (a number, kept as text); null until it is registered.
       .addColumn("jira_webhook_id", "text")

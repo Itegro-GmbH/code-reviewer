@@ -45,6 +45,8 @@ export function withJiraActivation(
   return createJiraActivationHook(
     {
       tracker: createTrackerRepository(getDatabase(), workspaceId),
+      projects: createProjectsRepository(getDatabase(), workspaceId),
+      webhooks: createJiraWebhooksRepository(getDatabase(), workspaceId),
       registrar: jiraWebhookRegistrarFor(workspaceId),
     },
     next,

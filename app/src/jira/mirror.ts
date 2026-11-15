@@ -20,6 +20,15 @@ export const JIRA_TRACKER_PROVIDER = "jira";
 /** The mirror's own limits (`tracker_items_shape_check`): a longer text is cut, never refused. */
 const TITLE_MAX_CHARS = 1024;
 const BODY_EXCERPT_MAX_CHARS = 4000;
+/** What a payload may bring beyond those: a delivery is authenticated by a secret in its address, not signed, so it is bounded too. */
+const MAX_LABELS = 50;
+const MAX_ASSIGNEES = 20;
+const NAME_MAX_CHARS = 100;
+/**
+ * How far ahead of the server's clock a time of the payload may be. The row keeps the newest `updatedAt` and drops older deliveries, so a
+ * made-up time far ahead would freeze it; a time clamped to a little after now is overtaken within minutes.
+ */
+const FUTURE_TOLERANCE_MS = 2 * 60 * 1000;
 
 export type JiraMirrorTarget = {
   /** The repository the code of the project lives in: where the rows sit. */
@@ -51,7 +60,13 @@ const cut = (text: string, max: number): string =>
 
 export function createJiraMirror(deps: {
   tracker: Pick<TrackerRepository, "upsertItem" | "deleteItem">;
+  now?: () => Date;
 }): JiraMirror {
+  const now = deps.now ?? (() => new Date());
+  const notAhead = (time: string): string => {
+    const limit = now().getTime() + FUTURE_TOLERANCE_MS;
+    return Date.parse(time) > limit ? new Date(limit).toISOString() : time;
+  };
   return {
     async apply(target, change) {
       if (change.kind === "ignored") return "not_mirrored";
@@ -62,7 +77,8 @@ export function createJiraMirror(deps: {
         return (await deps.tracker.deleteItem(
           target.repositoryId,
           number,
-          change.at,
+          notAhead(change.at),
+          JIRA_TRACKER_PROVIDER,
         ))
           ? "updated"
           : "not_mirrored";
@@ -82,10 +98,14 @@ export function createJiraMirror(deps: {
         type: issue.type === "" ? null : issue.type,
         title: cut(issue.title, TITLE_MAX_CHARS),
         bodyExcerpt: cut(issue.body, BODY_EXCERPT_MAX_CHARS),
-        labels: issue.labels.map((name) => ({ name, color: "" })),
-        assignees: issue.assignees.map((login) => ({ login })),
+        labels: issue.labels
+          .slice(0, MAX_LABELS)
+          .map((name) => ({ name: cut(name, NAME_MAX_CHARS), color: "" })),
+        assignees: issue.assignees
+          .slice(0, MAX_ASSIGNEES)
+          .map((login) => ({ login: cut(login, NAME_MAX_CHARS) })),
         closes: [],
-        updatedAt: issue.updatedAt,
+        updatedAt: notAhead(issue.updatedAt),
         parentNumber: parentNumberOf(issue),
         boardStatus: issue.status === "" ? null : issue.status,
       });

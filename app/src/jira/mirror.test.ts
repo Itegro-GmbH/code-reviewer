@@ -35,9 +35,11 @@ const changed = (i: JiraIssue): JiraChange => ({
 
 const TARGET = { repositoryId: "repo-1", repoFullName: "acme/widgets" };
 
+const NOW = new Date("2026-11-14T13:00:00.000Z");
+
 function setup() {
   const tracker = createFakeTrackerRepository();
-  return { tracker, mirror: createJiraMirror({ tracker }) };
+  return { tracker, mirror: createJiraMirror({ tracker, now: () => NOW }) };
 }
 
 describe("the Jira mirror", () => {
@@ -148,6 +150,87 @@ describe("the Jira mirror", () => {
     expect(await mirror.apply(TARGET, { kind: "ignored", reason: "x" })).toBe(
       "not_mirrored",
     );
+  });
+});
+
+describe("what a payload cannot make the mirror hold", () => {
+  // #1039
+  it("clamps an `updatedAt` in the future to a little after now, so a made-up date does not freeze the row against later deliveries", async () => {
+    const { tracker, mirror } = setup();
+    await mirror.apply(
+      TARGET,
+      changed(
+        issue({ title: "forged", updatedAt: "2999-01-01T00:00:00.000Z" }),
+      ),
+    );
+    const clamped = (await tracker.getItem("repo-1", 7))?.updatedAt ?? "";
+    expect(Date.parse(clamped)).toBeGreaterThan(NOW.getTime());
+    expect(Date.parse(clamped) - NOW.getTime()).toBeLessThanOrEqual(
+      5 * 60 * 1000,
+    );
+    // The next honest delivery, a few minutes later, replaces it.
+    const later = new Date(Date.parse(clamped) + 1000).toISOString();
+    expect(
+      await mirror.apply(
+        TARGET,
+        changed(issue({ title: "honest", updatedAt: later })),
+      ),
+    ).toBe("updated");
+    expect((await tracker.getItem("repo-1", 7))?.title).toBe("honest");
+  });
+
+  // #1039
+  it("keeps a time that is not ahead of now as it is, and clamps the time of a deletion too", async () => {
+    const { tracker, mirror } = setup();
+    await mirror.apply(TARGET, changed(issue()));
+    expect((await tracker.getItem("repo-1", 7))?.updatedAt).toBe(
+      "2026-11-14T10:00:00.000Z",
+    );
+    await mirror.apply(TARGET, {
+      kind: "issue_deleted",
+      key: "PROJ-7",
+      at: "2999-01-01T00:00:00.000Z",
+      matchedWebhookIds: [],
+    });
+    // Ten minutes later an honest delivery replaces the tombstone; one dated 2999 would have outlasted every delivery.
+    const later = createJiraMirror({
+      tracker,
+      now: () => new Date(NOW.getTime() + 10 * 60 * 1000),
+    });
+    expect(
+      await later.apply(
+        TARGET,
+        changed(issue({ updatedAt: "2026-11-14T13:05:00.000Z" })),
+      ),
+    ).toBe("updated");
+  });
+
+  // #1039
+  it("bounds the count and the length of labels and assignees", async () => {
+    const { tracker, mirror } = setup();
+    await mirror.apply(
+      TARGET,
+      changed(
+        issue({
+          labels: Array.from({ length: 500 }, (_, i) => `l${String(i)}`),
+          assignees: Array.from({ length: 100 }, (_, i) => `a${String(i)}`),
+        }),
+      ),
+    );
+    let row = await tracker.getItem("repo-1", 7);
+    expect(row?.labels).toHaveLength(50);
+    expect(row?.assignees).toHaveLength(20);
+    await mirror.apply(
+      TARGET,
+      changed(
+        issue({
+          labels: ["x".repeat(5000)],
+          updatedAt: "2026-11-14T11:00:00.000Z",
+        }),
+      ),
+    );
+    row = await tracker.getItem("repo-1", 7);
+    expect(row?.labels[0]?.name).toHaveLength(100);
   });
 });
 

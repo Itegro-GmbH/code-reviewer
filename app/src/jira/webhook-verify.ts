@@ -9,8 +9,13 @@
 //  1. The registered address carries an unguessable secret of its own, one per registration (`newWebhookSecret`, 256 bits; only its SHA-256
 //     is stored, `hashWebhookSecret`). A delivery without it, or with another one, is refused. This is the check that always applies.
 //  2. When the delivery carries a bearer token, it must be a JWT (HS256, HS384 or HS512, never `none` or an asymmetric algorithm) signed with
-//     the app's client secret, and not expired when it has an `exp`. A token that does not verify refuses the delivery, as Atlassian's
-//     documentation asks ("Remember to verify the token"). A delivery without a token is accepted on the secret alone.
+//     the app's client secret, not expired when it has an `exp`, and not issued (`iat`) or valid (`nbf`) in the future beyond a small clock
+//     skew. A token that does not verify refuses the delivery, as Atlassian's documentation asks ("Remember to verify the token"). A token
+//     without `exp` is accepted: the signature proves that the sender knows the client secret, and the claims are undocumented.
+//  3. Trust on first use: Atlassian's documentation says the token is present, community reports say it is not always. So a registration
+//     starts out accepting deliveries without one, and the first delivery whose token verifies (`bearerSeen` is then stored by the handler)
+//     ends that for the registration: from then on a delivery without a token is refused, so a leaked address alone no longer forges a
+//     delivery of a registration whose real deliveries carry a token. A token that does not verify is refused in every case.
 //
 // Pure: no database, no network. Comparisons are constant time.
 import {
@@ -29,7 +34,12 @@ export const hashWebhookSecret = (secret: string): string =>
   createHash("sha256").update(secret).digest("hex");
 
 export type JiraDeliveryRefusal =
-  "secret_missing" | "secret_mismatch" | "bearer_invalid" | "bearer_expired";
+  | "secret_missing"
+  | "secret_mismatch"
+  | "bearer_invalid"
+  | "bearer_expired"
+  | "bearer_not_yet_valid"
+  | "bearer_missing";
 
 export type JiraDeliveryVerdict =
   | { ok: true; bearer: "verified" | "absent" }
@@ -40,6 +50,10 @@ export type VerifyDeliveryInput = {
   urlSecret: string | null;
   /** The hash stored for the registration the address names. */
   storedSecretHash: string;
+  /** The hash of the secret of a registration under way: accepted next to the stored one (null or left out for none). */
+  pendingSecretHash?: string | null;
+  /** A token that verified was seen on a delivery of this registration before (trust on first use); left out: not yet. */
+  bearerSeen?: boolean;
   /** The `Authorization` header, null for none. */
   authorization: string | null;
   /** The client secret of the factory's Atlassian app. */
@@ -53,7 +67,7 @@ const HMAC_ALGORITHMS: Record<string, string> = {
   HS512: "sha512",
 };
 
-/** Seconds of clock difference between Atlassian and the server that an `exp` may be off by. */
+/** Seconds of clock difference between Atlassian and the server that `exp`, `iat` and `nbf` may be off by. */
 const CLOCK_SKEW_SECONDS = 60;
 
 function sameBytes(a: Buffer, b: Buffer): boolean {
@@ -77,7 +91,7 @@ function verifyBearer(
   authorization: string,
   clientSecret: string,
   now: Date,
-): "verified" | "invalid" | "expired" {
+): "verified" | "invalid" | "expired" | "not_yet_valid" {
   const match =
     /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(
       authorization,
@@ -100,11 +114,15 @@ function verifyBearer(
     return "invalid";
   const claims = decodeJson(body);
   if (claims === undefined) return "invalid";
+  const seconds = now.getTime() / 1000;
   if (
     typeof claims.exp === "number" &&
-    claims.exp + CLOCK_SKEW_SECONDS < now.getTime() / 1000
+    claims.exp + CLOCK_SKEW_SECONDS < seconds
   )
     return "expired";
+  for (const claim of [claims.iat, claims.nbf])
+    if (typeof claim === "number" && claim - CLOCK_SKEW_SECONDS > seconds)
+      return "not_yet_valid";
   return "verified";
 }
 
@@ -114,11 +132,16 @@ export function verifyJiraDelivery(
   if (input.urlSecret === null || input.urlSecret === "")
     return { ok: false, reason: "secret_missing" };
   const given = Buffer.from(hashWebhookSecret(input.urlSecret), "hex");
-  const stored = Buffer.from(input.storedSecretHash, "hex");
-  if (!sameBytes(given, stored))
-    return { ok: false, reason: "secret_mismatch" };
+  const accepted = [input.storedSecretHash, input.pendingSecretHash ?? null]
+    .filter((hash): hash is string => hash !== null)
+    .map((hash) => sameBytes(given, Buffer.from(hash, "hex")));
+  // Every hash is compared (no early exit on the first match).
+  if (!accepted.some(Boolean)) return { ok: false, reason: "secret_mismatch" };
 
-  if (input.authorization === null) return { ok: true, bearer: "absent" };
+  if (input.authorization === null)
+    return input.bearerSeen === true
+      ? { ok: false, reason: "bearer_missing" }
+      : { ok: true, bearer: "absent" };
   const bearer = verifyBearer(
     input.authorization,
     input.clientSecret,
@@ -127,6 +150,11 @@ export function verifyJiraDelivery(
   if (bearer === "verified") return { ok: true, bearer };
   return {
     ok: false,
-    reason: bearer === "expired" ? "bearer_expired" : "bearer_invalid",
+    reason:
+      bearer === "expired"
+        ? "bearer_expired"
+        : bearer === "not_yet_valid"
+          ? "bearer_not_yet_valid"
+          : "bearer_invalid",
   };
 }

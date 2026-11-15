@@ -2,6 +2,7 @@
 
 // The steps of the Jira webhook handler (#1039) with its collaborators replaced: the order of the refusals, what a claim does, and what a
 // failure after the claim does. The whole path against real tables is in webhook.integration.test.ts.
+import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { DirectoryJiraWebhook } from "../db/repositories/jira-webhook-directory-repository.ts";
 import type { StoredProject } from "../db/repositories/projects-repository.ts";
@@ -21,9 +22,12 @@ const REGISTRATION: DirectoryJiraWebhook = {
   connectionId: "conn-1",
   projectKey: "PROJ",
   secretHash: hashWebhookSecret(SECRET),
+  pendingSecretHash: null,
   status: "active",
   jiraWebhookId: "1001",
   expiresAt: "2026-12-14T00:00:00.000Z",
+  registeredAt: "2026-11-14T00:00:00.000Z",
+  bearerSeenAt: null,
   errorCode: null,
   createdAt: "",
   updatedAt: "",
@@ -43,6 +47,20 @@ const PROJECT = {
     projectKey: "PROJ",
   },
 } as unknown as StoredProject;
+
+const NOW_SECONDS = Math.floor(Date.parse("2026-11-14T12:00:00Z") / 1000);
+
+/** A bearer token as Atlassian is documented to send one: signed with the client secret of the app. */
+function bearer(claims: Record<string, unknown>, secret = "client-secret") {
+  const part = (value: unknown) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const head = part({ alg: "HS256", typ: "JWT" });
+  const body = part(claims);
+  const signature = createHmac("sha256", secret)
+    .update(`${head}.${body}`)
+    .digest("base64url");
+  return `Bearer ${head}.${body}.${signature}`;
+}
 
 const payload = (over: Record<string, unknown> = {}) => ({
   timestamp: 1763116200000,
@@ -98,7 +116,9 @@ function setup(
     if (options.mirrorFails === true) throw new Error("db gone");
     return "updated" as const;
   });
+  const markBearerSeen = vi.fn(async () => true);
   const collaborators: JiraWorkspaceCollaborators = {
+    registrations: { markBearerSeen },
     projects: {
       getById: async () => ("project" in options ? options.project : PROJECT),
     },
@@ -144,7 +164,7 @@ function setup(
         body: typeof body === "string" ? body : JSON.stringify(body),
       },
     );
-  return { handler, request, calls, statuses, apply, lines };
+  return { handler, request, calls, statuses, apply, lines, markBearerSeen };
 }
 
 describe("the Jira webhook handler", () => {
@@ -160,28 +180,55 @@ describe("the Jira webhook handler", () => {
   });
 
   // #1039
-  it("refuses a body over the limit with 413 and a missing identifier or a body that is no JSON with 400, none of it claimed", async () => {
+  it("refuses a body over the limit with 413 and a body that is no JSON with 400, none of it claimed", async () => {
     const t = setup();
     expect((await t.handler(t.request("x".repeat(5000)))).status).toBe(413);
-    const noIdentifier = new Request(
-      `https://factory.example.test/api/webhooks/jira?w=reg-1&s=${SECRET}`,
-      { method: "POST", body: "{}" },
-    );
-    const noId = await t.handler(noIdentifier);
-    expect(noId.status).toBe(400);
-    expect(await noId.json()).toEqual({
-      error: "JIRA_WEBHOOK_IDENTIFIER_INVALID",
-    });
     const bad = await t.handler(t.request("{not json"));
     expect(bad.status).toBe(400);
     expect(await bad.json()).toEqual({ error: "JIRA_WEBHOOK_BODY_NOT_JSON" });
-    const odd = await t.handler(
-      t.request(payload(), {
-        headers: { "x-atlassian-webhook-identifier": "../x" },
-      }),
-    );
-    expect(odd.status).toBe(400);
     expect(t.calls).toEqual([]);
+  });
+
+  // #1039
+  it("verifies the address before it reads the body: a wrong secret is 401 even for a body over the limit", async () => {
+    const t = setup();
+    const response = await t.handler(
+      t.request("x".repeat(5000), { query: "w=reg-1&s=wrong" }),
+    );
+    expect(response.status).toBe(401);
+    expect(t.calls).toEqual([]);
+  });
+
+  // #1039
+  it("does not hard-fail a delivery without a usable identifier header (Jira treats a 4xx as final): it is claimed under a hash of the body, the same body under the same claim", async () => {
+    const claims: string[] = [];
+    const request = (body: unknown, headers: Record<string, string> = {}) =>
+      new Request(
+        `https://factory.example.test/api/webhooks/jira?w=reg-1&s=${SECRET}`,
+        { method: "POST", headers, body: JSON.stringify(body) },
+      );
+    const t = setup();
+    for (const [body, headers] of [
+      [payload(), {}],
+      [payload(), { "x-atlassian-webhook-identifier": "../x" }],
+      [payload({ timestamp: 2 }), {}],
+    ] as const) {
+      const response = await t.handler(request(body, headers));
+      expect(response.status).toBe(200);
+    }
+    for (const call of t.calls)
+      if (call.startsWith("claim:")) claims.push(call);
+    const hash = (body: unknown) =>
+      createHash("sha256")
+        .update(JSON.stringify(body))
+        .digest("hex")
+        .slice(0, 32);
+    expect(claims).toEqual([
+      `claim:jira-reg-1-b-${hash(payload())}`,
+      `claim:jira-reg-1-b-${hash(payload())}`,
+      `claim:jira-reg-1-b-${hash(payload({ timestamp: 2 }))}`,
+    ]);
+    expect(t.lines.join("\n")).toContain("body hash");
   });
 
   // #1039-T02
@@ -335,5 +382,76 @@ describe("the Jira webhook handler", () => {
     );
     expect(response.status).toBe(503);
     expect(onlyMirror.calls.at(-1)).toBe("release:jira-reg-1-id-1");
+  });
+
+  // #1039
+  it("notes the first bearer token that verifies, once, and never for a delivery without one", async () => {
+    const claims = { exp: NOW_SECONDS + 300 };
+    const first = setup();
+    expect(
+      (
+        await first.handler(
+          first.request(payload(), {
+            headers: { authorization: bearer(claims) },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(first.markBearerSeen).toHaveBeenCalledWith("reg-1");
+
+    const noToken = setup();
+    await noToken.handler(noToken.request());
+    expect(noToken.markBearerSeen).not.toHaveBeenCalled();
+
+    const seen = setup({
+      registration: {
+        ...REGISTRATION,
+        bearerSeenAt: "2026-11-14T00:00:00.000Z",
+      },
+    });
+    await seen.handler(
+      seen.request(payload(), { headers: { authorization: bearer(claims) } }),
+    );
+    expect(seen.markBearerSeen).not.toHaveBeenCalled();
+  });
+
+  // #1039
+  it("refuses a delivery without a token once one was seen, and a token that does not verify always", async () => {
+    const seen = setup({
+      registration: {
+        ...REGISTRATION,
+        bearerSeenAt: "2026-11-14T00:00:00.000Z",
+      },
+    });
+    expect((await seen.handler(seen.request())).status).toBe(401);
+    expect(seen.calls).toEqual([]);
+    expect(seen.lines.join("\n")).toContain("bearer_missing");
+
+    const wrong = bearer({ exp: NOW_SECONDS + 300 }, "other-secret");
+    for (const t of [setup(), seen]) {
+      const response = await t.handler(
+        t.request(payload(), { headers: { authorization: wrong } }),
+      );
+      expect(response.status).toBe(401);
+      expect(t.calls).toEqual([]);
+    }
+  });
+
+  // #1039
+  it("accepts the secret of a registration under way next to the current one", async () => {
+    const t = setup({
+      registration: {
+        ...REGISTRATION,
+        pendingSecretHash: hashWebhookSecret("next-secret"),
+      },
+    });
+    for (const secret of [SECRET, "next-secret"])
+      expect(
+        (
+          await t.handler(
+            t.request(payload(), { query: `w=reg-1&s=${secret}` }),
+          )
+        ).status,
+      ).toBe(200);
   });
 });

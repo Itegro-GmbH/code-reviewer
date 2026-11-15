@@ -21,11 +21,17 @@ export type StoredJiraWebhook = {
   connectionId: string;
   projectKey: string;
   secretHash: string;
+  /** The hash of the secret of a registration under way, accepted next to `secretHash`; null otherwise. */
+  pendingSecretHash: string | null;
   status: JiraWebhookStatus;
   /** Jira's id of the registered webhook; null until it is registered. */
   jiraWebhookId: string | null;
   /** When Jira ends the webhook unless it is extended; null until it is registered. */
   expiresAt: string | null;
+  /** When the webhook was registered (what its secret is rotated by); null until it is. */
+  registeredAt: string | null;
+  /** When a bearer token that verified was first seen on a delivery; from then on one without a token is refused; null while none was. */
+  bearerSeenAt: string | null;
   /** Why the last registration or extension failed; null after a success. */
   errorCode: string | null;
   createdAt: string;
@@ -50,21 +56,34 @@ export type JiraWebhooksRepository = {
    * would accept another workspace's connection, so the insert selects it from the workspace's own.
    */
   create(input: NewJiraWebhook): Promise<StoredJiraWebhook | undefined>;
-  /** The webhook is registered at Jira: `active`, with Jira's id and the end of its life; clears the error. */
+  /**
+   * Starts a registration at Jira: the secret of its address (`pendingSecretHash`) is accepted from now on, next to the current one. Only
+   * while the row still has the Jira id the caller read (`expectedJiraWebhookId`, null for none) and is not being removed, so a
+   * registration another caller finished meanwhile is not started over (an extra webhook would be left at Jira). Answers whether it began.
+   * A second caller overwrites the pending secret: the first one then finds `markRegistered` refused and takes its webhook back.
+   */
+  beginRegistration(
+    id: string,
+    pendingSecretHash: string,
+    expectedJiraWebhookId: string | null,
+  ): Promise<boolean>;
+  /**
+   * The webhook is registered at Jira: `active`, with Jira's id, the end of its life and the pending secret as THE secret; clears the error.
+   * Only while `pendingSecretHash` is still the one this registration began with and the row is not being removed: if another registration
+   * began meanwhile, or the row is being removed, nothing is written and the answer is false (the caller deletes the webhook it made).
+   */
   markRegistered(
     id: string,
     jiraWebhookId: string,
     expiresAt: string,
+    pendingSecretHash: string,
   ): Promise<boolean>;
+  /** A delivery of the registration carried a bearer token that verified: noted once (the first time stays). */
+  markBearerSeen(id: string): Promise<boolean>;
   /** Jira extended the webhook: the new end of its life; clears the error. */
   markExtended(id: string, expiresAt: string): Promise<boolean>;
   /** A registration or an extension failed: the code why; the row stays as it was otherwise. */
   markError(id: string, errorCode: string): Promise<boolean>;
-  /**
-   * Starts over: `pending`, no Jira id, a new secret (the webhook of the old one is gone at Jira, or its address is to change). The
-   * caller made the new secret and registers a webhook with it.
-   */
-  reset(id: string, secretHash: string): Promise<boolean>;
   /** The source of the project is gone: the webhook at Jira is to be deleted, then the row goes (`remove`). */
   markRemoving(projectId: string): Promise<boolean>;
   remove(id: string): Promise<boolean>;
@@ -80,12 +99,15 @@ export function toStoredJiraWebhook(
     connectionId: row.connection_id,
     projectKey: row.project_key,
     secretHash: row.secret_hash,
+    pendingSecretHash: row.pending_secret_hash,
     status:
       row.status === "active" || row.status === "removing"
         ? row.status
         : "pending",
     jiraWebhookId: row.jira_webhook_id,
     expiresAt: row.expires_at,
+    registeredAt: row.registered_at,
+    bearerSeenAt: row.bearer_seen_at,
     errorCode: row.error_code,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -132,11 +154,11 @@ export function createJiraWebhooksRepository(
       const at = stamp();
       const { rows } = await sql<Selectable<JiraWebhooksTable>>`
         insert into jira_webhooks (
-          id, workspace_id, project_id, connection_id, project_key, secret_hash, status, jira_webhook_id, expires_at, error_code,
-          created_at, updated_at
+          id, workspace_id, project_id, connection_id, project_key, secret_hash, pending_secret_hash, registered_at, bearer_seen_at, status,
+          jira_webhook_id, expires_at, error_code, created_at, updated_at
         )
         select ${input.id}::text, c.workspace_id, ${input.projectId}::text, c.id, ${input.projectKey}::text, ${input.secretHash}::text,
-          'pending', null, null, null, ${at}::text, ${at}::text
+          null, null, null, 'pending', null, null, null, ${at}::text, ${at}::text
         from jira_connections c
         where c.id = ${input.connectionId} and c.workspace_id = ${workspaceId}
         on conflict (project_id) do nothing
@@ -145,17 +167,42 @@ export function createJiraWebhooksRepository(
       return row === undefined ? undefined : toStoredJiraWebhook(row);
     },
 
-    async markRegistered(id, jiraWebhookId, expiresAt) {
+    async beginRegistration(id, pendingSecretHash, expectedJiraWebhookId) {
+      let update = own(id)
+        .set({ pending_secret_hash: pendingSecretHash, updated_at: stamp() })
+        .where("status", "<>", "removing");
+      update =
+        expectedJiraWebhookId === null
+          ? update.where("jira_webhook_id", "is", null)
+          : update.where("jira_webhook_id", "=", expectedJiraWebhookId);
+      return changed(await update.executeTakeFirst());
+    },
+
+    async markRegistered(id, jiraWebhookId, expiresAt, pendingSecretHash) {
+      const at = stamp();
       return changed(
         await own(id)
           .set({
             status: "active",
+            secret_hash: pendingSecretHash,
+            pending_secret_hash: null,
             jira_webhook_id: jiraWebhookId,
             expires_at: expiresAt,
+            registered_at: at,
             error_code: null,
-            updated_at: stamp(),
+            updated_at: at,
           })
           .where("status", "<>", "removing")
+          .where("pending_secret_hash", "=", pendingSecretHash)
+          .executeTakeFirst(),
+      );
+    },
+
+    async markBearerSeen(id) {
+      return changed(
+        await own(id)
+          .set({ bearer_seen_at: stamp() })
+          .where("bearer_seen_at", "is", null)
           .executeTakeFirst(),
       );
     },
@@ -173,22 +220,6 @@ export function createJiraWebhooksRepository(
       return changed(
         await own(id)
           .set({ error_code: errorCode, updated_at: stamp() })
-          .executeTakeFirst(),
-      );
-    },
-
-    async reset(id, secretHash) {
-      return changed(
-        await own(id)
-          .set({
-            status: "pending",
-            secret_hash: secretHash,
-            jira_webhook_id: null,
-            expires_at: null,
-            error_code: null,
-            updated_at: stamp(),
-          })
-          .where("status", "<>", "removing")
           .executeTakeFirst(),
       );
     },

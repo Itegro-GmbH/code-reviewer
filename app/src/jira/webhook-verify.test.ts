@@ -110,3 +110,65 @@ describe("verifyJiraDelivery", () => {
     ).toEqual({ ok: false, reason: "secret_missing" });
   });
 });
+
+describe("trust on first use of the bearer token", () => {
+  const exp = Math.floor(NOW.getTime() / 1000) + 300;
+  const seconds = Math.floor(NOW.getTime() / 1000);
+
+  // #1039
+  it("refuses a delivery without a token once a token was seen for the registration, and still accepts one without while none was", () => {
+    expect(verify({ bearerSeen: false })).toEqual({
+      ok: true,
+      bearer: "absent",
+    });
+    expect(verify({ bearerSeen: true })).toEqual({
+      ok: false,
+      reason: "bearer_missing",
+    });
+    expect(
+      verify({ bearerSeen: true, authorization: `Bearer ${jwt({ exp })}` }),
+    ).toEqual({ ok: true, bearer: "verified" });
+  });
+
+  // #1039
+  it("refuses an invalid token whether or not one was seen before", () => {
+    const bad = `Bearer ${jwt({ exp }, { secret: "other" })}`;
+    for (const bearerSeen of [false, true])
+      expect(verify({ bearerSeen, authorization: bad })).toEqual({
+        ok: false,
+        reason: "bearer_invalid",
+      });
+  });
+
+  // #1039
+  it("accepts a token without `exp` (its signature proves the client secret) and counts it as a token seen", () => {
+    expect(verify({ authorization: `Bearer ${jwt({})}` })).toEqual({
+      ok: true,
+      bearer: "verified",
+    });
+  });
+
+  // #1039
+  it("refuses a token issued or valid only in the future beyond the clock skew and accepts one within it", () => {
+    expect(
+      verify({ authorization: `Bearer ${jwt({ exp, iat: seconds + 30 })}` }),
+    ).toMatchObject({ ok: true });
+    expect(
+      verify({ authorization: `Bearer ${jwt({ exp, iat: seconds + 600 })}` }),
+    ).toEqual({ ok: false, reason: "bearer_not_yet_valid" });
+    expect(
+      verify({ authorization: `Bearer ${jwt({ exp, nbf: seconds + 600 })}` }),
+    ).toEqual({ ok: false, reason: "bearer_not_yet_valid" });
+  });
+
+  // #1039
+  it("takes either the current secret or the pending one of a registration under way", () => {
+    const next = newWebhookSecret();
+    const both = { pendingSecretHash: hashWebhookSecret(next) };
+    expect(verify({ ...both, urlSecret: next })).toMatchObject({ ok: true });
+    expect(verify({ ...both, urlSecret: secret })).toMatchObject({ ok: true });
+    expect(verify({ ...both, urlSecret: newWebhookSecret() })).toMatchObject({
+      ok: false,
+    });
+  });
+});

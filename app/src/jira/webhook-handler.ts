@@ -3,16 +3,20 @@
 // The handler behind `POST /api/webhooks/jira` (#1039, epic #1034): the dynamic webhooks the factory registers itself at a Jira site
 // (`webhook-registrar.ts`) call it. A function of its collaborators, so the route file only wires the real ones in (`webhook-shared.ts`) and
 // tests wire fakes in. The order is the contract; each step ends the request on failure, and nothing before the claim of the delivery has a
-// side effect:
+// side effect except noting, once per registration, that a bearer token verified (step 2):
 //
 //   1. config    the Atlassian app is configured at all (the client secret verifies the bearer token)                          404
-//   2. size      the body is read with a 1 MB limit                                                                              413
-//   3. verify    the registration the address names (`w`) exists and is not being removed, the secret in the address (`s`) is its
-//                secret, and a bearer token, when the delivery has one, is signed with the client secret (`webhook-verify.ts`)  401
-//   4. shape     the `X-Atlassian-Webhook-Identifier` header exists, the body is JSON                                            400
+//   2. verify    the registration the address names (`w`) exists and is not being removed, the secret in the address (`s`) is its
+//                secret (or its pending one), and a bearer token verifies (`webhook-verify.ts`): one that does not is refused, a
+//                missing one is refused once a token was seen for the registration (trust on first use)                         401
+//                This comes before the body is read: an unauthenticated request costs a lookup, not a megabyte.
+//   3. size      the body is read with a 1 MB limit                                                                              413
+//   4. shape     the body is JSON                                                                                                400
 //   5. relevance an event the factory does not follow, or one that is no issue, is answered at once                              200
-//   6. claim     the delivery is claimed under `jira-<registration>-<identifier>` (Jira's identifier is the same across retries);
-//                a succeeded delivery is a duplicate (200), one another request handles right now is 409 (Jira retries it)
+//   6. claim     the delivery is claimed under `jira-<registration>-<identifier>` (Jira's identifier is the same across retries;
+//                a delivery without a usable `X-Atlassian-Webhook-Identifier` is claimed under a hash of its body instead, as
+//                the same retry has the same body); a succeeded delivery is a duplicate (200), one another request handles right
+//                now is 409 (Jira retries it)
 //   7. attribute the registration names the project; it must still be an active one whose ticket source is exactly the Jira project the
 //                webhook watches, and the issue must be of that Jira project (everything after this runs in the project's workspace)
 //   8. mirror    the issue is written into the ticket mirror (`mirror.ts`); a failure is logged and never stops the trigger
@@ -22,6 +26,7 @@
 // Everything is answered 200 except a refusal or a failure: Jira retries 408, 409, 425, 429 and 5xx and treats everything else as final.
 // Nothing here logs the secret, the address, a token or a body: lines name the delivery, the event and the outcome.
 import "server-only";
+import { createHash } from "node:crypto";
 import type { JiraWebhookDirectory } from "../db/repositories/jira-webhook-directory-repository.ts";
 import type { StoredProject } from "../db/repositories/projects-repository.ts";
 import { jiraSourceOf } from "../db/repositories/projects-repository.ts";
@@ -46,10 +51,8 @@ export const JIRA_WEBHOOK_ERROR_CODES = [
   "JIRA_WEBHOOK_NOT_CONFIGURED",
   /** The body is larger than the limit. 413. */
   "JIRA_WEBHOOK_BODY_TOO_LARGE",
-  /** The registration is unknown or being removed, the secret in the address is missing or wrong, or the bearer token does not verify. 401. */
+  /** The registration is unknown or being removed, the secret in the address is missing or wrong, or the bearer token does not verify or is missing after one was seen. 401. */
   "JIRA_WEBHOOK_UNAUTHORIZED",
-  /** The `X-Atlassian-Webhook-Identifier` header is missing or malformed. 400. */
-  "JIRA_WEBHOOK_IDENTIFIER_INVALID",
   /** The body is not valid JSON. 400. */
   "JIRA_WEBHOOK_BODY_NOT_JSON",
   /** Another request is handling this delivery right now; Jira retries it. 409. */
@@ -93,6 +96,8 @@ export type JiraStatusStarter = {
 
 /** What acts inside the workspace of the registration. */
 export type JiraWorkspaceCollaborators = {
+  /** Notes that a bearer token that verified came with a delivery of the registration (the first time stays). */
+  registrations: { markBearerSeen(registrationId: string): Promise<boolean> };
   projects: { getById(projectId: string): Promise<StoredProject | undefined> };
   /** The full name of the repository the code lives in (where the mirror's rows sit); undefined for none. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
@@ -139,9 +144,6 @@ export function createJiraWebhookHandler(
     if (clientSecret === undefined)
       return fail(404, "JIRA_WEBHOOK_NOT_CONFIGURED");
 
-    const body = await readLimitedBody(request, maxBodyBytes);
-    if (!body.ok) return fail(413, "JIRA_WEBHOOK_BODY_TOO_LARGE");
-
     // The address names the registration; whether it exists, and a wrong secret, look the same from outside.
     const address = new URL(request.url);
     const registrationId = address.searchParams.get("w") ?? "";
@@ -155,6 +157,8 @@ export function createJiraWebhookHandler(
     const verdict = verifyJiraDelivery({
       urlSecret: address.searchParams.get("s"),
       storedSecretHash: registration.secretHash,
+      pendingSecretHash: registration.pendingSecretHash,
+      bearerSeen: registration.bearerSeenAt !== null,
       authorization: request.headers.get("authorization"),
       clientSecret,
       now: now(),
@@ -165,10 +169,21 @@ export function createJiraWebhookHandler(
       );
       return fail(401, "JIRA_WEBHOOK_UNAUTHORIZED");
     }
+    if (verdict.bearer === "verified" && registration.bearerSeenAt === null) {
+      // From now on a delivery of this registration without a token is refused. A failure to note it only delays that.
+      try {
+        await deps
+          .workspace(registration.workspaceId)
+          .registrations.markBearerSeen(registration.id);
+      } catch (error) {
+        logger.warn(
+          `[jira-webhook] registration=${registration.id} the bearer token could not be noted (${errorCodeOf(error)})`,
+        );
+      }
+    }
 
-    const identifier = request.headers.get("x-atlassian-webhook-identifier");
-    if (identifier === null || !IDENTIFIER.test(identifier))
-      return fail(400, "JIRA_WEBHOOK_IDENTIFIER_INVALID");
+    const body = await readLimitedBody(request, maxBodyBytes);
+    if (!body.ok) return fail(413, "JIRA_WEBHOOK_BODY_TOO_LARGE");
     let payload: unknown;
     try {
       payload = JSON.parse(body.text);
@@ -195,6 +210,16 @@ export function createJiraWebhookHandler(
       return accepted("ignored");
     }
 
+    // Jira treats a 4xx as final, so a missing or odd identifier must not be refused: the retries of one delivery carry one body.
+    const header = request.headers.get("x-atlassian-webhook-identifier");
+    const identifier =
+      header !== null && IDENTIFIER.test(header)
+        ? header
+        : `b-${createHash("sha256").update(body.text).digest("hex").slice(0, 32)}`;
+    if (identifier !== header)
+      logger.info(
+        `[jira-webhook] registration=${registration.id} no usable X-Atlassian-Webhook-Identifier: de-duplicated by a body hash`,
+      );
     const deliveryId = `${registration.id}-${identifier}`;
     const eventName =
       change.kind === "issue_deleted"

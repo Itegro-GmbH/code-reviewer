@@ -24,6 +24,14 @@ export type JiraWebhookApi = {
     connectionId: string,
     webhookIds: readonly string[],
   ): Promise<{ ok: true; expiresAt: string } | JiraWebhookFailure>;
+  /** The webhooks the app has registered for the person of the connection on the site (Jira does not say their address). */
+  list(connectionId: string): Promise<
+    | {
+        ok: true;
+        webhooks: { id: string; jql: string; expiresAt: string }[];
+      }
+    | JiraWebhookFailure
+  >;
   /** Deletes the webhooks; an id Jira does not know counts as deleted. */
   remove(
     connectionId: string,
@@ -45,6 +53,10 @@ async function jsonOf(response: Response): Promise<unknown> {
 /** Jira's numeric ids as the numbers its API takes; an id that is none is dropped (the call then refuses it). */
 const numbersOf = (ids: readonly string[]): number[] =>
   ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+
+/** Pages of the list the factory reads at most; Jira allows five webhooks per app and user, so one page is the rule. */
+const LIST_PAGE_SIZE = 100;
+const LIST_MAX_PAGES = 5;
 
 /** The failure an answer that is no success stands for. */
 function failureOf(status: number): JiraWebhookFailure {
@@ -132,6 +144,40 @@ export function createJiraWebhookApi({
       return expiresAt === ""
         ? { ok: false, error: "jira_webhook_rejected" }
         : { ok: true, expiresAt };
+    },
+
+    async list(connectionId) {
+      const webhooks: { id: string; jql: string; expiresAt: string }[] = [];
+      for (let page = 0; page < LIST_MAX_PAGES; page += 1) {
+        const result = await tokens.request(
+          connectionId,
+          `/rest/api/3/webhook?startAt=${String(page * LIST_PAGE_SIZE)}&maxResults=${String(LIST_PAGE_SIZE)}`,
+          { method: "GET", headers: { accept: "application/json" } },
+        );
+        if (!result.ok) return { ok: false, error: result.error };
+        const { response } = result;
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => undefined);
+          return failureOf(response.status);
+        }
+        const body = await jsonOf(response);
+        const values =
+          isRecord(body) && Array.isArray(body.values) ? body.values : [];
+        for (const value of values as unknown[]) {
+          if (!isRecord(value)) continue;
+          const id = Number(value.id);
+          const expiresAt = jiraTime(value.expirationDate);
+          if (
+            Number.isSafeInteger(id) &&
+            id > 0 &&
+            typeof value.jqlFilter === "string" &&
+            expiresAt !== ""
+          )
+            webhooks.push({ id: String(id), jql: value.jqlFilter, expiresAt });
+        }
+        if (!isRecord(body) || body.isLast !== false) break;
+      }
+      return { ok: true, webhooks };
     },
 
     async remove(connectionId, webhookIds) {
