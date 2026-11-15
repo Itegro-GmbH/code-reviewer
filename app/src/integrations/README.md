@@ -128,12 +128,13 @@ client behind both faces). The git `IntegrationProvider` keeps the repository an
 ```ts
 interface TicketProvider {
   readonly id: string; // `github`, as a ticket source and a `ticket_ref` name it
+  readonly boardless?: true; // statuses are no board columns (Jira, #1040): `ticket.setStatus` needs no board
   isTicketKey?(key: string): boolean; // can this text name a ticket of the provider? (GitHub: a whole number)
   readTicket?(scope: TicketScope, key: string, signal?): Promise<TicketRead | null>;
   commentOnTicket?(scope, key, body, options?): Promise<{ url; existing; id? }>;
-  updateTicketComment?(scope, commentId, body, signal?): Promise<void>;
+  updateTicketComment?(scope, key, commentId, body, signal?): Promise<void>; // the key since #1040: Jira addresses a comment through its issue
   changeTicketLabels?(scope, key, change, signal?): Promise<{ labels: string[] }>;
-  setTicketStatus?(scope, key, move, signal?): Promise<...>; // only where tickets sit on a board
+  setTicketStatus?(scope, key, move, signal?): Promise<...>; // a board column (GitHub) or a workflow transition (Jira, `status_unreachable` is an answer)
   // The ticket mirror (#923, `src/tracker/`); a provider without a mirror has none of these:
   parseTrackerChange?(i: Integration, req: Request): Promise<TrackerChangeResult>; // what a delivery changes in the cache
   readTrackerPage?(scope, step: TrackerPageStep, signal?): Promise<TrackerPage>; // one page of the full sync
@@ -149,7 +150,7 @@ connection (`integration`) and the container of the tickets (`repo`: GitHub's re
 `connectorTargetOf(repositoryId)`, which stays the way to the git provider (pull requests, reviews, the question on a pull request): `workflow-runs/ticket-target.ts`
 resolves the provider, `workflow-runs/shared.ts` finds the container. A lane without a project acts through GitHub on the repository of the run.
 
-The connection of a workspace to Jira Cloud (#1037, OAuth 2.0 3LO, `src/jira/`) is not a git integration and has no row in `integrations`: it has its own table, `jira_connections`, and `src/jira/README.md`; the Jira ticket provider (`jira/ticket-provider.ts`; not in this registry, because `integrations` may not import `jira`: the routes that read Jira tickets hand it to the engine's wiring, `workflow-runs/shared.ts` `ticketProvidersWith`, which also has a method-less Jira stand-in so that ticket actions end with `ticket_provider_unsupported`) reads a ticket of a site through `JiraTokens.request` and has no write method until #1040 (a ticket action then ends with `ticket_provider_unsupported`); the container of a Jira ticket is `TicketScope.jira` (connection and project key), and `repo` stays the repository the code lives in.
+The connection of a workspace to Jira Cloud (#1037, OAuth 2.0 3LO, `src/jira/`) is not a git integration and has no row in `integrations`: it has its own table, `jira_connections`, and `src/jira/README.md`; the Jira ticket provider (`jira/ticket-provider.ts`; not in this registry, because `integrations` may not import `jira`: `instrumentation.ts` registers it for the process with `registerTicketProvider` (`ticket-provider.ts`, kept on `globalThis`), `workflow-runs/shared.ts` `ticketProvidersWith` finds it at every call and falls back to a method-less Jira stand-in, so that a process that did not register it ends a ticket action with `ticket_provider_unsupported`) reads and, since #1040, writes the tickets of a site through `JiraTokens.request` (comments as ADF, labels, transitions; `boardless`, failures are `TicketProviderError`s); the container of a Jira ticket is `TicketScope.jira` (connection and project key), and `repo` stays the repository the code lives in.
 `commentOnIssue`, `updateIssueComment` and `changeIssueLabels` stay on the git provider for the conversation below a pull request (GitHub numbers it like an issue); the
 GitHub ticket provider shares their implementation (`providers/github-app/issue-actions.ts`).
 

@@ -162,6 +162,24 @@ and is announced again is, as far as the lane can tell, in that status.
   it**, the factory's own transitions included. A creation is no change of status and starts nothing. Before a run starts the factory
   asks Jira for the issue and checks that it **still has that status** (a late or repeated delivery starts nothing).
 
+### What the factory writes to Jira (#1040)
+
+The OAuth scopes `read:jira-work` and `write:jira-work` let the factory write **as the person who connected the site** (3LO acts as that
+person), so its comments, label changes and transitions show that person's name in Jira. The permissions of that account in the Jira project
+decide what works: add comments, edit issues (labels) and transition issues. What it writes:
+
+- **Comments** (`POST /rest/api/3/issue/{key}/comment`, ADF from the Markdown of the lane), and **an edit of its own comment** (`PUT .../comment/{id}`)
+  when the question of an agent is answered. The hidden marker that tells the factory a comment is its own is kept as a comment **property**
+  (`factory.markers`), not as text; the factory looks for its comment by that property and by its author.
+- **Labels** (`PUT /rest/api/3/issue/{key}` with `update.labels`). Jira refuses a label with a space, so the factory writes `agent working` as `agent-working`.
+- **Transitions** (`GET` and `POST /rest/api/3/issue/{key}/transitions`): the transition whose target is the status the lane names. A transition that needs a field the factory cannot
+  fill (a screen with a required field) is refused by Jira; give that transition no required field, or use another route to the status.
+- **The full read of the project** (`POST /rest/api/3/search/jql`) for the first read, the nightly resync and the "Resync" button.
+- **A pull request** is linked to an issue by Jira's own GitHub integration (the Jira app for GitHub must be installed on the Jira site and the repository connected to it): the branch of a lane's agent
+  carries the key (`workflow/PROJ-12/…`), the pull request title starts with the key and the body has the ticket address. Without that integration the pull request still names the ticket, but
+  Jira's development panel does not show it.
+- **An answer** is a comment that begins with `/answer`; the `comment_created` event of the webhook delivers it. Anyone who can comment on the issue can answer (see [`docs/workflows.md`](workflows.md#the-status-trigger)).
+
 ## What the factory keeps, and what it never shows
 
 - Per connection: the site (cloud id, address, name), the Atlassian account id and display name of the person who connected
@@ -219,3 +237,16 @@ connection of a site must keep working through all of it:
       webhook in Jira's API and call the job: it registers a new one. Find out what `PUT /rest/api/3/webhook/refresh` answers for a webhook
       that does not exist (the factory takes 404 as gone and registers a new one; any other 4xx is kept as `jira_webhook_rejected`).
 - [ ] **Fifth and sixth project.** Five projects on one connection work; the sixth shows `jira_webhook_limit` on its row.
+- [ ] **Write-back (#1040).** On a project with the lane "Issue to PR (status)" and an issue in its trigger status: move the issue into the status. Within a minute the issue shows a transition to
+      the lane's "in progress" status, the label `agent-working`, and the comments of the lane written **as the connected person**, as formatted text (headings, lists, links) and **without** any
+      `<!-- … -->` text. Note what the activity of the issue shows: one entry per change, no duplicate comment when a step is retried.
+- [ ] **The marker property.** With the Jira REST API (`GET /rest/api/3/issue/{key}/comment?expand=properties`) check that the comment of the factory has the property `factory.markers`, that an
+      answered question has the marker `answered` (the first version has `ask`), and that a second run on the same issue does not edit the first run's comments.
+- [ ] **A transition that cannot be done.** Name a status in the lane that no transition leads to from the issue's status: the step ends `ticket_status_unreachable` and the message lists the reachable
+      statuses; a status the workflow does not have ends `ticket_status_unknown`; a transition with a required screen field ends `ticket_rejected`.
+- [ ] **The pull request link.** The pull request of the run has `PROJ-12: <title>`, `Ticket: <url>` in the body and no `Closes #`; with the Jira app for GitHub installed the issue's development
+      panel shows the branch and the pull request.
+- [ ] **`/answer` (#1040).** Let an agent ask a question: a comment of the factory appears. Reply in Jira with `/answer 1`: the run goes on, the question comment is edited to say it was answered. Check
+      what the real `comment_created` delivery carries (`comment.body` as ADF or as text, `comment.author.accountType`); the factory reads both, and takes only a comment of a person.
+- [ ] **The full read.** Create five issues in the project, set the project up, press **Resync** in the project's setup: the Issues tab lists them with their keys. Move one issue to another
+      Jira project and press **Resync** again: it is gone from the list. Note how many pages `search/jql` took.
