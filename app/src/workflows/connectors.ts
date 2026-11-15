@@ -24,7 +24,7 @@ import {
  * - `input`: `{{trigger.input.…}}`, what the caller of a manual trigger hands in (its type is the schema's);
  * - `issue`: `{{trigger.issue}}` or `{{trigger.issue.number}}`, the issue that started the run (not its title, body or labels: whoever
  *   opened the issue wrote those);
- * - `ticket` (#916): `{{trigger.ticket}}`, `{{trigger.ticket.number}}` or `{{trigger.ticket.key}}` (#1040), the ticket the run is about, the same way;
+ * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way (a Jira ticket is `{{trigger.ticket}}`, #1040);
  * - `defaultBranch`: `{{trigger.repo.defaultBranch}}` or `{{trigger.ticket.repo.defaultBranch}}`;
  * - `branch`: `{{<agent step>.branch}}`, the branch the platform made;
  * - `pullRequest` (#917): `{{<action>.number}}` of a `pullRequest.open` action, the pull request the platform opened.
@@ -73,17 +73,13 @@ const ISSUE: ValueType = {
 };
 
 /**
- * A ticket (#1040): what an issue is, or the text key of a ticket of a platform that does not number its tickets (Jira: `PROJ-7`), as a text
- * or as an object with a `key`: `{{trigger.ticket}}` (which has both) and `{{trigger.ticket.key}}` fit.
+ * A ticket (#1040): what an issue is, or the ticket object with its text key, for a platform that does not number its tickets (Jira: `PROJ-7`).
+ * `{{trigger.ticket}}` (which has the key and the number) fits; the engine hands the number on where there is one (GitHub, as before) and the
+ * key where there is none. No text literal: a key is never typed into a lane, the ticket of the run is named by a reference.
  */
 const TICKET: ValueType = {
   kind: "oneOf",
-  options: [
-    objectOf({ key: STRING }),
-    objectOf({ number: INTEGER }),
-    INTEGER,
-    STRING,
-  ],
+  options: [objectOf({ key: STRING }), objectOf({ number: INTEGER }), INTEGER],
 };
 
 const ISSUE_ROOTS: readonly TargetRoot[] = ["issue", "ticket", "input"];

@@ -457,15 +457,11 @@ describe("a field that takes one value", () => {
       />,
     );
     await openPicker();
-    expect(optionNames()).toEqual([
-      "trigger.ticket",
-      "trigger.ticket.key",
-      "trigger.ticket.number",
-    ]);
+    expect(optionNames()).toEqual(["trigger.ticket", "trigger.ticket.number"]);
     expect(
       within(screen.getByRole("dialog")).getByText(/Nothing else is offered/),
     ).toBeTruthy();
-    await userEvent.click(screen.getAllByRole("option")[2]!);
+    await userEvent.click(screen.getAllByRole("option")[1]!);
     expect(seen).toHaveBeenLastCalledWith("{{trigger.ticket.number}}");
     expect((plus() as HTMLButtonElement).disabled).toBe(true);
     await userEvent.click(plus());

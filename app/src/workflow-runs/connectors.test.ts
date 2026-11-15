@@ -218,16 +218,15 @@ describe("the ticket input of the ticket actions (#1040)", () => {
   });
 
   // #1040-T01
-  it("hands on the text key of a Jira ticket, as the whole ticket object, as its key or as a literal", () => {
+  it("hands on the text key of a Jira ticket, which has no number, when a lane names the ticket object", () => {
     const jira = ticketValues("PROJ-7", 0);
-    for (const ticket of [
-      "{{trigger.ticket}}",
-      "{{trigger.ticket.key}}",
-      "PROJ-7",
-    ])
-      expect(
-        resolveActionInputs({ ticket, body: "Hi" }, TICKET_COMMENT, jira),
-      ).toEqual({ ticket: "PROJ-7", body: "Hi" });
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket}}", body: "Hi" },
+        TICKET_COMMENT,
+        jira,
+      ),
+    ).toEqual({ ticket: "PROJ-7", body: "Hi" });
     expect(
       resolveActionInputs(
         { ticket: "{{trigger.ticket}}", add: ["x"] },
@@ -238,34 +237,34 @@ describe("the ticket input of the ticket actions (#1040)", () => {
   });
 
   // #1040-T01
-  it("keeps what a GitHub lane always had: the object and the number name the issue, and the key is its number as text", () => {
+  it("keeps what a GitHub lane always had: the number of the issue, for the object, the number and a literal", () => {
     const github = ticketValues("15", 15);
-    expect(
-      resolveActionInputs(
-        { ticket: "{{trigger.ticket.number}}", body: "Hi" },
-        TICKET_COMMENT,
-        github,
-      ),
-    ).toEqual({ ticket: 15, body: "Hi" });
-    expect(
-      resolveActionInputs(
-        { ticket: "{{trigger.ticket}}", body: "Hi" },
-        TICKET_COMMENT,
-        github,
-      ),
-    ).toEqual({ ticket: "15", body: "Hi" });
-    expect(
-      resolveActionInputs({ ticket: 15, body: "Hi" }, TICKET_COMMENT, github),
-    ).toEqual({ ticket: 15, body: "Hi" });
+    for (const ticket of [
+      "{{trigger.ticket}}",
+      "{{trigger.ticket.number}}",
+      15,
+    ])
+      expect(
+        resolveActionInputs({ ticket, body: "Hi" }, TICKET_COMMENT, github),
+      ).toEqual({ ticket: 15, body: "Hi" });
   });
 
   // #1040-T01
-  it("still holds the issue of a github.issue action to a whole number: a key is no issue there", () => {
+  it("holds the issue of a github.issue action to a whole number, and takes no text literal as a ticket", () => {
     expect(
       failure(() =>
         resolveActionInputs(
-          { issue: "{{trigger.ticket.key}}", body: "Hi" },
+          { issue: "{{trigger.ticket}}", body: "Hi" },
           GITHUB_ISSUE_COMMENT,
+          ticketValues("PROJ-7", 0),
+        ),
+      ),
+    ).toBeInstanceOf(ActionInputError);
+    expect(
+      failure(() =>
+        resolveActionInputs(
+          { ticket: "PROJ-7", body: "Hi" },
+          TICKET_COMMENT,
           ticketValues("PROJ-7", 0),
         ),
       ),

@@ -148,12 +148,19 @@ function coerce(
       // An input that is a text or a list of texts (`reviewers`, #917); the other oneOf is the issue: an object with a number, or a number.
       const list = type.options.find((option) => option.kind === "list");
       if (list === undefined) {
-        // A ticket (#1040) may also be the text key of a ticket of a platform that does not number them (Jira): the key, whole or as the
-        // `key` of the ticket object, is what the action takes then.
-        if (type.options.some((option) => option.kind === "string")) {
-          const key = isRecord(value) ? value.key : value;
-          if (typeof key === "string" && key !== "") return key;
-        }
+        // A ticket (#1040) may be a ticket of a platform that does not number its tickets (Jira): the object has no number then (0), and what
+        // the action takes is its text key. Where the ticket has a number (GitHub) the number is handed on, as before.
+        const wantsKey = type.options.some(
+          (option) => option.kind === "object" && "key" in option.fields,
+        );
+        if (
+          wantsKey &&
+          isRecord(value) &&
+          typeof value.key === "string" &&
+          value.key !== "" &&
+          !(typeof value.number === "number" && value.number >= 1)
+        )
+          return value.key;
         return issueNumber(value, input);
       }
       return coerce(

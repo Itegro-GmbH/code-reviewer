@@ -180,7 +180,7 @@ async function world(options: { searchPageSize?: number } = {}) {
 
 describe("the ticket actions of a lane on a Jira ticket", () => {
   // #1040-T01
-  it("comments, moves and labels through a fake Jira, in the order of the lane, with the key of the ticket as the input", async () => {
+  it("comments, moves and labels through a fake Jira, in the order of the lane, with the key of the ticket", async () => {
     const w = await world();
     const { atlassian } = w.h;
     atlassian.setIssues(SITE.id, [issue(7)]);
