@@ -61,6 +61,9 @@ export interface TicketProvider {
   /** The provider's name in a project's ticket source and in a `ticket_ref` (`github`). */
   readonly id: string;
 
+  /** True where a status is not a column of a board (Jira): `ticket.setStatus` then needs no board of the project and names none (#1040). */
+  readonly boardless?: true;
+
   /**
    * Whether `key` can name a ticket of this provider at all (GitHub: a whole number; Jira: `PROJ-123`). A cheap check on the text, no call to
    * the platform: the ticket actions refuse a key that fails it as an input of the action. Left out, every key passes.
@@ -90,9 +93,13 @@ export interface TicketProvider {
     options?: { signal?: AbortSignal; marker?: string; since?: string },
   ): Promise<{ url: string; existing: boolean; id?: string }>;
 
-  /** Replaces the body of the app's own comment `commentId` below a ticket (#920). Rejects like `commentOnTicket`; 404 when the comment is gone. */
+  /**
+   * Replaces the body of the app's own comment `commentId` below the ticket `key` (#920; the key since #1040: Jira addresses a comment
+   * through its issue). Rejects like `commentOnTicket`; 404 when the comment is gone.
+   */
   updateTicketComment?(
     scope: TicketScope,
+    key: string,
     commentId: string,
     body: string,
     signal?: AbortSignal,
@@ -107,19 +114,22 @@ export interface TicketProvider {
   ): Promise<{ labels: string[] }>;
 
   /**
-   * Only where tickets sit on a board (#917; GitHub: a Project, projects_v2): puts the ticket into the status column named `status` of the
-   * board `board`, adding it to the board when it is not on it. What the board or the ticket decide is an answer, not an error. Idempotent.
+   * Puts the ticket into the status named `status`. GitHub (#917): the column of the Project board `board` (projects_v2), adding the ticket
+   * to the board when it is not on it. Jira (#1040): the transition to that status of the issue's workflow (`boardless`: no `board`).
+   * What the board, the workflow or the ticket decide is an answer, not an error. Idempotent: a ticket that is in the status stays.
    */
   setTicketStatus?(
     scope: TicketScope,
     key: string,
-    move: { board: string; status: string },
+    move: { board?: string; status: string },
     signal?: AbortSignal,
   ): Promise<
     | { kind: "moved"; status: string }
     | { kind: "board_not_found" }
     | { kind: "issue_not_found" }
     | { kind: "status_unknown"; available: string[] }
+    /** The workflow has such a status, but no transition leads there from the ticket's current one (Jira, #1040): `reachable` are the ones that do. */
+    | { kind: "status_unreachable"; reachable: string[] }
   >;
 
   /**
@@ -174,6 +184,35 @@ export interface TicketProvider {
   ): Promise<string | null>;
 }
 
+/**
+ * What a ticket provider that is not GitHub fails with (#1040): a code the ticket actions translate to a step failure, and a short text
+ * that holds nothing of the platform's answer (a message of Jira may name people and tickets).
+ */
+export const TICKET_PROVIDER_ERROR_CODES = [
+  /** There is no such ticket (or comment) for the account the connection is made with. */
+  "ticket_not_found",
+  /** The platform refused the account: it may not see the ticket or write to it. */
+  "ticket_forbidden",
+  /** The connection of the workspace is broken: a person has to connect it again. */
+  "ticket_connection_broken",
+  /** The platform could not be reached or answered something unusable. */
+  "ticket_unavailable",
+  /** The platform refused what was asked (a label it does not take, a transition that needs a form). */
+  "ticket_rejected",
+] as const;
+export type TicketProviderErrorCode =
+  (typeof TICKET_PROVIDER_ERROR_CODES)[number];
+
+export class TicketProviderError extends Error {
+  readonly code: TicketProviderErrorCode;
+
+  constructor(code: TicketProviderErrorCode, message: string) {
+    super(message);
+    this.name = "TicketProviderError";
+    this.code = code;
+  }
+}
+
 /** The provider a ticket source names. */
 export type TicketProviderRegistry = {
   /** The provider of this name, or undefined when none is registered. */
@@ -206,4 +245,32 @@ export const ticketKeyOfNumber = (number: number): string => String(number);
 export function ticketNumberOfKey(key: string): number | undefined {
   if (!/^[1-9]\d{0,9}$/.test(key)) return undefined;
   return Number(key);
+}
+
+/**
+ * Ticket providers a module that cannot be imported where the engine runs registers at the start of the process (#1040): the Jira provider
+ * (`jira/shared.ts`) reaches the engine's ticket actions from every entry point (a route, the runner API, the sweep) without those modules
+ * importing `jira` (an import cycle). Kept on `globalThis` under a symbol: the routes of a Next.js server are separate bundles of one process.
+ */
+const REGISTERED = Symbol.for("code-reviewer.registered-ticket-providers");
+
+function registeredMap(): Map<string, TicketProvider> {
+  const holder = globalThis as unknown as Record<symbol, unknown>;
+  const found = holder[REGISTERED];
+  if (found instanceof Map) return found as Map<string, TicketProvider>;
+  const created = new Map<string, TicketProvider>();
+  holder[REGISTERED] = created;
+  return created;
+}
+
+/** Makes `provider` the ticket provider of its id for the whole process (a second registration of the id replaces the first). */
+export function registerTicketProvider(provider: TicketProvider): void {
+  registeredMap().set(provider.id, provider);
+}
+
+/** The provider registered under `id`, or undefined. */
+export function registeredTicketProvider(
+  id: string,
+): TicketProvider | undefined {
+  return registeredMap().get(id);
 }

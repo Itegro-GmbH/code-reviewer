@@ -94,6 +94,7 @@ describe("the scope lookup of the service", () => {
 
     expect(answer.entries.map((entry) => entry.reference)).toEqual([
       "trigger.ticket",
+      "trigger.ticket.key",
       "trigger.ticket.number",
     ]);
   });

@@ -117,7 +117,7 @@ const ROOT_WORDS: Record<TargetRoot, string> = {
   issue:
     "the issue that started the run, {{trigger.issue}} or {{trigger.issue.number}}",
   ticket:
-    "the ticket the run is about, {{trigger.ticket}} or {{trigger.ticket.number}}",
+    "the ticket the run is about, {{trigger.ticket}}, {{trigger.ticket.number}} or {{trigger.ticket.key}}",
   defaultBranch:
     "the default branch of the repository, {{trigger.repo.defaultBranch}} or {{trigger.ticket.repo.defaultBranch}}",
   branch: "the branch of an agent step that may push, {{<step id>.branch}}",
@@ -158,7 +158,10 @@ export function targetVerdict(
     )
       return "ok";
     if (field === "issue" || field === "ticket")
-      return takes(field) && (more.length === 0 || only(["number"]))
+      return takes(field) &&
+        (more.length === 0 ||
+          only(["number"]) ||
+          (field === "ticket" && only(["key"])))
         ? "ok"
         : "refused";
     if (field === "repo")

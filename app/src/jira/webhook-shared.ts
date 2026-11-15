@@ -14,6 +14,7 @@ import { createJiraMirror } from "./mirror.ts";
 import { getAtlassianConfig } from "./shared.ts";
 import {
   createJiraWebhookHandler,
+  type JiraAnswerTaker,
   type JiraStatusStarter,
   type JiraWebhookHandler,
 } from "./webhook-handler.ts";
@@ -22,6 +23,8 @@ export function getJiraWebhookHandler(
   options: {
     /** What starts the lanes a status change in Jira starts in one workspace; the route passes it in. */
     statusesFor?: (workspaceId: string) => JiraStatusStarter;
+    /** What takes the answer of a comment `/answer …` in one workspace (#1040); the route passes it in. */
+    answersFor?: (workspaceId: string) => JiraAnswerTaker;
   } = {},
 ): JiraWebhookHandler {
   const db = getDatabase();
@@ -46,6 +49,9 @@ export function getJiraWebhookHandler(
         ...(options.statusesFor === undefined
           ? {}
           : { statuses: options.statusesFor(workspaceId) }),
+        ...(options.answersFor === undefined
+          ? {}
+          : { answers: options.answersFor(workspaceId) }),
       };
     },
   });

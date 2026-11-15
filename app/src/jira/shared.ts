@@ -13,7 +13,12 @@ import { sessionOfRequest } from "../github-signin/shared.ts";
 import { assembleJira, type AssembledJira } from "./assemble.ts";
 import { readAtlassianConfig, type AtlassianConfig } from "./config.ts";
 import { createJiraIssueReader, type JiraIssueReader } from "./issue-reader.ts";
+import { createJiraProjectReader } from "./projects.ts";
 import { createJiraTicketProvider } from "./ticket-provider.ts";
+import {
+  createJiraTicketWriter,
+  type JiraTicketWriter,
+} from "./ticket-writer.ts";
 import { createJiraRouteHandlers, type JiraRouteHandlers } from "./http.ts";
 
 function appSecret(): string {
@@ -66,7 +71,25 @@ export function jiraIssueReaderFor(workspaceId: string): JiraIssueReader {
   });
 }
 
-/** The Jira ticket provider of the running server (#1039): reads a ticket of a project's Jira source through the workspace's connection. */
+/** The writer of the Jira issues of the connections of one workspace (#1040): comments, labels and transitions. */
+export function jiraTicketWriterFor(workspaceId: string): JiraTicketWriter {
+  const connections = createJiraConnectionsRepository(
+    getDatabase(),
+    workspaceId,
+  );
+  const tokens = getJira().tokensFor(workspaceId);
+  return createJiraTicketWriter({
+    tokens,
+    siteUrlOf: async (connectionId) =>
+      (await connections.get(connectionId))?.siteUrl,
+    accountIdOf: async (connectionId) =>
+      (await connections.get(connectionId))?.accountId,
+    statuses: createJiraProjectReader({ tokens }),
+  });
+}
+
+/** The Jira ticket provider of the running server (#1039, #1040): reads and writes a ticket of a project's Jira source through the workspace's connection. */
 export const jiraTicketProvider = createJiraTicketProvider({
   readerFor: async (workspaceId) => jiraIssueReaderFor(workspaceId),
+  writerFor: async (workspaceId) => jiraTicketWriterFor(workspaceId),
 });

@@ -147,7 +147,20 @@ const STEP_FAILURE_TEXT: Record<
     "GitHub's rate limit was reached. The action was not repeated; wait a while and run the workflow again.",
   github_unavailable: "GitHub could not be reached or did not answer in time.",
   ticket_provider_unsupported:
-    "The ticket source of this project cannot do this yet: a Jira project can start a run, but comments, labels and status changes on its tickets are not supported yet.",
+    "The ticket source of this project cannot do this: this server has no write access to Jira tickets (the Jira provider is not registered).",
+  ticket_not_found:
+    "Jira has no such issue or comment for this workspace's connection. The issue may have moved to another project or been deleted.",
+  ticket_forbidden:
+    "Jira refuses the account of the connection: it may not see the issue or write to it. Check its permissions in the Jira project.",
+  ticket_connection_broken:
+    "The Jira connection of this workspace is broken. Connect it again in the workspace settings, then run the workflow again.",
+  ticket_unavailable: "Jira could not be reached or did not answer in time.",
+  ticket_rejected:
+    "Jira refused the request: a label it does not take, or a transition that needs a field the factory cannot fill. Change the Jira workflow so that the transition needs none.",
+  ticket_status_unknown:
+    "The workflow of the Jira project has no status with that name. The message lists the statuses it has.",
+  ticket_status_unreachable:
+    "No transition leads to that status from the ticket's current one. The message lists the statuses that can be reached from there; add the transition in the Jira workflow, or choose another status. A person has to move the ticket on.",
   action_timeout:
     "The action did not answer in time. It is not repeated, because it may have happened.",
   action_interrupted:

@@ -15,9 +15,11 @@ import {
 } from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { JIRA_ISSUE_KEY } from "../workflows/ticket-ref.ts";
-import type {
-  TicketProvider,
-  TicketProviderRegistry,
+import type { JiraAnswerTakerShape } from "./ticket-answers.ts";
+import {
+  registeredTicketProvider,
+  type TicketProvider,
+  type TicketProviderRegistry,
 } from "../integrations/ticket-provider.ts";
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
@@ -102,9 +104,9 @@ export async function connectorTargetOf(
 
 /**
  * The Jira ticket provider as the engine's wiring knows it without importing `jira` (the `workflow-runs` module may not: a cycle through
- * `projects`): it can name a key and has NO method, so a ticket action of a run of a Jira project finds a target and ends with
- * `ticket_provider_unsupported` (#1039; the write-back is #1040). A route that reads Jira tickets (the start of a run, the Jira webhook)
- * hands in the real provider of `jira/` (`ticketProvidersWith`).
+ * `projects`): it can name a key and has NO method, so a ticket action of a process that registered no Jira provider finds a target and
+ * ends with `ticket_provider_unsupported` (#1039). The real one is registered at the start of the process (`instrumentation.ts`,
+ * `registerTicketProvider`, #1040) and found here at every call; a route that reads Jira tickets may also hand it in (`ticketProvidersWith`).
  */
 export const WRITELESS_JIRA_PROVIDER: TicketProvider = {
   id: "jira",
@@ -121,8 +123,14 @@ export function ticketProvidersWith(
       provider,
     ]),
   );
+  const extraIds = new Set(extra.map((provider) => provider.id));
   return {
-    get: (id) => byId.get(id) ?? ticketProviderRegistry.get(id),
+    // A provider handed in wins; then the one registered for the process (looked up now: it is registered at start); then the stand-ins.
+    get: (id) =>
+      (extraIds.has(id) ? byId.get(id) : undefined) ??
+      registeredTicketProvider(id) ??
+      byId.get(id) ??
+      ticketProviderRegistry.get(id),
     ids: () => [...new Set([...ticketProviderRegistry.ids(), ...byId.keys()])],
   };
 }
@@ -377,6 +385,37 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
     hasRuns: (repositoryId) => runs.hasRunOnRepository(repositoryId),
     engine: lazyAnswerEngine(workspaceId),
     async reply(repositoryId, answer, text, key) {
+      // The reply goes where the comment was: below the Jira issue, through the ticket provider of the project's Jira source (#1040).
+      if (answer.ticket?.provider === "jira") {
+        const jira = jiraSourceOf(
+          (
+            await createProjectsRepository(
+              db,
+              workspaceId,
+            ).findActiveForRepository(repositoryId)
+          )?.ticketSource ?? { provider: "github", repositoryId, board: null },
+        );
+        const provider = ticketProvidersWith().get("jira");
+        const target = await connectorTargetOf(workspaceId, repositoryId);
+        if (
+          jira === null ||
+          provider?.commentOnTicket === undefined ||
+          target === undefined
+        )
+          return;
+        await provider.commentOnTicket(
+          { integration: target.integration, repo: target.repo, jira },
+          answer.ticket.key,
+          `${key}\n${text}`,
+          {
+            marker: key,
+            ...(answer.createdAt === undefined
+              ? {}
+              : { since: answer.createdAt }),
+          },
+        );
+        return;
+      }
       const target = await connectorTargetOf(workspaceId, repositoryId);
       if (target?.provider.commentOnIssue === undefined) return;
       await target.provider.commentOnIssue(
@@ -396,6 +435,44 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });
+}
+
+/**
+ * What takes the answer a Jira comment `/answer …` gives (#1040): the Jira webhook hands over the comment; this finds the run that waits on
+ * the issue (`ticket_ref` `jira:<owner>/<repo>#PROJ-12`) with `ticketAnswersFor` and answers it, as a comment on GitHub does.
+ */
+export function jiraAnswersFor(workspaceId: string): JiraAnswerTakerShape {
+  const repositories = createRepositoriesRepository(getDatabase(), workspaceId);
+  const answers = ticketAnswersFor(workspaceId);
+  return {
+    async answer(deliveryId, answer) {
+      const repository = await repositories.get(answer.repositoryId);
+      if (repository === undefined) return { outcome: "no_run" };
+      const { comment } = answer;
+      const taken = await answers.answer(deliveryId, {
+        repo: {
+          integrationId: repository.integrationId,
+          externalId: repository.externalId,
+          fullName: repository.fullName,
+          url: repository.url,
+        },
+        number: Number(JIRA_ISSUE_KEY.exec(answer.issueKey)?.[2] ?? 0),
+        ticket: { provider: "jira", key: answer.issueKey },
+        commentId: comment.id,
+        ...(comment.createdAt === "" ? {} : { createdAt: comment.createdAt }),
+        actor: {
+          login: comment.author.name,
+          externalId: comment.author.accountId,
+        },
+        ...(answer.choice === undefined ? {} : { choice: answer.choice }),
+        ...(answer.text === undefined ? {} : { text: answer.text }),
+        raw: answer.raw,
+      });
+      return taken.outcome === "not_taken"
+        ? { outcome: "not_taken", reason: taken.reason }
+        : taken;
+    },
+  };
 }
 
 /**

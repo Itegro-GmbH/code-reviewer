@@ -1279,7 +1279,14 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `github_validation` | step | GitHub refused the content: no commits between head and base, an archived repository, a value it does not accept. |
 | `github_rate_limited` | step | GitHub's rate limit was reached (also the secondary limit, which comes without a rate-limit header); the action is not repeated. |
 | `github_unavailable` | step | GitHub could not be reached or did not answer in time. For an action that creates something the message adds that the action may have happened. |
-| `ticket_provider_unsupported` | step | `ticket.comment`, `ticket.labels` or `ticket.setStatus` on a run of a project whose ticket source is a Jira project: Jira's tickets can be read and start runs, but writing to them (comments, labels, transitions) is not supported yet (#1040). |
+| `ticket_provider_unsupported` | step | `ticket.comment`, `ticket.labels` or `ticket.setStatus` on a run of a project whose ticket source is a Jira project, in a process that has no Jira write provider registered (the running server registers it at start; this is a server that did not, #1040). |
+| `ticket_not_found` | step | A ticket action on a Jira project: Jira has no such issue (or comment) for the connection's account, or the key is an issue of another Jira project than the project's source. |
+| `ticket_forbidden` | step | Jira refused the account of the connection: it may not see the issue or write to it (the Jira project's permissions). |
+| `ticket_connection_broken` | step | The Jira connection of the workspace is broken: connect it again in the workspace settings. |
+| `ticket_unavailable` | step | Jira could not be reached or did not answer in time. For a comment the message adds that the action may have happened. |
+| `ticket_rejected` | step | Jira refused the request: a label it does not take, or a transition that needs a field of a screen the factory cannot fill. |
+| `ticket_status_unknown` | step | `ticket.setStatus` on a Jira project: the workflow of the project has no status of that name; the message lists the statuses it has. |
+| `ticket_status_unreachable` | step | `ticket.setStatus` on a Jira project: the workflow has the status but no transition leads there from the ticket's current one; the message lists the statuses that can be reached from there. |
 | `action_timeout` | step | The connector did not answer within 60 seconds; the action is not repeated, and for an action that is not idempotent the message says it may have happened. |
 | `action_interrupted` | step | The engine was interrupted while the action ran; it is not repeated. |
 | `cancelled` | step | A member stopped the run (or the task of the step) before the turn of the step started, or while it ran. The run ends `cancelled` (status, no `errorCode`). The job of the turn has the same code. |

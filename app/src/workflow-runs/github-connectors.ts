@@ -27,6 +27,10 @@ import {
 } from "./limits.ts";
 import { PROJECT_MEMBERS } from "../workflows/connectors.ts";
 import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
+import {
+  TicketProviderError,
+  type TicketScope,
+} from "../integrations/ticket-provider.ts";
 import type { TicketTarget } from "./ticket-target.ts";
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
@@ -441,6 +445,54 @@ function pageOfRepository(
   }
 }
 
+/**
+ * What a ticket action reports when its provider is not GitHub (#1040): a `TicketProviderError` is a step failure with its own code and a
+ * text that holds nothing of the platform's answer; anything else is as for GitHub.
+ */
+function toTicketError(name: GithubConnectorName, error: unknown): Error {
+  if (error instanceof TicketProviderError) {
+    const code = {
+      ticket_not_found: "ticket_not_found",
+      ticket_forbidden: "ticket_forbidden",
+      ticket_connection_broken: "ticket_connection_broken",
+      ticket_unavailable: "ticket_unavailable",
+      ticket_rejected: "ticket_rejected",
+    } as const;
+    return new ConnectorError(
+      code[error.code],
+      NOT_REPEATABLE.has(name) && error.code === "ticket_unavailable"
+        ? `${error.message} ${MAY_HAVE_HAPPENED}`
+        : error.message,
+    );
+  }
+  return toConnectorError(name, error);
+}
+
+/**
+ * The address of the comment a ticket provider reports. A GitHub ticket is a page of the repository of the run (`pageOfRepository`); a ticket
+ * that lives elsewhere (Jira) has the address of its own site, taken only when it is an http(s) address without credentials (it ends up as a
+ * link on the run page), else none.
+ */
+function pageOfTicket(
+  reported: string,
+  scope: TicketScope,
+  fallbackPath: string,
+): string {
+  if (scope.jira === undefined)
+    return pageOfRepository(reported, scope.repo, fallbackPath);
+  try {
+    const page = new URL(reported);
+    return (page.protocol === "https:" || page.protocol === "http:") &&
+      page.username === "" &&
+      page.password === "" &&
+      reported.length <= 2000
+      ? page.href
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 function unavailable(name: GithubConnectorName): ConnectorError {
   return new ConnectorError(
     "github_unavailable",
@@ -463,7 +515,10 @@ function ticketUnsupported(
 }
 
 /** The failure of a status the board does not have: the options it has, as the board spells them (one line each, bounded). */
-function boardStatusText(available: readonly string[]): string {
+function boardStatusText(
+  available: readonly string[],
+  workflow = false,
+): string {
   const shown = available
     .slice(0, BOARD_OPTIONS_SHOWN)
     .map((option) => cleanReason(option))
@@ -472,9 +527,24 @@ function boardStatusText(available: readonly string[]): string {
     available.length > BOARD_OPTIONS_SHOWN
       ? ` and ${String(available.length - BOARD_OPTIONS_SHOWN)} more`
       : "";
+  if (workflow)
+    return shown.length === 0
+      ? "The workflow of the Jira project has no statuses to set."
+      : `The workflow of the Jira project has no such status. Its statuses are: ${shown.join(", ")}${more}.`;
   return shown.length === 0
     ? "The board has no Status field with options, so no status can be set."
     : `The board has no such status. Its statuses are: ${shown.join(", ")}${more}.`;
+}
+
+/** The failure of a status no transition leads to from the ticket's current one: the statuses that can be reached from there. */
+function reachableText(reachable: readonly string[]): string {
+  const shown = reachable
+    .slice(0, BOARD_OPTIONS_SHOWN)
+    .map((option) => cleanReason(option))
+    .filter((option): option is string => option !== undefined);
+  return shown.length === 0
+    ? "No transition of the Jira workflow leads to that status from the ticket's current one, and none leads anywhere else from there. Add the transition in the Jira workflow, or move the ticket by hand."
+    : `No transition of the Jira workflow leads to that status from the ticket's current one. From there it can go to: ${shown.join(", ")}. Add the transition in the Jira workflow, or move the ticket by hand.`;
 }
 
 export function createGithubConnectors(
@@ -579,11 +649,11 @@ export function createGithubConnectors(
           { signal: call.signal, marker, ...searchSince(call) },
         );
         return {
-          url: pageOfRepository(url, scope.repo, `/issues/${key}`),
+          url: pageOfTicket(url, scope, `/issues/${key}`),
           existing,
         };
       } catch (error) {
-        throw toConnectorError(name, error);
+        throw toTicketError(name, error);
       }
     },
   };
@@ -641,7 +711,7 @@ export function createGithubConnectors(
         );
         return { labels };
       } catch (error) {
-        throw toConnectorError(name, error);
+        throw toTicketError(name, error);
       }
     },
   };
@@ -652,34 +722,43 @@ export function createGithubConnectors(
     async run(call) {
       const name = "ticket.setStatus";
       const key = ticketKey(call.inputs.ticket);
-      // The board of the project, unless the step names one (an override that stays accepted).
-      const named = call.inputs.board;
-      const projectBoard =
-        named === undefined ? await deps.projectBoard?.(call) : undefined;
-      if (named === undefined && projectBoard === undefined)
-        throw new ActionInputError(
-          "The project of this lane has no board: set one on the project, or name it with board.",
-        );
-      const board = boardReference(named ?? projectBoard);
       const status = statusName(call.inputs.status);
       const { provider, scope } = await ticketTargetOrFail(deps, call, key);
       if (provider.setTicketStatus === undefined)
         throw ticketUnsupported(provider.id, name);
+      // The board of the project, unless the step names one (an override that stays accepted). A provider whose statuses are no board
+      // columns (Jira: the transitions of the ticket's workflow) needs none.
+      let board: string | undefined;
+      if (provider.boardless !== true) {
+        const named = call.inputs.board;
+        const projectBoard =
+          named === undefined ? await deps.projectBoard?.(call) : undefined;
+        if (named === undefined && projectBoard === undefined)
+          throw new ActionInputError(
+            "The project of this lane has no board: set one on the project, or name it with board.",
+          );
+        board = boardReference(named ?? projectBoard);
+      }
       try {
         const moved = await provider.setTicketStatus(
           scope,
           key,
-          { board, status },
+          { ...(board === undefined ? {} : { board }), status },
           call.signal,
         );
         switch (moved.kind) {
           case "moved":
             return { status: moved.status };
           case "issue_not_found":
-            throw new ConnectorError(
-              "github_not_found",
-              "GitHub has no issue with that number in the repository of the run.",
-            );
+            throw provider.boardless === true
+              ? new ConnectorError(
+                  "ticket_not_found",
+                  "Jira has no issue with that key in the Jira project of this project.",
+                )
+              : new ConnectorError(
+                  "github_not_found",
+                  "GitHub has no issue with that number in the repository of the run.",
+                );
           case "board_not_found":
             throw new ConnectorError(
               "github_not_found",
@@ -687,12 +766,19 @@ export function createGithubConnectors(
             );
           case "status_unknown":
             throw new ConnectorError(
-              "board_status_unknown",
-              boardStatusText(moved.available),
+              provider.boardless === true
+                ? "ticket_status_unknown"
+                : "board_status_unknown",
+              boardStatusText(moved.available, provider.boardless === true),
+            );
+          case "status_unreachable":
+            throw new ConnectorError(
+              "ticket_status_unreachable",
+              reachableText(moved.reachable),
             );
         }
       } catch (error) {
-        throw toConnectorError(name, error);
+        throw toTicketError(name, error);
       }
     },
   };

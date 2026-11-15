@@ -71,6 +71,13 @@ export const CONNECTOR_FAILURE_CODES = [
   "github_rate_limited",
   "github_unavailable",
   "ticket_provider_unsupported",
+  "ticket_not_found",
+  "ticket_forbidden",
+  "ticket_connection_broken",
+  "ticket_unavailable",
+  "ticket_rejected",
+  "ticket_status_unknown",
+  "ticket_status_unreachable",
 ] as const;
 export type ConnectorFailureCode = (typeof CONNECTOR_FAILURE_CODES)[number];
 
@@ -140,7 +147,15 @@ function coerce(
     case "oneOf": {
       // An input that is a text or a list of texts (`reviewers`, #917); the other oneOf is the issue: an object with a number, or a number.
       const list = type.options.find((option) => option.kind === "list");
-      if (list === undefined) return issueNumber(value, input);
+      if (list === undefined) {
+        // A ticket (#1040) may also be the text key of a ticket of a platform that does not number them (Jira): the key, whole or as the
+        // `key` of the ticket object, is what the action takes then.
+        if (type.options.some((option) => option.kind === "string")) {
+          const key = isRecord(value) ? value.key : value;
+          if (typeof key === "string" && key !== "") return key;
+        }
+        return issueNumber(value, input);
+      }
       return coerce(
         value,
         typeof value === "string" ? STRING : list,

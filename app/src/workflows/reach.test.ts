@@ -300,6 +300,7 @@ describe("reachAt", () => {
     });
     expect(names(issue?.entries ?? [])).toEqual([
       "trigger.ticket",
+      "trigger.ticket.key",
       "trigger.ticket.number",
     ]);
     const branch = reachAt(lane(), FAKE_RESOLVER, "/steps/1", {

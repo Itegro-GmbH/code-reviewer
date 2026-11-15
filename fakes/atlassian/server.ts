@@ -14,6 +14,13 @@
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>          one project by key or id (404 for an unknown one, as Jira also answers for a project the account cannot browse)
 //   GET  /ex/jira/<cloudId>/rest/api/3/project/<key>/statuses  the workflow statuses of a project, by issue type (404 for an unknown key)
 //   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>            one issue (REST shape, `fields` is not filtered); 404 for an unknown key (#1039)
+//   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment    adds a comment (`body` is ADF; `properties`), authored by the account that granted (#1040)
+//   PUT  /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment/<id>  replaces the body (and the properties, when given) of a comment; 404 for an unknown one
+//   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>/comment    the comments, paged (`startAt`, `maxResults`, `orderBy=-created`, `expand=properties`)
+//   PUT  /ex/jira/<cloudId>/rest/api/3/issue/<key>            `update.labels` (`add`, `remove`) and `fields.labels`: a label with a space is refused (400) as Jira does
+//   GET  /ex/jira/<cloudId>/rest/api/3/issue/<key>/transitions the transitions the workflow offers from the issue's status (`setTransitions`; by default every status of the project from any other)
+//   POST /ex/jira/<cloudId>/rest/api/3/issue/<key>/transitions performs one by id (204); 400 when it needs fields (`requiresFields`) or is not offered
+//   GET|POST /ex/jira/<cloudId>/rest/api/3/search/jql         JQL search, `project = KEY` only, paged by `nextPageToken` (`searchPageSize`), the issues in key order (#1040)
 //   POST /ex/jira/<cloudId>/rest/api/3/webhook                registers dynamic webhooks (`url`, `webhooks[].jqlFilter`, `events`): a grant with
 //                                                             `manage:jira-webhook` only, the clauses Jira supports, at most 5 per grant, 30 days of life
 //   PUT  /ex/jira/<cloudId>/rest/api/3/webhook/refresh        extends the life of known webhooks by 30 days (`{ expirationDate }`); 404 when none is known
@@ -88,6 +95,28 @@ export type FakeJiraIssue = {
   updated?: string;
 };
 
+/** A comment of an issue as the fake keeps it. */
+export type FakeComment = {
+  id: string;
+  author: { accountId: string; displayName: string; accountType: string };
+  /** ADF as it was written, or a string a test wrote. */
+  body: unknown;
+  properties: { key: string; value: unknown }[];
+  created: string;
+  updated: string;
+};
+
+/** A transition of the fake's workflow. `from` left out: from any status. */
+export type FakeTransition = {
+  id: string;
+  name: string;
+  /** The status the issue ends in. */
+  to: string;
+  from?: string[];
+  /** The transition has a screen with required fields: performing it without them is a 400. */
+  requiresFields?: boolean;
+};
+
 /** A webhook a test finds registered at the fake. */
 export type FakeRegisteredWebhook = {
   id: number;
@@ -119,6 +148,13 @@ export type FakeDelivery = {
   timestamp?: number;
   /** The person who made the change. */
   user?: { accountId: string; displayName: string };
+  /** For `comment_created`: the comment (default: a comment with the text "a comment"). `body` as ADF when `adf` is true, else as text. */
+  comment?: {
+    id?: string;
+    body: string;
+    adf?: boolean;
+    author?: { accountId: string; displayName: string; accountType?: string };
+  };
 };
 
 export type AtlassianFakeOptions = {
@@ -136,6 +172,8 @@ export type AtlassianFakeOptions = {
   projects?: Record<string, FakeJiraProject[]>;
   /** How many projects one page of `project/search` holds at most. Default 50, as Jira's own default. */
   projectPageSize?: number;
+  /** How many issues one page of `search/jql` holds at most (#1040). Default 100. */
+  searchPageSize?: number;
   port?: number;
   host?: string;
 };
@@ -175,6 +213,23 @@ export type AtlassianFake = {
     key: string,
     status: FakeJiraIssue["status"],
   ): void;
+  /** The comments of an issue, oldest first (#1040). */
+  comments(cloudId: string, key: string): FakeComment[];
+  /** A comment a person writes below an issue (not through the API): answers the comment, to be handed to `deliver`. */
+  addComment(
+    cloudId: string,
+    key: string,
+    comment: {
+      body: string;
+      author?: { accountId: string; displayName: string; accountType?: string };
+    },
+  ): FakeComment;
+  /** The workflow's transitions of the site (replaces the default: every status of the project from any other). */
+  setTransitions(cloudId: string, transitions: FakeTransition[]): void;
+  /** The labels of an issue now. */
+  labelsOf(cloudId: string, key: string): string[];
+  /** The status name of an issue now. */
+  statusOf(cloudId: string, key: string): string;
   /** The webhooks registered at the fake, in the order they were registered. */
   webhooks(): FakeRegisteredWebhook[];
   /** Changes when a webhook ends (ISO), for the test of the nightly extension. */
@@ -274,6 +329,11 @@ export async function startAtlassianFake(
     Object.entries(options.projects ?? {}),
   );
   const projectPageSize = options.projectPageSize ?? 50;
+  const searchPageSize = options.searchPageSize ?? 100;
+  /** cloud id -> issue key -> comments, oldest first. */
+  const commentsOfSite = new Map<string, Map<string, FakeComment[]>>();
+  const transitionsOfSite = new Map<string, FakeTransition[]>();
+  let nextCommentId = 10_000;
   const issuesOfSite = new Map<string, Map<string, FakeJiraIssue>>();
   const registeredWebhooks = new Map<
     number,
@@ -373,6 +433,398 @@ export async function startAtlassianFake(
         ),
       },
     };
+  }
+
+  const accountAuthor = () => ({
+    accountId: account.id,
+    displayName: account.name,
+    accountType: "atlassian",
+  });
+
+  function commentList(cloudId: string, key: string): FakeComment[] {
+    let issues = commentsOfSite.get(cloudId);
+    if (issues === undefined) {
+      issues = new Map();
+      commentsOfSite.set(cloudId, issues);
+    }
+    let list = issues.get(key);
+    if (list === undefined) {
+      list = [];
+      issues.set(key, list);
+    }
+    return list;
+  }
+
+  function newComment(
+    cloudId: string,
+    key: string,
+    comment: Pick<FakeComment, "body" | "author"> &
+      Partial<Pick<FakeComment, "properties">>,
+  ): FakeComment {
+    const now = new Date().toISOString();
+    const created: FakeComment = {
+      id: String(nextCommentId++),
+      author: comment.author,
+      body: comment.body,
+      properties: comment.properties ?? [],
+      created: now,
+      updated: now,
+    };
+    commentList(cloudId, key).push(created);
+    return created;
+  }
+
+  /** The statuses of the project an issue key belongs to: those of its issue types, each name once. */
+  function statusesOfIssue(cloudId: string, key: string) {
+    const projectKey = key.slice(0, key.lastIndexOf("-"));
+    const project = (projectsOfSite.get(cloudId) ?? []).find(
+      (candidate) => candidate.key === projectKey,
+    );
+    const seen = new Map<string, FakeJiraStatus>();
+    for (const type of project?.issueTypes ?? DEFAULT_ISSUE_TYPES)
+      for (const status of type.statuses)
+        if (!seen.has(status.name)) seen.set(status.name, status);
+    return [...seen.values()];
+  }
+
+  /** The transitions offered from the issue's current status. */
+  function transitionsFor(cloudId: string, issue: FakeJiraIssue) {
+    const configured = transitionsOfSite.get(cloudId);
+    const all: FakeTransition[] =
+      configured ??
+      statusesOfIssue(cloudId, issue.key).map((status, index) => ({
+        id: String(11 + index),
+        name: `Move to ${status.name}`,
+        to: status.name,
+      }));
+    return all.filter(
+      (transition) =>
+        transition.to !== issue.status.name &&
+        (transition.from === undefined ||
+          transition.from.includes(issue.status.name)),
+    );
+  }
+
+  /** `project = KEY` (the clause the factory searches by), optionally quoted, optionally followed by `ORDER BY`. */
+  function projectOfJql(jql: string): string | undefined {
+    return /^\s*project\s*=\s*"?([A-Z][A-Z0-9_]*)"?\s*(?:order\s+by\s+[\w ,.]+)?\s*$/i.exec(
+      jql,
+    )?.[1];
+  }
+
+  const notFound = (response: ServerResponse, entry: RecordedRequest) =>
+    json(
+      response,
+      404,
+      {
+        errorMessages: [
+          "Issue does not exist or you do not have permission to see it.",
+        ],
+        errors: {},
+      },
+      entry,
+    );
+
+  /** What Jira offers below an issue (comments, labels, transitions) and the JQL search; true when the request was answered here. */
+  function handleIssueApi(
+    method: string,
+    cloudId: string,
+    path: string,
+    url: URL,
+    body: string,
+    grant: Grant,
+    response: ServerResponse,
+    entry: RecordedRequest,
+  ): boolean {
+    const search = path === "/search/jql";
+    const below =
+      /^\/issue\/([^/]+)(\/comment|\/transitions)?(?:\/([^/]+))?$/.exec(path);
+    if (!search && below === null) return false;
+    if (!grant.sites.some((site) => site.id === cloudId)) {
+      json(response, 404, { message: "no such site" }, entry);
+      return true;
+    }
+    const write = method !== "GET" && !(search && method === "POST");
+    if (write && !grant.scopes.includes("write:jira-work")) {
+      json(response, 403, { message: "Forbidden" }, entry);
+      return true;
+    }
+    let input: Record<string, unknown> = {};
+    if (body !== "") {
+      try {
+        input = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        json(
+          response,
+          400,
+          { errorMessages: ["Invalid JSON"], errors: {} },
+          entry,
+        );
+        return true;
+      }
+    }
+    const issues =
+      issuesOfSite.get(cloudId) ?? new Map<string, FakeJiraIssue>();
+
+    if (search) {
+      if (method !== "GET" && method !== "POST") return false;
+      const jql =
+        method === "GET"
+          ? (url.searchParams.get("jql") ?? "")
+          : typeof input.jql === "string"
+            ? input.jql
+            : "";
+      const projectKey = projectOfJql(jql);
+      if (projectKey === undefined) {
+        json(
+          response,
+          400,
+          {
+            errorMessages: [
+              `Error in the JQL Query: unsupported in the fake: ${jql.slice(0, 80)}`,
+            ],
+            errors: {},
+          },
+          entry,
+        );
+        return true;
+      }
+      const token =
+        method === "GET"
+          ? url.searchParams.get("nextPageToken")
+          : typeof input.nextPageToken === "string"
+            ? input.nextPageToken
+            : null;
+      const asked =
+        method === "GET"
+          ? Number(url.searchParams.get("maxResults") ?? searchPageSize)
+          : typeof input.maxResults === "number"
+            ? input.maxResults
+            : searchPageSize;
+      const offset = token === null ? 0 : Number(token);
+      const size = Math.max(1, Math.min(asked, searchPageSize));
+      const matching = [...issues.values()].filter((issue) =>
+        issue.key.startsWith(`${projectKey}-`),
+      );
+      const page = matching.slice(offset, offset + size);
+      const more = offset + page.length < matching.length;
+      json(
+        response,
+        200,
+        {
+          issues: page.map((issue) => issueJson(issue, url.origin, cloudId)),
+          ...(more ? { nextPageToken: String(offset + page.length) } : {}),
+          isLast: !more,
+        },
+        entry,
+      );
+      return true;
+    }
+
+    const key = decodeURIComponent(below?.[1] ?? "");
+    const kind = below?.[2];
+    const id = below?.[3];
+    const issue = issues.get(key);
+
+    if (kind === undefined) {
+      // PUT /issue/<key>: the labels (the only edit the factory makes).
+      if (method !== "PUT" || id !== undefined) return false;
+      if (issue === undefined) {
+        notFound(response, entry);
+        return true;
+      }
+      const update = (input.update ?? {}) as { labels?: unknown };
+      const fields = (input.fields ?? {}) as { labels?: unknown };
+      const labels = new Set(issue.labels ?? []);
+      const operations: { add?: string; remove?: string }[] = [];
+      if (Array.isArray(update.labels))
+        operations.push(
+          ...(update.labels as { add?: string; remove?: string }[]),
+        );
+      if (Array.isArray(fields.labels)) {
+        labels.clear();
+        for (const label of fields.labels as string[])
+          operations.push({ add: label });
+      }
+      for (const operation of operations)
+        for (const label of [operation.add, operation.remove])
+          if (typeof label === "string" && /\s/.test(label)) {
+            json(
+              response,
+              400,
+              {
+                errorMessages: [],
+                errors: { labels: `The label '${label}' contains spaces.` },
+              },
+              entry,
+            );
+            return true;
+          }
+      for (const operation of operations) {
+        if (typeof operation.add === "string") labels.add(operation.add);
+        if (typeof operation.remove === "string")
+          labels.delete(operation.remove);
+      }
+      issue.labels = [...labels];
+      issue.updated = new Date().toISOString();
+      response.writeHead(204);
+      response.end();
+      entry.status = 204;
+      return true;
+    }
+
+    if (issue === undefined) {
+      notFound(response, entry);
+      return true;
+    }
+
+    if (kind === "/transitions") {
+      if (id !== undefined) return false;
+      if (method === "GET") {
+        json(
+          response,
+          200,
+          {
+            transitions: transitionsFor(cloudId, issue).map((transition) => {
+              const target = statusesOfIssue(cloudId, key).find(
+                (status) => status.name === transition.to,
+              );
+              return {
+                id: transition.id,
+                name: transition.name,
+                to: {
+                  id: target?.id ?? "0",
+                  name: transition.to,
+                  statusCategory: {
+                    key: target?.category ?? "indeterminate",
+                  },
+                },
+                hasScreen: transition.requiresFields === true,
+                isAvailable: true,
+              };
+            }),
+          },
+          entry,
+        );
+        return true;
+      }
+      if (method === "POST") {
+        const chosen = (input.transition ?? {}) as { id?: unknown };
+        const transition = transitionsFor(cloudId, issue).find(
+          (candidate) => candidate.id === chosen.id,
+        );
+        if (transition === undefined) {
+          json(
+            response,
+            400,
+            {
+              errorMessages: ["Invalid transition: it is not available."],
+              errors: {},
+            },
+            entry,
+          );
+          return true;
+        }
+        if (transition.requiresFields === true && input.fields === undefined) {
+          json(
+            response,
+            400,
+            {
+              errorMessages: [],
+              errors: { resolution: "Field 'resolution' is required" },
+            },
+            entry,
+          );
+          return true;
+        }
+        const target = statusesOfIssue(cloudId, key).find(
+          (status) => status.name === transition.to,
+        );
+        issue.status = {
+          name: transition.to,
+          ...(target?.category === undefined
+            ? {}
+            : { category: target.category }),
+        };
+        issue.updated = new Date().toISOString();
+        response.writeHead(204);
+        response.end();
+        entry.status = 204;
+        return true;
+      }
+      return false;
+    }
+
+    // Comments.
+    const list = commentList(cloudId, key);
+    const commentJson = (comment: FakeComment, withProperties: boolean) => ({
+      id: comment.id,
+      self: `${url.origin}/ex/jira/${cloudId}/rest/api/3/issue/${issue.id}/comment/${comment.id}`,
+      author: comment.author,
+      body: comment.body,
+      created: comment.created.replace(/Z$/, "+0000"),
+      updated: comment.updated.replace(/Z$/, "+0000"),
+      ...(withProperties ? { properties: comment.properties } : {}),
+    });
+    if (id === undefined && method === "POST") {
+      const created = newComment(cloudId, key, {
+        body: input.body,
+        author: accountAuthor(),
+        properties: Array.isArray(input.properties)
+          ? (input.properties as FakeComment["properties"])
+          : [],
+      });
+      json(response, 201, commentJson(created, false), entry);
+      return true;
+    }
+    if (id === undefined && method === "GET") {
+      const startAt = Math.max(0, Number(url.searchParams.get("startAt") ?? 0));
+      const size = Math.max(
+        1,
+        Math.min(Number(url.searchParams.get("maxResults") ?? 50), 100),
+      );
+      const newestFirst = url.searchParams.get("orderBy") === "-created";
+      const ordered = newestFirst ? [...list].reverse() : [...list];
+      const withProperties = (url.searchParams.get("expand") ?? "")
+        .split(",")
+        .includes("properties");
+      json(
+        response,
+        200,
+        {
+          startAt,
+          maxResults: size,
+          total: ordered.length,
+          comments: ordered
+            .slice(startAt, startAt + size)
+            .map((comment) => commentJson(comment, withProperties)),
+        },
+        entry,
+      );
+      return true;
+    }
+    if (id !== undefined && method === "PUT") {
+      const comment = list.find((candidate) => candidate.id === id);
+      if (comment === undefined) {
+        json(
+          response,
+          404,
+          {
+            errorMessages: ["Can't find a comment with the id " + id],
+            errors: {},
+          },
+          entry,
+        );
+        return true;
+      }
+      comment.body = input.body;
+      if (Array.isArray(input.properties))
+        comment.properties = input.properties as FakeComment["properties"];
+      comment.updated = new Date().toISOString();
+      json(response, 200, commentJson(comment, false), entry);
+      return true;
+    }
+    return false;
   }
 
   function handleWebhookApi(
@@ -681,6 +1133,20 @@ export async function startAtlassianFake(
         response,
         entry,
       );
+    if (
+      jira !== null &&
+      handleIssueApi(
+        request.method ?? "GET",
+        jira[1] ?? "",
+        jira[2] ?? "",
+        url,
+        body,
+        grant,
+        response,
+        entry,
+      )
+    )
+      return;
     if (request.method === "GET" && jira !== null) {
       const cloudId = jira[1] ?? "";
       const path = jira[2] ?? "";
@@ -847,6 +1313,32 @@ export async function startAtlassianFake(
         new Map(issues.map((issue) => [issue.key, { ...issue }])),
       );
     },
+    comments: (cloudId, key) =>
+      structuredClone(commentsOfSite.get(cloudId)?.get(key) ?? []),
+    addComment(cloudId, key, comment) {
+      const created = newComment(cloudId, key, {
+        body: comment.body,
+        author: {
+          ...(comment.author ?? {
+            accountId: "712020:a-person",
+            displayName: "A Person",
+          }),
+          accountType: comment.author?.accountType ?? "atlassian",
+        },
+      });
+      return structuredClone(created);
+    },
+    setTransitions(cloudId, transitions) {
+      transitionsOfSite.set(cloudId, [...transitions]);
+    },
+    labelsOf: (cloudId, key) => [
+      ...(issuesOfSite.get(cloudId)?.get(key)?.labels ?? []),
+    ],
+    statusOf(cloudId, key) {
+      const issue = issuesOfSite.get(cloudId)?.get(key);
+      if (issue === undefined) throw new Error(`No issue ${key} in the fake.`);
+      return issue.status.name;
+    },
     setIssueStatus(cloudId, key, status) {
       const issue = issuesOfSite.get(cloudId)?.get(key);
       if (issue === undefined) throw new Error(`No issue ${key} in the fake.`);
@@ -892,7 +1384,37 @@ export async function startAtlassianFake(
           ? { changelog: { id: "1", items: delivery.changelog ?? [] } }
           : {}),
         ...(delivery.webhookEvent === "comment_created"
-          ? { comment: { id: "1", body: "a comment" } }
+          ? {
+              comment: {
+                id: delivery.comment?.id ?? "1",
+                author: delivery.comment?.author ?? {
+                  accountId: "712020:a-person",
+                  displayName: "A Person",
+                  accountType: "atlassian",
+                },
+                body:
+                  delivery.comment?.adf === true
+                    ? {
+                        version: 1,
+                        type: "doc",
+                        content: [
+                          {
+                            type: "paragraph",
+                            content: [
+                              { type: "text", text: delivery.comment.body },
+                            ],
+                          },
+                        ],
+                      }
+                    : (delivery.comment?.body ?? "a comment"),
+                created: new Date(timestamp)
+                  .toISOString()
+                  .replace(/Z$/, "+0000"),
+                updated: new Date(timestamp)
+                  .toISOString()
+                  .replace(/Z$/, "+0000"),
+              },
+            }
           : {}),
         matchedWebhookIds: [webhookId],
       };
