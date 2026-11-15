@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The Jira ticket provider (#1039): reads a ticket of the project's Jira source; write-back is not part of it until #1040.
+// The Jira ticket provider (#1039, #1040): reads and writes the tickets of the project's Jira source.
 import { describe, expect, it } from "vitest";
 import type { Integration } from "../integrations/types.ts";
 import type { JiraIssue } from "./issue.ts";
 import type { JiraIssueReader } from "./issue-reader.ts";
 import { createJiraTicketProvider } from "./ticket-provider.ts";
+import type { JiraTicketWriter } from "./ticket-writer.ts";
 
 const issue: JiraIssue = {
   id: "1",
@@ -87,7 +88,7 @@ describe("the Jira ticket provider", () => {
   });
 
   // #1039
-  it("names the keys it can read and has no write-back yet", () => {
+  it("names the keys it can read, and without a writer it only reads", () => {
     const p = provider(async () => ({ ok: true, issue: null }));
     expect(p.provider.id).toBe("jira");
     expect(p.provider.isTicketKey?.("PROJ-1")).toBe(true);
@@ -95,5 +96,83 @@ describe("the Jira ticket provider", () => {
     expect(p.provider.commentOnTicket).toBeUndefined();
     expect(p.provider.changeTicketLabels).toBeUndefined();
     expect(p.provider.setTicketStatus).toBeUndefined();
+  });
+});
+
+describe("the Jira ticket provider that writes (#1040)", () => {
+  function writing() {
+    const calls: unknown[][] = [];
+    const record =
+      <T>(name: string, result: T) =>
+      async (...args: unknown[]): Promise<T> => {
+        calls.push([name, ...args]);
+        return result;
+      };
+    const writer: JiraTicketWriter = {
+      comment: record("comment", { url: "u", existing: false, id: "1" }),
+      updateComment: record("updateComment", undefined),
+      changeLabels: record("changeLabels", { labels: ["a"] }),
+      setStatus: record("setStatus", {
+        kind: "moved" as const,
+        status: "Done",
+      }),
+    };
+    const workspaces: string[] = [];
+    const p = createJiraTicketProvider({
+      readerFor: async () => ({
+        read: async () => ({ ok: true, issue: null }),
+      }),
+      writerFor: async (workspaceId) => {
+        workspaces.push(workspaceId);
+        return writer;
+      },
+    });
+    return { p, calls, workspaces };
+  }
+
+  // #1040-T01
+  it("is boardless, writes through the connection and project of the scope in the workspace of the integration, and passes the key on", async () => {
+    const { p, calls, workspaces } = writing();
+    expect(p.boardless).toBe(true);
+
+    expect(
+      await p.commentOnTicket?.(scope(), "PROJ-7", "body", { marker: "m" }),
+    ).toEqual({ url: "u", existing: false, id: "1" });
+    await p.updateTicketComment?.(scope(), "PROJ-7", "5", "new");
+    expect(
+      await p.changeTicketLabels?.(scope(), "PROJ-7", {
+        add: ["a"],
+        remove: [],
+      }),
+    ).toEqual({ labels: ["a"] });
+    expect(
+      await p.setTicketStatus?.(scope(), "PROJ-7", { status: "Done" }),
+    ).toEqual({ kind: "moved", status: "Done" });
+
+    expect(calls).toEqual([
+      ["comment", "c1", "PROJ-7", "body", { marker: "m" }],
+      ["updateComment", "c1", "PROJ-7", "5", "new", undefined],
+      ["changeLabels", "c1", "PROJ-7", { add: ["a"], remove: [] }, undefined],
+      ["setStatus", "c1", "PROJ", "PROJ-7", "Done", undefined],
+    ]);
+    expect(new Set(workspaces)).toEqual(new Set(["ws"]));
+  });
+
+  // #1040-T01
+  it("writes to no issue of another Jira project and to none without a Jira source, before the writer is asked", async () => {
+    const { p, calls } = writing();
+    await expect(
+      p.commentOnTicket?.(scope(), "OTHER-1", "body"),
+    ).rejects.toMatchObject({ code: "ticket_not_found" });
+    await expect(
+      p.setTicketStatus?.(scope(), "OTHER-1", { status: "Done" }),
+    ).rejects.toMatchObject({ code: "ticket_not_found" });
+    await expect(
+      p.changeTicketLabels?.({ ...scope(), jira: undefined }, "PROJ-7", {
+        add: ["a"],
+        remove: [],
+      }),
+    ).rejects.toMatchObject({ code: "ticket_not_found" });
+    expect(calls).toEqual([]);
   });
 });

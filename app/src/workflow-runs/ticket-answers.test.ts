@@ -153,6 +153,89 @@ function harness(options: {
   };
 }
 
+describe("an answer on a Jira ticket (#1040)", () => {
+  const jiraRun = (id: string, key: string): StoredWorkflowRun => ({
+    ...run(id, 7),
+    ticketRef: `jira:acme/widgets#${key}`,
+    triggerInput: JSON.stringify({ ticket: { key, number: 0 } }),
+  });
+  const JIRA_ANSWER = {
+    ...ANSWER,
+    number: 7,
+    ticket: { provider: "jira", key: "PROJ-7" },
+    commentId: "20001",
+    actor: { login: "Ada Lovelace", externalId: "712020:ada" },
+  };
+
+  // #1040-T03
+  it("answers the run that waits on that Jira issue, found by the ticket reference of the repository the code lives in, and kicks the engine", async () => {
+    const { answers, answer, kick, listWaitingForTicket } = harness({
+      runs: [jiraRun("run-1", "PROJ-7")],
+    });
+
+    const taken = await answers.answer("d-1", JIRA_ANSWER);
+
+    expect(taken).toEqual({ outcome: "answered", runId: "run-1" });
+    expect(listWaitingForTicket).toHaveBeenCalledWith(
+      "jira:acme/widgets#PROJ-7",
+    );
+    expect(answer).toHaveBeenCalledWith("run-1", {
+      question: { stepRunId: "s-1", n: 1 },
+      choice: 2,
+      text: "and log it",
+      by: "Ada Lovelace",
+      via: "comment",
+    });
+    expect(kick).toHaveBeenCalledWith("run-1");
+  });
+
+  // #1040-T03
+  it("does not answer the run of another Jira issue, or of a GitHub issue that has the number at the end of the key", async () => {
+    const other = harness({ runs: [jiraRun("run-1", "PROJ-8")] });
+    expect(await other.answers.answer("d", JIRA_ANSWER)).toEqual({
+      outcome: "no_run",
+    });
+    expect(other.answer).not.toHaveBeenCalled();
+
+    // A GitHub comment on issue 7 does not answer the run of PROJ-7.
+    const github = harness({ runs: [jiraRun("run-1", "PROJ-7")] });
+    expect(await github.answers.answer("d", ANSWER)).toEqual({
+      outcome: "no_run",
+    });
+    expect(github.answer).not.toHaveBeenCalled();
+  });
+
+  // #1040-T03
+  it("keeps the order of the comments: a comment older than the question is none to it, by the ids of Jira's comments", async () => {
+    const { answers, answer } = harness({
+      runs: [jiraRun("run-1", "PROJ-7")],
+      steps: { "run-1": [waitingStep(OPEN, "20005")] },
+    });
+
+    expect(
+      await answers.answer("d", { ...JIRA_ANSWER, commentId: "20001" }),
+    ).toEqual({ outcome: "not_taken", reason: "stale" });
+    expect(answer).not.toHaveBeenCalled();
+    expect(
+      await answers.answer("d", { ...JIRA_ANSWER, commentId: "20006" }),
+    ).toEqual({ outcome: "answered", runId: "run-1" });
+  });
+
+  // #1040-T03
+  it("replies on the Jira issue to an answer that could not be taken, naming the provider to the reply", async () => {
+    const { answers, reply } = harness({ runs: [] });
+
+    await answers.answer("d", JIRA_ANSWER);
+
+    expect(reply).toHaveBeenCalledWith(
+      "r-1",
+      expect.objectContaining({ ticket: { provider: "jira", key: "PROJ-7" } }),
+      ANSWER_REPLIES.no_run,
+      expect.stringContaining("20001"),
+    );
+  });
+});
+
 describe("an answer on a ticket", () => {
   // #920-T120
   it("answers the run that waits on that ticket as the commenter, from a comment, and kicks the engine", async () => {

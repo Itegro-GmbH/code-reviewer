@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readTicketSource } from "../db/repositories/projects-repository.ts";
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import {
+  TicketProviderError,
   createTicketProviderRegistry,
   type TicketProvider,
   type TicketScope,
@@ -156,7 +157,151 @@ describe("the ticket actions of a run whose project source names another provide
   });
 });
 
-describe("the ticket actions of a run whose project source cannot write (Jira until #1040)", () => {
+describe("the ticket actions of a provider whose statuses are no board columns (Jira, #1040)", () => {
+  function boardless(
+    move: NonNullable<TicketProvider["setTicketStatus"]> = async (
+      _scope,
+      _key,
+      to,
+    ) => ({ kind: "moved", status: to.status }),
+  ) {
+    const setTicketStatus = vi.fn(move);
+    const comment = vi.fn<NonNullable<TicketProvider["commentOnTicket"]>>(
+      async () => ({ url: "", existing: false }),
+    );
+    const provider: TicketProvider = {
+      id: "boardless",
+      boardless: true,
+      isTicketKey: (key) => /^[A-Z]+-\d+$/.test(key),
+      setTicketStatus,
+      commentOnTicket: comment,
+    };
+    const connectors = createGithubConnectors({
+      targetOf: async () => undefined,
+      // The project has no board: a provider with boards would refuse the step for it.
+      projectBoard: async () => undefined,
+      ticketTargetOf: createTicketTargetResolver({
+        tickets: createTicketProviderRegistry([provider]),
+        sourceProviderOf: async () => "boardless",
+        scopeOf: async () => ({
+          ...scope,
+          jira: { connectionId: "c1", projectKey: "PROJ" },
+        }),
+      }),
+    });
+    const connector = (name: string) => {
+      const found = connectors.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`no connector ${name}`);
+      return found;
+    };
+    return { connector, setTicketStatus, comment };
+  }
+
+  // #1040-T01
+  it("moves a ticket without any board of the project and hands no board to the provider", async () => {
+    const { connector, setTicketStatus } = boardless();
+
+    expect(
+      await connector("ticket.setStatus").run(
+        call({ ticket: "PROJ-1", status: "In Progress" }),
+      ),
+    ).toEqual({ status: "In Progress" });
+
+    expect(setTicketStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ jira: expect.anything() }),
+      "PROJ-1",
+      { status: "In Progress" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  // #1040-T01
+  it("ends a status no transition leads to, a status the workflow lacks and a missing ticket with their own codes", async () => {
+    const reachable = boardless(async () => ({
+      kind: "status_unreachable",
+      reachable: ["In Progress", "Done"],
+    }));
+    const error = await reachable
+      .connector("ticket.setStatus")
+      .run(call({ ticket: "PROJ-1", status: "In Review" }))
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ConnectorError);
+    expect((error as ConnectorError).code).toBe("ticket_status_unreachable");
+    expect((error as ConnectorError).message).toContain("In Progress, Done");
+
+    const unknown = boardless(async () => ({
+      kind: "status_unknown",
+      available: ["To Do", "Done"],
+    }));
+    const unknownError = await unknown
+      .connector("ticket.setStatus")
+      .run(call({ ticket: "PROJ-1", status: "Blocked" }))
+      .catch((caught: unknown) => caught);
+    expect((unknownError as ConnectorError).code).toBe("ticket_status_unknown");
+    expect((unknownError as ConnectorError).message).toContain(
+      "workflow of the Jira project",
+    );
+
+    const missing = boardless(async () => ({ kind: "issue_not_found" }));
+    const missingError = await missing
+      .connector("ticket.setStatus")
+      .run(call({ ticket: "PROJ-1", status: "Done" }))
+      .catch((caught: unknown) => caught);
+    expect((missingError as ConnectorError).code).toBe("ticket_not_found");
+  });
+
+  // #1040-T01
+  it("turns the failures of a provider into step codes with text of ours, never the platform's", async () => {
+    for (const code of [
+      "ticket_not_found",
+      "ticket_forbidden",
+      "ticket_connection_broken",
+      "ticket_unavailable",
+      "ticket_rejected",
+    ] as const) {
+      const { connector, comment } = boardless();
+      comment.mockRejectedValueOnce(
+        new TicketProviderError(code, "Our words."),
+      );
+      const error = await connector("ticket.comment")
+        .run(call({ ticket: "PROJ-1", body: "b" }))
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConnectorError);
+      expect((error as ConnectorError).code).toBe(code);
+      expect((error as ConnectorError).message).toContain("Our words.");
+    }
+  });
+
+  // #1040-T01
+  it("takes the address of the comment of the provider's own site, and none that is not an http(s) address", async () => {
+    const { connector, comment } = boardless();
+    comment.mockResolvedValueOnce({
+      url: "https://acme.atlassian.net/browse/PROJ-1?focusedCommentId=1",
+      existing: false,
+    });
+    expect(
+      await connector("ticket.comment").run(
+        call({ ticket: "PROJ-1", body: "b" }),
+      ),
+    ).toMatchObject({
+      url: "https://acme.atlassian.net/browse/PROJ-1?focusedCommentId=1",
+    });
+    for (const url of [
+      "javascript:alert(1)",
+      "https://u:p@x.test/",
+      "nonsense",
+    ]) {
+      comment.mockResolvedValueOnce({ url, existing: false });
+      expect(
+        await connector("ticket.comment").run(
+          call({ ticket: "PROJ-1", body: "b" }),
+        ),
+      ).toMatchObject({ url: "" });
+    }
+  });
+});
+
+describe("the ticket actions of a run whose project source cannot write (a provider without those methods)", () => {
   /** A read-only provider, as the Jira one is: it can read a ticket and has no comment, label or status method. */
   function readOnly() {
     const provider: TicketProvider = {

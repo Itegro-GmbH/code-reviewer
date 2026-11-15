@@ -13,7 +13,11 @@ import {
   resolveActionInputs,
   specOf,
 } from "./connectors.ts";
-import { TICKET_SET_STATUS } from "../workflows/connectors.ts";
+import {
+  TICKET_COMMENT,
+  TICKET_LABELS,
+  TICKET_SET_STATUS,
+} from "../workflows/connectors.ts";
 import { TemplateError, type RunValues } from "./templates.ts";
 
 const values: RunValues = {
@@ -201,5 +205,70 @@ describe("the board of ticket.setStatus (#922)", () => {
       ),
     ).toEqual({ ticket: 5, status: "Done" });
     expect(TICKET_SET_STATUS.inputs.board?.required).toBe(false);
+  });
+});
+
+describe("the ticket input of the ticket actions (#1040)", () => {
+  const ticketValues = (key: string, number: number): RunValues => ({
+    trigger: {
+      input: {},
+      ticket: { key, number, title: "T", repo: { fullName: "acme/shop" } },
+    },
+    steps: {},
+  });
+
+  // #1040-T01
+  it("hands on the text key of a Jira ticket, as the whole ticket object, as its key or as a literal", () => {
+    const jira = ticketValues("PROJ-7", 0);
+    for (const ticket of [
+      "{{trigger.ticket}}",
+      "{{trigger.ticket.key}}",
+      "PROJ-7",
+    ])
+      expect(
+        resolveActionInputs({ ticket, body: "Hi" }, TICKET_COMMENT, jira),
+      ).toEqual({ ticket: "PROJ-7", body: "Hi" });
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket}}", add: ["x"] },
+        TICKET_LABELS,
+        jira,
+      ),
+    ).toMatchObject({ ticket: "PROJ-7" });
+  });
+
+  // #1040-T01
+  it("keeps what a GitHub lane always had: the object and the number name the issue, and the key is its number as text", () => {
+    const github = ticketValues("15", 15);
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket.number}}", body: "Hi" },
+        TICKET_COMMENT,
+        github,
+      ),
+    ).toEqual({ ticket: 15, body: "Hi" });
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket}}", body: "Hi" },
+        TICKET_COMMENT,
+        github,
+      ),
+    ).toEqual({ ticket: "15", body: "Hi" });
+    expect(
+      resolveActionInputs({ ticket: 15, body: "Hi" }, TICKET_COMMENT, github),
+    ).toEqual({ ticket: 15, body: "Hi" });
+  });
+
+  // #1040-T01
+  it("still holds the issue of a github.issue action to a whole number: a key is no issue there", () => {
+    expect(
+      failure(() =>
+        resolveActionInputs(
+          { issue: "{{trigger.ticket.key}}", body: "Hi" },
+          GITHUB_ISSUE_COMMENT,
+          ticketValues("PROJ-7", 0),
+        ),
+      ),
+    ).toBeInstanceOf(ActionInputError);
   });
 });
