@@ -7,7 +7,7 @@ import type {
   StoredWorkflowRun,
 } from "../db/repositories/workflow-runs-repository.ts";
 import { isRecord } from "../workflows/json.ts";
-import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import { JIRA_ISSUE_KEY, parseTicketRef } from "../workflows/ticket-ref.ts";
 import { ticketNumberOfKey } from "../integrations/ticket-provider.ts";
 import { readStoredInput } from "./ticket.ts";
 
@@ -52,6 +52,17 @@ export function ticketKeyOf(
   if (typeof found.key === "string" && found.key !== "") return found.key;
   const number = wholeNumber(found.number);
   return number === undefined ? undefined : String(number);
+}
+
+/** The key of the Jira issue a run is about (`PROJ-12` of `jira:acme/shop#PROJ-12`), or undefined: another provider, or no ticket. */
+export function jiraKeyOfRef(ticketRef: string | null): string | undefined {
+  if (ticketRef === null) return undefined;
+  const parsed = parseTicketRef(ticketRef);
+  return parsed.ok &&
+    parsed.ref.provider === "jira" &&
+    JIRA_ISSUE_KEY.test(parsed.ref.key)
+    ? parsed.ref.key
+    : undefined;
 }
 
 /** The number of the run's ticket where the provider numbers its tickets (GitHub), or undefined: `ticketKeyOf` read as a number. */

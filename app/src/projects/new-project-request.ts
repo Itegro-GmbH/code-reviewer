@@ -19,11 +19,15 @@ const SOURCE_PROVIDERS = ["github", "jira"] as const;
 /** What can be a Jira project key (the same rule as the stored source: `projects-repository.ts`). */
 const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
 /**
- * The built-in lanes a project on a Jira project may start with: the review lane needs no ticket; the others read and write the GitHub
- * issues of the repository, which are not that project's tickets (a Jira lane needs the write-back to Jira, #1040). The dialog offers
- * these only; the route refuses the rest.
+ * The built-in lanes a project on a Jira project may start with (#1040): the review lane needs no ticket, and "Issue to PR (status)" starts
+ * by a move of the ticket into a status and writes back to Jira (comments, transitions). "Issue to PR" starts by a LABEL, which a Jira project
+ * does not offer: the factory follows the status changes of a Jira project (the owner's decision, epic #1034), not its labels. The dialog
+ * offers these only; the route refuses the rest.
  */
-export const LANES_FOR_JIRA: readonly string[] = ["review-a-pull-request"];
+export const LANES_FOR_JIRA: readonly string[] = [
+  "issue-to-pr-status",
+  "review-a-pull-request",
+];
 const MAX_ID_LENGTH = 128;
 /** A node id of a GitHub Project (`PVT_…`); anything else cannot name a board. */
 const BOARD_ID = /^PVT_[A-Za-z0-9_-]{1,200}$/;
@@ -265,7 +269,7 @@ export function readNewProjectRequest(
         issues.push({
           path: `lanes/${String(index)}`,
           code: "lane_not_for_jira",
-          message: `The lane ${lane} reads and writes GitHub issues, so it cannot be a lane of a Jira project yet.`,
+          message: `The lane ${lane} starts when a label is put on a GitHub issue, which a Jira project does not offer: a Jira ticket starts a lane by a move into a status.`,
           available: [...LANES_FOR_JIRA],
         });
     });

@@ -34,9 +34,12 @@ export type LaneRow = {
 export function LanesTab({
   workspaceSlug,
   lanes,
+  provider = "github",
 }: {
   workspaceSlug: string;
   lanes: readonly LaneRow[];
+  /** The provider of the project's ticket source: a Jira project's lanes start from a status, not a label (#1040). */
+  provider?: string;
 }) {
   return (
     <section aria-labelledby="lanes-heading" className="flex flex-col gap-3">
@@ -87,7 +90,9 @@ export function LanesTab({
           </TableBody>
         </Table>
       )}
-      <p className="text-xs text-muted-foreground">{LANES_COPY.note}</p>
+      <p className="text-xs text-muted-foreground">
+        {provider === "jira" ? LANES_COPY.noteJira : LANES_COPY.note}
+      </p>
       <p className="text-sm text-muted-foreground">
         {LANES_COPY.taskNote}{" "}
         <Link href={workspacePath(workspaceSlug, "/implementer")}>

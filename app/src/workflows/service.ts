@@ -115,6 +115,8 @@ export type WorkflowService = {
     projectId: string,
     keys: readonly BuiltInLaneKey[],
     statuses?: LaneStatuses,
+    /** The provider of the project's ticket source (#1040): the lanes word their pull request for it. Left out: `github`. */
+    provider?: string,
   ): Promise<BuiltInLaneResult[]>;
   /** Saves `body` as the next version. `expectedVersion`: only if that is still the current one. */
   update(
@@ -444,7 +446,7 @@ export function createWorkflowService({
 
     create: createLane,
 
-    async copyBuiltIn(user, projectId, keys, statuses) {
+    async copyBuiltIn(user, projectId, keys, statuses, provider) {
       const [first] = [...(await environments.listSummaries())].sort((a, b) =>
         a.name.localeCompare(b.name),
       );
@@ -455,7 +457,7 @@ export function createWorkflowService({
           const view = await createLane(
             user,
             projectId,
-            builtInLaneDocument(key, environment, statuses),
+            builtInLaneDocument(key, environment, statuses, provider),
           );
           results.push({
             key,

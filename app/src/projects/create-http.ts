@@ -97,7 +97,14 @@ export type NewProjectDependencies = {
     user: SessionUser,
     projectId: string,
     keys: readonly string[],
+    /** For a Jira project (#1040): the names of the statuses of its workflow, from which the status lane takes its own names. */
+    jira?: { statusNames: readonly string[] },
   ): Promise<LaneCopy[]>;
+  /**
+   * The names of the workflow statuses of a Jira project (#1040), for the status lane's defaults. Empty when they cannot be read: the lane then
+   * keeps its default names. Never throws. Left out where the deployment has no Jira.
+   */
+  jiraStatuses?(connectionId: string, projectKey: string): Promise<string[]>;
 };
 
 export type NewProjectHandlers = {
@@ -160,6 +167,7 @@ export function createNewProjectHandlers({
   jiraProject,
   laneKeys,
   copyLanes,
+  jiraStatuses,
 }: NewProjectDependencies): NewProjectHandlers {
   /** The projects of a Jira connection, or the `ProjectError` that says why there are none to look at. */
   async function jiraProjectsOf(connectionId: string) {
@@ -380,7 +388,19 @@ export function createNewProjectHandlers({
         let copied: LaneCopy[] = [];
         if (lanes.length > 0)
           try {
-            copied = await copyLanes(user, project.id, lanes);
+            copied =
+              jiraChoice === undefined
+                ? await copyLanes(user, project.id, lanes)
+                : await copyLanes(user, project.id, lanes, {
+                    statusNames:
+                      lanes.includes("issue-to-pr-status") &&
+                      jiraStatuses !== undefined
+                        ? await jiraStatuses(
+                            jiraChoice.connectionId,
+                            jiraChoice.projectKey,
+                          )
+                        : [],
+                  });
           } catch (error) {
             console.error(
               "[projects] copying the built-in lanes failed:",

@@ -9,6 +9,7 @@ import {
   DEFAULT_LANE_STATUSES,
   builtInLaneDocument,
   isBuiltInLaneKey,
+  laneStatusesFromNames,
 } from "./built-in-lanes.ts";
 import { FAKE_RESOLVER } from "./test-fixtures.ts";
 import { validateWorkflow } from "./validate.ts";
@@ -134,5 +135,57 @@ describe("the built-in lanes", () => {
     const text = JSON.stringify(document);
     for (const name of Object.values(statuses)) expect(text).toContain(name);
     expect(text).not.toContain(DEFAULT_LANE_STATUSES.ready);
+  });
+
+  // #1040-T02
+  it("Issue to PR (status) for a Jira project puts the key in the pull request title and the ticket address in its body, never `Closes #n`", () => {
+    const document = builtInLaneDocument(
+      "issue-to-pr-status",
+      "node",
+      DEFAULT_LANE_STATUSES,
+      "jira",
+    );
+    const text = JSON.stringify(document);
+    expect(text).toContain("{{trigger.ticket.key}}: {{trigger.ticket.title}}");
+    expect(text).toContain("Ticket: {{trigger.ticket.url}}");
+    expect(text).not.toContain("Closes #");
+    expect(text).toContain("jira:owner/repo#PROJ-128");
+    const result = validateWorkflow(document, FAKE_RESOLVER, {
+      maxBudgetUsd: 100,
+    });
+    expect(result.errors).toEqual([]);
+    // The GitHub lane keeps its words.
+    expect(
+      JSON.stringify(builtInLaneDocument("issue-to-pr-status", "node")),
+    ).toContain("Closes #{{trigger.ticket.number}}");
+  });
+
+  // #1040
+  it("takes the status names of a Jira workflow where they fit, and never lets the trigger status be one of the others", () => {
+    expect(
+      laneStatusesFromNames([
+        "Backlog",
+        "Selected for Development",
+        "In Progress",
+        "Code Review",
+        "Ready for agent",
+        "Done",
+      ]),
+    ).toEqual({
+      ready: "Ready for agent",
+      inProgress: "In Progress",
+      inReview: "Code Review",
+      back: "Backlog",
+    });
+    // The statuses of a plain Jira project: what fits is taken, the rest keeps the lane's own name.
+    expect(laneStatusesFromNames(["To Do", "In Progress", "Done"])).toEqual({
+      ready: DEFAULT_LANE_STATUSES.ready,
+      inProgress: "In Progress",
+      inReview: DEFAULT_LANE_STATUSES.inReview,
+      back: "To Do",
+    });
+    expect(laneStatusesFromNames([])).toEqual(DEFAULT_LANE_STATUSES);
+    const same = laneStatusesFromNames(["Ready for review", "Review"]);
+    expect(new Set(Object.values(same)).size).toBe(4);
   });
 });

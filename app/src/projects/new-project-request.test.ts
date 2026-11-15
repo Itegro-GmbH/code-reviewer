@@ -124,7 +124,7 @@ describe("the ticket source in the body of a new project (#1038)", () => {
   });
 
   // #1038 (finding of the review of #1044)
-  it("refuses the lanes that read and write GitHub issues for a Jira project, naming the lane that is allowed, and still takes them for the issues of a repository", () => {
+  it("refuses the lane that starts from a GitHub label for a Jira project, naming the lanes that are allowed, and still takes it for the issues of a repository", () => {
     expect(
       readNewProjectRequest({
         repositoryId: "r1",
@@ -138,10 +138,21 @@ describe("the ticket source in the body of a new project (#1038)", () => {
           path: "lanes/1",
           code: "lane_not_for_jira",
           message: expect.stringContaining("issue-to-pr"),
-          available: ["review-a-pull-request"],
+          available: ["issue-to-pr-status", "review-a-pull-request"],
         },
       ],
     });
+    // #1040: the status lane works for a Jira project.
+    expect(
+      read(
+        {
+          repositoryId: "r1",
+          ticketSource: JIRA,
+          lanes: ["issue-to-pr-status", "review-a-pull-request"],
+        },
+        [...LANES, "issue-to-pr-status"],
+      ).ok,
+    ).toBe(true);
     expect(
       readNewProjectRequest({
         repositoryId: "r1",

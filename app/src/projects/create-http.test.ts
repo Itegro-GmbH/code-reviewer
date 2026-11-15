@@ -91,6 +91,9 @@ function setup(
     jiraProject?: JiraProjectAnswer;
     /** The repository as the list of projects has it; left out: a repository that can be switched on, without a project. */
     entry?: ProjectListEntry | undefined | null;
+    /** The workflow statuses of the Jira project (#1040); left out: the handlers are wired without the reader. */
+    jiraStatuses?: string[];
+    laneKeys?: string[];
   } = {},
 ) {
   const createProject = vi.fn<
@@ -114,6 +117,9 @@ function setup(
     async () =>
       options.jiraProject ?? { kind: "project", project: { key: "PROJ" } },
   );
+  const jiraStatuses = vi.fn<
+    NonNullable<NewProjectDependencies["jiraStatuses"]>
+  >(async () => options.jiraStatuses ?? []);
   const findProject = vi.fn<NewProjectDependencies["service"]["findProject"]>(
     async () =>
       options.entry === null ? undefined : (options.entry ?? entryOf()),
@@ -129,8 +135,11 @@ function setup(
       },
     },
     boards,
-    laneKeys: ["issue-to-pr", "review-a-pull-request"],
+    laneKeys: options.laneKeys ?? ["issue-to-pr", "review-a-pull-request"],
     copyLanes,
+    ...(options.jiraStatuses === undefined
+      ? {}
+      : { jiraStatuses: jiraStatuses }),
     ...(options.jira === undefined ? {} : { jiraProjects }),
     ...(options.jiraProject === undefined && options.jira === undefined
       ? {}
@@ -151,6 +160,7 @@ function setup(
     post,
     jiraProjects,
     jiraProject,
+    jiraStatuses,
     findProject,
   };
 }
@@ -650,7 +660,7 @@ describe("creating a project on a Jira project (#1038)", () => {
   });
 
   // #1038 (finding of the review of #1044)
-  it("refuses the lanes that read and write GitHub issues for a Jira project before anybody is asked", async () => {
+  it("refuses the lane that starts from a GitHub label for a Jira project before anybody is asked", async () => {
     const { handlers, jiraProject, createProject, copyLanes, post } = setup({
       jiraProject: { kind: "project", project: { key: "PROJ" } },
     });
@@ -667,6 +677,64 @@ describe("creating a project on a Jira project (#1038)", () => {
     expect(jiraProject).not.toHaveBeenCalled();
     expect(createProject).not.toHaveBeenCalled();
     expect(copyLanes).not.toHaveBeenCalled();
+  });
+});
+
+describe("the lanes of a Jira project (#1040)", () => {
+  // #1040
+  it("hands the status names of the Jira project's workflow to the copy of the status lane, and asks for them only then", async () => {
+    const statusNames = ["To Do", "In Progress", "Done"];
+    const jiraBody = (lanes: string[]) => ({
+      repositoryId: "repo-1",
+      ticketSource: {
+        provider: "jira",
+        connectionId: "conn-1",
+        projectKey: "PROJ",
+      },
+      lanes,
+    });
+    const laneKeys = [
+      "issue-to-pr",
+      "issue-to-pr-status",
+      "review-a-pull-request",
+    ];
+    const withLane = setup({
+      jiraProject: { kind: "project", project: { key: "PROJ" } },
+      jiraStatuses: statusNames,
+      laneKeys,
+    });
+
+    const response = await withLane.handlers.create(
+      withLane.post(jiraBody(["issue-to-pr-status"])),
+    );
+
+    expect(response.status).toBe(201);
+    expect(withLane.jiraStatuses).toHaveBeenCalledWith("conn-1", "PROJ");
+    expect(withLane.copyLanes).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      ["issue-to-pr-status"],
+      { statusNames },
+    );
+
+    const reviewOnly = setup({
+      jiraProject: { kind: "project", project: { key: "PROJ" } },
+      jiraStatuses: statusNames,
+      laneKeys,
+    });
+    await reviewOnly.handlers.create(
+      reviewOnly.post(jiraBody(["review-a-pull-request"])),
+    );
+    expect(reviewOnly.jiraStatuses).not.toHaveBeenCalled();
+  });
+
+  // #1040
+  it("copies the lanes of a GitHub project as before, without Jira's names", async () => {
+    const { handlers, copyLanes, post } = setup();
+    await handlers.create(
+      post({ repositoryId: "repo-1", lanes: ["issue-to-pr"] }),
+    );
+    expect(copyLanes.mock.calls[0]).toHaveLength(3);
   });
 });
 
