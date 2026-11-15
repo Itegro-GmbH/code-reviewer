@@ -168,7 +168,11 @@ export function createTrackerMirror(
       switch (change.kind) {
         case "item_changed": {
           const { item } = change;
-          const before = await tracker.getItem(repositoryId, item.number);
+          const before = await tracker.getItem(
+            repositoryId,
+            item.number,
+            TRACKER_PROVIDER,
+          );
           // A delivery older than what the cache holds (replayed, or overtaken by a newer one) changes nothing, not even the checks.
           const written = await tracker.upsertItem(repositoryId, {
             provider: TRACKER_PROVIDER,
@@ -213,6 +217,7 @@ export function createTrackerMirror(
             repositoryId,
             change.number,
             change.at,
+            TRACKER_PROVIDER,
           ))
             ? "updated"
             : "not_mirrored";
@@ -222,6 +227,7 @@ export function createTrackerMirror(
             change.child,
             change.parent,
             change.at,
+            TRACKER_PROVIDER,
           ))
             ? "updated"
             : "not_mirrored";
@@ -229,7 +235,11 @@ export function createTrackerMirror(
           let updated = false;
           let state: string | null | undefined;
           for (const number of change.pullRequests) {
-            const item = await tracker.getItem(repositoryId, number);
+            const item = await tracker.getItem(
+              repositoryId,
+              number,
+              TRACKER_PROVIDER,
+            );
             // Only an open pull request has checks that matter.
             if (
               item === undefined ||

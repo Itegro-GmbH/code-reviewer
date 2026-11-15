@@ -24,6 +24,8 @@ export function projectServiceFor(
    * mirror, #923: the ticket mirror depends on this module, so it is handed in and never imported here).
    */
   onProjectActivated?: ProjectHooks["onProjectActivated"],
+  /** What the caller does after a project was switched off (the Jira webhook of its source is deleted, #1039). */
+  afterProjectDeactivated?: ProjectHooks["afterProjectDeactivated"],
 ): ProjectService {
   return createProjectService({
     projects: createProjectsRepository(
@@ -37,6 +39,9 @@ export function projectServiceFor(
     hooks: {
       ...getProjectHooks(workspaceId),
       ...(onProjectActivated === undefined ? {} : { onProjectActivated }),
+      ...(afterProjectDeactivated === undefined
+        ? {}
+        : { afterProjectDeactivated }),
     },
   });
 }

@@ -146,6 +146,8 @@ const STEP_FAILURE_TEXT: Record<
   github_rate_limited:
     "GitHub's rate limit was reached. The action was not repeated; wait a while and run the workflow again.",
   github_unavailable: "GitHub could not be reached or did not answer in time.",
+  ticket_provider_unsupported:
+    "The ticket source of this project cannot do this yet: a Jira project can start a run, but comments, labels and status changes on its tickets are not supported yet.",
   action_timeout:
     "The action did not answer in time. It is not repeated, because it may have happened.",
   action_interrupted:
@@ -389,7 +391,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT:
     "That ticket is not in the repository this project takes its tickets from.",
   WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED:
-    "Runs cannot start from a ticket of that tracker yet: only GitHub issues can.",
+    "That ticket is not of the ticket source of this lane's project: name a GitHub issue or a Jira issue the way the project's tickets are.",
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
     "That repository is not the one this project takes its tickets from.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
@@ -403,7 +405,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
     "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
-    "GitHub could not be asked right now. Try again in a moment.",
+    "GitHub could not be asked right now (or Jira, for a Jira project). Try again in a moment.",
 };
 
 /** The sentence for a failed start or read: the route's code, or a transport code, or a status the page cannot read. */

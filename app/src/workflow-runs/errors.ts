@@ -135,6 +135,8 @@ export const STEP_FAILURE_CODES = [
   "github_rate_limited",
   /** GitHub could not be reached or answered with an error of its own. */
   "github_unavailable",
+  /** A ticket action (`ticket.comment`, `ticket.labels`, `ticket.setStatus`): the project's ticket source (Jira, until #1040) cannot do it yet. */
+  "ticket_provider_unsupported",
   /** The connector did not answer within `ACTION_TIMEOUT_MS`; whether the action happened is not known, and it is not repeated. */
   "action_timeout",
   /** The engine was interrupted while an action ran; whether it happened is not known, and it is not repeated. */

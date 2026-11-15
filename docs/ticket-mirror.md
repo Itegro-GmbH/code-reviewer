@@ -231,18 +231,40 @@ reads when it is asked again. `TRACKER_INTEGRATION_UNAVAILABLE` (409) says the i
 Code: `app/src/tracker/` (the mirror, the sync, the list and its routes), `app/src/db/repositories/tracker-repository.ts` (the only SQL),
 `app/src/integrations/providers/github-app/` (`tracker-events.ts`, `tracker-map.ts` and the three reads of the client).
 
-## A project on a Jira project (#1038)
+## A project on a Jira project (#1038, #1039)
 
 A project's ticket source can be a Jira project (`{ provider: "jira", repositoryId, connectionId, projectKey }`, [`src/jira/README.md`](../app/src/jira/README.md)).
-**The mirror is not touched by that issue.** `repositoryId` of such a source is the GitHub repository the code lives in, and the mirror is keyed by
-`(repository_id, provider, key)` since #1035, so a Jira ticket can be stored under that repository with `provider = 'jira'` and the key `PROJ-123`
-without a new column and without the `repository_id` question that #1035 left open (a Jira container with no repository does not exist: a Jira source
-always names the repository of the code). What the mirror has to learn is #1039's work: the inbound webhook, reading a Jira page (`readTrackerPage`), and
-the sync state per `(repository_id, provider)`, which already exists.
+`repositoryId` of such a source is the GitHub repository the code lives in, and the mirror is keyed by `(repository_id, provider, key)` since #1035, so a Jira ticket
+is stored under that repository with `provider = 'jira'` and the key `PROJ-123`, without a new column.
 
-Until then the mirror leaves such a project alone: the issues of its repository are not its tickets. The webhook (`mirroredRepository`) writes only for a
-repository whose active project has a GitHub source (`ProjectService.activeTicketProvider`), `TrackerService` (`listIssues`, `syncState`, `sync`)
-answers `TRACKER_SOURCE_NOT_MIRRORED` (409), the nightly resync (`listResyncTargets`) skips it, and neither route that creates or switches on a project
-(`POST .../projects`, `PUT .../repositories/:id/project`) starts the first sync for it (`firstSyncAfterActivation`). The label and the status of a GitHub issue
-or board start no lane of such a project either (`WorkflowsRepository.listWithIssueTrigger` / `listWithStatusTrigger`). **Not decided here, for #1039:** GitHub
-rows that the repository held while the project's tickets were its issues stay in the cache until the mirror clears or rewrites them.
+**How the rows get there (#1039).** The inbound webhook of Jira ([`docs/jira-cloud-setup.md`](jira-cloud-setup.md#5-webhooks-nothing-to-do-in-jira)) writes the issue of every
+delivery (`jira:issue_created`, `jira:issue_updated`, `comment_created`; `jira:issue_deleted` makes a tombstone), through `createJiraMirror`. The fields are the neutral ones,
+mapped as follows and never to a vocabulary of ours:
+
+| Column | From Jira |
+| --- | --- |
+| `key` | the issue key (`PROJ-7`) |
+| `number` | the number at the end of the key (7): keeps the old primary key `(repository_id, number)` unique within a project and `#7` meaningful |
+| `title` | `summary` (cut at 1024 characters) |
+| `body_excerpt` | `description`, an ADF document read as plain text (cut at 4000 characters) |
+| `board_status` | the **name of the status**, as Jira spells it (the column holds a GitHub board's Status for GitHub rows) |
+| `state` | `closed` when the status's category is `done`, otherwise `open` |
+| `type` | the issue type (`Bug`, `Task`, ...); null when none |
+| `assignees` | the display name of the assignee (one) |
+| `labels` | the labels (no colour: `""`); at most 50, each cut at 100 characters (assignees: 20) |
+| `parent_number` | the number of the parent (epic or parent of a sub-task) **when it is in the same Jira project**, else none |
+| `node_id` | `jira:<issue id>` (keeps the row clear of GitHub node ids) |
+| `updated_at` | `fields.updated` as ISO UTC, **never more than 2 minutes ahead of the server's clock** (a payload is authenticated by a secret in its address, not signed: a made-up date far ahead would freeze the row against every later delivery); a delivery older than the row changes nothing, as for GitHub |
+
+**When a project switches its tickets** from GitHub issues to a Jira project (or back), the rows of the other provider are removed (`TrackerRepository.clearOtherProviders`, in the
+activation hook, with the sync state of that provider): they are not the new tickets and their numbers would collide with the new rows. The cache is rebuilt from the provider, so
+nothing is lost that cannot be read again. A project that is switched on again with the same source clears nothing. A switch from one Jira project to another clears the Jira rows
+of the old one as well (`clearJiraItemsOutside`): the primary key is `(repository_id, number)`, so `OLD-7` would block `NEW-7`; with another connection (another site) all Jira rows go. If the
+webhook row was already deleted when the project was switched off, the connection of the old source is not known any more: only the rows of another project key are cleared, and rows of the
+same key from another site stay until a delivery of that key overwrites them. The reads and writes of the Jira mirror (`getItem`, `deleteItem`, `setParent`) name their provider, so a
+delivery of one provider never touches a row of the other on the same number.
+
+**What is still not mirrored.** There is no first read of the issues a Jira project already had (the webhook only brings what changes after it was registered; "resync by JQL" is #1040),
+`TrackerService` still answers `TRACKER_SOURCE_NOT_MIRRORED` (409) for a Jira source and the nightly resync skips it, an issue that is moved **out** of the project in Jira is not
+removed from the mirror (the project's webhook no longer matches it), and the cockpit's Issues tab shows GitHub wording. The label and the status of a GitHub issue or board still start no
+lane of a Jira project, and the status change in Jira starts the lanes of that project only.

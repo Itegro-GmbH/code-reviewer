@@ -42,6 +42,7 @@ const LATER_TABLES = [
   "runners",
   "runner_registration_tokens",
   "jira_connections",
+  "jira_webhooks",
   "job_rings",
 ];
 

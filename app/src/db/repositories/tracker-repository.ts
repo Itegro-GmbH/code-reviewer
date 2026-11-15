@@ -126,6 +126,11 @@ export type TrackerItemWrite = Pick<
    */
   parentNumber?: number | null;
   /**
+   * The status of the ticket as its platform names it (#1039: a Jira issue's status name, which the mirror keeps where GitHub keeps the
+   * board's Status); `undefined` leaves what the row has (GitHub's board status comes from the board's own deliveries), null or a name sets it.
+   */
+  boardStatus?: string | null;
+  /**
    * #924: who a review of the pull request is asked from; `undefined` leaves what the row has (an issue, a comment event and the list of
    * the issues say nothing about it).
    */
@@ -171,9 +176,14 @@ export type TrackerRepository = {
    * delivery; false for a stale one and for a repository that is not in the workspace.
    */
   upsertItem(repositoryId: string, item: TrackerItemWrite): Promise<boolean>;
+  /**
+   * The cached item with this number. `provider` (#1039): the primary key is `(repository, number)`, so rows of two providers (or two Jira
+   * projects) can claim one number in turn; with it, only a row of that provider is found.
+   */
   getItem(
     repositoryId: string,
     number: number,
+    provider?: string,
   ): Promise<TrackerItem | undefined>;
   /** The cached item the provider's id names, in any repository of the workspace; undefined for none and for a tombstone. */
   findItemByNode(nodeId: string): Promise<TrackerItem | undefined>;
@@ -189,12 +199,14 @@ export type TrackerRepository = {
   ): Promise<TrackerItem[]>;
   /**
    * Hides the item as of `at` (the provider's time of the deletion): the row stays as a tombstone, so a delivery older than `at` does not
-   * bring it back. Answers whether a visible item was hidden; false when there is none, or it changed after `at`.
+   * bring it back. Answers whether a visible item was hidden; false when there is none, or it changed after `at`. With `provider` only a
+   * row of that provider is hidden (see `getItem`).
    */
   deleteItem(
     repositoryId: string,
     number: number,
     at: string,
+    provider?: string,
   ): Promise<boolean>;
   /**
    * Sets the board status of the item the board names by its node id (any repository of the workspace) and notes that a board saw it;
@@ -203,13 +215,14 @@ export type TrackerRepository = {
   setBoardStatusByNode(nodeId: string, status: string | null): Promise<number>;
   /**
    * Sets the parent of an issue as of `at` (the provider's time of the change, the same clock as `updatedAt`); answers whether the issue is
-   * cached and was not changed after `at`.
+   * cached and was not changed after `at`. With `provider` only a row of that provider is changed (see `getItem`).
    */
   setParent(
     repositoryId: string,
     number: number,
     parent: number | null,
     at: string,
+    provider?: string,
   ): Promise<boolean>;
   setChecksState(
     repositoryId: string,
@@ -283,6 +296,21 @@ export type TrackerRepository = {
    * `TOMBSTONE_KEPT_MS` before `before`.
    */
   removeNotWrittenSince(repositoryId: string, before: string): Promise<number>;
+  /**
+   * Removes every cached item and sync state of the repository that belongs to another provider than `keep` (#1039): a project that
+   * switches its tickets from GitHub issues to a Jira project (or back) must not show, or collide on the numbers with, the other provider's
+   * rows. Answers how many items went. The cache is rebuilt from the provider, so nothing is lost that cannot be read again.
+   */
+  clearOtherProviders(repositoryId: string, keep: string): Promise<number>;
+  /**
+   * Removes the Jira rows of the repository that are not of the Jira project `projectKey` (their key does not start with `KEY-`), or all of
+   * them when `projectKey` is null (#1039): a project that switches from one Jira project (or connection) to another keeps the row
+   * identity `(repository, number)`, so `OLD-7` would collide with `NEW-7`. Answers how many items went.
+   */
+  clearJiraItemsOutside(
+    repositoryId: string,
+    projectKey: string | null,
+  ): Promise<number>;
   getSyncState(repositoryId: string): Promise<TrackerSyncState | undefined>;
   /**
    * Starts a sync in one atomic step, unless one is under way: the state is written (this cursor and start, nothing else changes) only
@@ -392,12 +420,16 @@ export function createTrackerRepository(
   options: { now?: () => Date } = {},
 ): TrackerRepository {
   const now = options.now ?? (() => new Date());
-  const own = (repositoryId: string, number: number) =>
-    db
+  const own = (repositoryId: string, number: number, provider?: string) => {
+    const update = db
       .updateTable("tracker_items")
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
+    return provider === undefined
+      ? update
+      : update.where("provider", "=", provider);
+  };
 
   /**
    * Changes the lists of a pull request in one transaction, with the row locked, so that two members acting at once, or an action and a
@@ -471,6 +503,10 @@ export function createTrackerRepository(
         item.parentNumber === undefined
           ? sql`tracker_items.parent_number`
           : sql`excluded.parent_number`;
+      const boardStatus =
+        item.boardStatus === undefined
+          ? sql`tracker_items.board_status`
+          : sql`excluded.board_status`;
       const requested =
         item.reviewRequestedFrom === undefined
           ? sql`tracker_items.review_requested_from`
@@ -490,7 +526,7 @@ export function createTrackerRepository(
         )
         select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.key ?? String(item.number)}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
-          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
+          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, ${item.boardStatus ?? null}::text,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
           null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
@@ -509,6 +545,7 @@ export function createTrackerRepository(
           labels = excluded.labels,
           assignees = excluded.assignees,
           closes = excluded.closes,
+          board_status = ${boardStatus},
           parent_number = ${parent},
           review_requested_from = ${requested},
           review_acted_by = ${acted},
@@ -528,15 +565,17 @@ export function createTrackerRepository(
       return false;
     },
 
-    async getItem(repositoryId, number) {
-      const row = await db
+    async getItem(repositoryId, number, provider) {
+      let query = db
         .selectFrom("tracker_items")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("number", "=", number)
-        .where("deleted_at", "is", null)
-        .executeTakeFirst();
+        .where("deleted_at", "is", null);
+      if (provider !== undefined)
+        query = query.where("provider", "=", provider);
+      const row = await query.executeTakeFirst();
       return row === undefined ? undefined : itemFrom(row);
     },
 
@@ -581,8 +620,8 @@ export function createTrackerRepository(
       return rows.map(itemFrom);
     },
 
-    async deleteItem(repositoryId, number, at) {
-      const result = await own(repositoryId, number)
+    async deleteItem(repositoryId, number, at, provider) {
+      const result = await own(repositoryId, number, provider)
         .set({
           deleted_at: at,
           updated_at: at,
@@ -606,8 +645,8 @@ export function createTrackerRepository(
       return Number(result.numUpdatedRows);
     },
 
-    async setParent(repositoryId, number, parent, at) {
-      const result = await own(repositoryId, number)
+    async setParent(repositoryId, number, parent, at, provider) {
+      const result = await own(repositoryId, number, provider)
         .set({
           parent_number: parent,
           updated_at: at,
@@ -754,6 +793,37 @@ export function createTrackerRepository(
           eb.or([eb("kind", "<>", "pull_request"), eb("state", "<>", "open")]),
         )
         .execute();
+    },
+
+    async clearOtherProviders(repositoryId, keep) {
+      const items = await db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .executeTakeFirst();
+      await db
+        .deleteFrom("tracker_sync_state")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .execute();
+      return Number(items.numDeletedRows);
+    },
+
+    async clearJiraItemsOutside(repositoryId, projectKey) {
+      let query = db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "=", "jira");
+      // `starts_with`, not `like`: a project key may hold an underscore.
+      if (projectKey !== null)
+        query = query.where(
+          sql<boolean>`not starts_with(coalesce(key, ''), ${`${projectKey}-`})`,
+        );
+      const result = await query.executeTakeFirst();
+      return Number(result.numDeletedRows);
     },
 
     async removeNotWrittenSince(repositoryId, before) {

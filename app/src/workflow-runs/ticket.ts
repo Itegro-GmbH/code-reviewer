@@ -15,6 +15,7 @@ import {
   TICKET_ASSIGNEE_MAX_CHARS,
   TICKET_TYPE_MAX_CHARS,
 } from "./limits.ts";
+import { STATUS_NAME_MAX_LENGTH } from "../workflows/limits.ts";
 import { ticketNumberOfKey } from "../integrations/ticket-provider.ts";
 import { isRecord } from "../workflows/json.ts";
 import { cleanText } from "./templates.ts";
@@ -31,6 +32,8 @@ export type TicketValue = {
   labels: string[];
   type: string;
   assignees: string[];
+  /** The status of the ticket as its platform names it (a Jira issue's status name, #1039); empty for a ticket the platform gives none (GitHub). */
+  status: string;
   repo: {
     fullName: string;
     owner: string;
@@ -64,6 +67,7 @@ export function ticketValue(
     labels: readonly string[];
     type?: string | undefined;
     assignees?: readonly string[] | undefined;
+    status?: string | undefined;
   },
   repo: { fullName: string; defaultBranch: string },
 ): TicketValue {
@@ -85,6 +89,7 @@ export function ticketValue(
     assignees: (ticket.assignees ?? [])
       .slice(0, TICKET_ASSIGNEES_MAX)
       .map((login) => bounded(login, TICKET_ASSIGNEE_MAX_CHARS, false)),
+    status: bounded(ticket.status ?? "", STATUS_NAME_MAX_LENGTH, false),
     repo: {
       fullName,
       owner: slash < 0 ? fullName : fullName.slice(0, slash),

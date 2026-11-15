@@ -224,6 +224,7 @@ describe("which workflows a move into a status starts", () => {
         labels: ["enhancement"],
         type: "Bug",
         assignees: ["alice"],
+        status: "",
         repo: {
           fullName: "acme/widgets",
           owner: "acme",

@@ -156,6 +156,50 @@ describe("the ticket actions of a run whose project source names another provide
   });
 });
 
+describe("the ticket actions of a run whose project source cannot write (Jira until #1040)", () => {
+  /** A read-only provider, as the Jira one is: it can read a ticket and has no comment, label or status method. */
+  function readOnly() {
+    const provider: TicketProvider = {
+      id: "readonly",
+      isTicketKey: (key) => /^[A-Z]+-\d+$/.test(key),
+      readTicket: async () => null,
+    };
+    const connectors = createGithubConnectors({
+      targetOf: async () => undefined,
+      projectBoard: async () => "PVT_board",
+      ticketTargetOf: createTicketTargetResolver({
+        tickets: createTicketProviderRegistry([provider]),
+        sourceProviderOf: async () => "readonly",
+        scopeOf: async () => scope,
+      }),
+    });
+    return (name: string) => {
+      const found = connectors.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`no connector ${name}`);
+      return found;
+    };
+  }
+
+  // #1039
+  it("end with ticket_provider_unsupported, not with a GitHub code, and name the source", async () => {
+    const connector = readOnly();
+    for (const [name, inputs] of [
+      ["ticket.comment", { ticket: "PROJ-1", body: "b" }],
+      ["ticket.labels", { ticket: "PROJ-1", add: ["x"] }],
+      ["ticket.setStatus", { ticket: "PROJ-1", board: "1", status: "Done" }],
+    ] as const) {
+      const error = await connector(name)
+        .run(call(inputs))
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ConnectorError);
+      expect((error as ConnectorError).code).toBe(
+        "ticket_provider_unsupported",
+      );
+      expect((error as ConnectorError).message).toContain("readonly");
+    }
+  });
+});
+
 describe("the ticket actions of a run whose project names no provider", () => {
   // #1035-T01
   it("act through GitHub with the number of the issue as the text key, as before", async () => {

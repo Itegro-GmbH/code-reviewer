@@ -48,8 +48,16 @@ export const TICKET_TYPE: ObjectType = objectOf({
   labels: listOf(STRING),
   type: STRING,
   assignees: listOf(STRING),
+  /** The status of the ticket as its platform names it (Jira's own status name, #1039); empty where the platform has none (a GitHub issue: its board status is `trigger.status.to`). */
+  status: STRING,
   repo: TICKET_REPO_TYPE,
 });
+
+/**
+ * A Jira issue key: the project key, a dash, the number (upper case letters, digits and underscore; the number starts at 1). Here, not in
+ * `jira/`, so that the engine's wiring can name Jira keys without importing that module (#1039).
+ */
+export const JIRA_ISSUE_KEY = /^([A-Z][A-Z0-9_]{1,99})-([1-9]\d{0,9})$/;
 
 export type TicketRef = {
   provider: TicketProviderName;

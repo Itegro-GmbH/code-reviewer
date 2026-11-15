@@ -448,6 +448,20 @@ function unavailable(name: GithubConnectorName): ConnectorError {
   );
 }
 
+/**
+ * The ticket source of the run's project cannot do this action (#1039): its provider has no such method (Jira's comments, labels and
+ * transitions are #1040). A stable code of its own, so a lane's author sees that it is the source and not GitHub.
+ */
+function ticketUnsupported(
+  providerId: string,
+  name: GithubConnectorName,
+): ConnectorError {
+  return new ConnectorError(
+    "ticket_provider_unsupported",
+    `The ticket source of this project (${providerId}) cannot ${ACTION_VERB[name]} yet.`,
+  );
+}
+
 /** The failure of a status the board does not have: the options it has, as the board spells them (one line each, bounded). */
 function boardStatusText(available: readonly string[]): string {
   const shown = available
@@ -555,7 +569,8 @@ export function createGithubConnectors(
       const key = ticketKey(call.inputs.ticket);
       const { body, marker } = commentBody(call);
       const { provider, scope } = await ticketTargetOrFail(deps, call, key);
-      if (provider.commentOnTicket === undefined) throw unavailable(name);
+      if (provider.commentOnTicket === undefined)
+        throw ticketUnsupported(provider.id, name);
       try {
         const { url, existing } = await provider.commentOnTicket(
           scope,
@@ -615,7 +630,8 @@ export function createGithubConnectors(
       const key = ticketKey(call.inputs.ticket);
       const change = labelChange(call);
       const { provider, scope } = await ticketTargetOrFail(deps, call, key);
-      if (provider.changeTicketLabels === undefined) throw unavailable(name);
+      if (provider.changeTicketLabels === undefined)
+        throw ticketUnsupported(provider.id, name);
       try {
         const { labels } = await provider.changeTicketLabels(
           scope,
@@ -647,7 +663,8 @@ export function createGithubConnectors(
       const board = boardReference(named ?? projectBoard);
       const status = statusName(call.inputs.status);
       const { provider, scope } = await ticketTargetOrFail(deps, call, key);
-      if (provider.setTicketStatus === undefined) throw unavailable(name);
+      if (provider.setTicketStatus === undefined)
+        throw ticketUnsupported(provider.id, name);
       try {
         const moved = await provider.setTicketStatus(
           scope,

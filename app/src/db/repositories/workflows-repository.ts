@@ -105,6 +105,13 @@ export type WorkflowsRepository = {
   listWithStatusTrigger(
     repositoryId: string,
   ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]>;
+  /**
+   * The lanes of ONE project by its id (#1039) whose current version names `ticket.statusChanged`, when the project is active: for a
+   * project whose tickets are a Jira project, which `listWithStatusTrigger` (GitHub issues of a repository) leaves out. A text match as well.
+   */
+  listProjectWithStatusTrigger(
+    projectId: string,
+  ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]>;
   /** The workflow with its current version, also when it is archived (its versions stay readable). */
   get(
     id: string,
@@ -182,9 +189,12 @@ export function createWorkflowsRepository(
    * code lives.
    */
   async function listWithTrigger(
-    repositoryId: string,
+    // A repository whose project's tickets are its GitHub issues, or (#1039) one project by its id, whatever its ticket source: the lanes
+    // of a Jira project that a status change in Jira starts.
+    scope: { repositoryId: string } | { projectId: string },
     patterns: readonly string[],
   ): Promise<{ workflow: StoredWorkflow; current: StoredWorkflowVersion }[]> {
+    const byProject = "projectId" in scope;
     const rows = await db
       .selectFrom("workflows")
       .innerJoin("projects", "projects.id", "workflows.project_id")
@@ -207,7 +217,11 @@ export function createWorkflowsRepository(
       .where("workflow_versions.workspace_id", "=", workspaceId)
       .where("workflows.archived_at", "is", null)
       // The project row is one per repository: its repository is the repository of its ticket source (`ticket_source.repositoryId`).
-      .where("projects.repository_id", "=", repositoryId)
+      .where(
+        byProject ? "projects.id" : "projects.repository_id",
+        "=",
+        byProject ? scope.projectId : scope.repositoryId,
+      )
       .where("projects.active", "=", encodeBoolean(true))
       .where((eb) =>
         eb.or(
@@ -222,9 +236,10 @@ export function createWorkflowsRepository(
     return rows
       .filter(
         (row) =>
+          byProject ||
           readTicketSource(
             row.source_ticket_source,
-            repositoryId,
+            scope.repositoryId,
             row.source_project_id,
             // The project list and the claim warn about a damaged source already; a lane list stays quiet.
             () => undefined,
@@ -259,13 +274,16 @@ export function createWorkflowsRepository(
     },
 
     listWithIssueTrigger: (repositoryId) =>
-      listWithTrigger(repositoryId, [
+      listWithTrigger({ repositoryId }, [
         '%"ticket.labeled"%',
         '%"github.issueLabeled"%',
       ]),
 
     listWithStatusTrigger: (repositoryId) =>
-      listWithTrigger(repositoryId, ['%"ticket.statusChanged"%']),
+      listWithTrigger({ repositoryId }, ['%"ticket.statusChanged"%']),
+
+    listProjectWithStatusTrigger: (projectId) =>
+      listWithTrigger({ projectId }, ['%"ticket.statusChanged"%']),
 
     async get(id) {
       const workflow = await db

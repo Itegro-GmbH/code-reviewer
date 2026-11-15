@@ -34,7 +34,8 @@ async function snapshot(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "jira_connections") continue;
+    if (table.name === "jira_connections" || table.name === "jira_webhooks")
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,
@@ -48,7 +49,7 @@ async function columns(db: Kysely<Database>): Promise<string[]> {
   const { rows } = await sql<{
     name: string;
   }>`select table_name || '.' || column_name as name from information_schema.columns
-    where table_schema = 'public' and table_name <> 'jira_connections' order by 1`.execute(
+    where table_schema = 'public' and table_name not in ('jira_connections', 'jira_webhooks') order by 1`.execute(
     db,
   );
   return rows.map((row) => row.name);
@@ -106,7 +107,10 @@ describe("the Jira connections migration", () => {
     expect((await migrateToLatest(db, migrationProvider)).executed).toEqual([]);
     const before = await columns(db);
 
-    await (await migrationProvider.getMigrations())[THIS]?.down?.(db);
+    // The webhooks of #1039 point at the connections: they go first, as the later migration comes off before this one.
+    const migrations = await migrationProvider.getMigrations();
+    await migrations["20261114180000_create_jira_webhooks"]?.down?.(db);
+    await migrations[THIS]?.down?.(db);
 
     const { rows } = await sql<{
       name: string;

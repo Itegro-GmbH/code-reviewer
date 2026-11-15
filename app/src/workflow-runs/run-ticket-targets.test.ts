@@ -28,6 +28,7 @@ const call = {
 
 const github: TicketProvider = { id: "github", isTicketKey: () => true };
 const fake: TicketProvider = { id: "fake", isTicketKey: () => true };
+const jira: TicketProvider = { id: "jira", isTicketKey: () => true };
 
 function project(
   ticketSource: Partial<StoredProject["ticketSource"]>,
@@ -57,7 +58,7 @@ function wire(
     "gitScope" in options ? options.gitScope : gitScope,
   );
   const targets = createRunTicketTargets({
-    tickets: createTicketProviderRegistry([github, fake]),
+    tickets: createTicketProviderRegistry([github, fake, jira]),
     runs: () => ({ getRun }) as never,
     workflows: () => ({ get: getWorkflow }) as never,
     projects: () => ({ getById: getProject }) as never,
@@ -141,6 +142,52 @@ describe("the ticket target of a run", () => {
     });
 
     expect(await targets.ticketTargetOf(call)).toBeUndefined();
+  });
+
+  // #1039
+  it("is the Jira provider with the Jira project of the source and the repository the code lives in, for a project with a Jira source", async () => {
+    const { targets, gitScopeOf } = wire({
+      ...LANE,
+      workflow: { workflow: { projectId: "p1" } },
+      project: project({
+        provider: "jira",
+        connectionId: "conn-1",
+        projectKey: "PROJ",
+      }),
+    });
+
+    const target = await targets.ticketTargetOf(call);
+
+    expect(target?.provider).toBe(jira);
+    expect(target?.scope).toEqual({
+      integration,
+      repo,
+      jira: { connectionId: "conn-1", projectKey: "PROJ" },
+    });
+    expect(gitScopeOf).toHaveBeenCalledWith("w1", "repo-1");
+  });
+
+  // #1039
+  it("finds no target for a Jira source that names no connection or project, or when the repository has no active connection", async () => {
+    expect(
+      await wire({
+        ...LANE,
+        workflow: { workflow: { projectId: "p1" } },
+        project: project({ provider: "jira" }),
+      }).targets.ticketTargetOf(call),
+    ).toBeUndefined();
+    expect(
+      await wire({
+        ...LANE,
+        workflow: { workflow: { projectId: "p1" } },
+        project: project({
+          provider: "jira",
+          connectionId: "conn-1",
+          projectKey: "PROJ",
+        }),
+        gitScope: undefined,
+      }).targets.ticketTargetOf(call),
+    ).toBeUndefined();
   });
 
   it("does not guess a container for a source whose provider the server has no scope for", async () => {

@@ -177,7 +177,7 @@ export function createDefaultIntegrationRegistry(
   return createDefaultProviders(options).integrations;
 }
 
-// The MVP has exactly one git provider, the GitHub App, and one ticket provider, GitHub issues through the same App. A new provider adds its
+// The MVP has exactly one git provider, the GitHub App, and one ticket provider, GitHub issues through the same App. (The read-only ticket provider of Jira Cloud, #1039, lives with the workflow engine's wiring, `workflow-runs/shared.ts`: `integrations` may not import `jira`, an import cycle.) A new provider adds its
 // entry above and nowhere else.
 const defaults = createDefaultProviders();
 export const integrationRegistry = defaults.integrations;
