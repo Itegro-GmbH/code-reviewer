@@ -854,6 +854,57 @@ describe("references in the fields (#927)", () => {
   });
 });
 
+describe("the status of a ticket.setStatus step (#1040)", () => {
+  const lane = (status: string): Doc =>
+    ({
+      version: 1,
+      name: "Status lane",
+      triggers: [{ id: "manual", kind: "manual", steps: [] }],
+      steps: [
+        {
+          id: "s",
+          kind: "action",
+          connector: "ticket.setStatus",
+          ticket: "{{trigger.ticket}}",
+          status,
+        },
+      ],
+    }) as Doc;
+
+  it("offers the statuses of the project's board or Jira workflow, keeps a name the project does not have, and writes the choice", () => {
+    const seen = vi.fn();
+    render(
+      <Harness
+        start={lane("In Review")}
+        pointer="/steps/0"
+        statuses={["To Do", "In Progress", "Done"]}
+        seen={seen}
+      />,
+    );
+
+    expect(value("status")).toBe("In Review");
+    expect(
+      within(screen.getByLabelText("status"))
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["In Review", "To Do", "In Progress", "Done"]);
+    fireEvent.change(screen.getByLabelText("status"), {
+      target: { value: "In Progress" },
+    });
+    expect(getAt(seen.mock.lastCall?.[0] as Doc, "/steps/0/status")).toBe(
+      "In Progress",
+    );
+  });
+
+  it("keeps the plain literal field when the project has no statuses to offer", () => {
+    render(<Harness start={lane("Doing")} pointer="/steps/0" />);
+
+    expect(value("status")).toBe("Doing");
+    // `board` and `status` take a literal: the field is the plain one, marked as before.
+    expect(screen.getAllByText("target · literal")).toHaveLength(2);
+  });
+});
+
 describe("a status trigger (#1036)", () => {
   const lane = (): Doc =>
     ({

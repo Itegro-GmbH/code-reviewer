@@ -477,7 +477,7 @@ function ValueControl({
   );
 }
 
-function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
+function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
   const connector = textOf(node.connector);
   const spec = specOf(connector);
   const names =
@@ -506,6 +506,26 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
         : inputsOf(spec).map(([name, input]) => {
             const control = controlOf(name, input);
             const label = `${name}${input.required ? "" : " (optional)"}`;
+            // The status a `ticket.setStatus` step sets (#1040): a choice among the statuses of the project's board or Jira workflow
+            // (the same names the status trigger offers); a project with none to offer keeps the plain literal field.
+            if (
+              connector === "ticket.setStatus" &&
+              name === "status" &&
+              statuses.length > 0
+            )
+              return (
+                <StatusControl
+                  key={`${pointer}-${name}`}
+                  name={name}
+                  label={label}
+                  value={textOf(node[name])}
+                  statuses={statuses}
+                  hint="The name of the status to move the ticket into: a board column (GitHub) or the status a Jira transition ends in. A literal."
+                  onChange={(next) =>
+                    onChange(patchNode(doc, pointer, { [name]: next }))
+                  }
+                />
+              );
             if (control === "boolean")
               return (
                 <div
