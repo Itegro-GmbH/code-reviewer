@@ -251,14 +251,18 @@ mapped as follows and never to a vocabulary of ours:
 | `state` | `closed` when the status's category is `done`, otherwise `open` |
 | `type` | the issue type (`Bug`, `Task`, ...); null when none |
 | `assignees` | the display name of the assignee (one) |
-| `labels` | the labels (no colour: `""`) |
+| `labels` | the labels (no colour: `""`); at most 50, each cut at 100 characters (assignees: 20) |
 | `parent_number` | the number of the parent (epic or parent of a sub-task) **when it is in the same Jira project**, else none |
 | `node_id` | `jira:<issue id>` (keeps the row clear of GitHub node ids) |
-| `updated_at` | `fields.updated` as ISO UTC; a delivery older than the row changes nothing, as for GitHub |
+| `updated_at` | `fields.updated` as ISO UTC, **never more than 2 minutes ahead of the server's clock** (a payload is authenticated by a secret in its address, not signed: a made-up date far ahead would freeze the row against every later delivery); a delivery older than the row changes nothing, as for GitHub |
 
 **When a project switches its tickets** from GitHub issues to a Jira project (or back), the rows of the other provider are removed (`TrackerRepository.clearOtherProviders`, in the
 activation hook, with the sync state of that provider): they are not the new tickets and their numbers would collide with the new rows. The cache is rebuilt from the provider, so
-nothing is lost that cannot be read again. A project that is switched on again with the same source clears nothing.
+nothing is lost that cannot be read again. A project that is switched on again with the same source clears nothing. A switch from one Jira project to another clears the Jira rows
+of the old one as well (`clearJiraItemsOutside`): the primary key is `(repository_id, number)`, so `OLD-7` would block `NEW-7`; with another connection (another site) all Jira rows go. If the
+webhook row was already deleted when the project was switched off, the connection of the old source is not known any more: only the rows of another project key are cleared, and rows of the
+same key from another site stay until a delivery of that key overwrites them. The reads and writes of the Jira mirror (`getItem`, `deleteItem`, `setParent`) name their provider, so a
+delivery of one provider never touches a row of the other on the same number.
 
 **What is still not mirrored.** There is no first read of the issues a Jira project already had (the webhook only brings what changes after it was registered; "resync by JQL" is #1040),
 `TrackerService` still answers `TRACKER_SOURCE_NOT_MIRRORED` (409) for a Jira source and the nightly resync skips it, an issue that is moved **out** of the project in Jira is not

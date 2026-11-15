@@ -93,8 +93,24 @@ _admin_ webhook (Atlassian does not list the webhooks of an OAuth 2.0 app on tha
   Jira lost (Atlassian keeps an expired webhook for three months) or that failed to register, and deletes one whose project is off or has
   another source. The `jira_webhooks` table says where each stands (`status`, `expires_at`, `error_code`). Without a working cron a Jira
   source stops delivering after at most 30 days.
+- **The secret is rotated.** The secret is part of the address, and an address ends up in the request logs of the platform (Vercel's
+  request logs and any log drain keep the query string). So the nightly job registers a **new webhook with a new secret** for a
+  registration that is more than **25 days** old, and deletes the old webhook after the new one is the row's; while it runs both secrets
+  are accepted (`pending_secret_hash`), so no delivery is lost. A rotation that fails (Jira's limit of five is the usual reason: the new
+  webhook exists next to the old one for a moment) leaves the old webhook as it was and extends it when it ends soon; it is tried again the next night. A secret that
+  leaked into a log is therefore valid for 25 days at most, not for as long as the webhook is extended. There is no way to rotate sooner
+  than by switching the project off and on (or by setting `registered_at` of the row back in the database and calling the job).
 - **They are deleted** when the project is switched off, when its ticket source changes, and when the project is switched to GitHub
-  issues. A deletion that fails is repeated by the nightly job.
+  issues. A deletion that fails is repeated by the nightly job. A deletion Jira **refuses** (401 or 403, a connection that is broken or
+  gone) is not repeated: the row goes anyway, so the new source can register, and Jira ends the webhook within 30 days (its deliveries
+  are refused as those of an unknown registration until then).
+- **A registration that times out** may have made a webhook at Jira without the factory knowing its id (Jira does not tell the address
+  of a webhook, so it cannot be matched by it). The next registration looks for webhooks with the filter `project = KEY` that no
+  registration of the workspace knows and that end about 30 days after the failed attempt, and deletes them, so they do not eat the
+  five. Two registrations of one project at the same moment leave the row with the Jira id and the secret of one of them; the other
+  deletes its webhook.
+- **A changed source clears the mirror's rows of the old one.** Switching a project to another Jira project (or connection) deletes the
+  cached Jira issues of the old one (`OLD-7` and `NEW-7` cannot share a number in the mirror); the cache of the new one fills from deliveries.
 - **Limit: five webhooks per connection.** Atlassian allows 5 webhooks per OAuth 2.0 app and user on a site. The factory uses one per
   Jira project, so one connection (one person's grant) can serve **five projects**; the sixth gets the code `jira_webhook_limit` on its
   row (the project is created, no status change reaches it). Connect the site again with another person's grant to serve more.
@@ -113,17 +129,30 @@ the bearer token alone**:
 1. **The address carries an unguessable secret of its own, one per registration** (256 random bits; only its SHA-256 is stored). A
    delivery without it, with another one, or for a registration that is unknown or being removed is refused `401` with one and the same
    answer. **This is the check that always applies, and it is a shared secret in the URL, not a signature of Atlassian's**: whoever learns
-   the address (Atlassian's delivery log, an access log of a proxy in front of the app, a screenshot) can post deliveries until the
-   webhook is registered again. The deliveries only carry the factory to re-read the issue from Jira (the status that starts a lane is read
+   the address (Atlassian's delivery log, **Vercel's request logs and log drains, which keep the query string**, an access log of a proxy
+   in front of the app, a screenshot) can post deliveries until the secret is rotated (every 25 days, see above). The deliveries only carry the factory to re-read the issue from Jira (the status that starts a lane is read
    again from Jira before a run starts, so a forged status change cannot start a run Jira does not stand behind), but a forged delivery
    could write a made-up issue into the mirror. Keep the address out of logs you share.
 2. **When a delivery carries a bearer token it must verify**: a JWT signed with the app's client secret (HS256, HS384 or HS512; never
-   `none` or an asymmetric algorithm) that is not expired. A token that does not verify refuses the delivery. A delivery without a token
-   is accepted on the secret alone. Because Atlassian does not document the claims, only the signature and `exp` are checked.
+   `none` or an asymmetric algorithm), not expired (`exp` plus 60 seconds of clock skew) and not issued or valid in the future (`iat`,
+   `nbf`, minus 60 seconds). A token that does not verify refuses the delivery, always. **A token without `exp` is accepted**: its
+   signature proves that the sender knows the client secret, and Atlassian documents no claims, so none is required.
+3. **Trust on first use.** Atlassian's documentation says the token is present, community reports say it is not always. So a registration
+   accepts deliveries without a token until the first delivery whose token verifies; the factory notes that (`bearer_seen_at` of the
+   registration) and from then on **refuses a delivery without a token** (`bearer_missing` in the log). A leaked address alone then forges
+   nothing for a registration whose real deliveries carry a token (the forger would need the client secret too). A rotation keeps the
+   note; a new registration (a project switched off and on) starts without it.
 
-Deliveries are **de-duplicated** by registration and Jira's `X-Atlassian-Webhook-Identifier` (the same across retries, unique per
-tenant): a delivery that succeeded is answered `duplicate` and does nothing; one that another request is handling answers `409` (Jira retries
+The request is checked (steps 1 and 2) **before its body is read**. Deliveries are **de-duplicated** by registration and Jira's
+`X-Atlassian-Webhook-Identifier` (the same across retries, unique per tenant). A delivery without a usable identifier is **not** refused
+(Jira treats a `4xx` as final and the event would be lost): it is claimed under a hash of its body, which a retry repeats, and the log says
+so. A delivery that succeeded is answered `duplicate` and does nothing; one that another request is handling answers `409` (Jira retries
 408, 409, 425, 429 and 5xx up to five times); one that failed after its claim releases it and answers `503`.
+
+A delivery that Atlassian **replays after the 7 days** the claims are kept for is no duplicate any more. It is handled as new, and if the
+ticket **still has** the status a lane waits for, it starts a run (the factory reads the status from Jira again before a run starts, and it
+matches). That is by design: the claim table is a retry guard, not a history, and a ticket that has sat in the trigger status for a week
+and is announced again is, as far as the lane can tell, in that status.
 
 ### What a delivery does
 
@@ -171,6 +200,18 @@ connection of a site must keep working through all of it:
       whether its signature verifies with the client secret (the factory refuses a delivery whose token does not verify; if real deliveries
       are refused for that reason the documentation of Atlassian and its behaviour disagree, and the check of the token needs another look
       before the release).
+- [ ] **Open question 1: the bearer token (#1039).** Capture one real delivery (Atlassian's delivery log, or a temporary log line of the
+      header's first two segments, never the signature): which `alg`, which claims (`exp`, `iat`, `nbf`, `iss`, anything else), and whether
+      **every** delivery has one. The factory refuses a token that does not verify with the client secret and, once one verified,
+      a delivery without a token (`bearer_seen_at` of the row is set after the first). If real deliveries are refused with `bearer_invalid`
+      or `bearer_expired`, or alternate between with and without a token (then `bearer_missing` refuses the ones without), the
+      documentation and the behaviour disagree: stop and look before the release.
+- [ ] **Open question 2: the identifier header (#1039).** Check that every real delivery carries `X-Atlassian-Webhook-Identifier` and that
+      the retry of a failed delivery carries the **same** one. A delivery without it is claimed under a hash of its body (log line:
+      `no usable X-Atlassian-Webhook-Identifier`); that line should never appear.
+- [ ] **Rotation.** Set `registered_at` of the row 26 days back, call `GET /api/internal/jira-webhooks`: `registered: 1`, Jira's
+      `GET /rest/api/3/webhook` shows one webhook with a new id, the next delivery is accepted and `bearer_seen_at` is unchanged. With five
+      webhooks already on the connection the rotation fails (`jira_webhook_limit`) and the old webhook keeps working.
 - [ ] **Status into a lane.** A lane with `ticket.statusChanged` to a Jira status: move an issue into it in Jira (person, then an automation
       rule): one run each, `trigger.ticket` has key, title, description as text, status, type, labels, assignee, link.
 - [ ] **Extension and expiry.** Call `GET /api/internal/jira-webhooks` with the cron secret: a young webhook is `unchanged`; set `expires_at`
