@@ -17,12 +17,19 @@ export type JiraIssuePage =
   | {
       ok: true;
       issues: JiraIssue[];
-      /** Entries of the page that were no issue the factory can read (counted, never an error). */
+      /** Entries of the page that were no issue the factory can read, or that have no time of their last change (counted, never an error). */
       skipped: number;
+      /** True when Jira said so (`isLast`): only then is the project read to its end. */
+      last: boolean;
       /** The token of the next page; undefined on the last one. */
       next?: string;
     }
-  | { ok: false; error: JiraReadErrorCode };
+  | {
+      ok: false;
+      error: JiraReadErrorCode;
+      /** Jira answered 400 to a request with a page token: the token is no longer good (it expires), not the project that is wrong. */
+      cursorRejected?: true;
+    };
 
 export type JiraIssueSearch = {
   /** One page of the issues of the project `projectKey`, oldest first; `after` is the `next` of the page before. */
@@ -75,7 +82,13 @@ export function createJiraIssueSearch({
       }
       if (response.status === 400 || response.status === 404) {
         await response.body?.cancel().catch(() => undefined);
-        return { ok: false, error: "jira_project_not_found" };
+        return {
+          ok: false,
+          error: "jira_project_not_found",
+          ...(response.status === 400 && after !== undefined
+            ? { cursorRejected: true as const }
+            : {}),
+        };
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
@@ -89,26 +102,37 @@ export function createJiraIssueSearch({
       }
       if (!isRecord(body) || !Array.isArray(body.issues))
         return { ok: false, error: "jira_unavailable" };
+      // The end of the project is what Jira says it is: a page without `isLast` and without the token of a next page is an answer the
+      // factory does not understand, not the last one (the rows not written would be removed as gone).
+      const last = body.isLast === true;
+      const next =
+        !last &&
+        typeof body.nextPageToken === "string" &&
+        body.nextPageToken !== ""
+          ? body.nextPageToken
+          : undefined;
+      if (!last && next === undefined)
+        return { ok: false, error: "jira_unavailable" };
       const siteUrl = await siteUrlOf(connectionId);
       const issues: JiraIssue[] = [];
       let skipped = 0;
       for (const entry of body.issues as unknown[]) {
         const issue = readJiraIssue(entry, siteUrl);
-        // An issue of another project cannot be in the answer of this query; one the reader does not know is counted.
-        if (issue === undefined || issue.projectKey !== projectKey)
+        // An issue of another project cannot be in the answer of this query; one the reader does not know is counted, and so is one without
+        // a time of its last change (the mirror does not take it, and its row would look gone).
+        if (
+          issue === undefined ||
+          issue.projectKey !== projectKey ||
+          issue.updatedAt === ""
+        )
           skipped += 1;
         else issues.push(issue);
       }
-      const next =
-        body.isLast !== true &&
-        typeof body.nextPageToken === "string" &&
-        body.nextPageToken !== ""
-          ? body.nextPageToken
-          : undefined;
       return {
         ok: true,
         issues,
         skipped,
+        last,
         ...(next === undefined ? {} : { next }),
       };
     },

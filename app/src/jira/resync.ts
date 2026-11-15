@@ -8,8 +8,11 @@
 //    page in the sync state of provider `jira`. A call that ends early (its deadline, its page limit, Jira did not answer) continues with the
 //    next call where it stopped; a sync that has not moved for `STALE_AFTER_MS` starts again from the first page; the nightly resync asks to
 //    `resume` and waits `RESUME_STALE_AFTER_MS` instead.
-//  - The rebuild rule: when the last page is read, the rows that were not written since the sync began are gone from Jira (deleted, or moved
-//    to another project) and are removed. When an entry of a page could not be read, nothing is removed (its row would look gone).
+//  - The rebuild rule: when the last page is read (Jira said `isLast`; a page that says neither that nor where the next one is is an error),
+//    the rows that were not written since the sync began are gone from Jira (deleted, or moved to another project) and are removed. When an
+//    entry of a page could not be read (an issue without the time of its last change counts), or the whole read found no issue while the
+//    mirror has rows, nothing is removed (the rows would look gone; an empty answer is more likely a failure than an emptied project).
+//  - A page token that Jira refuses (a 400; the tokens expire) is dropped once and the read starts again at the first page.
 //  - Every issue goes into the mirror the way a delivery does (`mirror.ts`, newest change wins), so a delivery that arrives meanwhile is never
 //    overwritten by an older read.
 // Throws what the search cannot do (a code, never a body); the position of the last page that was written is kept.
@@ -68,21 +71,21 @@ export type JiraResync = {
   ): Promise<JiraSyncProgress>;
 };
 
-type Cursor = { after?: string; skipped: number };
+type Cursor = { after?: string; skipped: number; read: number };
 
 function readCursor(text: string | null): Cursor | undefined {
   if (text === null) return undefined;
   try {
     const value: unknown = JSON.parse(text);
     if (typeof value !== "object" || value === null) return undefined;
-    const { after, skipped } = value as Record<string, unknown>;
+    const { after, skipped, read } = value as Record<string, unknown>;
+    const count = (n: unknown) =>
+      typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0;
     if (after !== undefined && typeof after !== "string") return undefined;
     return {
       ...(after === undefined ? {} : { after }),
-      skipped:
-        typeof skipped === "number" && Number.isInteger(skipped) && skipped > 0
-          ? skipped
-          : 0,
+      skipped: count(skipped),
+      read: count(read),
     };
   } catch {
     return undefined;
@@ -92,7 +95,7 @@ function readCursor(text: string | null): Cursor | undefined {
 export function createJiraResync(deps: {
   tracker: Pick<
     TrackerRepository,
-    "getSyncState" | "saveSyncState" | "removeNotWrittenSince"
+    "getSyncState" | "saveSyncState" | "removeNotWrittenSince" | "listItems"
   >;
   search: JiraIssueSearch;
   mirror: JiraMirror;
@@ -129,7 +132,8 @@ export function createJiraResync(deps: {
         JIRA_SYNC_PROVIDER,
       );
       const resumed = continuing(state, options.resume === true);
-      let cursor: Cursor = resumed?.cursor ?? { skipped: 0 };
+      let cursor: Cursor = resumed?.cursor ?? { skipped: 0, read: 0 };
+      let restarted = false;
       const startedAt = resumed?.startedAt ?? now().toISOString();
       if (resumed === undefined)
         await tracker.saveSyncState(
@@ -152,7 +156,20 @@ export function createJiraResync(deps: {
           cursor.after,
           options.signal,
         );
-        if (!page.ok) throw new JiraSyncError(page.error);
+        if (!page.ok) {
+          // A token that Jira refuses is stale, not a sign that the project is gone: once, the read begins again at the first page.
+          if (page.cursorRejected === true && !restarted) {
+            restarted = true;
+            cursor = { skipped: 0, read: 0 };
+            await tracker.saveSyncState(
+              repositoryId,
+              { cursor: JSON.stringify(cursor) },
+              JIRA_SYNC_PROVIDER,
+            );
+            continue;
+          }
+          throw new JiraSyncError(page.error);
+        }
         for (const issue of page.issues)
           if (
             (await deps.mirror.apply(target, {
@@ -164,8 +181,9 @@ export function createJiraResync(deps: {
           )
             written += 1;
         const skipped = cursor.skipped + page.skipped;
+        const read = cursor.read + page.issues.length;
         if (page.next !== undefined) {
-          cursor = { after: page.next, skipped };
+          cursor = { after: page.next, skipped, read };
           await tracker.saveSyncState(
             repositoryId,
             { cursor: JSON.stringify(cursor) },
@@ -173,17 +191,27 @@ export function createJiraResync(deps: {
           );
           continue;
         }
-        // The last page: what Jira no longer has is removed, unless an entry could not be read (nothing is removed then).
+        // Only a page that Jira calls the last one ends the read: nothing is removed after any other.
+        if (!page.last) throw new JiraSyncError("jira_unavailable");
+        // The last page: what Jira no longer has is removed, unless an entry could not be read (nothing is removed then), or nothing at all was
+        // read while the mirror has rows (a project is rarely emptied, an answer without issues often is a failure of the search).
         let removed = 0;
-        if (skipped === 0)
+        if (skipped > 0)
+          warn(
+            `[jira] the full read of repository=${repositoryId} could not read ${String(skipped)} issue(s): nothing was removed.`,
+          );
+        else if (
+          read === 0 &&
+          (await tracker.listItems(repositoryId, { limit: 1 })).length > 0
+        )
+          warn(
+            `[jira] the full read of repository=${repositoryId} read no issue but the mirror has rows: nothing was removed.`,
+          );
+        else
           removed = await tracker.removeNotWrittenSince(
             repositoryId,
             startedAt,
             JIRA_SYNC_PROVIDER,
-          );
-        else
-          warn(
-            `[jira] the full read of repository=${repositoryId} could not read ${String(skipped)} issue(s): nothing was removed.`,
           );
         await tracker.saveSyncState(
           repositoryId,

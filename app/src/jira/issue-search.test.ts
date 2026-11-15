@@ -48,7 +48,12 @@ describe("the JQL search of a project's issues", () => {
 
     const page = await search.page("conn-1", "PROJ", "tok-1");
 
-    expect(page).toMatchObject({ ok: true, next: "tok-2", skipped: 0 });
+    expect(page).toMatchObject({
+      ok: true,
+      next: "tok-2",
+      last: false,
+      skipped: 0,
+    });
     expect(page.ok && page.issues[0]).toMatchObject({
       key: "PROJ-1",
       url: "https://acme.atlassian.net/browse/PROJ-1",
@@ -85,6 +90,53 @@ describe("the JQL search of a project's issues", () => {
     });
     const last = await search.page("c", "PROJ");
     expect(last.ok && last.next).toBeUndefined();
+    expect(last).toMatchObject({ ok: true, last: true });
+  });
+
+  // #1040-T04
+  it("is an error, not a last page, when the answer says neither isLast nor where the next page is", async () => {
+    for (const body of [
+      { issues: [issueJson("PROJ-1")] },
+      { issues: [issueJson("PROJ-1")], isLast: false },
+      { issues: [issueJson("PROJ-1")], isLast: false, nextPageToken: "" },
+    ])
+      expect(
+        await searchAnswering(() => reply(200, body)).search.page("c", "PROJ"),
+      ).toEqual({ ok: false, error: "jira_unavailable" });
+    // `isLast` wins over a token that is still there.
+    expect(
+      await searchAnswering(() =>
+        reply(200, { issues: [], isLast: true, nextPageToken: "t" }),
+      ).search.page("c", "PROJ"),
+    ).toMatchObject({ ok: true, last: true });
+  });
+
+  // #1040-T04
+  it("counts an issue without a time of its last change as one it cannot read: it would never be written to the mirror", async () => {
+    const undated = issueJson("PROJ-2");
+    undated.fields.updated = "";
+    const { search } = searchAnswering(() =>
+      reply(200, { isLast: true, issues: [issueJson("PROJ-1"), undated] }),
+    );
+    const page = await search.page("c", "PROJ");
+    expect(page).toMatchObject({ ok: true, skipped: 1 });
+    expect(page.ok && page.issues.map((issue) => issue.key)).toEqual([
+      "PROJ-1",
+    ]);
+  });
+
+  // #1040-T04
+  it("tells a 400 on a page with a token (the token is stale) from a 400 on the first page (the project)", async () => {
+    expect(
+      await searchAnswering(() => reply(400)).search.page("c", "PROJ", "old"),
+    ).toEqual({
+      ok: false,
+      error: "jira_project_not_found",
+      cursorRejected: true,
+    });
+    expect(
+      await searchAnswering(() => reply(400)).search.page("c", "PROJ"),
+    ).toEqual({ ok: false, error: "jira_project_not_found" });
   });
 
   it("never puts a text that is no project key into the JQL, and reads the failures as codes", async () => {

@@ -33,7 +33,10 @@ const TARGET = {
   projectKey: "PROJ",
 };
 
-function setup(pages: JiraIssuePage[]) {
+function setup(
+  pages: JiraIssuePage[],
+  warn: (line: string) => void = () => undefined,
+) {
   let at = Date.parse("2026-11-14T12:00:00.000Z");
   const now = () => new Date(at);
   const tracker = createFakeTrackerRepository(now);
@@ -42,7 +45,7 @@ function setup(pages: JiraIssuePage[]) {
     async page(_connection, _key, after) {
       asked.push(after);
       const index = after === undefined ? 0 : Number(after);
-      return pages[index] ?? { ok: true, issues: [], skipped: 0 };
+      return pages[index] ?? { ok: true, issues: [], skipped: 0, last: true };
     },
   };
   const resync = createJiraResync({
@@ -50,7 +53,7 @@ function setup(pages: JiraIssuePage[]) {
     search,
     mirror: createJiraMirror({ tracker, now }),
     now,
-    warn: () => undefined,
+    warn,
   });
   return {
     tracker,
@@ -60,10 +63,34 @@ function setup(pages: JiraIssuePage[]) {
   };
 }
 
+async function seedRow(
+  tracker: ReturnType<typeof createFakeTrackerRepository>,
+  number: number,
+) {
+  await tracker.upsertItem("repo-1", {
+    provider: "jira",
+    repo: "acme/shop",
+    key: `PROJ-${String(number)}`,
+    number,
+    nodeId: `jira:${String(number)}`,
+    kind: "issue",
+    state: "open",
+    stateReason: null,
+    type: null,
+    title: "Old",
+    bodyExcerpt: "",
+    labels: [],
+    assignees: [],
+    closes: [],
+    updatedAt: "2026-11-01T10:00:00.000Z",
+  });
+}
+
 const page = (numbers: number[], next?: string): JiraIssuePage => ({
   ok: true,
   issues: numbers.map((n) => issue(n)),
   skipped: 0,
+  last: next === undefined,
   ...(next === undefined ? {} : { next }),
 });
 
@@ -191,7 +218,7 @@ describe("the full read of a Jira project", () => {
   // #1040-T04
   it("removes nothing when an entry of a page could not be read", async () => {
     const { tracker, resync } = setup([
-      { ok: true, issues: [issue(1)], skipped: 1 },
+      { ok: true, issues: [issue(1)], skipped: 1, last: true },
     ]);
     await tracker.upsertItem("repo-1", {
       provider: "jira",
@@ -215,5 +242,132 @@ describe("the full read of a Jira project", () => {
 
     expect(progress).toMatchObject({ status: "done", removed: 0, skipped: 1 });
     expect(tracker.rows().map((row) => row.key)).toContain("PROJ-9");
+  });
+
+  // #1040-T04
+  it("removes nothing after a page that is not known to be the last (no next token and no isLast)", async () => {
+    const { tracker, resync } = setup([
+      { ok: true, issues: [issue(1)], skipped: 0, last: false },
+    ]);
+    await seedRow(tracker, 9);
+
+    await expect(resync.run(TARGET)).rejects.toMatchObject({
+      name: "JiraSyncError",
+      providerCode: "jira_unavailable",
+    });
+    expect(tracker.rows().map((row) => row.key)).toContain("PROJ-9");
+    expect(
+      (await tracker.getSyncState("repo-1", "jira"))?.lastFullSyncAt,
+    ).toBeNull();
+  });
+
+  // #1040-T04
+  it("removes nothing when the whole read found no issue but the mirror has rows, and says so", async () => {
+    const lines: string[] = [];
+    const { tracker, resync } = setup(
+      [{ ok: true, issues: [], skipped: 0, last: true }],
+      (line) => lines.push(line),
+    );
+    await seedRow(tracker, 9);
+
+    const progress = await resync.run(TARGET);
+
+    expect(progress).toMatchObject({ status: "done", removed: 0, written: 0 });
+    expect(tracker.rows().map((row) => row.key)).toEqual(["PROJ-9"]);
+    expect(lines.join("\n")).toContain("read no issue");
+  });
+
+  // #1040-T04
+  it("counts the issues of the whole read, also across calls: an empty last page after pages with issues still rebuilds", async () => {
+    const { tracker, resync, tick } = setup([
+      page([1], "1"),
+      { ok: true, issues: [], skipped: 0, last: true },
+    ]);
+    await seedRow(tracker, 9);
+    tick(60_000);
+    await resync.run(TARGET, { maxPages: 1 });
+
+    const progress = await resync.run(TARGET);
+
+    expect(progress).toMatchObject({ status: "done", removed: 1 });
+    expect(tracker.rows().map((row) => row.key)).toEqual(["PROJ-1"]);
+  });
+
+  // #1040-T04
+  it("removes nothing when the mirror is empty and the project too (nothing to say)", async () => {
+    const lines: string[] = [];
+    const { resync } = setup(
+      [{ ok: true, issues: [], skipped: 0, last: true }],
+      (line) => lines.push(line),
+    );
+    expect(await resync.run(TARGET)).toMatchObject({
+      status: "done",
+      removed: 0,
+    });
+    expect(lines).toEqual([]);
+  });
+
+  // #1040-T04
+  it("starts again from the first page, once, when Jira refuses the saved token", async () => {
+    let calls = 0;
+    const answers = (after?: string): JiraIssuePage => {
+      calls += 1;
+      if (after === "stale")
+        return {
+          ok: false,
+          error: "jira_project_not_found",
+          cursorRejected: true,
+        };
+      return page([1, 2]);
+    };
+    const asked: (string | undefined)[] = [];
+    const now = () => new Date("2026-11-14T12:00:00.000Z");
+    const tracker = createFakeTrackerRepository(now);
+    await tracker.saveSyncState(
+      "repo-1",
+      {
+        cursor: JSON.stringify({ after: "stale", skipped: 0 }),
+        startedAt: now().toISOString(),
+      },
+      "jira",
+    );
+    const resync = createJiraResync({
+      tracker,
+      search: {
+        async page(_c, _k, after) {
+          asked.push(after);
+          return answers(after);
+        },
+      },
+      mirror: createJiraMirror({ tracker, now }),
+      now,
+      warn: () => undefined,
+    });
+
+    const progress = await resync.run(TARGET);
+
+    expect(progress).toMatchObject({ status: "done", written: 2 });
+    expect(asked).toEqual(["stale", undefined]);
+    expect(calls).toBe(2);
+
+    // A refusal without a token (or a second one) is the project that is gone: the code, as before.
+    const gone = createJiraResync({
+      tracker: createFakeTrackerRepository(now),
+      search: {
+        async page(_c, _k, after) {
+          return {
+            ok: false,
+            error: "jira_project_not_found",
+            ...(after === undefined ? {} : { cursorRejected: true as const }),
+          };
+        },
+      },
+      mirror: createJiraMirror({ tracker, now }),
+      now,
+      warn: () => undefined,
+    });
+    await expect(gone.run(TARGET)).rejects.toMatchObject({
+      providerCode: "jira_project_not_found",
+    });
   });
 });
