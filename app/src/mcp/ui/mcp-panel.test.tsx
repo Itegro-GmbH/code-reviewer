@@ -324,6 +324,104 @@ describe("changing a server", () => {
   });
 });
 
+describe("changing the address of a server that has stored keys", () => {
+  // #1050-T02
+  it("asks for the values again and sends nothing when the address changed and a value is left empty", async () => {
+    const user = userEvent.setup();
+    const { api, sent } = fakeApi();
+    show(api, true);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Edit Linear" }),
+    );
+    const url = screen.getByLabelText("Address");
+    await user.clear(url);
+    await user.type(url, "https://mcp.mine.example/mcp");
+    const values = screen.getAllByLabelText(
+      "Header value",
+    ) as HTMLInputElement[];
+    expect(values[0]?.placeholder).toMatch(/enter this value again/);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /enter the header values again/,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  // #1050-T02
+  it("sends every value as a value, and no keep, when the address changed and the values are entered again", async () => {
+    const user = userEvent.setup();
+    const { api, sent } = fakeApi();
+    show(api, true);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Edit Linear" }),
+    );
+    const url = screen.getByLabelText("Address");
+    await user.clear(url);
+    await user.type(url, "https://mcp.mine.example/mcp");
+    const values = screen.getAllByLabelText(
+      "Header value",
+    ) as HTMLInputElement[];
+    await user.type(values[0] as HTMLInputElement, "one");
+    await user.type(values[1] as HTMLInputElement, "two");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await screen.findByRole("heading", { name: "Linear" });
+    expect(sent[0]).toMatchObject({
+      url: "https://mcp.mine.example/mcp",
+      revision: 1,
+      auth: {
+        headers: [
+          { name: "Authorization", value: "one" },
+          { name: "X-Team", value: "two" },
+        ],
+      },
+    });
+  });
+
+  // #1050-T02
+  it("asks again when the transport changes, and says in the form that keys belong in headers", async () => {
+    const user = userEvent.setup();
+    const { api, sent } = fakeApi();
+    show(api, true);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Edit Linear" }),
+    );
+    await user.selectOptions(screen.getByLabelText("Transport"), "sse");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(sent).toEqual([]);
+    expect(
+      screen.getByText(/belong here, in a header, and not in the address/),
+    ).toBeTruthy();
+  });
+});
+
+describe("the tool list of a server", () => {
+  // #1050-T01
+  it("shows a tool that a server lists twice both times", async () => {
+    const twice: McpServerView = {
+      ...LINEAR,
+      tools: {
+        ...TOOLS,
+        tools: [
+          { name: "search", description: "First." },
+          { name: "search", description: "Second." },
+        ],
+      },
+    };
+    show(fakeApi([twice]).api, true);
+
+    expect(await screen.findByText("First.")).toBeTruthy();
+    expect(screen.getByText("Second.")).toBeTruthy();
+  });
+});
+
 describe("testing and removing a server", () => {
   // #1050-T01
   it("tests the connection and shows what the server answered, or the sentence of the failure", async () => {

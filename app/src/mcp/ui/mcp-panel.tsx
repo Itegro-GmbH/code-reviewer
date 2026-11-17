@@ -91,8 +91,12 @@ function ToolList({ server }: { server: McpServerView }) {
       </summary>
       {tools.tools.length === 0 ? null : (
         <ul className="m-0 mt-2 flex list-none flex-col gap-2 p-0">
-          {tools.tools.map((tool) => (
-            <li key={tool.name} className="flex flex-col gap-0.5">
+          {tools.tools.map((tool, index) => (
+            // A server may list one name twice: the position is part of the key.
+            <li
+              key={`${String(index)}:${tool.name}`}
+              className="flex flex-col gap-0.5"
+            >
               <span className="font-mono text-sm break-words">{tool.name}</span>
               {tool.description === "" ? null : (
                 <span className="text-sm break-words text-muted-foreground">

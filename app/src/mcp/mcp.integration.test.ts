@@ -163,6 +163,7 @@ describe("the MCP registry", () => {
         kind: "header",
         headers: [{ name: "Authorization", value: "Bearer wrong" }],
       },
+      revision: 2,
     });
     expect(await service.test(id)).toMatchObject({
       ok: true,
@@ -173,8 +174,65 @@ describe("the MCP registry", () => {
       await service.update(id, {
         ...form(fake.url, { name: "Renamed" }),
         auth: { kind: "header", headers: [{ name: "X-Other", keep: true }] },
+        revision: 3,
       }),
     ).toMatchObject({ ok: false, error: "mcp_header_unknown" });
+  });
+
+  // #1050-T02
+  it("never sends a stored header to another address: a change of the address keeps no value, and nothing is saved", async () => {
+    const { idA, fake, serviceOf } = await setup();
+    const foreign = await startMcpFake();
+    fakes.push(foreign);
+    const service = serviceOf(idA);
+    const created = await service.create({ id: "u-1" }, form(fake.url));
+    if (!created.ok) throw new Error("seeding failed");
+    const { id, revision } = created.value;
+    const keepForm = (url: string, over: Record<string, unknown> = {}) => ({
+      ...form(url),
+      auth: {
+        kind: "header",
+        headers: [{ name: "Authorization", keep: true }],
+      },
+      revision,
+      ...over,
+    });
+
+    // An Admin points the server at a host of their own, leaves the value empty and presses Test: refused, nothing changed.
+    expect(await service.update(id, keepForm(foreign.url))).toMatchObject({
+      ok: false,
+      error: "mcp_header_value_required",
+    });
+    expect(
+      await service.update(id, keepForm(fake.url, { transport: "sse" })),
+    ).toMatchObject({ ok: false, error: "mcp_header_value_required" });
+    expect(await service.test(id)).toMatchObject({
+      ok: true,
+      value: { status: "ok", revision },
+    });
+    expect(foreign.requests()).toEqual([]);
+
+    // The values entered again are fine for the new address.
+    expect(
+      await service.update(id, { ...form(foreign.url), revision }),
+    ).toMatchObject({ ok: true, value: { revision: revision + 1 } });
+  });
+
+  // #1050-T02
+  it("refuses a change without the revision the form was made from", async () => {
+    const { idA, fake, serviceOf } = await setup();
+    const service = serviceOf(idA);
+    const created = await service.create({ id: "u-1" }, form(fake.url));
+    if (!created.ok) throw new Error("seeding failed");
+
+    for (const revision of [undefined, "1", 0, 1.5, null])
+      expect(
+        await service.update(created.value.id, {
+          ...form(fake.url, { name: "Renamed" }),
+          ...(revision === undefined ? {} : { revision }),
+        }),
+      ).toMatchObject({ ok: false, error: "mcp_revision_required" });
+    expect(await service.list()).toMatchObject([{ name: "Fake issues" }]);
   });
 
   // #1050-T01

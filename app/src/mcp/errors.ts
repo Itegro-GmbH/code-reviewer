@@ -35,10 +35,12 @@ export const MCP_INPUT_CODES = [
   "mcp_header_name_invalid",
   /** A header name the client sets itself (`Host`, `Content-Type`, `Accept`, `Mcp-Session-Id`, ...). */
   "mcp_header_name_forbidden",
-  /** A header value is empty, too long, or holds a line break or another control character. */
+  /** A header value is empty, too long, or holds a line break, another control character or a character above U+00FF. */
   "mcp_header_value_invalid",
   /** Editing: a header kept without a new value that the server does not have. */
   "mcp_header_unknown",
+  /** Editing: the address or the transport changed, so a stored header value is not kept for it: every value has to be entered again. */
+  "mcp_header_value_required",
 ] as const;
 export type McpInputCode = (typeof MCP_INPUT_CODES)[number];
 
@@ -52,6 +54,8 @@ export const MCP_ERROR_CODES = [
   "mcp_server_in_use",
   /** The workspace holds the most servers it may. */
   "mcp_limit_reached",
+  /** A change was sent without the revision the form was made from. */
+  "mcp_revision_required",
   /** The server was changed while the request ran: reload and try again. */
   "mcp_server_changed",
   "rate_limited",
@@ -76,10 +80,12 @@ export const MCP_ERROR_STATUS: Record<McpErrorCode, number> = {
   mcp_header_name_forbidden: 422,
   mcp_header_value_invalid: 422,
   mcp_header_unknown: 422,
+  mcp_header_value_required: 422,
   forbidden: 403,
   mcp_server_not_found: 404,
   mcp_server_in_use: 409,
   mcp_limit_reached: 409,
+  mcp_revision_required: 422,
   mcp_server_changed: 409,
   rate_limited: 429,
   unavailable: 503,
@@ -105,6 +111,7 @@ export const MCP_INPUT_FIELD: Record<
   mcp_header_name_forbidden: "headers",
   mcp_header_value_invalid: "headers",
   mcp_header_unknown: "headers",
+  mcp_header_value_required: "headers",
 };
 
 /** How a connection test ended when it did not succeed. Stored on the row; never holds an address, a header or a body. */

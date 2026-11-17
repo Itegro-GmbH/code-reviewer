@@ -19,7 +19,9 @@ import {
   SecretBoxError,
 } from "../crypto/secret-box.ts";
 import type {
+  CurrentMcpServer,
   LaneUsingMcpServer,
+  McpServerChange,
   McpServersRepository,
   McpToolsSnapshot,
   McpTestStatus,
@@ -30,11 +32,7 @@ import type { RateLimitsRepository } from "../db/repositories/rate-limits-reposi
 import { secondsLeft } from "../auth/sign-in-limit.ts";
 import { testMcpServer, type McpTestOptions } from "./client.ts";
 import type { McpErrorCode } from "./errors.ts";
-import {
-  parseMcpServerInput,
-  type McpHeaderInput,
-  type McpServerInput,
-} from "./input.ts";
+import { parseMcpServerInput, type McpServerInput } from "./input.ts";
 
 /** How many servers a workspace may hold. */
 export const MCP_SERVERS_MAX = 50;
@@ -98,7 +96,7 @@ export type McpService = {
     actor: { id: string },
     raw: unknown,
   ): Promise<McpServiceResult<McpServerView>>;
-  /** `raw` is the form; `raw.revision`, when a number, is the revision the form was made from. */
+  /** `raw` is the form; `raw.revision` is the revision the form was made from and is required (`mcp_revision_required`). */
   update(id: string, raw: unknown): Promise<McpServiceResult<McpServerView>>;
   remove(id: string): Promise<McpServiceResult<{ removed: true }>>;
   /** Connects to the server as an MCP client, stores what it found and returns the server with the result. */
@@ -184,6 +182,83 @@ const fail = (
   ...more,
 });
 
+const fieldsOf = (input: McpServerInput) => ({
+  name: input.name,
+  transport: input.transport,
+  url: input.url,
+  authKind: input.auth.kind,
+  headerNames:
+    input.auth.kind === "header"
+      ? input.auth.headers.map((header) => header.name)
+      : [],
+});
+
+/**
+ * The change an edit makes to the row it is applied to (the row as it is under the lock, so a kept value is read in the same transaction that
+ * writes), or the code it is refused with. A header value is sealed for the address it was entered for: when the address or the transport
+ * changes, `keep` is refused and every value has to be entered again, so an edit cannot send a stored key to another place.
+ */
+export function planMcpUpdate(
+  appSecret: string,
+  serverId: string,
+  current: CurrentMcpServer,
+  input: McpServerInput,
+  log: (line: string) => void,
+): McpServerChange | { refused: McpErrorCode } {
+  const { auth } = input;
+  if (auth.kind === "none") return { ...fieldsOf(input), sealed: null };
+  const keeps = auth.headers.some((header) => "keep" in header);
+  if (!keeps)
+    return {
+      ...fieldsOf(input),
+      sealed: sealHeaders(
+        appSecret,
+        serverId,
+        auth.headers as { name: string; value: string }[],
+      ),
+    };
+  if (
+    current.server.url !== input.url ||
+    current.server.transport !== input.transport
+  )
+    return { refused: "mcp_header_value_required" };
+  const opened =
+    current.sealed === null
+      ? null
+      : openHeaders(appSecret, serverId, current.sealed);
+  if (opened === null) {
+    log(`[mcp] MCP_HEADERS_UNREADABLE: server ${serverId} (kept headers).`);
+    return { refused: "mcp_header_unknown" };
+  }
+  const byName = new Map(
+    opened.map((header) => [header.name.toLowerCase(), header.value]),
+  );
+  const resolved: { name: string; value: string }[] = [];
+  for (const entry of auth.headers) {
+    if ("value" in entry) {
+      resolved.push(entry);
+      continue;
+    }
+    const value = byName.get(entry.name.toLowerCase());
+    if (value === undefined) return { refused: "mcp_header_unknown" };
+    resolved.push({ name: entry.name, value });
+  }
+  // Nothing to seal again when every header is kept, in the same order.
+  const unchanged =
+    current.server.authKind === "header" &&
+    auth.headers.every(
+      (header, index) =>
+        "keep" in header && header.name === current.server.headerNames[index],
+    ) &&
+    auth.headers.length === current.server.headerNames.length;
+  return unchanged
+    ? fieldsOf(input)
+    : {
+        ...fieldsOf(input),
+        sealed: sealHeaders(appSecret, serverId, resolved),
+      };
+}
+
 export function createMcpService(options: McpServiceOptions): McpService {
   const {
     workspaceId,
@@ -195,50 +270,6 @@ export function createMcpService(options: McpServiceOptions): McpService {
     newId = () => crypto.randomUUID(),
     log = (line) => console.error(line),
   } = options;
-
-  /** The headers the input names, with a kept value read from the stored ones; null when a kept header is not stored. */
-  async function resolveHeaders(
-    serverId: string,
-    entries: McpHeaderInput[],
-  ): Promise<{ name: string; value: string }[] | null> {
-    if (!entries.some((entry) => "keep" in entry)) {
-      return entries as { name: string; value: string }[];
-    }
-    const stored = await repository.readHeaders(serverId);
-    const opened =
-      stored?.sealed == null
-        ? null
-        : openHeaders(appSecret, serverId, stored.sealed);
-    if (opened === null) {
-      log(`[mcp] MCP_HEADERS_UNREADABLE: server ${serverId} (kept headers).`);
-      return null;
-    }
-    const byName = new Map(
-      opened.map((header) => [header.name.toLowerCase(), header.value]),
-    );
-    const resolved: { name: string; value: string }[] = [];
-    for (const entry of entries) {
-      if ("value" in entry) {
-        resolved.push(entry);
-        continue;
-      }
-      const value = byName.get(entry.name.toLowerCase());
-      if (value === undefined) return null;
-      resolved.push({ name: entry.name, value });
-    }
-    return resolved;
-  }
-
-  const fieldsOf = (input: McpServerInput) => ({
-    name: input.name,
-    transport: input.transport,
-    url: input.url,
-    authKind: input.auth.kind,
-    headerNames:
-      input.auth.kind === "header"
-        ? input.auth.headers.map((header) => header.name)
-        : [],
-  });
 
   async function hitTestLimit(): Promise<McpServiceFailure | null> {
     const instance = await rateLimits.hit("mcp-test:all", MCP_TEST_WINDOW_MS);
@@ -307,34 +338,19 @@ export function createMcpService(options: McpServiceOptions): McpService {
         allowTestEndpoints,
       });
       if (!parsed.ok) return fail(parsed.code);
-      const current = await repository.get(id);
-      if (current === undefined) return fail("mcp_server_not_found");
+      // The form says which revision it was made from; without it a change could silently replace one the person never saw.
       const asked =
         typeof raw === "object" && raw !== null && "revision" in raw
           ? (raw as { revision: unknown }).revision
           : undefined;
-      const revision = typeof asked === "number" ? asked : current.revision;
-      const { auth } = parsed.value;
-      let sealed: SealedHeaders | null | undefined;
-      if (auth.kind === "none") sealed = null;
-      else {
-        const headers = await resolveHeaders(id, auth.headers);
-        if (headers === null) return fail("mcp_header_unknown");
-        // Nothing to seal again when every header is kept, in the same order.
-        const unchanged =
-          current.authKind === "header" &&
-          auth.headers.every(
-            (header, index) =>
-              "keep" in header && header.name === current.headerNames[index],
-          ) &&
-          auth.headers.length === current.headerNames.length;
-        sealed = unchanged ? undefined : sealHeaders(appSecret, id, headers);
-      }
-      const changed = await repository.update(id, revision, {
-        ...fieldsOf(parsed.value),
-        ...(sealed === undefined ? {} : { sealed }),
-      });
-      if (!changed.ok)
+      if (typeof asked !== "number" || !Number.isInteger(asked) || asked < 1)
+        return fail("mcp_revision_required");
+      const changed = await repository.update(id, asked, (current) =>
+        planMcpUpdate(appSecret, id, current, parsed.value, log),
+      );
+      if (!changed.ok) {
+        if (changed.reason === "refused")
+          return fail(changed.code as McpErrorCode);
         return fail(
           changed.reason === "name_taken"
             ? "mcp_name_taken"
@@ -342,6 +358,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
               ? "mcp_server_changed"
               : "mcp_server_not_found",
         );
+      }
       return { ok: true, value: toView(changed.server) };
     },
 

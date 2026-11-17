@@ -45,6 +45,8 @@ export const PAGE_COPY = {
   address: "Address",
   authentication: "Authentication",
   headers: "Headers",
+  headersHint:
+    "Keys and tokens belong here, in a header, and not in the address or its path: a header value is stored sealed and never shown again.",
   noHeaders: "None",
   lastTest: "Last test",
   neverTested: "Not tested yet. Test the connection to see its tools.",
@@ -62,11 +64,14 @@ export const PAGE_COPY = {
   nameHint: "Letters, digits, spaces, dots, dashes and underscores.",
   transportLabel: "Transport",
   urlLabel: "Address",
-  urlHint: "An https address without a key in it: put keys in a header below.",
+  urlHint:
+    "An https address without a key in it, not even in its path: keys belong in a header below, where they are stored sealed.",
   authLabel: "Authentication",
   headerNameLabel: "Header name",
   headerValueLabel: "Header value",
   headerKept: "Stored. Leave empty to keep it.",
+  headerReenter:
+    "The address or the transport changed: enter this value again.",
   addHeader: "Add header",
   removeHeader: "Remove header",
   oauthLater: "OAuth follows in a later version.",
@@ -105,14 +110,18 @@ const failureCopy = (): Record<McpErrorCode, string> => ({
   mcp_header_name_forbidden:
     "This header is set by the connection itself (for example Host, Content-Type or Accept). Choose another name.",
   mcp_header_value_invalid:
-    "A header value is empty, has spaces at its ends, a line break, or is longer than 4096 characters.",
+    "A header value is empty, has spaces at its ends, a line break or another control character, a character outside Latin-1 (such as an emoji or a typographic quote), or is longer than 4096 characters.",
   mcp_header_unknown:
     "A header kept without a value is not stored any more. Enter its value again.",
+  mcp_header_value_required:
+    "The address or the transport changed. A stored key is only sent to the address it was entered for, so enter the header values again.",
   forbidden: "Only an Owner or an Admin can change MCP servers.",
   mcp_server_not_found: "This server does not exist any more. Reload the page.",
   mcp_server_in_use:
     "A lane still uses this server. Take it out of the lane first.",
   mcp_limit_reached: "The workspace holds as many MCP servers as it may.",
+  mcp_revision_required:
+    "The form is out of date. Reload the page and try again.",
   mcp_server_changed:
     "The server was changed by someone else while you worked. Reload the page and try again.",
   rate_limited: "Too many connection tests. Wait a few minutes and try again.",

@@ -3,7 +3,8 @@
 "use client";
 // The dialog that adds or changes an MCP server (#1050): name, transport, address and authentication (none, or one or more headers).
 // The header values are write-only: a stored value is never loaded into the form, the field shows that one is stored, and an empty field
-// keeps it. A refusal is a fixed sentence for its code, shown at the field it belongs to (`MCP_INPUT_FIELD`).
+// keeps it, as long as the address and the transport stay as they were: a stored value is only sent to the address it was entered for, so
+// when either changes the fields ask for the values again (the server refuses a keep then, `mcp_header_value_required`). A refusal is a fixed sentence for its code, shown at the field it belongs to (`MCP_INPUT_FIELD`).
 import { useId, useState, type FormEvent } from "react";
 import { Button } from "../../components/button.tsx";
 import { NativeSelect } from "../../components/native-select.tsx";
@@ -93,6 +94,14 @@ export function ServerDialog({
   const [failure, setFailure] = useState<Failure | null>(null);
 
   const editing = server !== null;
+  // The address as the server stores it is trimmed; a text that differs only in case or a trailing slash counts as changed, to the safe side.
+  const reachChanged =
+    server !== null &&
+    (url.trim() !== server.url || transport !== server.transport);
+  /** A stored value may be left empty only while the place it is sent to is the one it was entered for. */
+  const isStored = (row: Row) =>
+    row.storedAs !== null && row.storedAs === row.name;
+  const keepable = (row: Row) => isStored(row) && !reachChanged;
   const errorAt = (field: string) =>
     failure?.field === field ? failure.text : undefined;
 
@@ -105,6 +114,19 @@ export function ServerDialog({
   async function submit(event: FormEvent) {
     event.preventDefault();
     setFailure(null);
+    if (
+      auth === "header" &&
+      reachChanged &&
+      rows.some((row) => isStored(row) && row.value === "")
+    ) {
+      setFailure({
+        text: describeMcpFailure(product, {
+          code: "mcp_header_value_required",
+        }),
+        field: "headers",
+      });
+      return;
+    }
     const form: McpServerForm = {
       name,
       transport,
@@ -115,9 +137,7 @@ export function ServerDialog({
           : {
               kind: "header",
               headers: rows.map((row) =>
-                row.value === "" &&
-                row.storedAs !== null &&
-                row.storedAs === row.name
+                row.value === "" && keepable(row)
                   ? { name: row.name, keep: true as const }
                   : { name: row.name, value: row.value },
               ),
@@ -283,9 +303,11 @@ export function ServerDialog({
                       spellCheck={false}
                       value={row.value}
                       placeholder={
-                        row.storedAs !== null && row.storedAs === row.name
+                        keepable(row)
                           ? PAGE_COPY.headerKept
-                          : undefined
+                          : isStored(row)
+                            ? PAGE_COPY.headerReenter
+                            : undefined
                       }
                       onChange={(event) =>
                         update(row.key, { value: event.target.value })
@@ -324,6 +346,9 @@ export function ServerDialog({
                   {PAGE_COPY.addHeader}
                 </Button>
               </div>
+              <p className="text-sm text-muted-foreground">
+                {PAGE_COPY.headersHint}
+              </p>
               {errorAt("headers") === undefined ? null : (
                 <p role="alert" className="text-sm text-destructive">
                   {errorAt("headers")}

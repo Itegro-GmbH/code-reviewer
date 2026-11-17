@@ -84,6 +84,23 @@ export type McpServerChange = McpServerFields & {
   sealed?: SealedHeaders | null;
 };
 
+/** The row an update starts from, read under the row lock: the server and its sealed headers. */
+export type CurrentMcpServer = {
+  server: StoredMcpServer;
+  sealed: SealedHeaders | null;
+};
+
+/**
+ * Makes the change from the row as it is under the lock (so a kept header value is read in the same transaction that writes), or refuses it:
+ * `refused` is a code of `src/mcp/errors.ts` and is handed back as `{ reason: "refused", code }`.
+ */
+export type McpChangeBuilder = (
+  current: CurrentMcpServer,
+) => McpServerChange | { refused: string };
+
+/** The key under which a lane's document names MCP servers (#1052 writes it; `mcpReferencesIn` reads every string below it). */
+export const MCP_LANE_DOCUMENT_KEY = "mcp";
+
 export type LaneUsingMcpServer = {
   /** The id of the lane. */
   id: string;
@@ -100,7 +117,8 @@ export type CreateMcpServerResult =
 
 export type UpdateMcpServerResult =
   | { ok: true; server: StoredMcpServer }
-  | { ok: false; reason: "not_found" | "name_taken" | "changed" };
+  | { ok: false; reason: "not_found" | "name_taken" | "changed" }
+  | { ok: false; reason: "refused"; code: string };
 
 export type RecordMcpTest =
   { ok: true; snapshot: McpToolsSnapshot } | { ok: false; code: string };
@@ -122,11 +140,11 @@ export type McpServersRepository = {
   >;
   /** `maximum` is how many servers the workspace may hold, counted with the new one. */
   create(input: NewMcpServer, maximum: number): Promise<CreateMcpServerResult>;
-  /** Changes the configuration when the server is still at `expectedRevision`. */
+  /** Changes the configuration when the server is still at `expectedRevision`; a builder is called with the locked row (see `McpChangeBuilder`). */
   update(
     id: string,
     expectedRevision: number,
-    change: McpServerChange,
+    change: McpServerChange | McpChangeBuilder,
   ): Promise<UpdateMcpServerResult>;
   /** Stores a test result when the server is still at `revision`; false when it was changed (or removed) in the meantime. */
   recordTest(
@@ -237,7 +255,10 @@ export function mcpReferencesIn(documentText: string): Set<string> {
     }
     if (typeof value !== "object" || value === null) continue;
     for (const [key, child] of Object.entries(value))
-      pending.push({ value: child, inside: inside || key === "mcp" });
+      pending.push({
+        value: child,
+        inside: inside || key === MCP_LANE_DOCUMENT_KEY,
+      });
   }
   return found;
 }
@@ -268,7 +289,7 @@ async function lanesOf(
     .where("workflow_versions.workspace_id", "=", workspaceId)
     .where("workflows.archived_at", "is", null)
     // A prefilter on the text; the reading of the document below decides.
-    .where("workflow_versions.document", "like", '%"mcp"%')
+    .where("workflow_versions.document", "like", `%"${MCP_LANE_DOCUMENT_KEY}"%`)
     .orderBy("workflows.name")
     .orderBy("workflows.id")
     .execute();
@@ -376,7 +397,7 @@ export function createMcpServersRepository(
       }
     },
 
-    async update(id, expectedRevision, change) {
+    async update(id, expectedRevision, requested) {
       const at = formatTimestamp(now());
       try {
         return await db.transaction().execute(async (trx) => {
@@ -385,12 +406,27 @@ export function createMcpServersRepository(
             .selectAll()
             .where("workspace_id", "=", workspaceId)
             .where("id", "=", id)
-            .forUpdate()
+            // Not `for update`: a lane that saves a document naming this server (#1052) holds `for key share` on the row, which this lock
+            // does not wait for, and the key of the row never changes here.
+            .forNoKeyUpdate()
             .executeTakeFirst();
           if (current === undefined)
             return { ok: false as const, reason: "not_found" as const };
           if (current.revision !== expectedRevision)
             return { ok: false as const, reason: "changed" as const };
+          const change =
+            typeof requested === "function"
+              ? requested({
+                  server: toStored(current),
+                  sealed: sealedOf(current),
+                })
+              : requested;
+          if ("refused" in change)
+            return {
+              ok: false as const,
+              reason: "refused" as const,
+              code: change.refused,
+            };
           const headerNames =
             change.authKind === "header"
               ? JSON.stringify(change.headerNames)

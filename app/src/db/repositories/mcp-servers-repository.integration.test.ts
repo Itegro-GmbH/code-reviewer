@@ -361,6 +361,42 @@ describe("the MCP servers repository", () => {
     ]);
   });
 
+  it("hands the row under the lock to a change that is built from it, and returns a refusal of the builder without writing", async () => {
+    const { a } = await setup();
+    await a.create(server("s-1"), 50);
+    const seen: { revision: number; url: string }[] = [];
+
+    const built = await a.update("s-1", 1, ({ server: current }) => {
+      seen.push({ revision: current.revision, url: current.url });
+      return {
+        name: "Built",
+        transport: "streamable-http",
+        url: current.url,
+        authKind: "none",
+        headerNames: [],
+        sealed: null,
+      };
+    });
+    const refused = await a.update("s-1", 2, () => ({ refused: "no_way" }));
+    // The revision is compared before the builder is asked.
+    const stale = await a.update("s-1", 1, () => {
+      throw new Error("not asked");
+    });
+
+    expect(seen).toEqual([{ revision: 1, url: "https://mcp.example.com/s-1" }]);
+    expect(built).toMatchObject({
+      ok: true,
+      server: { name: "Built", revision: 2, authKind: "none" },
+    });
+    expect(refused).toEqual({
+      ok: false,
+      reason: "refused",
+      code: "no_way",
+    });
+    expect(stale).toEqual({ ok: false, reason: "changed" });
+    expect(await a.get("s-1")).toMatchObject({ revision: 2, name: "Built" });
+  });
+
   it("reads the `mcp` references of a document: every string under the key, at any depth, and nothing else", () => {
     expect(
       [
