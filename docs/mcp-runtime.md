@@ -80,7 +80,7 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
 
 ## Limits of the route
 
-- **Per claim: 2000 calls** (`MCP_MAX_CALLS_PER_CLAIM`). `jobs.mcp_calls` is counted in one SQL statement on the job row, next to the lease token it belongs to, so it holds across all function instances; a new claim starts at zero. Every POST and DELETE that passes the credential, the method and the server-id checks counts, whether the server then exists or not.
+- **Per claim: 2000 calls** (`MCP_MAX_CALLS_PER_CLAIM`). `jobs.mcp_calls` is counted in one SQL statement on the job row, next to the lease token it belongs to, so it holds across all function instances; a new claim starts at zero. Every POST that passes the credential, the method and the server-id checks counts; whether the server then exists or not. A DELETE (ending a session) does not count, so the door can end its sessions when the cap is used up; it is still held to the places per job and to the running claim (`409` after the claim ended).
 - **In flight per job: 4** (`MCP_MAX_CONCURRENT_CALLS_PER_JOB`), **best effort per instance**: the app runs as many function instances, each counting for itself in memory (nothing is stored), so the cap bounds what one instance does for one job; the count per claim is the bound that holds everywhere. An event stream answer counts until its stream has ended or the consumer let go. A call refused for this reason was not counted and not made.
 - The deadline (55 s), the request cap (256 KiB) and the answer cap (4 MiB) are per call (see the threat model).
 - A refusal before the proxy leaves one log line with the job, the server id where there is one, and the code (`[worker-api] mcp job=… refused: <code>`, `[mcp-proxy] job=… server=… refused: <code>`); never a value.
@@ -153,19 +153,26 @@ container definition does not change but for the proxy exemption).
 - A path other than `/mcp/<server id of the step>` is `404 mcp_server_unavailable`, with no request to the app. `GET` is `405` (as the app answers).
 - It forwards the JSON-RPC message (at most 256 KiB), `Mcp-Session-Id` and `MCP-Protocol-Version` (each a plain token, else `400`), and nothing else
   (the agent's `Authorization`, cookies and any other header are dropped); it relays back the status, the content type, `Mcp-Session-Id` and the body
-  (an event stream as it arrives; when the agent lets go, the request to the app ends with it).
+  (an event stream as it arrives; when the agent lets go, the request to the app ends with it). No `Retry-After` goes back to the agent: the door has
+  retried once itself.
 - **Never an automatic retry of a `503`** (the door's own `503 mcp_proxy_unreachable` for a connection that failed is not repeated either). The only
   retry is a `429 mcp_too_many_concurrent_calls` with `Retry-After` (the call was not made): once, after the wait (at most 5 s). `429 mcp_call_limit_reached`
   and every other status pass as they are.
 - **Sessions end with the step.** The door remembers every `Mcp-Session-Id` the app handed out; when the step ends (success, failure, cancel: Control
   stops it after the agent's container is gone, and the end of its stdin does the same if Control dies) it sends a `DELETE` for each one the agent did not
-  end itself (5 s each, 8 s all, no retry), says how many it ended, drops the credential and exits. A session it could not end is a note of the run.
+  end itself, at most 3 at a time (the app allows 4 calls of a job at once; a `429 mcp_too_many_concurrent_calls` is asked once more, like any call;
+  5 s each, 8 s all), says how many it ended, drops the credential and exits. Only a `2xx`, `404` or `405` ends a session: any other answer (a `409`
+  after a cancel, a `5xx`, a broken connection) leaves it open, and so is a session beyond the 64 the door tracks. All of these are `sessionsLeft` of
+  the final status and a note of the run; the server's own timeout ends them. The agent's own `DELETE` stops the tracking only on the same statuses.
+- **Sockets are bounded.** An idle or slow connection is closed after 30 s, at most 32 connections are served at once (one more is `429
+mcp_too_many_concurrent_calls` and closed), a body that is not a plain length is `400`, and an answer of the app that breaks off is a `503`, never
+  an empty `200`.
 
 **The sandbox's network rule is not changed.** The agent reaches the door like it reaches the model door; the door's address is added to the agent's
 `NO_PROXY` only for a turn that has the door, so the network door never sees it. A turn without MCP servers is exactly what it was (the same container
 definition, environment and configuration; tests hold it).
 
-**Harness configuration** (`mcp_config.py`; a key is the server's name as a plain token `[A-Za-z0-9_-]`, unique, never `finish`):
+**Harness configuration** (`mcp_config.py`; a key is the server's name as a plain token `[A-Za-z0-9_-]`, unique, never `finish` and never a name that could build the name of a built-in tool or permission, such as `finish_submit` or `doom`, which get a number):
 
 | Harness     | Where                                                  | Entry                                                                  | Tool names           |
 | ----------- | ------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------- |
@@ -178,5 +185,5 @@ OpenCode's default-deny permission gets `<key>_*: allow` for the servers of the 
 that cannot be started, a job that holds no access and a runner without a door are notes too ("… could not be reached …", "… holds no access", "… not
 available on this runner yet"): none of them fails the turn.
 
-**Not here.** The Incus backend (instance A holds the door, a port through the inner wall, `no_proxy`) is #1068: its placement has no MCP door yet, so a
+**Not here.** The door's egress is the shared table (DNS and port 443 of public addresses), not the app's address alone: the app's address is a name behind a CDN, which an `nft` table cannot pin; narrowing it (a resolved set, or the host's proxy for the app) is a follow-up. The Incus backend (instance A holds the door, a port through the inner wall, `no_proxy`) is #1068: its placement has no MCP door yet, so a
 turn there runs without MCP tools and says so (`Placement.mcp_supported`). The door's code (`mcpdoor/`) takes the bind address as an argument for it.

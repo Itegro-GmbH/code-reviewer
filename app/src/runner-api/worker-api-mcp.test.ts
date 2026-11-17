@@ -164,9 +164,9 @@ describe("the MCP route of the Worker API", () => {
       expect(answer.status).toBe(405);
       expect(answer.headers.get("allow")).toBe("POST, DELETE");
     }
-    // Only the DELETE reached the runtime and the counter.
+    // Only the DELETE reached the runtime; a DELETE is not counted against the cap.
     expect(handled).toHaveLength(1);
-    expect(counts).toHaveLength(1);
+    expect(counts).toHaveLength(0);
     expect(workspaces).toHaveLength(1);
   });
 
@@ -363,6 +363,42 @@ describe("the limits of the MCP route", () => {
     const lost = setup({ counted: "not_holder" });
     expect((await lost.api.mcp(post(), lost.job.id, SERVER)).status).toBe(409);
     expect(lost.handled).toEqual([]);
+  });
+
+  // #1067 review: the door ends every open session with a DELETE at the end of the step; that must work with the cap used up.
+  it("does not count a DELETE of a session against the cap of the claim, so a step whose cap is used up can still end its sessions", async () => {
+    const { api, job, handled, counts } = setup({ counted: "exhausted" });
+    const answer = await api.mcp(
+      authorized({ method: "DELETE", headers: { "mcp-session-id": "s-1" } }),
+      job.id,
+      SERVER,
+    );
+    expect(answer.status).toBe(200);
+    expect(counts).toEqual([]);
+    expect(handled.map((call) => call.request.method)).toEqual(["DELETE"]);
+  });
+
+  it("still gates a DELETE by the places of the job, and still refuses it for a claim that ended", async () => {
+    const full = setup({ maxConcurrent: 0 });
+    const refused = await full.api.mcp(
+      authorized({ method: "DELETE", headers: { "mcp-session-id": "s-1" } }),
+      full.job.id,
+      SERVER,
+    );
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({
+      error: { message: "mcp_too_many_concurrent_calls" },
+    });
+    expect(full.handled).toEqual([]);
+
+    const ended = setup({ status: "cancelled" });
+    const gone = await ended.api.mcp(
+      authorized({ method: "DELETE", headers: { "mcp-session-id": "s-1" } }),
+      ended.job.id,
+      SERVER,
+    );
+    expect(gone.status).toBe(409);
+    expect(ended.handled).toEqual([]);
   });
 
   it("does not count a call that is refused before (wrong credential, ended job, 405)", async () => {
