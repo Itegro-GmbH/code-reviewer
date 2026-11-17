@@ -20,7 +20,8 @@ What it does, and nothing else:
   included, is dropped. The request to the app carries the job's credential, which only this
   process holds.
 * **Only the content type, the session id and the body come back** (an event stream as it arrives;
-  when the agent lets go, the request to the app ends with it). A status passes as it is.
+  when the agent lets go, the request to the app ends with it). A status passes as it is; a
+  `Retry-After` does not (the door has retried once itself, see below).
 * **`GET` is `405`**, like the app's route: the endpoint has no stream of its own.
 * **Never a retry of a `503`** (`docs/mcp-runtime.md`: a `tools/call` may have run before the
   error); a connection that failed or broke is a `503 mcp_proxy_unreachable` the door makes itself,
@@ -28,8 +29,14 @@ What it does, and nothing else:
   `Retry-After` (the call was not made): it waits as told, at most `MAX_RETRY_AFTER_SECONDS`, and
   asks **once** more. `429 mcp_call_limit_reached` and every other status are final.
 * **Sessions are closed.** Every `Mcp-Session-Id` the app handed out is remembered; when the step
-  ends `close_sessions` sends a `DELETE` for each one that the agent did not end itself, so no
-  session of a server outlives the step.
+  ends `close_sessions` sends a `DELETE` for each one that the agent did not end itself, at most
+  `CLOSE_PARALLEL` at a time (the app allows 4 calls of a job at once), so no session of a server
+  outlives the step. Only a `2xx`, a `404` (the server does not know it any more) and a `405` (the
+  server has no `DELETE`) end a session; any other answer leaves it open and it is **left**, as is a
+  session beyond the `MAX_OPEN_SESSIONS` that are tracked: both are in the final status.
+* **A socket that stalls is closed** (`SOCKET_TIMEOUT_SECONDS`) and the connections are bounded
+  (`MAX_CONNECTIONS`; one more is refused with `429`): the door has a small process limit and holds
+  the job's credential.
 
 Nothing here logs a header, a body or an address. Standard library only: the door runs in the Worker
 image and imports no more of the runner than its own package, `job_loop.http` and `outer_proxy`.
@@ -39,6 +46,7 @@ import contextlib
 import http.client
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -72,6 +80,17 @@ CLOSE_SECONDS: Final = 8.0
 # Calls the door serves at once (the app allows 4 per job); more is the same `429` the app gives.
 MAX_IN_FLIGHT: Final = 16
 MAX_OPEN_SESSIONS: Final = 64
+# Sessions beyond MAX_OPEN_SESSIONS whose ids are remembered, only to count each once as left; past
+# this a further one is counted without its id.
+MAX_UNTRACKED_SESSIONS: Final = 1024
+# DELETEs of the end of the step in flight at once: the app allows 4 calls per job.
+CLOSE_PARALLEL: Final = 3
+# An idle or slow socket is closed after this long; open connections are bounded (the container has
+# a small process limit, one thread per connection).
+SOCKET_TIMEOUT_SECONDS: Final = 30.0
+MAX_CONNECTIONS: Final = 32
+# What ends a session: 2xx, 404 (the server does not know it) and 405 (it has no DELETE).
+_ENDED_STATUS_OTHER: Final = frozenset({404, 405})
 _CHUNK: Final = 8192
 
 SERVER_ID: Final = re.compile(
@@ -82,6 +101,9 @@ JOB_ID: Final = SERVER_ID
 _TOKEN: Final = re.compile(r"[\x21-\x7e]{1,256}")
 _CONTENT_TYPE: Final = re.compile(r"[A-Za-z0-9!#$&^_.+/;=\" -]{1,128}")
 _PATH: Final = re.compile(r"/mcp/([0-9a-fA-F-]{36})")
+# A body of at most 256 KiB: a length is a few ASCII digits (`str.isdigit` also takes `²` and the
+# digits of other scripts, which `int` then refuses).
+_LENGTH: Final = re.compile(r"[0-9]{1,9}")
 
 CODE_UNAVAILABLE: Final = "mcp_server_unavailable"
 CODE_INVALID: Final = "mcp_proxy_request_invalid"
@@ -113,6 +135,18 @@ class AppAccess:
         return f"{self.app_url.rstrip('/')}/api/workers/v1/jobs/{quote(self.job_id, safe='')}/mcp/{
             quote(server_id, safe='')
         }"
+
+
+def session_ended(status: int) -> bool:
+    """Whether the answer to a `DELETE` of a session means it is over."""
+    return 200 <= status < 300 or status in _ENDED_STATUS_OTHER
+
+
+def _start_thread(target: Callable[..., None], args: tuple[Any, ...]) -> threading.Thread:
+    """A started daemon thread; raises `RuntimeError` when the process cannot have one more."""
+    thread = threading.Thread(target=target, args=args, daemon=True)
+    thread.start()
+    return thread
 
 
 @dataclass
@@ -163,6 +197,7 @@ class McpRelay:
         proxy: OuterProxy | None = None,
         sleeper: Sleeper = time.sleep,
         opener: urllib.request.OpenerDirector | None = None,
+        socket_timeout: float = SOCKET_TIMEOUT_SECONDS,
     ) -> None:
         self._access: AppAccess | None = access
         self.servers = servers
@@ -170,6 +205,10 @@ class McpRelay:
         self._sleep = sleeper
         self._lock = threading.Lock()
         self._sessions: dict[tuple[str, str], None] = {}
+        # Sessions the app opened beyond the tracked ones: never ended by the door, always left.
+        self._untracked: set[tuple[str, str]] = set()
+        self._untracked_overflow = 0
+        self._socket_timeout = socket_timeout
         self._slots = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         self.counts = RelayCounts()
         self._closing = False
@@ -222,12 +261,11 @@ class McpRelay:
         body: bytes | None,
         session_id: str | None,
         protocol_version: str | None,
+        timeout: float = UPSTREAM_TIMEOUT_SECONDS,
     ) -> _Upstream:
         """The request to the app, with the one allowed retry: a `429 mcp_too_many_concurrent_calls`
         that says when to come back. Everything else, a `503` first, is the answer."""
-        reply = self._request(
-            method, server_id, body, session_id, protocol_version, UPSTREAM_TIMEOUT_SECONDS
-        )
+        reply = self._request(method, server_id, body, session_id, protocol_version, timeout)
         wait = _retry_wait(reply)
         if wait is None:
             return reply
@@ -236,55 +274,90 @@ class McpRelay:
         if _error_message(text) != CODE_CONCURRENT:
             return _Upstream(reply.status, reply.headers, _Bytes(text))
         self._sleep(wait)
-        return self._request(
-            method, server_id, body, session_id, protocol_version, UPSTREAM_TIMEOUT_SECONDS
-        )
+        return self._request(method, server_id, body, session_id, protocol_version, timeout)
 
     # -- sessions ------------------------------------------------------------------------
 
     def remember(self, server_id: str, session_id: str) -> None:
         with self._lock:
             key = (server_id, session_id)
-            if key in self._sessions or len(self._sessions) >= MAX_OPEN_SESSIONS:
+            if key in self._sessions or key in self._untracked:
+                return
+            if len(self._sessions) >= MAX_OPEN_SESSIONS:
+                # Not tracked, so never ended by the door: counted, to be said as left.
+                if len(self._untracked) < MAX_UNTRACKED_SESSIONS:
+                    self._untracked.add(key)
+                else:
+                    self._untracked_overflow += 1
                 return
             self._sessions[key] = None
             self.counts.opened += 1
 
     def forget(self, server_id: str, session_id: str) -> None:
         with self._lock:
-            self._sessions.pop((server_id, session_id), None)
+            key = (server_id, session_id)
+            self._sessions.pop(key, None)
+            self._untracked.discard(key)
 
     def open_sessions(self) -> list[tuple[str, str]]:
         with self._lock:
             return list(self._sessions)
 
+    def sessions_left(self) -> int:
+        """The sessions that are not known to be ended: the tracked ones still open and those the
+        door could not track."""
+        with self._lock:
+            return len(self._sessions) + len(self._untracked) + self._untracked_overflow
+
     def close_sessions(self) -> int:
-        """`DELETE` every session that is still open, all at once, within `CLOSE_SECONDS`. No retry
-        of a failure: a session the app could not end is left to the server's own timeout, and said
-        in the final status. Returns how many sessions are still open. The credential is dropped."""
+        """`DELETE` every session that is still open, `CLOSE_PARALLEL` at a time, within
+        `CLOSE_SECONDS`. A session is ended by a `2xx`, `404` or `405` only; anything else (a `409`
+        after the claim ended, a `429` after the one retry, a `5xx`, a broken connection) leaves it
+        open, and it is said in the final status. Returns how many sessions are left, those beyond
+        the tracked ones included. Never raises: a thread that cannot be started means those
+        sessions are left. The credential is dropped."""
+        try:
+            self._close_all()
+        except Exception:  # the last word must come, whatever went wrong here
+            _log.warning("the MCP sessions could not all be ended")
+        finally:
+            self._access = None
+        return self.sessions_left()
+
+    def _close_all(self) -> None:
         pending = self.open_sessions()
-        threads = [
-            threading.Thread(target=self._close_one, args=key, daemon=True) for key in pending
-        ]
-        for thread in threads:
-            thread.start()
+        if not pending:
+            return
+        work: queue.SimpleQueue[tuple[str, str]] = queue.SimpleQueue()
+        for key in pending:
+            work.put(key)
         deadline = time.monotonic() + CLOSE_SECONDS
+        threads: list[threading.Thread] = []
+        for _ in range(min(CLOSE_PARALLEL, len(pending))):
+            try:
+                threads.append(_start_thread(self._close_worker, (work, deadline)))
+            except RuntimeError:
+                break  # no more threads: the ones that run take what is left, or nothing is ended
         for thread in threads:
             thread.join(max(0.0, deadline - time.monotonic()))
-        left = len(self.open_sessions())
-        self._access = None
-        return left
+
+    def _close_worker(self, work: "queue.SimpleQueue[tuple[str, str]]", deadline: float) -> None:
+        while time.monotonic() < deadline:
+            try:
+                server_id, session_id = work.get_nowait()
+            except queue.Empty:
+                return
+            self._close_one(server_id, session_id)
 
     def _close_one(self, server_id: str, session_id: str) -> None:
         try:
-            reply = self._request("DELETE", server_id, None, session_id, None, CLOSE_CALL_SECONDS)
+            # Through `call`: a `429 mcp_too_many_concurrent_calls` is asked once more.
+            reply = self.call("DELETE", server_id, None, session_id, None, CLOSE_CALL_SECONDS)
         except (OSError, http.client.HTTPException):
             return
         status = reply.status
         reply.close()
-        # An answer is an end: 2xx closed it, 404 says the server does not know it any more, and
-        # any other refusal will not get better by asking again.
-        if status < 500:
+        if session_ended(status):
             self.forget(server_id, session_id)
             with self._lock:
                 self.counts.closed += 1
@@ -300,6 +373,8 @@ class McpRelay:
             protocol_version = "HTTP/1.0"
             server_version = "mcp-door"
             sys_version = ""
+            # A client that stops sending, or reading, is let go of after this long.
+            timeout = relay._socket_timeout  # pyright: ignore[reportPrivateUsage]
 
             def log_message(self, format: str, *args: Any) -> None:
                 return None
@@ -353,7 +428,7 @@ class McpRelay:
         body: bytes | None = None
         if method == "POST":
             length_text = handler.headers.get("Content-Length")
-            if length_text is None or not length_text.isdigit():
+            if length_text is None or _LENGTH.fullmatch(length_text) is None:
                 self._refuse(handler, 400, CODE_INVALID)
                 return
             length = int(length_text)
@@ -364,7 +439,7 @@ class McpRelay:
             if len(body) != length:
                 return
         if not self._slots.acquire(blocking=False):
-            self._refuse(handler, 429, CODE_CONCURRENT, retry_after="1")
+            self._refuse(handler, 429, CODE_CONCURRENT)
             return
         try:
             self._forward(handler, method, server_id, body, session_id, protocol_version)
@@ -407,7 +482,7 @@ class McpRelay:
         if method == "POST" and _is_token(returned) and 200 <= reply.status < 300:
             assert returned is not None
             self.remember(server_id, returned)
-        if method == "DELETE" and sent_session is not None and reply.status < 500:
+        if method == "DELETE" and sent_session is not None and session_ended(reply.status):
             self.forget(server_id, sent_session)
         content_type = reply.headers.get("content-type")
         streaming = content_type is not None and content_type.lower().startswith(
@@ -427,17 +502,25 @@ class McpRelay:
                 handler.end_headers()
                 self._stream(handler, reply)
                 return
-            data = _small(reply.body, MAX_RESPONSE_BYTES)
+            try:
+                data = reply.body.read(MAX_RESPONSE_BYTES)
+            except (OSError, http.client.HTTPException):
+                # The app's answer broke off: not an empty `200`, which the agent would take for
+                # the server's answer.
+                self._refuse(handler, 503, CODE_UNREACHABLE)
+                return
             if len(data) > MAX_RESPONSE_BYTES - 1:
                 self._refuse(handler, 503, CODE_RESPONSE_TOO_LARGE)
+                return
+            declared = reply.headers.get("content-length", "")
+            if _LENGTH.fullmatch(declared) is not None and len(data) < int(declared):
+                # `read(amount)` does not say that a body ended before its length.
+                self._refuse(handler, 503, CODE_UNREACHABLE)
                 return
             handler.send_response(reply.status)
             for name, value in head.items():
                 handler.send_header(name, value)
             handler.send_header("Content-Length", str(len(data)))
-            wait = reply.headers.get("retry-after")
-            if reply.status == 429 and wait is not None and _is_token(wait):
-                handler.send_header("Retry-After", wait)
             handler.end_headers()
             handler.wfile.write(data)
         except (OSError, http.client.HTTPException):
@@ -514,7 +597,50 @@ def _retry_wait(reply: _Upstream) -> float | None:
     return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
-def make_server(relay: McpRelay, host: str, port: int) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer((host, port), relay.handler_class())
-    server.daemon_threads = True
-    return server
+class _LimitedServer(ThreadingHTTPServer):
+    """A server with a bound on its connections: one more than `max_connections` is answered `429`
+    at once and closed, so that a flood (or a client that opens and goes silent) cannot take the
+    threads of the container; a thread that cannot be started is the same refusal."""
+
+    daemon_threads = True
+
+    def __init__(
+        self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], max_connections: int
+    ) -> None:
+        super().__init__(address, handler)
+        self._places = threading.BoundedSemaphore(max_connections)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._places.acquire(blocking=False):
+            self._turn_away(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:  # RuntimeError: can't start new thread
+            self._places.release()
+            self._turn_away(request)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._places.release()
+
+    def _turn_away(self, request: Any) -> None:
+        body = refusal_body(CODE_CONCURRENT)
+        head = (
+            b"HTTP/1.0 429 Too Many Requests\r\nContent-Type: application/json\r\n"
+            b"Cache-Control: no-store\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+        )
+        try:
+            request.settimeout(1.0)
+            request.sendall(head + body)
+        except OSError:
+            pass
+        self.shutdown_request(request)
+
+
+def make_server(
+    relay: McpRelay, host: str, port: int, *, max_connections: int = MAX_CONNECTIONS
+) -> ThreadingHTTPServer:
+    return _LimitedServer((host, port), relay.handler_class(), max_connections)

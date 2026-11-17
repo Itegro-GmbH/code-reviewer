@@ -27,6 +27,7 @@ from mcp_door_support import (
     jsonrpc,
 )
 
+from code_reviewer_runner.implementer.mcpdoor.relay import McpRelay
 from code_reviewer_runner.implementer.mcpdoor.service import (
     McpStart,
     StartRefused,
@@ -118,6 +119,26 @@ def test_the_door_says_refused_when_it_cannot_listen() -> None:
 
     assert code == 2
     assert json.loads(stdout.getvalue()) == {"t": "refused", "reason": "listen_failed"}
+
+
+@pytest.mark.unit
+def test_the_door_says_its_last_word_even_when_ending_the_sessions_fails() -> None:
+    class Broken(McpRelay):
+        def close_sessions(self) -> int:
+            self.remember(SERVER_A, "s-1")
+            raise RuntimeError("boom")
+
+    stdout = io.StringIO()
+    code = run_mcp_door(
+        io.StringIO(start_text() + "\n"),  # then the end of stdin: Control is gone
+        stdout,
+        bind=("127.0.0.1", 0),
+        relay_factory=lambda start: Broken(start.access, start.servers),
+    )
+
+    last = json.loads(stdout.getvalue().splitlines()[-1])
+    assert code == 0
+    assert last["final"] is True and last["sessionsLeft"] == 1
 
 
 # -- the credential is in the door's memory and nowhere the agent could read ---

@@ -26,8 +26,9 @@ is
 an
   environment variable, not a file, not a mount. `docker inspect` of the container shows none of it,
   its process list shows none, and the agent, which has no connection to the door but the endpoint's
-  port, reaches none of its memory. Control drops its own copy once the door has it
-  (`ImplementerSession`);
+  port, reaches none of its memory. Control's own copy stays in the job object it was parsed into
+  (`Job.mcp_access`, hidden from `repr`) until the run ends; it is in no file, no argument and no
+  environment, and the agent's container never gets it;
 * at the end of the step Control asks the door to stop: it sends a `DELETE` for every MCP session
   still open, says how many it ended, and exits (`mcpdoor/service.py`).
 

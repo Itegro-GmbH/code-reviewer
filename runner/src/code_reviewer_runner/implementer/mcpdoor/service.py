@@ -232,7 +232,11 @@ def run_mcp_door(
         # No new call is taken, then the sessions are ended while the credential is still held.
         server.shutdown()
         server.server_close()
-        left = relay.close_sessions()
+        try:
+            left = relay.close_sessions()
+        except Exception:  # the last word must come
+            _log.warning("the MCP door could not end its sessions")
+            left = relay.sessions_left()
         try:
             _emit(
                 stdout,

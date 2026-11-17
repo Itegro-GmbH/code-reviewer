@@ -11,6 +11,7 @@ door is the real code; nothing here is the network.
 
 import json
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -54,6 +55,18 @@ class FakeApp:
         self.stream_release = threading.Event()
         self.stream_started = threading.Event()
         self.stream_closed = threading.Event()
+        # The app's walls (#1053): at most `max_concurrent` calls in flight (429 with
+        # `Retry-After`), `call_cap` POSTs per claim (a DELETE is not counted), and 409 for
+        # everything once the claim has ended. `delete_delay` makes a DELETE take a while, so that
+        # several overlap.
+        self.max_concurrent = 4
+        self.call_cap: int | None = None
+        self.claim_ended = False
+        self.delete_delay = 0.0
+        self.active = 0
+        self.peak = 0
+        self.calls = 0
+        self.refused_busy = 0
         self._count = 0
         self._lock = threading.Lock()
         app = self
@@ -87,7 +100,8 @@ class FakeApp:
         handler.send_response(answer.status)
         for name, value in answer.headers.items():
             handler.send_header(name, value)
-        handler.send_header("Content-Length", str(len(answer.body)))
+        if "Content-Length" not in answer.headers:
+            handler.send_header("Content-Length", str(len(answer.body)))
         handler.end_headers()
         handler.wfile.write(answer.body)
 
@@ -102,13 +116,51 @@ class FakeApp:
         if headers.get("authorization") != f"Bearer {JOB_CREDENTIAL}":
             self._reply(handler, Answer(401, error("WORKER_CREDENTIAL_INVALID")))
             return
-        # The app adds the SERVER's credential; the fake server behind it records what it saw.
-        self.server_saw.append(SERVER_CREDENTIAL)
+        if self.claim_ended:
+            self._reply(handler, Answer(409, error("RUNNER_LEASE_LOST")))
+            return
+        with self._lock:
+            busy = self.active >= self.max_concurrent
+            if busy:
+                self.refused_busy += 1
+            else:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+        if busy:
+            self._reply(
+                handler,
+                Answer(
+                    429,
+                    error("mcp_too_many_concurrent_calls"),
+                    {"Retry-After": "1", "Content-Type": "application/json"},
+                ),
+            )
+            return
+        try:
+            self._play(handler, headers, body)
+        finally:
+            with self._lock:
+                self.active -= 1
+
+    def _play(self, handler: BaseHTTPRequestHandler, headers: dict[str, str], body: bytes) -> None:
         session = headers.get("mcp-session-id")
         if handler.command == "DELETE":
+            if self.delete_delay:
+                time.sleep(self.delete_delay)
             self.sessions.discard(session or "")
             self._reply(handler, Answer(200))
             return
+        with self._lock:
+            self.calls += 1
+            over = self.call_cap is not None and self.calls > self.call_cap
+        if over:
+            self._reply(
+                handler,
+                Answer(429, error("mcp_call_limit_reached"), {"Retry-After": "1"}),
+            )
+            return
+        # The app adds the SERVER's credential; the fake server behind it records what it saw.
+        self.server_saw.append(SERVER_CREDENTIAL)
         message = json.loads(body or b"{}")
         method = message.get("method")
         if method == "initialize":

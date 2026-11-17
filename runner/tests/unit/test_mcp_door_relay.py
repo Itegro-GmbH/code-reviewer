@@ -6,9 +6,12 @@ the app with the job's credential. The relay is the real code on a loopback sock
 
 import http.client
 import json
+import socket
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from http.server import ThreadingHTTPServer
 
 import pytest
 from mcp_door_support import (
@@ -23,6 +26,7 @@ from mcp_door_support import (
     jsonrpc,
 )
 
+from code_reviewer_runner.implementer.mcpdoor import relay as relay_module
 from code_reviewer_runner.implementer.mcpdoor.relay import (
     MAX_REQUEST_BYTES,
     AppAccess,
@@ -255,7 +259,9 @@ def test_a_second_429_is_the_answer_there_is_one_retry_at_most(rig: Rig) -> None
 
     status, headers, body = rig.request("POST", body=jsonrpc("tools/call", name="t"))
 
-    assert status == 429 and headers["retry-after"] == "1"
+    assert status == 429 and "retry-after" not in headers, (
+        "the door retried once; the agent gets none"
+    )
     assert json.loads(body)["error"]["message"] == "mcp_too_many_concurrent_calls"
     assert len(rig.app.requests) == 2 and rig.slept == [1.0]
 
@@ -403,3 +409,300 @@ def test_a_path_that_tries_to_leave_the_server_is_404(rig: Rig) -> None:
     status, _, _ = rig.request("POST", body=b"{}", path=f"/mcp/{SERVER_A}/../../x")
 
     assert status == 404 and rig.app.requests == []
+
+
+# -- #1067 review: the end of the step ------------------------------------------------------------
+
+
+def serve(relay: McpRelay, **options: float) -> tuple[ThreadingHTTPServer, int]:
+    server = make_server(relay, "127.0.0.1", 0, **options)  # type: ignore[arg-type]
+    threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+    ).start()
+    return server, server.server_address[1]
+
+
+def deletes(rig: Rig) -> list[str]:
+    return [seen.method for seen in rig.app.requests if seen.method == "DELETE"]
+
+
+# #1067-T05
+def test_many_sessions_are_ended_with_three_deletes_in_flight_at_most_and_none_is_refused(
+    rig: Rig,
+) -> None:
+    rig.app.delete_delay = 0.1  # the app allows 4 calls of a job at once; the door uses 3
+    for _ in range(10):
+        initialize(rig)
+
+    left = rig.relay.close_sessions()
+
+    assert left == 0 and rig.app.sessions == set()
+    assert rig.app.refused_busy == 0 and rig.slept == []
+    assert 2 <= rig.app.peak <= 3, "overlapping, but never more than three"
+    assert rig.relay.counts.closed == 10
+
+
+# #1067-T05
+def test_the_sessions_are_ended_although_the_call_cap_of_the_claim_is_used_up(rig: Rig) -> None:
+    rig.app.call_cap = 3
+    for _ in range(3):
+        initialize(rig)
+    status, _, body = rig.request("POST", body=jsonrpc("tools/call", name="t"))
+    assert status == 429 and b"mcp_call_limit_reached" in body
+
+    left = rig.relay.close_sessions()
+
+    assert left == 0 and rig.app.sessions == set()
+
+
+# #1067-T05
+def test_after_the_claim_ended_the_sessions_stay_open_and_are_reported_not_ended(
+    rig: Rig,
+) -> None:
+    initialize(rig)
+    initialize(rig, SERVER_B)
+    rig.app.claim_ended = True  # cancelled: the app answers 409 to everything
+
+    left = rig.relay.close_sessions()
+
+    assert left == 2 and rig.relay.counts.closed == 0
+    assert len(deletes(rig)) == 2, "one try each, no repeat of a 409"
+    assert len(rig.relay.open_sessions()) == 2
+
+
+# #1067-T05
+def test_a_delete_refused_as_busy_is_asked_once_more_after_the_wait_and_then_is_left(
+    rig: Rig,
+) -> None:
+    initialize(rig)
+    busy = Answer(
+        429,
+        error("mcp_too_many_concurrent_calls"),
+        {"Retry-After": "1", "Content-Type": "application/json"},
+    )
+    rig.app.script.append(busy)
+    assert rig.relay.close_sessions() == 0, "the second try went through"
+    assert rig.slept == [1.0]
+
+    other = McpRelay(
+        AppAccess(rig.app.url, JOB_ID, JOB_CREDENTIAL),
+        frozenset({SERVER_A}),
+        sleeper=rig.slept.append,
+    )
+    other.remember(SERVER_A, "stuck")
+    rig.app.script.extend([busy, busy])
+    before = len(deletes(rig))
+    assert other.close_sessions() == 1
+    assert len(deletes(rig)) - before == 2
+
+
+# #1067-T05
+@pytest.mark.parametrize("status", [200, 204, 404, 405])
+def test_a_delete_that_the_app_answers_with_2xx_404_or_405_has_ended_the_session(
+    rig: Rig, status: int
+) -> None:
+    initialize(rig)
+    rig.app.script.append(Answer(status, error("x") if status >= 400 else b""))
+
+    assert rig.relay.close_sessions() == 0
+    assert rig.relay.counts.closed == 1
+
+
+# #1067-T05
+@pytest.mark.parametrize("status", [400, 401, 403, 409, 413, 429, 500, 503])
+def test_any_other_answer_to_a_delete_leaves_the_session_open_and_counted(
+    rig: Rig, status: int
+) -> None:
+    initialize(rig)
+    rig.app.script.append(Answer(status, error("x")))
+
+    assert rig.relay.close_sessions() == 1
+    assert rig.relay.counts.closed == 0
+
+
+# #1067-T05
+@pytest.mark.parametrize(
+    ("status", "tracked"), [(200, False), (404, False), (409, True), (400, True), (503, True)]
+)
+def test_the_agents_own_delete_ends_the_tracking_only_when_the_session_is_ended(
+    rig: Rig, status: int, tracked: bool
+) -> None:
+    session = initialize(rig)
+    rig.app.script.append(Answer(status, error("x")))
+
+    rig.request("DELETE", headers={"Mcp-Session-Id": session})
+
+    assert ((SERVER_A, session) in rig.relay.open_sessions()) is tracked
+
+
+# #1067-T05
+def test_sessions_beyond_the_tracked_ones_are_counted_as_left_and_never_dropped_silently(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(relay_module, "MAX_OPEN_SESSIONS", 2)
+    for _ in range(4):
+        initialize(rig)
+    # the same unknown session again is not a second one
+    again = Answer(200, b"{}", {"Content-Type": "application/json", "Mcp-Session-Id": "session-4"})
+    rig.app.script.extend([again, again])
+    rig.request("POST", body=jsonrpc("tools/list"))
+    rig.request("POST", body=jsonrpc("tools/list"))
+    assert len(rig.relay.open_sessions()) == 2
+
+    left = rig.relay.close_sessions()
+
+    assert left == 2, "two were ended, two were not tracked: they are left to the server's timeout"
+    assert rig.relay.counts.closed == 2
+
+
+# #1067-T05
+def test_an_untracked_session_the_agent_ends_itself_is_not_left(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(relay_module, "MAX_OPEN_SESSIONS", 1)
+    initialize(rig)
+    second = initialize(rig)
+
+    status, _, _ = rig.request("DELETE", headers={"Mcp-Session-Id": second})
+
+    assert status == 200
+    assert rig.relay.close_sessions() == 0
+
+
+# #1067-T05
+def test_a_thread_that_cannot_be_started_still_ends_with_an_answer_and_says_what_is_left(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initialize(rig)
+    initialize(rig, SERVER_B)
+
+    def refuse(target: object, args: tuple[object, ...]) -> threading.Thread:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(relay_module, "_start_thread", refuse)
+
+    left = rig.relay.close_sessions()
+
+    assert left == 2 and deletes(rig) == []
+    status, _, _ = rig.request("POST", body=jsonrpc("tools/call", name="t"))
+    assert status == 503, "the credential is dropped all the same"
+
+
+# #1067-T05
+def test_when_only_some_threads_can_be_started_the_others_do_the_work(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for _ in range(5):
+        initialize(rig)
+    real = relay_module._start_thread  # pyright: ignore[reportPrivateUsage]
+    started: list[int] = []
+
+    def flaky(target: object, args: tuple[object, ...]) -> threading.Thread:
+        started.append(1)
+        if len(started) > 1:
+            raise RuntimeError("can't start new thread")
+        return real(target, args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(relay_module, "_start_thread", flaky)
+
+    assert rig.relay.close_sessions() == 0
+    assert rig.relay.counts.closed == 5
+
+
+# -- #1067 review: the door's own sockets ---------------------------------------------------------
+
+
+def raw(port: int) -> socket.socket:
+    connection = socket.create_connection(("127.0.0.1", port), timeout=5)
+    return connection
+
+
+# #1067-T06
+def test_a_connection_that_stops_talking_is_closed_by_the_door_after_the_timeout(rig: Rig) -> None:
+    relay = McpRelay(
+        AppAccess(rig.app.url, JOB_ID, JOB_CREDENTIAL),
+        frozenset({SERVER_A}),
+        socket_timeout=0.3,
+    )
+    server, port = serve(relay)
+    try:
+        silent = raw(port)  # sends nothing at all
+        half = raw(port)  # promises a body and sends a bit of it
+        half.sendall(f"POST /mcp/{SERVER_A} HTTP/1.0\r\nContent-Length: 50\r\n\r\nabc".encode())
+        began = time.monotonic()
+        assert silent.recv(10) == b""
+        assert half.recv(10) == b""
+        assert time.monotonic() - began < 4, "the door let go of both"
+        silent.close()
+        half.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert rig.app.requests == []
+
+
+# #1067-T06
+def test_connections_beyond_the_cap_are_refused_at_once_and_a_slot_comes_back(rig: Rig) -> None:
+    relay = McpRelay(
+        AppAccess(rig.app.url, JOB_ID, JOB_CREDENTIAL),
+        frozenset({SERVER_A}),
+        sleeper=rig.slept.append,
+    )
+    server, port = serve(relay, max_connections=2)
+    try:
+        first, second = raw(port), raw(port)  # idle: each holds a place
+        time.sleep(0.2)
+        third = raw(port)
+        data = third.recv(4096)
+        assert data.startswith(b"HTTP/1.0 429 ") and b"mcp_too_many_concurrent_calls" in data
+        third.close()
+        assert rig.app.requests == []
+
+        first.close()
+        status = 0
+        for _ in range(50):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            connection.request("POST", f"/mcp/{SERVER_A}", body=jsonrpc("initialize"))
+            status = connection.getresponse().status
+            connection.close()
+            if status == 200:
+                break
+            time.sleep(0.05)
+        assert status == 200, "the place of the closed connection was given back"
+        second.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# -- #1067 review: small things -------------------------------------------------------------------
+
+
+# #1067-T06
+def test_a_content_length_that_is_not_plain_digits_is_400_and_does_not_crash_the_thread(
+    rig: Rig,
+) -> None:
+    for value in (b"\xb2", b"1e3", b"-1", b"9" * 5000, b"0x10"):
+        connection = raw(rig.port)
+        connection.sendall(
+            f"POST /mcp/{SERVER_A} HTTP/1.0\r\n".encode()
+            + b"Content-Length: "
+            + value
+            + b"\r\n\r\n"
+        )
+        data = connection.recv(4096)
+        connection.close()
+        assert data.startswith(b"HTTP/1.0 400 "), value
+    assert rig.app.requests == []
+
+
+# #1067-T06
+def test_an_answer_of_the_app_that_breaks_off_is_a_503_and_not_an_empty_200(rig: Rig) -> None:
+    rig.app.script.append(
+        Answer(200, b"abc", {"Content-Length": "100", "Content-Type": "application/json"})
+    )
+
+    status, _, body = rig.request("POST", body=jsonrpc("tools/list"))
+
+    assert status == 503
+    assert json.loads(body)["error"]["message"] == "mcp_proxy_unreachable"

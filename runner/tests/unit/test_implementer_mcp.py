@@ -28,8 +28,15 @@ from code_reviewer_runner.implementer.claude_code.command import (
     claude_environment,
 )
 from code_reviewer_runner.implementer.claude_code.login import ClaudeLogin
-from code_reviewer_runner.implementer.config import build_engine_config
+from code_reviewer_runner.implementer.config import (
+    ALLOWED_TOOLS,
+    DENIED_TOOLS,
+    FINISH_MCP_SERVER,
+    FINISH_TOOL_NAME,
+    build_engine_config,
+)
 from code_reviewer_runner.implementer.mcp_config import (
+    RESERVED_TOOL_NAMES,
     endpoint_keys,
     endpoints_of,
     mcp_door_wanted,
@@ -231,6 +238,28 @@ def test_a_key_is_the_name_as_a_plain_token_unique_and_never_the_finish_servers(
     assert len(keys[5]) <= 64
     assert len({key.lower() for key in keys}) == len(keys)
     assert all(key.replace("_", "").replace("-", "").isalnum() for key in keys)
+
+
+# #1067-T02
+def test_a_key_that_could_build_the_name_of_a_built_in_tool_or_permission_is_renamed() -> None:
+    # The engine names a tool `<key>_<tool>` and the config allows `<key>_*`: `finish_submit` +
+    # `result` is the finish tool, `doom` + `loop` the permission `doom_loop`.
+    names = ("finish_submit", "doom", "external", "Doom_Loop", "bash", "finish_submit_result")
+    keys = endpoint_keys(refs(*names))
+
+    for key in keys:
+        for reserved in RESERVED_TOOL_NAMES:
+            assert key.lower() != reserved and not reserved.startswith(key.lower() + "_"), key
+    assert len({key.lower() for key in keys}) == len(keys)
+    assert endpoint_keys(refs("github", "doomsday")) == ["github", "doomsday"], (
+        "others stay as named"
+    )
+
+
+def test_the_reserved_names_hold_every_tool_and_permission_the_engine_config_names() -> None:
+    assert set(ALLOWED_TOOLS) | set(DENIED_TOOLS) <= RESERVED_TOOL_NAMES
+    assert f"{FINISH_MCP_SERVER}_{FINISH_TOOL_NAME}" in RESERVED_TOOL_NAMES
+    assert {"doom_loop", "external_directory"} <= RESERVED_TOOL_NAMES
 
 
 # #1067-T02
