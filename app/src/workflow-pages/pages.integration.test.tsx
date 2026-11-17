@@ -128,6 +128,57 @@ describe("the status names a lane's page offers (#1036)", () => {
   });
 });
 
+describe("the MCP servers a lane's page offers (#1052)", () => {
+  // #1052-T01
+  it("hands the builder the id, the name and whether the last test failed, never an address, a header name or a tool", async () => {
+    const app = await startEngineHarness();
+    const { workflow } = await startedRun(app);
+    const view = (id: string, name: string, status: "ok" | "failed") => ({
+      id,
+      name,
+      transport: "streamable-http",
+      url: "https://mcp.example.com/secret-path",
+      auth: "header",
+      headers: ["Authorization"],
+      revision: 1,
+      status,
+      testedAt: null,
+      testErrorCode: null,
+      tools: { tools: [{ name: "danger", description: "d" }] },
+      createdAt: "2026-11-17T08:00:00.000Z",
+      updatedAt: "2026-11-17T08:00:00.000Z",
+    });
+    const own = {
+      ...servicesOf(app, app.workspaceId),
+      mcp: {
+        list: async () =>
+          [
+            view("s-1", "GitHub", "ok"),
+            view("s-2", "Linear", "failed"),
+          ] as never,
+      },
+    };
+
+    const page = await loadWorkflowPage(workflow.id, own);
+
+    if (page.kind !== "ready") throw new Error("not ready");
+    expect(page.mcpServers).toEqual([
+      { id: "s-1", name: "GitHub", status: "ok" },
+      { id: "s-2", name: "Linear", status: "failed" },
+    ]);
+    expect(JSON.stringify(page.mcpServers)).not.toMatch(
+      /secret-path|Authorization|danger/,
+    );
+    // Left out, the builder offers none.
+    const plain = await loadWorkflowPage(
+      workflow.id,
+      servicesOf(app, app.workspaceId),
+    );
+    if (plain.kind !== "ready") throw new Error("not ready");
+    expect(plain.mcpServers).toEqual([]);
+  });
+});
+
 describe("the pages with real data", () => {
   // #873-T72
   it("shows the Start form and the runs of a workflow", async () => {

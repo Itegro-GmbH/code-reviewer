@@ -48,6 +48,10 @@
           "maximum": 60,
           "default": 60
         },
+        "mcp": {
+          "description": "The MCP servers of the workspace the lane's agents may use (#1052, epic #1049): the ids of servers of the MCP page. Left out: none. A step may narrow the list (`mcp` of an agent step). That a server exists in the workspace, and that a step names only servers of its lane, is the validator's (`mcp_server_unknown`, `mcp_server_not_in_lane`).",
+          "$ref": "#/$defs/McpServerList"
+        },
         "steps": {
           "$ref": "#/$defs/Steps"
         },
@@ -185,7 +189,21 @@
         "result": {
           "description": "What the agent's result looks like; the finish tool is made from it. Without one the step yields the facts only (and the result schema of the profile, once profiles bring one).",
           "$ref": "result-schema.v1.json#/$defs/ResultSchema"
+        },
+        "mcp": {
+          "description": "The MCP servers this step may use (#1052): a subset of the lane's `mcp`. Left out: all of the lane's. An empty list: none. A server the lane does not name is `mcp_server_not_in_lane` (checked by the validator).",
+          "$ref": "#/$defs/McpServerList"
         }
+      }
+    },
+    "McpServerList": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
       }
     },
     "ActionStep": {
