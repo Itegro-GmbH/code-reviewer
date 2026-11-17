@@ -74,6 +74,10 @@ export const CLAIM_FEATURES = [
   // #920: the runner reads `implementer.canAsk` and offers the agent the question next to the result (`implementer.agentAsk`). Sent only to
   // a caller that named it; for any other caller the turn runs as before (no question can be asked), it is not refused.
   "implementer_ask",
+  // #1053: the runner reads `implementer.mcp` (the MCP servers of the agent step: id, name and transport, no address, no credential), serves
+  // a local endpoint for each at its door and points the harness at them. Sent only to a caller that named it and only to a turn a workflow
+  // step started; for any other caller the turn runs as before, without MCP tools (not refused: the agent only lacks tools).
+  "implementer_mcp",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 

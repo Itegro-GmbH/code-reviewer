@@ -10,6 +10,7 @@ import {
   createMcpProxy,
   type McpCallMeta,
   type McpProxyOptions,
+  type McpProxyRequest,
 } from "./proxy.ts";
 
 const fakes: McpFake[] = [];
@@ -67,8 +68,11 @@ const rpc = (method: string, id: number | null, params?: unknown) =>
     ...(params === undefined ? {} : { params }),
   });
 
-const post = (body: string, extra: Record<string, string> = {}) => ({
-  method: "POST" as const,
+const post = (
+  body: string,
+  extra: Partial<Pick<McpProxyRequest, "sessionId" | "protocolVersion">> = {},
+): McpProxyRequest => ({
+  method: "POST",
   body,
   sessionId: null,
   protocolVersion: null,

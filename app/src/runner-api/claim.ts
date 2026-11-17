@@ -111,6 +111,8 @@ import {
 } from "../runner-identity/harness.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { callerLlmProviders } from "./requests.ts";
+import { mcpBlockOf } from "./mcp-block.ts";
+import type { JobMcp } from "../mcp/job-proxy.ts";
 import { errorResponse, jsonResponse, noContent } from "./responses.ts";
 import type { ClaimOptions } from "../db/repositories/runner-jobs-repository.ts";
 import type { HarnessAccess } from "../runner-identity/access.ts";
@@ -283,6 +285,11 @@ export type ClaimDeps = {
    * workspace). Only such a turn may be offered the question: a plain task or follow-up has nobody to answer it.
    */
   startedByWorkflow: (job: Job) => Promise<boolean>;
+  /**
+   * #1053: the MCP runtime of one workspace (`mcp/job-proxy.ts`): which servers the agent step of a job may use, resolved in that workspace.
+   * Left out where the deployment has none: no turn carries `mcp` then.
+   */
+  jobMcp?: (workspaceId: string) => Pick<JobMcp, "serversOf">;
   /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
@@ -1320,6 +1327,15 @@ export async function buildJobInput(
 
   // The one place that creates credentials for a job. A turn gets a token that may write this one repository, a review job one that
   // may not (#753).
+  // #1053: the MCP servers of the agent step, resolved before any credential exists (a failure here leaves nothing to revoke).
+  const mcp =
+    implementer === null
+      ? undefined
+      : await mcpBlockOf(deps, {
+          job,
+          features,
+          startedByWorkflow: implementer.startedByWorkflow,
+        });
   let git: GitAccess;
   try {
     git = revealGitAccess(
@@ -1438,6 +1454,8 @@ export async function buildJobInput(
             features.includes("implementer_ask")
               ? { canAsk: true }
               : {}),
+            // #1053: the MCP servers of the step (no address, no credential), only to a Worker that named `implementer_mcp`.
+            ...(mcp === undefined ? {} : { mcp }),
             // #841: only a follow-up turn carries `resume`, and only to a Worker that reads it (the refusal above).
             ...(implementer.resume === null
               ? {}
@@ -1707,6 +1725,10 @@ export async function buildSubscriptionJob(
   if (!Number.isSafeInteger(cents) || cents < 1)
     return refuse("implementer_config_invalid", "reason=cost_limit");
 
+  // #1053: as for a hosted turn, before any credential exists. A turn on a customer's runner is one of a workflow step too.
+  const startedByWorkflow = await deps.startedByWorkflow(job);
+  const mcp = await mcpBlockOf(deps, { job, features, startedByWorkflow });
+
   let git: GitAccess;
   try {
     git = revealGitAccess(
@@ -1739,7 +1761,6 @@ export async function buildSubscriptionJob(
     throw error;
   }
   const profile = turn.turn.profile;
-  const startedByWorkflow = await deps.startedByWorkflow(job);
   const input: SubscriptionJobInput = {
     reviewKind: "implementer",
     implementer: {
@@ -1773,6 +1794,8 @@ export async function buildSubscriptionJob(
       features.includes("implementer_ask")
         ? { canAsk: true }
         : {}),
+      // #1053: as for a hosted turn.
+      ...(mcp === undefined ? {} : { mcp }),
       ...(resume === null
         ? {}
         : {
