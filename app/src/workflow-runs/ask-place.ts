@@ -7,11 +7,15 @@ import type {
   StoredWorkflowRun,
 } from "../db/repositories/workflow-runs-repository.ts";
 import { isRecord } from "../workflows/json.ts";
-import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import { JIRA_ISSUE_KEY, parseTicketRef } from "../workflows/ticket-ref.ts";
+import { ticketNumberOfKey } from "../integrations/ticket-provider.ts";
 import { readStoredInput } from "./ticket.ts";
 
-/** What a run is about: the number of its ticket or, failing that, of the pull request it opened. */
-export type Place = { number: number; kind: "ticket" | "pull_request" };
+/**
+ * What a run is about: the key of its ticket or, failing that, the number of the pull request it opened (as text, like a key). A ticket is
+ * written through the ticket provider, a pull request through the git provider (#1035).
+ */
+export type Place = { key: string; kind: "ticket" | "pull_request" };
 
 function jsonOrNull(text: string): unknown {
   try {
@@ -28,23 +32,45 @@ function wholeNumber(value: unknown): number | undefined {
 }
 
 /**
- * The ticket the run is about: the number in `workflow_runs.ticket_ref` (#923). A run written before the column existed and not
+ * The ticket the run is about: the key in `workflow_runs.ticket_ref` (#923). A run written before the column existed and not
  * backfilled has none, and its ticket is read from the input of its trigger: `trigger.ticket` of a run with a `ticket` input, and the
  * issue of a run a label started.
  */
-export function ticketNumberOf(
+export function ticketKeyOf(
   run: Pick<StoredWorkflowRun, "ticketRef" | "triggerInput">,
-): number | undefined {
+): string | undefined {
   if (run.ticketRef !== null) {
     const parsed = parseTicketRef(run.ticketRef);
-    if (parsed.ok) return parsed.ref.number;
+    if (parsed.ok) return parsed.ref.key;
   }
   const { input, ticket } = readStoredInput(jsonOrNull(run.triggerInput));
   const found =
     ticket ??
     (isRecord(input.ticket) ? input.ticket : undefined) ??
     (isRecord(input.issue) ? input.issue : undefined);
-  return found === undefined ? undefined : wholeNumber(found.number);
+  if (found === undefined) return undefined;
+  if (typeof found.key === "string" && found.key !== "") return found.key;
+  const number = wholeNumber(found.number);
+  return number === undefined ? undefined : String(number);
+}
+
+/** The key of the Jira issue a run is about (`PROJ-12` of `jira:acme/shop#PROJ-12`), or undefined: another provider, or no ticket. */
+export function jiraKeyOfRef(ticketRef: string | null): string | undefined {
+  if (ticketRef === null) return undefined;
+  const parsed = parseTicketRef(ticketRef);
+  return parsed.ok &&
+    parsed.ref.provider === "jira" &&
+    JIRA_ISSUE_KEY.test(parsed.ref.key)
+    ? parsed.ref.key
+    : undefined;
+}
+
+/** The number of the run's ticket where the provider numbers its tickets (GitHub), or undefined: `ticketKeyOf` read as a number. */
+export function ticketNumberOf(
+  run: Pick<StoredWorkflowRun, "ticketRef" | "triggerInput">,
+): number | undefined {
+  const key = ticketKeyOf(run);
+  return key === undefined ? undefined : ticketNumberOfKey(key);
 }
 
 /** The pull request an action step of the run opened: the last one whose output is a pull request of the repository (`number` and its `/pull/<n>` address). */
@@ -76,10 +102,10 @@ export function placeOf(
   run: Pick<StoredWorkflowRun, "ticketRef" | "triggerInput">,
   steps: readonly StoredStepRun[],
 ): Place | undefined {
-  const ticket = ticketNumberOf(run);
-  if (ticket !== undefined) return { number: ticket, kind: "ticket" };
+  const ticket = ticketKeyOf(run);
+  if (ticket !== undefined) return { key: ticket, kind: "ticket" };
   const pullRequest = pullRequestNumberOf(steps);
   return pullRequest === undefined
     ? undefined
-    : { number: pullRequest, kind: "pull_request" };
+    : { key: String(pullRequest), kind: "pull_request" };
 }

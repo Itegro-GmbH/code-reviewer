@@ -15,6 +15,7 @@
   "crons": [
     { "path": "/api/internal/repository-sync", "schedule": "17 3 * * *" },
     { "path": "/api/internal/dispatch-sweep", "schedule": "0 */2 * * *" },
-    { "path": "/api/internal/tracker-resync", "schedule": "43 3 * * *" }
+    { "path": "/api/internal/tracker-resync", "schedule": "43 3 * * *" },
+    { "path": "/api/internal/jira-webhooks", "schedule": "29 3 * * *" }
   ]
 }

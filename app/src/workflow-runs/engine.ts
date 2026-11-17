@@ -31,6 +31,7 @@ import type { WorkspaceMembersRepository } from "../db/repositories/workspace-me
 import { ImplementerError } from "../implementer/errors.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
 import type { ImplementerService } from "../implementer/service.ts";
+import { BRANCH_NAME_MAX_LENGTH } from "../implementer/branch-name.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
@@ -55,7 +56,7 @@ import {
   type AnswerInput,
   type StepAsk,
 } from "./ask.ts";
-import { placeOf, ticketNumberOf } from "./ask-place.ts";
+import { jiraKeyOfRef, placeOf, ticketKeyOf } from "./ask-place.ts";
 import { conditionHolds } from "./conditions.ts";
 import { readStoredInput } from "./ticket.ts";
 import {
@@ -479,10 +480,17 @@ function instructionOf(
  * round gets its own, `<step id>.r<round>`: a step id never holds a `.`, so no step can be named like another step's later round.
  */
 export function sessionBranchOf(
-  run: Pick<StoredWorkflowRun, "id">,
+  run: Pick<StoredWorkflowRun, "id" | "ticketRef">,
   step: Pick<StoredStepRun, "stepId" | "round">,
 ): string {
-  return `workflow/${run.id}/${step.stepId}${step.round > 1 ? `.r${String(step.round)}` : ""}`;
+  const tail = `${run.id}/${step.stepId}${step.round > 1 ? `.r${String(step.round)}` : ""}`;
+  // The branch of a run on a Jira issue carries the issue's key (#1040): Jira's GitHub integration links a branch to an issue by the key in
+  // its name. A key that would make the name too long for a branch is left out (the pull request title and the ticket link still carry it).
+  const key = jiraKeyOfRef(run.ticketRef);
+  const named = key === undefined ? undefined : `workflow/${key}/${tail}`;
+  return named !== undefined && named.length <= BRANCH_NAME_MAX_LENGTH
+    ? named
+    : `workflow/${tail}`;
 }
 
 /** The `branch` of an agent step with its reference filled in: a text, else the step ends. A missing value fails the step (`TemplateError`). */
@@ -1925,12 +1933,12 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       );
       for (const other of active) {
         if (other.id === run.id) continue;
-        const ticket = ticketNumberOf(other);
+        const ticket = ticketKeyOf(other);
         const otherPlace =
           ticket !== undefined
-            ? { number: ticket }
+            ? { key: ticket }
             : placeOf(other, await deps.runs.listSteps(other.id));
-        if (otherPlace?.number === place.number) return true;
+        if (otherPlace?.key === place.key) return true;
       }
       return false;
     } catch {

@@ -85,6 +85,11 @@ function describeTrigger(node: Doc): { title: string; summary: string } {
         title: `Label “${brief(node.label, 40)}” on a ticket`,
         summary: "gives trigger.ticket",
       };
+    case "ticket.statusChanged":
+      return {
+        title: `Moved into “${brief(node.to, 40)}”`,
+        summary: "gives trigger.ticket and trigger.status",
+      };
     case "manual":
     case "api": {
       const input = isRecord(node.input) ? node.input : {};

@@ -49,7 +49,7 @@ describe("the body of a new project", () => {
         expect.objectContaining({
           path: "extra",
           code: "unknown_field",
-          available: ["repositoryId", "board", "lanes"],
+          available: ["repositoryId", "board", "lanes", "ticketSource"],
         }),
         expect.objectContaining({
           path: "repositoryId",
@@ -98,5 +98,194 @@ describe("the body of a new project", () => {
         { path: "lanes", code: "wrong_type" },
       ],
     });
+  });
+});
+
+describe("the ticket source in the body of a new project (#1038)", () => {
+  const JIRA = { provider: "jira", connectionId: "conn-1", projectKey: "PROJ" };
+
+  // #1038-T01
+  it("takes a Jira project with its connection and key, the repository being the one the code lives in", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: JIRA,
+        lanes: ["review-a-pull-request"],
+      }),
+    ).toEqual({
+      ok: true,
+      request: {
+        repositoryId: "r1",
+        board: null,
+        lanes: ["review-a-pull-request"],
+        jira: { connectionId: "conn-1", projectKey: "PROJ" },
+      },
+    });
+  });
+
+  // #1038 (finding of the review of #1044)
+  it("refuses the lane that starts from a GitHub label for a Jira project, naming the lanes that are allowed, and still takes it for the issues of a repository", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: JIRA,
+        lanes: ["review-a-pull-request", "issue-to-pr"],
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        {
+          path: "lanes/1",
+          code: "lane_not_for_jira",
+          message: expect.stringContaining("issue-to-pr"),
+          available: ["issue-to-pr-status", "review-a-pull-request"],
+        },
+      ],
+    });
+    // #1040: the status lane works for a Jira project.
+    expect(
+      read(
+        {
+          repositoryId: "r1",
+          ticketSource: JIRA,
+          lanes: ["issue-to-pr-status", "review-a-pull-request"],
+        },
+        [...LANES, "issue-to-pr-status"],
+      ).ok,
+    ).toBe(true);
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { provider: "github" },
+        lanes: ["issue-to-pr"],
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  // #1038
+  it("reads `github` as the issues of the repository, as when no source is named, and keeps the board", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { provider: "github" },
+        board: { projectV2Id: BOARD },
+      }),
+    ).toEqual({
+      ok: true,
+      request: {
+        repositoryId: "r1",
+        board: { projectV2Id: BOARD },
+        lanes: [],
+      },
+    });
+  });
+
+  // #1038
+  it("names every problem of the source with its path and what would have been accepted", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { provider: "linear", connectionId: "c", color: 1 },
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "ticketSource.color",
+          code: "unknown_field",
+          available: ["provider", "connectionId", "projectKey"],
+        }),
+        expect.objectContaining({
+          path: "ticketSource.provider",
+          code: "invalid_value",
+          available: ["github", "jira"],
+        }),
+      ],
+    });
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { provider: "jira" },
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "ticketSource.connectionId",
+          code: "missing_field",
+        }),
+        expect.objectContaining({
+          path: "ticketSource.projectKey",
+          code: "missing_field",
+        }),
+      ],
+    });
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { ...JIRA, projectKey: "proj/../x" },
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "ticketSource.projectKey",
+          code: "invalid_value",
+        }),
+      ],
+    });
+    expect(
+      readNewProjectRequest({ repositoryId: "r1", ticketSource: "jira" }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "ticketSource",
+          code: "wrong_type",
+        }),
+      ],
+    });
+  });
+
+  // #1038
+  it("refuses a connection that is not a text of a sensible size, and a GitHub board next to a Jira project", () => {
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { ...JIRA, connectionId: 7 },
+      }),
+    ).toMatchObject({
+      ok: false,
+      issues: [{ path: "ticketSource.connectionId", code: "invalid_value" }],
+    });
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: { ...JIRA, connectionId: "x".repeat(129) },
+      }),
+    ).toMatchObject({ ok: false });
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: JIRA,
+        board: { projectV2Id: BOARD },
+      }),
+    ).toEqual({
+      ok: false,
+      issues: [
+        expect.objectContaining({
+          path: "board",
+          code: "invalid_value",
+        }),
+      ],
+    });
+    // `board: null` next to a Jira project says nothing and is fine.
+    expect(
+      readNewProjectRequest({
+        repositoryId: "r1",
+        ticketSource: JIRA,
+        board: null,
+      }),
+    ).toMatchObject({ ok: true });
   });
 });

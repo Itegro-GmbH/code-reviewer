@@ -684,6 +684,37 @@
         }
       }
     },
+    "TicketStatusChangedTriggerEntry": {
+      "description": "Started when a ticket is moved into the status `to` (#1036), whoever moved it, the factory's own moves included. The status names are the provider's own (GitHub: the options of the Status field of the project's board). Steps read `{{trigger.ticket.…}}` as for `ticket.labeled` and `{{trigger.status.from}}`, `{{trigger.status.to}}` (`from` is empty when the ticket had no status). A workflow that moves a ticket into its own `to` starts itself again: the validator warns (`status_retriggers_workflow`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "to"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/StepId"
+        },
+        "kind": {
+          "const": "ticket.statusChanged"
+        },
+        "to": {
+          "description": "The status that starts the workflow, as the provider names it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "from": {
+          "description": "Optional: only a move out of this status starts the workflow.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "steps": {
+          "$ref": "#/$defs/TriggerSteps"
+        }
+      }
+    },
     "PullRequestPushedTriggerEntry": {
       "description": "Reserved (#916): a push to a pull request. The format validates it, the engine starts no run from it yet.",
       "type": "object",
@@ -754,6 +785,31 @@
         }
       }
     },
+    "TicketStatusChangedTrigger": {
+      "description": "Started when a ticket is moved into the status `to` (#1036), whoever moved it, the factory's own moves included. The status names are the provider's own (GitHub: the options of the Status field of the project's board). Steps read `{{trigger.ticket.…}}` as for `ticket.labeled` and `{{trigger.status.from}}`, `{{trigger.status.to}}` (`from` is empty when the ticket had no status). A workflow that moves a ticket into its own `to` starts itself again: the validator warns (`status_retriggers_workflow`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "to"],
+      "properties": {
+        "kind": {
+          "const": "ticket.statusChanged"
+        },
+        "to": {
+          "description": "The status that starts the workflow, as the provider names it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        },
+        "from": {
+          "description": "Optional: only a move out of this status starts the workflow.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "\\S"
+        }
+      }
+    },
     "PullRequestPushedTrigger": {
       "description": "Reserved (#916): a push to a pull request. The format validates it, the engine starts no run from it yet.",
       "type": "object",
@@ -791,6 +847,9 @@
           "$ref": "#/$defs/TicketLabeledTrigger"
         },
         {
+          "$ref": "#/$defs/TicketStatusChangedTrigger"
+        },
+        {
           "$ref": "#/$defs/PullRequestPushedTrigger"
         },
         {
@@ -806,6 +865,9 @@
         },
         {
           "$ref": "#/$defs/TicketLabeledTriggerEntry"
+        },
+        {
+          "$ref": "#/$defs/TicketStatusChangedTriggerEntry"
         },
         {
           "$ref": "#/$defs/PullRequestPushedTriggerEntry"
@@ -960,7 +1022,7 @@
       ]
     },
     "TicketTarget": {
-      "description": "As `IssueInput`, for the action on a ticket: a positive whole number up to 2147483647, or exactly one reference to the ticket of the trigger (`{{trigger.ticket}}`, `{{trigger.ticket.number}}`, or the issue of a label trigger, `{{trigger.issue}}`) or to an input of a manual trigger that is declared `integer`. A trigger that does not yield a ticket makes the reference `reference_not_in_scope`.",
+      "description": "As `IssueInput`, for the action on a ticket: a positive whole number up to 2147483647, or exactly one reference to the ticket of the trigger (`{{trigger.ticket}}`, `{{trigger.ticket.number}}` (#1040: for a ticket of a platform that does not number its tickets, Jira, the action takes the text key `PROJ-12` of `{{trigger.ticket}}`), or the issue of a label trigger, `{{trigger.issue}}`) or to an input of a manual trigger that is declared `integer`. A trigger that does not yield a ticket makes the reference `reference_not_in_scope`.",
       "$ref": "#/$defs/IssueInput"
     }
   }

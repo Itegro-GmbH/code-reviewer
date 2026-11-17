@@ -60,6 +60,7 @@ from code_reviewer_runner.usage_probe import UsageProbe
 
 from .agent_container import OPENCODE, Adopted, AgentContainer, AgentSeams
 from .claude_code.gates import subscription_rule
+from .claude_code.layer import LayerDaemon
 from .claude_code.login import ClaudeLogin
 from .claude_code.readiness import HarnessNotReady, ReadyHarness, ready_harness
 from .docker_api import DockerApi
@@ -72,6 +73,7 @@ from .git_workspace import (
     WorkspaceSpec,
 )
 from .network_rule import OFF
+from .placement import placement_of
 from .reader import ReaderAccess
 from .report import clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory, redacted_value
@@ -162,11 +164,26 @@ class JobSeams:
 RUNNER_HOME_VARIABLE = "FACTORY_RUNNER_HOME"
 
 
-def device_harness(environment: Mapping[str, str]) -> ReadyHarness | HarnessNotReady:
-    """The default look at the device for a job that asks for Claude Code (#856)."""
+def device_daemon(environment: Mapping[str, str]) -> DockerApi:
+    """The daemon that holds the agent image and the Claude Code layer: the VM's own Docker, and on
+    the Incus backend (`placement.py`) **B's**, which is where the agent's container is made. The
+    layer is built into the golden image there; instance A's Docker has neither."""
+    return placement_of(environment).environment_api()
+
+
+def device_harness(
+    environment: Mapping[str, str],
+    *,
+    daemon: Callable[[Mapping[str, str]], LayerDaemon] = device_daemon,
+) -> ReadyHarness | HarnessNotReady:
+    """The default look at the device for a job that asks for Claude Code (#856). The login is the
+    one the dispatcher handed this process (#980): the runner's own home exists only for a Worker
+    that runs on the device itself."""
     home = Path(environment.get(RUNNER_HOME_VARIABLE) or "/nonexistent")
     try:
-        return ready_harness(DockerApi(), environment, home)
+        return ready_harness(daemon(environment), environment, home)
+    except JobError as error:
+        return HarnessNotReady(error.detail)
     except Exception:
         return HarnessNotReady("the daemon could not be asked")
 

@@ -2,8 +2,11 @@
 
 // The handlers of the factory's new project (#922): `POST /api/w/:workspace/projects` creates the project of a repository (its one ticket
 // source, with the optional GitHub Project that is its board, and the built-in lanes it starts with) and
-// `GET /api/w/:workspace/repositories/:repositoryId/boards` lists the boards a project can take, read from GitHub. Collaborators are passed
-// in so the route files wire the real ones and tests wire fakes.
+// `GET /api/w/:workspace/repositories/:repositoryId/boards` lists the boards a project can take, read from GitHub, and (#1038)
+// `GET /api/w/:workspace/jira/connections/:connectionId/projects` lists the projects of a Jira site. A project's ticket source may be a Jira
+// project (`ticketSource` in the body of the creation): the connection must be the workspace's and the key a project of its site, asked of
+// Jira now with one call for that project (never by reading the site's list), after the repository was looked at.
+// Collaborators are passed in so the route files wire the real ones and tests wire fakes.
 //
 // Order, as for the other routes: the user first, then where the request comes from, the content type and size of the body, its JSON,
 // the strict check of its shape, the board against the boards GitHub has, then the service. A refusal is `{ "error": <code> }` with a stable
@@ -12,6 +15,7 @@
 // boards and takes the Status field from them.
 import type { SessionUser } from "../auth/access-policy.ts";
 import type {
+  JiraSourceChoice,
   StoredProject,
   TicketBoard,
 } from "../db/repositories/projects-repository.ts";
@@ -38,6 +42,18 @@ export type BoardsAnswer =
   | { kind: "integration_unavailable" }
   | { kind: "failed" };
 
+/** What asking a Jira site for its projects came to (#1038). `connection_not_found` is also what another workspace's connection is. */
+export type JiraProjectsAnswer =
+  | {
+      kind: "projects";
+      projects: { key: string; name: string }[];
+      /** False when the site has more projects than were read. */
+      complete: boolean;
+    }
+  | { kind: "connection_not_found" }
+  | { kind: "connection_broken" }
+  | { kind: "unavailable" };
+
 /** The code a lane is reported with when copying them failed in a way no lane has a code for (the project stays). */
 export const LANE_COPY_FAILED = "LANE_COPY_FAILED";
 
@@ -46,18 +62,49 @@ export type LaneCopy =
   | { key: string; ok: true; workflow: { id: string; name: string } }
   | { key: string; ok: false; code: string };
 
+/** What asking a Jira site for ONE project by its key came to (#1038). `connection_not_found` is also what another workspace's connection is. */
+export type JiraProjectAnswer =
+  | { kind: "project"; project: { key: string } }
+  | { kind: "project_not_found" }
+  | { kind: "connection_not_found" }
+  | { kind: "connection_broken" }
+  | { kind: "unavailable" };
+
 export type NewProjectDependencies = {
   /** The signed in user, or a throw that ends the request. Called first, on every request. */
   requireUser: () => Promise<SessionUser>;
-  service: Pick<ProjectService, "createProject" | "getProject" | "setBoard">;
+  service: Pick<
+    ProjectService,
+    "createProject" | "findProject" | "getProject" | "setBoard"
+  >;
   boards(repositoryId: string): Promise<BoardsAnswer>;
+  /**
+   * The projects of the site of a Jira connection of the workspace (#1038). Left out where the deployment has no Jira: a Jira project
+   * cannot be named then (`PROJECT_JIRA_UNAVAILABLE`).
+   */
+  jiraProjects?(connectionId: string): Promise<JiraProjectsAnswer>;
+  /**
+   * One project of a Jira site by its key (#1038), the check of a creation: one call to Jira, never the list of the site's projects.
+   * Left out where the deployment has no Jira: a Jira project cannot be named then (`PROJECT_JIRA_UNAVAILABLE`).
+   */
+  jiraProject?(
+    connectionId: string,
+    projectKey: string,
+  ): Promise<JiraProjectAnswer>;
   /** The names of the built-in lanes a new project may copy (the workflows module owns them). */
   laneKeys: readonly string[];
   copyLanes(
     user: SessionUser,
     projectId: string,
     keys: readonly string[],
+    /** For a Jira project (#1040): the names of the statuses of its workflow, from which the status lane takes its own names. */
+    jira?: { statusNames: readonly string[] },
   ): Promise<LaneCopy[]>;
+  /**
+   * The names of the workflow statuses of a Jira project (#1040), for the status lane's defaults. Empty when they cannot be read: the lane then
+   * keeps its default names. Never throws. Left out where the deployment has no Jira.
+   */
+  jiraStatuses?(connectionId: string, projectKey: string): Promise<string[]>;
 };
 
 export type NewProjectHandlers = {
@@ -65,6 +112,8 @@ export type NewProjectHandlers = {
   /** `PUT .../projects/:projectId` (#937): sets, changes or clears the board of a project. */
   setBoard(request: Request, projectId: string): Promise<Response>;
   boards(request: Request, repositoryId: string): Promise<Response>;
+  /** `GET .../jira/connections/:connectionId/projects` (#1038): the projects of the site of a Jira connection. */
+  jiraProjects(request: Request, connectionId: string): Promise<Response>;
 };
 
 const NO_STORE = { "cache-control": "no-store" };
@@ -114,9 +163,120 @@ export function createNewProjectHandlers({
   requireUser,
   service,
   boards,
+  jiraProjects,
+  jiraProject,
   laneKeys,
   copyLanes,
+  jiraStatuses,
 }: NewProjectDependencies): NewProjectHandlers {
+  /** The projects of a Jira connection, or the `ProjectError` that says why there are none to look at. */
+  async function jiraProjectsOf(connectionId: string) {
+    const answer =
+      jiraProjects === undefined
+        ? ({ kind: "unavailable" } as const)
+        : await jiraProjects(connectionId);
+    switch (answer.kind) {
+      case "projects":
+        return answer;
+      case "connection_not_found":
+        throw new ProjectError(
+          "PROJECT_JIRA_CONNECTION_NOT_FOUND",
+          "The workspace has no Jira connection with this id.",
+        );
+      case "connection_broken":
+        throw new ProjectError(
+          "PROJECT_JIRA_CONNECTION_BROKEN",
+          "The Jira connection is broken: a person has to connect it again.",
+        );
+      case "unavailable":
+        throw new ProjectError(
+          "PROJECT_JIRA_UNAVAILABLE",
+          "Jira could not be asked for its projects.",
+        );
+    }
+  }
+
+  /**
+   * The repository of a creation, looked at before Jira is asked anything: it must be there, available, and have no project that is on.
+   * Throws the `ProjectError` the service would have thrown for it (so a creation that cannot succeed costs Jira no call).
+   */
+  async function checkRepository(repositoryId: string): Promise<void> {
+    const entry = await service.findProject(repositoryId);
+    if (entry === undefined)
+      throw new ProjectError(
+        "PROJECT_REPOSITORY_NOT_FOUND",
+        "There is no repository with this id.",
+      );
+    if (!entry.repository.available)
+      throw entry.repository.integration.status === "active"
+        ? new ProjectError(
+            "PROJECT_REPOSITORY_UNAVAILABLE",
+            "The repository is no longer available on the platform and cannot be activated.",
+          )
+        : new ProjectError(
+            "PROJECT_INTEGRATION_UNAVAILABLE",
+            "The installation of the repository is suspended or removed, so the repository cannot be activated.",
+          );
+    if (entry.project?.active === true)
+      throw new ProjectError(
+        "PROJECT_ALREADY_EXISTS",
+        "The repository has a project that is switched on already.",
+      );
+  }
+
+  /**
+   * The Jira source a body names, against the project the site has now (one call for that project): the choice, or the refusal that says
+   * why not. The refusal names no key of the site. Another workspace's connection is none, so the answer for it is the one for an unknown id.
+   */
+  async function resolveJira(
+    choice: JiraSourceChoice,
+  ): Promise<
+    { ok: true; choice: JiraSourceChoice } | { ok: false; response: Response }
+  > {
+    const answer =
+      jiraProject === undefined
+        ? ({ kind: "unavailable" } as const)
+        : await jiraProject(choice.connectionId, choice.projectKey);
+    switch (answer.kind) {
+      case "project":
+        return { ok: true, choice };
+      case "project_not_found":
+        return {
+          ok: false,
+          response: refusal("PROJECT_REQUEST_INVALID", [
+            {
+              path: "ticketSource.projectKey",
+              code: "unknown_jira_project",
+              message:
+                "The Jira site has no project with this key, or the connected account cannot see it.",
+            },
+          ]),
+        };
+      case "connection_not_found":
+        return {
+          ok: false,
+          response: refusal("PROJECT_REQUEST_INVALID", [
+            {
+              path: "ticketSource.connectionId",
+              code: "unknown_connection",
+              message:
+                "The workspace has no Jira connection with this id. Connect Jira in the settings first.",
+            },
+          ]),
+        };
+      case "connection_broken":
+        throw new ProjectError(
+          "PROJECT_JIRA_CONNECTION_BROKEN",
+          "The Jira connection is broken: a person has to connect it again.",
+        );
+      case "unavailable":
+        throw new ProjectError(
+          "PROJECT_JIRA_UNAVAILABLE",
+          "Jira could not be asked for the project.",
+        );
+    }
+  }
+
   /** The boards of a repository, or the `ProjectError` that says why there are none to look at. */
   async function boardsOf(repositoryId: string) {
     const answer = await boards(repositoryId);
@@ -204,7 +364,7 @@ export function createNewProjectHandlers({
           );
         const read = readNewProjectRequest(await readBody(request), laneKeys);
         if (!read.ok) return refusal("PROJECT_REQUEST_INVALID", read.issues);
-        const { repositoryId, board, lanes } = read.request;
+        const { repositoryId, board, lanes, jira } = read.request;
 
         let ticketBoard: TicketBoard | null = null;
         if (board !== null) {
@@ -212,13 +372,35 @@ export function createNewProjectHandlers({
           if (!resolved.ok) return resolved.response;
           ticketBoard = resolved.board;
         }
+        let jiraChoice: JiraSourceChoice | undefined;
+        if (jira !== undefined) {
+          await checkRepository(repositoryId);
+          const resolved = await resolveJira(jira);
+          if (!resolved.ok) return resolved.response;
+          jiraChoice = resolved.choice;
+        }
 
-        const project = await service.createProject(repositoryId, ticketBoard);
+        const project =
+          jiraChoice === undefined
+            ? await service.createProject(repositoryId, ticketBoard)
+            : await service.createProject(repositoryId, null, jiraChoice);
         // The project is written: whatever goes wrong while the lanes are copied is reported per lane, never as a failure of the creation.
         let copied: LaneCopy[] = [];
         if (lanes.length > 0)
           try {
-            copied = await copyLanes(user, project.id, lanes);
+            copied =
+              jiraChoice === undefined
+                ? await copyLanes(user, project.id, lanes)
+                : await copyLanes(user, project.id, lanes, {
+                    statusNames:
+                      lanes.includes("issue-to-pr-status") &&
+                      jiraStatuses !== undefined
+                        ? await jiraStatuses(
+                            jiraChoice.connectionId,
+                            jiraChoice.projectKey,
+                          )
+                        : [],
+                  });
           } catch (error) {
             console.error(
               "[projects] copying the built-in lanes failed:",
@@ -275,6 +457,23 @@ export function createNewProjectHandlers({
         const updated = await service.setBoard(project.id, ticketBoard);
         return Response.json(
           { project: projectView(updated) },
+          { headers: NO_STORE },
+        );
+      } catch (error) {
+        if (error instanceof ProjectError) return refusal(error.code);
+        throw error;
+      }
+    },
+
+    async jiraProjects(_request, connectionId) {
+      await requireUser();
+      try {
+        const answer = await jiraProjectsOf(connectionId);
+        return Response.json(
+          {
+            complete: answer.complete,
+            projects: answer.projects.map(({ key, name }) => ({ key, name })),
+          },
           { headers: NO_STORE },
         );
       } catch (error) {

@@ -443,3 +443,45 @@ def test_a_device_without_a_type_is_an_error_before_any_call() -> None:
             go(lambda: rig.client.add_device("x", "eth0", {"network": "n"}))
 
         assert not rig.record.exists()
+
+
+# #1023-T10
+def test_the_properties_of_an_image_are_read_from_the_entry_that_has_the_alias() -> None:
+    """The properties are what `build-golden.sh` recorded: the one call lists the images that match
+    the alias and takes the entry that has exactly that alias (a prefix of a fingerprint or a longer
+    alias matches the filter too)."""
+    with short_directory() as root:
+        images = [
+            {
+                "aliases": [{"name": "code-reviewer-golden-old"}],
+                "properties": {"code-reviewer.opencode": "0.0.1"},
+            },
+            {
+                "aliases": [{"name": "code-reviewer-golden"}],
+                "properties": {"code-reviewer.opencode": "1.19.0", "os": "ubuntu"},
+            },
+        ]
+        rig = Rig(root, stdout=json.dumps(images))
+
+        found = go(lambda: rig.client.image_properties("code-reviewer-golden"))
+
+        assert found == {"code-reviewer.opencode": "1.19.0", "os": "ubuntu"}
+        assert [call["argv"] for call in rig.calls()] == [
+            ["image", "list", "code-reviewer-golden", "--format", "json"]
+        ]
+        assert [call["stdin"] for call in rig.calls()] == [""]
+
+
+# #1023-T10
+def test_an_image_that_is_not_listed_has_no_properties_and_a_broken_answer_is_an_error() -> None:
+    with short_directory() as root:
+        rig = Rig(root, stdout="[]")
+        assert go(lambda: rig.client.image_properties("nope")) is None
+
+        rig.set(stdout='{"not": "a list"}')
+        with pytest.raises(IncusError, match="not a list"):
+            go(lambda: rig.client.image_properties("nope"))
+
+        rig.set(exit=1, stderr="Error: permission denied\n")
+        with pytest.raises(IncusError, match="permission denied"):
+            go(lambda: rig.client.image_properties("nope"))

@@ -49,6 +49,7 @@ import {
   boardTiles,
   formatUsd,
   issuesOf,
+  ticketLabel,
   ticketUrl,
   waitsFor,
   type WaitsFor,
@@ -390,7 +391,7 @@ function IssueRow({
   onOpen: (button: HTMLElement) => void;
   onStart: (button: HTMLElement) => void;
 }) {
-  const address = ticketUrl(list.repo, item);
+  const address = ticketUrl(list.repo, item, list.provider);
   return (
     <TableRow data-issue={item.number}>
       <TableCell className="min-w-0 align-top whitespace-normal">
@@ -401,7 +402,7 @@ function IssueRow({
             className="cursor-pointer border-0 bg-transparent p-0 text-left font-semibold break-words text-foreground"
           >
             <span className="font-mono text-muted-foreground">
-              #{item.number}
+              {ticketLabel(list.provider, item)}
             </span>{" "}
             {item.title}
           </button>

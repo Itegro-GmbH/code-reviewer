@@ -9,14 +9,26 @@ import { createRepositoriesRepository } from "../db/repositories/repositories-re
 import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { getDatabase } from "../db/startup.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import { ticketProviderRegistry } from "../integrations/registry.ts";
 import { projectServiceFor } from "../projects/shared.ts";
+import { registeredJiraMirrorSync } from "./jira-mirror-sync.ts";
 import { createTrackerMirror, type TrackerMirror } from "./mirror.ts";
 import { listResyncTargets, type ResyncTarget } from "./resync-targets.ts";
 import { createTrackerService, type TrackerService } from "./service.ts";
 import { createTrackerSync, type TrackerSync } from "./sync.ts";
 
-const TYPE = "github_app";
+/** The ticket provider of a repository's tickets (#1035): GitHub issues, the one ticket source there is. */
+const TICKET_PROVIDER = "github";
+
+/** The ticket provider of the mirror; the registry has it unless the deployment was wired without. */
+function ticketProvider() {
+  const provider = ticketProviderRegistry.get(TICKET_PROVIDER);
+  if (provider === undefined)
+    throw new Error(
+      `No ticket provider is registered as "${TICKET_PROVIDER}".`,
+    );
+  return provider;
+}
 
 /** The board the active project of a repository chose, for the sync and the mirror (undefined: none). */
 const boardOfRepository =
@@ -30,7 +42,7 @@ export function trackerSyncFor(workspaceId: string): TrackerSync {
   const projects = projectServiceFor(workspaceId);
   return createTrackerSync({
     tracker: createTrackerRepository(getDatabase(), workspaceId),
-    provider: integrationRegistry.resolve(TYPE),
+    provider: ticketProvider(),
     boardOf: boardOfRepository(projects),
   });
 }
@@ -38,7 +50,7 @@ export function trackerSyncFor(workspaceId: string): TrackerSync {
 /** What a webhook delivery changes in the ticket mirror of one workspace. */
 export function trackerMirrorFor(workspaceId: string): TrackerMirror {
   const db = getDatabase();
-  const provider = integrationRegistry.resolve(TYPE);
+  const provider = ticketProvider();
   const projects = projectServiceFor(workspaceId);
   return createTrackerMirror({
     repositories: createRepositoriesRepository(db, workspaceId),
@@ -47,12 +59,12 @@ export function trackerMirrorFor(workspaceId: string): TrackerMirror {
     async boardStatusOf(integration, repo, nodeId, boardId) {
       if (provider.readBoardStatus === undefined)
         return { available: false, status: null };
-      return provider.readBoardStatus(integration, repo, nodeId, boardId);
+      return provider.readBoardStatus({ integration, repo }, nodeId, boardId);
     },
     boardOf: boardOfRepository(projects),
     async checksStateOf(integration, repo, headSha) {
       if (provider.readChecksState === undefined) return null;
-      return provider.readChecksState(integration, repo, headSha);
+      return provider.readChecksState({ integration, repo }, headSha);
     },
   });
 }
@@ -60,6 +72,7 @@ export function trackerMirrorFor(workspaceId: string): TrackerMirror {
 /** The list of the tickets and the full sync of one workspace. */
 export function trackerServiceFor(workspaceId: string): TrackerService {
   const db = getDatabase();
+  const jira = registeredJiraMirrorSync(workspaceId);
   return createTrackerService({
     repositories: createRepositoriesRepository(db, workspaceId),
     integrations: createIntegrationsRepository(db, workspaceId),
@@ -67,6 +80,7 @@ export function trackerServiceFor(workspaceId: string): TrackerService {
     tracker: createTrackerRepository(db, workspaceId),
     runs: createWorkflowRunsRepository(db, workspaceId),
     sync: trackerSyncFor(workspaceId),
+    ...(jira === undefined ? {} : { jira }),
   });
 }
 
@@ -76,7 +90,10 @@ export function resyncTargets(): Promise<ResyncTarget[]> {
   return listResyncTargets({
     integrations: () => createIntegrationDirectory(db).list(),
     projectsOf: (workspaceId) => projectServiceFor(workspaceId).listProjects(),
-    syncStateOf: (workspaceId, repositoryId) =>
-      createTrackerRepository(db, workspaceId).getSyncState(repositoryId),
+    syncStateOf: (workspaceId, repositoryId, provider) =>
+      createTrackerRepository(db, workspaceId).getSyncState(
+        repositoryId,
+        provider,
+      ),
   });
 }

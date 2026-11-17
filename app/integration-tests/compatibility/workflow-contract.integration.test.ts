@@ -130,6 +130,7 @@ describe("the workflow contract", () => {
     const triggerKinds = [
       "ManualTriggerEntry",
       "TicketLabeledTriggerEntry",
+      "TicketStatusChangedTriggerEntry",
       "PullRequestPushedTriggerEntry",
       "ScheduleTriggerEntry",
     ].flatMap(kindOf);
@@ -138,6 +139,7 @@ describe("the workflow contract", () => {
       [
         "ManualTrigger",
         "TicketLabeledTrigger",
+        "TicketStatusChangedTrigger",
         "PullRequestPushedTrigger",
         "ScheduleTrigger",
       ]
@@ -316,6 +318,59 @@ const WORKFLOW_CASES: Case[] = [
     (d) => (entry(d, 1).label = "x"),
   ],
   ["an api trigger", (d) => (entry(d, 1).kind = "api")],
+  // #1036: the status trigger
+  [
+    "a status trigger",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      delete entry(d, 0).label;
+      entry(d, 0).to = "Ready for agent";
+    },
+  ],
+  [
+    "a status trigger with a from",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      delete entry(d, 0).label;
+      entry(d, 0).to = "Ready for agent";
+      entry(d, 0).from = "Backlog";
+    },
+  ],
+  [
+    "a status trigger without a to",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      delete entry(d, 0).label;
+    },
+  ],
+  [
+    "a status trigger with a blank to",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      delete entry(d, 0).label;
+      entry(d, 0).to = "   ";
+    },
+  ],
+  [
+    "a status trigger with a blank from",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      delete entry(d, 0).label;
+      entry(d, 0).to = "Ready";
+      entry(d, 0).from = " ";
+    },
+  ],
+  [
+    "a status trigger with a label",
+    (d) => {
+      entry(d, 0).kind = "ticket.statusChanged";
+      entry(d, 0).to = "Ready";
+    },
+  ],
+  [
+    "a legacy status trigger",
+    legacy({ kind: "ticket.statusChanged", to: "Ready" }),
+  ],
   ["pre-steps that are no list", (d) => (entry(d, 1).steps = {})],
   ["pre-steps with a step that is no object", (d) => (entry(d, 1).steps = [3])],
   ["an empty list of pre-steps", (d) => (entry(d, 1).steps = [])],

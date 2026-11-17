@@ -2,7 +2,8 @@
 
 // What the production server checks about the deployment when it starts, besides sign in (see
 // src/auth/startup.ts, which requires the master key and the public address): the shared token of the
-// runner, that the operator API token (when set) is not a copy of another credential, and, in webhook
+// runner, that the operator API token (when set) is not a copy of another credential, that the Atlassian settings of the Jira connection are
+// complete when set (#1037), and, in webhook
 // dispatch mode, the URL and the signing secret of the dispatch webhook (src/dispatch/config.ts). A missing value would otherwise show up later as a failing runner with a less helpful
 // message. The capability set of the deployment (`PRODUCT_CAPABILITIES`, src/capabilities/) is checked here too. Called from `src/instrumentation.ts`.
 //
@@ -13,6 +14,7 @@
 
 import { capabilityConfigProblems } from "../capabilities/products.ts";
 import { dispatchConfigProblems } from "../dispatch/config.ts";
+import { atlassianConfigProblems } from "../jira/config.ts";
 import { operatorTokenReuseProblem } from "../operator-api/token.ts";
 import { runnerTokenProblem } from "../runner-api/token-auth.ts";
 
@@ -62,6 +64,10 @@ export function findDeploymentConfigProblems(env: Env): string[] {
   // The dispatch webhook (#326) is off by default. Only a webhook mode with an incomplete setup stops the
   // start: the app would queue jobs and never wake anyone. The problems name variables, never values.
   problems.push(...dispatchConfigProblems(env));
+
+  // Jira Cloud (#1037) is optional: unset, it is off. One of the two Atlassian values without the other, or an address of Atlassian that is
+  // not allowed, stops the start (the problems name variables, never values).
+  problems.push(...atlassianConfigProblems(env));
 
   // The product and its capability set (#731, `implementer` #747); unset means today's code-review.com, so this adds no required variable.
   problems.push(...capabilityConfigProblems(env));

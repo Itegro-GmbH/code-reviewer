@@ -26,7 +26,7 @@ them**: no status, type or label is mapped to a vocabulary of ours.
 | Column                                        | Content                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `workspace_id`, `repository_id`, `project_id` | The owner. `project_id` is empty until a project is the ticket source (#922); until then the rows are keyed by the repository                                                                                                                                                                                                                                                                                               |
-| `provider`, `repo`, `number`, `node_id`       | `github`, `owner/name`, the number, and GitHub's global id (a board item names its ticket by it)                                                                                                                                                                                                                                                                                                                            |
+| `provider`, `repo`, `key`, `number`, `node_id` | `github`, `owner/name`, the text key (the number as text; the identity of a row is `(repository_id, provider, key)` since #1035, a Jira ticket is `PROJ-123`), the number, and GitHub's global id (a board item names its ticket by it)                                                                                                                                                                                                                                                                                                                            |
 | `kind`                                        | `issue` or `pull_request`                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `state`, `state_reason`                       | `open` or `closed`; GitHub's reason (`completed`, `not_planned`, `reopened`). A merged pull request is `closed` with the reason `merged`, the one value that is not GitHub's word for an issue                                                                                                                                                                                                                              |
 | `type`                                        | The issue type of the organization (`Bug`, `Task`, ...), as named; empty for none and for a pull request                                                                                                                                                                                                                                                                                                                    |
@@ -42,8 +42,12 @@ them**: no status, type or label is mapped to a vocabulary of ours.
 | `deleted_at`                                  | Set when GitHub deleted or moved the issue: the row stays as a **tombstone**, hidden from every read, so that a late delivery cannot bring the issue back. Empty for a ticket that exists                                                                                                                                                                                                                                   |
 | `board_seen_at`                               | When a board last said something about the item (a delivery, or the board phase of a full sync): what the end of a full sync resets the board statuses by                                                                                                                                                                                                                                                                   |
 
-`tracker_sync_state` holds, per repository, the position of a full sync that is under way (`cursor`, `started_at`) and when the last
-one ended (`last_full_sync_at`).
+`tracker_sync_state` holds, per repository and provider (`provider`, `github` for every row that exists), the position of a full sync that is under way (`cursor`,
+`started_at`) and when the last one ended (`last_full_sync_at`).
+
+The key (#1035, migration `20261114120000_tracker_ticket_keys.ts`) is an expand-only change: the old primary keys `(repository_id, number)` and `repository_id`
+stay while the version before it may still run, a trigger gives a row written without a key its number as text, and the new unique indexes
+`(repository_id, provider, key)` and `(repository_id, provider)` are what the code writes by. The old keys and the trigger go, and `key` becomes NOT NULL, in a later release.
 
 `workflow_runs.ticket_ref` (`github:owner/repo#128`) names the ticket a run is about. The label trigger sets it, and so does the start of a run
 with a `ticket` input (by hand or through the API; the reference of the ticket as the provider resolved it). A run without a ticket has none. The migration filled it
@@ -67,6 +71,8 @@ come from two sources, and both write the same shape:
 | `projects_v2_item`, `edited` (field Status)                                                               | `board_status` of the item's ticket is set to the new **Status**, or emptied when the new value is none. The item is found by the node id of its content, in any repository of the workspace. With a chosen board, the edit of an item of **another** board is ignored; a delivery without `project_node_id` (the payload names no board) is applied on purpose, and the next delivery of the project's board or the next full sync corrects it                                                                                                                                                                                                                                                                                     |
 | `projects_v2_item`, `created`, `restored`, `archived`, `deleted`                                          | These deliveries carry no status, and the ticket can be on **more than one board**, so the app asks GitHub where the ticket stands now and stores that: the status on **the board the project chose** (`ticket_source.board`, #922; the ticket's item on it, not archived), or, for a project without a chosen board, the first board item of the ticket that has a Status (a ticket that left one board keeps the status another board gives it). One that is added or restored shows its status at once. The delivery names its board (`project_node_id`): with a chosen board, a delivery about **another** board changes nothing. Nothing is stored when the boards cannot be read, except that an `archived` or `deleted` item empties the status |
 | `check_suite`                                                                                             | For each open pull request the suite lists (same repository), the app asks GitHub for the check suites of the commit and stores their state (`checks_state`)                                                                                                                                                                                                                                                                                                                     |
+
+A `projects_v2_item` `edited` delivery that changes the Status **also starts the lanes that wait for the new status** (#1036, [the status trigger](workflows.md#the-status-trigger)), after the mirror has taken it; the ticket is found in the mirror by its node id, so a ticket the mirror does not hold starts no run.
 
 What a delivery does not carry stays as it was: a ticket written again keeps its `board_status`, its `pull_requests`, its
 `checks_state` and (a comment event, the list of the issues) its `review_requested_from`. The checks phase of the full sync reads the list of the open
@@ -224,3 +230,49 @@ reads when it is asked again. `TRACKER_INTEGRATION_UNAVAILABLE` (409) says the i
 
 Code: `app/src/tracker/` (the mirror, the sync, the list and its routes), `app/src/db/repositories/tracker-repository.ts` (the only SQL),
 `app/src/integrations/providers/github-app/` (`tracker-events.ts`, `tracker-map.ts` and the three reads of the client).
+
+## A project on a Jira project (#1038, #1039)
+
+A project's ticket source can be a Jira project (`{ provider: "jira", repositoryId, connectionId, projectKey }`, [`src/jira/README.md`](../app/src/jira/README.md)).
+`repositoryId` of such a source is the GitHub repository the code lives in, and the mirror is keyed by `(repository_id, provider, key)` since #1035, so a Jira ticket
+is stored under that repository with `provider = 'jira'` and the key `PROJ-123`, without a new column.
+
+**How the rows get there (#1039).** The inbound webhook of Jira ([`docs/jira-cloud-setup.md`](jira-cloud-setup.md#5-webhooks-nothing-to-do-in-jira)) writes the issue of every
+delivery (`jira:issue_created`, `jira:issue_updated`, `comment_created`; `jira:issue_deleted` makes a tombstone), through `createJiraMirror`. The fields are the neutral ones,
+mapped as follows and never to a vocabulary of ours:
+
+| Column | From Jira |
+| --- | --- |
+| `key` | the issue key (`PROJ-7`) |
+| `number` | the number at the end of the key (7): keeps the old primary key `(repository_id, number)` unique within a project and `#7` meaningful |
+| `title` | `summary` (cut at 1024 characters) |
+| `body_excerpt` | `description`, an ADF document read as plain text (cut at 4000 characters) |
+| `board_status` | the **name of the status**, as Jira spells it (the column holds a GitHub board's Status for GitHub rows) |
+| `state` | `closed` when the status's category is `done`, otherwise `open` |
+| `type` | the issue type (`Bug`, `Task`, ...); null when none |
+| `assignees` | the display name of the assignee (one) |
+| `labels` | the labels (no colour: `""`); at most 50, each cut at 100 characters (assignees: 20) |
+| `parent_number` | the number of the parent (epic or parent of a sub-task) **when it is in the same Jira project**, else none |
+| `node_id` | `jira:<issue id>` (keeps the row clear of GitHub node ids) |
+| `updated_at` | `fields.updated` as ISO UTC, **never more than 2 minutes ahead of the server's clock** (a payload is authenticated by a secret in its address, not signed: a made-up date far ahead would freeze the row against every later delivery); a delivery older than the row changes nothing, as for GitHub |
+
+**When a project switches its tickets** from GitHub issues to a Jira project (or back), the rows of the other provider are removed (`TrackerRepository.clearOtherProviders`, in the
+activation hook, with the sync state of that provider): they are not the new tickets and their numbers would collide with the new rows. The cache is rebuilt from the provider, so
+nothing is lost that cannot be read again. A project that is switched on again with the same source clears nothing. A switch from one Jira project to another clears the Jira rows
+of the old one as well (`clearJiraItemsOutside`): the primary key is `(repository_id, number)`, so `OLD-7` would block `NEW-7`; with another connection (another site) all Jira rows go. If the
+webhook row was already deleted when the project was switched off, the connection of the old source is not known any more: only the rows of another project key are cleared, and rows of the
+same key from another site stay until a delivery of that key overwrites them. The reads and writes of the Jira mirror (`getItem`, `deleteItem`, `setParent`) name their provider, so a
+delivery of one provider never touches a row of the other on the same number.
+
+**The full read of the project (#1040).** The webhook only brings what changes after it was registered, so the factory also reads the whole Jira project: `POST /rest/api/3/search/jql`
+with the JQL `project = "KEY" ORDER BY created ASC`, paged by Jira's `nextPageToken` (100 issues a page), every issue written through the same mapping as a delivery (newest change wins,
+so a delivery that arrives meanwhile is never overwritten by an older read). It is [`src/jira/resync.ts`](../app/src/jira/resync.ts) and is reached through `TrackerService.sync`, so **the first read
+after a project is created or switched on, the nightly resync and the "Resync" button all cover a Jira source**. The position is kept in the sync state of provider `jira` (`tracker_sync_state` is
+keyed by `(repository_id, provider)`): a call that ends early (its deadline, its page limit, Jira did not answer) continues where it stopped, a read that has not moved for an hour starts again
+(a week for the nightly resync, which resumes), and **the rebuild rule is the one of GitHub**: when the last page is read, the rows that were not written since the read began are gone from
+Jira (deleted, or **moved out of the project**) and are removed; if an entry of a page could not be read nothing is removed. The cache that was emptied and read holds what a cache that was
+kept current holds. The cockpit's Issues tab lists a Jira project's rows with their key (`PROJ-7`) and a link to the issue on the site; the Jira part is registered for the process at its start
+(`tracker/jira-mirror-sync.ts`, `instrumentation.ts`), and a deployment without it answers `TRACKER_SOURCE_NOT_MIRRORED` (409) for a Jira source as before.
+
+**What is still not mirrored.** The label and the status of a GitHub issue or board start no lane of a Jira project, and the status change in Jira starts the lanes of that project only. Jira has
+no board and no checks, so those columns stay empty. A Jira issue has no linked pull requests in the mirror (Jira's own development panel shows them).

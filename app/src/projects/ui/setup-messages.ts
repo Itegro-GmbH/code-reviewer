@@ -94,6 +94,8 @@ const SETUP_FAILURE: Record<string, string> = {
     "The project is switched off, so its tickets are not read. Switch it on first.",
   TRACKER_INTEGRATION_UNAVAILABLE:
     "The GitHub App installation of this repository is suspended or removed, so GitHub cannot be asked.",
+  TRACKER_SOURCE_NOT_MIRRORED:
+    "The tickets of this project are Jira issues, which are not mirrored yet. There is nothing to read here.",
   TRACKER_SYNC_FAILED:
     "GitHub could not be read just now: press Resync to go on.",
   TRACKER_CROSS_SITE_REQUEST: CROSS_SITE_REQUEST_RELOAD_PAGE,

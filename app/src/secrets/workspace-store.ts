@@ -97,6 +97,11 @@ export type WorkspaceSecretStore<Name extends string = string> = {
   use(name: Name): Promise<UseWorkspaceSecretResult>;
   /** Forgets the secret; false when there was none. */
   remove(name: Name): Promise<boolean>;
+  /**
+   * The value, and the secret is gone in the same step (one statement): of two callers that take it at once only one gets it. For a
+   * secret that may be used once. The secret is gone even when it could not be read.
+   */
+  take(name: Name): Promise<UseWorkspaceSecretResult>;
   /** The names of the secrets the workspace holds (configured or not readable); never a value. */
   names(): Promise<string[]>;
 };
@@ -195,6 +200,19 @@ export function createWorkspaceSecretStore<Name extends string>({
 
     async use(name) {
       const row = await rows.get(name);
+      if (row === undefined)
+        return { ok: false, error: "secret_not_configured" };
+      const opened = open(name, row);
+      if (!opened.ok) return { ok: false, error: opened.code };
+      return {
+        ok: true,
+        value: new SecretValue(opened.value),
+        binding: row.binding,
+      };
+    },
+
+    async take(name) {
+      const row = await rows.take(name);
       if (row === undefined)
         return { ok: false, error: "secret_not_configured" };
       const opened = open(name, row);

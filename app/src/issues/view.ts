@@ -35,12 +35,31 @@ export function pullRequestUrl(
   );
 }
 
-/** The address of the ticket on GitHub, or undefined when the list's address is not one of the repository's. */
+/**
+ * The address of the ticket on its platform: on GitHub, undefined when the list's address is not one of the repository's; for a Jira ticket
+ * (#1040) the address of its site, when it is an https address without credentials.
+ */
 export function ticketUrl(
   repo: string,
   item: TicketListItem,
+  provider = "github",
 ): string | undefined {
-  return githubLinkInRepository(item.url, repo);
+  if (provider !== "jira") return githubLinkInRepository(item.url, repo);
+  try {
+    const page = new URL(item.url);
+    return page.protocol === "https:" &&
+      page.username === "" &&
+      page.password === ""
+      ? page.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** How a ticket is named in the list: `#15` for a GitHub issue, the key (`PROJ-7`) for a Jira issue (#1040). */
+export function ticketLabel(provider: string, item: TicketListItem): string {
+  return provider === "jira" ? item.key : `#${String(item.number)}`;
 }
 
 /**

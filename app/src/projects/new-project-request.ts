@@ -6,11 +6,28 @@
 //
 //   { "repositoryId": "<id of a repository of the workspace>",
 //     "board": { "projectV2Id": "PVT_…" } | null,          // optional; the board of the GitHub Project, read from the repository
-//     "lanes": ["issue-to-pr", "review-a-pull-request"] }  // optional; built-in lanes copied into the new project
+//     "lanes": ["issue-to-pr", "review-a-pull-request"],   // optional; built-in lanes copied into the new project
+//     "ticketSource": { "provider": "jira", "connectionId": "<id of a Jira connection of the workspace>", "projectKey": "PROJ" } }
+//                                                          // optional (#1038); the tickets are those of a Jira project and the code is in
+//                                                          // the repository; `{ "provider": "github" }` is the default: its issues
 import type { NewProjectIssue } from "./errors.ts";
 
-const FIELDS = ["repositoryId", "board", "lanes"] as const;
+const FIELDS = ["repositoryId", "board", "lanes", "ticketSource"] as const;
 const BOARD_FIELDS = ["projectV2Id"] as const;
+const SOURCE_FIELDS = ["provider", "connectionId", "projectKey"] as const;
+const SOURCE_PROVIDERS = ["github", "jira"] as const;
+/** What can be a Jira project key (the same rule as the stored source: `projects-repository.ts`). */
+const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
+/**
+ * The built-in lanes a project on a Jira project may start with (#1040): the review lane needs no ticket, and "Issue to PR (status)" starts
+ * by a move of the ticket into a status and writes back to Jira (comments, transitions). "Issue to PR" starts by a LABEL, which a Jira project
+ * does not offer: the factory follows the status changes of a Jira project (the owner's decision, epic #1034), not its labels. The dialog
+ * offers these only; the route refuses the rest.
+ */
+export const LANES_FOR_JIRA: readonly string[] = [
+  "issue-to-pr-status",
+  "review-a-pull-request",
+];
 const MAX_ID_LENGTH = 128;
 /** A node id of a GitHub Project (`PVT_…`); anything else cannot name a board. */
 const BOARD_ID = /^PVT_[A-Za-z0-9_-]{1,200}$/;
@@ -20,6 +37,8 @@ export type NewProjectRequest = {
   board: { projectV2Id: string } | null;
   /** The names of built-in lanes, each at most once, as `laneKeys` has them. */
   lanes: string[];
+  /** The Jira project the tickets come from (#1038); left out for the issues of the repository. */
+  jira?: { connectionId: string; projectKey: string };
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -60,7 +79,7 @@ export function readNewProjectRequest(
         available: [...FIELDS],
       });
 
-  const { repositoryId, board, lanes } = body;
+  const { repositoryId, board, lanes, ticketSource } = body;
   if (repositoryId === undefined)
     issues.push({
       path: "repositoryId",
@@ -117,6 +136,103 @@ export function readNewProjectRequest(
     }
   }
 
+  let jira: NewProjectRequest["jira"];
+  if (ticketSource !== undefined) {
+    if (!isRecord(ticketSource))
+      issues.push({
+        path: "ticketSource",
+        code: "wrong_type",
+        message:
+          "ticketSource must be an object with provider (github or jira), and for jira the connectionId and the projectKey.",
+        available: [...SOURCE_FIELDS],
+      });
+    else {
+      for (const key of Object.keys(ticketSource))
+        if (!(SOURCE_FIELDS as readonly string[]).includes(key))
+          issues.push({
+            path: `ticketSource.${shown(key)}`,
+            code: "unknown_field",
+            message: `ticketSource has no field ${shown(key)}.`,
+            available: [...SOURCE_FIELDS],
+          });
+      const provider = ticketSource.provider;
+      if (
+        typeof provider !== "string" ||
+        !(SOURCE_PROVIDERS as readonly string[]).includes(provider)
+      )
+        issues.push({
+          path: "ticketSource.provider",
+          code: provider === undefined ? "missing_field" : "invalid_value",
+          message:
+            "ticketSource.provider must be github (the issues of the repository) or jira (a Jira project).",
+          available: [...SOURCE_PROVIDERS],
+        });
+      else if (provider === "jira") {
+        const { connectionId, projectKey } = ticketSource;
+        let connectionOk = false;
+        if (connectionId === undefined)
+          issues.push({
+            path: "ticketSource.connectionId",
+            code: "missing_field",
+            message:
+              "ticketSource.connectionId is required: the Jira connection of the workspace the project is on.",
+          });
+        else if (
+          typeof connectionId !== "string" ||
+          connectionId.trim() === "" ||
+          connectionId.length > MAX_ID_LENGTH
+        )
+          issues.push({
+            path: "ticketSource.connectionId",
+            code: "invalid_value",
+            message: `ticketSource.connectionId must be the id of a Jira connection, a text of 1 to ${String(MAX_ID_LENGTH)} characters.`,
+          });
+        else connectionOk = true;
+        let keyOk = false;
+        if (projectKey === undefined)
+          issues.push({
+            path: "ticketSource.projectKey",
+            code: "missing_field",
+            message:
+              "ticketSource.projectKey is required: the key of a project of the site, like PROJ.",
+          });
+        else if (
+          typeof projectKey !== "string" ||
+          !JIRA_PROJECT_KEY.test(projectKey)
+        )
+          issues.push({
+            path: "ticketSource.projectKey",
+            code: "invalid_value",
+            message:
+              "ticketSource.projectKey must be the key of a Jira project, upper case letters, digits and underscores, like PROJ.",
+          });
+        else keyOk = true;
+        if (connectionOk && keyOk)
+          jira = {
+            connectionId: connectionId as string,
+            projectKey: projectKey as string,
+          };
+        // A Jira project has no GitHub Project as its board; naming one would ask for something that cannot be.
+        if (board !== undefined && board !== null)
+          issues.push({
+            path: "board",
+            code: "invalid_value",
+            message:
+              "A Jira project has no GitHub board: leave board out, or choose the issues of the repository as the ticket source.",
+          });
+      } else {
+        for (const key of ["connectionId", "projectKey"] as const)
+          if (ticketSource[key] !== undefined)
+            issues.push({
+              path: `ticketSource.${key}`,
+              code: "unknown_field",
+              message: `The issues of a repository have no ${key}; it belongs to a Jira project.`,
+              available: ["provider"],
+            });
+      }
+    }
+  }
+
   const lanesRead: string[] = [];
   if (lanes !== undefined) {
     if (!Array.isArray(lanes))
@@ -147,6 +263,17 @@ export function readNewProjectRequest(
       });
   }
 
+  if (jira !== undefined)
+    lanesRead.forEach((lane, index) => {
+      if (!LANES_FOR_JIRA.includes(lane))
+        issues.push({
+          path: `lanes/${String(index)}`,
+          code: "lane_not_for_jira",
+          message: `The lane ${lane} starts when a label is put on a GitHub issue, which a Jira project does not offer: a Jira ticket starts a lane by a move into a status.`,
+          available: [...LANES_FOR_JIRA],
+        });
+    });
+
   if (issues.length > 0) return { ok: false, issues };
   return {
     ok: true,
@@ -154,6 +281,7 @@ export function readNewProjectRequest(
       repositoryId: repositoryId as string,
       board: boardRead,
       lanes: lanesRead,
+      ...(jira === undefined ? {} : { jira }),
     },
   };
 }

@@ -11,10 +11,11 @@
 import "server-only";
 import { lockDynamicReviewGate } from "../dynamic-review-lock.ts";
 import { sql, type Kysely } from "kysely";
-import type {
-  IntegrationStatus,
-  IntegrationType,
-  JsonValue,
+import {
+  TICKET_PROVIDERS,
+  type IntegrationStatus,
+  type IntegrationType,
+  type JsonValue,
 } from "../../integrations/types.ts";
 import {
   decodeBoolean,
@@ -32,15 +33,33 @@ export type ProjectSettings = { [key: string]: JsonValue };
 export type TicketBoard = { projectV2Id: string; statusFieldId: string };
 
 /**
- * What a project is in the factory (#922): the GitHub issues of one repository and, optionally, the GitHub Project that is their board.
- * `repositoryId` is always the repository of the project row (one project per repository), repeated so that a reader of the source
- * needs nothing else.
+ * What a project is in the factory (#922): the GitHub issues of one repository and, optionally, the GitHub Project that is their board,
+ * or (#1038) the tickets of a Jira project. `repositoryId` is always the repository of the project row (one project per repository),
+ * repeated so that a reader of the source needs nothing else: for Jira it is the repository the code lives in. `connectionId` and
+ * `projectKey` are there for `provider` `jira` and only then (a Jira source has no board).
  */
 export type TicketSource = {
-  provider: "github";
+  provider: string;
   repositoryId: string;
   board: TicketBoard | null;
+  connectionId?: string;
+  projectKey?: string;
 };
+
+/** The Jira project a source names: the connection of the workspace (its site) and the project's key on that site. */
+export type JiraSourceChoice = { connectionId: string; projectKey: string };
+
+/** The Jira project the source names, or null for any other source. */
+export function jiraSourceOf(source: TicketSource): JiraSourceChoice | null {
+  return source.provider === "jira" &&
+    source.connectionId !== undefined &&
+    source.projectKey !== undefined
+    ? { connectionId: source.connectionId, projectKey: source.projectKey }
+    : null;
+}
+
+/** What a Jira project key can be (upper case letters, digits and underscore; the site's rule is narrower, never wider). */
+const JIRA_PROJECT_KEY = /^[A-Z][A-Z0-9_]{1,99}$/;
 
 /** What a row without a stored source (every project an older version wrote) is: the issues of its repository, no board. */
 export function defaultTicketSource(repositoryId: string): TicketSource {
@@ -51,11 +70,13 @@ export function defaultTicketSource(repositoryId: string): TicketSource {
  * The ticket source of a row. Damaged or foreign text reads as the default with a warning that names the project (never the text), like
  * damaged settings; the repository is always the row's.
  */
-function readTicketSource(
+export function readTicketSource(
   text: string | null,
   repositoryId: string,
   projectId: string,
   warn: (message: string) => void,
+  /** The ticket providers a source may name (#1035); a source that names another one is not usable. Left out: the providers of `ticket-ref.ts`. */
+  providers: readonly string[] = TICKET_PROVIDERS,
 ): TicketSource {
   if (text === null) return defaultTicketSource(repositoryId);
   const decoded = tryDecodeJson<unknown>(text);
@@ -64,11 +85,36 @@ function readTicketSource(
     typeof value === "object" && value !== null && "board" in value
       ? value.board
       : undefined;
-  const wellFormed =
+  const provider =
     typeof value === "object" &&
     value !== null &&
     "provider" in value &&
-    value.provider === "github" &&
+    typeof value.provider === "string" &&
+    providers.includes(value.provider)
+      ? value.provider
+      : undefined;
+  if (provider === "jira") {
+    const named = value as { connectionId?: unknown; projectKey?: unknown };
+    if (
+      typeof named.connectionId === "string" &&
+      named.connectionId !== "" &&
+      typeof named.projectKey === "string" &&
+      JIRA_PROJECT_KEY.test(named.projectKey)
+    )
+      return {
+        provider,
+        repositoryId,
+        board: null,
+        connectionId: named.connectionId,
+        projectKey: named.projectKey,
+      };
+    warn(
+      `[db] PROJECT_TICKET_SOURCE_UNREADABLE: the stored ticket source of project ${projectId} is not usable and reads as the issues of its repository without a board.`,
+    );
+    return defaultTicketSource(repositoryId);
+  }
+  const wellFormed =
+    provider !== undefined &&
     (board === null ||
       (typeof board === "object" &&
         board !== null &&
@@ -83,7 +129,7 @@ function readTicketSource(
     return defaultTicketSource(repositoryId);
   }
   return {
-    provider: "github",
+    provider,
     repositoryId,
     board:
       board === null
@@ -139,10 +185,14 @@ export type ProjectListEntry = {
 };
 
 /**
- * What a project created in the factory says beyond the switch (#922): `board` is the GitHub Project that is its board, or `null` for none.
- * Left out (the review switch of every other deployment), the stored ticket source is not touched.
+ * What a project created in the factory says beyond the switch (#922): `board` is the GitHub Project that is its board, or `null` for none;
+ * `jira` (#1038) makes the tickets those of a Jira project of a connection of the workspace (the code stays in the repository; a Jira source
+ * has no board, so `board` is not read with it). Left out (the review switch of every other deployment), the stored ticket source is not touched.
  */
-export type ActivateOptions = { board?: TicketBoard | null };
+export type ActivateOptions = {
+  board?: TicketBoard | null;
+  jira?: JiraSourceChoice;
+};
 
 export type ActivateResult =
   | {
@@ -157,7 +207,9 @@ export type ActivateResult =
   | { kind: "repository_not_found" }
   | { kind: "repository_unavailable" }
   /** The repository is listed, but its integration is suspended or removed (status `disabled`). */
-  | { kind: "integration_unavailable" };
+  | { kind: "integration_unavailable" }
+  /** `jira` names a connection the workspace does not have (another workspace's, or one removed meanwhile); nothing was written. */
+  | { kind: "jira_connection_not_found" };
 
 export type DeactivateResult =
   | {
@@ -218,7 +270,7 @@ export type ProjectsRepository = {
   /**
    * Sets, changes or clears the board of the ticket source of a project (#937; `null` clears it) and moves `updatedAt`; the rest of the
    * source stays. Works for a project that is switched off too. Returns the project after the change, or undefined (nothing written)
-   * for an id of another workspace.
+   * for an id of another workspace, or for a project whose tickets are not GitHub's (#1038: a Jira source has no board).
    */
   setTicketBoard(
     projectId: string,
@@ -571,12 +623,26 @@ export function createProjectsRepository(
             "repositories.id",
             "projects.repository_id",
           )
-          .select(["projects.id", "projects.repository_id"])
+          .select([
+            "projects.id",
+            "projects.repository_id",
+            "projects.ticket_source",
+          ])
           .where("repositories.workspace_id", "=", workspaceId)
           .where("projects.id", "=", projectId)
           .forUpdate("projects")
           .executeTakeFirst();
         if (current === undefined) return undefined;
+        // A Jira source has no board: the board of a GitHub Project would turn it into the issues of the repository.
+        if (
+          readTicketSource(
+            current.ticket_source,
+            current.repository_id,
+            current.id,
+            warn,
+          ).provider !== "github"
+        )
+          return undefined;
         const row = await trx
           .updateTable("projects")
           .set({
@@ -636,6 +702,23 @@ export function createProjectsRepository(
         if (repository.integration_status !== "active")
           return { kind: "integration_unavailable" };
 
+        // A Jira source takes the connection's row `for key share` until this transaction ends: a removal of the connection (`for update`,
+        // src/jira/README.md) waits for the write below and then finds a project that uses it, and an assignment that comes after a
+        // removal finds no row. The weakest lock that conflicts with `for update` is the one taken, so that the activation does not wait
+        // behind a token refresh (`for no key update` across the call to Atlassian, `withLockedTokens`) while it holds the repository's
+        // lock. The workspace is in the query, so another workspace's connection is none.
+        if (options.jira !== undefined) {
+          const connection = await trx
+            .selectFrom("jira_connections")
+            .select("id")
+            .where("workspace_id", "=", workspaceId)
+            .where("id", "=", options.jira.connectionId)
+            .forKeyShare()
+            .executeTakeFirst();
+          if (connection === undefined)
+            return { kind: "jira_connection_not_found" };
+        }
+
         const timestamp = formatTimestamp(now());
         const existing = await trx
           .selectFrom("projects")
@@ -643,13 +726,20 @@ export function createProjectsRepository(
           .where("repository_id", "=", repositoryId)
           .executeTakeFirst();
         const ticketSource =
-          options.board === undefined
-            ? undefined
-            : encodeJson({
-                provider: "github",
+          options.jira !== undefined
+            ? encodeJson({
+                provider: "jira",
                 repositoryId,
-                board: options.board,
-              });
+                connectionId: options.jira.connectionId,
+                projectKey: options.jira.projectKey,
+              })
+            : options.board === undefined
+              ? undefined
+              : encodeJson({
+                  provider: "github",
+                  repositoryId,
+                  board: options.board,
+                });
 
         if (existing === undefined) {
           const row = await trx

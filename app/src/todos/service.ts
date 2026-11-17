@@ -17,6 +17,7 @@
 //    still asked from the viewer (or from the members by a fan-out).
 //  - Every list is read newest first and bounded (`LOOK_AT_MAX` per kind of row); a list narrowed to a project is narrowed inside the
 //    queries, by the repositories of the project, so the rows of another project cannot use up the bound.
+import { ticketNumberOfKey } from "../integrations/ticket-provider.ts";
 import type {
   StoredStepRun,
   StoredWorkflowRun,
@@ -309,15 +310,18 @@ export function createTodosService(
     repositoryId: string,
     place: Place | undefined,
   ): TodoTicket | null => {
-    if (place === undefined) return null;
-    const item = mirror.get(`${repositoryId}#${String(place.number)}`);
+    // The ToDo list shows GitHub tickets, which are numbered; a ticket of a platform that does not number them has no row here (#1035).
+    const number =
+      place === undefined ? undefined : ticketNumberOfKey(place.key);
+    if (place === undefined || number === undefined) return null;
+    const item = mirror.get(`${repositoryId}#${String(number)}`);
     const kind =
       item?.kind ?? (place.kind === "ticket" ? "issue" : "pull_request");
     return {
-      number: place.number,
+      number,
       kind,
       title: item?.title ?? null,
-      url: addressOf(facts, repositoryId, kind, place.number),
+      url: addressOf(facts, repositoryId, kind, number),
       labelled:
         item?.labels.some((label) => label.name === LABEL_WAITING) ?? false,
     };
@@ -373,11 +377,13 @@ export function createTodosService(
   ): Promise<QuestionTodo[]> {
     const open = await openAsks(facts, inScope, repositoryIds);
     const mirror = await ticketsOf(
-      open.flatMap(({ run, place }) =>
-        place === undefined
+      open.flatMap(({ run, place }) => {
+        const number =
+          place === undefined ? undefined : ticketNumberOfKey(place.key);
+        return number === undefined
           ? []
-          : [{ repositoryId: run.repositoryId, number: place.number }],
-      ),
+          : [{ repositoryId: run.repositoryId, number }];
+      }),
     );
     return open
       .map(({ run, step, ask, place }): QuestionTodo => ({
@@ -575,9 +581,11 @@ export function createTodosService(
     const mirror = await ticketsOf(
       newest.flatMap(({ run }) => {
         const place = places.get(run.id);
-        return place === undefined
+        const number =
+          place === undefined ? undefined : ticketNumberOfKey(place.key);
+        return number === undefined
           ? []
-          : [{ repositoryId: run.repositoryId, number: place.number }];
+          : [{ repositoryId: run.repositoryId, number }];
       }),
     );
     return newest.map(({ run, step, ask }): DoneTodo => ({

@@ -44,6 +44,8 @@ const PUBLIC_ROUTES = [
   "/invitation",
   // GitHub signs its deliveries; the route checks the signature itself (src/webhooks/README.md).
   "/api/webhooks/github-app",
+  // Jira calls the webhooks the factory registered itself; the secret in the address is the credential (#1039).
+  "/api/webhooks/jira",
   // A payment provider signs its webhooks; the route asks the active adapter to check the signature (#497).
   "/api/billing/webhook",
   // The runner sends its own shared token (src/runner-api/README.md).
@@ -87,6 +89,8 @@ const PUBLIC_ROUTES = [
   "/api/internal/dispatch-sweep",
   // The nightly resync of the ticket mirror (#932): the same credential.
   "/api/internal/tracker-resync",
+  // The nightly extension of the Jira webhooks (#1039): the same credential.
+  "/api/internal/jira-webhooks",
 ] as const;
 const PROTECTED_ROUTES = [
   "/",
@@ -191,8 +195,16 @@ const PROTECTED_DATA_ROUTES = [
   // Not about one workspace: creating one, accepting an invitation (src/auth/access.ts, NO_WORKSPACE_PATHS).
   "/api/workspaces",
   "/api/invitations/accept",
+  // Where Atlassian sends the browser after the consent page of a Jira connection (#1037, src/jira/): a signed in person only.
+  "/api/jira/callback",
   // The data routes of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/api/w/[workspace]",
+  "/api/w/[workspace]/jira/choose",
+  "/api/w/[workspace]/jira/connect",
+  "/api/w/[workspace]/jira/connections",
+  "/api/w/[workspace]/jira/connections/[connectionId]",
+  // The projects of the Jira site of a connection, for the new-project dialog (#1038).
+  "/api/w/[workspace]/jira/connections/[connectionId]/projects",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",

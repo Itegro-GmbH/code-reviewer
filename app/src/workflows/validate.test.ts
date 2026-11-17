@@ -361,6 +361,7 @@ describe("the trigger", () => {
           "manual",
           "api",
           "ticket.labeled",
+          "ticket.statusChanged",
           "pullRequest.pushed",
           "schedule",
           "github.issueLabeled",

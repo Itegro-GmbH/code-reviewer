@@ -21,5 +21,5 @@ App (`src/github-config/`) and the authorization that links a GitHub identity to
   value learns nothing.
 - Rows are removed by the clean-up of `src/maintenance/` once they have expired.
 - The purposes are `github-manifest`, `github-link` and, for the binding of installations to workspaces
-  (`src/installation-binding/`), `github-install`, `github-authorize` and `github-picker`. A flow of a workspace puts the
+  (`src/installation-binding/`), `github-install`, `github-authorize` and `github-picker`; `jira-connect` for the round trip through Atlassian's consent page when a workspace connects a Jira Cloud site (`src/jira/`, #1037). A flow of a workspace puts the
   workspace into the signed value (`workspaceId`), so a callback can only act for the workspace the state was made for.

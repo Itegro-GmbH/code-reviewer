@@ -5,6 +5,7 @@
 // lane, its current step and status) and the money the runs of the ticket spent so far, both from `workflow_runs` through `ticket_ref`.
 // The cache itself holds only what the provider delivers; a value here is the provider's, unmapped.
 import type { IntegrationsRepository } from "../db/repositories/integrations-repository.ts";
+import { jiraSourceOf } from "../db/repositories/projects-repository.ts";
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type {
   TrackerItem,
@@ -34,6 +35,8 @@ export type TicketLane = {
 
 /** One ticket of the list: the provider's fields as the cache holds them, plus what is read at the time of the question. */
 export type TicketListItem = {
+  /** The text key of the ticket inside its provider (`15` for a GitHub issue, `PROJ-7` for a Jira issue, #1040). */
+  key: string;
   number: number;
   kind: TrackerItem["kind"];
   state: TrackerItem["state"];
@@ -65,6 +68,8 @@ export type TicketListItem = {
 };
 
 export type TicketList = {
+  /** The provider of the project's ticket source: `github` or `jira` (#1040); the Issues tab words and links its tickets for it. */
+  provider: string;
   repositoryId: string;
   repo: string;
   items: TicketListItem[];
@@ -103,6 +108,29 @@ export type TrackerService = {
   ): Promise<SyncProgress>;
 };
 
+/**
+ * What reads a Jira project into the mirror (#1040): `src/jira/resync.ts`, which this module does not import (the two would form an import
+ * cycle; `shared.ts` wires them). Left out where the deployment has no Jira: a Jira project is then `TRACKER_SOURCE_NOT_MIRRORED`.
+ */
+export type JiraMirrorSync = {
+  /** The address of a ticket of the site (`<site>/browse/KEY`), or undefined when the site is not known. */
+  siteUrlOf(connectionId: string): Promise<string | undefined>;
+  sync(
+    target: {
+      repositoryId: string;
+      repoFullName: string;
+      connectionId: string;
+      projectKey: string;
+    },
+    options: {
+      maxPages?: number;
+      deadline?: number;
+      signal?: AbortSignal;
+      resume?: boolean;
+    },
+  ): Promise<SyncProgress>;
+};
+
 export type TrackerServiceDependencies = {
   repositories: Pick<RepositoriesRepository, "get">;
   integrations: Pick<IntegrationsRepository, "get">;
@@ -113,6 +141,7 @@ export type TrackerServiceDependencies = {
   >;
   runs: Pick<WorkflowRunsRepository, "summarizeTickets">;
   sync: TrackerSync;
+  jira?: JiraMirrorSync;
 };
 
 const MAX_ID_LENGTH = 128;
@@ -120,9 +149,12 @@ const MICRO = 1_000_000;
 /** The most numbers one `listItemsByNumbers` call looks at. */
 const NUMBERS_PER_READ = 200;
 
-/** `github:owner/repo#128`: the form of `workflow_runs.ticket_ref`. */
-export const ticketRefOf = (repo: string, number: number): string =>
-  `${TRACKER_PROVIDER}:${repo}#${number}`;
+/** `github:owner/repo#128`: the form of `workflow_runs.ticket_ref` (`<provider>:<repo>#<key>`). */
+export const ticketRefOf = (
+  repo: string,
+  key: string | number,
+  provider: string = TRACKER_PROVIDER,
+): string => `${provider}:${repo}#${key}`;
 
 export function createTrackerService(
   deps: TrackerServiceDependencies,
@@ -151,11 +183,26 @@ export function createTrackerService(
         "TRACKER_PROJECT_NOT_ACTIVE",
         "The repository has no active project, so its tickets are not mirrored.",
       );
-    return { repository, project };
+    // The mirror holds GitHub issues or, since #1040, the issues of the project's Jira project (the issues of the repository of a Jira
+    // project are not that project's tickets); a source it cannot read is not mirrored.
+    const jira = jiraSourceOf(project.ticketSource);
+    if (
+      jira === null
+        ? project.ticketSource.provider !== TRACKER_PROVIDER
+        : deps.jira === undefined
+    )
+      throw new TrackerError(
+        "TRACKER_SOURCE_NOT_MIRRORED",
+        "The tickets of this project do not come from a source whose tickets are mirrored here.",
+      );
+    return { repository, project, jira };
   }
 
-  async function stateOf(repositoryId: string): Promise<SyncState> {
-    const state = await deps.tracker.getSyncState(repositoryId);
+  async function stateOf(
+    repositoryId: string,
+    provider?: string,
+  ): Promise<SyncState> {
+    const state = await deps.tracker.getSyncState(repositoryId, provider);
     return {
       lastFullSyncAt: state?.lastFullSyncAt ?? null,
       inProgress: state?.cursor != null,
@@ -190,12 +237,19 @@ export function createTrackerService(
 
   return {
     async syncState(repositoryId) {
-      const { repository } = await resolve(repositoryId);
-      return stateOf(repository.id);
+      const { repository, jira } = await resolve(repositoryId);
+      return stateOf(repository.id, jira === null ? undefined : "jira");
     },
 
     async listIssues(repositoryId, query) {
-      const { repository } = await resolve(repositoryId);
+      const { repository, jira } = await resolve(repositoryId);
+      const siteUrl =
+        jira === null
+          ? undefined
+          : (await deps.jira?.siteUrlOf(jira.connectionId))?.replace(
+              /\/+$/,
+              "",
+            );
       const items = await deps.tracker.listItems(repository.id, {
         ...(query.state === "all" ? {} : { state: query.state }),
         limit: query.limit,
@@ -205,15 +259,20 @@ export function createTrackerService(
       const summaries = new Map(
         (
           await deps.runs.summarizeTickets(
-            items.map((item) => ticketRefOf(item.repo, item.number)),
+            items.map((item) =>
+              ticketRefOf(item.repo, item.key, item.provider),
+            ),
           )
         ).map((summary) => [summary.ticketRef, summary]),
       );
       return {
+        provider: jira === null ? TRACKER_PROVIDER : "jira",
         repositoryId: repository.id,
         repo: repository.fullName,
         items: items.map((item) => {
-          const summary = summaries.get(ticketRefOf(item.repo, item.number));
+          const summary = summaries.get(
+            ticketRefOf(item.repo, item.key, item.provider),
+          );
           const segment = item.kind === "pull_request" ? "pull" : "issues";
           return {
             number: item.number,
@@ -239,7 +298,13 @@ export function createTrackerService(
             checksState: item.checksState,
             updatedAt: item.updatedAt,
             syncedAt: item.syncedAt,
-            url: `${repository.url}/${segment}/${item.number}`,
+            key: item.key,
+            url:
+              jira === null
+                ? `${repository.url}/${segment}/${item.number}`
+                : siteUrl === undefined
+                  ? ""
+                  : `${siteUrl}/browse/${encodeURIComponent(item.key)}`,
             lane:
               summary?.activeRun == null
                 ? null
@@ -261,7 +326,36 @@ export function createTrackerService(
     },
 
     async sync(repositoryId, options = {}) {
-      const { repository, project } = await resolve(repositoryId);
+      const { repository, project, jira } = await resolve(repositoryId);
+      if (jira !== null && deps.jira !== undefined) {
+        // A Jira project is read through its connection (no installation of the repository is involved: it only holds the code).
+        try {
+          return await deps.jira.sync(
+            {
+              repositoryId: repository.id,
+              repoFullName: repository.fullName,
+              ...jira,
+            },
+            options,
+          );
+        } catch (error) {
+          const providerCode =
+            typeof (error as { providerCode?: unknown } | null)
+              ?.providerCode === "string"
+              ? String((error as { providerCode: string }).providerCode)
+              : error instanceof Error
+                ? error.name
+                : "unknown";
+          console.error(
+            `[tracker] sync of repository=${repository.id} (Jira) failed (${providerCode})`,
+          );
+          throw new TrackerError(
+            "TRACKER_SYNC_FAILED",
+            "Jira could not be asked, or refused. The sync stands where it was; start it again.",
+            { providerCode },
+          );
+        }
+      }
       const integration: Integration | undefined = await deps.integrations.get(
         repository.integrationId,
       );

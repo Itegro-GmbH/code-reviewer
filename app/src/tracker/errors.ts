@@ -10,6 +10,8 @@ export const TRACKER_ERROR_CODES = [
   "TRACKER_PROJECT_NOT_ACTIVE",
   /** The installation of the repository is suspended, removed or disconnected, so the platform cannot be asked. */
   "TRACKER_INTEGRATION_UNAVAILABLE",
+  /** The project's tickets are not GitHub issues (a Jira project, #1038): the mirror of Jira tickets is not built yet, and the issues of the repository are not its tickets. */
+  "TRACKER_SOURCE_NOT_MIRRORED",
   /** The query of the list is not one the route knows (`state`, `limit`, `offset`). */
   "TRACKER_REQUEST_INVALID",
   /** The request does not come from this site (cross-site `Sec-Fetch-Site` or a foreign `Origin`). */
@@ -24,6 +26,7 @@ export const TRACKER_ERROR_STATUS: Record<TrackerErrorCode, number> = {
   TRACKER_PROJECT_NOT_FOUND: 404,
   TRACKER_PROJECT_NOT_ACTIVE: 409,
   TRACKER_INTEGRATION_UNAVAILABLE: 409,
+  TRACKER_SOURCE_NOT_MIRRORED: 409,
   TRACKER_REQUEST_INVALID: 400,
   TRACKER_CROSS_SITE_REQUEST: 403,
   // Never a 502: a proxy swaps its body (#690).

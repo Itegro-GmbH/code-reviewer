@@ -63,6 +63,8 @@ export type TrackerItem = {
   provider: string;
   /** "owner/name". */
   repo: string;
+  /** #1035: the text key of the ticket inside its provider (`15` for a GitHub issue): with the repository and the provider the identity of the row. */
+  key: string;
   number: number;
   nodeId: string;
   kind: TrackerItemKind;
@@ -116,11 +118,18 @@ export type TrackerItemWrite = Pick<
   | "closes"
   | "updatedAt"
 > & {
+  /** The text key of the ticket (#1035); left out: the number as text, the key of a GitHub issue. */
+  key?: string;
   /**
    * The parent issue, or null for none; `undefined` leaves what the row has (a payload that does not carry the field says nothing about
    * it).
    */
   parentNumber?: number | null;
+  /**
+   * The status of the ticket as its platform names it (#1039: a Jira issue's status name, which the mirror keeps where GitHub keeps the
+   * board's Status); `undefined` leaves what the row has (GitHub's board status comes from the board's own deliveries), null or a name sets it.
+   */
+  boardStatus?: string | null;
   /**
    * #924: who a review of the pull request is asked from; `undefined` leaves what the row has (an issue, a comment event and the list of
    * the issues say nothing about it).
@@ -150,6 +159,12 @@ export type TrackerSyncState = {
   updatedAt: string;
 };
 
+/**
+ * The provider whose sync state this repository holds (`tracker_sync_state` is keyed by `(repository_id, provider)`, #1035). GitHub is
+ * the one ticket provider whose tickets are mirrored per repository; the second provider passes its own with each call.
+ */
+const SYNC_PROVIDER = "github";
+
 /** How long a tombstone (an item the provider deleted) is kept after the last time it was written: long enough for a late delivery. */
 export const TOMBSTONE_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -161,9 +176,14 @@ export type TrackerRepository = {
    * delivery; false for a stale one and for a repository that is not in the workspace.
    */
   upsertItem(repositoryId: string, item: TrackerItemWrite): Promise<boolean>;
+  /**
+   * The cached item with this number. `provider` (#1039): the primary key is `(repository, number)`, so rows of two providers (or two Jira
+   * projects) can claim one number in turn; with it, only a row of that provider is found.
+   */
   getItem(
     repositoryId: string,
     number: number,
+    provider?: string,
   ): Promise<TrackerItem | undefined>;
   /** The cached item the provider's id names, in any repository of the workspace; undefined for none and for a tombstone. */
   findItemByNode(nodeId: string): Promise<TrackerItem | undefined>;
@@ -179,12 +199,14 @@ export type TrackerRepository = {
   ): Promise<TrackerItem[]>;
   /**
    * Hides the item as of `at` (the provider's time of the deletion): the row stays as a tombstone, so a delivery older than `at` does not
-   * bring it back. Answers whether a visible item was hidden; false when there is none, or it changed after `at`.
+   * bring it back. Answers whether a visible item was hidden; false when there is none, or it changed after `at`. With `provider` only a
+   * row of that provider is hidden (see `getItem`).
    */
   deleteItem(
     repositoryId: string,
     number: number,
     at: string,
+    provider?: string,
   ): Promise<boolean>;
   /**
    * Sets the board status of the item the board names by its node id (any repository of the workspace) and notes that a board saw it;
@@ -193,13 +215,14 @@ export type TrackerRepository = {
   setBoardStatusByNode(nodeId: string, status: string | null): Promise<number>;
   /**
    * Sets the parent of an issue as of `at` (the provider's time of the change, the same clock as `updatedAt`); answers whether the issue is
-   * cached and was not changed after `at`.
+   * cached and was not changed after `at`. With `provider` only a row of that provider is changed (see `getItem`).
    */
   setParent(
     repositoryId: string,
     number: number,
     parent: number | null,
     at: string,
+    provider?: string,
   ): Promise<boolean>;
   setChecksState(
     repositoryId: string,
@@ -272,8 +295,32 @@ export type TrackerRepository = {
    * Removes the items not written since `before`; answers how many. Tombstones go only when they were written last more than
    * `TOMBSTONE_KEPT_MS` before `before`.
    */
-  removeNotWrittenSince(repositoryId: string, before: string): Promise<number>;
-  getSyncState(repositoryId: string): Promise<TrackerSyncState | undefined>;
+  removeNotWrittenSince(
+    repositoryId: string,
+    before: string,
+    /** Only the rows of this provider (#1040: the Jira resync); left out: every row of the repository, as before. */
+    provider?: string,
+  ): Promise<number>;
+  /**
+   * Removes every cached item and sync state of the repository that belongs to another provider than `keep` (#1039): a project that
+   * switches its tickets from GitHub issues to a Jira project (or back) must not show, or collide on the numbers with, the other provider's
+   * rows. Answers how many items went. The cache is rebuilt from the provider, so nothing is lost that cannot be read again.
+   */
+  clearOtherProviders(repositoryId: string, keep: string): Promise<number>;
+  /**
+   * Removes the Jira rows of the repository that are not of the Jira project `projectKey` (their key does not start with `KEY-`), or all of
+   * them when `projectKey` is null (#1039): a project that switches from one Jira project (or connection) to another keeps the row
+   * identity `(repository, number)`, so `OLD-7` would collide with `NEW-7`. Answers how many items went.
+   */
+  clearJiraItemsOutside(
+    repositoryId: string,
+    projectKey: string | null,
+  ): Promise<number>;
+  /** The sync state of the repository for `provider` (default GitHub; the Jira resync keeps its own, #1040). */
+  getSyncState(
+    repositoryId: string,
+    provider?: string,
+  ): Promise<TrackerSyncState | undefined>;
   /**
    * Starts a sync in one atomic step, unless one is under way: the state is written (this cursor and start, nothing else changes) only
    * when the repository has no sync, the last one ended, it has not moved since `staleBefore` (its `updatedAt` is bumped with every
@@ -297,6 +344,8 @@ export type TrackerRepository = {
       startedAt?: string | null;
       lastFullSyncAt?: string | null;
     },
+    /** The provider the state belongs to; default GitHub. */
+    provider?: string,
   ): Promise<void>;
 };
 
@@ -306,6 +355,8 @@ function itemFrom(row: Selectable<TrackerItemsTable>): TrackerItem {
     projectId: row.project_id,
     provider: row.provider,
     repo: row.repo,
+    // A row the version before #1035 wrote and the trigger has not reached has no key yet: it reads as its number.
+    key: row.key ?? String(row.number),
     number: row.number,
     nodeId: row.node_id,
     kind: row.kind as TrackerItemKind,
@@ -380,12 +431,16 @@ export function createTrackerRepository(
   options: { now?: () => Date } = {},
 ): TrackerRepository {
   const now = options.now ?? (() => new Date());
-  const own = (repositoryId: string, number: number) =>
-    db
+  const own = (repositoryId: string, number: number, provider?: string) => {
+    const update = db
       .updateTable("tracker_items")
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
       .where("number", "=", number);
+    return provider === undefined
+      ? update
+      : update.where("provider", "=", provider);
+  };
 
   /**
    * Changes the lists of a pull request in one transaction, with the row locked, so that two members acting at once, or an action and a
@@ -438,12 +493,14 @@ export function createTrackerRepository(
 
   const getSyncState: TrackerRepository["getSyncState"] = async (
     repositoryId,
+    provider = SYNC_PROVIDER,
   ) => {
     const row = await db
       .selectFrom("tracker_sync_state")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .where("repository_id", "=", repositoryId)
+      .where("provider", "=", provider)
       .executeTakeFirst();
     return row === undefined ? undefined : syncStateFrom(row);
   };
@@ -458,6 +515,10 @@ export function createTrackerRepository(
         item.parentNumber === undefined
           ? sql`tracker_items.parent_number`
           : sql`excluded.parent_number`;
+      const boardStatus =
+        item.boardStatus === undefined
+          ? sql`tracker_items.board_status`
+          : sql`excluded.board_status`;
       const requested =
         item.reviewRequestedFrom === undefined
           ? sql`tracker_items.review_requested_from`
@@ -471,21 +532,21 @@ export function createTrackerRepository(
           ? sql`case when excluded.updated_at > tracker_items.updated_at then null else tracker_items.review_acted_by end`
           : sql`tracker_items.review_acted_by`;
       const written = await sql<{ number: number }>`insert into tracker_items (
-          workspace_id, repository_id, project_id, provider, repo, number, node_id, kind, state, state_reason, type, title,
+          workspace_id, repository_id, project_id, provider, repo, key, number, node_id, kind, state, state_reason, type, title,
           body_excerpt, labels, assignees, board_status, parent_number, pull_requests, closes, checks_state, updated_at, synced_at,
           deleted_at, board_seen_at, review_requested_from
         )
-        select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.number}::integer, ${item.nodeId}::text,
+        select r.workspace_id, r.id, (select p.id from projects p where p.repository_id = r.id), ${item.provider}::text, ${item.repo}::text, ${item.key ?? String(item.number)}::text, ${item.number}::integer, ${item.nodeId}::text,
           ${item.kind}::text, ${item.state}::text, ${item.stateReason}::text, ${item.type}::text, ${item.title}::text,
-          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, null,
+          ${item.bodyExcerpt}::text, ${encodeJson(item.labels)}::text, ${encodeJson(item.assignees)}::text, ${item.boardStatus ?? null}::text,
           ${item.parentNumber ?? null}::integer, '[]', ${encodeJson(item.closes)}::text, null, ${item.updatedAt}::text, ${at}::text,
           null, null, ${item.reviewRequestedFrom === undefined ? null : encodeJson(item.reviewRequestedFrom)}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id, number) do update set
+        on conflict (repository_id, provider, key) do update set
           project_id = coalesce(excluded.project_id, tracker_items.project_id),
-          provider = excluded.provider,
           repo = excluded.repo,
+          number = excluded.number,
           node_id = excluded.node_id,
           kind = excluded.kind,
           state = excluded.state,
@@ -496,6 +557,7 @@ export function createTrackerRepository(
           labels = excluded.labels,
           assignees = excluded.assignees,
           closes = excluded.closes,
+          board_status = ${boardStatus},
           parent_number = ${parent},
           review_requested_from = ${requested},
           review_acted_by = ${acted},
@@ -515,15 +577,17 @@ export function createTrackerRepository(
       return false;
     },
 
-    async getItem(repositoryId, number) {
-      const row = await db
+    async getItem(repositoryId, number, provider) {
+      let query = db
         .selectFrom("tracker_items")
         .selectAll()
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("number", "=", number)
-        .where("deleted_at", "is", null)
-        .executeTakeFirst();
+        .where("deleted_at", "is", null);
+      if (provider !== undefined)
+        query = query.where("provider", "=", provider);
+      const row = await query.executeTakeFirst();
       return row === undefined ? undefined : itemFrom(row);
     },
 
@@ -568,8 +632,8 @@ export function createTrackerRepository(
       return rows.map(itemFrom);
     },
 
-    async deleteItem(repositoryId, number, at) {
-      const result = await own(repositoryId, number)
+    async deleteItem(repositoryId, number, at, provider) {
+      const result = await own(repositoryId, number, provider)
         .set({
           deleted_at: at,
           updated_at: at,
@@ -593,8 +657,8 @@ export function createTrackerRepository(
       return Number(result.numUpdatedRows);
     },
 
-    async setParent(repositoryId, number, parent, at) {
-      const result = await own(repositoryId, number)
+    async setParent(repositoryId, number, parent, at, provider) {
+      const result = await own(repositoryId, number, provider)
         .set({
           parent_number: parent,
           updated_at: at,
@@ -743,14 +807,46 @@ export function createTrackerRepository(
         .execute();
     },
 
-    async removeNotWrittenSince(repositoryId, before) {
-      const result = await db
+    async clearOtherProviders(repositoryId, keep) {
+      const items = await db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .executeTakeFirst();
+      await db
+        .deleteFrom("tracker_sync_state")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "<>", keep)
+        .execute();
+      return Number(items.numDeletedRows);
+    },
+
+    async clearJiraItemsOutside(repositoryId, projectKey) {
+      let query = db
+        .deleteFrom("tracker_items")
+        .where("workspace_id", "=", workspaceId)
+        .where("repository_id", "=", repositoryId)
+        .where("provider", "=", "jira");
+      // `starts_with`, not `like`: a project key may hold an underscore.
+      if (projectKey !== null)
+        query = query.where(
+          sql<boolean>`not starts_with(coalesce(key, ''), ${`${projectKey}-`})`,
+        );
+      const result = await query.executeTakeFirst();
+      return Number(result.numDeletedRows);
+    },
+
+    async removeNotWrittenSince(repositoryId, before, provider) {
+      let live = db
         .deleteFrom("tracker_items")
         .where("workspace_id", "=", workspaceId)
         .where("repository_id", "=", repositoryId)
         .where("synced_at", "<", before)
-        .where("deleted_at", "is", null)
-        .executeTakeFirst();
+        .where("deleted_at", "is", null);
+      if (provider !== undefined) live = live.where("provider", "=", provider);
+      const result = await live.executeTakeFirst();
       // A tombstone is not counted: it is an item that was already gone. It stays for a while for the deliveries that come late.
       await db
         .deleteFrom("tracker_items")
@@ -778,11 +874,11 @@ export function createTrackerRepository(
       // condition. A repository that is not in the workspace is never inserted.
       const claimed = await sql<
         Selectable<TrackerSyncStateTable>
-      >`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
+      >`insert into tracker_sync_state (repository_id, provider, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, ${SYNC_PROVIDER}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${claim.cursor}::text, ${claim.startedAt}::text, null, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id) do update set
+        on conflict (repository_id, provider) do update set
           project_id = coalesce(excluded.project_id, tracker_sync_state.project_id),
           "cursor" = excluded."cursor",
           started_at = excluded.started_at,
@@ -801,7 +897,7 @@ export function createTrackerRepository(
       return { claimed: false, state: await getSyncState(repositoryId) };
     },
 
-    async saveSyncState(repositoryId, state) {
+    async saveSyncState(repositoryId, state, provider = SYNC_PROVIDER) {
       const at = formatTimestamp(now());
       const columns = [
         sql`project_id = coalesce(excluded.project_id, tracker_sync_state.project_id)`,
@@ -816,12 +912,12 @@ export function createTrackerRepository(
           : [sql`last_full_sync_at = excluded.last_full_sync_at`]),
         sql`updated_at = excluded.updated_at`,
       ];
-      await sql`insert into tracker_sync_state (repository_id, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
-        select r.id, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
+      await sql`insert into tracker_sync_state (repository_id, provider, workspace_id, project_id, "cursor", started_at, last_full_sync_at, updated_at)
+        select r.id, ${provider}::text, r.workspace_id, (select p.id from projects p where p.repository_id = r.id), ${state.cursor ?? null}::text, ${state.startedAt ?? null}::text,
           ${state.lastFullSyncAt ?? null}::text, ${at}::text
         from repositories r
         where r.id = ${repositoryId} and r.workspace_id = ${workspaceId}
-        on conflict (repository_id) do update set ${sql.join(columns)}
+        on conflict (repository_id, provider) do update set ${sql.join(columns)}
         where tracker_sync_state.workspace_id = ${workspaceId}`.execute(db);
     },
   };

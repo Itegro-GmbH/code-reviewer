@@ -19,6 +19,8 @@ export const SIGNED_STATE_PURPOSES = [
   "github-install",
   "github-authorize",
   "github-picker",
+  // Connecting a Jira Cloud site to a workspace (src/jira/): the round trip through Atlassian's consent page (#1037).
+  "jira-connect",
 ] as const;
 export type SignedStatePurpose = (typeof SIGNED_STATE_PURPOSES)[number];
 

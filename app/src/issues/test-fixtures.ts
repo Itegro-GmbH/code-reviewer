@@ -9,6 +9,7 @@ export function ticket(
   overrides: Partial<TicketListItem> = {},
 ): TicketListItem {
   return {
+    key: String(number),
     number,
     kind: "issue",
     state: "open",
@@ -37,6 +38,7 @@ export function ticketList(
   overrides: Partial<TicketList> = {},
 ): TicketList {
   return {
+    provider: "github",
     repositoryId: "repo-1",
     repo: "acme/widgets",
     items,

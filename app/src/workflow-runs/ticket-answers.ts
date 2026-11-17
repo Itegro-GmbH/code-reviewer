@@ -41,8 +41,46 @@ export type TicketAnswerResult =
    */
   | { outcome: "not_taken"; reason: "refused" | "not_waiting" | "stale" };
 
+/**
+ * An answer and the ticket it is on. A GitHub comment names the issue by `number` (the provider and key are then `github` and that number);
+ * a comment of another ticket source names it by `ticket` (#1040: Jira, `PROJ-12`) and carries the number at the end of the key as `number`.
+ * `repo` is always the repository the run works in: for Jira the one the code lives in, whose name is the container of the run's `ticket_ref`.
+ */
+export type TicketAnswerInput = TicketAnswer & {
+  ticket?: { provider: string; key: string };
+};
+
+/**
+ * What the Jira webhook hands over for a comment `/answer …` (#1040), as `jira/webhook-handler.ts` states it (`JiraAnswerTaker`; the two
+ * are the same shape, this module may not import `jira`).
+ */
+export type JiraAnswerTakerShape = {
+  answer(
+    deliveryId: string,
+    answer: {
+      repositoryId: string;
+      issueKey: string;
+      comment: {
+        id: string;
+        createdAt: string;
+        author: { accountId: string; name: string };
+      };
+      choice?: number;
+      text?: string;
+      raw: string;
+    },
+  ): Promise<
+    | { outcome: "answered"; runId: string }
+    | { outcome: "no_run" }
+    | { outcome: "not_taken"; reason: string }
+  >;
+};
+
 export type TicketAnswers = {
-  answer(deliveryId: string, answer: TicketAnswer): Promise<TicketAnswerResult>;
+  answer(
+    deliveryId: string,
+    answer: TicketAnswerInput,
+  ): Promise<TicketAnswerResult>;
 };
 
 export type TicketAnswersDependencies = {
@@ -65,7 +103,7 @@ export type TicketAnswersDependencies = {
    */
   reply?(
     repositoryId: string,
-    answer: TicketAnswer,
+    answer: TicketAnswerInput,
     text: string,
     key: string,
   ): Promise<void>;
@@ -122,7 +160,7 @@ export function createTicketAnswers(
 ): TicketAnswers {
   async function reply(
     repositoryId: string,
-    answer: TicketAnswer,
+    answer: TicketAnswerInput,
     text: string,
   ): Promise<void> {
     try {
@@ -142,12 +180,16 @@ export function createTicketAnswers(
       const repository = await deps.activeRepository(answer.repo);
       if (repository === undefined) return { outcome: "no_run" };
       let stale = false;
+      const ticket = answer.ticket ?? {
+        provider: "github",
+        key: String(answer.number),
+      };
       const candidates = [
         ...(await deps.listWaitingForTicket(
           formatTicketRef({
-            provider: "github",
+            provider: ticket.provider,
             repo: answer.repo.fullName,
-            number: answer.number,
+            key: ticket.key,
           }),
         )),
         ...(await deps.listWaitingWithoutTicket(repository.id)),
@@ -159,7 +201,7 @@ export function createTicketAnswers(
         const ask = parseStepAsk(waiting?.ask ?? null);
         if (waiting === undefined || ask === undefined || ask.state !== "open")
           continue;
-        if (placeOf(run, steps)?.number !== answer.number) continue;
+        if (placeOf(run, steps)?.key !== ticket.key) continue;
         // A comment from before the question is none to it; another run on the ticket may still be the one it was meant for.
         if (
           isOlderThanQuestion(answer, {

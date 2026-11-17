@@ -11,6 +11,9 @@ import {
 import { fakeGithubAppClient } from "./fake-client.ts";
 import { loadGithubAppConfig } from "./config.ts";
 import { createGithubAppProvider } from "./provider.ts";
+import { createGithubClientSource } from "./client-source.ts";
+import { createGithubTicketProvider } from "./ticket-provider.ts";
+import { createTicketProviderRegistry } from "../../ticket-provider.ts";
 import type { TrackerChange } from "../../types.ts";
 import { fakeIntegration } from "../../../test-support/fake-integration-provider.ts";
 import {
@@ -20,6 +23,7 @@ import {
 import type { TrackerMirror } from "../../../tracker/mirror.ts";
 import {
   createGithubAppWebhookHandler,
+  type StatusStarter,
   type WorkflowStarter,
 } from "../../../webhooks/github-app-handler.ts";
 
@@ -33,6 +37,7 @@ function setup(
   options: {
     mirror?: TrackerMirror | undefined;
     workflows?: WorkflowStarter | undefined;
+    statuses?: StatusStarter | undefined;
   } = {},
 ) {
   const provider = createGithubAppProvider({
@@ -44,6 +49,14 @@ function setup(
   const logs: string[] = [];
   const handler = createGithubAppWebhookHandler({
     registry: { resolve: () => provider } as never,
+    tickets: createTicketProviderRegistry([
+      createGithubTicketProvider(
+        createGithubClientSource({
+          config: loadGithubAppConfig(testGithubAppEnv()),
+          client: fakeGithubAppClient({}),
+        }),
+      ),
+    ]),
     integrations: { findByExternalId: async () => integration },
     deliveries: {
       claim: async () => ({ status: "claimed", token: "claim-1" }),
@@ -65,6 +78,7 @@ function setup(
       ...(options.workflows === undefined
         ? {}
         : { workflows: options.workflows }),
+      ...(options.statuses === undefined ? {} : { statuses: options.statuses }),
     }),
     automatic: {},
     logger: {
@@ -186,6 +200,7 @@ describe("the events only the ticket mirror reads", () => {
     });
     const handler = createGithubAppWebhookHandler({
       registry: { resolve: () => provider } as never,
+      tickets: createTicketProviderRegistry([]),
       integrations: {
         findByExternalId: async () => ({ ...integration, status: "disabled" }),
       },
@@ -331,5 +346,103 @@ describe("the events the ticket mirror shares with the reviews and the workflows
     ]);
     // The project has no settings in this setup: the review path ran after the mirror and said so.
     expect(answer.body.outcome).toBe("project_not_active");
+  });
+});
+
+describe("a ticket moved into a board status (#1036)", () => {
+  const none = { matched: 0, started: 0, existing: 0, skipped: 0, busy: 0 };
+
+  // #1036-T01
+  it("hands the move to the status trigger after the mirror took it, and answers workflow_runs_started when a run was written", async () => {
+    const recorded = mirror();
+    const start = vi.fn(async () => ({ ...none, matched: 1, started: 1 }));
+    const { send, completed } = setup({
+      mirror: recorded.port,
+      statuses: { start },
+    });
+
+    const answer = await send(
+      "projects_v2_item",
+      webhookFixture("projects_v2_item.edited"),
+    );
+
+    expect(answer).toEqual({
+      status: 202,
+      body: { status: "accepted", outcome: "workflow_runs_started" },
+    });
+    expect(recorded.changes.map((change) => change.kind)).toEqual([
+      "board_status_changed",
+    ]);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.any(String), {
+      nodeId: "I_kwDOAAA12",
+      from: "Todo",
+      to: "In Progress",
+      projectId: "PVT_1",
+      integrationId: "integration-1",
+      actor: { login: "bob", externalId: "1002" },
+    });
+    expect(completed).toEqual(["workflow_runs_started"]);
+  });
+
+  // #1036-T02
+  it("answers tracker_updated when no workflow starts", async () => {
+    const start = vi.fn(async () => none);
+    const { send } = setup({ mirror: mirror().port, statuses: { start } });
+
+    expect(
+      (
+        await send(
+          "projects_v2_item",
+          webhookFixture("projects_v2_item.edited"),
+        )
+      ).body.outcome,
+    ).toBe("tracker_updated");
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts nothing for the other board events (an item added or archived says no status), and nothing without a status starter", async () => {
+    const start = vi.fn(async () => ({ ...none, matched: 1, started: 1 }));
+    const withStarter = setup({ mirror: mirror().port, statuses: { start } });
+    const without = setup({ mirror: mirror().port });
+
+    await withStarter.send(
+      "projects_v2_item",
+      webhookFixture("projects_v2_item.deleted"),
+    );
+    const answer = await without.send(
+      "projects_v2_item",
+      webhookFixture("projects_v2_item.edited"),
+    );
+
+    expect(start).not.toHaveBeenCalled();
+    expect(answer.body.outcome).toBe("tracker_updated");
+  });
+
+  it("fails the delivery when the runs cannot be written, so that GitHub can redeliver it, and never leaks the error", async () => {
+    const { send, released, completed, logs } = setup({
+      mirror: mirror().port,
+      statuses: {
+        start: async () => {
+          throw Object.assign(new Error("connection string with secret"), {
+            code: "ECONNRESET",
+          });
+        },
+      },
+    });
+
+    const answer = await send(
+      "projects_v2_item",
+      webhookFixture("projects_v2_item.edited"),
+    );
+
+    expect(answer).toEqual({
+      status: 503,
+      body: { error: "WEBHOOK_PROCESSING_FAILED" },
+    });
+    expect(released).toHaveLength(1);
+    expect(completed).toEqual([]);
+    expect(logs.join("\n")).toContain("ECONNRESET");
+    expect(logs.join("\n")).not.toContain("secret");
   });
 });

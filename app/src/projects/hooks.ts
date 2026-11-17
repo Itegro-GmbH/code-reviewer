@@ -14,6 +14,8 @@ export type ProjectDeactivatedEvent = {
 export type ProjectActivatedEvent = {
   projectId: string;
   repositoryId: string;
+  /** The provider of the project's ticket source (`github`, `jira`, #1038): what the mirror starts a sync for is the GitHub issues. */
+  ticketProvider: string;
 };
 
 export interface ProjectHooks {
@@ -22,6 +24,13 @@ export interface ProjectHooks {
    * never fail the activation, so a rejection is logged and dropped. The ticket mirror starts its first full sync here (#923).
    */
   onProjectActivated?(event: ProjectActivatedEvent): Promise<void>;
+
+  /**
+   * Called after a project was switched off (the transaction committed, nothing is rolled back by it): what it does must never fail the
+   * deactivation, so a rejection is logged and dropped. The Jira webhook of a project that had a Jira source is deleted here (#1039); a
+   * deletion that fails is repeated by the nightly job.
+   */
+  afterProjectDeactivated?(event: ProjectDeactivatedEvent): Promise<void>;
 
   /**
    * Called in the transaction that switched the project off, so everything it writes commits or

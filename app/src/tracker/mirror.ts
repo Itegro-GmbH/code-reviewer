@@ -3,7 +3,7 @@
 // Applies what a webhook delivery says to the ticket mirror (#923): one `TrackerChange` of the provider becomes a write of the cache of ONE
 // workspace. The cache is a read model: a change that cannot be applied (the repository has no project, the ticket is not cached) is
 // `not_mirrored` and never an error, and nothing here is the source of truth: the next full sync rebuilds what a missed delivery left
-// behind. Only a repository with an active project is mirrored, the same rule that decides which repositories are reviewed.
+// behind. Only a repository with an active project whose tickets are its GitHub issues is mirrored (the code repository of a Jira project is not, #1038).
 import type { RepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import type { TrackerRepository } from "../db/repositories/tracker-repository.ts";
 import type {
@@ -31,10 +31,11 @@ export type TrackerMirror = {
 export type TrackerMirrorDependencies = {
   repositories: Pick<RepositoriesRepository, "findByExternalId" | "get">;
   projects: {
-    hasActiveProject(
+    /** The provider of the ticket source of the active project of the repository, undefined for none (`ProjectService.activeTicketProvider`). */
+    activeTicketProvider(
       integrationId: string,
       repositoryExternalId: string,
-    ): Promise<boolean>;
+    ): Promise<string | undefined>;
   };
   tracker: Pick<
     TrackerRepository,
@@ -84,8 +85,13 @@ export function createTrackerMirror(
       repo.externalId,
     );
     if (stored === undefined || !stored.active) return undefined;
+    // The mirror holds the GitHub issues of a repository for the project whose tickets they are. The code repository of a Jira project
+    // has issues too, but they are not that project's tickets (#1038): its Jira rows are written elsewhere (#1039).
     if (
-      !(await deps.projects.hasActiveProject(integration.id, repo.externalId))
+      (await deps.projects.activeTicketProvider(
+        integration.id,
+        repo.externalId,
+      )) !== TRACKER_PROVIDER
     )
       return undefined;
     return stored.id;
@@ -162,11 +168,17 @@ export function createTrackerMirror(
       switch (change.kind) {
         case "item_changed": {
           const { item } = change;
-          const before = await tracker.getItem(repositoryId, item.number);
+          const before = await tracker.getItem(
+            repositoryId,
+            item.number,
+            TRACKER_PROVIDER,
+          );
           // A delivery older than what the cache holds (replayed, or overtaken by a newer one) changes nothing, not even the checks.
           const written = await tracker.upsertItem(repositoryId, {
             provider: TRACKER_PROVIDER,
             repo: change.repo.fullName,
+            // The key of a GitHub issue is its number as text (#1035).
+            key: String(item.number),
             ...item,
           });
           if (!written) return "not_mirrored";
@@ -205,6 +217,7 @@ export function createTrackerMirror(
             repositoryId,
             change.number,
             change.at,
+            TRACKER_PROVIDER,
           ))
             ? "updated"
             : "not_mirrored";
@@ -214,6 +227,7 @@ export function createTrackerMirror(
             change.child,
             change.parent,
             change.at,
+            TRACKER_PROVIDER,
           ))
             ? "updated"
             : "not_mirrored";
@@ -221,7 +235,11 @@ export function createTrackerMirror(
           let updated = false;
           let state: string | null | undefined;
           for (const number of change.pullRequests) {
-            const item = await tracker.getItem(repositoryId, number);
+            const item = await tracker.getItem(
+              repositoryId,
+              number,
+              TRACKER_PROVIDER,
+            );
             // Only an open pull request has checks that matter.
             if (
               item === undefined ||

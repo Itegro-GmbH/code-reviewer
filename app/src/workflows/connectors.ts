@@ -24,7 +24,7 @@ import {
  * - `input`: `{{trigger.input.…}}`, what the caller of a manual trigger hands in (its type is the schema's);
  * - `issue`: `{{trigger.issue}}` or `{{trigger.issue.number}}`, the issue that started the run (not its title, body or labels: whoever
  *   opened the issue wrote those);
- * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way;
+ * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way (a Jira ticket is `{{trigger.ticket}}`, #1040);
  * - `defaultBranch`: `{{trigger.repo.defaultBranch}}` or `{{trigger.ticket.repo.defaultBranch}}`;
  * - `branch`: `{{<agent step>.branch}}`, the branch the platform made;
  * - `pullRequest` (#917): `{{<action>.number}}` of a `pullRequest.open` action, the pull request the platform opened.
@@ -70,6 +70,16 @@ export type ConnectorSpec = {
 const ISSUE: ValueType = {
   kind: "oneOf",
   options: [objectOf({ number: INTEGER }), INTEGER],
+};
+
+/**
+ * A ticket (#1040): what an issue is, or the ticket object with its text key, for a platform that does not number its tickets (Jira: `PROJ-7`).
+ * `{{trigger.ticket}}` (which has the key and the number) fits; the engine hands the number on where there is one (GitHub, as before) and the
+ * key where there is none. No text literal: a key is never typed into a lane, the ticket of the run is named by a reference.
+ */
+const TICKET: ValueType = {
+  kind: "oneOf",
+  options: [objectOf({ key: STRING }), objectOf({ number: INTEGER }), INTEGER],
 };
 
 const ISSUE_ROOTS: readonly TargetRoot[] = ["issue", "ticket", "input"];
@@ -124,7 +134,7 @@ export const TICKET_COMMENT: ConnectorSpec = {
   name: "ticket.comment",
   description: "Writes a comment on a ticket.",
   inputs: {
-    ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
+    ticket: { type: TICKET, required: true, target: ISSUE_ROOTS },
     body: { type: STRING, required: true },
   },
   output: GITHUB_ISSUE_COMMENT.output,
@@ -134,7 +144,7 @@ export const TICKET_LABELS: ConnectorSpec = {
   name: "ticket.labels",
   description: "Adds and removes labels on a ticket.",
   inputs: {
-    ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
+    ticket: { type: TICKET, required: true, target: ISSUE_ROOTS },
     add: { type: listOf(STRING), required: false, target: LABEL_ROOTS },
     remove: { type: listOf(STRING), required: false, target: LABEL_ROOTS },
   },
@@ -173,7 +183,7 @@ export const TICKET_SET_STATUS: ConnectorSpec = {
   name: "ticket.setStatus",
   description: "Moves a ticket to a column of the board of its project.",
   inputs: {
-    ticket: { type: ISSUE, required: true, target: ISSUE_ROOTS },
+    ticket: { type: TICKET, required: true, target: ISSUE_ROOTS },
     board: { type: STRING, required: false, target: [] },
     status: { type: STRING, required: true, target: [] },
   },

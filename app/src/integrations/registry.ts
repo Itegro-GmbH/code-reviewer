@@ -9,6 +9,12 @@ import { GithubAppConfigError } from "./providers/github-app/errors.ts";
 import type { IntegrationProvider } from "./provider.ts";
 import type { GithubAppConfig } from "./providers/github-app/config.ts";
 import { createGithubAppProvider } from "./providers/github-app/provider.ts";
+import { createGithubClientSource } from "./providers/github-app/client-source.ts";
+import { createGithubTicketProvider } from "./providers/github-app/ticket-provider.ts";
+import {
+  createTicketProviderRegistry,
+  type TicketProviderRegistry,
+} from "./ticket-provider.ts";
 import type { CapabilitySet } from "../capabilities/capability.ts";
 import { getCapabilities } from "../capabilities/shared.ts";
 import type { GithubAppClientOptions } from "./providers/github-app/client.ts";
@@ -131,25 +137,49 @@ async function loadServerGithubAppConfig(): Promise<GithubAppConfig> {
 }
 
 /**
- * The registry of this app: the GitHub App provider. The settings are read every time GitHub is used, not
- * when the app loads and not once: a missing setting fails that call with GITHUB_APP_CONFIG_INVALID and
- * breaks nothing else, and a webhook secret or key that was replaced counts from the next call.
+ * The providers of this app, built from one set of GitHub App settings and one client (#1035): the GitHub App as a git provider and as
+ * the ticket provider of GitHub issues. The settings are read every time GitHub is used, not when the app loads and not once: a missing
+ * setting fails that call with GITHUB_APP_CONFIG_INVALID and breaks nothing else, and a webhook secret or key that was replaced counts
+ * from the next call.
  */
+export function createDefaultProviders(options: DefaultRegistryOptions = {}): {
+  integrations: IntegrationRegistry;
+  tickets: TicketProviderRegistry;
+} {
+  const config = options.loadConfig ?? loadServerGithubAppConfig;
+  const source = createGithubClientSource({
+    config,
+    ...(options.githubClient === undefined
+      ? {}
+      : { clientOptions: options.githubClient }),
+  });
+  return {
+    integrations: createIntegrationRegistry({
+      github_app: createGithubAppProvider(
+        {
+          config,
+          capabilities: options.capabilities ?? (() => getCapabilities()),
+          ...(options.githubClient === undefined
+            ? {}
+            : { clientOptions: options.githubClient }),
+        },
+        source,
+      ),
+    }),
+    tickets: createTicketProviderRegistry([createGithubTicketProvider(source)]),
+  };
+}
+
+/** The git providers of this app: the GitHub App. */
 export function createDefaultIntegrationRegistry(
   options: DefaultRegistryOptions = {},
 ): IntegrationRegistry {
-  const config = options.loadConfig ?? loadServerGithubAppConfig;
-  return createIntegrationRegistry({
-    github_app: createGithubAppProvider({
-      config,
-      capabilities: options.capabilities ?? (() => getCapabilities()),
-      ...(options.githubClient === undefined
-        ? {}
-        : { clientOptions: options.githubClient }),
-    }),
-  });
+  return createDefaultProviders(options).integrations;
 }
 
-// The MVP has exactly one provider, the GitHub App. A new provider adds its entry above and nowhere
-// else.
-export const integrationRegistry = createDefaultIntegrationRegistry();
+// The MVP has exactly one git provider, the GitHub App, and one ticket provider, GitHub issues through the same App. (The read-only ticket provider of Jira Cloud, #1039, lives with the workflow engine's wiring, `workflow-runs/shared.ts`: `integrations` may not import `jira`, an import cycle.) A new provider adds its
+// entry above and nowhere else.
+const defaults = createDefaultProviders();
+export const integrationRegistry = defaults.integrations;
+/** The ticket providers of this app (#1035): what a project's ticket source names. */
+export const ticketProviderRegistry = defaults.tickets;

@@ -40,6 +40,11 @@ vi.mock("@/profiles/shared", () => ({
   })),
 }));
 
+// #1036: and the status names of its project's board for a status trigger (#1038: or of its Jira project; one wiring for both).
+vi.mock("@/jira/source-shared", () => ({
+  statusNamesFor: vi.fn(() => async () => []),
+}));
+
 import { WorkflowError } from "@/workflows/errors";
 import { WorkflowRunError } from "@/workflow-runs/errors";
 import WorkflowsPage from "./page.tsx";

@@ -9,13 +9,17 @@ import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-de
 import { getDatabase } from "../db/startup.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import { getGithubCredentialStore } from "../github-config/shared.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import {
+  integrationRegistry,
+  ticketProviderRegistry,
+} from "../integrations/registry.ts";
 import { getIntegrationSync } from "../integrations/sync/shared.ts";
 import {
   createGithubAppWebhookHandler,
   type WebhookHandler,
   type TicketAnswerTaker,
   type TrackerWriter,
+  type StatusStarter,
   type WorkflowStarter,
 } from "./github-app-handler.ts";
 import { projectServiceFor } from "../projects/shared.ts";
@@ -47,6 +51,8 @@ export function getJobQueueReviewTriggerIntake(
 export function getGithubAppWebhookHandler(
   options: {
     workflowsFor?: (workspaceId: string) => WorkflowStarter;
+    /** #1036: what starts the workflows a move of a ticket into a board status starts in one workspace. */
+    statusesFor?: (workspaceId: string) => StatusStarter;
     /** #920: what takes the answer of a comment `/answer ...` in one workspace. */
     answersFor?: (workspaceId: string) => TicketAnswerTaker;
     /** What writes the changes of tickets of one workspace into the ticket mirror (#923); the route passes it in like `workflowsFor`. */
@@ -56,6 +62,7 @@ export function getGithubAppWebhookHandler(
   const db = getDatabase();
   return createGithubAppWebhookHandler({
     registry: integrationRegistry,
+    tickets: ticketProviderRegistry,
     integrations: createIntegrationDirectory(db),
     deliveries: createWebhookDeliveriesRepository(db),
     sync: getIntegrationSync(),
@@ -73,6 +80,9 @@ export function getGithubAppWebhookHandler(
       ...(options.workflowsFor === undefined
         ? {}
         : { workflows: options.workflowsFor(workspaceId) }),
+      ...(options.statusesFor === undefined
+        ? {}
+        : { statuses: options.statusesFor(workspaceId) }),
       ...(options.answersFor === undefined
         ? {}
         : { answers: options.answersFor(workspaceId) }),

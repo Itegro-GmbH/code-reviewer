@@ -368,6 +368,10 @@ export type TrackerChange =
       nodeId: string;
       status: string | null;
       projectId?: string;
+      /** The status the item had before (`null`: none); absent when the delivery does not say (#1036: the status trigger reads it). */
+      from?: string | null;
+      /** Who moved it, when the delivery names them (#1036: shown as the actor of a run the move starts, decides nothing). */
+      actor?: { login: string; externalId: string };
     }
   /**
    * An item was added to a board, restored on it, archived or deleted: the delivery names no status, and the ticket may be on other boards,
@@ -516,3 +520,9 @@ export type IntegrationEvent =
   | { kind: "invalid_payload"; reason: string }
   /** Genuine but of no interest for reviews; `reason` is for logs, never for branching. */
   | { kind: "ignored"; reason: string };
+
+/**
+ * The ticket providers a ticket reference and a project's ticket source may name (#1035): GitHub (its issues) and, since #1038, Jira
+ * Cloud (epic #1034). A caller that has registered another provider (a test) passes its own list.
+ */
+export const TICKET_PROVIDERS = ["github", "jira"] as const;

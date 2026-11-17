@@ -30,7 +30,7 @@ import type {
   TrackerItemWrite,
   TrackerRepository,
 } from "../db/repositories/tracker-repository.ts";
-import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { TicketProvider } from "../integrations/ticket-provider.ts";
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import { TRACKER_PROVIDER } from "./mirror.ts";
 
@@ -102,7 +102,7 @@ export type TrackerSyncDependencies = {
     | "claimSync"
     | "saveSyncState"
   >;
-  provider: Pick<IntegrationProvider, "readTrackerPage">;
+  provider: Pick<TicketProvider, "readTrackerPage">;
   /**
    * The board the active project of a repository chose (undefined: none). A board is the organization's, so its items can name a
    * ticket of another repository: that ticket takes the status only when its repository has no chosen board or reads this one (#947).
@@ -290,8 +290,7 @@ export function createTrackerSync(deps: TrackerSyncDependencies): TrackerSync {
         ) {
           pages += 1;
           const page = await read(
-            integration,
-            repo,
+            { integration, repo },
             cursor.phase === "board"
               ? {
                   phase: "board",

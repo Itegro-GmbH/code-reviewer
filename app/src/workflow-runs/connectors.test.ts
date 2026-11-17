@@ -13,7 +13,11 @@ import {
   resolveActionInputs,
   specOf,
 } from "./connectors.ts";
-import { TICKET_SET_STATUS } from "../workflows/connectors.ts";
+import {
+  TICKET_COMMENT,
+  TICKET_LABELS,
+  TICKET_SET_STATUS,
+} from "../workflows/connectors.ts";
 import { TemplateError, type RunValues } from "./templates.ts";
 
 const values: RunValues = {
@@ -201,5 +205,69 @@ describe("the board of ticket.setStatus (#922)", () => {
       ),
     ).toEqual({ ticket: 5, status: "Done" });
     expect(TICKET_SET_STATUS.inputs.board?.required).toBe(false);
+  });
+});
+
+describe("the ticket input of the ticket actions (#1040)", () => {
+  const ticketValues = (key: string, number: number): RunValues => ({
+    trigger: {
+      input: {},
+      ticket: { key, number, title: "T", repo: { fullName: "acme/shop" } },
+    },
+    steps: {},
+  });
+
+  // #1040-T01
+  it("hands on the text key of a Jira ticket, which has no number, when a lane names the ticket object", () => {
+    const jira = ticketValues("PROJ-7", 0);
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket}}", body: "Hi" },
+        TICKET_COMMENT,
+        jira,
+      ),
+    ).toEqual({ ticket: "PROJ-7", body: "Hi" });
+    expect(
+      resolveActionInputs(
+        { ticket: "{{trigger.ticket}}", add: ["x"] },
+        TICKET_LABELS,
+        jira,
+      ),
+    ).toMatchObject({ ticket: "PROJ-7" });
+  });
+
+  // #1040-T01
+  it("keeps what a GitHub lane always had: the number of the issue, for the object, the number and a literal", () => {
+    const github = ticketValues("15", 15);
+    for (const ticket of [
+      "{{trigger.ticket}}",
+      "{{trigger.ticket.number}}",
+      15,
+    ])
+      expect(
+        resolveActionInputs({ ticket, body: "Hi" }, TICKET_COMMENT, github),
+      ).toEqual({ ticket: 15, body: "Hi" });
+  });
+
+  // #1040-T01
+  it("holds the issue of a github.issue action to a whole number, and takes no text literal as a ticket", () => {
+    expect(
+      failure(() =>
+        resolveActionInputs(
+          { issue: "{{trigger.ticket}}", body: "Hi" },
+          GITHUB_ISSUE_COMMENT,
+          ticketValues("PROJ-7", 0),
+        ),
+      ),
+    ).toBeInstanceOf(ActionInputError);
+    expect(
+      failure(() =>
+        resolveActionInputs(
+          { ticket: "PROJ-7", body: "Hi" },
+          TICKET_COMMENT,
+          ticketValues("PROJ-7", 0),
+        ),
+      ),
+    ).toBeInstanceOf(ActionInputError);
   });
 });

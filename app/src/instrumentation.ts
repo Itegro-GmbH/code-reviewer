@@ -45,6 +45,19 @@ export async function register(): Promise<void> {
   warnAboutRunnerToken(process.env);
   const { logOperatorApiState } = await import("./operator-api/startup.ts");
   logOperatorApiState(process.env);
+  const { jiraStateLine } = await import("./jira/config.ts");
+  console.info(jiraStateLine(process.env));
+  // The ticket actions of the workflow engine reach Jira from every entry point of the process (#1040); the engine's modules may not import
+  // `jira` (an import cycle), so the provider is registered once here. It opens nothing: the connection is looked up with each call.
+  const { registerTicketProvider } =
+    await import("./integrations/ticket-provider.ts");
+  const { jiraMirrorSyncFor, jiraTicketProvider } =
+    await import("./jira/shared.ts");
+  registerTicketProvider(jiraTicketProvider);
+  // The same for the full read of a Jira project into the ticket mirror (the first read, the nightly resync and the button).
+  const { registerJiraMirrorSync } =
+    await import("./tracker/jira-mirror-sync.ts");
+  registerJiraMirrorSync(jiraMirrorSyncFor);
   const { warnAboutDebounce } = await import("./webhooks/debounce-config.ts");
   warnAboutDebounce(process.env);
 }

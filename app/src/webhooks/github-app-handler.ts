@@ -41,6 +41,7 @@ import { hasSafeMessage } from "../integrations/errors.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 import type { IntegrationSyncService } from "../integrations/sync/service.ts";
 import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { TicketProviderRegistry } from "../integrations/ticket-provider.ts";
 import type {
   Integration,
   IntegrationEvent,
@@ -73,6 +74,9 @@ import type { ReviewTriggerIntake } from "./review-trigger-intake.ts";
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
 
 const TYPE: IntegrationType = "github_app";
+
+/** The ticket provider whose events the GitHub webhook carries (#1035): the issues, projects and checks of the installation. */
+const TICKET_PROVIDER = "github";
 
 /** The events that can start a review or change what the app knows about the installation. */
 const REVIEW_EVENTS: ReadonlySet<string> = new Set([
@@ -139,6 +143,36 @@ export type WorkflowStarter = {
 };
 
 /**
+ * What starts the workflows a move of a ticket into a board status starts (#1036): `StatusTrigger` of `src/workflow-runs/`, which this module
+ * does not import, as for `WorkflowStarter`. It reads the ticket the board item names from the ticket mirror, so it is asked after the mirror
+ * took the delivery.
+ */
+export type StatusStarter = {
+  start(
+    deliveryId: string,
+    move: {
+      nodeId: string;
+      from: string | null;
+      to: string | null;
+      projectId?: string;
+      integrationId: string;
+      actor?: { login: string; externalId: string };
+    },
+  ): Promise<{
+    /** The workflows whose trigger is this move. */
+    matched: number;
+    /** The runs this delivery wrote now. */
+    started: number;
+    /** The runs an earlier try of the same delivery had written. */
+    existing: number;
+    /** Matched workflows that start nothing (a step of a kind the engine does not run, a ticket the platform no longer has). */
+    skipped: number;
+    /** Matched workflows that already have a running run for the ticket. */
+    busy: number;
+  }>;
+};
+
+/**
  * What takes the answer a comment `/answer ...` gives to the question a workflow run waits for (#920): `TicketAnswers` of
  * `src/workflow-runs/`, which this module does not import, as for `WorkflowStarter`.
  */
@@ -182,6 +216,11 @@ export type WorkspaceCollaborators = {
    * nothing (`ignored`).
    */
   workflows?: WorkflowStarter;
+  /**
+   * Starts the workflows a move of a ticket into a board status starts (#1036). Left out where a server has no workflow engine: such a move
+   * is then only written into the ticket mirror.
+   */
+  statuses?: StatusStarter;
   /** Takes the answer of a comment `/answer ...` (#920). Left out where a server has no workflow engine: such a comment is then `ignored`. */
   answers?: TicketAnswerTaker;
   /** The ticket mirror of the workspace (#923). Left out where a server has none: the events it follows are then used for what else they do. */
@@ -190,6 +229,8 @@ export type WorkspaceCollaborators = {
 
 export type GithubAppWebhookDeps = {
   registry: IntegrationRegistry;
+  /** The ticket providers (#1035): where the ticket mirror reads what a delivery changed. Required, so a server that forgets it fails the typecheck. */
+  tickets: TicketProviderRegistry;
   /**
    * Finds the integration an installation id belongs to, in any workspace: the delivery names the
    * installation before anybody knows the workspace, and the integration says which one it is.
@@ -366,25 +407,29 @@ export function createGithubAppWebhookHandler(
    * otherwise it is logged by its code and the delivery goes on with what else it does.
    */
   async function mirrorTickets(
-    provider: IntegrationProvider,
     integration: Integration,
     eventName: string,
     deliveryId: string,
     request: Request,
     strict: boolean,
-  ): Promise<boolean> {
+  ): Promise<{ updated: boolean; change?: TrackerChange }> {
     const tracker = deps.workspace(integration.workspaceId).tracker;
-    if (tracker === undefined || provider.parseTrackerChange === undefined)
-      return false;
+    const provider = deps.tickets.get(TICKET_PROVIDER);
+    if (tracker === undefined || provider?.parseTrackerChange === undefined)
+      return { updated: false };
     try {
       const parsed = await provider.parseTrackerChange(integration, request);
       if (parsed.kind !== "change") {
         logger.info(
           `[webhook] delivery=${deliveryId} the ticket mirror takes nothing from it: ${parsed.reason}`,
         );
-        return false;
+        return { updated: false };
       }
-      return (await tracker.apply(integration, parsed.change)) === "updated";
+      return {
+        updated:
+          (await tracker.apply(integration, parsed.change)) === "updated",
+        change: parsed.change,
+      };
     } catch (error) {
       logger.error(
         `[webhook] delivery=${deliveryId} event=${eventName} the ticket mirror could not be updated (${errorCodeOf(error)})`,
@@ -394,7 +439,46 @@ export function createGithubAppWebhookHandler(
           `the ticket mirror could not be updated (${errorCodeOf(error)})`,
           503,
         );
-      return false;
+      return { updated: false };
+    }
+  }
+
+  /**
+   * A move of a ticket into a board status starts the workflows that wait for it (#1036). Nobody is asked who moved it: the board decides
+   * who may. A failure is thrown (503): the delivery is not completed and a redelivery finds the runs that were written.
+   */
+  async function startStatusWorkflows(
+    integration: Integration,
+    deliveryId: string,
+    change: TrackerChange,
+  ): Promise<number> {
+    if (change.kind !== "board_status_changed") return 0;
+    const { statuses } = deps.workspace(integration.workspaceId);
+    if (statuses === undefined) return 0;
+    try {
+      const started = await statuses.start(deliveryId, {
+        nodeId: change.nodeId,
+        from: change.from ?? null,
+        to: change.status,
+        integrationId: integration.id,
+        ...(change.projectId === undefined
+          ? {}
+          : { projectId: change.projectId }),
+        ...(change.actor === undefined ? {} : { actor: change.actor }),
+      });
+      if (started.matched > 0)
+        logger.info(
+          `[webhook] delivery=${deliveryId} a ticket moved to a status that ${started.matched} workflow(s) wait for: started=${started.started} existing=${started.existing} skipped=${started.skipped} busy=${started.busy}`,
+        );
+      return started.started + started.existing;
+    } catch (error) {
+      logger.error(
+        `[webhook] delivery=${deliveryId} the workflows of a status change could not be started (${errorCodeOf(error)})`,
+      );
+      throw new WebhookProcessingError(
+        `the workflows of a status change could not be started (${errorCodeOf(error)})`,
+        503,
+      );
     }
   }
 
@@ -431,14 +515,21 @@ export function createGithubAppWebhookHandler(
     // failure of the mirror is logged there; an event only the mirror uses fails the delivery, so that GitHub can redeliver it.
     let mirrored = false;
     if (integration !== undefined && TRACKER_EVENTS.has(eventName)) {
-      mirrored = await mirrorTickets(
-        provider,
+      const taken = await mirrorTickets(
         integration,
         eventName,
         deliveryId,
         request,
         TRACKER_ONLY_EVENTS.has(eventName),
       );
+      mirrored = taken.updated;
+      // A ticket moved into a board status (#1036) starts the workflows that wait for it, after the mirror holds the new status.
+      if (
+        eventName === "projects_v2_item" &&
+        taken.change !== undefined &&
+        (await startStatusWorkflows(integration, deliveryId, taken.change)) > 0
+      )
+        return "workflow_runs_started";
       if (TRACKER_ONLY_EVENTS.has(eventName))
         return mirrored ? "tracker_updated" : "ignored";
     }

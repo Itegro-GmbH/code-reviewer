@@ -68,6 +68,8 @@ async function rowsOfEveryOldTable(
       table.name === "profile_versions" ||
       table.name === "runners" ||
       table.name === "runner_registration_tokens" ||
+      table.name === "jira_connections" ||
+      table.name === "jira_webhooks" ||
       table.name === "job_rings"
     )
       continue;

@@ -1,0 +1,137 @@
+# Jira Cloud connection
+
+A workspace connects Jira Cloud sites to the factory with OAuth 2.0 (3LO) and the factory's own Atlassian app (epic #1034,
+issue #1037). This folder is the connection and, since #1038, the reads a project's ticket source needs (the projects and the workflow statuses of a
+site, `projects.ts`); the inbound webhook and the mirror (#1039) and the write-back and the full read (#1040) call Jira through `JiraTokens.request`. How an owner registers the Atlassian app:
+[`docs/jira-cloud-setup.md`](../../../docs/jira-cloud-setup.md).
+
+| File                                                                     | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.ts`                                                              | `readAtlassianConfig(env)` (`ATLASSIAN_CLIENT_ID` and `ATLASSIAN_CLIENT_SECRET`, both or the feature is off; the test-only addresses need `ALLOW_TEST_ATLASSIAN_ENDPOINTS`), `JIRA_SCOPES`, `jiraCallbackUrl`, the start-up problems and the one start line                                                                                                                                                                                                                              |
+| `errors.ts`                                                              | The stable codes: refusals, why a connection is broken (`jira_refresh_refused`), what a call can fail with, what a flow can end with                                                                                                                                                                                                                                                                                                                                                     |
+| `client.ts`                                                              | The calls to Atlassian (consent address, code exchange, refresh, accessible resources, the account): values, never exceptions; a failure holds nothing of the answer                                                                                                                                                                                                                                                                                                                     |
+| `projects.ts`                                                            | `createJiraProjectReader` (#1038): `listProjects` (the projects of the connection's site, page by page, cut at `MAX_PROJECT_PAGES`, `complete` says so) and `listStatuses` (the workflow statuses of one project, all issue types together, each name once, Jira's own spelling and order); values, never exceptions (`jira_forbidden`, `jira_project_not_found`, plus the call codes)                                                                                                   |
+| `project-source.ts`                                                      | `jiraProjectsVia` (the projects of a connection's site for the dialog; `jiraProjectVia`, one project by its key for the check of a creation; a connection of another workspace is none, a broken one asks nothing of Atlassian) and `statusNamesVia` (the status names the lane editor offers: Jira's own for a Jira source, the board's for GitHub)                                                                                                                                     |
+| `source-shared.ts`, `source-setup.ts`, `connection-choices.ts`           | The wiring on the running server: `jiraProjectsFor`, `statusNamesFor`, the Setup tab's site name and statuses, the connections the dialog offers. They live here because the `projects` module may not import `jira` (an import cycle; `src/ci/import-cycles`)                                                                                                                                                                                                                           |
+| `tokens.ts`                                                              | `createJiraTokens`: seals and opens the pair, refreshes before a call, `request` (a call to a site's Jira API that renews on 401 and repeats once)                                                                                                                                                                                                                                                                                                                                       |
+| `service.ts`                                                             | `createJiraService`: `startConnect`, `completeCallback`, the choice among several sites (`readChoice`, `choose`), `remove`, `list`                                                                                                                                                                                                                                                                                                                                                       |
+| `http.ts`, `shared.ts`, `assemble.ts`                                    | The handlers of the routes below, the wiring of the running server, the wiring over a database (tests)                                                                                                                                                                                                                                                                                                                                                                                   |
+| `rate-limits.ts`                                                         | The shared counters of "Connect Jira" (`start`, `callback`; per person and for the instance)                                                                                                                                                                                                                                                                                                                                                                                             |
+| `webhook-handler.ts`, `webhook-shared.ts`                                | `POST /api/webhooks/jira` (#1039): `createJiraWebhookHandler(deps)` (the steps below) and its wiring on the running server (`getJiraWebhookHandler`; the route file hands it the workflow engine's `jiraStatusTriggerFor`)                                                                                                                                                                                                                                                               |
+| `webhook-verify.ts`                                                      | How a delivery is verified: the secret of the registration in the address (`newWebhookSecret`, `hashWebhookSecret`) and Atlassian's bearer token when there is one (`verifyJiraDelivery`); pure                                                                                                                                                                                                                                                                                          |
+| `webhook-events.ts`, `issue.ts`, `adf.ts`                                | What a delivery says (`parseJiraDelivery`: created, updated with the `status` item of the changelog, deleted, comment), a Jira issue as the neutral ticket (`readJiraIssue`: key, title = summary, body, status name, type, assignee, labels, parent, link) and the description as plain text (`adfToText`); pure                                                                                                                                                                        |
+| `mirror.ts`                                                              | `createJiraMirror`: a delivery written into `tracker_items` with `provider = 'jira'` under the code repository                                                                                                                                                                                                                                                                                                                                                                           |
+| `webhooks-api.ts`, `webhook-registrar.ts`, `webhook-registrar-shared.ts` | The dynamic webhook API of Jira (register, extend, delete) and `reconcile(projectId)`: brings a project's webhook to what its source says (register, extend before the 30 days run out, register again, delete); idempotent, never throws what Jira answers                                                                                                                                                                                                                              |
+| `project-hooks.ts`                                                       | What switching a project on or off does for Jira: clears the mirror rows of the other provider, registers or deletes the webhook (wired by the two routes that switch projects)                                                                                                                                                                                                                                                                                                          |
+| `issue-reader.ts`, `ticket-provider.ts`                                  | One issue read through a connection (`GET /rest/api/3/issue/{key}`), and the `TicketProvider` of `jira` (`readTicket`, and since #1040 `commentOnTicket`, `updateTicketComment`, `changeTicketLabels`, `setTicketStatus`, `boardless`; `jira/shared.ts` exports it as `jiraTicketProvider`, which `instrumentation.ts` registers for the process with `registerTicketProvider`, because `workflow-runs` may not import `jira`: an import cycle)                                          |
+| `ticket-writer.ts`, `markdown-adf.ts`                                    | What a lane writes to an issue (#1040): comments (our Markdown as ADF, the hidden markers kept as the comment property `factory.markers`, the factory's own comment found again by it and its author), the edit of that comment, labels (a label with a space gets a hyphen) and the transition to a status (looked up in the transitions of the issue, `status_unreachable` and `status_unknown` as answers); a failure is a `TicketProviderError` with a stable code and words of ours |
+| `issue-search.ts`, `resync.ts`                                           | The full read of a project (#1040): JQL `project = "KEY"` by `POST /rest/api/3/search/jql` paged by `nextPageToken`, written into the mirror with the rules of the GitHub sync (resumable, rebuild rule); reached through `TrackerService.sync` (`jiraMirrorSyncFor`, registered at start in `tracker/jira-mirror-sync.ts`)                                                                                                                                                              |
+| `ui/`                                                                    | The Jira card of the Integrations tab (`jira-section.tsx`), its data (`jira-page.ts`), the calls (`api.ts`) and the words (`messages.ts`)                                                                                                                                                                                                                                                                                                                                                |
+
+The table is `jira_connections` (`src/db/migrations/20261114160000_create_jira_connections.ts`), read and written only through
+`src/db/repositories/jira-connections-repository.ts`, created for one workspace.
+
+## The flow
+
+1. `POST /api/w/:workspace/jira/connect` (Owner or Admin; `{ connectionId }` to connect an existing one again): a signed
+   `jira-connect` state (workspace, person, single-use nonce, 10 minutes, bound to the browser session) and the address of
+   Atlassian's consent page (`audience`, the scopes, the callback, `prompt=consent`). No PKCE: Atlassian documents none for a web
+   app's 3LO flow; the client secret authenticates the code exchange.
+2. `GET /api/jira/callback?code&state`: the state is used up **first**; a forged, used, expired or foreign state refuses at once and
+   nothing is exchanged. The person must still be an Owner or Admin. Then the code is exchanged, the Jira sites of the grant
+   (`accessible-resources`, only entries with `read:jira-work`) and the account (`/me`) are read:
+   - one site: the connection is saved (the same site again renews that row in place);
+   - several: the sealed grant waits in the workspace's secrets (`jira_pending_grant`, 15 minutes, for that person) and
+     `POST /api/w/:workspace/jira/choose { cloudId }` connects one; one round makes one connection, because the tokens of a grant
+     are one rotating pair. `choose` takes the waiting grant in one statement (`delete ... returning`), so a double click stores
+     the pair once; an expired grant is removed when it is read (there is no sweep of grants nobody reads yet);
+   - none: `jira_no_site`; a reconnect whose grant does not cover the connection's site: `jira_site_mismatch`.
+     The browser always lands on a fixed page: `/w/<slug>/settings/integrations?jira=<code>`, or `/` when no workspace can be named.
+3. `GET /api/w/:workspace/jira/connections` (the action `start_implementer_task`, today every member): the connections as `JiraConnectionView`, never a token.
+4. `DELETE /api/w/:workspace/jira/connections/:id` (Owner or Admin): removes the connection unless a project's ticket source names
+   it, then `409 jira_connection_in_use` with the projects (`{ id, name }`; the name is the repository's full name).
+
+## Tokens
+
+- The pair `{ accessToken, refreshToken }` is ONE JSON sealed in the row (`tokens_*` columns, AAD: table, row id, `tokens`), so a
+  refresh replaces both in one statement. `token_version` counts the writes; a write replaces only the version it read (compare
+  and swap).
+- `tokens.use(id)` / `tokens.request(id, path)`: renew when the access token ends within 5 minutes; a 401 renews and repeats once.
+- Atlassian rotates the refresh token on every refresh, so the refresh of a connection is serialized: the row is locked
+  (`withLockedTokens`, `select ... for no key update`) from the read of the pair to its write. A request that needs a refresh while
+  another one runs waits, then reads the pair the first stored and uses it; it never sends a refresh token that is used up.
+  The lock is held across the one call to the token endpoint (10 s timeout). It is `for no key update` on purpose: a removal
+  (`for update`) and another refresh wait for it, a project that is pointed at the connection (`for key share`, below) does not.
+- Only `error: "invalid_grant"` from the token endpoint (the refresh token is revoked, expired or used) makes the connection
+  `broken` with `jira_refresh_refused`. `invalid_client`, `unauthorized_client`, any other 400/401/403, a timeout and a 5xx are
+  `jira_unavailable`: nothing is marked and the operator's log has `JIRA_TOKEN_ENDPOINT_REJECTED` (status and a short code, never
+  a body), so a wrong client id or secret cannot break every connection for good. A pair this process cannot decrypt (another
+  `APP_SECRET`) is `jira_unavailable` too, with `JIRA_TOKENS_UNREADABLE` in the log. A broken connection makes no call to
+  Atlassian; a person connects it again (the settings page offers Reconnect).
+- No answer, page, state, log line or error holds a token, the authorization code or the client secret (`#1037-T04` searches the
+  answers, redirects, rows and logs of a whole life of a connection for the tokens the fake issued).
+
+## The ticket source (#1038)
+
+A project whose tickets are a Jira project stores `{ "provider": "jira", "repositoryId", "connectionId", "projectKey" }` in `projects.ticket_source`
+(`repositoryId` is the GitHub repository the code lives in; there is no board). `removeUnlessUsed` reads exactly `provider` and `connectionId`.
+
+- **The lock.** The one code that writes such a source is `ProjectsRepository.activate(repositoryId, { jira })`. It takes the connection's row
+  `select ... for key share` (in the workspace of the repository, so another workspace's connection is none) in the transaction that writes the
+  source, after the repository's own lock. A removal (`for update`, then the check of the projects) therefore waits for the write and finds
+  the project; an assignment that comes after a removal finds no row (`jira_connection_not_found`). `for key share` is the weakest lock that
+  `for update` waits for, and a token refresh (`for no key update` across the call to Atlassian) does not conflict with it: an activation never
+  waits behind a refresh while it holds the repository's lock. The orders are tested (`projects-repository.integration.test.ts`: "takes the
+  connection's row for share…", "is refused when a removal holds the connection…", "does not wait for a token refresh…", "lets a removal and a
+  second refresh wait for a refresh in flight…").
+- **What the dialog and the route check** before that: `POST /api/w/:workspace/projects` with `ticketSource: { provider: "jira", connectionId,
+projectKey }` looks at the repository first (unknown, unavailable, or a project that is on already: `PROJECT_REPOSITORY_NOT_FOUND`,
+  `PROJECT_REPOSITORY_UNAVAILABLE`, `PROJECT_INTEGRATION_UNAVAILABLE`, `PROJECT_ALREADY_EXISTS`, and no call to Jira), then asks Jira for that one
+  project (`GET /rest/api/3/project/{key}`, `JiraProjectReader.getProject`: one call, never the site's list) and refuses a key the site
+  does not have or the account cannot see (`unknown_jira_project`, no key of the site in the answer), a connection the workspace does not have
+  (`unknown_connection`; another workspace's is none), a broken one (`PROJECT_JIRA_CONNECTION_BROKEN`, 409) and a site that cannot be asked
+  (`PROJECT_JIRA_UNAVAILABLE`, 503). The body may name the review lane and "Issue to PR (status)" (#1040); "Issue to PR" starts from a label, which a Jira
+  project does not offer (`lane_not_for_jira`). The status lane's four status names are taken from the project's workflow where one fits (`laneStatusesFromNames`). The projects are also `GET /api/w/:workspace/jira/connections/:connectionId/projects` (`manage_projects`), for the dialog.
+- **What GitHub does not do for such a project:** the label and the status of a GitHub issue or board start none of its lanes (also not one it
+  kept from when its tickets were GitHub issues), the mirror writes none of the code repository's issues, and a run does not start from a GitHub
+  ticket reference (`WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED`).
+- **The statuses** are `JiraProjectReader.listStatuses`, read when a page is built: the lane editor's picker for `ticket.statusChanged`
+  (`statusNamesFor` in `source-shared.ts`) and the Setup tab of the project. Jira's own names, never mapped; a site that cannot be
+  asked, or a broken connection, offers none and the editor takes a typed name.
+- **The ticket mirror (#1039, #1040):** the webhook keeps it current and the full read (`resync.ts`) starts and rebuilds it: the first read after creating a
+  project (`POST /projects`, `PUT .../repositories/:id/project`), the nightly resync and the "Resync" button; the issues of the code repository are not that
+  project's tickets. The cockpit's Issues tab lists the rows with their keys.
+
+## The inbound webhook (#1039)
+
+The factory registers **its own dynamic webhook** per project with a Jira source (`webhook-registrar.ts`; nothing to do in Jira) and Jira calls
+`POST /api/webhooks/jira?w=<registration>&s=<secret>`. The route is public (the secret is the credential) and a hosted deployment without the
+factory answers 404 for it. The table is `jira_webhooks` (`src/db/migrations/20261114180000_create_jira_webhooks.ts`), written through
+`jira-webhooks-repository.ts` (one workspace) and found by a delivery through `jira-webhook-directory-repository.ts` (instance level, read only).
+How a delivery is verified, the expiry and the limit of five webhooks per connection: [`docs/jira-cloud-setup.md`](../../../docs/jira-cloud-setup.md#5-webhooks-nothing-to-do-in-jira).
+
+| Step | What                                                                                                                                                                   | Answer                                                                                                |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 1    | The Atlassian app is configured (the client secret verifies the bearer token)                                                                                          | `404` `JIRA_WEBHOOK_NOT_CONFIGURED`                                                                   |
+| 2    | The registration `w` exists and is not being removed, `s` is its secret (or its pending one), a bearer token verifies; once one did, a delivery without one is refused | `401` `JIRA_WEBHOOK_UNAUTHORIZED` (one answer for every cause; the cause is in the log)               |
+| 3    | Size: 1 MiB at most (the body is read only now, after step 2)                                                                                                          | `413` `JIRA_WEBHOOK_BODY_TOO_LARGE`                                                                   |
+| 4    | The body is JSON                                                                                                                                                       | `400` `JIRA_WEBHOOK_BODY_NOT_JSON`                                                                    |
+| 5    | An event the factory does not follow, a payload without an issue, a delivery that names other webhook ids                                                              | `200` `ignored`                                                                                       |
+| 6    | Claim `jira-<registration>-<identifier>` in `webhook_deliveries` (a delivery without a usable `X-Atlassian-Webhook-Identifier`: `b-<hash of the body>`, never a `4xx`) | `200` `duplicate`; `409` `JIRA_WEBHOOK_IN_PROGRESS`                                                   |
+| 7    | The registration's project is active, its source is exactly this Jira project, the issue is of it                                                                      | `200` `ignored` otherwise                                                                             |
+| 8    | The issue is written into the mirror (`updatedAt` not ahead of the clock, labels bounded); a failure is logged and goes on                                             |                                                                                                       |
+| 9    | A change of status starts the lanes that wait for it ([`workflow-runs/jira-status-trigger.ts`](../workflow-runs/jira-status-trigger.ts)); a failure releases the claim | `200` `workflow_runs_started` / `tracker_updated` / `ignored`; `503` `JIRA_WEBHOOK_PROCESSING_FAILED` |
+
+A delivery only the mirror uses (no status change) whose mirror write failed is answered 503 so that Jira retries it. Answers carry only a code or
+`{ "status": "accepted", "outcome": ... }`; no log line holds the secret, the address, a token or a body.
+
+**What a Jira project has.** The status trigger, the mirror (webhook and full read), the ticket read when a run starts (`jira:<owner>/<repo>#PROJ-12` for a manual start; the
+repository is the one the code lives in) and, since #1040, **the write-back**: `ticket.comment`, `ticket.labels` and `ticket.setStatus` act through `ticket-writer.ts` (see its row above and
+[`docs/workflows.md`](../../../docs/workflows.md#the-status-trigger)), the branch, title and body of a lane's pull request carry the key and the ticket address, and a comment that begins with
+`/answer` answers the question of the run that waits on the issue.
+
+| Step | What                                                                                                                                                                                                                                                                                                                                                                   |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 10   | A `comment_created` whose text begins with `/answer`, from a person (`accountType` `atlassian` or none, never an app), goes to `workspace.answers` (`workflow-runs/shared.ts` `jiraAnswersFor`), which finds the run by its `ticket_ref` and answers it; the delivery's outcome is `ticket_answered`, or `no_answer_taken` (not final: a redelivery looks at it again) |
+
+The label trigger (`ticket.labeled`) has no Jira front on purpose: the factory follows the status changes of a Jira project (epic #1034), and labels carry the factory's own state (`agent working`).

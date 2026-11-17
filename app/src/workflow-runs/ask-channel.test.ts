@@ -8,6 +8,7 @@ import type {
   StoredWorkflowRun,
 } from "../db/repositories/workflow-runs-repository.ts";
 import type { IntegrationProvider } from "../integrations/provider.ts";
+import type { TicketProvider } from "../integrations/ticket-provider.ts";
 import type { Integration, RepoRef } from "../integrations/types.ts";
 import type { StepAsk } from "./ask.ts";
 import { serializeAsk } from "./ask.ts";
@@ -131,7 +132,7 @@ describe("where a question is shown", () => {
     expect(ticketNumberOf(run({ issue: { number: 11 } }, "garbage"))).toBe(11);
     expect(
       placeOf(run({ repo: "x" }, "github:acme/widgets#12"), [opened(5)]),
-    ).toEqual({ number: 12, kind: "ticket" });
+    ).toEqual({ key: "12", kind: "ticket" });
   });
 
   // #920-T131
@@ -151,11 +152,11 @@ describe("where a question is shown", () => {
       ]),
     ).toBeUndefined();
     expect(placeOf(run({ ticket: { number: 7 } }), [opened(5)])).toEqual({
-      number: 7,
+      key: "7",
       kind: "ticket",
     });
     expect(placeOf(run({ repo: "x" }), [opened(5)])).toEqual({
-      number: 5,
+      key: "5",
       kind: "pull_request",
     });
     expect(placeOf(run({ repo: "x" }), [])).toBeUndefined();
@@ -184,11 +185,36 @@ function harness(
     changeIssueLabels,
     ...options.provider,
   } as unknown as IntegrationProvider;
+  // The ticket of a run is written through the ticket provider (#1035); this one hands the same calls to the recording fakes above.
+  const { commentOnIssue: comment, updateIssueComment: edit } = provider;
+  const { changeIssueLabels: label } = provider;
+  const tickets: TicketProvider = {
+    id: "github",
+    ...(comment === undefined
+      ? {}
+      : {
+          commentOnTicket: (scope, key, body, o) =>
+            comment(scope.integration, scope.repo, Number(key), body, o),
+        }),
+    ...(edit === undefined
+      ? {}
+      : {
+          updateTicketComment: (scope, _key, commentId, body) =>
+            edit(scope.integration, scope.repo, commentId, body),
+        }),
+    ...(label === undefined
+      ? {}
+      : {
+          changeTicketLabels: (scope, key, change) =>
+            label(scope.integration, scope.repo, Number(key), change),
+        }),
+  };
+  const integration = { id: "i-1" } as unknown as Integration;
   const channel = createGithubAskChannel({
-    targetOf: async () => ({
-      provider,
-      integration: { id: "i-1" } as unknown as Integration,
-      repo: REPO,
+    targetOf: async () => ({ provider, integration, repo: REPO }),
+    ticketTargetOf: async () => ({
+      provider: tickets,
+      scope: { integration, repo: REPO },
     }),
     listSteps: async () => (options.ticket === false ? [opened(12)] : []),
     memberLogins: async () => ["alice", "bob"],

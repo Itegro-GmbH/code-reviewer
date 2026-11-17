@@ -11,6 +11,8 @@ function entry(
   overrides: {
     status?: ProjectListEntry["status"];
     integrationStatus?: ProjectListEntry["repository"]["integration"]["status"];
+    /** The provider of the project's ticket source (#1038); left out: a project the entry does not describe. */
+    provider?: string;
   } = {},
 ): ProjectListEntry {
   return {
@@ -27,7 +29,19 @@ function entry(
         status: overrides.integrationStatus ?? "active",
       },
     },
-    project: null,
+    project:
+      overrides.provider === undefined
+        ? null
+        : ({
+            id: `p-${id}`,
+            repositoryId: id,
+            active: true,
+            ticketSource: {
+              provider: overrides.provider,
+              repositoryId: id,
+              board: null,
+            },
+          } as ProjectListEntry["project"]),
     status: overrides.status ?? "active",
   };
 }
@@ -101,6 +115,30 @@ describe("the projects of the nightly resync", () => {
     ]);
   });
 
+  // #1038
+  it("takes a project on a Jira project (#1040) and leaves out one whose tickets the mirror cannot read", async () => {
+    const { run, getSyncState } = setup(
+      {
+        "w-1": [
+          entry("r-github", { provider: "github" }),
+          entry("r-jira", { provider: "jira" }),
+          entry("r-other", { provider: "linear" }),
+        ],
+      },
+      [{ workspaceId: "w-1", status: "active" }],
+    );
+
+    expect((await run()).map((target) => target.repositoryId)).toEqual([
+      "r-github",
+      "r-jira",
+    ]);
+    // The sync state of a Jira project is its own (provider `jira`), not GitHub's.
+    expect(getSyncState.mock.calls).toEqual([
+      ["w-1", "r-github", undefined],
+      ["w-1", "r-jira", "jira"],
+    ]);
+  });
+
   // #932-T31
   it("reads the projects and the sync state through the workspace of each project, once per workspace", async () => {
     const { run, listProjects, getSyncState } = setup(
@@ -117,9 +155,9 @@ describe("the projects of the nightly resync", () => {
 
     expect(listProjects.mock.calls.map(([w]) => w)).toEqual(["w-1", "w-2"]);
     expect(getSyncState.mock.calls).toEqual([
-      ["w-1", "r-1"],
-      ["w-1", "r-2"],
-      ["w-2", "r-3"],
+      ["w-1", "r-1", undefined],
+      ["w-1", "r-2", undefined],
+      ["w-2", "r-3", undefined],
     ]);
   });
 

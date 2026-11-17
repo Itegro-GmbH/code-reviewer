@@ -24,6 +24,7 @@ describe("which paths are public", () => {
     "/api/operator/v1/workspaces/abc/entitlements",
     "/api/operator/v1/entitlements/default",
     "/api/webhooks/github-app",
+    "/api/webhooks/jira",
     // #497: a payment provider signs its webhooks; the route checks the signature itself.
     "/api/billing/webhook",
     // #319-T10: the platform's cron has no session; CRON_SECRET is its credential.
@@ -32,6 +33,7 @@ describe("which paths are public", () => {
     "/api/internal/dispatch-sweep",
     // #932: the nightly resync of the ticket mirror, with the same credential.
     "/api/internal/tracker-resync",
+    "/api/internal/jira-webhooks",
   ])("lets %s through without a session", (pathname) => {
     expect(isPublicPath(pathname)).toBe(true);
   });
@@ -117,6 +119,7 @@ describe("which paths are public", () => {
       { path: "/api/internal/repository-sync", match: "exact" },
       { path: "/api/internal/dispatch-sweep", match: "exact" },
       { path: "/api/internal/tracker-resync", match: "exact" },
+      { path: "/api/internal/jira-webhooks", match: "exact" },
     ]);
   });
 });

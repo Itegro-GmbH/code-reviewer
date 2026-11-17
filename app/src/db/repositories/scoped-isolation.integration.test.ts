@@ -43,6 +43,8 @@ import { createWorkflowRunsRepository } from "./workflow-runs-repository.ts";
 import { implementerDeliveryId } from "../implementer-job-shape.ts";
 import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
+import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
+import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
@@ -82,6 +84,8 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     tracker: createTrackerRepository(db, workspaceId),
     agentProfiles: createProfilesRepository(db, workspaceId),
     runners: createRunnersRepository(db, workspaceId),
+    jira: createJiraConnectionsRepository(db, workspaceId),
+    jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -623,7 +627,32 @@ async function seed(
       revoked_at: null,
     })
     .execute();
+  // A Jira Cloud connection (#1037) in every workspace: the other workspace's is there to be read, broken and removed.
+  await repos.jira.save({
+    id: `jira-${tag}`,
+    cloudId: `cloud-${tag}`,
+    siteUrl: `https://${tag}.atlassian.net`,
+    siteName: tag,
+    accountId: `account-${tag}`,
+    accountName: `Account ${tag}`,
+    scopes: ["read:jira-work"],
+    sealed: { ciphertext: `c-${tag}`, nonce: `n-${tag}`, keyVersion: 1 },
+    accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+    connectedBy: null,
+  });
+  // A Jira webhook (#1039) in every workspace: the other workspace's is there to be read, changed and removed.
+  await repos.jiraWebhooks.create({
+    id: `jira-webhook-${tag}`,
+    projectId: `jira-project-${tag}`,
+    connectionId: `jira-${tag}`,
+    projectKey: "PROJ",
+    secretHash: `hash-${tag}`,
+  });
   return {
+    jiraWebhookId: `jira-webhook-${tag}`,
+    jiraWebhookProjectId: `jira-project-${tag}`,
+    jiraConnectionId: `jira-${tag}`,
+    jiraCloudId: `cloud-${tag}`,
     runnerId: `runner-${tag}`,
     environment: created.environment,
     workflow: secondVersion.workflow,
@@ -847,6 +876,18 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .execute(),
     runners: await db
       .selectFrom("runners")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    jiraConnections: await db
+      .selectFrom("jira_connections")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    jiraWebhooks: await db
+      .selectFrom("jira_webhooks")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
@@ -1416,6 +1457,12 @@ const CASES: Case[] = [
     run: (a) => a.workspaceSecrets.names(),
     expectAnswer: (answer) =>
       expect(answer).toEqual(["llm_api_key", "llm_api_key.fakeai"]),
+  },
+  {
+    name: "workspaceSecrets.take",
+    run: (a) => a.workspaceSecrets.take("llm_api_key"),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ binding: "binding-a" }),
   },
   {
     name: "workspaceSecrets.remove",
@@ -2331,6 +2378,17 @@ const CASES: Case[] = [
     run: (a, b) => a.workflows.listWithIssueTrigger(b.repository.id),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // #1036-T01: the workflows a move into a board status starts are read in the workspace of the installation only
+  {
+    name: "workflows.listWithStatusTrigger",
+    run: (a, b) => a.workflows.listWithStatusTrigger(b.repository.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "workflows.listProjectWithStatusTrigger",
+    run: (a, b) => a.workflows.listProjectWithStatusTrigger(b.project.id),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
   {
     name: "workflows.getVersion",
     run: (a, b) => a.workflows.getVersion(b.workflow.id, 1),
@@ -2670,6 +2728,18 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBe(0),
   },
   {
+    // #1039: B's rows of another provider are not A's to clear
+    name: "tracker.clearOtherProviders",
+    run: (a, b) => a.tracker.clearOtherProviders(b.repository.id, "jira"),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
+    // #1039: B's Jira rows are not A's to clear
+    name: "tracker.clearJiraItemsOutside",
+    run: (a, b) => a.tracker.clearJiraItemsOutside(b.repository.id, null),
+    expectAnswer: (answer) => expect(answer).toBe(0),
+  },
+  {
     name: "tracker.getSyncState",
     run: (a, b) => a.tracker.getSyncState(b.repository.id),
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
@@ -2812,6 +2882,153 @@ const CASES: Case[] = [
   {
     name: "runners.revoke",
     run: (a, b) => a.runners.revoke(b.runnerId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  // Jira connections (#1037-T04): B's connections are not A's to read, mend, break or remove, and a pair of A's is A's alone
+  {
+    name: "jira.list",
+    run: (a) => a.jira.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.jiraConnectionId }),
+      ]),
+  },
+  {
+    name: "jira.get",
+    run: (a, b) => a.jira.get(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.findBySite",
+    run: (a, b) => a.jira.findBySite(b.jiraCloudId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.readTokens",
+    run: (a, b) => a.jira.readTokens(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // The same site as B's row: this workspace gets a row of its own, the row of B is not saved over.
+    name: "jira.save",
+    run: (a, b) =>
+      a.jira.save({
+        id: "jira-a-second",
+        cloudId: b.jiraCloudId,
+        siteUrl: "https://elsewhere.atlassian.net",
+        siteName: "elsewhere",
+        accountId: "account-a",
+        accountName: "Account a",
+        scopes: ["read:jira-work"],
+        sealed: { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        accessExpiresAt: new Date("2026-11-14T10:00:00.000Z"),
+        connectedBy: null,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toMatchObject({ status: "connected" }),
+  },
+  {
+    name: "jira.replaceTokens",
+    run: (a, b) =>
+      a.jira.replaceTokens(
+        b.jiraConnectionId,
+        1,
+        { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        new Date("2026-11-14T11:00:00.000Z"),
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jira.withLockedTokens",
+    run: (a, b) =>
+      a.jira.withLockedTokens(b.jiraConnectionId, async (locked) => locked),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jira.markBroken",
+    run: (a, b) =>
+      a.jira.markBroken(b.jiraConnectionId, 1, "jira_refresh_refused"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jira.projectsUsing",
+    run: (a, b) => a.jira.projectsUsing(b.jiraConnectionId),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "jira.removeUnlessUsed",
+    run: (a, b) => a.jira.removeUnlessUsed(b.jiraConnectionId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // Jira webhooks (#1039): B's registrations are not A's to read, change or remove, and A cannot register one on B's connection
+  {
+    name: "jiraWebhooks.getByProject",
+    run: (a, b) => a.jiraWebhooks.getByProject(b.jiraWebhookProjectId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jiraWebhooks.list",
+    run: (a) => a.jiraWebhooks.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.jiraWebhookId }),
+      ]),
+  },
+  {
+    name: "jiraWebhooks.create",
+    run: (a, b) =>
+      a.jiraWebhooks.create({
+        id: "jira-webhook-a-second",
+        projectId: "jira-project-a-second",
+        connectionId: b.jiraConnectionId,
+        projectKey: "PROJ",
+        secretHash: "x",
+      }),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "jiraWebhooks.markRegistered",
+    run: (a, b) =>
+      a.jiraWebhooks.markRegistered(
+        b.jiraWebhookId,
+        "1000",
+        "2026-12-14T00:00:00.000Z",
+        "other",
+      ),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markExtended",
+    run: (a, b) =>
+      a.jiraWebhooks.markExtended(b.jiraWebhookId, "2026-12-14T00:00:00.000Z"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markError",
+    run: (a, b) =>
+      a.jiraWebhooks.markError(b.jiraWebhookId, "jira_unavailable"),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.beginRegistration",
+    run: (a, b) =>
+      a.jiraWebhooks.beginRegistration(b.jiraWebhookId, "other", null),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markBearerSeen",
+    run: (a, b) => a.jiraWebhooks.markBearerSeen(b.jiraWebhookId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.markRemoving",
+    run: (a, b) => a.jiraWebhooks.markRemoving(b.jiraWebhookProjectId),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "jiraWebhooks.remove",
+    run: (a, b) => a.jiraWebhooks.remove(b.jiraWebhookId),
     expectAnswer: (answer) => expect(answer).toBe(false),
   },
   // runs

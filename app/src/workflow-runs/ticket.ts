@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-// The ticket a run is about (#916), as the steps read it: `{{trigger.ticket.number|title|body|labels|type|assignees|url|repo}}`. Every
+// The ticket a run is about (#916), as the steps read it: `{{trigger.ticket.key|number|title|body|labels|type|assignees|url|repo}}`. Every
 // trigger that yields one makes it the same way, whether the platform handed it over in a webhook (the label trigger) or the engine
 // read it when a person or a script started the run (the `ticket` input). The texts are those of whoever opened the ticket: bounded here
 // once, and defused where they go into the text of an action (`templates.ts`).
@@ -15,11 +15,16 @@ import {
   TICKET_ASSIGNEE_MAX_CHARS,
   TICKET_TYPE_MAX_CHARS,
 } from "./limits.ts";
+import { STATUS_NAME_MAX_LENGTH } from "../workflows/limits.ts";
+import { ticketNumberOfKey } from "../integrations/ticket-provider.ts";
 import { isRecord } from "../workflows/json.ts";
 import { cleanText } from "./templates.ts";
 
 /** What `{{trigger.ticket}}` holds: `TICKET_TYPE` of `src/workflows/ticket-ref.ts`. */
 export type TicketValue = {
+  /** The text key of the ticket (#1035): `15` for GitHub, `PROJ-123` for Jira. */
+  key: string;
+  /** The number of the ticket where the platform numbers its tickets (GitHub); 0 for a ticket of a platform that does not (read `key`). */
   number: number;
   title: string;
   body: string;
@@ -27,6 +32,8 @@ export type TicketValue = {
   labels: string[];
   type: string;
   assignees: string[];
+  /** The status of the ticket as its platform names it (a Jira issue's status name, #1039); empty for a ticket the platform gives none (GitHub). */
+  status: string;
   repo: {
     fullName: string;
     owner: string;
@@ -50,20 +57,28 @@ export function bounded(text: string, max: number, note: boolean): string {
 /** The ticket as the steps read it, bounded. `assignees` and `type` are empty when the platform did not say. */
 export function ticketValue(
   ticket: {
-    number: number;
+    /** Left out: the number as text (GitHub). */
+    key?: string | undefined;
+    /** Left out: the number the key names, or 0 for a key that is none (a platform that does not number its tickets). */
+    number?: number | undefined;
     title: string;
     body: string;
     url: string;
     labels: readonly string[];
     type?: string | undefined;
     assignees?: readonly string[] | undefined;
+    status?: string | undefined;
   },
   repo: { fullName: string; defaultBranch: string },
 ): TicketValue {
   const { fullName } = repo;
   const slash = fullName.indexOf("/");
   return {
-    number: ticket.number,
+    key: ticket.key ?? String(ticket.number ?? 0),
+    number:
+      ticket.number ??
+      (ticket.key === undefined ? undefined : ticketNumberOfKey(ticket.key)) ??
+      0,
     title: bounded(ticket.title, ISSUE_TITLE_MAX_CHARS, false),
     body: bounded(ticket.body, ISSUE_BODY_MAX_CHARS, true),
     url: bounded(ticket.url, ISSUE_URL_MAX_CHARS, false),
@@ -74,6 +89,7 @@ export function ticketValue(
     assignees: (ticket.assignees ?? [])
       .slice(0, TICKET_ASSIGNEES_MAX)
       .map((login) => bounded(login, TICKET_ASSIGNEE_MAX_CHARS, false)),
+    status: bounded(ticket.status ?? "", STATUS_NAME_MAX_LENGTH, false),
     repo: {
       fullName,
       owner: slash < 0 ? fullName : fullName.slice(0, slash),

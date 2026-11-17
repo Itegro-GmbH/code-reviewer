@@ -9,8 +9,19 @@ import { createImplementerRepository } from "../db/repositories/implementer-repo
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
-import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
+import {
+  createProjectsRepository,
+  jiraSourceOf,
+} from "../db/repositories/projects-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
+import { JIRA_ISSUE_KEY } from "../workflows/ticket-ref.ts";
+import type { JiraAnswerTakerShape } from "./ticket-answers.ts";
+import {
+  registeredTicketProvider,
+  type TicketProvider,
+  type TicketProviderRegistry,
+} from "../integrations/ticket-provider.ts";
+import { createTrackerRepository } from "../db/repositories/tracker-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { dueWorkflowRuns } from "../db/repositories/workflow-runs-sweep.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -23,7 +34,11 @@ import {
   implementerServiceFor,
   implementerTurnPricer,
 } from "../implementer/shared.ts";
-import { integrationRegistry } from "../integrations/registry.ts";
+import {
+  integrationRegistry,
+  ticketProviderRegistry,
+} from "../integrations/registry.ts";
+import type { TicketScope } from "../integrations/ticket-provider.ts";
 import { jobQueueFor } from "../jobs/shared.ts";
 import type { Job } from "../jobs/job-types.ts";
 import { loadAuthConfig } from "../auth/config.ts";
@@ -37,11 +52,19 @@ import {
   type GithubActionTarget,
 } from "./github-connectors.ts";
 import { createTurnReader } from "./turn-reader.ts";
+import { DEFAULT_TICKET_PROVIDER } from "./ticket-target.ts";
+import { createRunTicketTargets } from "./run-ticket-targets.ts";
 import { reconcileRuns, type ReconcileReport } from "./reconcile.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { createWorkflowEngine, type WorkflowEngine } from "./engine.ts";
 import { RUN_QUIET_MS, SWEEP_RUNS_MAX } from "./limits.ts";
 import { createLabelTrigger, type LabelTrigger } from "./label-trigger.ts";
+import { createStatusTrigger, type StatusTrigger } from "./status-trigger.ts";
+import {
+  createJiraStatusTrigger,
+  jiraProjectView,
+  type JiraStatusTrigger,
+} from "./jira-status-trigger.ts";
 import { latestRunSamples } from "./samples.ts";
 import {
   createWorkflowRunService,
@@ -79,27 +102,69 @@ export async function connectorTargetOf(
   };
 }
 
+/**
+ * The Jira ticket provider as the engine's wiring knows it without importing `jira` (the `workflow-runs` module may not: a cycle through
+ * `projects`): it can name a key and has NO method, so a ticket action of a process that registered no Jira provider finds a target and
+ * ends with `ticket_provider_unsupported` (#1039). The real one is registered at the start of the process (`instrumentation.ts`,
+ * `registerTicketProvider`, #1040) and found here at every call; a route that reads Jira tickets may also hand it in (`ticketProvidersWith`).
+ */
+export const WRITELESS_JIRA_PROVIDER: TicketProvider = {
+  id: "jira",
+  isTicketKey: (key) => JIRA_ISSUE_KEY.test(key),
+};
+
+/** The ticket providers of the app's registry (GitHub issues), the Jira stand-in above and, taking its place, the providers a caller hands in. */
+export function ticketProvidersWith(
+  extra: readonly TicketProvider[] = [],
+): TicketProviderRegistry {
+  const byId = new Map<string, TicketProvider>(
+    [WRITELESS_JIRA_PROVIDER, ...extra].map((provider) => [
+      provider.id,
+      provider,
+    ]),
+  );
+  const extraIds = new Set(extra.map((provider) => provider.id));
+  return {
+    // A provider handed in wins; then the one registered for the process (looked up now: it is registered at start); then the stand-ins.
+    get: (id) =>
+      (extraIds.has(id) ? byId.get(id) : undefined) ??
+      registeredTicketProvider(id) ??
+      byId.get(id) ??
+      ticketProviderRegistry.get(id),
+    ids: () => [...new Set([...ticketProviderRegistry.ids(), ...byId.keys()])],
+  };
+}
+
+const runTicketTargets = createRunTicketTargets({
+  tickets: ticketProvidersWith(),
+  runs: (workspaceId) =>
+    createWorkflowRunsRepository(getDatabase(), workspaceId),
+  workflows: (workspaceId) =>
+    createWorkflowsRepository(getDatabase(), workspaceId),
+  projects: (workspaceId) =>
+    createProjectsRepository(getDatabase(), workspaceId),
+  async gitScopeOf(
+    workspaceId,
+    repositoryId,
+  ): Promise<TicketScope | undefined> {
+    const target = await connectorTargetOf(workspaceId, repositoryId);
+    return target === undefined
+      ? undefined
+      : { integration: target.integration, repo: target.repo };
+  },
+});
+
+/** Where the ticket actions of a run act (#1035): the ticket provider the ticket source of the run's project names; see `run-ticket-targets.ts`. */
+export const ticketTargetOf = runTicketTargets.ticketTargetOf;
+const projectOfRun = runTicketTargets.projectOfRun;
+
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    ticketTargetOf,
     // #922: the board of the project the run's lane belongs to.
     async projectBoard(call) {
-      const db = getDatabase();
-      const run = await createWorkflowRunsRepository(
-        db,
-        call.workspaceId,
-      ).getRun(call.runId);
-      if (run === undefined) return undefined;
-      const workflow = await createWorkflowsRepository(
-        db,
-        call.workspaceId,
-      ).get(run.workflowId);
-      if (workflow?.workflow.projectId == null) return undefined;
-      const project = await createProjectsRepository(
-        db,
-        call.workspaceId,
-      ).getById(workflow.workflow.projectId);
-      return project?.ticketSource.board?.projectV2Id;
+      return (await projectOfRun(call))?.ticketSource.board?.projectV2Id;
     },
     // The members of the workspace are the people of its projects until a project has members of its own (#922).
     projectMembers: (call) =>
@@ -121,6 +186,12 @@ function askChannelFor(workspaceId: string) {
     async targetOf(run) {
       return connectorTargetOf(workspaceId, run.repositoryId);
     },
+    ticketTargetOf: (run) =>
+      ticketTargetOf({
+        workspaceId,
+        runId: run.id,
+        repository: { id: run.repositoryId },
+      }),
     listSteps: (runId) => runs.listSteps(runId),
     isDiscarded: async (runId) =>
       (await runs.getRun(runId))?.status === "discarded",
@@ -176,18 +247,22 @@ function lazyAnswerEngine(
   };
 }
 
-/** The run service of one workspace. */
-export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
+/**
+ * What a run reads from GitHub before it exists: the repository of the workspace with its default branch, and a ticket of it (the
+ * texts are those of whoever opened it). Shared by the run service (a start by hand) and the status trigger (#1036).
+ */
+function githubReads(
+  workspaceId: string,
+  tickets: TicketProviderRegistry = ticketProvidersWith(),
+): Pick<
+  Parameters<typeof createWorkflowRunService>[0],
+  "resolveRepository" | "readTicket"
+> {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
   const integrations = createIntegrationsRepository(db, workspaceId);
-  return createWorkflowRunService({
-    runs: createWorkflowRunsRepository(db, workspaceId),
-    // #920: the engine that takes an answer from the page of the run.
-    engine: lazyAnswerEngine(workspaceId),
-    workflows: createWorkflowsRepository(db, workspaceId),
-    projects: createProjectsRepository(db, workspaceId),
-    repositoryName: async (id) => (await repositories.get(id))?.fullName,
+  const projects = createProjectsRepository(db, workspaceId);
+  return {
     async resolveRepository(fullName) {
       const wanted = fullName.toLowerCase();
       const repository = (await repositories.list({ active: true })).find(
@@ -218,34 +293,68 @@ export function workflowRunServiceFor(workspaceId: string): WorkflowRunService {
         );
       }
     },
-    async readTicket(repositoryId, number) {
+    async readTicket(repositoryId, key) {
       const repository = await repositories.get(repositoryId);
       if (repository === undefined) return undefined;
       const integration = await integrations.get(repository.integrationId);
       if (integration === undefined || integration.status !== "active")
         return undefined;
-      const provider = integrationRegistry.resolve(integration.type);
-      if (provider.readIssue === undefined) return undefined;
+      // The tickets of a repository are read through the ticket provider of its project's source: the GitHub issues of the repository, or
+      // the Jira project (#1039; the repository is then where the code lives).
+      const jira = jiraSourceOf(
+        (await projects.findActiveForRepository(repositoryId))
+          ?.ticketSource ?? {
+          provider: "github",
+          repositoryId,
+          board: null,
+        },
+      );
+      const provider = tickets.get(
+        jira === null ? DEFAULT_TICKET_PROVIDER : "jira",
+      );
+      if (provider?.readTicket === undefined) return undefined;
       try {
         return (
-          (await provider.readIssue(
-            integration,
+          (await provider.readTicket(
             {
-              integrationId: repository.integrationId,
-              externalId: repository.externalId,
-              fullName: repository.fullName,
-              url: repository.url,
+              integration,
+              repo: {
+                integrationId: repository.integrationId,
+                externalId: repository.externalId,
+                fullName: repository.fullName,
+                url: repository.url,
+              },
+              ...(jira === null ? {} : { jira }),
             },
-            number,
+            key,
           )) ?? undefined
         );
       } catch {
         throw new WorkflowRunError(
           "WORKFLOW_RUN_GITHUB_UNAVAILABLE",
-          "GitHub could not be asked, or answered with something unusable.",
+          "The ticket platform (GitHub or Jira) could not be asked, or answered with something unusable.",
         );
       }
     },
+  };
+}
+
+/** The run service of one workspace. */
+export function workflowRunServiceFor(
+  workspaceId: string,
+  /** The ticket providers the route can read tickets with that this module may not import (the Jira provider, #1039). */
+  extraTicketProviders: readonly TicketProvider[] = [],
+): WorkflowRunService {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  return createWorkflowRunService({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    // #920: the engine that takes an answer from the page of the run.
+    engine: lazyAnswerEngine(workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    projects: createProjectsRepository(db, workspaceId),
+    repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    ...githubReads(workspaceId, ticketProvidersWith(extraTicketProviders)),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
@@ -276,6 +385,37 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
     hasRuns: (repositoryId) => runs.hasRunOnRepository(repositoryId),
     engine: lazyAnswerEngine(workspaceId),
     async reply(repositoryId, answer, text, key) {
+      // The reply goes where the comment was: below the Jira issue, through the ticket provider of the project's Jira source (#1040).
+      if (answer.ticket?.provider === "jira") {
+        const jira = jiraSourceOf(
+          (
+            await createProjectsRepository(
+              db,
+              workspaceId,
+            ).findActiveForRepository(repositoryId)
+          )?.ticketSource ?? { provider: "github", repositoryId, board: null },
+        );
+        const provider = ticketProvidersWith().get("jira");
+        const target = await connectorTargetOf(workspaceId, repositoryId);
+        if (
+          jira === null ||
+          provider?.commentOnTicket === undefined ||
+          target === undefined
+        )
+          return;
+        await provider.commentOnTicket(
+          { integration: target.integration, repo: target.repo, jira },
+          answer.ticket.key,
+          `${key}\n${text}`,
+          {
+            marker: key,
+            ...(answer.createdAt === undefined
+              ? {}
+              : { since: answer.createdAt }),
+          },
+        );
+        return;
+      }
       const target = await connectorTargetOf(workspaceId, repositoryId);
       if (target?.provider.commentOnIssue === undefined) return;
       await target.provider.commentOnIssue(
@@ -298,6 +438,44 @@ export function ticketAnswersFor(workspaceId: string): TicketAnswers {
 }
 
 /**
+ * What takes the answer a Jira comment `/answer …` gives (#1040): the Jira webhook hands over the comment; this finds the run that waits on
+ * the issue (`ticket_ref` `jira:<owner>/<repo>#PROJ-12`) with `ticketAnswersFor` and answers it, as a comment on GitHub does.
+ */
+export function jiraAnswersFor(workspaceId: string): JiraAnswerTakerShape {
+  const repositories = createRepositoriesRepository(getDatabase(), workspaceId);
+  const answers = ticketAnswersFor(workspaceId);
+  return {
+    async answer(deliveryId, answer) {
+      const repository = await repositories.get(answer.repositoryId);
+      if (repository === undefined) return { outcome: "no_run" };
+      const { comment } = answer;
+      const taken = await answers.answer(deliveryId, {
+        repo: {
+          integrationId: repository.integrationId,
+          externalId: repository.externalId,
+          fullName: repository.fullName,
+          url: repository.url,
+        },
+        number: Number(JIRA_ISSUE_KEY.exec(answer.issueKey)?.[2] ?? 0),
+        ticket: { provider: "jira", key: answer.issueKey },
+        commentId: comment.id,
+        ...(comment.createdAt === "" ? {} : { createdAt: comment.createdAt }),
+        actor: {
+          login: comment.author.name,
+          externalId: comment.author.accountId,
+        },
+        ...(answer.choice === undefined ? {} : { choice: answer.choice }),
+        ...(answer.text === undefined ? {} : { text: answer.text }),
+        raw: answer.raw,
+      });
+      return taken.outcome === "not_taken"
+        ? { outcome: "not_taken", reason: taken.reason }
+        : taken;
+    },
+  };
+}
+
+/**
  * The label trigger of one workspace (#845): the webhook hands it the issue a label was put on, it writes the runs of the workflows that
  * wait for that label. The first steps run after the response, as for a run started by hand.
  */
@@ -314,6 +492,104 @@ export function labelTriggerFor(workspaceId: string): LabelTrigger {
       );
       return repository?.active === true ? { id: repository.id } : undefined;
     },
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The status trigger of one workspace (#1036): the webhook hands it a board item that got another Status once the ticket mirror took it; it
+ * writes the runs of the workflows that wait for that status. The ticket and the repository are read from GitHub only when a workflow
+ * matched. The first steps run after the response, as for a label.
+ */
+export function statusTriggerFor(workspaceId: string): StatusTrigger {
+  const db = getDatabase();
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  const tracker = createTrackerRepository(db, workspaceId);
+  const projects = createProjectsRepository(db, workspaceId);
+  const integrations = createIntegrationsRepository(db, workspaceId);
+  const reads = githubReads(workspaceId);
+  return createStatusTrigger({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async ticketOfNode(nodeId) {
+      const item = await tracker.findItemByNode(nodeId);
+      // A pull request on a board is no ticket a lane starts for.
+      return item === undefined || item.kind !== "issue"
+        ? undefined
+        : {
+            provider: item.provider,
+            repositoryId: item.repositoryId,
+            integrationId:
+              (await repositories.get(item.repositoryId))?.integrationId ?? "",
+            key: item.key,
+          };
+    },
+    async currentStatusOf(repositoryId, nodeId, board) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined) return { available: false, status: null };
+      const integration = await integrations.get(repository.integrationId);
+      if (integration === undefined || integration.status !== "active")
+        return { available: false, status: null };
+      const provider = ticketProviderRegistry.get(DEFAULT_TICKET_PROVIDER);
+      if (provider?.readBoardStatus === undefined)
+        return { available: false, status: null };
+      return provider.readBoardStatus(
+        {
+          integration,
+          repo: {
+            integrationId: repository.integrationId,
+            externalId: repository.externalId,
+            fullName: repository.fullName,
+            url: repository.url,
+          },
+        },
+        nodeId,
+        board,
+      );
+    },
+    async boardOf(repositoryId) {
+      return (await projects.findActiveForRepository(repositoryId))
+        ?.ticketSource.board?.projectV2Id;
+    },
+    async repositoryOf(repositoryId) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined || !repository.active) return undefined;
+      return reads.resolveRepository(repository.fullName);
+    },
+    readTicket: reads.readTicket,
+    kick: (runId) =>
+      runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
+  });
+}
+
+/**
+ * The status trigger of a Jira project in one workspace (#1039): the webhook hands it an issue whose status changed; it finds the lanes of
+ * the registration's project, asks Jira for the issue's status NOW (the stale guard) and writes the runs. The first steps run after the
+ * response, as for a label.
+ */
+export function jiraStatusTriggerFor(
+  workspaceId: string,
+  /** The Jira ticket provider (`jira/shared.ts`): the route that wires the Jira webhook hands it in. */
+  jira: TicketProvider,
+): JiraStatusTrigger {
+  const db = getDatabase();
+  const projects = createProjectsRepository(db, workspaceId);
+  const reads = githubReads(workspaceId, ticketProvidersWith([jira]));
+  const repositories = createRepositoriesRepository(db, workspaceId);
+  return createJiraStatusTrigger({
+    runs: createWorkflowRunsRepository(db, workspaceId),
+    workflows: createWorkflowsRepository(db, workspaceId),
+    async projectOf(projectId) {
+      const project = await projects.getById(projectId);
+      return project === undefined ? undefined : jiraProjectView(project);
+    },
+    async repositoryOf(repositoryId) {
+      const repository = await repositories.get(repositoryId);
+      if (repository === undefined || !repository.active) return undefined;
+      return reads.resolveRepository(repository.fullName);
+    },
+    readTicket: (source, key) => reads.readTicket(source.repositoryId, key),
     kick: (runId) =>
       runAfterResponse(() => workflowEngineFor(workspaceId).advance(runId)),
   });

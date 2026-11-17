@@ -113,6 +113,7 @@ function item(number: number, over: Partial<TrackerItem> = {}): TrackerItem {
     projectId: "p-1",
     provider: "github",
     repo: "acme/widgets",
+    key: String(number),
     number,
     nodeId: `N_${String(number)}`,
     kind: "issue",

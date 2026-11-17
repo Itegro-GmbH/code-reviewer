@@ -76,13 +76,39 @@ const REPOSITORIES: Record<string, string> = {
   "acme/other": "repo-other",
 };
 
+const JIRA_SOURCE = {
+  provider: "jira",
+  repositoryId: "repo-widgets",
+  board: null,
+  connectionId: "conn-1",
+  projectKey: "PROJ",
+};
+
+const JIRA_ISSUE = {
+  key: "PROJ-12",
+  title: "Fix the login",
+  body: "It fails.",
+  url: "https://acme.atlassian.net/browse/PROJ-12",
+  labels: [],
+  assignees: ["Ada"],
+  type: "Bug",
+  status: "Ready for agent",
+};
+
 function harness(
   document: unknown,
   projectId: string | null = "project-1",
   earlier?: StoredWorkflowRun,
+  source: Record<string, unknown> = {
+    provider: "github",
+    repositoryId: "repo-widgets",
+    board: null,
+  },
 ) {
   const created: NewWorkflowRun[] = [];
-  const readTicket = vi.fn(async () => ISSUE);
+  const readTicket = vi.fn(async (_repositoryId: string, key: string) =>
+    source.provider === "jira" ? { ...JIRA_ISSUE, key } : ISSUE,
+  );
   const service = createWorkflowRunService({
     runs: {
       async findByRequest() {
@@ -115,11 +141,7 @@ function harness(
       async getById() {
         return {
           id: "project-1",
-          ticketSource: {
-            provider: "github",
-            repositoryId: "repo-widgets",
-            board: null,
-          },
+          ticketSource: source,
         };
       },
     },
@@ -184,6 +206,77 @@ describe("a manual start within the project of the lane (#922)", () => {
         available: ["acme/widgets"],
       }),
     ]);
+    expect(readTicket).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
+  // #1039
+  it("starts with a Jira issue in a lane of a Jira project: the ticket is read by its key and the run names the Jira reference", async () => {
+    const { service, created, readTicket } = harness(
+      BY_TICKET,
+      "project-1",
+      undefined,
+      JIRA_SOURCE,
+    );
+
+    const started = await service.start(USER, "wf-1", {
+      input: { ticket: "jira:acme/widgets#PROJ-12" },
+      clientRequestId: "r-1",
+    });
+
+    expect(started.created).toBe(true);
+    expect(readTicket).toHaveBeenCalledWith("repo-widgets", "PROJ-12");
+    expect(created[0]).toMatchObject({
+      repositoryId: "repo-widgets",
+      ticketRef: "jira:acme/widgets#PROJ-12",
+    });
+    const input = JSON.parse(created[0]?.triggerInput ?? "{}") as {
+      ticket: Record<string, unknown>;
+    };
+    expect(input.ticket).toMatchObject({
+      key: "PROJ-12",
+      title: "Fix the login",
+      status: "Ready for agent",
+      assignees: ["Ada"],
+    });
+  });
+
+  // #1039
+  it("refuses a GitHub ticket in a lane of a Jira project, and a Jira ticket in a lane without a project, before anything is asked", async () => {
+    const jira = harness(BY_TICKET, "project-1", undefined, JIRA_SOURCE);
+    const wrong = await refusal(
+      jira.service.start(USER, "wf-1", {
+        input: { ticket: "github:acme/widgets#128" },
+        clientRequestId: "r-1",
+      }),
+    );
+    expect(wrong.code).toBe("WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED");
+    expect(jira.readTicket).not.toHaveBeenCalled();
+    expect(jira.created).toEqual([]);
+
+    const none = harness(BY_TICKET, null);
+    const noProject = await refusal(
+      none.service.start(USER, "wf-1", {
+        input: { ticket: "jira:acme/widgets#PROJ-12" },
+        clientRequestId: "r-2",
+      }),
+    );
+    expect(noProject.code).toBe("WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED");
+    expect(none.readTicket).not.toHaveBeenCalled();
+  });
+
+  // #1038
+  it("refuses a ticket of the Jira provider in a lane of a GitHub project before anything is asked and writes no run", async () => {
+    const { service, created, readTicket } = harness(BY_TICKET);
+
+    const failure = await refusal(
+      service.start(USER, "wf-1", {
+        input: { ticket: "jira:acme/widgets#PROJ-12" },
+        clientRequestId: "r-1",
+      }),
+    );
+
+    expect(failure.code).toBe("WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED");
     expect(readTicket).not.toHaveBeenCalled();
     expect(created).toEqual([]);
   });

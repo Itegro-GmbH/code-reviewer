@@ -8,6 +8,11 @@
 import { after, connection } from "next/server";
 import { createProjectRouteHandler } from "@/projects/http";
 import { projectServiceFor } from "@/projects/shared";
+import {
+  afterJiraDeactivation,
+  withJiraActivation,
+} from "@/jira/webhook-registrar-shared";
+import { firstSyncAfterActivation } from "@/tracker/first-sync";
 import { trackerServiceFor } from "@/tracker/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
 
@@ -26,21 +31,20 @@ export async function PUT(
       requireUser: () => Promise.resolve(access.user),
       service: projectServiceFor(
         access.workspace.id,
-        async ({ repositoryId }) => {
-          after(() =>
-            trackerServiceFor(access.workspace.id)
-              .sync(repositoryId, {
-                deadline: Date.now() + FIRST_SYNC_BUDGET_MS,
-              })
-              .then(
-                () => undefined,
-                (error: unknown) =>
-                  console.error(
-                    `[tracker] the first sync of repository=${repositoryId} did not finish (${error instanceof Error ? error.name : "unknown"})`,
-                  ),
+        // Jira's part first (the other provider's mirror rows go, the webhook is registered), then the first sync of the GitHub issues.
+        withJiraActivation(
+          access.workspace.id,
+          firstSyncAfterActivation({
+            sync: (repositoryId, options) =>
+              trackerServiceFor(access.workspace.id).sync(
+                repositoryId,
+                options,
               ),
-          );
-        },
+            schedule: (work) => after(work),
+            budgetMs: FIRST_SYNC_BUDGET_MS,
+          }),
+        ),
+        afterJiraDeactivation(access.workspace.id),
       ),
     })(request, repositoryId),
   );

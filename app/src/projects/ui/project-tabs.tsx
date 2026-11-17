@@ -34,9 +34,12 @@ export type LaneRow = {
 export function LanesTab({
   workspaceSlug,
   lanes,
+  provider = "github",
 }: {
   workspaceSlug: string;
   lanes: readonly LaneRow[];
+  /** The provider of the project's ticket source: a Jira project's lanes start from a status, not a label (#1040). */
+  provider?: string;
 }) {
   return (
     <section aria-labelledby="lanes-heading" className="flex flex-col gap-3">
@@ -87,7 +90,9 @@ export function LanesTab({
           </TableBody>
         </Table>
       )}
-      <p className="text-xs text-muted-foreground">{LANES_COPY.note}</p>
+      <p className="text-xs text-muted-foreground">
+        {provider === "jira" ? LANES_COPY.noteJira : LANES_COPY.note}
+      </p>
       <p className="text-sm text-muted-foreground">
         {LANES_COPY.taskNote}{" "}
         <Link href={workspacePath(workspaceSlug, "/implementer")}>
@@ -107,12 +112,29 @@ const SOURCE_STATE = {
 /** The ticket source card of the Setup tab: exactly one per project, in its own words. `children` are its controls (the board, the resync). */
 export function TicketSourceCard({
   row,
+  jira,
   children,
 }: {
   row: ProjectRowView;
+  /**
+   * What the page read of the Jira project of a project whose tickets come from Jira (#1038): the name of the site (null when the
+   * connection could not be read) and the names of the workflow statuses, Jira's own (empty when Jira could not be asked).
+   */
+  jira?: { siteName: string | null; statuses: readonly string[] };
   children?: ReactNode;
 }) {
   const state = SOURCE_STATE[row.status];
+  if (row.jira !== undefined && jira !== undefined)
+    return (
+      <JiraSourceCard
+        row={row}
+        projectKey={row.jira.projectKey}
+        jira={jira}
+        state={state}
+      >
+        {children}
+      </JiraSourceCard>
+    );
   return (
     <section
       aria-labelledby="ticket-source-heading"
@@ -151,6 +173,84 @@ export function TicketSourceCard({
         ) : null}
         {children}
       </div>
+      <p className="text-xs text-muted-foreground">{SETUP_COPY.footnote}</p>
+    </section>
+  );
+}
+
+/** The ticket source card of a project on a Jira project (#1038): the project, its site, where the code lives, and Jira's statuses. */
+function JiraSourceCard({
+  row,
+  projectKey,
+  jira,
+  state,
+  children,
+}: {
+  row: ProjectRowView;
+  projectKey: string;
+  jira: { siteName: string | null; statuses: readonly string[] };
+  state: { label: string; variant: "success" | "neutral" | "warning" };
+  children?: ReactNode;
+}) {
+  return (
+    <section
+      aria-labelledby="ticket-source-heading"
+      className="flex max-w-[45rem] flex-col gap-3"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h2
+          id="ticket-source-heading"
+          className="text-lg leading-7 font-semibold"
+        >
+          {SETUP_COPY.title}
+        </h2>
+        <p className="text-sm text-muted-foreground">{SETUP_COPY.hint}</p>
+      </div>
+      <div className="flex flex-col gap-2 rounded-2xl border border-border bg-card px-6 py-4">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-muted-foreground">
+            {SETUP_COPY.jiraKind}
+          </span>
+          <Badge variant={state.variant}>{state.label}</Badge>
+        </div>
+        <span className="font-semibold break-words">{projectKey}</span>
+        {jira.siteName === null ? null : (
+          <span className="text-sm text-muted-foreground break-words">
+            {SETUP_COPY.jiraSite(jira.siteName)}
+          </span>
+        )}
+        <span className="text-sm text-muted-foreground break-words">
+          {SETUP_COPY.jiraCode(row.fullName, row.installation)}
+        </span>
+        <h3 className="mt-2 text-sm font-semibold">
+          {SETUP_COPY.jiraStatuses}
+        </h3>
+        {jira.statuses.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {SETUP_COPY.jiraStatusesNone}
+          </p>
+        ) : (
+          <>
+            <ul
+              aria-label={SETUP_COPY.jiraStatuses}
+              className="flex flex-wrap gap-2"
+            >
+              {jira.statuses.map((name) => (
+                <li key={name}>
+                  <Badge variant="neutral">{name}</Badge>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground">
+              {SETUP_COPY.jiraStatusesHint}
+            </p>
+          </>
+        )}
+        {children}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {SETUP_COPY.jiraNotMirrored}
+      </p>
       <p className="text-xs text-muted-foreground">{SETUP_COPY.footnote}</p>
     </section>
   );

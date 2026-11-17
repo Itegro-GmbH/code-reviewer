@@ -7,6 +7,7 @@
 import { connection } from "next/server";
 import { requireImplementerCapability } from "@/implementer/shared";
 import { createWorkflowRunRouteHandlers } from "@/workflow-runs/http";
+import { jiraTicketProvider } from "@/jira/shared";
 import { workflowRunServiceFor } from "@/workflow-runs/shared";
 import { withWorkspace } from "@/workspaces/access-runtime";
 
@@ -22,7 +23,7 @@ export async function POST(
   return withWorkspace(workspace, "start_implementer_task", (access) =>
     createWorkflowRunRouteHandlers({
       requireUser: () => Promise.resolve(access.user),
-      service: workflowRunServiceFor(access.workspace.id),
+      service: workflowRunServiceFor(access.workspace.id, [jiraTicketProvider]),
     }).start(request, workflowId),
   );
 }

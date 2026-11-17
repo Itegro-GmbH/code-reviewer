@@ -32,6 +32,8 @@ const SCOPED = [
   "implementer-steps-repository.ts",
   "integrations-repository.ts",
   "invitations-repository.ts",
+  "jira-connections-repository.ts",
+  "jira-webhooks-repository.ts",
   "job-check-runs-repository.ts",
   "job-vm-runs-repository.ts",
   "jobs-repository.ts",
@@ -137,6 +139,9 @@ const SCOPED = [
  *   order of the states of a refund or dispute, and for an event under review the ids of our own top-up and workspace it belongs to and
  *   what an operator recorded when closing it (#603: their id, time and note, and the journal entry). No payload, no amount and no
  *   buyer, so it is not customer data;
+ * - jira-webhook-directory: a delivery of Jira names a webhook registration by the id in the address it was sent to, before the workspace
+ *   is known, and the nightly job extends the webhooks of every workspace (#1039). It only reads, and every answer names its own workspace;
+ *   writing webhook rows goes through the scoped jira webhooks repository;
  * - runner-credentials: what happens to a customer's runner before its workspace is known (#854): the exchange of a registration
  *   token for a runner and the lookup of a runner by its credential on every call it makes. The caller holds only a secret
  *   (the database keeps its hash), so there is no workspace to scope to before the secret is looked up; it never lists, and every
@@ -168,6 +173,7 @@ const INSTANCE_LEVEL = [
   "invitation-directory-repository.ts",
   "job-check-runs-sweep.ts",
   "job-claimed-keys-repository.ts",
+  "jira-webhook-directory-repository.ts",
   "job-directory-repository.ts",
   "job-dispatches-repository.ts",
   "jobs-claim.ts",

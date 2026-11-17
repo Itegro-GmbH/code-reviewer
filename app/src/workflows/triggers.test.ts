@@ -489,6 +489,7 @@ describe("triggers with pre-steps", () => {
         "manual",
         "api",
         "ticket.labeled",
+        "ticket.statusChanged",
         "pullRequest.pushed",
         "schedule",
         "github.issueLabeled",
@@ -646,7 +647,7 @@ describe("a ticket reference", () => {
     expect(problems("github:itegro/shop#128")).toEqual([]);
     expect(parseTicketRef("github:itegro/shop#128")).toEqual({
       ok: true,
-      ref: { provider: "github", repo: "itegro/shop", number: 128 },
+      ref: { provider: "github", repo: "itegro/shop", key: "128" },
     });
   });
 
@@ -658,11 +659,11 @@ describe("a ticket reference", () => {
     expect(problems("itegro/shop#128")).toEqual([
       expect.objectContaining({ path: "/ticket", code: "invalid_value" }),
     ]);
-    expect(problems("jira:ABC-1")).toEqual([
+    expect(problems("linear:ABC-1")).toEqual([
       expect.objectContaining({
         path: "/ticket",
         code: "invalid_value",
-        available: ["github"],
+        available: ["github", "jira"],
       }),
     ]);
     expect(problems("github:itegro/shop#0")).toEqual([

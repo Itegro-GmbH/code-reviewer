@@ -58,6 +58,8 @@ type FieldsProps = {
   node: Doc;
   problems: readonly Problem[];
   profiles: readonly ProfileOption[];
+  /** The status names of the project's board (#1036), for the fields of a status trigger; empty: none to offer, the name is typed. */
+  statuses: readonly string[];
   onChange: Change;
 };
 
@@ -65,7 +67,62 @@ function textOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function TriggerFields({ doc, pointer, node, onChange }: FieldsProps) {
+/**
+ * The name of a board status (#1036): a choice among the names of the project's board, with the current name kept as an option when the
+ * board has no such name (nothing is rewritten), or typed when the project has no board to offer. `optional`: "any" stands for none.
+ */
+function StatusControl({
+  name,
+  label,
+  value,
+  statuses,
+  optional,
+  hint,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  statuses: readonly string[];
+  optional?: boolean;
+  hint: string;
+  onChange: (value: string) => void;
+}) {
+  if (statuses.length === 0)
+    return (
+      <TextControl
+        name={name}
+        label={label}
+        value={value}
+        onChange={onChange}
+        hint={hint}
+      />
+    );
+  return (
+    <SelectControl
+      name={name}
+      label={label}
+      value={value}
+      options={[
+        ...(optional === true ? [{ value: "", label: "any status" }] : []),
+        ...(value === "" || statuses.includes(value)
+          ? []
+          : [{ value, label: value }]),
+        ...statuses.map((status) => ({ value: status, label: status })),
+      ]}
+      onChange={onChange}
+      hint={hint}
+    />
+  );
+}
+
+function TriggerFields({
+  doc,
+  pointer,
+  node,
+  statuses,
+  onChange,
+}: FieldsProps) {
   const kind = textOf(node.kind);
   const kinds: readonly string[] = (
     TRIGGER_KINDS as readonly string[]
@@ -97,6 +154,34 @@ function TriggerFields({ doc, pointer, node, onChange }: FieldsProps) {
           onChange={(label) => patch({ label })}
           hint="The label that starts the lane."
         />
+      ) : null}
+      {kind === "ticket.statusChanged" ? (
+        <>
+          <StatusControl
+            name="to"
+            label="Moved into"
+            value={textOf(node.to)}
+            statuses={statuses}
+            hint="The status that starts the lane, as the board names it. Whoever moves a ticket into it starts a run, the lane's own moves included: the lane must not move a ticket into this status itself."
+            onChange={(to) => patch({ to })}
+          />
+          <StatusControl
+            name="from"
+            label="Moved out of"
+            value={textOf(node.from)}
+            statuses={statuses}
+            optional
+            hint="Optional: only a move out of this status starts the lane."
+            onChange={(from) => patch({ from: from === "" ? undefined : from })}
+          />
+          {statuses.length === 0 ? (
+            <p role="note" className="text-sm text-muted-foreground">
+              A move starts no run until the lane&apos;s project has chosen a
+              board: only moves on that board count. Choose one in the
+              project&apos;s settings.
+            </p>
+          ) : null}
+        </>
       ) : null}
       {kind === "schedule" ? (
         <TextControl
@@ -392,7 +477,7 @@ function ValueControl({
   );
 }
 
-function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
+function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
   const connector = textOf(node.connector);
   const spec = specOf(connector);
   const names =
@@ -421,6 +506,26 @@ function ActionFields({ doc, pointer, node, onChange }: FieldsProps) {
         : inputsOf(spec).map(([name, input]) => {
             const control = controlOf(name, input);
             const label = `${name}${input.required ? "" : " (optional)"}`;
+            // The status a `ticket.setStatus` step sets (#1040): a choice among the statuses of the project's board or Jira workflow
+            // (the same names the status trigger offers); a project with none to offer keeps the plain literal field.
+            if (
+              connector === "ticket.setStatus" &&
+              name === "status" &&
+              statuses.length > 0
+            )
+              return (
+                <StatusControl
+                  key={`${pointer}-${name}`}
+                  name={name}
+                  label={label}
+                  value={textOf(node[name])}
+                  statuses={statuses}
+                  hint="The name of the status to move the ticket into: a board column (GitHub) or the status a Jira transition ends in. A literal."
+                  onChange={(next) =>
+                    onChange(patchNode(doc, pointer, { [name]: next }))
+                  }
+                />
+              );
             if (control === "boolean")
               return (
                 <div
@@ -528,6 +633,7 @@ export function Inspector({
   pointer,
   problems,
   profiles,
+  statuses = [],
   lookup,
   headingRef,
   onChange,
@@ -538,6 +644,8 @@ export function Inspector({
   pointer: Pointer;
   problems: readonly Problem[];
   profiles: readonly ProfileOption[];
+  /** The status names of the project's board, for a status trigger (#1036). Left out: none are offered. */
+  statuses?: readonly string[];
   /** What the fields ask for the values they can reach: the builder binds it to its document and lane. */
   lookup: ReachLookup;
   /** The builder moves focus here when a card is picked. */
@@ -566,6 +674,7 @@ export function Inspector({
     node,
     problems,
     profiles,
+    statuses,
     onChange,
   };
   return (

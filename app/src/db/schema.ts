@@ -1462,6 +1462,11 @@ export interface TrackerItemsTable {
   /** "owner/name". */
   repo: string;
   number: number;
+  /**
+   * #1035: the text key of the ticket inside its provider (`15` for a GitHub issue, `PROJ-123` for Jira); with `repository_id` and `provider` the
+   * identity of the row. Null only for a row the version before #1035 wrote and the trigger has not reached: it reads as the number.
+   */
+  key: string | null;
   /** The provider's global id; how a board item finds its row. */
   node_id: string;
   /** `issue` or `pull_request`. */
@@ -1503,6 +1508,8 @@ export interface TrackerItemsTable {
 /** #923: where the full sync of a repository's tickets stands. */
 export interface TrackerSyncStateTable {
   repository_id: string;
+  /** #1035: the provider whose tickets this is the sync state of; `github` by default. */
+  provider: ColumnType<string, string | undefined, string>;
   workspace_id: string;
   project_id: string | null;
   /** JSON text: the phase and position of the sync under way; null when none is. */
@@ -1645,6 +1652,70 @@ export interface ProfileVersionsTable {
   created_at: string;
 }
 
+/**
+ * A Jira Cloud connection of a workspace (#1037): one OAuth grant to one site (src/db/repositories/jira-connections-repository.ts,
+ * src/jira/). The token pair is sealed in the three `tokens_*` columns and never leaves the server.
+ */
+export interface JiraConnectionsTable {
+  id: string;
+  workspace_id: string;
+  /** The Atlassian id of the site (`cloudId`); the address of its API is `/ex/jira/<cloud_id>`. */
+  cloud_id: string;
+  site_url: string;
+  site_name: string;
+  /** The Atlassian account that granted the app, by id and the name Atlassian shows. */
+  account_id: string;
+  account_name: string;
+  /** The scopes Atlassian granted, separated by a space. */
+  scopes: string;
+  /** `connected` or `broken` (JIRA_CONNECTION_STATUSES). */
+  status: string;
+  /** The stable code of why the connection is broken; null while it is connected. */
+  error_code: string | null;
+  /** The sealed JSON of the access and refresh token: the encrypted value and its tag (base64), the nonce (base64), the key version. */
+  tokens_ciphertext: string;
+  tokens_nonce: string;
+  tokens_key_version: number;
+  /** Counts the writes of the token pair; a refresh replaces only the version it read. */
+  token_version: ColumnType<number, number | undefined, number>;
+  /** When the access token ends (not secret). */
+  access_expires_at: string;
+  connected_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * The dynamic webhook the factory registered at a Jira site for a project's Jira ticket source (#1039): one row per project
+ * (src/db/repositories/jira-webhooks-repository.ts, src/jira/). Only the hash of the secret in the webhook's address is kept.
+ */
+export interface JiraWebhooksTable {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  connection_id: string;
+  /** The key of the Jira project the webhook watches (`project = KEY`). */
+  project_key: string;
+  /** SHA-256 (hex) of the secret in the address Jira calls. */
+  secret_hash: string;
+  /** SHA-256 (hex) of the secret of a registration under way, accepted next to `secret_hash`; null otherwise. */
+  pending_secret_hash: string | null;
+  /** When the webhook was registered; null until it is. */
+  registered_at: string | null;
+  /** When a bearer token that verified was first seen on a delivery; null while none was (trust on first use). */
+  bearer_seen_at: string | null;
+  /** `pending`, `active` or `removing` (JIRA_WEBHOOK_STATUSES). */
+  status: string;
+  /** Jira's id of the registered webhook; null until it is registered. */
+  jira_webhook_id: string | null;
+  /** When Jira ends the webhook unless it is extended; null until it is registered. */
+  expires_at: string | null;
+  /** Why the last registration or extension failed; null after a success. */
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1666,6 +1737,8 @@ export interface Database {
   setup_codes: SetupCodesTable;
   secrets: SecretsTable;
   workspace_secrets: WorkspaceSecretsTable;
+  jira_connections: JiraConnectionsTable;
+  jira_webhooks: JiraWebhooksTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

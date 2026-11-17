@@ -49,6 +49,7 @@ describe("app/vercel.json", () => {
   it("keeps its crons", () => {
     expect((config.crons ?? []).map(({ path }) => path).sort()).toEqual([
       "/api/internal/dispatch-sweep",
+      "/api/internal/jira-webhooks",
       "/api/internal/repository-sync",
       "/api/internal/tracker-resync",
     ]);

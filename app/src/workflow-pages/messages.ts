@@ -91,6 +91,7 @@ export const TRIGGER_COPY = {
   manual: "Started by hand",
   api: "Started through the API",
   "ticket.labeled": "A label on a ticket",
+  "ticket.statusChanged": "A ticket moved into a status",
   "github.issueLabeled": "A label on an issue",
   "pullRequest.pushed": "A push to a pull request",
   schedule: "On a schedule",
@@ -145,6 +146,21 @@ const STEP_FAILURE_TEXT: Record<
   github_rate_limited:
     "GitHub's rate limit was reached. The action was not repeated; wait a while and run the workflow again.",
   github_unavailable: "GitHub could not be reached or did not answer in time.",
+  ticket_provider_unsupported:
+    "The ticket source of this project cannot do this: this server has no write access to Jira tickets (the Jira provider is not registered).",
+  ticket_not_found:
+    "Jira has no such issue or comment for this workspace's connection. The issue may have moved to another project or been deleted.",
+  ticket_forbidden:
+    "Jira refuses the account of the connection: it may not see the issue or write to it. Check its permissions in the Jira project.",
+  ticket_connection_broken:
+    "The Jira connection of this workspace is broken. Connect it again in the workspace settings, then run the workflow again.",
+  ticket_unavailable: "Jira could not be reached or did not answer in time.",
+  ticket_rejected:
+    "Jira refused the request: a label it does not take, or a transition that needs a field the factory cannot fill. Change the Jira workflow so that the transition needs none.",
+  ticket_status_unknown:
+    "The workflow of the Jira project has no status with that name. The message lists the statuses it has.",
+  ticket_status_unreachable:
+    "No transition leads to that status from the ticket's current one. The message lists the statuses that can be reached from there; add the transition in the Jira workflow, or choose another status. A person has to move the ticket on.",
   action_timeout:
     "The action did not answer in time. It is not repeated, because it may have happened.",
   action_interrupted:
@@ -387,6 +403,8 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
   WORKFLOW_RUN_TRIGGER_NOT_MANUAL: "This workflow is not started by hand.",
   WORKFLOW_RUN_TICKET_OUTSIDE_PROJECT:
     "That ticket is not in the repository this project takes its tickets from.",
+  WORKFLOW_RUN_TICKET_PROVIDER_UNSUPPORTED:
+    "That ticket is not of the ticket source of this lane's project: name a GitHub issue or a Jira issue the way the project's tickets are.",
   WORKFLOW_RUN_REPOSITORY_OUTSIDE_PROJECT:
     "That repository is not the one this project takes its tickets from.",
   WORKFLOW_RUN_STEP_KIND_NOT_SUPPORTED:
@@ -400,7 +418,7 @@ const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {
     "That answer cannot be used: choose an option of the question, or write a text that is not too long.",
   WORKFLOW_RUN_DOCUMENT_UNUSABLE: "The saved workflow cannot be read.",
   WORKFLOW_RUN_GITHUB_UNAVAILABLE:
-    "GitHub could not be asked right now. Try again in a moment.",
+    "GitHub could not be asked right now (or Jira, for a Jira project). Try again in a moment.",
 };
 
 /** The sentence for a failed start or read: the route's code, or a transport code, or a status the page cannot read. */

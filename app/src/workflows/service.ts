@@ -16,6 +16,7 @@ import {
   builtInLaneDocument,
   LANE_COPY_FAILED,
   type BuiltInLaneKey,
+  type LaneStatuses,
 } from "./built-in-lanes.ts";
 import {
   WorkflowError,
@@ -113,6 +114,9 @@ export type WorkflowService = {
     user: { id: string },
     projectId: string,
     keys: readonly BuiltInLaneKey[],
+    statuses?: LaneStatuses,
+    /** The provider of the project's ticket source (#1040): the lanes word their pull request for it. Left out: `github`. */
+    provider?: string,
   ): Promise<BuiltInLaneResult[]>;
   /** Saves `body` as the next version. `expectedVersion`: only if that is still the current one. */
   update(
@@ -442,7 +446,7 @@ export function createWorkflowService({
 
     create: createLane,
 
-    async copyBuiltIn(user, projectId, keys) {
+    async copyBuiltIn(user, projectId, keys, statuses, provider) {
       const [first] = [...(await environments.listSummaries())].sort((a, b) =>
         a.name.localeCompare(b.name),
       );
@@ -453,7 +457,7 @@ export function createWorkflowService({
           const view = await createLane(
             user,
             projectId,
-            builtInLaneDocument(key, environment),
+            builtInLaneDocument(key, environment, statuses, provider),
           );
           results.push({
             key,
