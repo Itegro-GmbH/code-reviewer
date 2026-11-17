@@ -292,6 +292,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/runs/[id]",
   "/api/w/[workspace]/runs/[id]/continuation",
   "/api/w/[workspace]/runs/[id]/steps",
+  "/api/w/[workspace]/runs/[id]/mcp-calls",
 ] as const;
 // Files the proxy matcher leaves out on purpose (src/proxy.ts), so no session rule applies to them.
 const OUTSIDE_THE_PROXY = [

@@ -100,6 +100,8 @@ export function addressesOf(
         route.pattern === "/api/w/:workspace/llm-key-mode" ||
         route.pattern.startsWith("/api/w/:workspace/implementer/") ||
         route.pattern === "/api/w/:workspace/runs/:id/steps" ||
+        // The MCP calls of a run (#1055) are the factory's, like its steps.
+        route.pattern === "/api/w/:workspace/runs/:id/mcp-calls" ||
         route.pattern === "/api/w/:workspace/runs/:id/continuation" ||
         route.pattern === "/w/:workspace/implementer" ||
         route.pattern === "/w/:workspace/environments" ||
