@@ -22,8 +22,9 @@ export const MCP_HEADER_VALUE_MAX_LENGTH = 4096;
 const NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/;
 // An HTTP token (RFC 9110, 5.6.2).
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-// No control character: a line break in a value would split the header.
-const CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f]/;
+// A header value is Latin-1 text (RFC 9110, 5.5: visible characters, space and tab; `fetch` refuses a character above U+00FF). No control
+// character: a line break in a value would split the header.
+const VALUE_CHARACTERS = /^[\t\u0020-\u007e\u00a0-\u00ff]*$/;
 
 /** Names the client sets itself, or that would change what the request is. Compared in lower case. */
 const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
@@ -116,7 +117,7 @@ function parseHeaders(
       typeof value !== "string" ||
       value === "" ||
       value.length > MCP_HEADER_VALUE_MAX_LENGTH ||
-      CONTROL.test(value) ||
+      !VALUE_CHARACTERS.test(value) ||
       value !== value.trim()
     )
       return { ok: false, code: "mcp_header_value_invalid" };

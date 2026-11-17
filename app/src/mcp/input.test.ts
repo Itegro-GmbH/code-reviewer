@@ -16,6 +16,9 @@ const valid = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const headers = (list: unknown) =>
+  valid({ auth: { kind: "header", headers: list } });
+
 const codeOf = (
   raw: unknown,
   options: { allowKeep: boolean; allowTestEndpoints: boolean } = OPTIONS,
@@ -62,8 +65,6 @@ describe("the form of an MCP server", () => {
   });
 
   it("refuses headers that are missing, too many, duplicated, forbidden or malformed", () => {
-    const headers = (list: unknown) =>
-      valid({ auth: { kind: "header", headers: list } });
     expect(codeOf(headers([]))).toBe("mcp_headers_invalid");
     expect(codeOf(headers("x"))).toBe("mcp_headers_invalid");
     expect(
@@ -108,6 +109,23 @@ describe("the form of an MCP server", () => {
       expect(codeOf(headers([{ name: "X-Key", value }]))).toBe(
         "mcp_header_value_invalid",
       );
+  });
+
+  it("refuses a header value with a character a header cannot carry (above U+00FF, or a control character)", () => {
+    for (const value of [
+      "tok\u0151n",
+      "tok\u20ac",
+      "\u{1F511}",
+      "a\u0085b",
+      "a\u007fb",
+    ])
+      expect(codeOf(headers([{ name: "X-Key", value }]))).toBe(
+        "mcp_header_value_invalid",
+      );
+    // Latin-1 text and a tab inside the value are fine.
+    expect(codeOf(headers([{ name: "X-Key", value: "caf\u00e9\tau" }]))).toBe(
+      "ok",
+    );
   });
 
   it("lets an edit keep a header's stored value, and never a new server", () => {
