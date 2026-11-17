@@ -25,6 +25,8 @@ import type { WorkflowRunsApi } from "./api.ts";
 import type { BuilderApi } from "./builder/api.ts";
 import { LaneBuilder } from "./builder/builder.tsx";
 import type { ProfileOption } from "./builder/inspector.tsx";
+import type { McpServerOption } from "./builder/mcp-edit.ts";
+import type { McpService } from "../mcp/service.ts";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
 import { WorkflowRunsList } from "./runs-list.tsx";
@@ -65,6 +67,8 @@ export type WorkflowPageData =
       profiles: ProfileOption[];
       /** The status names of the board of the lane's project (#1036): what a status trigger offers; empty when the project has no board. */
       statuses: string[];
+      /** The MCP servers of the workspace (#1052): what the lane card and the agent steps offer. Never an address or a header. */
+      mcpServers: McpServerOption[];
     };
 
 export async function loadWorkflowPage(
@@ -76,6 +80,8 @@ export async function loadWorkflowPage(
     profiles?: Pick<ProfileService, "list">;
     /** #1036: the status names of the board of a project; never throws. Left out, the builder offers none and the names are typed. */
     statuses?: (projectId: string) => Promise<string[]>;
+    /** #1052: the MCP servers of the workspace. Left out: the builder offers none. */
+    mcp?: Pick<McpService, "list">;
   },
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
@@ -90,6 +96,7 @@ export async function loadWorkflowPage(
     deps.statuses === undefined || workflow.projectId === null
       ? []
       : await deps.statuses(workflow.projectId);
+  const servers = deps.mcp === undefined ? [] : await deps.mcp.list();
   return {
     kind: "ready",
     workflow: {
@@ -106,6 +113,12 @@ export async function loadWorkflowPage(
       .filter((profile) => profile.archivedAt === null)
       .map((profile) => ({ name: profile.name, version: profile.version })),
     statuses,
+    // Only what the pickers need: the name, and whether the last test failed. No address, no header name, no tool list.
+    mcpServers: servers.map((server) => ({
+      id: server.id,
+      name: server.name,
+      status: server.status,
+    })),
   };
 }
 
@@ -208,6 +221,7 @@ export function WorkflowPageContent({
         document={workflow.document}
         profiles={data.profiles}
         statuses={data.statuses}
+        mcpServers={data.mcpServers}
         startPanel={
           <StartSection
             workspaceSlug={workspaceSlug}
