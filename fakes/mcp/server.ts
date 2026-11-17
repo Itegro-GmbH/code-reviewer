@@ -44,6 +44,22 @@ export type FakeMcpOptions = {
   answerAs?: "json" | "sse";
   /** `tools/list` returns this many tools per page (and a `nextCursor`); default: all of them in one page. */
   toolsPageSize?: number;
+  /**
+   * OAuth protection (#1051): every MCP request needs `Authorization: Bearer <token>` of an access token the authorization server accepts,
+   * otherwise 401 with `WWW-Authenticate: Bearer resource_metadata="<url>"`; the protected-resource metadata (RFC 9728) is served at
+   * `/.well-known/oauth-protected-resource[/<path>]`.
+   */
+  oauth?: {
+    /** The issuer of the authorization server the metadata names. */
+    authorizationServer: string;
+    /** Whether a token is one the authorization server issued and has not ended (`OAuthFake.isValidAccessToken`). */
+    validate: (token: string) => boolean;
+    scopes?: string[];
+    /** Where a 401 points: the metadata URL in the header (default), or no `resource_metadata` at all (the well-known place is the fallback). */
+    challenge?: "header" | "bare";
+    /** The `resource` the metadata claims instead of the address it was asked for (to test a mismatch). */
+    claimedResource?: string;
+  };
 };
 
 /** What a test can make the next matching request do instead of the normal answer. */
@@ -83,12 +99,16 @@ export type McpFake = {
   requests(): readonly RecordedMcpRequest[];
   /** Whether any request carried the header with exactly this value. */
   sawHeader(name: string, value: string): boolean;
+  /** Whether any request carried `Authorization: Bearer <token>` with exactly this token. */
+  sawBearer(token: string): boolean;
   /** Streamable HTTP sessions that are open. */
   openSessions(): number;
   /** Legacy SSE event streams that are open (#1053: a call must close the session it opened, whatever happens). */
   openStreams(): number;
   /** The names of the tools `tools/call` was sent for (#1053), in order; never the arguments. */
   calledTools(): readonly string[];
+  /** OAuth: from now on the protected-resource metadata names this authorization server (a server that moved to another one). */
+  setAuthorizationServer(issuer: string): void;
   close(): Promise<void>;
 };
 
@@ -127,11 +147,13 @@ export async function startMcpFake(
   const recorded: RecordedMcpRequest[] = [];
   const called: string[] = [];
   const seenHeaders: { name: string; value: string }[] = [];
+  const seenBearers = new Set<string>();
   const scripted = new Map<string, ScriptedAnswer[]>();
   const sessions = new Set<string>();
   const streams = new Map<string, ServerResponse>();
   const hanging = new Set<ServerResponse>();
   let nextSession = 1;
+  let origin = "";
 
   const take = (target: string): ScriptedAnswer | undefined =>
     scripted.get(target)?.shift();
@@ -235,7 +257,12 @@ export async function startMcpFake(
     const lower: Record<string, string> = {};
     for (const [name, value] of Object.entries(request.headers))
       if (typeof value === "string") lower[name] = value;
-    const authorized = required.every(([name, value]) => lower[name] === value);
+    const bearer = /^Bearer (.+)$/.exec(lower.authorization ?? "")?.[1];
+    if (bearer !== undefined) seenBearers.add(bearer);
+    const authorized =
+      required.every(([name, value]) => lower[name] === value) &&
+      (options.oauth === undefined ||
+        (bearer !== undefined && options.oauth.validate(bearer)));
     for (const [name, value] of required)
       if (lower[name] === value) seenHeaders.push({ name, value });
     const body = request.method === "POST" ? await readBody(request) : "";
@@ -271,9 +298,37 @@ export async function startMcpFake(
       response.end();
       return;
     }
+    const oauth = options.oauth;
+    const wellKnown = "/.well-known/oauth-protected-resource";
+    if (
+      oauth !== undefined &&
+      request.method === "GET" &&
+      (url.pathname === wellKnown || url.pathname.startsWith(`${wellKnown}/`))
+    ) {
+      // RFC 9728: the path after the well-known part is the path of the resource.
+      const suffix = url.pathname.slice(wellKnown.length);
+      reply(
+        response,
+        200,
+        JSON.stringify({
+          resource: oauth.claimedResource ?? `${origin}${suffix}`,
+          authorization_servers: [oauth.authorizationServer],
+          ...(oauth.scopes === undefined
+            ? {}
+            : { scopes_supported: oauth.scopes }),
+        }),
+      );
+      return;
+    }
     if (!authorized) {
+      const challenge =
+        oauth === undefined
+          ? 'Bearer realm="fake-mcp"'
+          : oauth.challenge === "bare"
+            ? 'Bearer realm="fake-mcp"'
+            : `Bearer resource_metadata="${origin}${wellKnown}${url.pathname}"${oauth.scopes === undefined ? "" : `, scope="${oauth.scopes.join(" ")}"`}`;
       reply(response, 401, '{"error":"unauthorized"}', "application/json", {
-        "www-authenticate": 'Bearer realm="fake-mcp"',
+        "www-authenticate": challenge,
       });
       return;
     }
@@ -360,7 +415,7 @@ export async function startMcpFake(
   await new Promise<void>((resolve) => {
     server.listen(0, host, resolve);
   });
-  const origin = `http://${host}:${String((server.address() as AddressInfo).port)}`;
+  origin = `http://${host}:${String((server.address() as AddressInfo).port)}`;
 
   return {
     origin,
@@ -377,9 +432,14 @@ export async function startMcpFake(
       seenHeaders.some(
         (seen) => seen.name === name.toLowerCase() && seen.value === value,
       ),
+    sawBearer: (token) => seenBearers.has(token),
     openSessions: () => sessions.size,
     openStreams: () => streams.size,
     calledTools: () => called,
+    setAuthorizationServer(issuer) {
+      if (options.oauth !== undefined)
+        options.oauth = { ...options.oauth, authorizationServer: issuer };
+    },
     async close() {
       for (const response of [...hanging, ...streams.values()])
         response.destroy();

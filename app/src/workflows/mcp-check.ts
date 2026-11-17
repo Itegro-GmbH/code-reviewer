@@ -120,6 +120,22 @@ export function checkLaneMcp(
           `The MCP server ${shown(found.name)} failed its last connection test. The lane can name it and save; a step that needs it may find it unreachable. Test it again on the MCP page.`,
         ),
       );
+    else if (found.oauth === "broken")
+      report(
+        warning(
+          where,
+          "mcp_server_broken",
+          `The OAuth connection of the MCP server ${shown(found.name)} ended: its authorization server no longer accepts the grant. The lane can name it and save; a step that needs it will not reach it. Reconnect it on the MCP page.`,
+        ),
+      );
+    else if (found.oauth === "unconnected")
+      report(
+        warning(
+          where,
+          "mcp_server_broken",
+          `The MCP server ${shown(found.name)} uses OAuth and is not connected yet. The lane can name it and save; a step that needs it will not reach it. Connect it on the MCP page.`,
+        ),
+      );
   }
   return named;
 }

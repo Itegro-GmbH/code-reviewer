@@ -141,6 +141,9 @@ describe("the route classification", () => {
       "/api/w/[workspace]/mcp/servers": "implementer",
       "/api/w/[workspace]/mcp/servers/[serverId]": "implementer",
       "/api/w/[workspace]/mcp/servers/[serverId]/test": "implementer",
+      // #1051: OAuth for MCP servers: the start of "Connect" and the callback of the authorization server.
+      "/api/w/[workspace]/mcp/servers/[serverId]/connect": "implementer",
+      "/api/mcp/oauth/callback": "implementer",
     };
     for (const [route, expectedClass] of Object.entries(expected))
       expect(classOfRoute(route), route).toBe(expectedClass);

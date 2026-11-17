@@ -1080,6 +1080,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1051-T03: an Owner or an Admin starts "Connect" of an MCP server of their own workspace (the seeded server does not use OAuth: 409
+    // `mcp_oauth_not_oauth`, nothing is called); the other workspace's is not reachable.
+    name: "POST mcp/servers/[serverId]/connect",
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/connect",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_mcp,
+    path: (ids) => `/mcp/servers/${ids.mcpServerId}/connect`,
+    params: (ids) => ({ serverId: ids.mcpServerId }),
+    file: "mcp/servers/[serverId]/connect/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",

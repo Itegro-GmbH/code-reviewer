@@ -199,6 +199,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/invitations/accept",
   // Where Atlassian sends the browser after the consent page of a Jira connection (#1037, src/jira/): a signed in person only.
   "/api/jira/callback",
+  // Where an MCP server's authorization server sends the browser after the consent page (#1051, src/mcp/oauth/): a signed in person only.
+  "/api/mcp/oauth/callback",
   // The data routes of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/api/w/[workspace]",
   "/api/w/[workspace]/jira/choose",
@@ -211,6 +213,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/mcp/servers",
   "/api/w/[workspace]/mcp/servers/[serverId]",
   "/api/w/[workspace]/mcp/servers/[serverId]/test",
+  "/api/w/[workspace]/mcp/servers/[serverId]/connect",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",
