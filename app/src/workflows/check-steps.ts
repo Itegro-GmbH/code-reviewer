@@ -31,6 +31,7 @@ import {
 import { demandOfProfile } from "../runner-identity/access.ts";
 import { announcedBy, describeDemand } from "../runner-identity/announced.ts";
 import { issue, listNames, pointer, shown, warning } from "./issues.ts";
+import { checkStepMcp } from "./mcp-check.ts";
 import {
   parseProfileRef,
   type EnvironmentInfo,
@@ -90,6 +91,8 @@ const COMMON_KEYS = ["id", "kind", "description"] as const;
 
 export type Checker = ScopeContext & {
   resolver: WorkflowResolver;
+  /** The MCP servers the lane names (`mcp` of the document, #1052): what a step's own `mcp` may narrow to. Left out: the lane names none. */
+  laneMcp?: ReadonlySet<string>;
   /**
    * The labels (trimmed, lower case) a step here may not add, because they start the workflow: those of its label triggers that are
    * well formed. The pre-steps of a trigger that is not a label trigger have none: the bot's own writes start no run (#916).
@@ -368,6 +371,7 @@ const AGENT_KEYS = [
   "session",
   "branch",
   "result",
+  "mcp",
 ];
 
 function reachOf(
@@ -852,6 +856,7 @@ function checkAgent(
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
   checkStartBranch(node, path, c, env, state);
+  checkStepMcp(node, path, c.laneMcp ?? new Set(), c.report);
   if (node.result === undefined) return;
   const where = pointer(path, "result");
   const checked = validateResultSchema(node.result, where);

@@ -542,6 +542,27 @@ const WORKFLOW_CASES: Case[] = [
     (d) => (first(d).repo = "acme/api"),
   ],
   ["a repo on an agent step", (d) => (implement(d).repo = "acme/api")],
+  // #1052: `mcp` on the lane and on an agent step is a list of server ids, once each (that they exist and that a step narrows its lane is the validator's).
+  ["mcp of the lane that is no list", (d) => (d.mcp = "github")],
+  ["mcp of the lane with a number in it", (d) => (d.mcp = ["a", 4])],
+  ["mcp of the lane with an empty id", (d) => (d.mcp = [""])],
+  ["mcp of the lane with an id named twice", (d) => (d.mcp = ["a", "a"])],
+  [
+    "mcp of the lane with an id over 64 characters",
+    (d) => (d.mcp = ["a".repeat(65)]),
+  ],
+  [
+    "mcp of the lane with 51 servers",
+    (d) => (d.mcp = Array.from({ length: 51 }, (_, i) => `s${i}`)),
+  ],
+  ["mcp of the lane that is empty", (d) => (d.mcp = [])],
+  ["mcp of the lane with a server", (d) => (d.mcp = ["a"])],
+  ["mcp of an agent step that is no list", (d) => (implement(d).mcp = {})],
+  ["mcp of an agent step that is empty", (d) => (implement(d).mcp = [])],
+  [
+    "mcp of an agent step with an id named twice",
+    (d) => (implement(d).mcp = ["a", "a"]),
+  ],
   ["an agent without a profile", (d) => delete implement(d).profile],
   [
     "an agent with a profile in capitals",
