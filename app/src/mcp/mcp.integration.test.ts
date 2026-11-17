@@ -5,6 +5,7 @@
 // that is private or plain http is refused with a stable code; a server a lane uses is not removed and the lane is named. No real network.
 import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
+import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -43,6 +44,7 @@ async function setup(options: { appSecret?: string } = {}) {
     createMcpService({
       workspaceId,
       repository: createMcpServersRepository(db, workspaceId),
+      oauth: createMcpOAuthRepository(db, workspaceId),
       rateLimits: createRateLimitsRepository(db),
       appSecret,
       fetch: createGuardedFetch({ allowLoopback: true }),
@@ -299,6 +301,7 @@ describe("the MCP registry", () => {
     const service = createMcpService({
       workspaceId: idA,
       repository: createMcpServersRepository(db, idA),
+      oauth: createMcpOAuthRepository(db, idA),
       rateLimits: createRateLimitsRepository(db),
       appSecret: APP_SECRET,
       fetch: createGuardedFetch({ allowLoopback: false }),

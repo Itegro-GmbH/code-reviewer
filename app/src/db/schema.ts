@@ -1750,6 +1750,46 @@ export interface McpServersTable {
   updated_at: string;
 }
 
+/**
+ * The OAuth connection of an MCP server of the kind `oauth` (#1051, epic #1049): what discovery found, the OAuth client (entered by an Owner or
+ * Admin, or registered dynamically) and the sealed token pair (src/db/repositories/mcp-oauth-repository.ts, src/mcp/oauth/). One row per server;
+ * it goes with the server (cascade). The sealed values never leave the server.
+ */
+export interface McpOauthConnectionsTable {
+  /** The id of the MCP server; also the row id bound into the sealed values. */
+  server_id: string;
+  workspace_id: string;
+  /** `unconnected` (no tokens yet), `connected` or `broken` (MCP_OAUTH_STATUSES). */
+  status: ColumnType<string, string | undefined, string>;
+  /** Why the connection is broken (a code of src/mcp/oauth/errors.ts); null unless it is. */
+  error_code: string | null;
+  /** JSON of what discovery found (resource, issuer, endpoints, scopes); nothing secret. */
+  discovery: string | null;
+  /** `manual` (entered by an Owner or Admin) or `dynamic` (registered by this server); null while there is no client. */
+  client_source: string | null;
+  client_id: string | null;
+  /** `none`, `client_secret_basic` or `client_secret_post`. */
+  client_auth_method: string | null;
+  /** The sealed client secret; null for a public client. */
+  client_secret_ciphertext: string | null;
+  client_secret_nonce: string | null;
+  client_secret_key_version: number | null;
+  /** The issuer and the callback address a dynamic client was registered for. */
+  registered_issuer: string | null;
+  registered_redirect_uri: string | null;
+  /** The sealed token pair; null while `unconnected`. */
+  tokens_ciphertext: string | null;
+  tokens_nonce: string | null;
+  tokens_key_version: number | null;
+  /** Counts the writes of the pair; a refresh only replaces the version it read. */
+  token_version: ColumnType<number, number | undefined, number>;
+  access_expires_at: string | null;
+  scopes: string | null;
+  connected_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1774,6 +1814,7 @@ export interface Database {
   jira_connections: JiraConnectionsTable;
   jira_webhooks: JiraWebhooksTable;
   mcp_servers: McpServersTable;
+  mcp_oauth_connections: McpOauthConnectionsTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

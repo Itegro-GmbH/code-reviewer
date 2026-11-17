@@ -22,6 +22,16 @@ export type McpServerForm = {
         headers: (
           { name: string; value: string } | { name: string; keep: true }
         )[];
+      }
+    | {
+        kind: "oauth";
+        /** An OAuth client entered by hand; both empty or absent: the server registers itself. */
+        clientId?: string;
+        /** The authorization server (issuer address) the entered client belongs to; required with a client ID. */
+        issuer?: string;
+        clientSecret?: string;
+        /** On a change: the stored client secret stays. */
+        keepClientSecret?: boolean;
       };
   /** On a change: the revision the form was made from. */
   revision?: number;
@@ -38,6 +48,18 @@ export type McpApi = {
   ): Promise<RequestResult<{ server: McpServerView }>>;
   remove(id: string): Promise<RequestResult<{ removed: true }>>;
   test(id: string): Promise<RequestResult<{ server: McpServerView }>>;
+  /**
+   * Starts "Connect" of an OAuth server: the address of the consent page to send the browser to, and what the person confirms first: the
+   * host of the authorization server and the scopes that will be asked for.
+   */
+  connect(id: string): Promise<
+    RequestResult<{
+      ok: true;
+      url: string;
+      issuerHost: string;
+      scopes: string[];
+    }>
+  >;
 };
 
 export function createMcpApi(
@@ -52,6 +74,7 @@ export function createMcpApi(
     update: (id, form) => requestJson(fetchImpl, "PUT", one(id), form),
     remove: (id) => requestJson(fetchImpl, "DELETE", one(id)),
     test: (id) => requestJson(fetchImpl, "POST", `${one(id)}/test`),
+    connect: (id) => requestJson(fetchImpl, "POST", `${one(id)}/connect`),
   };
 }
 

@@ -34,6 +34,7 @@ const SCOPED = [
   "invitations-repository.ts",
   "jira-connections-repository.ts",
   "jira-webhooks-repository.ts",
+  "mcp-oauth-repository.ts",
   "mcp-servers-repository.ts",
   "job-check-runs-repository.ts",
   "job-vm-runs-repository.ts",

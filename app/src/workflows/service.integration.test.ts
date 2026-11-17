@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
@@ -60,6 +61,7 @@ async function setup() {
       environments: createImplementerEnvironmentsRepository(db, workspaceId),
       profiles: createProfilesRepository(db, workspaceId),
       mcpServers: createMcpServersRepository(db, workspaceId),
+      mcpOAuth: createMcpOAuthRepository(db, workspaceId),
       ...options,
     });
   /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
@@ -754,6 +756,63 @@ describe("a lane that names MCP servers (#1052)", () => {
       expect.objectContaining({ path: "/mcp/0", code: "mcp_server_broken" }),
     ]);
     expect(saved.version).toBe(1);
+  });
+
+  // #1051-T02
+  it("warns about an OAuth server that is not connected or whose grant ended, and still saves", async () => {
+    const { a, db, idA } = await withServers();
+    const mine = createMcpServersRepository(db, idA);
+    await mine.create(
+      { ...MCP_SERVER("srv-oauth", "oauth"), authKind: "oauth" },
+      50,
+    );
+
+    const waiting = await a.validate(withMcp(["srv-oauth"]));
+    expect(waiting.valid).toBe(true);
+    expect(waiting.warnings).toEqual([
+      expect.objectContaining({ path: "/mcp/0", code: "mcp_server_broken" }),
+    ]);
+
+    await createMcpOAuthRepository(db, idA).saveConnection("srv-oauth", 1, {
+      discovery: {
+        resource: "https://mcp.example.com/oauth",
+        issuer: "https://as.example.com",
+        authorizationEndpoint: "https://as.example.com/authorize",
+        tokenEndpoint: "https://as.example.com/token",
+        registrationEndpoint: null,
+        scopes: [],
+        issParameter: false,
+        authMethods: [],
+      },
+      client: {
+        source: "dynamic",
+        clientId: "c",
+        authMethod: "none",
+        sealedSecret: null,
+        registeredIssuer: "https://as.example.com",
+        registeredRedirectUri: "https://factory.example.test/cb",
+      },
+      sealedTokens: { ciphertext: "c", nonce: "n", keyVersion: 1 },
+      accessExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
+      scopes: [],
+      connectedBy: null,
+    });
+    expect((await a.validate(withMcp(["srv-oauth"]))).warnings).toBeUndefined();
+
+    await createMcpOAuthRepository(db, idA).withLockedTokens(
+      "srv-oauth",
+      (locked, writes) =>
+        writes.markBroken(
+          locked?.tokenVersion ?? 0,
+          "mcp_oauth_refresh_refused",
+        ),
+    );
+    const ended = await a.validate(withMcp(["srv-oauth"]));
+    expect(ended.valid).toBe(true);
+    expect(ended.warnings).toEqual([
+      expect.objectContaining({ path: "/mcp/0", code: "mcp_server_broken" }),
+    ]);
+    expect((await a.create(USER, withMcp(["srv-oauth"]))).version).toBe(1);
   });
 
   // #1052 (follow-up of #1050)

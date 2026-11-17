@@ -82,6 +82,7 @@ export const USER_REFERENCES: ReadonlyArray<{
   },
   { table: "jira_connections", column: "connected_by", handling: "move" },
   { table: "mcp_servers", column: "created_by", handling: "move" },
+  { table: "mcp_oauth_connections", column: "connected_by", handling: "move" },
   { table: "invitations", column: "invited_by", handling: "move" },
   { table: "invitations", column: "accepted_by", handling: "move" },
   {

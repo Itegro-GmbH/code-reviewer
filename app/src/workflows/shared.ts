@@ -4,6 +4,7 @@
 // (`requireImplementerCapability`) is the Implementer's, in `../implementer/shared.ts`; the workflows are part of the factory.
 import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
@@ -32,6 +33,7 @@ export function workflowServiceFor(
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     profiles: createProfilesRepository(db, workspaceId),
     mcpServers: createMcpServersRepository(db, workspaceId),
+    mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     onlineRunners: onlineRunnersFrom(createRunnersRepository(db, workspaceId)),
     ...(options.samples === undefined ? {} : { samples: options.samples }),
   });

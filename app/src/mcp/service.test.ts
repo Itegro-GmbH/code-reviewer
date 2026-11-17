@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
-import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
+import type {
+  CurrentMcpServer,
+  StoredMcpServer,
+} from "../db/repositories/mcp-servers-repository.ts";
 import { parseMcpServerInput } from "./input.ts";
 import { openHeaders, planMcpUpdate, sealHeaders } from "./service.ts";
 
@@ -29,7 +32,11 @@ function stored(over: Partial<StoredMcpServer> = {}): StoredMcpServer {
   };
 }
 
-const current = (over: Partial<StoredMcpServer> = {}) => ({
+const current = (
+  over: Partial<StoredMcpServer> = {},
+  oauth: CurrentMcpServer["oauth"] = null,
+) => ({
+  oauth,
   server: stored(over),
   sealed: sealHeaders(SECRET, ID, [
     { name: "Authorization", value: "Bearer stored" },
@@ -143,6 +150,7 @@ describe("a change of an MCP server that keeps its header values", () => {
 
     const lines: string[] = [];
     const broken = {
+      oauth: null,
       server: stored(),
       sealed: sealHeaders("another-secret-0123456789-0123456789", ID, [
         { name: "Authorization", value: "x" },
@@ -160,5 +168,166 @@ describe("a change of an MCP server that keeps its header values", () => {
       authKind: "none",
       sealed: null,
     });
+  });
+});
+
+describe("a change of an MCP server that uses OAuth", () => {
+  const oauthServer = { authKind: "oauth", headerNames: [] };
+  const form = (
+    over: Record<string, unknown> = {},
+    auth: Record<string, unknown> = {},
+  ) => parse({ auth: { kind: "oauth", ...auth }, ...over });
+  const manual = {
+    clientSource: "manual",
+    clientId: "c-1",
+    registeredIssuer: "https://auth.example.com",
+    hasClientSecret: true,
+  } as const;
+
+  // #1051-T01
+  it("changes nothing about the connection when only the name changes", () => {
+    const change = plan(form({ name: "Renamed" }), current(oauthServer, null));
+
+    expect(change).toMatchObject({
+      name: "Renamed",
+      authKind: "oauth",
+      sealed: null,
+    });
+    expect(change).not.toHaveProperty("oauth");
+  });
+
+  it("drops the connection when the address or the transport changes, and when the server stops using OAuth", () => {
+    expect(
+      plan(
+        form({ url: "https://other.example.com/mcp" }),
+        current(oauthServer, null),
+      ),
+    ).not.toHaveProperty("oauth");
+    expect(
+      plan(
+        form({ url: "https://other.example.com/mcp" }),
+        current(oauthServer, {
+          clientSource: "dynamic",
+          clientId: "d",
+          registeredIssuer: "https://as.example.com",
+          hasClientSecret: false,
+        }),
+      ),
+    ).toMatchObject({ oauth: { kind: "drop" } });
+    expect(
+      plan(form({ transport: "sse" }), current(oauthServer, manual)),
+    ).toMatchObject({ oauth: { kind: "drop" } });
+    expect(
+      plan(parse({ auth: { kind: "none" } }), current(oauthServer, manual)),
+    ).toMatchObject({ authKind: "none", oauth: { kind: "drop" } });
+    // A header server that becomes an OAuth server has no sealed headers any more.
+    expect(plan(form({}), current({}, null))).toMatchObject({ sealed: null });
+  });
+
+  it("keeps a registered client when nothing about the address changes, and drops a client that was entered when it is taken away", () => {
+    const dynamic = {
+      clientSource: "dynamic",
+      clientId: "d",
+      registeredIssuer: "https://as.example.com",
+      hasClientSecret: false,
+    } as const;
+
+    expect(plan(form(), current(oauthServer, dynamic))).not.toHaveProperty(
+      "oauth",
+    );
+    expect(plan(form(), current(oauthServer, manual))).toMatchObject({
+      oauth: { kind: "drop" },
+    });
+  });
+
+  it("keeps a client secret only for the same address and client id, and replaces the client otherwise", () => {
+    const keep = {
+      clientId: "c-1",
+      issuer: "https://auth.example.com",
+      keepClientSecret: true,
+    };
+
+    expect(
+      plan(form({}, keep), current(oauthServer, manual)),
+    ).not.toHaveProperty("oauth");
+    expect(
+      plan(
+        form({}, { ...keep, clientId: "c-2" }),
+        current(oauthServer, manual),
+      ),
+    ).toEqual({
+      refused: "mcp_oauth_secret_required",
+    });
+    expect(
+      plan(
+        form({ url: "https://other.example.com/mcp" }, keep),
+        current(oauthServer, manual),
+      ),
+    ).toEqual({ refused: "mcp_oauth_secret_required" });
+    expect(plan(form({}, keep), current(oauthServer, null))).toEqual({
+      refused: "mcp_oauth_secret_required",
+    });
+    const replaced = plan(
+      form(
+        {},
+        {
+          clientId: "c-1",
+          issuer: "https://auth.example.com",
+          clientSecret: "new-secret",
+        },
+      ),
+      current(oauthServer, manual),
+    );
+    expect(replaced).toMatchObject({
+      oauth: {
+        kind: "replace-manual",
+        client: {
+          source: "manual",
+          clientId: "c-1",
+          registeredIssuer: "https://auth.example.com",
+          authMethod: "client_secret_basic",
+        },
+      },
+    });
+    // The secret is sealed, never in the change as text.
+    expect(JSON.stringify(replaced)).not.toContain("new-secret");
+  });
+
+  // #1051-T01
+  it("pins an entered client to its issuer: a kept secret does not follow the client to another authorization server", () => {
+    const moved = {
+      ...{ clientId: "c-1" },
+      issuer: "https://other.example.com",
+    };
+
+    // The same client id at another issuer: the secret was entered for the first one.
+    expect(
+      plan(
+        form({}, { ...moved, keepClientSecret: true }),
+        current(oauthServer, manual),
+      ),
+    ).toEqual({ refused: "mcp_oauth_secret_required" });
+    // Entering it again replaces the client, and the new client is pinned to the new issuer.
+    expect(
+      plan(
+        form({}, { ...moved, clientSecret: "again" }),
+        current(oauthServer, manual),
+      ),
+    ).toMatchObject({
+      oauth: {
+        kind: "replace-manual",
+        client: {
+          clientId: "c-1",
+          registeredIssuer: "https://other.example.com",
+        },
+      },
+    });
+    // A public client (no secret) at another issuer is a different client too: the old grant goes.
+    expect(
+      plan(
+        form({}, { ...moved }),
+        current(oauthServer, { ...manual, hasClientSecret: false }),
+      ),
+    ).toMatchObject({ oauth: { kind: "replace-manual" } });
   });
 });

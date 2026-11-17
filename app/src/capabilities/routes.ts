@@ -254,6 +254,12 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/mcp", class: "implementer" },
+  // #1051: "Connect" of an MCP server that uses OAuth: the start, and the callback the authorization server sends the browser to.
+  {
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/connect",
+    class: "implementer",
+  },
+  { route: "/api/mcp/oauth/callback", class: "implementer" },
   // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
   // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
   // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review

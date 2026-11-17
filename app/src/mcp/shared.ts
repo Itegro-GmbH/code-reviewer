@@ -4,6 +4,7 @@
 // fetch the connection test uses. Server code only.
 import "server-only";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
+import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createRateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -25,7 +26,7 @@ const guardedFetches = new Map<
   ReturnType<typeof createGuardedFetch>
 >();
 
-function guardedFetch(allowLoopback: boolean) {
+export function guardedMcpFetch(allowLoopback: boolean) {
   let guarded = guardedFetches.get(allowLoopback);
   if (guarded === undefined) {
     guarded = createGuardedFetch({ allowLoopback });
@@ -41,9 +42,10 @@ export function mcpServiceFor(workspaceId: string): McpService {
   return createMcpService({
     workspaceId,
     repository: createMcpServersRepository(db, workspaceId),
+    oauth: createMcpOAuthRepository(db, workspaceId),
     rateLimits: createRateLimitsRepository(db),
     appSecret: appSecret(),
-    fetch: guardedFetch(allowTestEndpoints),
+    fetch: guardedMcpFetch(allowTestEndpoints),
     allowTestEndpoints,
   });
 }
