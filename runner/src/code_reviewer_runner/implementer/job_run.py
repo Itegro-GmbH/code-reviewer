@@ -72,6 +72,7 @@ from .git_workspace import (
     WorkspaceLayout,
     WorkspaceSpec,
 )
+from .mcp_config import mcp_door_wanted
 from .network_rule import OFF
 from .placement import placement_of
 from .reader import ReaderAccess
@@ -318,12 +319,19 @@ def production_setup(
         )
 
     rule = rule_of_turn
-    claude = None if harness is None else AgentSeams(image=harness.image, no_new_privileges=True)
+    # #1067: a turn with MCP servers has the MCP door on the model network; the agent's tools do not
+    # send its address to the network door. Any other turn is exactly as before.
+    has_mcp = mcp_door_wanted(spec, environment)
+    claude = (
+        None
+        if harness is None
+        else AgentSeams(image=harness.image, no_new_privileges=True, mcp=has_mcp)
+    )
 
     def place_from(adopted: Adopted) -> Callable[[], AgentPlace]:
         return lambda: AgentContainer(
             memory,
-            agent_seams(environment, AgentSeams()),
+            agent_seams(environment, AgentSeams(mcp=has_mcp)),
             rule,
             result=with_result,
             adopted=adopted,
@@ -333,7 +341,7 @@ def production_setup(
         workspace,
         lambda: AgentContainer(
             memory,
-            agent_seams(environment, AgentSeams() if claude is None else claude),
+            agent_seams(environment, AgentSeams(mcp=has_mcp) if claude is None else claude),
             rule,
             result=with_result,
         ),

@@ -48,7 +48,7 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from code_reviewer_runner.capabilities import (
     ENGINE_DYNAMIC,
@@ -328,14 +328,51 @@ def _end_of(result: Result, delivery: Delivery, superseded: bool = False) -> Job
     return JobEnd.OK if result["ok"] else JobEnd.FAILED
 
 
-def process_stdin(raw_input: Mapping[str, Any], kind: ReviewKind, control_token: str | None) -> str:
+@runtime_checkable
+class McpAccessApi(Protocol):
+    """The API of a Worker (#1067): it knows the app's address the job credential is good for. The
+    runner loop's API (a lease token, not a job credential) does not have it, so a job of the loop
+    never gets an MCP door."""
+
+    @property
+    def worker_app_url(self) -> str: ...
+
+
+def mcp_access_of(
+    api: object, job_id: str, credential: str, raw_input: Mapping[str, Any]
+) -> dict[str, str] | None:
+    """What the MCP door needs (#1067), for an Implementer turn that has MCP servers and an API that
+    holds a job credential for the app: `{appUrl, jobId, credential}`; None otherwise (no servers,
+    or
+    a loop that has no such credential). It goes to the job process's stdin like the job's other
+    secrets, never into its environment or arguments."""
+    implementer = as_object(raw_input.get("implementer"))
+    mcp = as_object(implementer.get("mcp")) if implementer else None
+    servers = mcp.get("servers") if mcp else None
+    if not isinstance(servers, list) or not servers or not isinstance(api, McpAccessApi):
+        return None
+    return {"appUrl": api.worker_app_url, "jobId": job_id, "credential": credential}
+
+
+def process_stdin(
+    raw_input: Mapping[str, Any],
+    kind: ReviewKind,
+    control_token: str | None,
+    mcp_access: Mapping[str, str] | None = None,
+) -> str:
     """The text a job process reads on its stdin: the job as the app sent it and, for an Implementer
     turn of a Worker that vm-init started, the host's token for the environment control
-    (`environmentControlToken`, #977). ASCII escapes: a lone surrogate in a text cannot break the
-    encoding, and the job process reads the same JSON."""
-    if kind is ReviewKind.IMPLEMENTER and control_token is not None:
-        return json.dumps({**raw_input, "environmentControlToken": control_token})
-    return json.dumps(raw_input)
+    (`environmentControlToken`, #977) and, for a turn with MCP servers, the job's access for the MCP
+    door (`mcpAccess`, #1067). ASCII escapes: a lone surrogate in a text cannot break the encoding,
+    and the job process reads the same JSON."""
+    if kind is not ReviewKind.IMPLEMENTER:
+        return json.dumps(raw_input)
+    extra: dict[str, Any] = {}
+    if control_token is not None:
+        extra["environmentControlToken"] = control_token
+    if mcp_access is not None:
+        extra["mcpAccess"] = dict(mcp_access)
+    return json.dumps({**raw_input, **extra})
 
 
 def _secrets_in(raw_input: Mapping[str, Any]) -> list[str]:
@@ -583,7 +620,14 @@ class JobHost:
                     **self._child_environment(job),
                     **({} if resumed.state is None else {RESUME_STATE_VARIABLE: resumed.state}),
                 },
-                stdin=process_stdin(claimed.input, kind, self._control_token).encode("ascii"),
+                stdin=process_stdin(
+                    claimed.input,
+                    kind,
+                    self._control_token,
+                    mcp_access_of(self._api, claimed.id, claimed.lease_token, claimed.input)
+                    if kind is ReviewKind.IMPLEMENTER
+                    else None,
+                ).encode("ascii"),
                 files=resumed.files,
                 # A Dynamic job is the root supervisor (it drops the engine to its own user); every
                 # other job drops to the unprivileged job user when the loop itself is root.

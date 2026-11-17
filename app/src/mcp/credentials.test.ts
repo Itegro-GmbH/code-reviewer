@@ -2,7 +2,12 @@
 
 import { describe, expect, it } from "vitest";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
-import { createMcpCredentials } from "./credentials.ts";
+import {
+  createMcpCredentials,
+  oauthCredentialProvider,
+} from "./credentials.ts";
+import type { McpOAuthTokens } from "./oauth/tokens.ts";
+import { SecretValue } from "../secrets/secret-value.ts";
 import { sealHeaders } from "./service.ts";
 
 const SECRET = "a".repeat(40);
@@ -98,5 +103,84 @@ describe("the credentials of an MCP server", () => {
     expect(
       await withProvider.headersFor({ server: oauth, sealed: null }),
     ).toEqual({ ok: true, headers: { Authorization: "Bearer fresh" } });
+  });
+
+  // #1067-T04: the OAuth provider of #1051 is registered, so an OAuth server works through the proxy.
+  describe("the OAuth provider (#1051)", () => {
+    function tokens(
+      answer: Awaited<ReturnType<McpOAuthTokens["use"]>>,
+      asked: { serverId: string; serverUrl: string }[] = [],
+    ): McpOAuthTokens {
+      return {
+        use(serverId, options) {
+          asked.push({ serverId, serverUrl: options.serverUrl });
+          return Promise.resolve(answer);
+        },
+      };
+    }
+    const oauth = () =>
+      server({
+        authKind: "oauth",
+        headerNames: [],
+        url: "https://mcp.example.com/mcp",
+      });
+
+    it("answers a Bearer header with the fresh token for the address the server has now", async () => {
+      const asked: { serverId: string; serverUrl: string }[] = [];
+      const credentials = createMcpCredentials({
+        appSecret: SECRET,
+        providers: {
+          oauth: oauthCredentialProvider(
+            tokens(
+              { ok: true, accessToken: new SecretValue("fresh-token") },
+              asked,
+            ),
+          ),
+        },
+      });
+      const row = oauth();
+      expect(
+        await credentials.headersFor({ server: row, sealed: null }),
+      ).toEqual({
+        ok: true,
+        headers: { Authorization: "Bearer fresh-token" },
+      });
+      expect(asked).toEqual([{ serverId: row.id, serverUrl: row.url }]);
+    });
+
+    it.each([
+      [{ ok: false, error: "mcp_oauth_not_connected" } as const],
+      [
+        {
+          ok: false,
+          error: "mcp_oauth_broken",
+          brokenCode: "mcp_oauth_expired",
+        } as const,
+      ],
+      [{ ok: false, error: "mcp_oauth_unavailable" } as const],
+    ])(
+      "a connection that gives no token is mcp_credential_broken (%j)",
+      async (answer) => {
+        const provider = oauthCredentialProvider(tokens(answer));
+        expect(
+          await provider.headersFor({ server: oauth(), sealed: null }),
+        ).toEqual({
+          ok: false,
+          code: "mcp_credential_broken",
+        });
+      },
+    );
+
+    it("never lets the token into the result of a failure, and a throwing store is broken, not an exception", async () => {
+      const provider = oauthCredentialProvider({
+        use: () => Promise.reject(new Error("db down with secret-in-message")),
+      });
+      const result = await provider.headersFor({
+        server: oauth(),
+        sealed: null,
+      });
+      expect(result).toEqual({ ok: false, code: "mcp_credential_broken" });
+      expect(JSON.stringify(result)).not.toContain("secret-in-message");
+    });
   });
 });

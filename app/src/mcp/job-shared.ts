@@ -6,6 +6,7 @@ import "server-only";
 import { after } from "next/server";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { createJobMcpCallsRepository } from "../db/repositories/job-mcp-calls-repository.ts";
+import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -15,8 +16,12 @@ import { runAfterResponse } from "../dispatch/shared.ts";
 import { mcpTestEndpointsAllowed } from "./config.ts";
 import { cleanText } from "./client.ts";
 import { createCallTrace } from "./call-trace.ts";
-import { createMcpCredentials } from "./credentials.ts";
+import {
+  createMcpCredentials,
+  oauthCredentialProvider,
+} from "./credentials.ts";
 import { createJobMcp, type JobMcp } from "./job-proxy.ts";
+import { createMcpOAuthTokens } from "./oauth/tokens.ts";
 import { createMcpProxy, type McpCallMeta } from "./proxy.ts";
 
 const guardedFetches = new Map<
@@ -70,7 +75,22 @@ export function jobMcpFor(workspaceId: string): JobMcp {
     workflowRuns: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     mcpServers: createMcpServersRepository(db, workspaceId),
-    credentials: createMcpCredentials({ appSecret: resolved.secret }),
+    credentials: createMcpCredentials({
+      appSecret: resolved.secret,
+      // #1051: an OAuth server's token (renewed before it ends, under the row lock) is added by the proxy like a header.
+      providers: {
+        oauth: oauthCredentialProvider(
+          createMcpOAuthTokens({
+            repository: createMcpOAuthRepository(db, workspaceId),
+            appSecret: resolved.secret,
+            http: {
+              fetch: guardedFetch(allowTestEndpoints),
+              allowTestEndpoints,
+            },
+          }),
+        ),
+      },
+    }),
     log: (line) => console.info(line),
     recordCall: trace.recordCall,
     holdOpen: trace.holdOpen,

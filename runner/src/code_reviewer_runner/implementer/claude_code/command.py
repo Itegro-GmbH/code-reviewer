@@ -24,9 +24,10 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Final
+from typing import Any, Final
 
 from code_reviewer_runner.implementer import finish_tool
+from code_reviewer_runner.implementer.mcp_config import McpEndpoint, claude_servers
 
 from .login import ClaudeLogin
 
@@ -83,6 +84,10 @@ class ClaudeCommand:
     max_budget_usd: str | None = None
     # The runner's addition to Claude Code's own system prompt (`prompts.instructions_text`).
     instructions: str | None = None
+    # #1067: the MCP servers of the step, as the local endpoints of the MCP door. No header, no
+    # token,
+    # no address of a real server: `--mcp-config` carries the endpoints only.
+    mcp_endpoints: Sequence[McpEndpoint] = ()
 
     def argv(self) -> list[str]:
         argv = [
@@ -105,13 +110,13 @@ class ClaudeCommand:
             argv += ["--max-budget-usd", _amount(self.max_budget_usd)]
         if self.instructions:
             argv += ["--append-system-prompt", self.instructions]
+        servers: dict[str, Any] = {}
         if self.finish_command:
             command, *args = self.finish_command
-            server = {"type": "stdio", "command": command, "args": args}
-            argv += [
-                "--mcp-config",
-                json.dumps({"mcpServers": {FINISH_SERVER: server}}, separators=(",", ":")),
-            ]
+            servers[FINISH_SERVER] = {"type": "stdio", "command": command, "args": args}
+        servers.update(claude_servers(self.mcp_endpoints))
+        if servers:
+            argv += ["--mcp-config", json.dumps({"mcpServers": servers}, separators=(",", ":"))]
         return argv
 
 

@@ -105,6 +105,8 @@ from .history import CommitInfo, FileChange
 from .limits import MAX_AGENT_REQUEST_BYTES as MAX_AGENT_REQUEST_BYTES
 from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
+from .mcp_config import McpEndpoint, endpoints_of
+from .mcpdoor_launcher import McpDoorSeams, RunningMcpDoor, start_mcp_door
 from .netdoor.registries import rule_has_registries
 from .netdoor_launcher import NetDoorSeams, RunningNetDoor, start_network_door
 from .network_report import (
@@ -128,7 +130,7 @@ from .result_channel import (
     redacted_value,
 )
 from .resume_session import ResumeInput
-from .runner_profile import door_seams, netdoor_seams
+from .runner_profile import door_seams, mcpdoor_seams, netdoor_seams
 from .session_export import ExportFailed
 from .snapshot_pump import SnapshotPump
 from .step_pump import FLUSH_SECONDS as STEPS_FLUSH_SECONDS
@@ -229,6 +231,9 @@ class SessionSeams:
     door: DoorSeams = field(default_factory=DoorSeams)
     # The network door and the call that narrows the VM's network policy (#745, step 7).
     netdoor: NetDoorSeams = field(default_factory=NetDoorSeams)
+    # The MCP door (#1067): the local endpoint of the step's MCP servers, which holds the job's
+    # credential.
+    mcpdoor: McpDoorSeams = field(default_factory=McpDoorSeams)
     switch_post: Post = urllib_post
     switch_pause_seconds: float = 2.0
     # The connection of the vsock environment control (#975); a test brings a socket of its own.
@@ -489,6 +494,10 @@ class ImplementerSession:
         self._vm_policy = VM_POLICY_NOT_CONFIGURED
         # Whether the turn got as far as the network (one that failed before says nothing of it).
         self._network_reached = False
+        # #1067: the MCP door (None: the turn has no MCP servers, or the door could not be had) and
+        # the endpoints of the servers at it, which both harnesses' configuration names.
+        self._mcp_door: RunningMcpDoor | None = None
+        self._mcp_endpoints: tuple[McpEndpoint, ...] = ()
 
     @property
     def ledger(self) -> BudgetLedger | None:
@@ -515,6 +524,7 @@ class ImplementerSession:
             if self._subscription is None:
                 model = self._start_model()
             self._start_network(model)
+            self._start_mcp()
             place = self._place_factory()
             for note in place.create():
                 self._note(note)
@@ -548,6 +558,9 @@ class ImplementerSession:
             self._engine_ended = ended
             if not ended:
                 self._note("the agent's container could not be confirmed gone")
+            # No call of the agent can come any more: the MCP door ends the sessions it still holds
+            # open (`DELETE`) and goes, with the job's credential.
+            self._stop_mcp()
             # No connection can come any more: the network door says its last word. It goes before
             # the model door, whose network it is a member of.
             self._stop_network()
@@ -563,6 +576,7 @@ class ImplementerSession:
         try:
             self._finish()
         finally:
+            self._stop_mcp()
             self._stop_network()
             if model is not None:
                 model.stop()
@@ -610,6 +624,7 @@ class ImplementerSession:
             result_schema=self._schema,
             can_ask=self._can_ask,
             max_budget_usd=subscription.max_budget_usd,
+            mcp_endpoints=self._mcp_endpoints,
         )
         self._claude = agent
         agent.start()
@@ -822,6 +837,62 @@ class ImplementerSession:
             control.narrow(rule, model_host)
             self._vm_policy = VM_POLICY_NARROWED
 
+    def _start_mcp(self) -> None:
+        """The MCP door (#1067) for a turn whose step has MCP servers: the endpoint the harness is
+        configured with, and the one place that holds the job's credential. Nothing here fails the
+        turn: a door that cannot be had, a runner without one and servers the lane no longer has
+        are a **note of the run**, and the step runs without those tools."""
+        mcp = self.job.implementer.mcp
+        if mcp is None:
+            return
+        if mcp.unavailable:
+            noun = "server" if mcp.unavailable == 1 else "servers"
+            self._note(
+                f"{mcp.unavailable} MCP {noun} of this lane "
+                f"{'is' if mcp.unavailable == 1 else 'are'} no longer available; "
+                "the step runs without "
+                f"{'it' if mcp.unavailable == 1 else 'them'}"
+            )
+        if not mcp.servers:
+            return
+        placement = placement_of(self.environment)
+        access = self.job.mcp_access
+        if not placement.mcp_supported:
+            self._note("the MCP servers of this lane are not available on this runner yet")
+            return
+        if access is None:
+            self._note("the MCP servers of this lane could not be used: this run holds no access")
+            return
+        try:
+            door = start_mcp_door(
+                access,
+                [server.id for server in mcp.servers],
+                deadline_seconds=self._deadline_seconds(),
+                seams=mcpdoor_seams(self.environment, self.seams.mcpdoor),
+            )
+        except JobError as error:
+            _log.warning("the MCP door could not be started: %s", error.detail)
+            self._note(
+                "the MCP servers of this lane could not be reached: the step runs without them"
+            )
+            return
+        self._mcp_door = door
+        self._mcp_endpoints = endpoints_of(mcp.servers, door.url)
+
+    def _stop_mcp(self) -> None:
+        """End the MCP door: it sends a `DELETE` for every MCP session still open and drops the
+        credential. Safe to call twice."""
+        door, self._mcp_door = self._mcp_door, None
+        if door is None:
+            return
+        unexpected = door.end is not None and door.end.unexpected
+        status = door.stop()
+        if unexpected:
+            self._note("the MCP door ended during the turn; the agent had no MCP tools after it")
+        left = 0 if status is None else status.get("sessionsLeft", 0)
+        if isinstance(left, int) and left > 0:
+            self._note(f"{left} MCP session(s) could not be ended at the end of the step")
+
     def _install_registry_trust(self, place: AgentPlace) -> None:
         """The door's certificate authority into the agent's container (#784), before anything runs
         in it: the variables of `agent_container.trust_environment` point at these two files, and a
@@ -936,6 +1007,7 @@ class ImplementerSession:
                 instructions_path=instructions_path,
                 door_host=placement_of(self.environment).model_door_address,
                 finish_command=None if self._schema is None else finish_server_command(),
+                mcp_endpoints=self._mcp_endpoints,
             )
 
         options: dict[str, Any] = {}

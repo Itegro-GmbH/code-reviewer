@@ -38,6 +38,7 @@ from ..outer_proxy import OuterProxy, OuterProxyError, outer_proxy_of
 from ..result import ErrorCode
 from .agent_container import AGENT_IMAGE_REFERENCE, AGENT_RUNTIME, AgentSeams
 from .door_launcher import DoorSeams
+from .mcpdoor_launcher import McpDoorSeams
 from .netdoor_launcher import NetDoorSeams
 from .placement import HOSTED, PLACEMENT_NAMES, SPLIT_RUNTIME, Placement, placement_of
 from .reader import ReaderSeams
@@ -154,3 +155,13 @@ def reader_seams(environment: Mapping[str, str], base: ReaderSeams = ReaderSeams
         # B has the agent's golden image, not the Worker image the hosted readers are made from.
         image=base.image or (AGENT_IMAGE_REFERENCE if placement.split else ""),
     )
+
+
+def mcpdoor_seams(environment: Mapping[str, str], base: McpDoorSeams) -> McpDoorSeams:
+    """The MCP door's seams with the host's proxy and the placement, when this job process has
+    them."""
+    proxy = outer_proxy_for_job(environment)
+    placement = placement_of(environment)
+    if proxy is None and placement == base.placement:
+        return base
+    return replace(base, outer_proxy=proxy or base.outer_proxy, placement=placement)

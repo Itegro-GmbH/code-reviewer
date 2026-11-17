@@ -25,12 +25,19 @@ MODEL_DOOR_MODE: Final = "docker"
 
 # A /29 of 10.0.0.0/8 that nothing else on a VM uses (the Docker bridge pool is 172.16/12, the
 # platform's own network is not 10.213.77/29): .1 the network's own, .2 the model door, .3 the
-# network door (step 7), .4 the agent.
+# network door (step 7), .4 the agent, .5 the MCP door (#1067).
 MODEL_NETWORK_NAME: Final = "code-reviewer-model"
 MODEL_NETWORK_SUBNET: Final = "10.213.77.0/29"
 MODEL_NETWORK_GATEWAY: Final = "10.213.77.1"
 MODEL_DOOR_ADDRESS: Final = "10.213.77.2"
 MODEL_AGENT_ADDRESS: Final = "10.213.77.4"
+# The MCP door (#1067, epic #1049): the local endpoint of the MCP servers of a step, which holds
+# the job's
+# credential. Hosted it is on the model network like the other two doors; on the Incus backend it
+# is on
+# instance A (`implementer/placement.py`).
+MCP_DOOR_ADDRESS: Final = "10.213.77.5"
+MCP_DOOR_PORT: Final = 3129
 # The network door (#745, step 7): the HTTP and HTTPS proxy the environment's network rule is
 # enforced in. It sits on the model network at its own fixed address; the agent and the containers
 # it starts reach it by this address (a name does not resolve there).

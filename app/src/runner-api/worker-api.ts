@@ -273,16 +273,21 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
             "retry-after": "1",
           });
         }
-        const counted = await deps.queue.countMcpCall(
-          who.job.id,
-          who.leaseToken,
-          MCP_MAX_CALLS_PER_CLAIM,
-        );
-        if (counted === "not_holder") return ended();
-        if (counted === "exhausted") {
-          refusedMcp(who.job.id, "mcp_call_limit_reached");
-          runtime.refused(who.job, serverId, "mcp_call_limit_reached", null);
-          return mcpRefusal("mcp_call_limit_reached");
+        // A DELETE ends a session and costs nothing: the door ends every open session at the end of the step, also when the cap of the
+        // claim is used up (the holder of the claim was checked by `identify` above; the gate above still bounds it). It is still a call of
+        // the trace (the proxy's `onCall`), so a refused or failed session end shows there.
+        if (request.method !== "DELETE") {
+          const counted = await deps.queue.countMcpCall(
+            who.job.id,
+            who.leaseToken,
+            MCP_MAX_CALLS_PER_CLAIM,
+          );
+          if (counted === "not_holder") return ended();
+          if (counted === "exhausted") {
+            refusedMcp(who.job.id, "mcp_call_limit_reached");
+            runtime.refused(who.job, serverId, "mcp_call_limit_reached", null);
+            return mcpRefusal("mcp_call_limit_reached");
+          }
         }
         const read = await mcp.read();
         if (!read.ok) {

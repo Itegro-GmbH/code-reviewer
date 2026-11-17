@@ -80,24 +80,24 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
 
 ## Limits of the route
 
-- **Per claim: 2000 calls** (`MCP_MAX_CALLS_PER_CLAIM`). `jobs.mcp_calls` is counted in one SQL statement on the job row, next to the lease token it belongs to, so it holds across all function instances; a new claim starts at zero. Every POST and DELETE that passes the credential, the method and the server-id checks counts, whether the server then exists or not.
+- **Per claim: 2000 calls** (`MCP_MAX_CALLS_PER_CLAIM`). `jobs.mcp_calls` is counted in one SQL statement on the job row, next to the lease token it belongs to, so it holds across all function instances; a new claim starts at zero. Every POST that passes the credential, the method and the server-id checks counts; whether the server then exists or not. A DELETE (ending a session) does not count, so the door can end its sessions when the cap is used up; it is still held to the places per job and to the running claim (`409` after the claim ended).
 - **In flight per job: 4** (`MCP_MAX_CONCURRENT_CALLS_PER_JOB`), **best effort per instance**: the app runs as many function instances, each counting for itself in memory (nothing is stored), so the cap bounds what one instance does for one job; the count per claim is the bound that holds everywhere. An event stream answer counts until its stream has ended or the consumer let go. A call refused for this reason was not counted and not made.
 - The deadline (55 s), the request cap (256 KiB) and the answer cap (4 MiB) are per call (see the threat model).
 - A refusal before the proxy leaves one log line with the job, the server id where there is one, and the code (`[worker-api] mcp job=… refused: <code>`, `[mcp-proxy] job=… server=… refused: <code>`); never a value.
 
 ## Parts
 
-| Part                                                                                                                                                       | Where                                                             | State     |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------- |
-| Credential providers (none, header; OAuth plugs in, #1051)                                                                                                 | `app/src/mcp/credentials.ts`                                      | this PR   |
-| The proxy (Streamable HTTP, legacy SSE adapter, limits, call metadata)                                                                                     | `app/src/mcp/proxy.ts`                                            | this PR   |
-| Servers of a job (workspace-bound, tolerant of removed servers) and the call handler                                                                       | `app/src/mcp/job-proxy.ts`                                        | this PR   |
-| `implementer.mcp` in the job, claim feature `implementer_mcp`                                                                                              | `app/src/runner-api/mcp-block.ts`, `contracts/runner-api.v1.json` | this PR   |
-| Worker API route `POST/DELETE /api/workers/v1/jobs/{id}/mcp/{server}`                                                                                      | `app/src/runner-api/worker-api.ts`, `mcp-call.ts`                 | this PR   |
-| Limits of the route: calls per claim (`jobs.mcp_calls`, expand-only migration), in flight                                                                  | `app/src/mcp/in-flight.ts`, `runner-jobs-repository.ts`           | this PR   |
-| The run's trace and live view: every call and refusal in `job_mcp_calls`, `GET /api/w/:workspace/runs/:id/mcp-calls`, the "MCP tool calls" section (#1055) | `app/src/mcp/call-trace.ts`, `app/src/runs/ui/run-mcp-calls.tsx`  | this PR   |
-| Local endpoint at the hosted door, OpenCode and Claude Code configuration, the run's note                                                                  | `runner/`                                                         | follow-up |
-| The same at Incus instance A (and the endpoint through the inner wall)                                                                                     | `runner/…/incus/`                                                 | follow-up |
+| Part                                                                                                                                                       | Where                                                                     | State                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------- |
+| Credential providers (none, header, OAuth #1051)                                                                                                           | `app/src/mcp/credentials.ts`, `job-shared.ts`                             | #1069, #1067                 |
+| The proxy (Streamable HTTP, legacy SSE adapter, limits, call metadata)                                                                                     | `app/src/mcp/proxy.ts`                                                    | this PR                      |
+| Servers of a job (workspace-bound, tolerant of removed servers) and the call handler                                                                       | `app/src/mcp/job-proxy.ts`                                                | this PR                      |
+| `implementer.mcp` in the job, claim feature `implementer_mcp`                                                                                              | `app/src/runner-api/mcp-block.ts`, `contracts/runner-api.v1.json`         | this PR                      |
+| Worker API route `POST/DELETE /api/workers/v1/jobs/{id}/mcp/{server}`                                                                                      | `app/src/runner-api/worker-api.ts`, `mcp-call.ts`                         | this PR                      |
+| Limits of the route: calls per claim (`jobs.mcp_calls`, expand-only migration), in flight                                                                  | `app/src/mcp/in-flight.ts`, `runner-jobs-repository.ts`                   | this PR                      |
+| The run's trace and live view: every call and refusal in `job_mcp_calls`, `GET /api/w/:workspace/runs/:id/mcp-calls`, the "MCP tool calls" section (#1055) | `app/src/mcp/call-trace.ts`, `app/src/runs/ui/run-mcp-calls.tsx`          | this PR                      |
+| Local endpoint at the hosted door, OpenCode and Claude Code configuration, the run's note                                                                  | `runner/.../implementer/mcpdoor/`, `mcpdoor_launcher.py`, `mcp_config.py` | #1067 (see "The door" below) |
+| The same at Incus instance A (and the endpoint through the inner wall)                                                                                     | `runner/…/incus/`                                                         | follow-up                    |
 
 ## Rules of the proxy
 
@@ -109,8 +109,10 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
 - **Legacy SSE servers.** The proxy keeps no state between calls, so each call opens a short session: stream, endpoint, its own `initialize` and
   `initialized`, the call, the answer from the stream, close. The agent's own `initialized` is answered by the proxy. A server that keeps state
   across the calls of one session sees a new session each time.
-- **Header authentication only today.** `createMcpCredentials({ providers: { oauth } })` is where OAuth tokens (#1051) plug in: the provider
-  receives the server and returns the headers for this call, or `mcp_credential_broken` when the connection needs a new sign-in.
+- **Header and OAuth authentication.** `createMcpCredentials({ providers: { oauth } })` is where OAuth tokens (#1051) plug in, and `job-shared.ts`
+  registers `oauthCredentialProvider` there (#1067): it asks the token store for a fresh access token of the server (renewed before it ends, under
+  the row lock) and answers `Authorization: Bearer <token>`. A connection that gives no token (not connected, broken, the authorization server or
+  the key unavailable, a failing database) is `mcp_credential_broken`, never an exception and never a text of the failure.
 - **Per-call metadata** (`McpCallMeta`: job, server id and name, method, tool name, status, outcome, duration, sizes; never arguments or results) goes to
   `onCall`: the log line, and (#1055) the run's trace, below. An event stream answer is recorded once, when
   its body has ended, whatever the way: `ok`, `cancelled` (the consumer let go; the server's stream is closed with it), or the code of the
@@ -132,4 +134,68 @@ What people see of what the agent did with MCP tools: one line for each call, on
 - **Bound.** At most **2000 rows for a job** (`MAX_MCP_CALLS_RECORDED_PER_JOB`, the number of calls a claim may make), checked in the statement that inserts; a call past it is not stored (the page says "the first 2,000 calls"). One row more is kept for the refusal `mcp_call_limit_reached`, so a run that used all its calls shows why the next one was refused. The bound holds for the job across claims. It is a bound and not an exact number: the check and the insert are one statement without a lock, so inserts that run at the same moment count the same rows and may overshoot by the few in flight. How many: the route lets four calls of a job be in flight on one instance (the place is given back when the answer has ended, so a stream holds its place until its end), each instance has its own four, so the overshoot is a handful, never growth. Of the refusal `mcp_too_many_concurrent_calls` (it comes before the claim's call count, so a looping agent can make thousands) only the first 20 of a job get a row; every later one adds 1 to `suppressed` of the newest of them in the same statement, and the page says how many were counted. Real calls keep their room.
 - **Reading.** The cursor is `seq`, a table-wide Postgres identity: it is handed out when the insert runs and the row shows when its transaction commits, so a row can show up behind the cursor (four parallel writes). Every read starts 50 of the job's rows before the cursor and the page merges by `seq`. The route takes a cursor up to 2^53-1 (the identity is not held to the 32 bits of a step), refuses a larger one with `400 STEPS_QUERY_INVALID`, which the page treats as permanent; the repository throws `McpSeqOutOfRangeError` instead of misordering if a `seq` is ever beyond that (about 9·10^15 rows, not reachable in practice). **Side channel, accepted:** the gaps between the `seq` of one workspace's rows tell a little of the volume of MCP calls of all workspaces; `seq` is shown to members of the workspace only as the opaque cursor. A per-job sequence would hide it but needs a lock or a counter row on every call; not worth it for a count of calls.
 - **What people see.** A refusal reads "refused: …" with the status, a call that was made and went wrong "failed: …", an abandoned answer "cancelled by the agent". The section is not there for a run that made no MCP call. The read route is `GET /api/w/:workspace/runs/:id/mcp-calls?after=&limit=` (any member, the run is looked up in the workspace in the address, a run that is not a run of the Implementer is `404 RUN_NOT_FOUND`).
-- **Not done here.** The door's own record of a call it could not send to the app (runner side, #1067) and a trace for the hosted door's calls beyond `onCall` are follow-ups; a run's MCP calls are not in the result document.
+- **The door's calls (#1067).** The door's calls arrive at the same route, so they are in the trace like any call, including its `DELETE` that ends a session at the end of the step: a `DELETE` is not counted against the cap of the claim (it costs nothing), but it is a call of the proxy and so a row of the trace (outcome `ok`, or the code of the failure); its refusals (`429 mcp_too_many_concurrent_calls`) are rows (or the `suppressed` count) like any other. Rows count against the 2000 of the bound; past it a session end is not stored. **Not done here:** the door's own record of a call it could not send to the app (the app never sees it) and a run's MCP calls in the result document.
+
+## The door: the local endpoint at the sandbox (#1067)
+
+On a hosted sandbox (and on every VM of the Firecracker backend, which has the same placement) a step with MCP servers gets **a third container on
+the model network**, the MCP door, next to the model door (`10.213.77.2`) and the network door (`10.213.77.3`): `10.213.77.5:3129`
+(`model_door_route.py`, `mcpdoor_launcher.py`). It is made like the other doors (hardened by construction, no environment variable, no mount, no
+published port, the same egress table: DNS, port 443 of public addresses, nothing private and nothing of the model network; with the host's
+outer-wall proxy that proxy only), and it is the one place outside the agent's sandbox that holds the job credential.
+
+```
+claim: implementer.mcp = [{id, name, transport}], unavailable        (worker announces implementer_mcp)
+job host (Worker, holds crj_…) ──stdin of the job process: mcpAccess {appUrl, jobId, credential}──▶ Control (job process)
+Control ──stdin of the MCP door container: start document {…, credential, servers}──▶ door (mcpdoor/service.py)
+agent harness ──http://10.213.77.5:3129/mcp/<server id>──▶ door ──POST|DELETE /api/workers/v1/jobs/{job}/mcp/{server id} (Bearer crj_…)──▶ app
+```
+
+**How the credential is kept from the agent.** It travels on stdin only: the Worker puts it into the job process's stdin (as it does the git token and the
+environment-control token), Control writes it to the door's stdin, and the door keeps it in memory. It is in no argument, no environment variable, no file,
+no mount and no label of any container, so neither `docker inspect`, nor the door's process list, nor the agent's environment, files, `ps` or
+`/proc/*/{cmdline,environ}` shows it; the agent's container shares no namespace and no volume with the door and reaches it only through the one port.
+The harness files (OpenCode `mcp`, Claude Code `--mcp-config`) hold the local endpoint URLs and nothing else: no header, no token, no address of a real
+server. Tests: `test_mcp_door_service.py` (a real door process; greps its `/proc` files, `ps`, its temp files, its output), `test_mcp_door_launcher.py`
+(no request to the daemon holds it), `test_implementer_mcp.py` (neither harness's configuration, argument list or environment holds it; the agent's
+container definition does not change but for the proxy exemption).
+
+**What the door does** (`mcpdoor/relay.py`), and nothing else:
+
+- A path other than `/mcp/<server id of the step>` is `404 mcp_server_unavailable`, with no request to the app. `GET` is `405` (as the app answers).
+- It forwards the JSON-RPC message (at most 256 KiB), `Mcp-Session-Id` and `MCP-Protocol-Version` (each a plain token, else `400`), and nothing else
+  (the agent's `Authorization`, cookies and any other header are dropped); it relays back the status, the content type, `Mcp-Session-Id` and the body
+  (an event stream as it arrives; when the agent lets go, the request to the app ends with it). No `Retry-After` goes back to the agent: the door has
+  retried once itself.
+- **Never an automatic retry of a `503`** (the door's own `503 mcp_proxy_unreachable` for a connection that failed is not repeated either). The only
+  retry is a `429 mcp_too_many_concurrent_calls` with `Retry-After` (the call was not made): once, after the wait (at most 5 s). `429 mcp_call_limit_reached`
+  and every other status pass as they are.
+- **Sessions end with the step.** The door remembers every `Mcp-Session-Id` the app handed out; when the step ends (success, failure, cancel: Control
+  stops it after the agent's container is gone, and the end of its stdin does the same if Control dies) it sends a `DELETE` for each one the agent did not
+  end itself, at most 3 at a time (the app allows 4 calls of a job at once; a `429 mcp_too_many_concurrent_calls` is asked once more, like any call;
+  5 s each, 8 s all), says how many it ended, drops the credential and exits. Only a `2xx`, `404` or `405` ends a session: any other answer (a `409`
+  after a cancel, a `5xx`, a broken connection) leaves it open, and so is a session beyond the 64 the door tracks. All of these are `sessionsLeft` of
+  the final status and a note of the run; the server's own timeout ends them. The agent's own `DELETE` stops the tracking only on the same statuses.
+- **Sockets are bounded.** An idle or slow connection is closed after 30 s, at most 32 connections are served at once (one more is `429
+mcp_too_many_concurrent_calls` and closed), a body that is not a plain length is `400`, and an answer of the app that breaks off is a `503`, never
+  an empty `200`.
+
+**The sandbox's network rule is not changed.** The agent reaches the door like it reaches the model door; the door's address is added to the agent's
+`NO_PROXY` only for a turn that has the door, so the network door never sees it. A turn without MCP servers is exactly what it was (the same container
+definition, environment and configuration; tests hold it).
+
+**Harness configuration** (`mcp_config.py`; a key is the server's name as a plain token `[A-Za-z0-9_-]`, unique, never `finish` and never a name that could build the name of a built-in tool or permission, such as `finish_submit` or `doom`, which get a number):
+
+| Harness     | Where                                                  | Entry                                                                  | Tool names           |
+| ----------- | ------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------- |
+| OpenCode    | `mcp` in `/etc/code-reviewer/opencode.json` (hosted)   | `{type: "remote", url: <door>/mcp/<id>, oauth: false, timeout: 30000}` | `<key>_<tool>`       |
+| Claude Code | `--mcp-config` (`mcpServers`, next to the finish tool) | `{type: "http", url: <door>/mcp/<id>}`                                 | `mcp__<key>__<tool>` |
+
+OpenCode's default-deny permission gets `<key>_*: allow` for the servers of the step only; Claude Code runs with `bypassPermissions` and `--strict-mcp-config`.
+
+**Notes of the run.** `implementer.mcp.unavailable > 0` is the note "N MCP servers of this lane are no longer available; the step runs without them"; a door
+that cannot be started, a job that holds no access and a runner without a door are notes too ("… could not be reached …", "… holds no access", "… not
+available on this runner yet"): none of them fails the turn.
+
+**Not here.** The door's egress is the shared table (DNS and port 443 of public addresses), not the app's address alone: the app's address is a name behind a CDN, which an `nft` table cannot pin; narrowing it (a resolved set, or the host's proxy for the app) is a follow-up. The Incus backend (instance A holds the door, a port through the inner wall, `no_proxy`) is #1068: its placement has no MCP door yet, so a
+turn there runs without MCP tools and says so (`Placement.mcp_supported`). The door's code (`mcpdoor/`) takes the bind address as an argument for it.
