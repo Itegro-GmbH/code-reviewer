@@ -132,7 +132,21 @@ describe("the MCP calls route file", () => {
       cursor: expect.any(Number),
       hasMore: false,
       full: false,
+      omitted: 0,
     });
+  });
+
+  // #1055-T03
+  it("takes a cursor past 32 bits (the identity is table-wide) and refuses one a number cannot hold", async () => {
+    const { job } = await startRoutes();
+
+    const far = await calls("default", job.id, "?after=5000000000");
+    const absurd = await calls("default", job.id, "?after=9007199254740993");
+
+    expect(far.status).toBe(200);
+    // The cursor is far ahead of the row: the answer still starts a few rows behind it, and the cursor does not move back.
+    expect(await far.json()).toMatchObject({ cursor: 5000000000 });
+    expect(absurd.status).toBe(400);
   });
 
   // #1055-T04

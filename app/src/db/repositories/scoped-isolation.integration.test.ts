@@ -2364,15 +2364,33 @@ const CASES: Case[] = [
       }),
     expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
   },
+  // the refusal of the gate takes its own statement (insert or count): the same wall
+  {
+    name: "mcpCalls.record (gate refusal)",
+    run: (a, b) =>
+      a.mcpCalls.record(taskOf(b).turn.jobId, {
+        serverId: "planted",
+        serverName: "",
+        rpcMethod: null,
+        tool: null,
+        status: 429,
+        outcome: "mcp_too_many_concurrent_calls",
+        durationMs: 0,
+        requestBytes: 0,
+        responseBytes: 0,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
+  },
   {
     name: "mcpCalls.listAfter",
     run: (a, b) => a.mcpCalls.listAfter(taskOf(b).turn.jobId, 0, 100),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
-    name: "mcpCalls.count",
-    run: (a, b) => a.mcpCalls.count(taskOf(b).turn.jobId),
-    expectAnswer: (answer) => expect(answer).toBe(0),
+    name: "mcpCalls.summary",
+    run: (a, b) => a.mcpCalls.summary(taskOf(b).turn.jobId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ rows: 0, suppressed: 0 }),
   },
   // implementer session snapshots (#839): B's snapshot is not A's to read, replace or complete, not even with B's lease token
   {

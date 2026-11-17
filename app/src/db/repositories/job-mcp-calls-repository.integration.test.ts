@@ -10,7 +10,9 @@ import { addWorkspace } from "../../test-support/workspaces.ts";
 import { enqueueInWorkspace } from "../../test-support/other-workspace-jobs.ts";
 import {
   createJobMcpCallsRepository,
+  MAX_GATE_REFUSALS_STORED,
   MAX_MCP_CALLS_RECORDED_PER_JOB,
+  McpSeqOutOfRangeError,
   type McpCallRecord,
 } from "./job-mcp-calls-repository.ts";
 
@@ -104,6 +106,7 @@ describe("the MCP calls repository", () => {
       "server_id",
       "server_name",
       "status",
+      "suppressed",
       "tool",
       "workspace_id",
     ]);
@@ -122,7 +125,9 @@ describe("the MCP calls repository", () => {
     expect(await repo.record(job.id, call())).toBe("stored");
     expect(await repo.record(job.id, call())).toBe("capped");
 
-    expect(await repo.count(job.id)).toBe(MAX_MCP_CALLS_RECORDED_PER_JOB);
+    expect((await repo.summary(job.id)).rows).toBe(
+      MAX_MCP_CALLS_RECORDED_PER_JOB,
+    );
   });
 
   // #1055-T03
@@ -141,7 +146,9 @@ describe("the MCP calls repository", () => {
     expect(await repo.record(job.id, limit)).toBe("stored");
     expect(await repo.record(job.id, limit)).toBe("capped");
 
-    expect(await repo.count(job.id)).toBe(MAX_MCP_CALLS_RECORDED_PER_JOB + 1);
+    expect((await repo.summary(job.id)).rows).toBe(
+      MAX_MCP_CALLS_RECORDED_PER_JOB + 1,
+    );
   });
 
   // #1055-T04
@@ -160,7 +167,10 @@ describe("the MCP calls repository", () => {
     await fixture.repo.record(fixture.job.id, call());
 
     expect(await other.listAfter(fixture.job.id, 0, 10)).toEqual([]);
-    expect(await other.count(fixture.job.id)).toBe(0);
+    expect(await other.summary(fixture.job.id)).toEqual({
+      rows: 0,
+      suppressed: 0,
+    });
     expect(await fixture.repo.listAfter(otherJobId, 0, 10)).toEqual([]);
     expect(
       await fixture.db.selectFrom("job_mcp_calls").select("job_id").execute(),
@@ -176,5 +186,127 @@ describe("the MCP calls repository", () => {
     expect(await repo.listAfter(job.id, 0, 10)).toMatchObject([
       { serverId: "removed-server", serverName: "Linear" },
     ]);
+  });
+  // #1055-T03: the refusal of the gate comes before the claim's call count, so a loop can make thousands of them
+  it("stores only the first refusals of 'too many calls at once' and counts the rest on the newest of them, in one statement each", async () => {
+    const { repo, job } = await setup();
+    const gate = call({
+      status: 429,
+      outcome: "mcp_too_many_concurrent_calls",
+      tool: null,
+      rpcMethod: null,
+      durationMs: 0,
+    });
+    for (let i = 0; i < MAX_GATE_REFUSALS_STORED; i += 1)
+      expect(await repo.record(job.id, gate)).toBe("stored");
+    // A real call in between does not change what is counted.
+    expect(await repo.record(job.id, call())).toBe("stored");
+    expect(await repo.record(job.id, gate)).toBe("counted");
+    expect(await repo.record(job.id, gate)).toBe("counted");
+    expect(await repo.record(job.id, gate)).toBe("counted");
+
+    // The rows: the refusals that were stored and the real call; the three others are a number.
+    expect(await repo.summary(job.id)).toEqual({
+      rows: MAX_GATE_REFUSALS_STORED + 1,
+      suppressed: 3,
+    });
+    const rows = await repo.listAfter(job.id, 0, 100);
+    const withCount = rows.filter((row) => row.suppressed > 0);
+    expect(withCount).toHaveLength(1);
+    // On the newest refusal row (not on the real call).
+    expect(withCount[0]).toMatchObject({
+      outcome: "mcp_too_many_concurrent_calls",
+      suppressed: 3,
+    });
+  });
+
+  // #1055-T03
+  it("keeps the room of the real calls: a flood of gate refusals does not eat the budget of the job", async () => {
+    const { repo, job } = await setup();
+    const gate = call({
+      status: 429,
+      outcome: "mcp_too_many_concurrent_calls",
+    });
+    for (let i = 0; i < MAX_GATE_REFUSALS_STORED + 500; i += 1)
+      await repo.record(job.id, gate);
+
+    expect((await repo.summary(job.id)).rows).toBe(MAX_GATE_REFUSALS_STORED);
+    expect((await repo.summary(job.id)).suppressed).toBe(500);
+  });
+
+  // #1055-T04
+  it("does not store or count a gate refusal for a job of another workspace", async () => {
+    const fixture = await setup();
+    const otherId = await addWorkspace(fixture.db, "other");
+    const otherJobId = await enqueueInWorkspace(fixture, otherId);
+    const gate = call({
+      status: 429,
+      outcome: "mcp_too_many_concurrent_calls",
+    });
+
+    expect(await fixture.repo.record(otherJobId, gate)).toBe("unknown_job");
+    expect(
+      await fixture.db.selectFrom("job_mcp_calls").select("seq").execute(),
+    ).toEqual([]);
+  });
+
+  // #1055-T03: rows become visible when their transaction commits, not in the order of their seq
+  it("reads again from some rows before the cursor, so a row that became visible late is found", async () => {
+    const { repo, job, db } = await setup();
+    // A transaction that took the lower seq but commits after the row with the higher one.
+    const late = db.transaction().execute(async (trx) => {
+      await sql`insert into job_mcp_calls (job_id, workspace_id, server_id, server_name, rpc_method, tool, status, outcome, duration_ms, request_bytes, response_bytes, created_at)
+        values (${job.id}, ${job.workspaceId}, 's-1', 'Late', 'tools/call', 'late', 200, 'ok', 1, 1, 1, '2026-11-17T08:00:00.000Z')`.execute(
+        trx,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await repo.record(job.id, call({ serverName: "Fast" }));
+    const first = await repo.listAfter(job.id, 0, 10);
+    expect(first.map((row) => row.serverName)).toEqual(["Fast"]);
+    const cursor = first.at(-1)!.seq;
+    await late;
+
+    // Without the overlap the late row (lower seq) is never read; with it, it is.
+    expect(await repo.listAfter(job.id, cursor, 10)).toEqual([]);
+    const again = await repo.listAfter(job.id, cursor, 10, 50);
+    expect(again.map((row) => row.serverName)).toEqual(["Late", "Fast"]);
+    expect(again[0]!.seq).toBeLessThan(cursor);
+  });
+
+  // #1055-T03
+  it("keeps the overlap to rows of the job, not to a distance in the table-wide sequence", async () => {
+    const fixture = await setup();
+    const { repo, job } = fixture;
+    for (let i = 0; i < 5; i += 1) await repo.record(job.id, call());
+    // A flood of another workspace's rows between: the sequence jumps far.
+    const otherId = await addWorkspace(fixture.db, "other");
+    const otherJobId = await enqueueInWorkspace(fixture, otherId);
+    await sql`insert into job_mcp_calls (job_id, workspace_id, server_id, server_name, rpc_method, tool, status, outcome, duration_ms, request_bytes, response_bytes, created_at)
+      select ${otherJobId}, ${otherId}, 's', 'x', null, null, 200, 'ok', 1, 1, 1, '2026-11-17T08:00:00.000Z' from generate_series(1, 500)`.execute(
+      fixture.db,
+    );
+    await repo.record(job.id, call({ serverName: "after the flood" }));
+    const all = await repo.listAfter(job.id, 0, 100);
+    const cursor = all.at(-1)!.seq;
+
+    const again = await repo.listAfter(job.id, cursor, 100, 3);
+    expect(again.map((row) => row.seq)).toEqual(
+      all.slice(-3).map((row) => row.seq),
+    );
+  });
+
+  // #1055-T03
+  it("refuses to go on instead of misordering when a seq is beyond what a number holds exactly", async () => {
+    const { repo, job, db } = await setup();
+    await sql`select setval(pg_get_serial_sequence('job_mcp_calls', 'seq'), 9007199254740993)`.execute(
+      db,
+    );
+    await repo.record(job.id, call());
+
+    await expect(repo.listAfter(job.id, 0, 10)).rejects.toBeInstanceOf(
+      McpSeqOutOfRangeError,
+    );
   });
 });

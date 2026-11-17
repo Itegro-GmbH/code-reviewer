@@ -1308,6 +1308,8 @@ export interface JobMcpCallsTable {
   duration_ms: number;
   request_bytes: number;
   response_bytes: number;
+  /** Further refusals of the same kind counted on this row instead of stored (only `mcp_too_many_concurrent_calls`); 0 otherwise. */
+  suppressed: Generated<number>;
   created_at: string;
 }
 

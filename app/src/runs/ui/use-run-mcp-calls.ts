@@ -12,6 +12,12 @@ import type { McpCallView } from "../mcp-calls-view.ts";
 import type { RunsApi } from "./api.ts";
 import { mergeMcpCalls } from "./mcp-calls-merge.ts";
 
+/**
+ * A refused query cannot get better by asking again with the same cursor (a cursor the route does not take): that stops the asking, like the
+ * codes every live view stops on. Never expected (the cursor is a number the route handed out), so it must not turn into a request every tick.
+ */
+const PERMANENT_HERE = ["STEPS_QUERY_INVALID"] as const;
+
 /** A guard against a loop that never ends: a pull goes on until nothing more is waiting (the record keeps 2000 calls, 200 a page). */
 const MAX_PAGES_PER_PULL = 50;
 
@@ -19,6 +25,8 @@ export type RunMcpCalls = {
   calls: McpCallView[];
   /** The record holds as many calls as it keeps at most. */
   full: boolean;
+  /** Refusals "too many calls at once" that were counted and not listed one by one. */
+  omitted: number;
   /** The code of the last failed request, or null. */
   failure: string | null;
 };
@@ -35,6 +43,7 @@ export function useRunMcpCalls({
 }): RunMcpCalls {
   const [calls, setCalls] = useState<McpCallView[]>([]);
   const [full, setFull] = useState(false);
+  const [omitted, setOmitted] = useState(0);
   const [failure, setFailure] = useState<string | null>(null);
   const cursor = useRef(0);
   const busy = useRef(false);
@@ -71,13 +80,15 @@ export function useRunMcpCalls({
             if (
               (PERMANENT_FAILURE_CODES as readonly string[]).includes(
                 result.code,
-              )
+              ) ||
+              (PERMANENT_HERE as readonly string[]).includes(result.code)
             )
               stopped.current = true;
             break;
           }
           setFailure(null);
           setFull(result.data.full);
+          setOmitted(result.data.omitted);
           const before = cursor.current;
           cursor.current = Math.max(before, result.data.cursor);
           if (result.data.calls.length > 0)
@@ -95,5 +106,5 @@ export function useRunMcpCalls({
     void pull();
   }, [tick, pull]);
 
-  return { calls, full, failure };
+  return { calls, full, omitted, failure };
 }

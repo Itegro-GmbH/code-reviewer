@@ -43,7 +43,12 @@ const callView = (
 
 const answer = (
   calls: McpCallView[],
-  options: { cursor?: number; hasMore?: boolean; full?: boolean } = {},
+  options: {
+    cursor?: number;
+    hasMore?: boolean;
+    full?: boolean;
+    omitted?: number;
+  } = {},
 ): RequestResult<McpCallsSnapshot> => ({
   ok: true,
   data: {
@@ -51,6 +56,7 @@ const answer = (
     cursor: options.cursor ?? Math.max(0, ...calls.map((call) => call.seq)),
     hasMore: options.hasMore ?? false,
     full: options.full ?? false,
+    omitted: options.omitted ?? 0,
   },
 });
 
@@ -250,5 +256,61 @@ describe("the MCP tool calls of a run", () => {
       screen.getByRole("button", { name: /earlier calls \(50 hidden\)/i }),
     );
     expect(screen.getAllByRole("listitem")).toHaveLength(250);
+  });
+
+  // #1055-T03
+  it("says how many refusals of 'too many calls at once' were counted and not listed", async () => {
+    const { api } = apiAnswering(answer([callView(1)], { omitted: 1234 }));
+
+    await show(api);
+
+    expect(screen.getByText(/1,234 more calls were refused/)).toBeTruthy();
+  });
+
+  // #1055-T03: the answer starts a few rows behind the cursor; a row that came late is added once, the others are not shown twice
+  it("adds a row that became visible late and shows no call twice", async () => {
+    const { api } = apiAnswering(
+      answer([callView(1, { tool: "first" }), callView(3, { tool: "third" })]),
+      answer(
+        [
+          callView(1, { tool: "first" }),
+          callView(2, { tool: "late" }),
+          callView(3, { tool: "third" }),
+        ],
+        { cursor: 3 },
+      ),
+    );
+    const view = await show(api, "t1");
+
+    await view.again("t2");
+
+    expect(
+      screen.getAllByRole("listitem").map((item) => item.textContent),
+    ).toEqual([
+      expect.stringContaining("first"),
+      expect.stringContaining("late"),
+      expect.stringContaining("third"),
+    ]);
+  });
+
+  // #1055-T03
+  it("stops asking for good when the route refuses the cursor", async () => {
+    const mcpCalls = vi
+      .fn<RunsApi["mcpCalls"]>()
+      .mockResolvedValueOnce(answer([callView(1)]))
+      .mockResolvedValue({
+        ok: false,
+        status: 400,
+        code: "STEPS_QUERY_INVALID",
+        issues: [],
+      });
+    const api = { mcpCalls } as unknown as RunsApi;
+    const view = await show(api, "t1");
+
+    await view.again("t2");
+    await view.again("t3");
+    await view.again("t4");
+
+    expect(mcpCalls).toHaveBeenCalledTimes(2);
   });
 });

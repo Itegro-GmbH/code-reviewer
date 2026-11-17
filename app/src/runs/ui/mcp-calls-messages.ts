@@ -16,6 +16,11 @@ export const MCP_CALLS_COPY = {
   full: `This list holds the first ${new Intl.NumberFormat("en-US").format(MAX_MCP_CALLS_RECORDED_PER_JOB)} calls of the run; later ones are not listed.`,
 } as const;
 
+/** "12 more refusals (too many calls at once) are counted and not listed." */
+export function omittedCallsText(omitted: number): string {
+  return `${new Intl.NumberFormat("en-US").format(omitted)} more ${omitted === 1 ? "call was" : "calls were"} refused because too many ran at once; ${omitted === 1 ? "it is" : "they are"} counted, not listed one by one.`;
+}
+
 /** How a call ended, in words. Keyed by the closed set of outcomes the view knows (a Map: no property of an object is an outcome). */
 const OUTCOME_TEXT = new Map<McpCallOutcome, string>([
   ["ok", "done"],

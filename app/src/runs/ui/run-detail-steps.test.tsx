@@ -134,7 +134,7 @@ function apiAnswering(
     // #1055: a run that made no MCP call.
     mcpCalls: vi.fn(async () => ({
       ok: true,
-      data: { calls: [], cursor: 0, hasMore: false, full: false },
+      data: { calls: [], cursor: 0, hasMore: false, full: false, omitted: 0 },
     })),
   };
   return api as unknown as RunsApi & {

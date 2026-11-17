@@ -21,6 +21,7 @@ import {
   callDurationText,
   earlierCallsText,
   MCP_CALLS_COPY,
+  omittedCallsText,
   outcomeText,
 } from "./mcp-calls-messages.ts";
 import { useRunMcpCalls } from "./use-run-mcp-calls.ts";
@@ -67,7 +68,11 @@ export function RunMcpCalls({
   /** The stamp of the newest snapshot of the run: every new one asks for the calls once. */
   tick: string;
 }) {
-  const { calls, full, failure } = useRunMcpCalls({ api, runId, tick });
+  const { calls, full, omitted, failure } = useRunMcpCalls({
+    api,
+    runId,
+    tick,
+  });
   const [cap, setCap] = useState(RENDER_CALLS);
   const headingId = useId();
   if (calls.length === 0) return null;
@@ -98,6 +103,14 @@ export function RunMcpCalls({
             className="text-xs text-muted-foreground"
           >
             {MCP_CALLS_COPY.full}
+          </p>
+        ) : null}
+        {omitted > 0 ? (
+          <p
+            data-slot="run-mcp-calls-omitted"
+            className="text-xs text-muted-foreground"
+          >
+            {omittedCallsText(omitted)}
           </p>
         ) : null}
         {hidden === 0 ? null : (

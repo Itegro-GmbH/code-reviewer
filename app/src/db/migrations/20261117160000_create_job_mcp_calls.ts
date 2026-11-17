@@ -47,6 +47,11 @@ export const migration: Migration = {
       .addColumn("duration_ms", "integer", (column) => column.notNull())
       .addColumn("request_bytes", "integer", (column) => column.notNull())
       .addColumn("response_bytes", "integer", (column) => column.notNull())
+      // How many further refusals of the same kind were counted on this row instead of getting a row of their own (the route's "too many calls at
+      // once" refusal, which is not bounded by the claim's call count); 0 for every other row.
+      .addColumn("suppressed", "integer", (column) =>
+        column.notNull().defaultTo(0),
+      )
       .addColumn("created_at", "text", (column) => column.notNull())
       .addCheckConstraint(
         "job_mcp_calls_status_check",
@@ -58,7 +63,7 @@ export const migration: Migration = {
       )
       .addCheckConstraint(
         "job_mcp_calls_numbers_check",
-        sql`duration_ms >= 0 and request_bytes >= 0 and response_bytes >= 0`,
+        sql`duration_ms >= 0 and request_bytes >= 0 and response_bytes >= 0 and suppressed >= 0`,
       )
       .addCheckConstraint(
         "job_mcp_calls_texts_check",

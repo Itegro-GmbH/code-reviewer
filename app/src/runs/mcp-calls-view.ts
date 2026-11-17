@@ -102,7 +102,19 @@ export type McpCallsSnapshot = {
   hasMore: boolean;
   /** The record of this run holds as many calls as it keeps at most: a call after the last one listed may not be listed. */
   full: boolean;
+  /**
+   * How many refusals "too many calls at once" were counted and not listed one by one: the record keeps the first few of a run (a loop can make
+   * thousands, and they must not take the room of the real calls).
+   */
+  omitted: number;
 };
+
+/**
+ * How many of the run's rows before its cursor an answer starts with. Rows of a job become visible when their transaction commits, which is not
+ * always the order of their `seq` (four calls of a job run at once, on several instances): reading again a little behind the cursor finds the
+ * one that came late, and the page keeps each `seq` once (`mcp-calls-merge.ts`).
+ */
+export const MCP_CALLS_OVERLAP_ROWS = 50;
 
 /** How many calls one answer holds at most, and the default. */
 export const MCP_CALLS_PAGE_LIMIT = 200;
