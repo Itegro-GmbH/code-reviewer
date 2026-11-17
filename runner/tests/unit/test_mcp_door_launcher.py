@@ -13,6 +13,7 @@ import io
 import json
 import tempfile
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -297,19 +298,77 @@ def test_a_door_that_refuses_its_start_is_a_job_error_and_nothing_is_left(rig: R
     assert rig.engine.container(MCPDOOR_CONTAINER_NAME).removed
 
 
-# #1067-T06
-def test_a_placement_without_an_mcp_door_is_refused_before_anything_is_made(rig: Rig) -> None:
-    seams = McpDoorSeams(
-        api=rig.seams.api,
-        hostname=rig.seams.hostname,
-        placement=Placement(split=True, door_address="10.9.9.9"),
-    )
+# -- the door on instance A of the Incus backend (#1068) ---
 
-    with pytest.raises(JobError) as caught:
-        start_mcp_door(rig.access, [SERVER_A], deadline_seconds=60.0, seams=seams)
+SPLIT = Placement(split=True, door_address="10.98.0.2")
 
-    assert "no MCP door" in caught.value.detail
-    assert rig.engine.containers == {}
+
+def split_seams(rig: Rig) -> McpDoorSeams:
+    return replace(rig.seams, placement=SPLIT)
+
+
+# #1068-T01
+def test_on_incus_the_door_is_a_host_network_container_of_a_bound_to_a_s_inner_address() -> None:
+    document = door_document(IMAGE_ID, SPLIT)
+    host = document["HostConfig"]
+
+    assert host["NetworkMode"] == "host"
+    assert document["Cmd"] == ["--bind", "10.98.0.2:8082"]
+    # Hardened as hosted, and still no environment and no argument that could hold the credential.
+    assert host["ReadonlyRootfs"] is True and host["Privileged"] is False
+    assert host["CapDrop"] == ["ALL"] and "CapAdd" not in host
+    assert host["SecurityOpt"] == ["no-new-privileges:true"]
+    assert document["Env"] == [] and "Sysctls" not in host
+    assert "PortBindings" not in host and host["PublishAllPorts"] is False
+    for forbidden in ("Binds", "Mounts", "Devices", "PidMode", "VolumesFrom"):
+        assert forbidden not in host
+    assert document["User"] not in ("", "0", "0:0", "root")
+    assert door_document(IMAGE_ID) == door_document(IMAGE_ID, Placement()), "hosted is as it was"
+
+
+# #1068-T01
+def test_on_incus_the_credential_goes_to_the_stdin_of_a_s_door_and_is_in_no_request(
+    rig: Rig,
+) -> None:
+    door = rig.start(seams=split_seams(rig))
+
+    stdin = bytes(rig.engine.container(MCPDOOR_CONTAINER_NAME).stdin_received).decode()
+    document = json.loads(stdin.splitlines()[0])
+    assert document["credential"] == JOB_CREDENTIAL and document["listenPort"] == 8082
+    assert JOB_CREDENTIAL not in daemon_text(rig.engine)
+    assert JOB_CREDENTIAL not in repr(door.__dict__)
+    assert rig.engine.container(MCPDOOR_CONTAINER_NAME).document == door_document(IMAGE_ID, SPLIT)
+    assert door.url == "http://10.98.0.2:8082"
+    door.stop()
+
+
+# #1068-T03
+def test_on_incus_there_is_no_model_network_no_rules_container_and_the_wall_is_the_only_gate(
+    rig: Rig,
+) -> None:
+    door = rig.start(seams=split_seams(rig))
+
+    assert rig.engine.networks == {}, "A has no model network: B reaches A's address"
+    assert RULES_CONTAINER_NAME not in [
+        container.name for container in rig.engine.containers.values()
+    ]
+    assert rig.engine.container(MCPDOOR_CONTAINER_NAME).networks == {}
+    door.stop()
+
+
+# #1068-T05
+def test_on_incus_stopping_the_door_ends_every_open_session_and_removes_the_container(
+    rig: Rig,
+) -> None:
+    door = rig.start(seams=split_seams(rig))
+    for server in (SERVER_A, SERVER_B):
+        assert rig.call(server, jsonrpc("initialize"))[0] == 200
+
+    status = door.stop()
+
+    assert rig.app.sessions == set()
+    assert status is not None and status["sessionsClosed"] == 2 and status["sessionsLeft"] == 0
+    assert rig.engine.container(MCPDOOR_CONTAINER_NAME).removed
 
 
 # #1067-T06
@@ -434,20 +493,27 @@ def test_a_door_that_cannot_start_is_a_note_not_a_failed_turn(rig: Rig) -> None:
     session._stop_mcp()  # pyright: ignore[reportPrivateUsage]
 
 
-# #1067-T06
-def test_a_runner_on_incus_says_it_has_no_mcp_yet_and_starts_nothing(rig: Rig) -> None:
+# #1068-T01
+def test_a_runner_on_incus_starts_the_door_in_a_and_names_endpoints_at_its_address(
+    rig: Rig,
+) -> None:
     environment = {
         "RUNNER_ENVIRONMENT_DOCKER": "split",
-        "RUNNER_ENVIRONMENT_DOOR_ADDRESS": "10.9.9.9",
+        "RUNNER_ENVIRONMENT_DOOR_ADDRESS": "10.98.0.2",
     }
     session = mcp_session(rig, servers=SERVERS, environment=environment)
 
     session._start_mcp()  # pyright: ignore[reportPrivateUsage]
 
-    assert session._notes == [  # pyright: ignore[reportPrivateUsage]
-        "the MCP servers of this lane are not available on this runner yet"
+    assert session._notes == []  # pyright: ignore[reportPrivateUsage]
+    endpoints = session._mcp_endpoints  # pyright: ignore[reportPrivateUsage]
+    assert [endpoint.url for endpoint in endpoints] == [
+        f"http://10.98.0.2:8082/mcp/{SERVER_A}",
+        f"http://10.98.0.2:8082/mcp/{SERVER_B}",
     ]
-    assert rig.engine.containers == {}
+    assert JOB_CREDENTIAL not in json.dumps([endpoint.__dict__ for endpoint in endpoints])
+    session._stop_mcp()  # pyright: ignore[reportPrivateUsage]
+    assert rig.engine.container(MCPDOOR_CONTAINER_NAME).removed
 
 
 # #1067-T06

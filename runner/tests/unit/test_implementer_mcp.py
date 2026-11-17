@@ -37,6 +37,7 @@ from code_reviewer_runner.implementer.config import (
 )
 from code_reviewer_runner.implementer.mcp_config import (
     RESERVED_TOOL_NAMES,
+    claude_servers,
     endpoint_keys,
     endpoints_of,
     mcp_door_wanted,
@@ -44,7 +45,7 @@ from code_reviewer_runner.implementer.mcp_config import (
     opencode_permissions,
 )
 from code_reviewer_runner.implementer.network_rule import MODE_LIST, NetworkRule
-from code_reviewer_runner.implementer.placement import HOSTED, Placement
+from code_reviewer_runner.implementer.placement import HOSTED, MCP_DOOR_PORT_SPLIT, Placement
 from code_reviewer_runner.job import (
     JobError,
     McpServerRef,
@@ -443,7 +444,66 @@ def test_the_agents_container_has_no_credential_no_door_mount_and_the_same_netwo
     assert "PidMode" not in host and "VolumesFrom" not in host
 
 
-def test_a_placement_on_the_incus_backend_has_no_mcp_door_yet() -> None:
+def test_the_hosted_placement_has_its_mcp_door_on_the_model_network() -> None:
     assert HOSTED.mcp_supported and HOSTED.mcp_door_url == DOOR_URL
-    assert not Placement(split=True, door_address="10.9.9.9").mcp_supported
     assert HOSTED.no_proxy == HOSTED.no_proxy_for() and "10.213.77.5" not in HOSTED.no_proxy
+
+
+SPLIT = Placement(split=True, door_address="10.98.0.2")
+SPLIT_URL = "http://10.98.0.2:8082"
+
+
+# #1068-T03
+def test_the_incus_placement_has_its_mcp_door_next_to_the_other_two_at_a_s_inner_address() -> None:
+    assert SPLIT.mcp_supported
+    assert SPLIT.mcp_door_address == SPLIT.model_door_address == SPLIT.network_door_address
+    assert SPLIT.mcp_door_port == MCP_DOOR_PORT_SPLIT == 8082
+    assert SPLIT.mcp_door_port not in (SPLIT.model_door_port(1), SPLIT.network_door_port)
+    assert SPLIT.mcp_door_url == SPLIT_URL
+
+
+# #1068-T01
+def test_on_incus_a_s_address_is_sent_to_the_network_door_in_no_turn() -> None:
+    names = SPLIT.no_proxy_for(mcp=True).split(",")
+
+    assert "10.98.0.2" in names, "the address is A's, which every turn already exempts"
+    assert SPLIT.no_proxy_for(mcp=True) == SPLIT.no_proxy == SPLIT.no_proxy_for()
+    assert proxy_environment(LIST, SPLIT, mcp=True)["NO_PROXY"] == SPLIT.no_proxy
+
+
+# #1068-T01
+def test_the_agent_in_b_has_the_door_address_and_no_credential() -> None:
+    plain = agent_document("sha256:x", "vol", 1, rule=LIST, placement=SPLIT)
+    with_mcp = agent_document("sha256:x", "vol", 1, rule=LIST, placement=SPLIT, mcp=True)
+
+    assert JOB_CREDENTIAL not in json.dumps(with_mcp)
+    assert {k for k in with_mcp if with_mcp[k] != plain[k]} <= {"Env"}
+    assert with_mcp["HostConfig"] == plain["HostConfig"], "B's container is not changed"
+
+
+# #1068-T02
+def test_both_harnesses_get_a_config_that_names_only_the_endpoint_in_a() -> None:
+    endpoints = endpoints_of(refs("Issues", "Docs"), SPLIT.mcp_door_url)
+    url = f"{SPLIT_URL}/mcp/00000000-0000-4000-8000-000000000000"
+
+    opencode = opencode_block(endpoints)
+    claude = claude_servers(endpoints)
+
+    assert opencode["Issues"]["url"] == url and claude["Issues"] == {"type": "http", "url": url}
+    for block in (opencode, claude):
+        text = json.dumps(block)
+        assert JOB_CREDENTIAL not in text and "Authorization" not in text
+        assert "headers" not in text and "crj_" not in text
+        assert all(entry["url"].startswith(f"{SPLIT_URL}/mcp/") for entry in block.values())
+
+
+def test_a_turn_on_incus_with_servers_wants_a_door_and_one_without_wants_none() -> None:
+    environment = {
+        "RUNNER_ENVIRONMENT_DOCKER": "split",
+        "RUNNER_ENVIRONMENT_DOOR_ADDRESS": "10.98.0.2",
+    }
+    job = parse_implementer_input(json.dumps(document(mcp=MCP, mcpAccess=ACCESS)))
+    plain = parse_implementer_input(json.dumps(document()))
+
+    assert mcp_door_wanted(job.implementer, environment)
+    assert not mcp_door_wanted(plain.implementer, environment)

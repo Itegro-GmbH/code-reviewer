@@ -2228,7 +2228,7 @@ the claim loop, the reaper and the credential pool do not know which backend the
  proxy 10.99.0.<8n+1>:3128 ◀── outer bridge <prefix>-<owner>-o<n> ◀── A eth0 (.2) │ eth1 10.98.0.2
                                               ◀── B eth1 (.3), unplugged at narrow │
                                                                                    │ inner bridge <prefix>-<owner>-i<n> (no address on the host)
-                                                                  B: setup, then agent ── eth0 10.98.0.3  ──▶ only A:8080 and A:8081
+                                                                  B: setup, then agent ── eth0 10.98.0.3  ──▶ only A:8080, A:8081 and A:8082
 ```
 
 ### What a job does
@@ -2259,7 +2259,7 @@ the claim loop, the reaper and the credential pool do not know which backend the
    A and B cannot reach each other there). The addresses come from **files pushed before the instance starts** (`/etc/systemd/network/05-code-reviewer-*.network`, applied by the image's systemd-networkd, no gateway and no
    route: nothing is routed): a NIC change re-creates the interface, and an address set by hand is gone.
 4. **Start A, load the inner wall, start B**, wait until their addresses are applied and `docker info` answers in both (`ready_seconds`, 120), then **read the wall back** (`nft list table inet cr_inner` in A: every rule of the loaded ruleset, the drops especially, must be there; an absent or reduced table fails the start and everything is cleaned up: `nft -f` ending well is not proof). The wall is an nft table **inside A**, loaded before B runs
-   (`walls.py`, printed by `inner_wall_ruleset()`): from B's NIC only a TCP connection from B's address to A's two door ports (8080, 8081) and the answers to what A asked; every other packet from B, and anything forwarded to or from B,
+   (`walls.py`, printed by `inner_wall_ruleset()`): from B's NIC only a TCP connection from B's address to A's three door ports (8080, 8081, 8082: model, network, MCP #1068) and the answers to what A asked; every other packet from B, and anything forwarded to or from B,
    is dropped; A's outer NIC takes nothing in but answers. Incus's own ACLs do **not** do this between two ports of one bridge (they need `br_netfilter`), which is why the table is ours; B cannot change it (another instance,
    another network namespace), A's root can, and A is the trusted side.
 5. **Check, volume, Control.** In A: the Worker image's id must be the verified one (`image_missing`, `image_mismatch`), the work volume is made, and **Control runs with `incus exec`**: `docker run …` with the job document
@@ -2313,7 +2313,7 @@ Placement is `implementer/placement.py`; the launcher tells Control with three v
 
 | | hosted / Firecracker | Incus (`split`) |
 |---|---|---|
-| Control, the two doors | the VM's Docker | **A's** Docker; the doors run with **`--network host`** and listen on A's inner address only (`--bind 10.98.0.2:8080` and `:8081`, the wall's two ports): the inner wall's input chain matches traffic delivered to A, whereas a Docker-published port is DNATed and dropped by `forward … iifname eth1 drop` (by design). No model network, no connect, no door-side nft table (A has no default route, its outer NIC leads to the proxy of the host, the wall holds the inner side) |
+| Control, the doors | the VM's Docker | **A's** Docker; the doors (model, network, and for a step with MCP servers the MCP door of #1068, see [MCP servers at run time](mcp-runtime.md)) run with **`--network host`** and listen on A's inner address only (`--bind 10.98.0.2:8080`, `:8081` and `:8082`, the wall's three ports): the inner wall's input chain matches traffic delivered to A, whereas a Docker-published port is DNATed and dropped by `forward … iifname eth1 drop` (by design). No model network, no connect, no door-side nft table (A has no default route, its outer NIC leads to the proxy of the host, the wall holds the inner side) |
 | setup/agent container, readers | the VM's Docker, Sysbox | **B's** Docker, `runc`, the container privileged (it runs its own Docker; no Sysbox in an Incus instance: B's user namespace, cgroup and the inner wall confine it, as the spike measured). The readers run from the agent's golden image |
 | how Control reaches that Docker | the VM's socket | a unix socket `/b-docker.sock` in A, from **two `proxy` devices**: B's (`bind=host`, listens on a file in the job's directory that only `incusd` reaches, connects to B's `/var/run/docker.sock`) and A's (`bind=instance`, listens at `/b-docker.sock`, connects to that file); mode 0600. A dials B. **B has no connection of any kind to A through it; no Docker API on a TCP port exists anywhere.** The launcher checks that B's Docker answers through A's socket before Control starts |
 | networks | setup network (nft rules of ours), model network (`--internal`) | both are plain bridges of **B's** Docker (`code-reviewer-setup`, `code-reviewer-model`), the setup with the proxy variables of the outer wall; the setup's rules of ours are not installed (`install_rules=False`): the walls are the NICs (outer proxy for the wide rule, B's outer NIC unplugged at `narrow`, the inner wall in A) |
@@ -2350,7 +2350,7 @@ With the real golden image (Docker, the Worker image, the agent image) `start()`
 | T01 limits | in both instances `nproc` 2, `/sys/fs/cgroup/memory.max` 2147483648, `pids.max` 4096; the root of an instance is a host id ≥ 65536 (`uid_map`), the mark `user.cr.job` on both; both deleted at the end, and the job directory gone |
 | T01 crash | a job left running by a "crashed" dispatcher (its lock released): the next `setup` deleted exactly its two instances by their mark |
 | T02 `narrow` | before: from B the proxy of the host `:3128` reached, the host's `:22` did not, `eth1` there; the unix-socket `narrow` from Control returned `ack`; after: `eth1` gone, no route to the host, `:3128` unreachable from B |
-| T03 inner wall | from B with the wall: A's doors `:8080` and `:8081` reached; `:9000` (secrets), `:2375` (a "Docker API"), ICMP and `1.1.1.1:443` through A **not**; with the table deleted (the control) all four reached and ICMP answered; reloaded: as before |
+| T03 inner wall | from B with the wall: A's doors `:8080`, `:8081` and `:8082` reached; `:9000` (secrets), `:2375` (a "Docker API"), `:8083` (the next port), ICMP and `1.1.1.1:443` through A **not**; with the table deleted (the control) all of them reached and ICMP answered; reloaded: as before |
 | T04 quota | a write in B past its 3 GiB quota (the image counts: 633 MiB) failed with `Disk quota exceeded` after 2.6 GB; a 10 MB write (the control) worked; Control's own write past A's quota ended the job with `EXIT_DISK_QUOTA` (122) and the log tail `disk_quota_exceeded:` |
 | start budget | `start()` (both instances, boot, addresses, wall, readiness, image check, Control launched; the stand-in `docker` answers at once): **4.6 s and 6.8 s** at a load of 13 to 30 |
 

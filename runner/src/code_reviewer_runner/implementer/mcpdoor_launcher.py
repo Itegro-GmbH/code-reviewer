@@ -35,6 +35,15 @@ an
 The sandbox's network rule is **not changed**: the agent reaches the door (a member of the model
 network, like the other two) and never an MCP host.
 
+**On the Incus backend (#1068)** the door is the third door of instance A (`placement.py`): a
+container of A's Docker on A's host network, bound to A's address on the inner bridge at its own
+port (`MCP_DOOR_PORT_SPLIT`, 8082), which the inner wall opens for B next to the model and network
+doors. The credential is handed to its stdin in A exactly as above, so it is held by a process in A,
+outside B (the agent's instance), which has no connection to A but the three door ports: it is in no
+environment, file, argument or process list of B, nor in B's Docker. The door reaches the app
+through the host's outer proxy (`outerProxy` of the start document) like the other doors; there is
+no model network and no table of the door's own, because A has no default route.
+
 A door that cannot be started is not the turn's failure: the step runs without its MCP servers and
 says so in a note (`ImplementerSession`). Nothing here is money or a key of the model.
 """
@@ -62,6 +71,7 @@ from .door_launcher import (
     BRIDGE_NETWORK,
     DOOR_TMPFS,
     DOOR_USER,
+    HOST_NETWORK,
     READY_SECONDS,
     RULES_ENTRYPOINT,
     RULES_SECONDS,
@@ -95,13 +105,43 @@ MCPDOOR_ENTRYPOINT: Final = [
 STOP_SECONDS: Final = 12.0
 
 
-def door_document(image: str) -> dict[str, Any]:
+def door_document(image: str, placement: Placement = HOSTED) -> dict[str, Any]:
     """The door's container. Constants and the image id the daemon gave: nothing from a job, and no
-    environment variable, so that the credential, which goes to its stdin, is nowhere in it."""
+    environment variable, so that the credential, which goes to its stdin, is nowhere in it.
+
+    On the Incus backend (#1068) the door is a container of **A's Docker** with A's host network,
+    bound to A's address on the inner bridge only (`--bind`), as the model and network doors are: B
+    reaches it through the one port the inner wall opens. A has no default route and its outer NIC
+    leads to the host's proxy and nothing else, so there is no model network and no table of the
+    door's own; the credential is in this process in A, never in B."""
+    split = placement.split
+    host_config: dict[str, Any] = {
+        "NetworkMode": HOST_NETWORK if split else BRIDGE_NETWORK,
+        "Privileged": False,
+        "ReadonlyRootfs": True,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges:true"],
+        "Memory": MCPDOOR_MEMORY_BYTES,
+        "MemorySwap": MCPDOOR_MEMORY_BYTES,
+        "PidsLimit": MCPDOOR_PIDS_LIMIT,
+        "OomScoreAdj": MCPDOOR_OOM_SCORE_ADJ,
+        "Tmpfs": {"/tmp": DOOR_TMPFS},
+        "RestartPolicy": {"Name": "no"},
+        "PublishAllPorts": False,
+    }
+    if not split:
+        # The egress table is an `ip` table: it does not see IPv6, so the door has none. (Docker
+        # refuses network sysctls on the host network.)
+        host_config["Sysctls"] = {
+            "net.ipv6.conf.all.disable_ipv6": "1",
+            "net.ipv6.conf.default.disable_ipv6": "1",
+        }
     return {
         "Image": image,
         "Entrypoint": MCPDOOR_ENTRYPOINT,
-        "Cmd": [],
+        "Cmd": ["--bind", f"{placement.mcp_door_address}:{placement.mcp_door_port}"]
+        if split
+        else [],
         "User": DOOR_USER,
         "Env": [],
         "Hostname": "mcp-door",
@@ -112,25 +152,7 @@ def door_document(image: str) -> dict[str, Any]:
         "AttachStdout": True,
         "AttachStderr": True,
         "Tty": False,
-        "HostConfig": {
-            "NetworkMode": BRIDGE_NETWORK,
-            "Privileged": False,
-            "ReadonlyRootfs": True,
-            "CapDrop": ["ALL"],
-            "SecurityOpt": ["no-new-privileges:true"],
-            "Memory": MCPDOOR_MEMORY_BYTES,
-            "MemorySwap": MCPDOOR_MEMORY_BYTES,
-            "PidsLimit": MCPDOOR_PIDS_LIMIT,
-            "OomScoreAdj": MCPDOOR_OOM_SCORE_ADJ,
-            "Tmpfs": {"/tmp": DOOR_TMPFS},
-            "RestartPolicy": {"Name": "no"},
-            "PublishAllPorts": False,
-            # The egress table is an `ip` table: it does not see IPv6, so the door has none.
-            "Sysctls": {
-                "net.ipv6.conf.all.disable_ipv6": "1",
-                "net.ipv6.conf.default.disable_ipv6": "1",
-            },
-        },
+        "HostConfig": host_config,
     }
 
 
@@ -368,20 +390,26 @@ def start_mcp_door(
         image = str(me.get("Image", ""))
         if not image or not me.get("Id"):
             raise _unavailable("the daemon does not know this container")
-        network = _ensure_network(api)
-        container = api.create_container(door_document(image), MCPDOOR_CONTAINER_NAME)
-        api.connect_network(
-            MODEL_NETWORK_NAME,
-            {
-                "Container": container,
-                "EndpointConfig": {"IPAMConfig": {"IPv4Address": MCP_DOOR_ADDRESS}},
-            },
+        split = seams.placement.split
+        if not split:
+            network = _ensure_network(api)
+        container = api.create_container(
+            door_document(image, seams.placement), MCPDOOR_CONTAINER_NAME
         )
+        if not split:
+            api.connect_network(
+                MODEL_NETWORK_NAME,
+                {
+                    "Container": container,
+                    "EndpointConfig": {"IPAMConfig": {"IPv4Address": MCP_DOOR_ADDRESS}},
+                },
+            )
         streams = api.attach(container)
         running = RunningMcpDoor(api, streams, container=container, seams=seams, network=network)
         running.begin()
         api.start_container(container)
-        _close_the_doors_network(api, image, container, seams.outer_proxy)
+        if not split:
+            _close_the_doors_network(api, image, container, seams.outer_proxy)
         # A door that is already gone cannot be written to: the reader says how it ended.
         with contextlib.suppress(OSError):
             streams.write(
