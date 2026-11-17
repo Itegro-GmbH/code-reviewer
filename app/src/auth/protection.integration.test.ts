@@ -68,6 +68,7 @@ const PUBLIC_ROUTES = [
   // A Worker sends the per-job credential of its claim (src/runner-api/README.md, #320).
   "/api/workers/v1/jobs/[id]",
   "/api/workers/v1/jobs/[id]/heartbeat",
+  "/api/workers/v1/jobs/[id]/mcp/[server]",
   "/api/workers/v1/jobs/[id]/result",
   "/api/workers/v1/jobs/[id]/session",
   "/api/workers/v1/jobs/[id]/resume-session",

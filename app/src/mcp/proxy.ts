@@ -33,7 +33,7 @@ import { checkMcpUrl } from "./url.ts";
 
 /**
  * One call may take this long, whatever it is doing. It is shorter than `maxDuration` of the Worker API's functions (60 s, `vercel.json`;
- * `proxy.test.ts` holds the two together), so a slow server ends in our own code `mcp_proxy_timeout` and never in the platform's 504.
+ * `proxy.test.ts` holds the two together), so a slow server ends in our own code `mcp_proxy_timeout` and never in the platform's gateway error.
  */
 export const MCP_PROXY_DEADLINE_MS = 55_000;
 export const MCP_PROXY_MAX_REQUEST_BYTES = 256 * 1024;
@@ -61,14 +61,14 @@ export type McpProxyErrorCode = (typeof MCP_PROXY_ERROR_CODES)[number];
 const STATUS_OF: Record<McpProxyErrorCode, number> = {
   mcp_proxy_request_invalid: 400,
   mcp_proxy_request_too_large: 413,
-  mcp_proxy_address_refused: 502,
-  mcp_proxy_unreachable: 502,
-  mcp_proxy_timeout: 504,
-  mcp_proxy_unauthorized: 502,
-  mcp_proxy_http_error: 502,
-  mcp_proxy_redirect_refused: 502,
-  mcp_proxy_response_too_large: 502,
-  mcp_proxy_protocol_error: 502,
+  mcp_proxy_address_refused: 503,
+  mcp_proxy_unreachable: 503,
+  mcp_proxy_timeout: 503,
+  mcp_proxy_unauthorized: 503,
+  mcp_proxy_http_error: 503,
+  mcp_proxy_redirect_refused: 503,
+  mcp_proxy_response_too_large: 503,
+  mcp_proxy_protocol_error: 503,
 };
 
 /** What is recorded for one call (#1055 reads it). Never an argument, an answer, a header or an address. */

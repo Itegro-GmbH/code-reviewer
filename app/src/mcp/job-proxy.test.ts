@@ -231,7 +231,7 @@ describe("a call of the agent for a server of its job", () => {
       ...broken,
       credentials: createMcpCredentials({ appSecret: "x".repeat(40) }),
     }).handle(job, A, call("tools/list", 1));
-    expect(result.status).toBe(502);
+    expect(result.status).toBe(503);
     expect(JSON.parse(await result.text())).toMatchObject({
       error: { message: "mcp_credential_broken" },
     });

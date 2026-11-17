@@ -217,14 +217,14 @@ describe("what the agent's side sees when the server fails", () => {
     });
     expect(response.headers.get("www-authenticate")).toBeNull();
     expect(await failure(response)).toEqual({
-      status: 502,
+      status: 503,
       code: "mcp_proxy_unauthorized",
       id: 7,
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       outcome: "mcp_proxy_unauthorized",
-      status: 502,
+      status: 503,
       rpcMethod: "tools/list",
     });
   });
@@ -241,7 +241,7 @@ describe("what the agent's side sees when the server fails", () => {
           request: post(rpc("tools/list", 1)),
         }),
       ),
-    ).toMatchObject({ status: 502, code: "mcp_proxy_http_error" });
+    ).toMatchObject({ status: 503, code: "mcp_proxy_http_error" });
 
     server.script("tools/call", { kind: "hang" });
     expect(
@@ -252,7 +252,7 @@ describe("what the agent's side sees when the server fails", () => {
           request: post(rpc("tools/call", 2, { name: "x" })),
         }),
       ),
-    ).toMatchObject({ status: 504, code: "mcp_proxy_timeout" });
+    ).toMatchObject({ status: 503, code: "mcp_proxy_timeout" });
 
     const dead = await fake();
     const url = dead.url;
@@ -266,7 +266,7 @@ describe("what the agent's side sees when the server fails", () => {
           request: post(rpc("tools/list", 3)),
         }),
       ),
-    ).toMatchObject({ status: 502, code: "mcp_proxy_unreachable" });
+    ).toMatchObject({ status: 503, code: "mcp_proxy_unreachable" });
   });
 
   it("refuses an address that is not allowed any more, at the call", async () => {
@@ -279,7 +279,7 @@ describe("what the agent's side sees when the server fails", () => {
           request: post(rpc("tools/list", 1)),
         }),
       ),
-    ).toMatchObject({ status: 502, code: "mcp_proxy_address_refused" });
+    ).toMatchObject({ status: 503, code: "mcp_proxy_address_refused" });
   });
 
   it("refuses an answer that is too large and a request that is too large", async () => {
@@ -347,7 +347,7 @@ describe("what the proxy may reach", () => {
       headers: { Authorization: SECRET },
       request: post(rpc("tools/list", 1)),
     });
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(503);
     expect(JSON.parse(await response.text())).toMatchObject({
       error: { message: "mcp_proxy_redirect_refused" },
     });
@@ -424,7 +424,7 @@ describe("the legacy SSE transport behind the same endpoint", () => {
         headers: { Authorization: SECRET },
         request: post(rpc("tools/list", 1)),
       });
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(503);
       expect(JSON.parse(await response.text())).toMatchObject({
         error: { message: "mcp_proxy_protocol_error" },
       });

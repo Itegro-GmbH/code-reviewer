@@ -11,6 +11,10 @@ import type { AllowList } from "./graph.ts";
 // which reaches back into the job queue and the dispatch code. Taking the engine out of the module cycle means wiring the hook and
 // the reconciler in every route file of the runner API and the cron, which is a cut of its own (#715).
 
+// #1053 added the edge `runner-api -> mcp` (the claim and the Worker API's MCP route use the MCP runtime: the servers of a job's step and the
+// proxy) and with it the edges `mcp -> …` the MCP module had before: it reaches the sign-in limit, the repositories and the guarded fetch, which
+// reach the runner API. Wiring the runtime into every route file of the runner API instead is the same cut as for the workflow engine (#715).
+
 export const ALLOWED_IMPORT_CYCLES: AllowList = {
   fileGroups: [
     ["auth/auth.ts", "auth/session-user.ts"],
@@ -187,6 +191,13 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "mail -> secrets",
     "mail -> setup",
     "mail -> workspaces",
+    "mcp -> auth",
+    "mcp -> db",
+    "mcp -> dispatch",
+    "mcp -> http",
+    "mcp -> implementer",
+    "mcp -> workflows",
+    "mcp -> workspaces",
     "maintenance -> auth",
     "maintenance -> db",
     "manual-reviews -> auth",
@@ -267,6 +278,7 @@ export const ALLOWED_IMPORT_CYCLES: AllowList = {
     "runner-api -> integrations",
     "runner-api -> jobs",
     "runner-api -> llm",
+    "runner-api -> mcp",
     "runner-api -> model-catalog",
     "runner-api -> models-dev",
     "runner-api -> native-cost",

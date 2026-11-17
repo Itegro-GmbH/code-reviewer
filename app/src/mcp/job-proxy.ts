@@ -104,7 +104,7 @@ export function createJobMcp(deps: JobMcpDeps): JobMcp {
       const stored = await deps.mcpServers.readHeaders(serverId);
       if (stored === undefined) return refusal("mcp_server_unavailable", 404);
       const credential = await deps.credentials.headersFor(stored);
-      if (!credential.ok) return refusal(credential.code, 502);
+      if (!credential.ok) return refusal(credential.code, 503);
       return deps.proxy.forward({
         jobId: job.id,
         server: stored.server,
