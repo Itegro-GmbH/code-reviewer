@@ -44,6 +44,7 @@ const LATER_TABLES = [
   "jira_connections",
   "jira_webhooks",
   "mcp_servers",
+  "job_mcp_calls",
   "mcp_oauth_connections",
   "job_rings",
 ];

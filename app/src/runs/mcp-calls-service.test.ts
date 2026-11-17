@@ -7,7 +7,10 @@ import { createRunMcpCallsService } from "./mcp-calls-service.ts";
 
 vi.mock("server-only", () => ({}));
 
-const stored = (seq: number, over: Partial<StoredMcpCall> = {}): StoredMcpCall => ({
+const stored = (
+  seq: number,
+  over: Partial<StoredMcpCall> = {},
+): StoredMcpCall => ({
   seq,
   serverId: "11111111-1111-4111-8111-111111111111",
   serverName: "Linear",
@@ -24,7 +27,11 @@ const stored = (seq: number, over: Partial<StoredMcpCall> = {}): StoredMcpCall =
 
 function setup(
   rows: StoredMcpCall[],
-  options: { run?: boolean; count?: number; redact?: (text: string) => string } = {},
+  options: {
+    run?: boolean;
+    count?: number;
+    redact?: (text: string) => string;
+  } = {},
 ) {
   const asked: { id: string; after: number; limit: number }[] = [];
   const service = createRunMcpCallsService({
@@ -39,7 +46,9 @@ function setup(
     calls: {
       listAfter: (id, after, limit) => {
         asked.push({ id, after, limit });
-        return Promise.resolve(rows.filter((row) => row.seq > after).slice(0, limit));
+        return Promise.resolve(
+          rows.filter((row) => row.seq > after).slice(0, limit),
+        );
       },
       count: () => Promise.resolve(options.count ?? rows.length),
     },
@@ -62,7 +71,14 @@ describe("the MCP calls of a run for the live view", () => {
 
     expect(snapshot).toMatchObject({
       calls: [
-        { seq: 1, serverName: "Linear", tool: "list_issues", durationMs: 120, outcome: "ok", status: 200 },
+        {
+          seq: 1,
+          serverName: "Linear",
+          tool: "list_issues",
+          durationMs: 120,
+          outcome: "ok",
+          status: 200,
+        },
         { seq: 2, serverName: "Sentry", tool: "get_event", durationMs: 30 },
       ],
       cursor: 2,
@@ -81,13 +97,21 @@ describe("the MCP calls of a run for the live view", () => {
 
     const second = await service.list(RUN, first?.cursor ?? 0, 2);
     expect(second).toMatchObject({ cursor: 3, hasMore: false });
-    expect(await service.list(RUN, 3, 2)).toMatchObject({ calls: [], cursor: 3 });
+    expect(await service.list(RUN, 3, 2)).toMatchObject({
+      calls: [],
+      cursor: 3,
+    });
   });
 
   // #1055-T06
   it("shows a refusal as one: its code and status stay what the agent got", async () => {
     const { service } = setup([
-      stored(1, { status: 404, outcome: "mcp_server_unavailable", serverName: "", durationMs: 0 }),
+      stored(1, {
+        status: 404,
+        outcome: "mcp_server_unavailable",
+        serverName: "",
+        durationMs: 0,
+      }),
       stored(2, { status: 429, outcome: "mcp_too_many_concurrent_calls" }),
       stored(3, { status: 503, outcome: "mcp_credential_broken" }),
       stored(4, { status: 503, outcome: "mcp_proxy_timeout" }),
@@ -96,7 +120,9 @@ describe("the MCP calls of a run for the live view", () => {
 
     const snapshot = await service.list(RUN, 0, 200);
 
-    expect(snapshot?.calls.map((call) => [call.status, call.outcome, call.result])).toEqual([
+    expect(
+      snapshot?.calls.map((call) => [call.status, call.outcome, call.result]),
+    ).toEqual([
       [404, "mcp_server_unavailable", "refused"],
       [429, "mcp_too_many_concurrent_calls", "refused"],
       [503, "mcp_credential_broken", "refused"],
@@ -111,7 +137,10 @@ describe("the MCP calls of a run for the live view", () => {
 
     const snapshot = await service.list(RUN, 0, 200);
 
-    expect(snapshot?.calls[0]).toMatchObject({ result: "failed", outcome: "unknown" });
+    expect(snapshot?.calls[0]).toMatchObject({
+      result: "failed",
+      outcome: "unknown",
+    });
   });
 
   // #1055-T02
@@ -150,12 +179,16 @@ describe("the MCP calls of a run for the live view", () => {
       redact: (text) => text.replace("TOKEN-123", "[redacted]"),
     });
 
-    expect((await service.list(RUN, 0, 200))?.calls[0]?.tool).toBe("use-[redacted]");
+    expect((await service.list(RUN, 0, 200))?.calls[0]?.tool).toBe(
+      "use-[redacted]",
+    );
   });
 
   // #1055-T03
   it("says when the job holds as many calls as the record keeps, so a list that ends there is not taken for the whole", async () => {
-    const { service } = setup([stored(1)], { count: MAX_MCP_CALLS_RECORDED_PER_JOB });
+    const { service } = setup([stored(1)], {
+      count: MAX_MCP_CALLS_RECORDED_PER_JOB,
+    });
     expect(await service.list(RUN, 0, 200)).toMatchObject({ full: true });
 
     const half = setup([stored(1)], { count: 10 });

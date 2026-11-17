@@ -41,6 +41,7 @@ import {
   FINDINGS_WAITING_TEXT,
 } from "./findings-messages.ts";
 import { ReviewText } from "./review-text.tsx";
+import { RunMcpCalls } from "./run-mcp-calls.tsx";
 import { RunSteps } from "./run-steps.tsx";
 import { RunStatusBadge } from "./status-badge.tsx";
 import { STEPS_COPY } from "./steps-messages.ts";
@@ -796,6 +797,8 @@ export function RunDetail({
               showCost={!run.costHidden}
             />
           </Section>
+          {/* #1055: the MCP calls of the agent; nothing at all for a run that made none. Rides on the same poll. */}
+          <RunMcpCalls api={api} runId={run.id} tick={data.generatedAt} />
           <TaskNetwork task={task} />
           <TaskResult task={task} run={run} />
         </>

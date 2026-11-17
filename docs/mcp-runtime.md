@@ -87,16 +87,17 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
 
 ## Parts
 
-| Part                                                                                      | Where                                                             | State     |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------- |
-| Credential providers (none, header; OAuth plugs in, #1051)                                | `app/src/mcp/credentials.ts`                                      | this PR   |
-| The proxy (Streamable HTTP, legacy SSE adapter, limits, call metadata)                    | `app/src/mcp/proxy.ts`                                            | this PR   |
-| Servers of a job (workspace-bound, tolerant of removed servers) and the call handler      | `app/src/mcp/job-proxy.ts`                                        | this PR   |
-| `implementer.mcp` in the job, claim feature `implementer_mcp`                             | `app/src/runner-api/mcp-block.ts`, `contracts/runner-api.v1.json` | this PR   |
-| Worker API route `POST/DELETE /api/workers/v1/jobs/{id}/mcp/{server}`                     | `app/src/runner-api/worker-api.ts`, `mcp-call.ts`                 | this PR   |
-| Limits of the route: calls per claim (`jobs.mcp_calls`, expand-only migration), in flight | `app/src/mcp/in-flight.ts`, `runner-jobs-repository.ts`           | this PR   |
-| Local endpoint at the hosted door, OpenCode and Claude Code configuration, the run's note | `runner/`                                                         | follow-up |
-| The same at Incus instance A (and the endpoint through the inner wall)                    | `runner/…/incus/`                                                 | follow-up |
+| Part                                                                                                                                                       | Where                                                             | State     |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | --------- |
+| Credential providers (none, header; OAuth plugs in, #1051)                                                                                                 | `app/src/mcp/credentials.ts`                                      | this PR   |
+| The proxy (Streamable HTTP, legacy SSE adapter, limits, call metadata)                                                                                     | `app/src/mcp/proxy.ts`                                            | this PR   |
+| Servers of a job (workspace-bound, tolerant of removed servers) and the call handler                                                                       | `app/src/mcp/job-proxy.ts`                                        | this PR   |
+| `implementer.mcp` in the job, claim feature `implementer_mcp`                                                                                              | `app/src/runner-api/mcp-block.ts`, `contracts/runner-api.v1.json` | this PR   |
+| Worker API route `POST/DELETE /api/workers/v1/jobs/{id}/mcp/{server}`                                                                                      | `app/src/runner-api/worker-api.ts`, `mcp-call.ts`                 | this PR   |
+| Limits of the route: calls per claim (`jobs.mcp_calls`, expand-only migration), in flight                                                                  | `app/src/mcp/in-flight.ts`, `runner-jobs-repository.ts`           | this PR   |
+| The run's trace and live view: every call and refusal in `job_mcp_calls`, `GET /api/w/:workspace/runs/:id/mcp-calls`, the "MCP tool calls" section (#1055) | `app/src/mcp/call-trace.ts`, `app/src/runs/ui/run-mcp-calls.tsx`  | this PR   |
+| Local endpoint at the hosted door, OpenCode and Claude Code configuration, the run's note                                                                  | `runner/`                                                         | follow-up |
+| The same at Incus instance A (and the endpoint through the inner wall)                                                                                     | `runner/…/incus/`                                                 | follow-up |
 
 ## Rules of the proxy
 
@@ -110,8 +111,8 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
   across the calls of one session sees a new session each time.
 - **Header authentication only today.** `createMcpCredentials({ providers: { oauth } })` is where OAuth tokens (#1051) plug in: the provider
   receives the server and returns the headers for this call, or `mcp_credential_broken` when the connection needs a new sign-in.
-- **Per-call metadata** (`McpCallMeta`: job, server id, method, tool name, status, outcome, duration, sizes; never arguments or results) goes to
-  `onCall`; today it is the log line, and #1055 hooks the live view and the trace in the same place. An event stream answer is recorded once, when
+- **Per-call metadata** (`McpCallMeta`: job, server id and name, method, tool name, status, outcome, duration, sizes; never arguments or results) goes to
+  `onCall`: the log line, and (#1055) the run's trace, below. An event stream answer is recorded once, when
   its body has ended, whatever the way: `ok`, `cancelled` (the consumer let go; the server's stream is closed with it), or the code of the
   failure (`mcp_proxy_timeout` when the deadline cut it, `mcp_proxy_response_too_large` at the cap).
 - **Cost of a call and of a claim.** The claim looks at `implementer_mcp` before it reads anything, and a lane without `mcp` costs it no query of
@@ -121,3 +122,13 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
   deadline).
 - **A job that no workflow step started has no servers.** The claim sends `implementer.mcp` only to a Worker that named `implementer_mcp` and only
   for such a turn; for any other caller the turn runs without MCP tools (not refused: nothing widens).
+
+## The run's trace of MCP calls (#1055)
+
+What people see of what the agent did with MCP tools: one line for each call, on the detail page of the run (the section "MCP tool calls", under "What the agent did"): the server (its name as it was at the call), the tool, the duration, how it ended.
+
+- **What is stored** (`job_mcp_calls`, `app/src/db/repositories/job-mcp-calls-repository.ts`): the job, the workspace, the server id and name, the JSON-RPC method, the cleaned tool name (at most 100 characters), the status the agent's side got, the outcome (`ok`, `cancelled` or a stable code of the table above), the duration and the sizes. **No arguments, no results, no headers, no address, by default and not as an option**: the type has no field for them and the table has no column. The server id is not a foreign key, so a removed server's calls stay in the record of the run that made them.
+- **Where it is written.** The proxy's `onCall` (a call that reached the server's address or failed on its way) and the refusals before the proxy (`404 mcp_server_unavailable`, `429` limits, `503` credential, `413`; recorded with the status and code the agent got, and the method and tool name read from the request) both end in `createCallTrace` (`call-trace.ts`) and are written **after the response** (`after()`), so the agent never waits for the database and a database that fails costs the record of that call only (one log line with the job, never the error). A server id that is not a server id (a path the agent made up) is not recorded.
+- **Bound.** At most **2000 rows for a job** (`MAX_MCP_CALLS_RECORDED_PER_JOB`, the number of calls a claim may make), checked in the statement that inserts; a call past it is not stored (the page says "the first 2,000 calls"). One row more is kept for the refusal `mcp_call_limit_reached`, so a run that used all its calls shows why the next one was refused. The bound holds for the job across claims; concurrent inserts (four in flight per instance) may overshoot by the few counted at the same moment.
+- **What people see.** A refusal reads "refused: …" with the status, a call that was made and went wrong "failed: …", an abandoned answer "cancelled by the agent". The section is not there for a run that made no MCP call. The read route is `GET /api/w/:workspace/runs/:id/mcp-calls?after=&limit=` (any member, the run is looked up in the workspace in the address, a run that is not a run of the Implementer is `404 RUN_NOT_FOUND`).
+- **Not done here.** The door's own record of a call it could not send to the app (runner side, #1067) and a trace for the hosted door's calls beyond `onCall` are follow-ups; a run's MCP calls are not in the result document.

@@ -262,7 +262,12 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         release = gate.enter(who.job.id);
         if (release === undefined) {
           refusedMcp(who.job.id, "mcp_too_many_concurrent_calls");
-          runtime.refused(who.job, serverId, "mcp_too_many_concurrent_calls", null);
+          runtime.refused(
+            who.job,
+            serverId,
+            "mcp_too_many_concurrent_calls",
+            null,
+          );
           return mcpRefusal("mcp_too_many_concurrent_calls", {
             "retry-after": "1",
           });
@@ -281,7 +286,12 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         const read = await mcp.read();
         if (!read.ok) {
           refusedMcp(who.job.id, "mcp_proxy_request_too_large");
-          runtime.refused(who.job, serverId, "mcp_proxy_request_too_large", null);
+          runtime.refused(
+            who.job,
+            serverId,
+            "mcp_proxy_request_too_large",
+            null,
+          );
           return mcpRefusal("mcp_proxy_request_too_large");
         }
         const answer = await runtime.handle(who.job, serverId, read.request);

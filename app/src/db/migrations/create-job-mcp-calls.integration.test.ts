@@ -127,7 +127,9 @@ describe("the MCP call record migration", () => {
       conname: string;
       definition: string;
     }>`select conname, pg_get_constraintdef(oid) as definition from pg_constraint
-        where conrelid = 'job_mcp_calls'::regclass order by conname`.execute(db);
+        where conrelid = 'job_mcp_calls'::regclass order by conname`.execute(
+      db,
+    );
     const byName = Object.fromEntries(
       constraints.rows.map((row) => [row.conname, row.definition]),
     );

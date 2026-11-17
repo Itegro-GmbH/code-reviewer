@@ -12,12 +12,12 @@
 // not stored for (`unknown_job`): the insert names the workspace and the job together.
 import "server-only";
 import { sql, type Kysely } from "kysely";
+import { MAX_MCP_CALLS_RECORDED_PER_JOB } from "../mcp-call-limits.ts";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 
-/** The rows a job keeps: the calls one claim may make (`MCP_MAX_CALLS_PER_CLAIM`, src/mcp/in-flight.ts), also across claims of the same job. */
-export const MAX_MCP_CALLS_RECORDED_PER_JOB = 2000;
+export { MAX_MCP_CALLS_RECORDED_PER_JOB };
 
 /**
  * One row more than the cap is kept for the refusal that says the claim's limit was reached (`mcp_call_limit_reached`, once: the next one finds the
@@ -81,10 +81,8 @@ export function createJobMcpCallsRepository(
             call.outcome === LIMIT_REFUSAL
               ? MAX_MCP_CALLS_RECORDED_PER_JOB + 1
               : MAX_MCP_CALLS_RECORDED_PER_JOB
-          }`.execute(
-        db,
-      );
-      if (Number(result.numAffectedRows ?? 0n) > 0) return "stored";
+          }`.execute(db);
+      if (Number(result.numAffectedRows ?? 0) > 0) return "stored";
       const job = await db
         .selectFrom("jobs")
         .select("id")

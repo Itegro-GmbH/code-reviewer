@@ -64,7 +64,8 @@ export function classifyOutcome(code: string): {
   result: McpCallResult;
 } {
   if (code === "ok") return { outcome: "ok", result: "ok" };
-  if (code === "cancelled") return { outcome: "cancelled", result: "cancelled" };
+  if (code === "cancelled")
+    return { outcome: "cancelled", result: "cancelled" };
   if (isOneOf(REFUSED, code)) return { outcome: code, result: "refused" };
   if (isOneOf(FAILED, code)) return { outcome: code, result: "failed" };
   return { outcome: "unknown", result: "failed" };
