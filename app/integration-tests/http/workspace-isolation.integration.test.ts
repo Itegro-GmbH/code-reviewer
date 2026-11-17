@@ -83,6 +83,16 @@ type Ids = {
   runnerId: string;
   /** #1037: a Jira connection of the workspace. */
   jiraConnectionId: string;
+  /** #1050: an MCP server of the workspace. */
+  mcpServerId: string;
+};
+
+/** A valid form of an MCP server (#1050): no authentication, a public https address. */
+const MCP_FORM = {
+  name: "Docs",
+  transport: "streamable-http",
+  url: "https://mcp.example.com/mcp",
+  auth: { kind: "none" },
 };
 
 /** What a row of the table needs to make a request: the parts of the address and the body. */
@@ -1010,6 +1020,66 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1050-T03: every member lists the MCP servers of their own workspace, never a header value; the other workspace's are not reachable.
+    name: "GET mcp/servers",
+    route: "/api/w/[workspace]/mcp/servers",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: () => "/mcp/servers",
+    params: () => ({}),
+    file: "mcp/servers/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #1050: an Owner or an Admin adds an MCP server to their own workspace.
+    name: "POST mcp/servers",
+    route: "/api/w/[workspace]/mcp/servers",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_mcp,
+    path: () => "/mcp/servers",
+    body: () => MCP_FORM,
+    params: () => ({}),
+    file: "mcp/servers/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
+    // #1050-T03: an Owner or an Admin changes an MCP server of their own workspace; the other workspace's is not reachable.
+    name: "PUT mcp/servers/[serverId]",
+    route: "/api/w/[workspace]/mcp/servers/[serverId]",
+    method: "PUT",
+    minRole: MINIMUM_ROLE.manage_mcp,
+    path: (ids) => `/mcp/servers/${ids.mcpServerId}`,
+    body: () => ({ ...MCP_FORM, name: "Renamed" }),
+    params: (ids) => ({ serverId: ids.mcpServerId }),
+    file: "mcp/servers/[serverId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #1050-T03: an Owner or an Admin removes an MCP server of their own workspace; the other workspace's is not reachable.
+    name: "DELETE mcp/servers/[serverId]",
+    route: "/api/w/[workspace]/mcp/servers/[serverId]",
+    method: "DELETE",
+    minRole: MINIMUM_ROLE.manage_mcp,
+    path: (ids) => `/mcp/servers/${ids.mcpServerId}`,
+    params: (ids) => ({ serverId: ids.mcpServerId }),
+    file: "mcp/servers/[serverId]/route.ts",
+    implementer: true,
+  },
+  {
+    // #1050-T02: an Owner or an Admin tests an MCP server of their own workspace (the seeded address is an internal one: refused as
+    // text, no connection is made); the other workspace's is not reachable.
+    name: "POST mcp/servers/[serverId]/test",
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/test",
+    method: "POST",
+    minRole: MINIMUM_ROLE.manage_mcp,
+    path: (ids) => `/mcp/servers/${ids.mcpServerId}/test`,
+    params: (ids) => ({ serverId: ids.mcpServerId }),
+    file: "mcp/servers/[serverId]/test/route.ts",
+    implementer: true,
+  },
+  {
     name: "POST plan-handoff",
     route: "/api/w/[workspace]/plan-handoff",
     method: "POST",
@@ -1498,6 +1568,22 @@ async function seedWorkspace(
       updated_at: "2026-11-14T08:00:00.000Z",
     })
     .execute();
+  // An MCP server (#1050): the other workspace's must not be changed, tested or removed through this one's address. The address is an
+  // internal one on purpose (a row the app would not accept as input): a test of it is refused as text and connects nowhere.
+  await db
+    .insertInto("mcp_servers")
+    .values({
+      id: `mcp-${slug}`,
+      workspace_id: workspace.id,
+      name: `server ${slug}`,
+      transport: "streamable-http",
+      url: "https://10.0.0.5/mcp",
+      auth_kind: "none",
+      created_by: null,
+      created_at: "2026-11-17T08:00:00.000Z",
+      updated_at: "2026-11-17T08:00:00.000Z",
+    })
+    .execute();
   return {
     workspace,
     owner,
@@ -1509,6 +1595,7 @@ async function seedWorkspace(
       profileId: profile.profile.id,
       runnerId: `runner-${slug}`,
       jiraConnectionId: `jira-${slug}`,
+      mcpServerId: `mcp-${slug}`,
       integrationId: integration.id,
       repositoryId: repository.id,
       projectId: activated.project.id,
@@ -1656,7 +1743,8 @@ async function start() {
         | "workflow_step_runs"
         | "profiles"
         | "profile_versions"
-        | "jira_connections",
+        | "jira_connections"
+        | "mcp_servers",
     ) =>
       db
         .selectFrom(table)
@@ -1685,6 +1773,7 @@ async function start() {
       profiles: await select("profiles"),
       profileVersions: await select("profile_versions"),
       jiraConnections: await select("jira_connections"),
+      mcpServers: await select("mcp_servers"),
       projects: await db
         .selectFrom("projects")
         .innerJoin("repositories", "repositories.id", "projects.repository_id")

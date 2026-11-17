@@ -125,7 +125,7 @@ export async function testMcpServer(
   let nextId = 1;
   let session: string | null = null;
   let negotiated: string | null = null;
-  let stream: SseEventReader | null = null;
+  let stream = null as SseEventReader | null;
   let postUrl: URL | null = null;
 
   /** One request with the redirects followed by hand; the credential stays on the origin it was meant for. */
@@ -464,7 +464,6 @@ export async function testMcpServer(
   } catch (error) {
     return { ok: false, code: failureOf(error, signal).code };
   } finally {
-    const open: SseEventReader | null = stream;
-    await open?.close();
+    await stream?.close();
   }
 }

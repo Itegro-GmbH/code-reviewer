@@ -131,6 +131,7 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/connections",
   "/w/[workspace]/environments",
   "/w/[workspace]/implementer",
+  "/w/[workspace]/mcp",
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
   "/w/[workspace]/projects/[repositoryId]",
@@ -205,6 +206,10 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/jira/connections/[connectionId]",
   // The projects of the Jira site of a connection, for the new-project dialog (#1038).
   "/api/w/[workspace]/jira/connections/[connectionId]/projects",
+  // The MCP servers of a workspace (#1050).
+  "/api/w/[workspace]/mcp/servers",
+  "/api/w/[workspace]/mcp/servers/[serverId]",
+  "/api/w/[workspace]/mcp/servers/[serverId]/test",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",

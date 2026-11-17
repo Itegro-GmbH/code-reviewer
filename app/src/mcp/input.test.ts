@@ -16,7 +16,10 @@ const valid = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-const codeOf = (raw: unknown, options = OPTIONS) => {
+const codeOf = (
+  raw: unknown,
+  options: { allowKeep: boolean; allowTestEndpoints: boolean } = OPTIONS,
+) => {
   const result = parseMcpServerInput(raw, options);
   return result.ok ? "ok" : result.code;
 };

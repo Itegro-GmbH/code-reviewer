@@ -23,7 +23,6 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/;
 // An HTTP token (RFC 9110, 5.6.2).
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 // No control character: a line break in a value would split the header.
-// eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u0008\u000a-\u001f\u007f]/;
 
 /** Names the client sets itself, or that would change what the request is. Compared in lower case. */
