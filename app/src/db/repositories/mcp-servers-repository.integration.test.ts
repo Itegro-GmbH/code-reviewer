@@ -418,6 +418,115 @@ describe("the MCP servers repository", () => {
     expect([...mcpReferencesIn("not json")]).toEqual([]);
   });
 
+  // #1052 (follow-up of #1050): a lane that is saved and names servers must find them in its workspace, in the same transaction.
+  it("refuses to save a lane (new or a new version) that names a server the workspace does not have, and stores nothing", async () => {
+    const { db, idA, a, b } = await setup();
+    await a.create(server("s-1"), 50);
+    await b.create(server("s-b"), 50);
+    const workflows = createWorkflowsRepository(db, idA);
+    const document = JSON.stringify({
+      name: "Triage",
+      mcp: ["s-1"],
+      steps: [],
+    });
+
+    // Another workspace's server is as missing as one that never was.
+    expect(
+      await workflows.create(
+        {
+          name: "Triage",
+          document,
+          createdBy: "u-1",
+          mcpServerIds: ["s-1", "s-b", "gone"],
+        },
+        100,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "mcp_server_missing",
+      missing: ["s-b", "gone"],
+    });
+    expect(await workflows.list()).toEqual([]);
+
+    const lane = await workflows.create(
+      { name: "Triage", document, createdBy: "u-1", mcpServerIds: ["s-1"] },
+      100,
+    );
+    if (!lane.ok) throw new Error("seeding failed");
+    expect(
+      await workflows.saveVersion(
+        lane.workflow.id,
+        { name: "Triage", document, createdBy: "u-1", mcpServerIds: ["gone"] },
+        100,
+      ),
+    ).toEqual({ ok: false, reason: "mcp_server_missing", missing: ["gone"] });
+    expect((await workflows.get(lane.workflow.id))?.workflow.version).toBe(1);
+  });
+
+  // #1052 (follow-up of #1050)
+  it("holds `for key share` on the named servers until the save commits: a removal waits, then finds the lane; a change of the server does not wait", async () => {
+    const { db, idA, a } = await setup();
+    await a.create(server("s-1"), 50);
+    const lane = await createWorkflowsRepository(db, idA).create(
+      {
+        name: "Triage",
+        document: JSON.stringify({ name: "Triage", steps: [] }),
+        createdBy: "u-1",
+      },
+      100,
+    );
+    if (!lane.ok) throw new Error("seeding failed");
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let saving: () => void = () => undefined;
+    const saved = new Promise<void>((resolve) => (saving = resolve));
+    // A save that has written and not committed yet.
+    const holder = db.transaction().execute(async (trx) => {
+      const result = await createWorkflowsRepository(trx, idA).saveVersion(
+        lane.workflow.id,
+        {
+          name: "Triage",
+          document: JSON.stringify({ name: "Triage", mcp: ["s-1"], steps: [] }),
+          createdBy: "u-1",
+          mcpServerIds: ["s-1"],
+        },
+        100,
+      );
+      saving();
+      await held;
+      return result;
+    });
+    await saved;
+
+    let removal: Promise<unknown> = Promise.resolve();
+    try {
+      // Editing the server's address is not blocked: the key of the row does not change.
+      const current = await a.get("s-1");
+      const edited = await a.update("s-1", current!.revision, {
+        name: "Renamed",
+        transport: "streamable-http",
+        url: "https://mcp.example.com/other",
+        authKind: "none",
+        headerNames: [],
+        sealed: null,
+      });
+      expect(edited.ok).toBe(true);
+      // Removing it waits for the save.
+      let removed = false;
+      removal = a.removeUnlessUsed("s-1").then((result) => {
+        removed = true;
+        return result;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(removed).toBe(false);
+    } finally {
+      release();
+    }
+    expect((await holder).ok).toBe(true);
+    expect(await removal).toMatchObject({ removed: false, reason: "in_use" });
+    expect(await a.get("s-1")).toBeDefined();
+  });
+
   it("never reads or changes another workspace's server", async () => {
     const { a, b } = await setup();
     await b.create(server("s-b"), 50);

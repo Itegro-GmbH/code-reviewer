@@ -5,6 +5,7 @@
 // version stays readable, and a workspace never sees the workflows of another.
 import { describe, expect, it, vi } from "vitest";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
+import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import { createProjectsRepository } from "../db/repositories/projects-repository.ts";
@@ -19,6 +20,7 @@ import {
 } from "../test-support/workspaces.ts";
 import { WorkflowError } from "./errors.ts";
 import { createWorkflowService, type WorkflowService } from "./service.ts";
+import { effectiveMcpServers } from "./mcp.ts";
 import { tiny } from "./test-fixtures.ts";
 
 const USER = { id: "u-1" };
@@ -57,6 +59,7 @@ async function setup() {
       projects: createProjectsRepository(db, workspaceId),
       environments: createImplementerEnvironmentsRepository(db, workspaceId),
       profiles: createProfilesRepository(db, workspaceId),
+      mcpServers: createMcpServersRepository(db, workspaceId),
       ...options,
     });
   /** The service with the project of the workspace filled in for `create` and `list`, as the tests below read. */
@@ -638,5 +641,169 @@ describe("the workflow service", () => {
     );
     expect(JSON.stringify(quiet.mock.calls)).not.toContain("connection lost");
     quiet.mockRestore();
+  });
+});
+
+const MCP_SERVER = (id: string, name: string) => ({
+  id,
+  name,
+  transport: "streamable-http",
+  url: `https://mcp.example.com/${name}`,
+  authKind: "none",
+  headerNames: [],
+  sealed: null,
+  createdBy: null,
+});
+
+function withMcp(lane: unknown, step?: unknown): Record<string, unknown> {
+  const document = tiny();
+  if (lane !== undefined) document.mcp = lane;
+  if (step !== undefined)
+    (document.steps as Array<Record<string, unknown>>)[0]!.mcp = step;
+  return document;
+}
+
+describe("a lane that names MCP servers (#1052)", () => {
+  async function withServers() {
+    const fixture = await setup();
+    const { db, idA, idB } = fixture;
+    const mine = createMcpServersRepository(db, idA);
+    const theirs = createMcpServersRepository(db, idB);
+    await mine.create(MCP_SERVER("srv-github", "github"), 50);
+    await mine.create(MCP_SERVER("srv-linear", "linear"), 50);
+    await theirs.create(MCP_SERVER("srv-foreign", "foreign"), 50);
+    return { ...fixture, mine };
+  }
+
+  // #1052-T01
+  it("saves a lane with two servers and a step narrowed to one, and the stored document gives the step that one", async () => {
+    const { a } = await withServers();
+
+    const saved = await a.create(
+      USER,
+      withMcp(["srv-github", "srv-linear"], ["srv-linear"]),
+    );
+
+    expect(saved.document).toMatchObject({ mcp: ["srv-github", "srv-linear"] });
+    expect(effectiveMcpServers(saved.document, "work")).toEqual(["srv-linear"]);
+    // The next version may change the list.
+    const next = await a.update(
+      USER,
+      saved.id,
+      withMcp(["srv-github", "srv-linear"], []),
+      1,
+    );
+    expect(effectiveMcpServers(next.document, "work")).toEqual([]);
+  });
+
+  // #1052-T02
+  it("refuses a server of another workspace like one that never existed, stores nothing, and names the place", async () => {
+    const { a } = await withServers();
+
+    for (const id of ["srv-foreign", "srv-nowhere"]) {
+      const refused = await failureOf(
+        a.create(USER, withMcp(["srv-github", id])),
+      );
+
+      expect(refused.code).toBe("WORKFLOW_INVALID");
+      expect(refused.errors).toEqual([
+        expect.objectContaining({
+          path: "/mcp/1",
+          code: "mcp_server_unknown",
+          available: ["srv-github", "srv-linear"],
+        }),
+      ]);
+      // The answer echoes what was written and names only this workspace's servers, never the other's.
+      expect(JSON.stringify(refused.errors)).not.toContain("'foreign'");
+    }
+    expect((await a.list()).workflows).toEqual([]);
+  });
+
+  // #1052-T02
+  it("refuses a step that names a server its lane does not, also on a new version", async () => {
+    const { a } = await withServers();
+    const saved = await a.create(USER, withMcp(["srv-github"]));
+
+    const refused = await failureOf(
+      a.update(USER, saved.id, withMcp(["srv-github"], ["srv-linear"]), 1),
+    );
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({
+        path: "/steps/0/mcp/0",
+        code: "mcp_server_not_in_lane",
+      }),
+    ]);
+    expect((await a.get(saved.id)).version).toBe(1);
+  });
+
+  // #1052-T02
+  it("says a broken server is broken and still saves", async () => {
+    const { a, mine } = await withServers();
+    const server = await mine.get("srv-github");
+    await mine.recordTest("srv-github", server!.revision, {
+      ok: false,
+      code: "mcp_test_timeout",
+    });
+
+    const checked = await a.validate(withMcp(["srv-github"]));
+    const saved = await a.create(USER, withMcp(["srv-github"]));
+
+    expect(checked.valid).toBe(true);
+    expect(checked.warnings).toEqual([
+      expect.objectContaining({ path: "/mcp/0", code: "mcp_server_broken" }),
+    ]);
+    expect(saved.version).toBe(1);
+  });
+
+  // #1052 (follow-up of #1050)
+  it("refuses a save when the server was removed after the check and before the commit, and stores nothing", async () => {
+    const { db, idA, mine } = await withServers();
+    const racing = {
+      // Reads the servers, then the server goes: the validator saw it, the save must not.
+      list: async () => {
+        const listed = await mine.list();
+        await mine.removeUnlessUsed("srv-linear");
+        return listed;
+      },
+    };
+    const service = createWorkflowService({
+      workflows: createWorkflowsRepository(db, idA),
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+      mcpServers: racing,
+    });
+    const projectId = (await createProjectsRepository(db, idA).list())[0]!
+      .project!.id;
+
+    const refused = await failureOf(
+      service.create(USER, projectId, withMcp(["srv-linear"])),
+    );
+
+    expect(refused.errors).toEqual([
+      expect.objectContaining({ path: "/mcp/0", code: "mcp_server_unknown" }),
+    ]);
+    expect((await service.list(projectId)).workflows).toEqual([]);
+  });
+
+  // #1052-T03
+  it("leaves a lane without `mcp` as it was: it saves and runs with or without a registry of servers", async () => {
+    const { a, db, idA } = await withServers();
+    const bare = createWorkflowService({
+      workflows: createWorkflowsRepository(db, idA),
+      projects: createProjectsRepository(db, idA),
+      environments: createImplementerEnvironmentsRepository(db, idA),
+      profiles: createProfilesRepository(db, idA),
+    });
+
+    const saved = await a.create(USER, tiny());
+
+    expect(saved.document).not.toHaveProperty("mcp");
+    expect((await bare.validate(tiny())).valid).toBe(true);
+    // A lane that names a server cannot be saved where no registry is wired: it fails closed.
+    expect((await bare.validate(withMcp(["srv-github"]))).errors).toEqual([
+      expect.objectContaining({ code: "mcp_server_unknown" }),
+    ]);
   });
 });

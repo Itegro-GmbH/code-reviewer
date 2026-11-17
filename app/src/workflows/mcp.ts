@@ -51,11 +51,13 @@ export function effectiveMcpServersOfStep(
 
 const CHILD_LISTS = ["then", "else", "body"] as const;
 
-/** Every node of a document that is a list of steps below a trigger's `steps`, `steps` and `onFailure`, walked without recursion. */
-function findStep(
+/**
+ * Every node of a document: the pre-steps of the triggers, `steps` and `onFailure`, and what lies inside an `if` and a `loop`. Walked
+ * without recursion, so a document of nothing but nesting cannot overflow the stack; a document is a tree, so the walk ends.
+ */
+function* nodesOf(
   document: Record<string, unknown>,
-  stepId: string,
-): Record<string, unknown> | undefined {
+): Generator<Record<string, unknown>> {
   const pending: unknown[] = [];
   const triggers = Array.isArray(document.triggers)
     ? (document.triggers as unknown[])
@@ -63,19 +65,29 @@ function findStep(
   for (const trigger of triggers)
     if (isRecord(trigger) && Array.isArray(trigger.steps))
       pending.push(...(trigger.steps as unknown[]));
-  if (Array.isArray(document.steps))
-    pending.push(...(document.steps as unknown[]));
-  if (Array.isArray(document.onFailure))
-    pending.push(...(document.onFailure as unknown[]));
-  // The walk is bounded by the size of a document the validator accepted; a document that is not one cannot loop it (a tree has no cycles).
-  while (pending.length > 0) {
-    const node = pending.shift();
+  for (const list of [document.steps, document.onFailure])
+    if (Array.isArray(list)) pending.push(...(list as unknown[]));
+  for (let at = 0; at < pending.length; at++) {
+    const node = pending[at];
     if (!isRecord(node)) continue;
-    if (node.id === stepId) return node;
+    yield node;
     for (const key of CHILD_LISTS)
       if (Array.isArray(node[key])) pending.push(...(node[key] as unknown[]));
   }
-  return undefined;
+}
+
+/**
+ * Every server a document names: the lane's list and the list of every agent step. What a save locks (`for key share`) so the server
+ * cannot be removed between the check and the commit. Exact: only the field `mcp` of the document and of agent steps, not any key of that
+ * name (the check that refuses removing a server reads more widely on purpose, `mcpReferencesIn`).
+ */
+export function mcpServersNamedBy(document: unknown): string[] {
+  if (!isRecord(document)) return [];
+  const named = new Set(laneMcpServers(document));
+  for (const node of nodesOf(document))
+    if (node.kind === "agent")
+      for (const ref of textsOf(node.mcp) ?? []) named.add(ref);
+  return [...named];
 }
 
 /**
@@ -89,7 +101,8 @@ export function effectiveMcpServers(
   if (!isRecord(document)) return [];
   const lane = laneMcpServers(document);
   if (lane.length === 0) return [];
-  const step = findStep(document, stepId);
-  if (step === undefined || step.kind !== "agent") return [];
-  return effectiveMcpServersOfStep(lane, step);
+  for (const node of nodesOf(document))
+    if (node.id === stepId)
+      return node.kind === "agent" ? effectiveMcpServersOfStep(lane, node) : [];
+  return [];
 }

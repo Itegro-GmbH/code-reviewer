@@ -243,6 +243,7 @@ describe("the document", () => {
           "triggers",
           "budgetUsd",
           "turnTimeLimitMinutes",
+          "mcp",
           "steps",
           "onFailure",
         ],

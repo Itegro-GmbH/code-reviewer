@@ -11,6 +11,7 @@ import {
   effectiveMcpServersOfStep,
   laneMcpServers,
   MCP_REFS_MAX,
+  mcpServersNamedBy,
 } from "./mcp.ts";
 import type {
   McpServerInfo,
@@ -375,5 +376,39 @@ describe("the effective list of a step", () => {
     expect(laneMcpServers({ mcp: [GITHUB, 7, null] })).toEqual([GITHUB]);
     // A step list that is no list grants nothing: fail closed.
     expect(effectiveMcpServersOfStep([GITHUB], { mcp: "github" })).toEqual([]);
+  });
+});
+
+describe("the servers a document names", () => {
+  // #1052 (follow-up of #1050)
+  it("are the lane's and every agent step's, once each, and only from the field `mcp` of the lane and of agent steps", () => {
+    const document = {
+      mcp: [GITHUB, LINEAR],
+      steps: [
+        {
+          id: "a",
+          kind: "agent",
+          mcp: [LINEAR, SENTRY],
+          // A property that happens to be called `mcp` in a result schema is no list of servers.
+          result: {
+            type: "object",
+            properties: { mcp: { type: "string", description: "x" } },
+          },
+        },
+        { id: "b", kind: "action", mcp: ["not-an-agent"] },
+        {
+          id: "c",
+          kind: "if",
+          when: {},
+          then: [{ id: "d", kind: "agent", mcp: [BROKEN] }],
+        },
+      ],
+    };
+
+    expect(mcpServersNamedBy(document).sort()).toEqual(
+      [GITHUB, LINEAR, SENTRY, BROKEN].sort(),
+    );
+    expect(mcpServersNamedBy(null)).toEqual([]);
+    expect(mcpServersNamedBy(lane(undefined))).toEqual([]);
   });
 });
