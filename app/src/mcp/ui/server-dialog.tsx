@@ -25,6 +25,8 @@ import {
 } from "../../components/ui/field.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
+import type { McpCatalogEntry } from "../catalog/entries.ts";
+import { presetDefaults } from "../catalog/preset.ts";
 import {
   MCP_INPUT_CODES,
   MCP_INPUT_FIELD,
@@ -59,6 +61,7 @@ export function ServerDialog({
   api,
   open,
   server,
+  preset = null,
   callbackUrl,
   onClose,
   onSaved,
@@ -67,6 +70,8 @@ export function ServerDialog({
   open: boolean;
   /** The server to change, or null to add one. */
   server: McpServerView | null;
+  /** A catalog entry to start from when adding (#1054): the form is prefilled, nothing is saved until the person saves. */
+  preset?: McpCatalogEntry | null;
   /** The redirect address an OAuth client has to be registered for (shown as a hint). */
   callbackUrl?: string;
   onClose: () => void;
@@ -74,16 +79,18 @@ export function ServerDialog({
 }) {
   const product = useProductIdentity();
   const ids = useId();
-  const [name, setName] = useState(server?.name ?? "");
+  const start =
+    server === null && preset !== null ? presetDefaults(preset) : null;
+  const [name, setName] = useState(server?.name ?? start?.name ?? "");
   const [transport, setTransport] = useState(
-    server?.transport ?? "streamable-http",
+    server?.transport ?? start?.transport ?? "streamable-http",
   );
-  const [url, setUrl] = useState(server?.url ?? "");
+  const [url, setUrl] = useState(server?.url ?? start?.url ?? "");
   const [auth, setAuth] = useState<"none" | "header" | "oauth">(
     server?.auth === "header" || server?.auth === "oauth"
       ? server.auth
       : server === null
-        ? "header"
+        ? (start?.auth ?? "header")
         : "none",
   );
   // An OAuth client entered by hand; its secret is write-only like a header value.
@@ -101,7 +108,14 @@ export function ServerDialog({
           value: "",
           storedAs: header,
         }))
-      : [{ key: 0, name: "Authorization", value: "", storedAs: null }],
+      : [
+          {
+            key: 0,
+            name: start?.headerName ?? "Authorization",
+            value: "",
+            storedAs: null,
+          },
+        ],
   );
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<Failure | null>(null);
@@ -222,6 +236,32 @@ export function ServerDialog({
           </DialogTitle>
           <DialogDescription>{PAGE_COPY.formDescription}</DialogDescription>
         </DialogHeader>
+        {start === null || preset === null ? null : (
+          <div
+            className="flex flex-col gap-1 rounded-lg border border-border bg-muted px-3 py-2 text-sm"
+            data-testid="catalog-note"
+          >
+            <p className="font-semibold">
+              {PAGE_COPY.fromCatalog(preset.name)}
+            </p>
+            <p className="text-muted-foreground">{preset.scopeNote}</p>
+            <p className="text-muted-foreground">
+              {preset.auth.kind === "oauth"
+                ? PAGE_COPY.catalogOauthNext
+                : PAGE_COPY.catalogHeaderNext(
+                    preset.auth.kind === "header" ? preset.auth.headerName : "",
+                  )}
+            </p>
+            <a
+              className="underline"
+              href={preset.docsUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {PAGE_COPY.catalogDocs}
+            </a>
+          </div>
+        )}
         <form
           onSubmit={(event) => void submit(event)}
           noValidate
@@ -422,7 +462,10 @@ export function ServerDialog({
                           ? PAGE_COPY.headerKept
                           : isStored(row)
                             ? PAGE_COPY.headerReenter
-                            : undefined
+                            : preset?.auth.kind === "header" &&
+                                row.name === preset.auth.headerName
+                              ? preset.auth.valueHint
+                              : undefined
                       }
                       onChange={(event) =>
                         update(row.key, { value: event.target.value })
