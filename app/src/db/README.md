@@ -697,16 +697,25 @@ file, and the migrator refuses to start (`previously executed migration ... is m
 ### MCP servers
 
 Migration `20261117100000_create_mcp_servers` (#1050, epic #1049): `mcp_servers` holds the remote MCP servers of a workspace (name, transport
-`streamable-http` or `sse`, address, authentication kind `none`, `header` or the reserved `oauth`, the NAMES of the headers, the header values
+`streamable-http` or `sse`, address, authentication kind `none`, `header` or `oauth`, the NAMES of the headers, the header values
 as ONE sealed JSON in `headers_ciphertext`, `headers_nonce` and `headers_key_version`, `revision`, the last test `test_status` with its error code and time, and
 `tools_snapshot`, the JSON of what the last successful test listed). Check constraints keep the transport and the kind to their lists, the sealed
 columns present exactly for the kind `header`, and the test status in line with its error code and time. A name is unique per workspace whatever its case. Expand
-only: one new table, nothing existing changes. The OAuth data of #1051 will live in a table of its own keyed by the server, so this table needs no
+only: one new table, nothing existing changes. The OAuth data of #1051 lives in a table of its own keyed by the server (below), so this table needed no
 rewrite. **Customer data, workspace scoped** (`mcp-servers-repository.ts`, classified in `scoping.test.ts`, covered row by row in
 `scoped-isolation.integration.test.ts`); `created_by` is an audit pointer that a user merge moves to the acting admin (`github-signin/merge.ts`).
 The repository decides, under a lock, the maximum per workspace, the compare and swap on `revision` for a change and for the record of a test, and the
 removal: `removeUnlessUsed` refuses while the CURRENT version of a lane that is not archived names the server under a key `mcp` (a lane's own or a step's; #1052
 adds the field and takes `for key share` on the server's row when it saves a document). See `src/mcp/README.md`.
+
+Migration `20261117140000_create_mcp_oauth_connections` (#1051): `mcp_oauth_connections`, one row per server of the kind `oauth` (`server_id` is the key and a
+foreign key with `on delete cascade`). Three groups: what discovery found (`discovery`, JSON, nothing secret: resource, issuer, endpoints, scopes), the OAuth client
+(`client_source` `manual` entered by an Owner or Admin, or `dynamic` registered by the server; the secret sealed in `client_secret_*`; `registered_issuer` and
+`registered_redirect_uri` say what a dynamic client was registered for), and the token pair as ONE sealed JSON (`tokens_*`, the table, the server id and the field
+`tokens` bound into the ciphertext) with `token_version` (compare and swap) and `access_expires_at`. `status` is `unconnected`, `connected` or `broken`; check
+constraints keep status, tokens, client and error in line. Expand only: one new table. **Customer data, workspace scoped** (`mcp-oauth-repository.ts`, classified in
+`scoping.test.ts`, covered row by row in `scoped-isolation.integration.test.ts`); `connected_by` is moved by a user merge; the erasure of a workspace deletes it.
+The registry's update deletes or replaces the row in ITS transaction when the address, the transport, the kind or the client changes.
 
 ## Workspace scoping
 

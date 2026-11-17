@@ -1,7 +1,7 @@
 # MCP servers of a workspace
 
 A workspace keeps a list of **remote MCP servers** its agents may use (epic #1049, this folder is issue #1050: the registry, the **MCP** tab and the
-connection test). Owners and Admins add, change, test and remove them (`manage_mcp`); every member sees the list. Factory only: the page and the routes
+connection test; `oauth/` is issue #1051: OAuth for servers that need it). Owners and Admins add, change, test and remove them (`manage_mcp`); every member sees the list. Factory only: the page and the routes
 exist in a deployment with the capability `implementer` (`src/capabilities/routes.ts`). Local servers started by a command (stdio) are out of scope.
 
 | File                   | Role                                                                                                                                                                                                                                   |
@@ -14,17 +14,20 @@ exist in a deployment with the capability `implementer` (`src/capabilities/route
 | `client.ts`            | `testMcpServer`: this server as an MCP client over Streamable HTTP or SSE: `initialize`, `notifications/initialized`, `tools/list` (paged); one deadline, size caps, redirects by hand                                                 |
 | `service.ts`           | `createMcpService`: list, create, update, remove, test; seals the header values, rate limits the test, stores the result for the revision that was tested                                                                              |
 | `http.ts`, `shared.ts` | The handlers of the routes below and the wiring of the running server (guarded fetch, master key)                                                                                                                                      |
+| `oauth/`               | OAuth for a server of the kind `oauth` (#1051): see the section below                                                                                                                                                                  |
 | `ui/`                  | The page: `mcp-panel.tsx` (list, test, remove), `server-dialog.tsx` (add and change), `api.ts`, `messages.ts` (the copy of every code)                                                                                                 |
 
 ## Routes
 
-| Route                                               | Who          | What                                                                                           |
-| --------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------- |
-| `GET /api/w/:workspace/mcp/servers`                 | every member | The servers: address, transport, the NAMES of the headers, last test, tool list                |
-| `POST /api/w/:workspace/mcp/servers`                | Owner, Admin | Adds a server                                                                                  |
-| `PUT /api/w/:workspace/mcp/servers/:serverId`       | Owner, Admin | Changes a server; `revision` is required; a header `{ name, keep: true }` keeps its value      |
-| `DELETE /api/w/:workspace/mcp/servers/:serverId`    | Owner, Admin | Removes a server; 409 `mcp_server_in_use`, naming the lanes, while a lane uses it              |
-| `POST /api/w/:workspace/mcp/servers/:serverId/test` | Owner, Admin | Connects as an MCP client, stores and returns the tool list (30 tests per workspace in 10 min) |
+| Route                                                  | Who          | What                                                                                                             |
+| ------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `GET /api/w/:workspace/mcp/servers`                    | every member | The servers: address, transport, the NAMES of the headers, last test, tool list                                  |
+| `POST /api/w/:workspace/mcp/servers`                   | Owner, Admin | Adds a server                                                                                                    |
+| `PUT /api/w/:workspace/mcp/servers/:serverId`          | Owner, Admin | Changes a server; `revision` is required; a header `{ name, keep: true }` keeps its value                        |
+| `DELETE /api/w/:workspace/mcp/servers/:serverId`       | Owner, Admin | Removes a server; 409 `mcp_server_in_use`, naming the lanes, while a lane uses it                                |
+| `POST /api/w/:workspace/mcp/servers/:serverId/test`    | Owner, Admin | Connects as an MCP client, stores and returns the tool list (30 tests per workspace in 10 min)                   |
+| `POST /api/w/:workspace/mcp/servers/:serverId/connect` | Owner, Admin | OAuth servers: discovery, client, signed state; answers `{ url }`, the consent page (20 per person in 10 min)    |
+| `GET /api/mcp/oauth/callback`                          | signed in    | Where the authorization server sends the browser (`?code&state`); ends on `/w/<slug>/mcp?mcp=<code>&server=<id>` |
 
 ## Rules that hold
 
@@ -46,15 +49,50 @@ exist in a deployment with the capability `implementer` (`src/capabilities/route
   (`mcp_header_value_required`): the values are entered again, so an Admin cannot point a server at their own host and press Test to collect the stored key. The kept values
   are read in the transaction that writes, and a change needs the `revision` of the form (`mcp_revision_required`).
 
+## OAuth for remote servers (#1051)
+
+A server of the kind `oauth` is connected with a click ("Connect" on the MCP tab) by the authorization code flow with PKCE of the MCP authorization specification.
+`oauth/` is the whole of it; the rows are in `mcp_oauth_connections` (`src/db/README.md`).
+
+| File                                                   | Role                                                                                                                                                                                           |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oauth/errors.ts`                                      | The stable codes: why starting failed, how the round trip ended (shown once on the page), why a token cannot be given out, why a connection is broken                                          |
+| `oauth/endpoint-http.ts`                               | One call to an address the flow was told about: the address is judged first (`checkMcpUrl`), the connection is the guarded fetch, redirects are NOT followed, a deadline and a cap on the body |
+| `oauth/discovery.ts`                                   | The 401 of the server and `resource_metadata` (RFC 9728), the well-known places, the authorization server's metadata (RFC 8414 or OpenID Connect discovery), S256 required                     |
+| `oauth/registration.ts`                                | Dynamic client registration (RFC 7591) as a public client; without it an Owner or Admin enters a client id (and secret) in the form                                                            |
+| `oauth/authorization-url.ts`, `oauth/pkce.ts`          | The consent address: PKCE S256, `state`, `redirect_uri`, `resource` (RFC 8707), `scope`                                                                                                        |
+| `oauth/token-endpoint.ts`                              | The exchange of the code and the refresh, with the client authentication the registration says; a failure is `refused`, `client`, `unavailable` or `address_refused`                           |
+| `oauth/tokens.ts`                                      | Sealing, and `use`: the access token renewed BEFORE it ends (5 min margin), the refresh serialized per server under the row lock                                                               |
+| `oauth/service.ts`, `oauth/http.ts`, `oauth/shared.ts` | `startConnect` and `completeCallback`, the two routes, the wiring of the running server                                                                                                        |
+
+Rules that hold:
+
+- **Every address is checked, each one.** The server's address, the metadata address a 401 names (it can be on any host), the authorization server's issuer, and its authorization, token and
+  registration endpoints go through the same rule as a server address (https only, no private, link-local, reserved or metadata address) and the guarded fetch. The authorization server
+  may be on another origin than the MCP server; that is checked, not assumed. A redirect of a discovery document or an endpoint is not followed. The test flag opens plain http and loopback only.
+- **The metadata has to be about this server.** The `resource` of the protected-resource metadata must be the server's address, the `issuer` of the authorization server's metadata must be the
+  issuer it was found for, and a response with `iss` (RFC 9207) must carry the discovered issuer (and must have one where the metadata announces it).
+- **The state is the person's and the session's.** `mcp-connect`, single use, 10 minutes, bound to the person and the browser session; the PKCE verifier stays server side with it; it names the
+  server and its REVISION: an edit between the start and the callback ends the flow (`mcp_server_changed`) and the tokens are saved only for that revision (the row is locked `for share`).
+  The callback uses the endpoints and the client kept at the start, never a second discovery.
+- **Tokens are for one resource and one client.** An edit of the address, the transport, the kind or the OAuth client deletes the connection in the same transaction (`McpOAuthChange`); the
+  connection records the resource and `use` refuses a server whose address is not it. The test sends the token only to the address it was made for (the credential is dropped when a redirect leaves the origin).
+- **Refresh is serialized, and only the grant's end is sticky.** `invalid_grant` marks the server `broken` (`mcp_oauth_refresh_refused`, shown as "Reconnect"), as does an expired access token
+  without a refresh token (`mcp_oauth_expired`). A client the authorization server does not accept, a 5xx, a timeout, an address that is no longer allowed or a pair this process cannot open
+  (another `APP_SECRET`) change nothing: `mcp_oauth_unavailable`, and the operator's log says why (`MCP_OAUTH_REFRESH_FAILED`, `MCP_OAUTH_TOKENS_UNREADABLE`, `MCP_OAUTH_CLIENT_REFUSED`).
+- **A secret never leaves the server.** The access and refresh token and the client secret are sealed (table, server id and field bound into the ciphertext); a view holds the state, the scopes
+  and an entered client id, never a token or a secret; a log line holds a code and the server id.
+- **No scope is invented.** The scopes asked for are the `scope` of the 401, else the `scopes_supported` of the metadata, else none.
+
 ## For the issues that follow
 
 - **Lanes (#1052)** name servers in their document under the key `mcp` (`MCP_LANE_DOCUMENT_KEY`; `lane-contract.test.ts` fails when another key is chosen without changing it). `removeUnlessUsed` (`src/db/repositories/mcp-servers-repository.ts`) reads EVERY string under a key
   `mcp` anywhere in the current version of a lane that is not archived, so a list of ids, a list of objects holding an id and a per-step list are all found. #1052
   takes `for key share` on the server's row in the transaction that saves a document, and may narrow `mcpReferencesIn` to its field.
-- **OAuth (#1051)**: the kind `oauth` is in the column's check list and refused by `parseMcpServerInput` (`mcp_auth_oauth_unavailable`). Its tokens and client registration go
-  into a table of their own keyed by `mcp_servers.id`; this table does not change.
+- **OAuth (#1051)** is done: see "OAuth for remote servers" below. For the proxy (#1053): `createMcpOAuthTokens(...).use(serverId, { serverUrl })` (`oauth/tokens.ts`) gives a fresh
+  access token (`SecretValue`) or a code (`mcp_oauth_not_connected`, `mcp_oauth_broken`, `mcp_oauth_unavailable`); a 401 from the server is passed back as `rejected` for one renewal.
 - **The proxy (#1053)** reads a server with `readHeaders` and `openHeaders` (`service.ts`); `tools_snapshot` is what a lane's editor may offer to narrow.
 - **The catalog (#1054)**: a preset is a prefilled form; nothing is added to the table.
 
-Tests: unit (`url`, `input`, `sse`, `client` against `fakes/mcp`, the page), integration against Postgres (`mcp.integration.test.ts`, the repository, the migration,
-`scoped-isolation.integration.test.ts`, `integration-tests/http/workspace-isolation.integration.test.ts`).
+Tests: unit (`url`, `input`, `sse`, `client` against `fakes/mcp`, `oauth/` against `fakes/mcp/oauth.ts`, the page), integration against Postgres (`mcp.integration.test.ts`,
+`oauth/oauth.integration.test.ts`, the repositories, the migrations, `scoped-isolation.integration.test.ts`, `integration-tests/http/workspace-isolation.integration.test.ts`).
