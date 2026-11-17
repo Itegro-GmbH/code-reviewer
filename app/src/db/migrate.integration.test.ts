@@ -165,6 +165,7 @@ describe("the migrations of both epics", () => {
       "20261114180000_create_jira_webhooks",
       "20261117100000_create_mcp_servers",
       "20261117140000_create_mcp_oauth_connections",
+      "20261117150000_add_job_mcp_calls",
     ]);
   });
 

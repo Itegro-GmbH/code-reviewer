@@ -74,7 +74,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
   workflow_step_runs: ["ask", "waiting_on_comment_id"],
   // #891: when a member asked for the running turn to stop; null for every job that exists.
   // #971: the labels a job requires; null for every job that exists (the claim derives them).
-  jobs: ["cancel_requested_at", "required_labels"],
+  // #1053: the MCP calls of the claim; 0 for every job that exists (`DEFAULTS_OF_COLUMNS`).
+  jobs: ["cancel_requested_at", "required_labels", "mcp_calls"],
   // #919: the environment a profile version runs in; null for every version that exists (its step names the environment).
   profile_versions: ["environment_id"],
   // #856: how to read a settled record without a cost (a subscription turn); null for every record that exists.
@@ -98,6 +99,7 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
   },
   workflow_runs: { trigger_kind: "manual" },
   runners: { delivery_mode: "poll" },
+  jobs: { mcp_calls: 0 },
 };
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */

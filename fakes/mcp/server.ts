@@ -3,7 +3,8 @@
 // A fake MCP server (loopback only, in memory) for the tests of the MCP registry (#1050, epic #1049). It speaks the two remote transports
 // of the Model Context Protocol, in their shapes, so the production client runs unchanged against it:
 //   POST /mcp          Streamable HTTP: one JSON-RPC message per request. `initialize` answers with the server info and a `Mcp-Session-Id`;
-//                      `notifications/initialized` answers 202; `tools/list` answers the tools (paged by `cursor`, `toolsPageSize`). The
+//                      `notifications/initialized` answers 202; `tools/list` answers the tools (paged by `cursor`, `toolsPageSize`);
+//                      `tools/call` (#1053) answers one text `called <name>` (and notes the name in `calledTools`, never the arguments). The
 //                      answer is `application/json`, or a `text/event-stream` with one `message` event (`answerAs: "sse"`).
 //   DELETE /mcp        ends the session (200).
 //   GET  /sse          the legacy HTTP+SSE transport: an event stream that starts with an `endpoint` event (`/messages?sessionId=...`)
@@ -102,6 +103,10 @@ export type McpFake = {
   sawBearer(token: string): boolean;
   /** Streamable HTTP sessions that are open. */
   openSessions(): number;
+  /** Legacy SSE event streams that are open (#1053: a call must close the session it opened, whatever happens). */
+  openStreams(): number;
+  /** The names of the tools `tools/call` was sent for (#1053), in order; never the arguments. */
+  calledTools(): readonly string[];
   /** OAuth: from now on the protected-resource metadata names this authorization server (a server that moved to another one). */
   setAuthorizationServer(issuer: string): void;
   close(): Promise<void>;
@@ -140,6 +145,7 @@ export async function startMcpFake(
   );
   const answerAs = options.answerAs ?? "json";
   const recorded: RecordedMcpRequest[] = [];
+  const called: string[] = [];
   const seenHeaders: { name: string; value: string }[] = [];
   const seenBearers = new Set<string>();
   const scripted = new Map<string, ScriptedAnswer[]>();
@@ -178,6 +184,14 @@ export async function startMcpFake(
           ...tool,
         })),
         ...(next < tools.length ? { nextCursor: String(next) } : {}),
+      };
+    }
+    if (request.method === "tools/call") {
+      const name = request.params?.name;
+      if (typeof name === "string") called.push(name);
+      return {
+        content: [{ type: "text", text: `called ${String(name)}` }],
+        isError: false,
       };
     }
     return undefined;
@@ -420,6 +434,8 @@ export async function startMcpFake(
       ),
     sawBearer: (token) => seenBearers.has(token),
     openSessions: () => sessions.size,
+    openStreams: () => streams.size,
+    calledTools: () => called,
     setAuthorizationServer(issuer) {
       if (options.oauth !== undefined)
         options.oauth = { ...options.oauth, authorizationServer: issuer };

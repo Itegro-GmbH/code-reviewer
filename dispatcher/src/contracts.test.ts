@@ -350,6 +350,8 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
       ["ImplementerAgentAsk", "examples/implementer/ImplementerAgentAsk.json"],
       // #838
       ["ImplementerResume", "examples/implementer/ImplementerResume.json"],
+      // #1053
+      ["ImplementerMcp", "examples/implementer/ImplementerMcp.json"],
     ] as const) {
       const check = validator("runner-api", definition);
       expect(
@@ -363,6 +365,7 @@ describe("the implementer kind in the contracts the Dispatcher speaks (#746)", (
       "ImplementerAgentAsk.json",
       "ImplementerAgentResult.json",
       "ImplementerEnvironment.json",
+      "ImplementerMcp.json",
       "ImplementerProfile.json",
       "ImplementerResultSchema.json",
       "ImplementerResume.json",

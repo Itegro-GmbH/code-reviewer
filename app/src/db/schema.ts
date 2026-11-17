@@ -256,6 +256,11 @@ export interface JobsTable {
    * every claim, so it only counts for a claim made with a per-job credential. Not a `Job` field.
    */
   worker_fetches: ColumnType<number, number | undefined, number>;
+  /**
+   * #1053: how many calls of the agent's MCP client the Worker of the current claim made through the Worker API's MCP route (capped per
+   * claim). Reset by every claim. Not a `Job` field.
+   */
+  mcp_calls: ColumnType<number, number | undefined, number>;
   /** #397: 1 when the holder of the claim understands that its run can be superseded (the feature `supersede`). */
   accepts_supersede: ColumnType<number, number | undefined, number>;
   /**

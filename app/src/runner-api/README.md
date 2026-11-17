@@ -759,3 +759,12 @@ jobs the policy let through.
 - The harness is `src/test-support/runner-api-harness.ts`; `projects: true` wires the guard and the
   options like the running server (real project service and review settings), otherwise every job may
   run and has no extra options.
+
+## MCP calls of the agent (#1053)
+
+`POST` and `DELETE` (any other method, `GET` included, is 405) on `/api/workers/v1/jobs/:id/mcp/:server` (Worker API only; the credential of the job in the header) carry a call of
+the agent's MCP client for one MCP server of the job's agent step. The app adds the credential of the server and forwards the call
+(`mcp/job-proxy.ts`, `mcp/proxy.ts`); the body is one JSON-RPC message of at most 256 KiB, the two MCP headers are all else that goes on
+(`mcp-call.ts`). The job must hold its claim and run (`401` / `409` otherwise); the lease is not extended. At most 2000 calls per claim (`jobs.mcp_calls`, `429 mcp_call_limit_reached`) and 4 in flight per job on one instance (`429 mcp_too_many_concurrent_calls`). A server that is not one of the step's, was
+removed, or never existed is `404 mcp_server_unavailable`. `mcp-block.ts` puts the same list in the job as `implementer.mcp` for a Worker that named
+the claim feature `implementer_mcp`. Codes, statuses and retry rules: `docs/mcp-runtime.md`.

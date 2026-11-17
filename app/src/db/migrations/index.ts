@@ -117,6 +117,7 @@ import { migration as createJiraConnections } from "./20261114160000_create_jira
 import { migration as createJiraWebhooks } from "./20261114180000_create_jira_webhooks.ts";
 import { migration as createMcpServers } from "./20261117100000_create_mcp_servers.ts";
 import { migration as createMcpOauthConnections } from "./20261117140000_create_mcp_oauth_connections.ts";
+import { migration as addJobMcpCalls } from "./20261117150000_add_job_mcp_calls.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -262,6 +263,7 @@ const migrations: Record<string, Migration> = {
   "20261114180000_create_jira_webhooks": createJiraWebhooks,
   "20261117100000_create_mcp_servers": createMcpServers,
   "20261117140000_create_mcp_oauth_connections": createMcpOauthConnections,
+  "20261117150000_add_job_mcp_calls": addJobMcpCalls,
 };
 
 export const migrationProvider: MigrationProvider = {

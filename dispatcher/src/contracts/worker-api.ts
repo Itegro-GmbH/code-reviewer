@@ -116,6 +116,7 @@ export type ImplementerJob = {
    */
   canAsk?: boolean;
   resume?: ImplementerResume;
+  mcp?: ImplementerMcp;
 };
 /**
  * #818: the environment a turn was started with, as the turn copied it when it started: the setup script the runner runs once in the repository's folder after the clone and before the model is called, and (#745, step 7) the rule for the agent's network. Present only when the environment has a script or a network rule other than `off`, and the caller named the claim feature `implementer_environment` (and `implementer_network` for a rule); a turn with neither carries nothing (the size of the VM is the Dispatcher's business, it reaches the Worker as the VM it runs in). `setupScript`, when present, is literal text of at most 64 KB of UTF-8, written by a member of the workspace: it is data to run, never a command of the app, and it holds no secret by design (there is no field for one). `network`, when present, is the rule the network door enforces; absent means `off`. At least one of the two is present. `name` is for the run's log line only.
@@ -870,6 +871,20 @@ export interface ImplementerResumeBranch {
    */
   name: string;
   head: string;
+}
+/**
+ * #1053 (epic #1049): the MCP servers the agent step of a turn may use, resolved by the app in the job's workspace when the job is claimed. Present only for a turn a workflow step started whose step has at least one server (or names one that no longer exists), and only to a caller that named the claim feature `implementer_mcp`. `servers` are the ones the workspace still has: `id` is the id the Worker API's MCP route takes, `name` is what the server is called in the harness's configuration (the tools of the agent are prefixed with it), `transport` is how the app reaches it. There is no address and no credential here by design: the agent never talks to a server, only to the local endpoint at the door, and the credential is added by the app on the way to the server. `unavailable` counts the servers the lane named that the workspace does not have (any more), for a note in the run; the turn runs without them.
+ */
+export interface ImplementerMcp {
+  /**
+   * @maxItems 50
+   */
+  servers: {
+    id: string;
+    name: string;
+    transport: "streamable-http" | "sse";
+  }[];
+  unavailable?: number;
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).

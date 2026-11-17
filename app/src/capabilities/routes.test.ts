@@ -127,6 +127,7 @@ describe("the route classification", () => {
       "/api/w/[workspace]/runs/[id]/steps": "implementer",
       "/api/runners/v1/jobs/[id]/steps": "implementer",
       "/api/workers/v1/jobs/[id]/steps": "implementer",
+      "/api/workers/v1/jobs/[id]/mcp/[server]": "implementer",
       // #755-T14: the routes behind the Implementer form belong to the capability, none of them is core.
       "/api/w/[workspace]/implementer/repositories": "implementer",
       "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches":

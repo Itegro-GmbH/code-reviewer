@@ -941,6 +941,55 @@ describe("a turn that ends with a question (#920)", () => {
   });
 });
 
+describe("the MCP servers of a turn (#1053)", () => {
+  // #1053-T01
+  it("has a valid example, alone and inside the job input, and the feature is a known claim feature", () => {
+    const input = example("RunnerJobInput");
+    input.implementer.mcp = example("ImplementerMcp");
+
+    expect(accepts("ImplementerMcp", example("ImplementerMcp"))).toBe(true);
+    expect(accepts("RunnerJobInput", input)).toBe(true);
+    expect(
+      contract.check("ClaimRequest", {
+        engines: ["implementer"],
+        features: ["implementer_mcp"],
+      }).valid,
+    ).toBe(true);
+    // A turn without servers carries none.
+    expect(example("RunnerJobInput").implementer.mcp).toBeUndefined();
+  });
+
+  // #1053-T01
+  it("has no place for an address, a header or a credential: a server is an id, a name and a transport", () => {
+    const server = { id: "a", name: "Linear", transport: "streamable-http" };
+    for (const extra of [
+      { url: "https://mcp.example.com/mcp" },
+      { headers: { Authorization: "Bearer x" } },
+      { token: "x" },
+      { auth: "header" },
+    ])
+      expect(
+        accepts("ImplementerMcp", { servers: [{ ...server, ...extra }] }),
+        JSON.stringify(Object.keys(extra)),
+      ).toBe(false);
+    expect(accepts("ImplementerMcp", { servers: [server], url: "x" })).toBe(
+      false,
+    );
+    expect(
+      accepts("ImplementerMcp", {
+        servers: [{ ...server, transport: "stdio" }],
+      }),
+    ).toBe(false);
+    expect(accepts("ImplementerMcp", { servers: [server] })).toBe(true);
+    expect(accepts("ImplementerMcp", { servers: [], unavailable: 2 })).toBe(
+      true,
+    );
+    expect(accepts("ImplementerMcp", { servers: [], unavailable: 0 })).toBe(
+      false,
+    );
+  });
+});
+
 describe("the result schema and the result of a turn (#843)", () => {
   function withSchema(schema: unknown): Document {
     const input = example("RunnerJobInput");
