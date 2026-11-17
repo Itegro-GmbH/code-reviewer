@@ -8,7 +8,7 @@ import { migrateToLatest } from "../migrate.ts";
 import { createEmptyTestDatabase } from "../../test-support/test-database.ts";
 import { migrationProvider } from "./index.ts";
 
-const THIS_MIGRATION = "20261117120000_add_job_mcp_calls";
+const THIS_MIGRATION = "20261117150000_add_job_mcp_calls";
 
 const beforeThisMigration: MigrationProvider = {
   async getMigrations() {

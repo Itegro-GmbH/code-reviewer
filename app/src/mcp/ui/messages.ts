@@ -31,6 +31,20 @@ export const PAGE_COPY = {
   empty: "No MCP server yet. Owners and Admins can add one.",
   count: (count: number) => `MCP servers · ${String(count)}`,
   add: "Add MCP server",
+  addFromCatalog: "Add from catalog",
+  catalogTitle: "MCP server catalog",
+  catalogDescription:
+    "Servers that vendors run themselves, with the address read from their own documentation. Choosing one only fills in the form: nothing is saved until you save it.",
+  catalogOpen: "Choose",
+  catalogOauth: "OAuth",
+  catalogHeader: (name: string) => `Header ${name}`,
+  catalogChecked: (day: string) => `Checked ${day}`,
+  catalogDocs: "Vendor documentation",
+  fromCatalog: (name: string) => `From the catalog: ${name}`,
+  catalogOauthNext:
+    "After saving you are asked to connect: the browser goes to the vendor's authorization server once you confirm.",
+  catalogHeaderNext: (name: string) =>
+    `Enter the value of the ${name} header below. It is stored sealed and never shown again.`,
   edit: "Edit",
   remove: "Remove",
   test: "Test connection",
