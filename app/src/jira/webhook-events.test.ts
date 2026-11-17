@@ -59,6 +59,50 @@ describe("parseJiraDelivery", () => {
     });
   });
 
+  // #1058-T01
+  it("keeps the ids of the two statuses next to their names, and the id of the issue's status", () => {
+    const change = parseJiraDelivery(
+      {
+        webhookEvent: "jira:issue_updated",
+        issue: {
+          ...issue("To Do"),
+          fields: {
+            ...issue("To Do").fields,
+            status: { id: "10100", name: "To Do" },
+          },
+        },
+        changelog: { items: [statusItem("In Progress", "To Do")] },
+      },
+      SITE,
+    );
+    expect(change).toMatchObject({
+      status: { from: "In Progress", to: "To Do", fromId: "1", toId: "2" },
+      issue: { status: "To Do", statusId: "10100" },
+    });
+  });
+
+  // #1058
+  it("takes no id for the new status from the payload issue when the item has none: the issue may have moved on since", () => {
+    const change = parseJiraDelivery(
+      {
+        webhookEvent: "jira:issue_updated",
+        issue: {
+          ...issue("Done"),
+          fields: {
+            ...issue("Done").fields,
+            status: { id: "3", name: "Done" },
+          },
+        },
+        changelog: {
+          items: [{ field: "status", fromString: "To Do", toString: "Ready" }],
+        },
+      },
+      SITE,
+    );
+    expect(change).toMatchObject({ status: { from: "To Do", to: "Ready" } });
+    expect(change).not.toHaveProperty("status.toId");
+  });
+
   // #1039
   it("reads an update without a status item as a change of the issue only", () => {
     const change = parseJiraDelivery(

@@ -35,8 +35,17 @@ export type JiraChange =
       /** `commented`: a comment was added; the issue is read from the payload all the same. */
       event: "created" | "updated" | "commented";
       issue: JiraIssue;
-      /** The move the changelog names; absent when the delivery moves no status (a creation moves none). */
-      status?: { from: string | null; to: string };
+      /**
+       * The move the changelog names; absent when the delivery moves no status (a creation moves none). `from` and `to` are the names the
+       * delivery carries (Jira keeps one name for every language here, the REST API says the localized one), `fromId` and `toId` the ids of
+       * the statuses, which are the same in every language (#1058); an id is absent when the payload has none.
+       */
+      status?: {
+        from: string | null;
+        to: string;
+        fromId?: string;
+        toId?: string;
+      };
       actor?: { accountId: string; name: string };
       /** Only for `commented`. */
       comment?: JiraComment;
@@ -89,6 +98,9 @@ type ChangelogItem = {
   field: string;
   fromString: string | null;
   toString: string;
+  /** The ids of the values (`from`, `to` of Jira's changelog item); for a status they are the status ids. */
+  from: string | null;
+  to: string | null;
 };
 
 function changelogOf(body: Record<string, unknown>): ChangelogItem[] {
@@ -102,6 +114,8 @@ function changelogOf(body: Record<string, unknown>): ChangelogItem[] {
       fromString: ownString(item, "fromString") ?? null,
       // `toString` is the name Jira gives the new value; read as data, so a payload without it does not find Object's method.
       toString: ownString(item, "toString") ?? "",
+      from: ownString(item, "from") ?? null,
+      to: ownString(item, "to") ?? null,
     });
   }
   return items;
@@ -137,6 +151,19 @@ function timeOf(
   if (typeof stamp === "number" && Number.isFinite(stamp) && stamp > 0)
     return new Date(stamp).toISOString();
   return issue?.updatedAt || new Date(0).toISOString();
+}
+
+/**
+ * The move a `status` item says. The ids are the item's `from` and `to` (Jira always sends them for a status). The payload issue's own
+ * status is not used as a fallback for the new one: it shows the issue as it is when the delivery is made, which may be later than this change.
+ */
+function statusMoveOf(item: ChangelogItem) {
+  return {
+    from: item.fromString,
+    to: item.toString,
+    ...(item.from === null || item.from === "" ? {} : { fromId: item.from }),
+    ...(item.to === null || item.to === "" ? {} : { toId: item.to }),
+  };
 }
 
 export function parseJiraDelivery(
@@ -177,7 +204,7 @@ export function parseJiraDelivery(
     issue,
     ...(statusItem === undefined || statusItem.toString === ""
       ? {}
-      : { status: { from: statusItem.fromString, to: statusItem.toString } }),
+      : { status: statusMoveOf(statusItem) }),
     ...(actor === undefined ? {} : { actor }),
     ...(comment === undefined ? {} : { comment }),
     matchedWebhookIds,

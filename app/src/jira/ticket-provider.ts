@@ -106,6 +106,7 @@ export function createJiraTicketProvider(deps: {
         assignees: issue.assignees,
         type: issue.type,
         status: issue.status,
+        ...(issue.statusId === undefined ? {} : { statusId: issue.statusId }),
       };
     },
   };

@@ -87,7 +87,9 @@ export function jiraStatusNamesFor(
         connectionId,
         projectKey,
       );
-      return read.ok ? read.statuses.map((status) => status.name) : [];
+      return read.ok
+        ? [...new Set(read.statuses.map((status) => status.name))]
+        : [];
     } catch {
       return [];
     }

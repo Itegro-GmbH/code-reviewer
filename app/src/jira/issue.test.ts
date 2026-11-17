@@ -58,6 +58,15 @@ describe("readJiraIssue", () => {
     });
   });
 
+  // #1058
+  it("keeps the id of the status, which is the same in every language", () => {
+    const issue = readJiraIssue(
+      raw({ status: { id: "10100", name: "Zu erledigen" } }),
+      SITE,
+    );
+    expect(issue).toMatchObject({ status: "Zu erledigen", statusId: "10100" });
+  });
+
   // #1039
   it("treats missing fields as empty and a done status category as done", () => {
     const issue = readJiraIssue(

@@ -33,8 +33,10 @@ export type JiraIssue = {
   title: string;
   /** The description as plain text. */
   body: string;
-  /** The name of the status, as Jira spells it. */
+  /** The name of the status, as Jira spells it in this answer: localized in a REST answer, the name Jira keeps in a webhook payload (#1058). */
   status: string;
+  /** Jira's id of the status; absent when the payload has none. It names the same status in every language, a name does not (#1058). */
+  statusId?: string;
   statusCategory: JiraStatusCategoryKey;
   /** The issue type (`Bug`, `Task`, ...); empty when the payload has none. */
   type: string;
@@ -99,6 +101,9 @@ export function readJiraIssue(
     title: fields.summary,
     body: adfToText(fields.description),
     status: text(status.name),
+    ...(typeof status.id === "string" && status.id !== ""
+      ? { statusId: status.id }
+      : {}),
     statusCategory:
       category === "new" || category === "done" ? category : "indeterminate",
     type: isRecord(fields.issuetype) ? text(fields.issuetype.name) : "",

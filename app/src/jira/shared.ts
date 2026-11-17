@@ -19,6 +19,10 @@ import { createJiraIssueSearch } from "./issue-search.ts";
 import { createJiraMirror } from "./mirror.ts";
 import { createJiraProjectReader } from "./projects.ts";
 import { createJiraResync } from "./resync.ts";
+import {
+  createJiraStatusDirectory,
+  type JiraStatusDirectory,
+} from "./status-directory.ts";
 import { createJiraTicketProvider } from "./ticket-provider.ts";
 import {
   createJiraTicketWriter,
@@ -91,6 +95,28 @@ export function jiraTicketWriterFor(workspaceId: string): JiraTicketWriter {
       (await connections.get(connectionId))?.accountId,
     statuses: createJiraProjectReader({ tokens }),
   });
+}
+
+const statusDirectories = new Map<string, JiraStatusDirectory>();
+
+/**
+ * The statuses (id, name, untranslated name) of a Jira project of the workspace's connections (#1058), for the webhook: the name the mirror
+ * keeps and the status the lanes compare by. Kept for a minute per project, so a burst of deliveries asks Jira once. Undefined when Jira cannot
+ * be asked; never throws.
+ */
+export function jiraStatusesFor(
+  workspaceId: string,
+): JiraStatusDirectory["statusesOf"] {
+  let directory = statusDirectories.get(workspaceId);
+  if (directory === undefined) {
+    directory = createJiraStatusDirectory({
+      reader: createJiraProjectReader({
+        tokens: getJira().tokensFor(workspaceId),
+      }),
+    });
+    statusDirectories.set(workspaceId, directory);
+  }
+  return directory.statusesOf;
 }
 
 /** The Jira ticket provider of the running server (#1039, #1040): reads and writes a ticket of a project's Jira source through the workspace's connection. */
