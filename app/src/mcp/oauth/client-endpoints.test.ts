@@ -52,7 +52,7 @@ describe("dynamic client registration (RFC 7591)", () => {
 
     const result = await registerClient(
       discovery,
-      { redirectUri: REDIRECT, clientName: "Code Reviewer" },
+      { redirectUri: REDIRECT, clientName: "Test product" },
       http,
     );
 
@@ -68,7 +68,7 @@ describe("dynamic client registration (RFC 7591)", () => {
 
     const result = await registerClient(
       discovery,
-      { redirectUri: REDIRECT, clientName: "Code Reviewer" },
+      { redirectUri: REDIRECT, clientName: "Test product" },
       http,
     );
 

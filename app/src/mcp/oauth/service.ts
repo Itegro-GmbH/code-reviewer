@@ -39,9 +39,6 @@ import {
   sealOAuthTokens,
 } from "./tokens.ts";
 
-/** The name an authorization server shows on its consent page. */
-export const MCP_OAUTH_CLIENT_NAME = "Code Reviewer";
-
 export type McpOAuthActor = { id: string; sessionId: string };
 
 export type StartConnectFailure =
@@ -86,6 +83,8 @@ export type McpOAuthServiceOptions = {
   publicUrl: string;
   /** The master key (`APP_SECRET`). */
   appSecret: string;
+  /** The name an authorization server shows on its consent page: the product's name, from its identity. */
+  clientName: string;
   now?: () => Date;
   log?: (line: string) => void;
 };
@@ -103,6 +102,7 @@ export function createMcpOAuthService({
   http,
   publicUrl,
   appSecret,
+  clientName,
   now = () => new Date(),
   log = (line) => console.error(line),
 }: McpOAuthServiceOptions): McpOAuthService {
@@ -228,7 +228,7 @@ export function createMcpOAuthService({
       } else {
         const registered = await registerClient(
           discovery,
-          { redirectUri, clientName: MCP_OAUTH_CLIENT_NAME },
+          { redirectUri, clientName },
           http,
         );
         if (!registered.ok) return { ok: false, error: registered.code };

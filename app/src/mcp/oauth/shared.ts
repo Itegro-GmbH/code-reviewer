@@ -10,6 +10,7 @@ import { createRateLimitsRepository } from "../../db/repositories/rate-limits-re
 import { createWorkspacesRepository } from "../../db/repositories/workspaces-repository.ts";
 import { getDatabase } from "../../db/startup.ts";
 import { sessionOfRequest } from "../../github-signin/shared.ts";
+import { getProductIdentity } from "../../product-identity/current.ts";
 import { createSignedStates } from "../../signed-state/state.ts";
 import { mcpTestEndpointsAllowed } from "../config.ts";
 import { guardedMcpFetch } from "../shared.ts";
@@ -37,6 +38,7 @@ export function getMcpOAuthService(): McpOAuthService {
     http: { fetch: guardedMcpFetch(allowTestEndpoints), allowTestEndpoints },
     publicUrl: loadAuthConfig(process.env).baseUrl,
     appSecret: secret,
+    clientName: getProductIdentity().name,
   });
 }
 

@@ -83,6 +83,7 @@ export async function createMcpOAuthHarness(
     http,
     publicUrl: MCP_OAUTH_TEST_PUBLIC_URL,
     appSecret: MCP_OAUTH_TEST_SECRET,
+    clientName: "Test product",
     now,
     log,
   });
