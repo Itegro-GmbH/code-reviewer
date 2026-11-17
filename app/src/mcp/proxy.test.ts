@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
 import {
+  MCP_PROXY_DEADLINE_MS,
   createMcpProxy,
   type McpCallMeta,
   type McpProxyOptions,
@@ -158,7 +160,12 @@ describe("the MCP proxy over Streamable HTTP", () => {
     const response = await proxy.forward({
       server: stored(server.url),
       headers: {},
-      request: { method: "GET", body: null, sessionId: null, protocolVersion: null },
+      request: {
+        method: "GET",
+        body: null,
+        sessionId: null,
+        protocolVersion: null,
+      },
     });
     expect(response.status).toBe(405);
     expect(response.headers.get("allow")).toBe("POST, DELETE");
@@ -178,7 +185,12 @@ describe("the MCP proxy over Streamable HTTP", () => {
     const ended = await proxy.forward({
       server: stored(server.url),
       headers: {},
-      request: { method: "DELETE", body: null, sessionId: session, protocolVersion: null },
+      request: {
+        method: "DELETE",
+        body: null,
+        sessionId: session,
+        protocolVersion: null,
+      },
     });
     expect(ended.status).toBe(200);
     expect(server.openSessions()).toBe(0);
@@ -456,5 +468,18 @@ describe("what is recorded for each call", () => {
     expect(JSON.stringify(meta)).not.toContain("needle-argument");
     expect(JSON.stringify(meta)).not.toContain("called get_issue");
     expect(JSON.stringify(meta)).not.toContain("dummy-proxy-secret");
+  });
+});
+
+describe("the limits of the proxy", () => {
+  it("end a call before the platform ends the function that carries it", () => {
+    const config = JSON.parse(
+      readFileSync(new URL("../../vercel.json", import.meta.url), "utf8"),
+    ) as { functions: Record<string, { maxDuration: number }> };
+    const limitMs =
+      (config.functions["src/app/api/workers/**/route.ts"]?.maxDuration ?? 0) *
+      1000;
+    expect(limitMs).toBeGreaterThan(0);
+    expect(MCP_PROXY_DEADLINE_MS).toBeLessThan(limitMs);
   });
 });

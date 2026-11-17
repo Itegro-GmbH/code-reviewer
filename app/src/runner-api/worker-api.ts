@@ -47,6 +47,7 @@ import { parseResumePart, readResumeSessionPart } from "./resume-session.ts";
 import { storeSnapshotPart, type SnapshotDeps } from "./snapshot.ts";
 import { parseSnapshotPartRequest } from "./snapshot-request.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
+import { mcpCallOf, mcpUnavailable, MCP_SERVER_ID } from "./mcp-call.ts";
 import { parseWorkerStepsRequest } from "./steps-request.ts";
 import {
   errorResponse,
@@ -71,6 +72,12 @@ export type WorkerApi = {
   result(request: Request, jobId: string): Promise<Response>;
   /** #745: the steps of the running turn of the Implementer (the live view); proves the claim, does not extend the lease. */
   steps(request: Request, jobId: string): Promise<Response>;
+  /**
+   * #1053: a call of the agent's MCP client for one server of the job (`POST` a JSON-RPC message, `DELETE` the session, `GET` is 405). The
+   * app adds the credential of the server and forwards the call (`mcp/job-proxy.ts`); proves the claim and the running job on every call,
+   * does not extend the lease.
+   */
+  mcp(request: Request, jobId: string, serverId: string): Promise<Response>;
   /** #839: one part of the session snapshot of the running turn of the Implementer; proves the claim, does not extend the lease. */
   session(request: Request, jobId: string): Promise<Response>;
   /** #840: one part of the stored session snapshot, read by the Worker of a follow-up turn; proves the claim, does not extend the lease. */
@@ -209,6 +216,29 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
             : ended();
       } catch (error) {
         return unexpected("steps", error);
+      }
+    },
+
+    async mcp(request, jobId, serverId) {
+      try {
+        const who = await identify(request, jobId);
+        if (!who.ok) return who.response;
+        if (who.job.status !== "running") return ended();
+        // Not a server id, or a deployment without the MCP runtime: the same answer as for a server that is not the job's.
+        const runtime = deps.jobMcp?.(who.job.workspaceId);
+        const mcp = mcpCallOf(request);
+        if (runtime === undefined || !MCP_SERVER_ID.test(serverId))
+          return mcpUnavailable();
+        if (mcp === "method_not_allowed")
+          return new Response(null, {
+            status: 405,
+            headers: { allow: "POST, DELETE" },
+          });
+        const read = await mcp.read();
+        if (!read.ok) return errorResponse(413, "RUNNER_BODY_TOO_LARGE");
+        return await runtime.handle(who.job, serverId, read.request);
+      } catch (error) {
+        return unexpected("mcp", error);
       }
     },
 

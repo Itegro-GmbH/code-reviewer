@@ -5,11 +5,7 @@ import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
 import { createMcpCredentials } from "./credentials.ts";
-import {
-  createJobMcp,
-  type JobMcpDeps,
-  type McpJob,
-} from "./job-proxy.ts";
+import { createJobMcp, type JobMcpDeps, type McpJob } from "./job-proxy.ts";
 import { createMcpProxy, type McpCallMeta } from "./proxy.ts";
 import { sealHeaders } from "./service.ts";
 
@@ -129,8 +125,13 @@ const call = (method: string, id: number, params?: unknown) => ({
 
 describe("the MCP servers of a job", () => {
   it("are the effective list of its agent step, resolved in the job's workspace", async () => {
-    const servers = [row(A, "Issues", "https://a.example.com/mcp"), row(B, "Docs", "https://b.example.com/mcp")];
-    const lane = await createJobMcp(deps({ servers, lane: [A, B] })).serversOf(job);
+    const servers = [
+      row(A, "Issues", "https://a.example.com/mcp"),
+      row(B, "Docs", "https://b.example.com/mcp"),
+    ];
+    const lane = await createJobMcp(deps({ servers, lane: [A, B] })).serversOf(
+      job,
+    );
     expect(lane.servers.map((server) => server.id)).toEqual([A, B]);
     expect(lane.unavailable).toBe(0);
 
@@ -165,7 +166,9 @@ describe("the MCP servers of a job", () => {
   it("are none for a job that no workflow step started, and for a lane without servers", async () => {
     const servers = [row(A, "Issues", "https://a.example.com/mcp")];
     expect(
-      await createJobMcp(deps({ servers, lane: [A], hasStep: false })).serversOf(job),
+      await createJobMcp(
+        deps({ servers, lane: [A], hasStep: false }),
+      ).serversOf(job),
     ).toEqual({ servers: [], unavailable: 0 });
     expect(
       await createJobMcp(deps({ servers, lane: [] })).serversOf(job),
@@ -182,22 +185,35 @@ describe("a call of the agent for a server of its job", () => {
     ).handle(job, A, call("tools/list", 1));
     expect(response.status).toBe(200);
     expect(server.sawHeader("authorization", SECRET)).toBe(true);
-    expect(calls[0]).toMatchObject({ serverId: A, rpcMethod: "tools/list" });
+    expect(calls[0]).toMatchObject({
+      jobId: job.id,
+      serverId: A,
+      rpcMethod: "tools/list",
+    });
   });
 
   it("is refused for a server the step may not use, one that does not exist, and a lane that names none: the same answer", async () => {
     const server = await fake();
-    const servers = [
-      row(A, "Issues", server.url),
-      row(B, "Docs", server.url),
-    ];
+    const servers = [row(A, "Issues", server.url), row(B, "Docs", server.url)];
     const answers = await Promise.all([
       // B exists in the workspace but the step narrows to A.
-      createJobMcp(deps({ servers, lane: [A, B], stepIds: [A] })).handle(job, B, call("tools/list", 1)),
+      createJobMcp(deps({ servers, lane: [A, B], stepIds: [A] })).handle(
+        job,
+        B,
+        call("tools/list", 1),
+      ),
       // GONE does not exist.
-      createJobMcp(deps({ servers, lane: [A, GONE] })).handle(job, GONE, call("tools/list", 1)),
+      createJobMcp(deps({ servers, lane: [A, GONE] })).handle(
+        job,
+        GONE,
+        call("tools/list", 1),
+      ),
       // The lane names nothing.
-      createJobMcp(deps({ servers, lane: [] })).handle(job, A, call("tools/list", 1)),
+      createJobMcp(deps({ servers, lane: [] })).handle(
+        job,
+        A,
+        call("tools/list", 1),
+      ),
     ]);
     for (const answer of answers) {
       expect(answer.status).toBe(404);

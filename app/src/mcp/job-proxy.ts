@@ -106,6 +106,7 @@ export function createJobMcp(deps: JobMcpDeps): JobMcp {
       const credential = await deps.credentials.headersFor(stored);
       if (!credential.ok) return refusal(credential.code, 502);
       return deps.proxy.forward({
+        jobId: job.id,
         server: stored.server,
         headers: credential.headers,
         request,

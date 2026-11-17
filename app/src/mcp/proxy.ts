@@ -31,8 +31,11 @@ import { cleanText, MCP_PROTOCOL_VERSION } from "./client.ts";
 import { createSseEventReader, SseTooLargeError } from "./sse.ts";
 import { checkMcpUrl } from "./url.ts";
 
-/** One call may take this long, whatever it is doing (the route's `maxDuration` is longer). */
-export const MCP_PROXY_DEADLINE_MS = 120_000;
+/**
+ * One call may take this long, whatever it is doing. It is shorter than `maxDuration` of the Worker API's functions (60 s, `vercel.json`;
+ * `proxy.test.ts` holds the two together), so a slow server ends in our own code `mcp_proxy_timeout` and never in the platform's 504.
+ */
+export const MCP_PROXY_DEADLINE_MS = 55_000;
 export const MCP_PROXY_MAX_REQUEST_BYTES = 256 * 1024;
 export const MCP_PROXY_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
@@ -70,6 +73,8 @@ const STATUS_OF: Record<McpProxyErrorCode, number> = {
 
 /** What is recorded for one call (#1055 reads it). Never an argument, an answer, a header or an address. */
 export type McpCallMeta = {
+  /** The job the call belongs to; null where the caller gave none. */
+  jobId: string | null;
   serverId: string;
   transport: string;
   /** The JSON-RPC method of the call (`tools/call`, `tools/list`, …); null for a DELETE. */
@@ -96,6 +101,8 @@ export type McpProxyRequest = {
 };
 
 export type McpProxyCall = {
+  /** For the record of the call only. */
+  jobId?: string;
   server: StoredMcpServer;
   /** The credential headers of the server (`credentials.ts`); they live in this call and nowhere else. */
   headers: Readonly<Record<string, string>>;
@@ -152,7 +159,11 @@ function parseMessage(body: string | null, maxBytes: number): RpcMessage {
   } catch {
     return fail("mcp_proxy_request_invalid");
   }
-  if (!isRecord(value) || typeof value.method !== "string" || value.method === "")
+  if (
+    !isRecord(value) ||
+    typeof value.method !== "string" ||
+    value.method === ""
+  )
     return fail("mcp_proxy_request_invalid");
   const id = value.id;
   if (id !== undefined && typeof id !== "string" && typeof id !== "number")
@@ -189,7 +200,10 @@ function failureOf(error: unknown, signal: AbortSignal): ProxyFailure {
   return new ProxyFailure("mcp_proxy_unreachable");
 }
 
-const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" };
+const JSON_HEADERS = {
+  "content-type": "application/json",
+  "cache-control": "no-store",
+};
 
 function errorResponse(
   code: McpProxyErrorCode,
@@ -245,6 +259,7 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
   };
 
   async function forward({
+    jobId,
     server,
     headers: credential,
     request,
@@ -262,11 +277,9 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
     let requestBytes = 0;
     let responseBytes = 0;
 
-    const record = (
-      status: number,
-      outcome: McpCallMeta["outcome"],
-    ): void => {
+    const record = (status: number, outcome: McpCallMeta["outcome"]): void => {
       options.onCall?.({
+        jobId: jobId ?? null,
         serverId: server.id,
         transport: server.transport,
         rpcMethod: message?.method ?? null,
@@ -298,7 +311,11 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
       /** One request with redirects on the server's own origin followed by hand; the credential goes to that origin only. */
       async function send(
         url: URL,
-        init: { method: string; headers: Record<string, string>; body?: string },
+        init: {
+          method: string;
+          headers: Record<string, string>;
+          body?: string;
+        },
       ): Promise<{ response: Response; finalUrl: URL }> {
         let current = url;
         for (let hop = 0; ; hop++) {
@@ -330,7 +347,10 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
           } catch {
             return fail("mcp_proxy_redirect_refused");
           }
-          if (next.origin !== base.origin || !checkMcpUrl(next.toString(), policy).ok)
+          if (
+            next.origin !== base.origin ||
+            !checkMcpUrl(next.toString(), policy).ok
+          )
             return fail("mcp_proxy_redirect_refused");
           current = next;
         }
@@ -411,12 +431,16 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
             : {};
         if (response.status === 202 || response.status === 204) {
           await release(response);
-          return finished(new Response(null, { status: response.status, headers: extra }));
+          return finished(
+            new Response(null, { status: response.status, headers: extra }),
+          );
         }
         const type = (response.headers.get("content-type") ?? "").toLowerCase();
         if (request.method === "DELETE") {
           await release(response);
-          return finished(new Response("{}", { status: 200, headers: JSON_HEADERS }));
+          return finished(
+            new Response("{}", { status: 200, headers: JSON_HEADERS }),
+          );
         }
         if (type.startsWith("application/json")) {
           const text = await readText(response);

@@ -291,6 +291,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
+  // #1053: the MCP proxy of the agent's door: the app adds the credential of the server.
+  { route: "/api/workers/v1/jobs/[id]/mcp/[server]", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },
   // One part of the stored session snapshot, read by the Worker of a follow-up turn (#840).

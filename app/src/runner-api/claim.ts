@@ -289,7 +289,7 @@ export type ClaimDeps = {
    * #1053: the MCP runtime of one workspace (`mcp/job-proxy.ts`): which servers the agent step of a job may use, resolved in that workspace.
    * Left out where the deployment has none: no turn carries `mcp` then.
    */
-  jobMcp?: (workspaceId: string) => Pick<JobMcp, "serversOf">;
+  jobMcp?: (workspaceId: string) => JobMcp;
   /**
    * Notes the provider and, for a job on the operator's key, the catalog entry (id and name as they are now) the job was
    * given in its usage record (#432): never the model. The claim reserved the record already; a failure gives the job back.
