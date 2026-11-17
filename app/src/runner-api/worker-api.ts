@@ -47,6 +47,13 @@ import { parseResumePart, readResumeSessionPart } from "./resume-session.ts";
 import { storeSnapshotPart, type SnapshotDeps } from "./snapshot.ts";
 import { parseSnapshotPartRequest } from "./snapshot-request.ts";
 import { storeSteps, type StepsDeps } from "./steps.ts";
+import {
+  MCP_MAX_CALLS_PER_CLAIM,
+  instanceInFlightGate,
+  releaseWhenDone,
+  type InFlightGate,
+} from "../mcp/in-flight.ts";
+import { mcpRefusal, type McpRouteRefusal } from "../mcp/refusal.ts";
 import { mcpCallOf, mcpUnavailable, MCP_SERVER_ID } from "./mcp-call.ts";
 import { parseWorkerStepsRequest } from "./steps-request.ts";
 import {
@@ -63,7 +70,12 @@ export type WorkerApiDeps = ClaimDeps &
   ReportDeps &
   Pick<StepsDeps, "steps"> &
   Pick<SnapshotDeps, "snapshots"> & {
-    queue: Pick<RunnerQueue, "holding" | "countFetch" | "noteSupersede">;
+    queue: Pick<
+      RunnerQueue,
+      "holding" | "countFetch" | "countMcpCall" | "noteSupersede"
+    >;
+    /** #1053: the places of the MCP calls in flight on this instance; the instance's own unless a test brings one. */
+    mcpInFlight?: InFlightGate;
   };
 
 export type WorkerApi = {
@@ -113,6 +125,13 @@ function endedByApp(job: Job): boolean {
 }
 
 export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
+  const gate = deps.mcpInFlight ?? instanceInFlightGate;
+
+  /** One line for a refusal of the MCP route before the proxy: the job and the code, never a value of the request. */
+  function refusedMcp(jobId: string, code: McpRouteRefusal): void {
+    deps.logger.info(`[worker-api] mcp job=${jobId} refused: ${code}`);
+  }
+
   /** Steps 1 and 2: the credential must be the one of the claim of this job. */
   async function identify(request: Request, jobId: string): Promise<Caller> {
     const credential = bearerWorkerCredential(
@@ -220,25 +239,56 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
     },
 
     async mcp(request, jobId, serverId) {
+      let release: (() => void) | undefined;
+      let handedOver = false;
       try {
         const who = await identify(request, jobId);
         if (!who.ok) return who.response;
         if (who.job.status !== "running") return ended();
-        // Not a server id, or a deployment without the MCP runtime: the same answer as for a server that is not the job's.
-        const runtime = deps.jobMcp?.(who.job.workspaceId);
+        // A GET (the server's own stream, not offered) and any other method: before anything is looked up, counted or opened.
         const mcp = mcpCallOf(request);
-        if (runtime === undefined || !MCP_SERVER_ID.test(serverId))
-          return mcpUnavailable();
         if (mcp === "method_not_allowed")
           return new Response(null, {
             status: 405,
-            headers: { allow: "POST, DELETE" },
+            headers: { allow: "POST, DELETE", "cache-control": "no-store" },
           });
+        // Not a server id, or a deployment without the MCP runtime: the same answer as for a server that is not the job's.
+        const runtime = deps.jobMcp?.(who.job.workspaceId);
+        if (runtime === undefined || !MCP_SERVER_ID.test(serverId)) {
+          refusedMcp(who.job.id, "mcp_server_unavailable");
+          return mcpUnavailable();
+        }
+        // The two limits, cheapest first. The places of this instance (in memory), then the count of the claim (one statement).
+        release = gate.enter(who.job.id);
+        if (release === undefined) {
+          refusedMcp(who.job.id, "mcp_too_many_concurrent_calls");
+          return mcpRefusal("mcp_too_many_concurrent_calls", {
+            "retry-after": "1",
+          });
+        }
+        const counted = await deps.queue.countMcpCall(
+          who.job.id,
+          who.leaseToken,
+          MCP_MAX_CALLS_PER_CLAIM,
+        );
+        if (counted === "not_holder") return ended();
+        if (counted === "exhausted") {
+          refusedMcp(who.job.id, "mcp_call_limit_reached");
+          return mcpRefusal("mcp_call_limit_reached");
+        }
         const read = await mcp.read();
-        if (!read.ok) return errorResponse(413, "RUNNER_BODY_TOO_LARGE");
-        return await runtime.handle(who.job, serverId, read.request);
+        if (!read.ok) {
+          refusedMcp(who.job.id, "mcp_proxy_request_too_large");
+          return mcpRefusal("mcp_proxy_request_too_large");
+        }
+        const answer = await runtime.handle(who.job, serverId, read.request);
+        handedOver = true;
+        // The place is given back when the answer has been read to the end (an event stream answer is in flight until it ends).
+        return releaseWhenDone(answer, release);
       } catch (error) {
         return unexpected("mcp", error);
+      } finally {
+        if (!handedOver) release?.();
       }
     },
 

@@ -10,6 +10,7 @@ import { createWorkflowsRepository } from "../db/repositories/workflows-reposito
 import { getDatabase } from "../db/startup.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import { mcpTestEndpointsAllowed } from "./config.ts";
+import { cleanText } from "./client.ts";
 import { createMcpCredentials } from "./credentials.ts";
 import { createJobMcp, type JobMcp } from "./job-proxy.ts";
 import { createMcpProxy, type McpCallMeta } from "./proxy.ts";
@@ -33,8 +34,9 @@ function guardedFetch(allowLoopback: boolean) {
  * view and trace read the same `McpCallMeta`; this is where they hook in. Never an argument, an answer, a header or an address.
  */
 export function logMcpCall(meta: McpCallMeta): void {
+  // The method and the tool come from the agent: cleaned once more here, so no line of a log can be forged whoever calls this.
   console.info(
-    `[mcp-proxy] job=${meta.jobId ?? "-"} server=${meta.serverId} method=${meta.rpcMethod ?? "-"} tool=${meta.tool ?? "-"} status=${String(meta.status)} outcome=${meta.outcome} ms=${String(meta.durationMs)} in=${String(meta.requestBytes)} out=${String(meta.responseBytes)}`,
+    `[mcp-proxy] job=${meta.jobId ?? "-"} server=${meta.serverId} method=${meta.rpcMethod === null ? "-" : cleanText(meta.rpcMethod).slice(0, 100)} tool=${meta.tool === null ? "-" : cleanText(meta.tool).slice(0, 100)} status=${String(meta.status)} outcome=${meta.outcome} ms=${String(meta.durationMs)} in=${String(meta.requestBytes)} out=${String(meta.responseBytes)}`,
   );
 }
 
@@ -50,6 +52,7 @@ export function jobMcpFor(workspaceId: string): JobMcp {
     workflows: createWorkflowsRepository(db, workspaceId),
     mcpServers: createMcpServersRepository(db, workspaceId),
     credentials: createMcpCredentials({ appSecret: resolved.secret }),
+    log: (line) => console.info(line),
     proxy: createMcpProxy({
       fetch: guardedFetch(allowTestEndpoints),
       allowTestEndpoints,

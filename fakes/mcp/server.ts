@@ -85,6 +85,8 @@ export type McpFake = {
   sawHeader(name: string, value: string): boolean;
   /** Streamable HTTP sessions that are open. */
   openSessions(): number;
+  /** Legacy SSE event streams that are open (#1053: a call must close the session it opened, whatever happens). */
+  openStreams(): number;
   /** The names of the tools `tools/call` was sent for (#1053), in order; never the arguments. */
   calledTools(): readonly string[];
   close(): Promise<void>;
@@ -376,6 +378,7 @@ export async function startMcpFake(
         (seen) => seen.name === name.toLowerCase() && seen.value === value,
       ),
     openSessions: () => sessions.size,
+    openStreams: () => streams.size,
     calledTools: () => called,
     async close() {
       for (const response of [...hanging, ...streams.values()])

@@ -55,6 +55,12 @@ export type RunnerQueue = {
     leaseToken: string,
     limit: number,
   ): Promise<CountFetchResult>;
+  /** #1053: counts one call of the agent's MCP client of the running claim, up to `limit` per claim. */
+  countMcpCall(
+    jobId: string,
+    leaseToken: string,
+    limit: number,
+  ): Promise<CountFetchResult>;
   /**
    * Extends the lease of the claim the token belongs to; `not_holder` for any other token (a stale
    * execution of the same job counts, even under the same runner id) and for a job past the hard
@@ -121,6 +127,8 @@ export function createRunnerQueue(
     holding: (jobId, leaseToken) => jobs.holding(jobId, leaseToken),
     countFetch: (jobId, leaseToken, limit) =>
       jobs.countFetch(jobId, leaseToken, limit),
+    countMcpCall: (jobId, leaseToken, limit) =>
+      jobs.countMcpCall(jobId, leaseToken, limit),
     heartbeat: (jobId, leaseToken) => jobs.heartbeat(jobId, leaseToken),
     complete: (jobId, leaseToken, outcome) =>
       jobs.complete(jobId, leaseToken, outcome),

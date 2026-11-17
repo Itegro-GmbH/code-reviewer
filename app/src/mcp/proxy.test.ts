@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
@@ -481,5 +481,279 @@ describe("the limits of the proxy", () => {
       1000;
     expect(limitMs).toBeGreaterThan(0);
     expect(MCP_PROXY_DEADLINE_MS).toBeLessThan(limitMs);
+  });
+});
+
+// A server of the test's own, for answers the fake does not give: headers of every kind, and an event stream that goes on.
+type RawServer = {
+  url: string;
+  /** The connections the server saw close (the proxy let go of the stream). */
+  closed(): number;
+  stop(): Promise<void>;
+};
+const raws: RawServer[] = [];
+afterEach(async () => {
+  await Promise.all(raws.splice(0).map((raw) => raw.stop()));
+});
+
+async function raw(
+  answer: (
+    response: import("node:http").ServerResponse,
+    request: import("node:http").IncomingMessage,
+  ) => void,
+): Promise<RawServer> {
+  let closed = 0;
+  const sockets = new Set<import("node:net").Socket>();
+  const server = createServer((request, response) => {
+    request.resume();
+    response.on("close", () => {
+      closed++;
+    });
+    answer(response, request);
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const handle: RawServer = {
+    url: `http://127.0.0.1:${String((server.address() as AddressInfo).port)}/mcp`,
+    closed: () => closed,
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
+  raws.push(handle);
+  return handle;
+}
+
+const HOSTILE_HEADERS = {
+  "set-cookie": "session=stolen; Path=/; HttpOnly",
+  "www-authenticate": 'Bearer realm="x", resource_metadata="https://evil.test"',
+  "x-powered-by": "evil",
+  "access-control-allow-origin": "*",
+  location: "https://evil.test/",
+  link: "<https://evil.test>; rel=preload",
+};
+
+describe("what of a server's headers reaches the agent's side", () => {
+  // #1053-T05
+  it("passes on only the content type, the cache rule and the session id: no Set-Cookie or anything else, whatever the answer", async () => {
+    const json = await raw((response) => {
+      response.writeHead(200, {
+        ...HOSTILE_HEADERS,
+        "content-type": "application/json",
+        "mcp-session-id": "session-ok",
+      });
+      response.end('{"jsonrpc":"2.0","id":1,"result":{}}');
+    });
+    const stream = await raw((response) => {
+      response.writeHead(200, {
+        ...HOSTILE_HEADERS,
+        "content-type": "text/event-stream",
+      });
+      response.end(
+        'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n',
+      );
+    });
+    const accepted = await raw((response) => {
+      response.writeHead(202, {
+        ...HOSTILE_HEADERS,
+        "mcp-session-id": "session-ok",
+      });
+      response.end();
+    });
+    const { proxy } = setup();
+    for (const url of [json.url, stream.url, accepted.url]) {
+      const answer = await proxy.forward({
+        server: stored(url),
+        headers: {},
+        request: post(rpc("tools/list", 1)),
+      });
+      expect([200, 202]).toContain(answer.status);
+      await answer.text();
+      const names = [...answer.headers.keys()];
+      expect(names).not.toContain("set-cookie");
+      for (const name of names)
+        expect(["content-type", "cache-control", "mcp-session-id"]).toContain(
+          name,
+        );
+      expect([...answer.headers.values()].join(" ")).not.toContain("evil");
+      expect([...answer.headers.values()].join(" ")).not.toContain("stolen");
+    }
+  });
+});
+
+describe("a call that is recorded whatever way its answer ends", () => {
+  const eventLine = 'event: message\ndata: {"jsonrpc":"2.0","method":"x"}\n\n';
+
+  async function streamingServer() {
+    return raw((response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(eventLine);
+      // The stream goes on until the other side lets go.
+    });
+  }
+
+  // #1053-T06
+  it("records a stream the consumer cancelled, and lets go of the server's stream", async () => {
+    const server = await streamingServer();
+    const { proxy, calls } = setup();
+    const answer = await proxy.forward({
+      server: stored(server.url),
+      headers: {},
+      request: post(rpc("tools/call", 1, { name: "long_running" })),
+    });
+    const reader = answer.body?.getReader();
+    expect((await reader?.read())?.done).toBe(false);
+    expect(calls).toEqual([]);
+    await reader?.cancel();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({
+      status: 200,
+      outcome: "cancelled",
+      rpcMethod: "tools/call",
+      tool: "long_running",
+    });
+    expect(calls[0]?.responseBytes).toBe(Buffer.byteLength(eventLine));
+    await vi.waitFor(() => expect(server.closed()).toBe(1));
+  });
+
+  it("records a stream the deadline ended, as a timeout, and the consumer's read fails", async () => {
+    const server = await streamingServer();
+    const { proxy, calls } = setup({ deadlineMs: 300 });
+    const answer = await proxy.forward({
+      server: stored(server.url),
+      headers: {},
+      request: post(rpc("tools/call", 1, { name: "long_running" })),
+    });
+    await expect(answer.text()).rejects.toThrow();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({ outcome: "mcp_proxy_timeout" });
+  });
+
+  it("records a stream that went past the cap as too large, once", async () => {
+    const server = await streamingServer();
+    const { proxy, calls } = setup({ maxResponseBytes: 40 });
+    const answer = await proxy.forward({
+      server: stored(server.url),
+      headers: {},
+      request: post(rpc("tools/call", 1, { name: "x" })),
+    });
+    await expect(answer.text()).rejects.toThrow();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({ outcome: "mcp_proxy_response_too_large" });
+  });
+
+  it("records a stream that ended by itself as ok, once", async () => {
+    const server = await fake({ answerAs: "sse" });
+    const { proxy, calls } = setup();
+    const answer = await proxy.forward({
+      server: stored(server.url),
+      headers: {},
+      request: post(rpc("tools/list", 1)),
+    });
+    await answer.text();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]).toMatchObject({ status: 200, outcome: "ok" });
+  });
+});
+
+describe("the legacy SSE session of a call", () => {
+  // #1053-T07
+  it("is closed when the call fails, as when it succeeds", async () => {
+    const server = await fake();
+    const { proxy } = setup();
+    const target = stored(server.sseUrl, "sse");
+    const ok = await proxy.forward({
+      server: target,
+      headers: {},
+      request: post(rpc("tools/list", 1)),
+    });
+    expect(ok.status).toBe(200);
+    await vi.waitFor(() => expect(server.openStreams()).toBe(0));
+
+    // The server refuses the message of the call itself.
+    server.script("tools/list", { kind: "status", status: 500 });
+    const failed = await proxy.forward({
+      server: target,
+      headers: {},
+      request: post(rpc("tools/list", 2)),
+    });
+    expect(failed.status).toBe(503);
+    expect(JSON.parse(await failed.text())).toMatchObject({
+      error: { message: "mcp_proxy_http_error" },
+    });
+    await vi.waitFor(() => expect(server.openStreams()).toBe(0));
+
+    // Its answer never arrives: the deadline ends the call and the session.
+    const slow = setup({ deadlineMs: 300 });
+    server.script("tools/list", { kind: "hang" });
+    const timedOut = await slow.proxy.forward({
+      server: target,
+      headers: {},
+      request: post(rpc("tools/list", 3)),
+    });
+    expect(timedOut.status).toBe(503);
+    await vi.waitFor(() => expect(server.openStreams()).toBe(0));
+  });
+});
+
+describe("what the proxy takes from the agent's headers", () => {
+  // #1053-T08
+  it("refuses a session id or a protocol version that is not a plain token, and calls no server", async () => {
+    const server = await fake();
+    const { proxy, calls } = setup();
+    const bad: Partial<
+      Pick<McpProxyRequest, "sessionId" | "protocolVersion">
+    >[] = [
+      { sessionId: "two words" },
+      { sessionId: "line\r\nx-evil: 1" },
+      { sessionId: "a".repeat(257) },
+      { sessionId: "" },
+      { protocolVersion: "2025 06 18" },
+      { protocolVersion: "2025-06-18\r\nx: y" },
+      { protocolVersion: "1".repeat(33) },
+    ];
+    for (const extra of bad) {
+      const answer = await proxy.forward({
+        server: stored(server.url),
+        headers: {},
+        request: post(rpc("tools/list", 1), extra),
+      });
+      expect(answer.status).toBe(400);
+      expect(JSON.parse(await answer.text())).toMatchObject({
+        error: { message: "mcp_proxy_request_invalid" },
+      });
+    }
+    expect(server.requests()).toEqual([]);
+    expect(
+      calls.every((meta) => meta.outcome === "mcp_proxy_request_invalid"),
+    ).toBe(true);
+  });
+});
+
+describe("the method of a call in the record", () => {
+  // #1053-T09
+  it("is cleaned and cut like a tool name: no line break or control character, at most 100 characters", async () => {
+    const server = await fake();
+    const { proxy, calls } = setup();
+    const forged = `tools/list\n[mcp-proxy] job=forged status=200 \u202e${"z".repeat(200)}`;
+    await proxy.forward({
+      server: stored(server.url),
+      headers: {},
+      request: post(rpc(forged, 1)),
+    });
+    const recorded = calls[0]?.rpcMethod ?? "";
+    expect(recorded).not.toMatch(/[\n\r\u202e]/);
+    expect(recorded.length).toBeLessThanOrEqual(100);
+    expect(recorded.startsWith("tools/list [mcp-proxy]")).toBe(true);
+    // What is sent on is the agent's message as it is.
+    expect(server.requests()[0]?.rpcMethod).toBe(forged);
   });
 });

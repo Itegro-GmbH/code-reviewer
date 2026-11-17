@@ -180,6 +180,7 @@ function claimQuery(
         runner_id = ${claim.runnerId},
         lease_token = ${claim.leaseToken},
         worker_fetches = 0,
+        mcp_calls = 0,
         accepts_supersede = ${claim.acceptsSupersede === true ? 1 : 0},
         claimed_at = ${now},
         heartbeat_at = ${now},

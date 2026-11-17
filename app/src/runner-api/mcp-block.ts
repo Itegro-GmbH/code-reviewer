@@ -9,8 +9,8 @@
 // of the server on the way. A turn no workflow step started has no lane and so no servers.
 import type { Job } from "../jobs/job-types.ts";
 import type { ImplementerMcp } from "../contracts/runner-api.ts";
-import type { JobMcp } from "../mcp/job-proxy.ts";
-import type { RunnerApiLogger } from "./logger.ts";
+import type { JobMcp, JobMcpServers } from "../mcp/job-proxy.ts";
+import { describeError, type RunnerApiLogger } from "./logger.ts";
 
 export type McpBlockDeps = {
   /** The MCP runtime of one workspace; left out where the deployment has none. */
@@ -30,7 +30,25 @@ export async function mcpBlockOf(
 ): Promise<ImplementerMcp | undefined> {
   const { job, features, startedByWorkflow } = input;
   if (deps.jobMcp === undefined || !startedByWorkflow) return undefined;
-  const found = await deps.jobMcp(job.workspaceId).serversOf(job);
+  // A caller that does not read the field runs the turn without MCP tools: the agent lacks tools, nothing widens, so the turn is not refused.
+  // Asked before anything is read: such a claim costs no query of the lane or of the servers.
+  if (!features.includes("implementer_mcp")) {
+    deps.logger.info(
+      `[runner-api] job=${job.id} mcp servers not delivered: the caller did not name implementer_mcp`,
+    );
+    return undefined;
+  }
+  let found: JobMcpServers;
+  try {
+    found = await deps.jobMcp(job.workspaceId).serversOf(job);
+  } catch (error) {
+    // MCP is an addition to the turn: a failure to resolve its servers (a lookup that fails, a table that is not there yet) must not fail the
+    // claim of the turn. The step runs without the tools, and the log says why. A call of the agent is checked again at the call.
+    deps.logger.error(
+      `[runner-api] job=${job.id} mcp servers could not be resolved, the step runs without them: ${describeError(error)}`,
+    );
+    return undefined;
+  }
   const servers = found.servers.flatMap((server) => {
     const transport = TRANSPORTS.find((entry) => entry === server.transport);
     return transport === undefined
@@ -38,13 +56,6 @@ export async function mcpBlockOf(
       : [{ id: server.id, name: server.name, transport }];
   });
   if (servers.length === 0 && found.unavailable === 0) return undefined;
-  // A caller that does not read the field runs the turn without MCP tools: the agent lacks tools, nothing widens, so the turn is not refused.
-  if (!features.includes("implementer_mcp")) {
-    deps.logger.info(
-      `[runner-api] job=${job.id} mcp servers not delivered: the caller did not name implementer_mcp`,
-    );
-    return undefined;
-  }
   return {
     servers,
     ...(found.unavailable === 0

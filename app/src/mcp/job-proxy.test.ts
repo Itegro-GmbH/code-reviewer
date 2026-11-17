@@ -55,6 +55,9 @@ function deps(options: {
   stepIds?: string[];
   hasStep?: boolean;
   calls?: McpCallMeta[];
+  /** Every read of the table of servers, by kind and id. */
+  reads?: string[];
+  lines?: string[];
 }): JobMcpDeps {
   const document = JSON.stringify({
     name: "Lane",
@@ -83,8 +86,14 @@ function deps(options: {
     },
     // The repository is scoped to the job's workspace: another workspace's rows are not in it.
     mcpServers: {
-      list: () => Promise.resolve(options.servers),
+      get: (id) => {
+        options.reads?.push(`get ${id}`);
+        return Promise.resolve(
+          options.servers.find((entry) => entry.id === id),
+        );
+      },
       readHeaders: (id) => {
+        options.reads?.push(`readHeaders ${id}`);
         const server = options.servers.find((entry) => entry.id === id);
         return Promise.resolve(
           server === undefined
@@ -102,6 +111,7 @@ function deps(options: {
       },
     },
     credentials: createMcpCredentials({ appSecret: APP_SECRET }),
+    log: (line) => options.lines?.push(line),
     proxy: createMcpProxy({
       fetch: createGuardedFetch({ allowLoopback: true }),
       allowTestEndpoints: true,
@@ -236,5 +246,101 @@ describe("a call of the agent for a server of its job", () => {
       error: { message: "mcp_credential_broken" },
     });
     expect(server.requests()).toEqual([]);
+  });
+});
+
+describe("what a call costs the database and what a refusal leaves in the log", () => {
+  // #1053-T10
+  it("reads one row for each server of the step at the claim, never the whole table", async () => {
+    const reads: string[] = [];
+    const servers = [
+      row(A, "Issues", "https://a.example.com/mcp"),
+      row(B, "Docs", "https://b.example.com/mcp"),
+    ];
+    await createJobMcp(
+      deps({ servers, lane: [A, B], stepIds: [B], reads }),
+    ).serversOf(job);
+    expect(reads).toEqual([`get ${B}`]);
+  });
+
+  it("reads the credential of the called server only, and nothing at all for a server the step does not name", async () => {
+    const server = await fake();
+    const reads: string[] = [];
+    const servers = [row(A, "Issues", server.url), row(B, "Docs", server.url)];
+    const mcp = createJobMcp(
+      deps({ servers, lane: [A, B], stepIds: [A], reads }),
+    );
+    expect((await mcp.handle(job, A, call("tools/list", 1))).status).toBe(200);
+    expect(reads).toEqual([`readHeaders ${A}`]);
+    reads.length = 0;
+    expect((await mcp.handle(job, B, call("tools/list", 2))).status).toBe(404);
+    expect(reads).toEqual([]);
+  });
+
+  it("answers a GET with 405 before the lane is read and before a credential is opened", async () => {
+    const reads: string[] = [];
+    const lane = deps({
+      servers: [row(A, "Issues", "https://a.example.com/mcp")],
+      lane: [A],
+      reads,
+    });
+    let asked = 0;
+    const mcp = createJobMcp({
+      ...lane,
+      workflowRuns: {
+        ...lane.workflowRuns,
+        findStepByJob: (...args) => {
+          asked++;
+          return lane.workflowRuns.findStepByJob(...args);
+        },
+      },
+    });
+    const answer = await mcp.handle(job, A, {
+      method: "GET",
+      body: null,
+      sessionId: null,
+      protocolVersion: null,
+    });
+    expect(answer.status).toBe(405);
+    expect(answer.headers.get("allow")).toBe("POST, DELETE");
+    expect(reads).toEqual([]);
+    expect(asked).toBe(0);
+  });
+
+  // #1053-T11
+  it("refuses a server that was removed while the run is going, at the call: the lane still names it, the workspace no longer holds it", async () => {
+    const server = await fake();
+    const servers = [row(A, "Issues", server.url)];
+    const mcp = createJobMcp(deps({ servers, lane: [A] }));
+    expect((await mcp.handle(job, A, call("tools/list", 1))).status).toBe(200);
+    const before = server.requests().length;
+    servers.splice(0); // removed in the registry
+    const answer = await mcp.handle(job, A, call("tools/list", 2));
+    expect(answer.status).toBe(404);
+    expect(JSON.parse(await answer.text())).toMatchObject({
+      error: { message: "mcp_server_unavailable" },
+    });
+    expect(server.requests()).toHaveLength(before);
+  });
+
+  // #1053-T12
+  it("logs each refusal before the proxy with the job, the server id and the code, and no value", async () => {
+    const server = await fake();
+    const lines: string[] = [];
+    const servers = [row(A, "Issues", server.url)];
+    const broken = deps({ servers, lane: [A], lines });
+    await createJobMcp(broken).handle(job, GONE, call("tools/list", 1));
+    await createJobMcp({
+      ...broken,
+      credentials: createMcpCredentials({ appSecret: "x".repeat(40) }),
+    }).handle(job, A, call("tools/list", 2));
+    await createJobMcp(broken).handle(job, "../etc/passwd", call("x", 3));
+    expect(lines).toEqual([
+      `[mcp-proxy] job=job-1 server=${GONE} refused: mcp_server_unavailable`,
+      `[mcp-proxy] job=job-1 server=${A} refused: mcp_credential_broken`,
+      "[mcp-proxy] job=job-1 server=- refused: mcp_server_unavailable",
+    ]);
+    expect(lines.join("\n")).not.toContain(SECRET);
+    expect(lines.join("\n")).not.toContain(server.url);
   });
 });

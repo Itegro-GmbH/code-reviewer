@@ -41,6 +41,7 @@ export const MCP_PROXY_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const EVENT_MAX_LENGTH = 1024 * 1024;
 const TOOL_NAME_MAX_LENGTH = 100;
+const METHOD_MAX_LENGTH = 100;
 
 /** What the agent's side is told. Stable words; never a value, an address or a body of the server. */
 export const MCP_PROXY_ERROR_CODES = [
@@ -77,14 +78,17 @@ export type McpCallMeta = {
   jobId: string | null;
   serverId: string;
   transport: string;
-  /** The JSON-RPC method of the call (`tools/call`, `tools/list`, …); null for a DELETE. */
+  /** The JSON-RPC method of the call (`tools/call`, `tools/list`, …), cleaned and cut to 100 characters like a tool name; null for a DELETE. */
   rpcMethod: string | null;
   /** The name of the tool, for `tools/call`, cut to 100 characters. */
   tool: string | null;
   /** The status the agent's side got. */
   status: number;
-  /** `ok`, or the code the call ended with. */
-  outcome: "ok" | McpProxyErrorCode;
+  /**
+   * `ok`, the code the call ended with, or `cancelled`: the agent's side let go of an answer that was still arriving (the answer was passed on
+   * up to there; `responseBytes` says how far).
+   */
+  outcome: "ok" | "cancelled" | McpProxyErrorCode;
   durationMs: number;
   requestBytes: number;
   responseBytes: number;
@@ -144,6 +148,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** The JSON-RPC id of a message, for the answer of an error (a request's id; null otherwise). */
 type RpcMessage = {
   method: string;
+  /** What is recorded of the method: it comes from the agent, so no control character and no line break, and short. */
+  label: string;
   id: string | number | undefined;
   tool: string | null;
   text: string;
@@ -173,7 +179,13 @@ function parseMessage(body: string | null, maxBytes: number): RpcMessage {
     value.method === "tools/call" && typeof params.name === "string"
       ? cleanText(params.name).slice(0, TOOL_NAME_MAX_LENGTH)
       : null;
-  return { method: value.method, id, tool, text: body };
+  return {
+    method: value.method,
+    label: cleanText(value.method).slice(0, METHOD_MAX_LENGTH),
+    id,
+    tool,
+    text: body,
+  };
 }
 
 const SESSION_ID = /^[!-~]{1,256}$/;
@@ -219,34 +231,60 @@ function errorResponse(
   );
 }
 
-/** The body of a response, passed on, ending with an error when it is longer than the cap. `done` is told the bytes once the body ended. */
+/** How the body of a passed-on answer ended. */
+type StreamEnd =
+  | { how: "end" }
+  | { how: "cancelled" }
+  | { how: "too_large" }
+  | { how: "failed"; error: unknown };
+
+/**
+ * The body of a response, passed on as it arrives, ending with an error when it is longer than the cap. `done` is told the bytes and how it
+ * ended, once, whatever the way: read to the end, past the cap, cut by the server or the deadline, or let go of by the consumer (which also lets go
+ * of the server's stream: it is not left open).
+ */
 function cappedStream(
   body: ReadableStream<Uint8Array>,
   max: number,
-  done: (bytes: number) => void,
+  done: (bytes: number, end: StreamEnd) => void,
 ): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
   let total = 0;
   let told = false;
-  const tell = () => {
+  const tell = (end: StreamEnd) => {
     if (told) return;
     told = true;
-    done(total);
+    done(total, end);
   };
-  return body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        total += chunk.length;
-        if (total > max) {
-          tell();
-          controller.error(new SseTooLargeError());
-          return;
-        }
-        controller.enqueue(chunk);
-      },
-      flush: tell,
-    }),
-    // A consumer that goes away (the agent's side closed) must not leave the server's stream open.
-  );
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        tell({ how: "failed", error });
+        controller.error(error);
+        return;
+      }
+      if (chunk.done) {
+        tell({ how: "end" });
+        controller.close();
+        return;
+      }
+      total += chunk.value.length;
+      if (total > max) {
+        tell({ how: "too_large" });
+        await reader.cancel().catch(() => undefined);
+        controller.error(new SseTooLargeError());
+        return;
+      }
+      controller.enqueue(chunk.value);
+    },
+    async cancel(reason) {
+      tell({ how: "cancelled" });
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
 }
 
 export function createMcpProxy(options: McpProxyOptions): McpProxy {
@@ -282,7 +320,7 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
         jobId: jobId ?? null,
         serverId: server.id,
         transport: server.transport,
-        rpcMethod: message?.method ?? null,
+        rpcMethod: message?.label ?? null,
         tool: message?.tool ?? null,
         status,
         outcome,
@@ -453,10 +491,23 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
         }
         if (type.startsWith("text/event-stream") && response.body !== null) {
           // Passed on as it arrives, bounded; the call is recorded when the stream has ended.
-          const body = cappedStream(response.body, maxResponse, (bytes) => {
-            responseBytes = bytes;
-            record(200, "ok");
-          });
+          const body = cappedStream(
+            response.body,
+            maxResponse,
+            (bytes, end) => {
+              responseBytes = bytes;
+              record(
+                200,
+                end.how === "end"
+                  ? "ok"
+                  : end.how === "cancelled"
+                    ? "cancelled"
+                    : end.how === "too_large"
+                      ? "mcp_proxy_response_too_large"
+                      : failureOf(end.error, signal).code,
+              );
+            },
+          );
           return new Response(body, {
             status: 200,
             headers: {

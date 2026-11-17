@@ -6,6 +6,7 @@ import {
   MCP_PROXY_MAX_REQUEST_BYTES,
   type McpProxyRequest,
 } from "../mcp/proxy.ts";
+import { mcpRefusal } from "../mcp/refusal.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
 
 /** A server id is a UUID (`mcp_servers.id`). */
@@ -14,20 +15,7 @@ export const MCP_SERVER_ID =
 
 /** The answer for a server that is not the job's, does not exist, or a deployment without MCP: one answer for all. */
 export function mcpUnavailable(): Response {
-  return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32000, message: "mcp_server_unavailable" },
-    }),
-    {
-      status: 404,
-      headers: {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-      },
-    },
-  );
+  return mcpRefusal("mcp_server_unavailable");
 }
 
 export type McpCall =
@@ -38,13 +26,14 @@ export type McpCall =
 
 export function mcpCallOf(request: Request): McpCall {
   const method = request.method;
-  if (method !== "POST" && method !== "DELETE" && method !== "GET")
-    return "method_not_allowed";
+  // A GET is the stream of the server's own, which the app does not offer (the specification allows a 405): answered before anything is
+  // looked up, counted or unsealed.
+  if (method !== "POST" && method !== "DELETE") return "method_not_allowed";
   const sessionId = request.headers.get("mcp-session-id");
   const protocolVersion = request.headers.get("mcp-protocol-version");
   return {
     async read() {
-      if (method !== "POST") {
+      if (method === "DELETE") {
         await request.body?.cancel().catch(() => undefined);
         return {
           ok: true,

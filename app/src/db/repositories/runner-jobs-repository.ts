@@ -269,6 +269,15 @@ export type RunnerJobsRepository = {
     limit: number,
   ): Promise<CountFetchResult>;
   /**
+   * #1053: counts one call of the agent's MCP client through the Worker API by the running claim `leaseToken` belongs to, in one
+   * statement, up to `limit` per claim (the claim resets the count). `exhausted`: the claim holds, the calls are used up.
+   */
+  countMcpCall(
+    jobId: string,
+    leaseToken: string,
+    limit: number,
+  ): Promise<CountFetchResult>;
+  /**
    * Extends the lease of the claim `leaseToken` belongs to. A job past the hard limit is failed with
    * `timeout` by this call and answers `not_holder`.
    */
@@ -1451,6 +1460,25 @@ export function createRunnerJobsRepository(
           .executeTakeFirst();
         return held === undefined ? "not_holder" : "exhausted";
       });
+    },
+
+    async countMcpCall(jobId, leaseToken, limit) {
+      // One statement, no transaction and not the gate of the transitions: the route counts every call of an agent, and a call must not
+      // queue behind a claim.
+      const counted = await db
+        .updateTable("jobs")
+        .set((eb) => ({ mcp_calls: eb("mcp_calls", "+", 1) }))
+        .where(runningWhere({ claim: { jobId, leaseToken } }))
+        .where("mcp_calls", "<", limit)
+        .returning("id")
+        .executeTakeFirst();
+      if (counted !== undefined) return "counted";
+      const held = await db
+        .selectFrom("jobs")
+        .select("id")
+        .where(runningWhere({ claim: { jobId, leaseToken } }))
+        .executeTakeFirst();
+      return held === undefined ? "not_holder" : "exhausted";
     },
 
     heartbeat(jobId, leaseToken) {

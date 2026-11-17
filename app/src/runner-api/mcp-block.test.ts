@@ -93,8 +93,12 @@ describe("the MCP servers a claim puts in the job", () => {
     expect(plain.asked).toEqual([]);
   });
 
-  it("is left out for a caller that did not name the feature, and the log says so (a turn is not refused: the agent only lacks tools)", async () => {
-    const { deps: d, lines } = deps({
+  it("is left out for a caller that did not name the feature, before any lane or server is read, and the log says so (a turn is not refused: the agent only lacks tools)", async () => {
+    const {
+      deps: d,
+      lines,
+      asked,
+    } = deps({
       servers: [server("a", "Linear", "streamable-http")],
       unavailable: 0,
     });
@@ -104,6 +108,29 @@ describe("the MCP servers a claim puts in the job", () => {
     expect(lines.join("\n")).toContain("job=job-1");
     expect(lines.join("\n")).toContain("implementer_mcp");
     expect(lines.join("\n")).not.toContain("Linear");
+    expect(asked).toEqual([]);
+  });
+
+  // #1053-T13
+  it("does not fail the claim when the servers cannot be resolved: no block, and the log says so with the job and no value", async () => {
+    const errors: string[] = [];
+    const d = {
+      jobMcp: () => ({
+        serversOf: () =>
+          Promise.reject(new Error('relation "mcp_servers" does not exist')),
+      }),
+      logger: { info: () => {}, error: (line: string) => errors.push(line) },
+    };
+    expect(
+      await mcpBlockOf(d, {
+        job,
+        features: ["implementer_mcp"],
+        startedByWorkflow: true,
+      }),
+    ).toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("job=job-1");
+    expect(errors[0]).toContain("runs without them");
   });
 
   it("is nothing where the deployment has no MCP runtime", async () => {

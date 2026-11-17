@@ -174,4 +174,55 @@ describe("the credential of a claim", () => {
       await fixture.queue.countFetch(job.id, claimed?.leaseToken ?? "", 3),
     ).toBe("not_holder");
   });
+
+  // #1053-T04
+  it("counts the MCP calls of a claim up to the limit, apart from the fetches, and starts again with the next claim", async () => {
+    const fixture = await start();
+    const job = await fixture.enqueueNew();
+    const first = await fixture.queue.claimNext("dispatcher-a", undefined, {
+      workerCredential: true,
+    });
+    const token = first?.leaseToken ?? "";
+    const answers = [];
+    for (let call = 0; call < 4; call += 1)
+      answers.push(await fixture.queue.countMcpCall(job.id, token, 3));
+    expect(answers).toStrictEqual([
+      "counted",
+      "counted",
+      "counted",
+      "exhausted",
+    ]);
+    // The fetches have a count of their own.
+    expect(await fixture.queue.countFetch(job.id, token, 3)).toBe("counted");
+    expect(await fixture.queue.countMcpCall(job.id, "x".repeat(43), 3)).toBe(
+      "not_holder",
+    );
+
+    fixture.clock.advance(3 * MINUTE);
+    const second = await fixture.queue.claimNext("dispatcher-a", undefined, {
+      workerCredential: true,
+    });
+    expect(
+      await fixture.queue.countMcpCall(job.id, second?.leaseToken ?? "", 3),
+    ).toBe("counted");
+    expect(await fixture.queue.countMcpCall(job.id, token, 3)).toBe(
+      "not_holder",
+    );
+  });
+
+  // #1053-T04
+  it("does not count an MCP call for a job that is not running", async () => {
+    const fixture = await start();
+    const job = await fixture.enqueueNew({ headSha: sha("d") });
+    const claimed = await fixture.queue.claimNext("dispatcher-a", undefined, {
+      workerCredential: true,
+    });
+    await fixture.queue.complete(job.id, claimed?.leaseToken ?? "", {
+      ok: true,
+      result: {},
+    });
+    expect(
+      await fixture.queue.countMcpCall(job.id, claimed?.leaseToken ?? "", 3),
+    ).toBe("not_holder");
+  });
 });
