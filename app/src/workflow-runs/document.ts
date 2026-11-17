@@ -4,6 +4,7 @@
 // change, so the engine only needs the shape it walks; it still reads the stored text defensively and answers `undefined` for text that
 // is not that shape, which fails the run with `document_unusable` instead of throwing.
 import { isRecord } from "../workflows/json.ts";
+import { effectiveMcpServersOfStep } from "../workflows/mcp.ts";
 import {
   BUDGET_DEFAULT_USD,
   LOOP_ROUNDS_MAX,
@@ -46,6 +47,11 @@ export type RunDocument = {
   budgetUsd: number;
   /** How long one agent turn of the run may run, in minutes (#918); the default when the document names none. */
   turnTimeLimitMinutes: number;
+  /**
+   * The MCP servers the lane names (`mcp` of the document, #1052); empty for a lane that names none. What an agent step may use is
+   * `effectiveMcpServersOfNode` (the runtime, #1053, asks it when it starts a turn).
+   */
+  mcpServers: string[];
   /** The nodes of the workflow, in the order they run; of a document made `forTrigger` the pre-steps of that trigger come first. */
   steps: RunNode[];
   /** The steps that run once after the run ended `failed` or `cancelled` (#902); empty when the workflow has none. */
@@ -99,6 +105,15 @@ export function readRunDocument(text: string): RunDocument | undefined {
   const failureNodes =
     parsed.onFailure === undefined ? [] : readNodes(parsed.onFailure);
   if (failureNodes === undefined) return undefined;
+  // Not a list of texts: not usable. A run never starts on a document that could open a door by accident (#1052).
+  if (
+    parsed.mcp !== undefined &&
+    !(
+      Array.isArray(parsed.mcp) &&
+      (parsed.mcp as unknown[]).every((entry) => typeof entry === "string")
+    )
+  )
+    return undefined;
   const budget = parsed.budgetUsd;
   if (
     budget !== undefined &&
@@ -118,9 +133,24 @@ export function readRunDocument(text: string): RunDocument | undefined {
     triggers,
     budgetUsd: budget ?? BUDGET_DEFAULT_USD,
     turnTimeLimitMinutes: turnLimit ?? TURN_TIME_LIMIT_MINUTES_DEFAULT,
+    mcpServers: (parsed.mcp as string[] | undefined) ?? [],
     steps: nodes,
     onFailure: failureNodes,
   };
+}
+
+/**
+ * The MCP servers one agent step of the run may use (#1052): its own list narrowed to the lane's, all of the lane's when it names none,
+ * none when its list is empty (`src/workflows/mcp.ts`). Where the runtime (#1053) reads it: the engine starts a turn from a node of this
+ * document (`engine.ts`, where `turnTimeLimitMinutes` is copied into the turn), so the servers of the turn are this list for that node.
+ */
+export function effectiveMcpServersOfNode(
+  document: RunDocument,
+  node: RunDocument["steps"][number],
+): string[] {
+  return node.kind === "agent"
+    ? effectiveMcpServersOfStep(document.mcpServers, node)
+    : [];
 }
 
 /**

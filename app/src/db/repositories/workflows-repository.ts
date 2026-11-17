@@ -49,6 +49,13 @@ export type NewWorkflow = {
   createdBy: string;
   /** The project the lane belongs to (#922). */
   projectId?: string;
+  /**
+   * #1052: the MCP servers the document names (`src/workflows/mcp.ts`, `mcpServersNamedBy`). They must be servers of this workspace; the rows
+   * are locked `for key share` until the save commits, so a server is not removed between the check and the commit (the removal takes
+   * `for update` and reads the lanes afterwards, `src/db/repositories/mcp-servers-repository.ts`). A server that is not there:
+   * `mcp_server_missing`. Left out or empty: no lock.
+   */
+  mcpServerIds?: readonly string[];
 };
 
 export type NewVersion = NewWorkflow & {
@@ -61,7 +68,13 @@ export type CreateOutcome =
   | {
       ok: false;
       /** `project_not_found`: the project is not one of this workspace (#922). */
-      reason: "name_taken" | "limit_reached" | "project_not_found";
+      reason:
+        | "name_taken"
+        | "limit_reached"
+        | "project_not_found"
+        | "mcp_server_missing";
+      /** On `mcp_server_missing`: the ids that are no server of this workspace. */
+      missing?: string[];
     };
 
 export type SaveOutcome =
@@ -73,9 +86,12 @@ export type SaveOutcome =
         | "archived"
         | "name_taken"
         | "version_conflict"
-        | "version_limit_reached";
+        | "version_limit_reached"
+        | "mcp_server_missing";
       /** On `version_conflict`: the version that is current. */
       current?: number;
+      /** On `mcp_server_missing`: the ids that are no server of this workspace. */
+      missing?: string[];
     };
 
 export type ArchiveOutcome =
@@ -181,6 +197,28 @@ export function createWorkflowsRepository(
   const inTransaction = <T>(
     run: (trx: Kysely<Database>) => Promise<T>,
   ): Promise<T> => (db.isTransaction ? run(db) : db.transaction().execute(run));
+
+  /**
+   * Locks the servers a document names `for key share` (they cannot be removed until this transaction ends, and may still be edited) and
+   * returns the ids that are no server of this workspace (#1052). In the caller's transaction.
+   */
+  async function lockMcpServers(
+    trx: Kysely<Database>,
+    ids: readonly string[] | undefined,
+  ): Promise<string[]> {
+    if (ids === undefined || ids.length === 0) return [];
+    const wanted = [...new Set(ids)];
+    const rows = await trx
+      .selectFrom("mcp_servers")
+      .select("id")
+      .where("workspace_id", "=", workspaceId)
+      .where("id", "in", wanted)
+      .orderBy("id")
+      .forKeyShare()
+      .execute();
+    const found = new Set(rows.map((row) => row.id));
+    return wanted.filter((id) => !found.has(id));
+  }
 
   /**
    * The not archived workflows of the active project whose ticket source is the GitHub issues of the repository, with their current
@@ -372,6 +410,9 @@ export function createWorkflowsRepository(
           .executeTakeFirstOrThrow();
         if (Number(count) >= maximum)
           return { ok: false, reason: "limit_reached" };
+        const missing = await lockMcpServers(trx, input.mcpServerIds);
+        if (missing.length > 0)
+          return { ok: false, reason: "mcp_server_missing", missing };
         const timestamp = formatTimestamp(now());
         // `do nothing` instead of a raised violation: a name that is taken is an answer and must not abort a caller's transaction.
         const row = await trx
@@ -452,6 +493,9 @@ export function createWorkflowsRepository(
             )
             .executeTakeFirst();
           if (taken !== undefined) return { ok: false, reason: "name_taken" };
+          const missing = await lockMcpServers(trx, input.mcpServerIds);
+          if (missing.length > 0)
+            return { ok: false, reason: "mcp_server_missing", missing };
           const timestamp = formatTimestamp(now());
           const version = row.current_version + 1;
           const saved = await trx

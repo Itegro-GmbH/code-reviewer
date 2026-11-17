@@ -48,12 +48,13 @@ exist in a deployment with the capability `implementer` (`src/capabilities/route
 
 ## For the issues that follow
 
-- **Lanes (#1052)** name servers in their document under the key `mcp` (`MCP_LANE_DOCUMENT_KEY`; `lane-contract.test.ts` fails when another key is chosen without changing it). `removeUnlessUsed` (`src/db/repositories/mcp-servers-repository.ts`) reads EVERY string under a key
-  `mcp` anywhere in the current version of a lane that is not archived, so a list of ids, a list of objects holding an id and a per-step list are all found. #1052
-  takes `for key share` on the server's row in the transaction that saves a document, and may narrow `mcpReferencesIn` to its field.
+- **Lanes (#1052, done)** name servers by id in their document under the key `mcp` (`MCP_LANE_DOCUMENT_KEY`; `lane-contract.test.ts` fails when another key is chosen without changing it): `mcp: [id…]` on the lane and `mcp: [id…]` on an agent step (a subset of the lane's;
+  absent = all of the lane's, empty = none). Format, codes and the pure effective-list functions: `src/workflows/mcp.ts`, `mcp-check.ts`, `docs/workflows.md` ("MCP servers of a lane"). Saving a lane (a new lane or a new version) that names servers
+  takes `for key share` on their rows in the same transaction and refuses one that is not a server of the workspace (`workflows-repository.ts`, `mcpServerIds`); `removeUnlessUsed` takes `for update`, so a removal waits for a save in flight and then finds the lane.
+  Editing a server (`for no key update`) never waits for a save. `removeUnlessUsed` still reads EVERY string under a key `mcp` anywhere in a current lane document (a superset of the exact field, on purpose: it can only refuse more).
 - **OAuth (#1051)**: the kind `oauth` is in the column's check list and refused by `parseMcpServerInput` (`mcp_auth_oauth_unavailable`). Its tokens and client registration go
   into a table of their own keyed by `mcp_servers.id`; this table does not change.
-- **The proxy (#1053)** reads a server with `readHeaders` and `openHeaders` (`service.ts`); `tools_snapshot` is what a lane's editor may offer to narrow.
+- **The proxy (#1053)** asks which servers an agent step may use with `effectiveMcpServers(document, stepId)` (`src/workflows/mcp.ts`) or, in the engine, `effectiveMcpServersOfNode(runDocument, node)` (`src/workflow-runs/document.ts`; `RunDocument.mcpServers` is the lane's list), where the engine starts a turn (`workflow-runs/engine.ts`, next to `turnTimeLimitMinutes`). It reads a server with `readHeaders` and `openHeaders` (`service.ts`); `tools_snapshot` is what a lane's editor may offer to narrow (the lane editor of #1052 narrows per server, not per tool; descriptions stay cut at 300 characters in the list: a detail read of one server is the way if an editor ever needs more, not larger caps).
 - **The catalog (#1054)**: a preset is a prefilled form; nothing is added to the table.
 
 Tests: unit (`url`, `input`, `sse`, `client` against `fakes/mcp`, the page), integration against Postgres (`mcp.integration.test.ts`, the repository, the migration,

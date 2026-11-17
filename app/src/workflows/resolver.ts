@@ -48,12 +48,26 @@ export type EnvironmentInfo = {
   labels?: readonly string[];
 };
 
+/** An MCP server of the workspace as a lane may name it (#1052). */
+export type McpServerInfo = {
+  /** The id a lane names the server by. */
+  id: string;
+  name: string;
+  /** The result of the last connection test; `failed` is a broken server (a warning where a lane names it). */
+  status: "untested" | "ok" | "failed";
+};
+
 export type WorkflowResolver = {
   profiles(): readonly ProfileInfo[];
   /** The names of the profiles of the workspace that are archived: a reference to one is not "unknown" (#843). */
   archivedProfiles?(): readonly string[];
   environments(): readonly EnvironmentInfo[];
   connectors(): readonly ConnectorSpec[];
+  /**
+   * #1052: the MCP servers of the workspace, so a lane can name only those. Left out: the workspace has none (a lane that names a server is
+   * refused, never accepted unseen).
+   */
+  mcpServers?(): readonly McpServerInfo[];
   /**
    * #973: the runners of the workspace that are online now, with what each announces. Left out (a resolver that does not know the runners): no
    * combination is refused for lacking one. See `no_runner_announces`.
@@ -67,9 +81,12 @@ export function createResolver(options: {
   archivedProfiles?: readonly string[];
   environments: readonly EnvironmentInfo[];
   onlineRunners?: readonly OnlineRunner[];
+  mcpServers?: readonly McpServerInfo[];
 }): WorkflowResolver {
   const runners = options.onlineRunners;
+  const servers = options.mcpServers;
   return {
+    ...(servers === undefined ? {} : { mcpServers: () => servers }),
     ...(runners === undefined ? {} : { onlineRunners: () => runners }),
     profiles: () => options.profiles,
     archivedProfiles: () => options.archivedProfiles ?? [],

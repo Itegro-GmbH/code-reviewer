@@ -7,6 +7,7 @@ import {
   MCP_LANE_DOCUMENT_KEY,
   mcpReferencesIn,
 } from "../db/repositories/mcp-servers-repository.ts";
+import { laneMcpServers, mcpServersNamedBy } from "../workflows/mcp.ts";
 
 describe("the lane document key of the MCP servers a lane names", () => {
   // #1050-T03
@@ -29,5 +30,20 @@ describe("the lane document key of the MCP servers a lane names", () => {
       expect([
         ...mcpReferencesIn(JSON.stringify({ [key]: ["server-1"] })),
       ]).toEqual([]);
+  });
+
+  // #1052-T01
+  it("is the key the lane format writes: what the validator accepts as the lane's and a step's servers is what the removal check reads", () => {
+    const document = {
+      [MCP_LANE_DOCUMENT_KEY]: ["server-1", "server-2"],
+      steps: [
+        { id: "a", kind: "agent", [MCP_LANE_DOCUMENT_KEY]: ["server-2"] },
+      ],
+    };
+
+    expect(laneMcpServers(document)).toEqual(["server-1", "server-2"]);
+    expect([...mcpServersNamedBy(document)].sort()).toEqual(
+      [...mcpReferencesIn(JSON.stringify(document))].sort(),
+    );
   });
 });

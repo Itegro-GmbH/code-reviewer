@@ -54,6 +54,20 @@ export const BUILDER_COPY = {
   budgetHint: "Most it may spend over all steps",
   turnTitle: "Time per turn",
   turnHint: "Longest one agent turn may run",
+  mcpTitle: "MCP servers",
+  mcpLaneHint:
+    "The servers the agents of this lane may use. A step can narrow the list.",
+  mcpStepTitle: "MCP servers of this step",
+  mcpStepHint:
+    "All checked: the step uses all of the lane's servers, also ones added later. Uncheck to narrow; none checked: no MCP server.",
+  mcpStepNone: "This step uses no MCP server.",
+  mcpStepLaneEmpty:
+    "The lane names no MCP server, so this step has none. Pick servers on the lane card; a step can then use fewer of them.",
+  mcpBroken: "Last test failed. The lane can still name it.",
+  mcpMissing: "No longer in this workspace. Uncheck it to take it out.",
+  mcpOutside: "Not in the lane. Uncheck it to take it out.",
+  mcpNone: "No MCP servers in this workspace yet.",
+  mcpPageLink: "Add one on the MCP page",
   versions: "Versions",
   versionCurrent: "current",
   askSentence:
