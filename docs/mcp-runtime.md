@@ -97,7 +97,7 @@ The app never answers 502 or 504 (a proxy in front replaces their bodies); every
 | Limits of the route: calls per claim (`jobs.mcp_calls`, expand-only migration), in flight                                                                  | `app/src/mcp/in-flight.ts`, `runner-jobs-repository.ts`                   | this PR                      |
 | The run's trace and live view: every call and refusal in `job_mcp_calls`, `GET /api/w/:workspace/runs/:id/mcp-calls`, the "MCP tool calls" section (#1055) | `app/src/mcp/call-trace.ts`, `app/src/runs/ui/run-mcp-calls.tsx`          | this PR                      |
 | Local endpoint at the hosted door, OpenCode and Claude Code configuration, the run's note                                                                  | `runner/.../implementer/mcpdoor/`, `mcpdoor_launcher.py`, `mcp_config.py` | #1067 (see "The door" below) |
-| The same at Incus instance A (and the endpoint through the inner wall)                                                                                     | `runner/…/incus/`                                                         | follow-up                    |
+| The same at Incus instance A: the third door of A, one more port in the inner wall                                                                          | `runner/…/incus/walls.py`, `implementer/placement.py`, `mcpdoor_launcher.py` | #1068 (see "On the Incus backend") |
 
 ## Rules of the proxy
 
@@ -197,5 +197,41 @@ OpenCode's default-deny permission gets `<key>_*: allow` for the servers of the 
 that cannot be started, a job that holds no access and a runner without a door are notes too ("… could not be reached …", "… holds no access", "… not
 available on this runner yet"): none of them fails the turn.
 
-**Not here.** The door's egress is the shared table (DNS and port 443 of public addresses), not the app's address alone: the app's address is a name behind a CDN, which an `nft` table cannot pin; narrowing it (a resolved set, or the host's proxy for the app) is a follow-up. The Incus backend (instance A holds the door, a port through the inner wall, `no_proxy`) is #1068: its placement has no MCP door yet, so a
-turn there runs without MCP tools and says so (`Placement.mcp_supported`). The door's code (`mcpdoor/`) takes the bind address as an argument for it.
+**Not here.** The door's egress is the shared table (DNS and port 443 of public addresses), not the app's address alone: the app's address is a name behind a CDN, which an `nft` table cannot pin; narrowing it (a resolved set, or the host's proxy for the app) is a follow-up.
+
+## On the Incus backend (#1068)
+
+On a self-hosted runner a job has two Incus instances: **A** (Control, the doors, the inner wall) and **B** (the setup, then the agent). The MCP door is the
+**third door of A**, next to the model door (8080) and the network door (8081):
+
+```
+agent (B) ──▶ http://<A's inner address>:8082/mcp/<server id> ──▶ MCP door in A (holds crj_…) ──▶ outer proxy of the host ──▶ app ──▶ MCP server
+   no credential         the one more port the inner wall opens        stdin of the process in A
+```
+
+- **Where it runs.** A container of **A's** Docker with A's host network, started by Control exactly as the hosted door (`start_mcp_door`: the Worker image
+  with `python -m code_reviewer_runner.implementer.mcpdoor`, hardened, no environment, no mount) but bound to A's address on the inner bridge only
+  (`--bind 10.98.0.2:8082`; `Placement.mcp_door_address` / `mcp_door_port`, `MCP_DOOR_PORT_SPLIT`). There is no model network and no table of the door's own: A has
+  no default route, and its outer NIC leads to the host's proxy and nothing else; the door reaches the app through that proxy like the other doors (`outerProxy` of
+  its start document). The outer wall needs no new host and **the sandbox's network rule is not changed**.
+- **The inner wall.** `walls.DOOR_PORTS` is `(MODEL_DOOR_PORT, NETWORK_DOOR_PORT_SPLIT, MCP_DOOR_PORT_SPLIT)`, built from the placement's constants: from B's address only
+  `tcp dport { 8080, 8081, 8082 }` is accepted, everything else from B is dropped as before. The wall is loaded when the job starts, before anybody knows
+  whether a step has MCP servers, so 8082 is open to B for every job, and without a listener it answers with a refusal. `inner_wall_holds` reads the table back after it
+  is loaded: a table that lost the port is not the wall (the launcher fails the start).
+- **How the credential stays out of B.** The job credential `crj_…` goes to the **stdin** of the door's process in A and nowhere else: not an argument, not an
+  environment variable, not a file, not a mount, not a request to A's Docker. Control keeps its copy in the job object (hidden from `repr`) in A. B is another
+  instance with its own kernel namespaces: it has **no connection to A but the three door ports** (no Docker API, no process list, no file of A), so its environment,
+  files and process list never hold the credential, and B's Docker never gets a request that holds it. The door's only client is the agent's harness, which
+  sends a JSON-RPC message and can not ask for a header.
+- **The harness configuration** written for B's agent container points at `http://<A's inner address>:8082/mcp/<server id>` (OpenCode `remote`, Claude Code
+  `type: http`), without header or token, as hosted.
+- **`NO_PROXY`.** The three doors share A's address, which every turn on Incus already exempts from the network door (`Placement.no_proxy`); an MCP turn adds
+  nothing to the list, and a turn without `mcp` is unchanged. The network door's `HTTP_PROXY` is still `http://<A>:8081` for everything else.
+- **End of the step, the failure cases, the notes**: the same code as hosted. `RunningMcpDoor.stop` sends `DELETE` for every open session before the container is
+  removed (success, failure, cancel), a 503 is never retried and 429 `mcp_too_many_concurrent_calls` may be (`mcpdoor/relay.py`), and a door that cannot start is a
+  note ("… could not be reached …"), not a failed turn. `Placement.mcp_supported` is true for the split placement.
+
+**Tests.** `test_mcp_door_launcher.py` (the door's document on A, the credential on the stdin only, no model network and no rules container, the sessions ended at
+`stop`, the session's endpoints), `test_implementer_mcp.py` (placement, `NO_PROXY`, both harness configurations, B's agent definition without a credential),
+`test_incus_parts.py` (the wall's ruleset: exactly `8080, 8081, 8082`, read back), and the Incus lane's `test_incus_job.py` (a real Incus: B reaches 8082 and no other new
+port; needs `incus-admin`, run on the DevBox). A live test with a real MCP server on the DevBox after the release is the follow-up.

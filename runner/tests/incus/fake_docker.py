@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 
 CTL = "/ctl.sock"
-DOORS = ("10.98.0.2", (8080, 8081))
-EVERYWHERE = ("0.0.0.0", (9000, 2375))
+DOORS = ("10.98.0.2", (8080, 8081, 8082))
+EVERYWHERE = ("0.0.0.0", (9000, 2375, 8083))
 READY, GO, FINISH, FILL = (
     Path("/tmp/ready"),
     Path("/tmp/go"),

@@ -3,14 +3,13 @@
 """The two walls of a job's instances and the files that give them their network (#1007).
 
 **The inner wall** is an nft table **inside instance A** (Control, the model door, the network
-door),
-in A's own network namespace: B (setup, then agent) is on the other side of A's second NIC and may
-open a TCP connection to exactly the two doors; nothing else of A and nothing through A. Incus's own
-ACLs do not do this between two ports of one bridge (they need `br_netfilter`, which a host may not
-have: spike #1005, Q3), so the table is ours. B cannot change it: it is another instance with
-another
-network namespace. A's own root can, and A is the trusted side, as Control's VM was. A's outer NIC
-takes nothing in either: only the answers to what A asked (the proxy of the host).
+door, the MCP door), in A's own network namespace: B (setup, then agent) is on the other side of A's
+second NIC and may open a TCP connection to exactly the three doors (model, network, MCP); nothing
+else of A and nothing through A. Incus's own ACLs do not do this between two ports of one bridge
+(they need `br_netfilter`, which a host may not have: spike #1005, Q3), so the table is ours. B
+cannot change it: it is another instance with another network namespace. A's own root can, and A
+is the trusted side, as Control's VM was. A's outer NIC takes nothing in either: only the answers
+to what A asked (the proxy of the host).
 
 **The outer wall** is the proxy of this dispatcher (`firecracker/proxy_wall.py`) and, on the host, a
 static nft table (#1008). Here is only what the launcher does at `narrow`: after the wall holds the
@@ -33,6 +32,11 @@ from code_reviewer_runner.factory_runner.firecracker.outer_wall import OuterWall
 from code_reviewer_runner.factory_runner.firecracker.proxy_wall import SlotAddresses
 from code_reviewer_runner.factory_runner.firecracker.slots import Slot
 from code_reviewer_runner.factory_runner.firecracker.wire import NarrowMessage, Refusal
+from code_reviewer_runner.implementer.placement import (
+    MCP_DOOR_PORT_SPLIT,
+    MODEL_DOOR_PORT,
+    NETWORK_DOOR_PORT_SPLIT,
+)
 
 from .slots import INNER_A_ADDRESS, INNER_B_ADDRESS, INNER_NETWORK, PREFIX_LENGTH, IncusSlot
 
@@ -47,8 +51,10 @@ OUTER_NIC_B: Final = "eth1"
 # The device names in Incus (the same as the names inside, set with `name=`).
 DEVICE_OUTER: Final = "eth0"
 DEVICE_INNER: Final = "eth1"
-# The doors B may reach on A (the model door and the network door, spike #1005).
-DOOR_PORTS: Final = (8080, 8081)
+# The doors B may reach on A: the model door, the network door (spike #1005) and the MCP door
+# (#1068).
+# One list with the placement's, so that a door and its port cannot drift apart.
+DOOR_PORTS: Final = (MODEL_DOOR_PORT, NETWORK_DOOR_PORT_SPLIT, MCP_DOOR_PORT_SPLIT)
 INNER_PREFIX: Final = INNER_NETWORK.prefixlen
 INNER_WALL_TABLE: Final = "cr_inner"
 NETWORK_DIRECTORY: Final = "/etc/systemd/network"
@@ -65,8 +71,9 @@ def inner_wall_ruleset(
     return f"""\
 # SPDX-License-Identifier: LicenseRef-Proprietary
 #
-# The inner wall of one job (#1007), loaded inside instance A. B (setup, then agent) reaches the two
-# doors of A and nothing else of A and nothing through A. `eth1` is the NIC on the inner bridge,
+# The inner wall of one job (#1007), loaded inside instance A. B (setup, then agent) reaches the
+# three doors of A (#1068: the MCP door is the third) and nothing else of A and nothing through A.
+# `eth1` is the NIC on the inner bridge,
 # `eth0` the one on the outer bridge (the host's proxy): A takes nothing in on it but answers.
 table inet {INNER_WALL_TABLE} {{
   chain input {{
