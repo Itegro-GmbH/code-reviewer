@@ -31,6 +31,8 @@ export const WORKSPACE_ACTIONS = [
   "manage_implementer_environments",
   /** The runners on customers' own machines: registration tokens, the list, revoking (#854). A runner takes the workspace's jobs. */
   "manage_runners",
+  /** The MCP servers of the workspace: add, change, test and remove them (#1050; factory only, the routes do not exist elsewhere). Every member sees the list. */
+  "manage_mcp",
   /** Change the settings of one project. */
   "change_project_settings",
   /** Switch a project on or off: which repositories are reviewed (and paid for). */
@@ -69,6 +71,7 @@ export const MINIMUM_ROLE: Record<WorkspaceAction, WorkspaceRole> = {
   start_implementer_task: "member",
   manage_implementer_environments: "admin",
   manage_runners: "admin",
+  manage_mcp: "admin",
   change_project_settings: "member",
   manage_projects: "admin",
   manage_review_defaults: "admin",

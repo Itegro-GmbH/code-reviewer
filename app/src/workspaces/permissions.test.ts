@@ -27,6 +27,7 @@ const MATRIX: Record<WorkspaceAction, [boolean, boolean, boolean]> = {
   manage_implementer_environments: [false, true, true],
   // #854-T01: a runner on a customer's machine takes the workspace's jobs: registering and revoking one is for Owners and Admins.
   manage_runners: [false, true, true],
+  manage_mcp: [false, true, true],
   // #588-T42: a Member saves the settings of a project, but confirming or moving the pinned address of its catalog provider is
   // `manage_llm_key` (below).
   change_project_settings: [true, true, true],

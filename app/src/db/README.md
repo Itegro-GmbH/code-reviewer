@@ -694,6 +694,20 @@ file, and the migrator refuses to start (`previously executed migration ... is m
 3. Start the app: the remaining migrations run as usual. The two encrypted rows of `secrets` named after the removed
    payment provider (`<provider>_api_key`, `<provider>_webhook_secret`) are ignored and may be deleted by hand.
 
+### MCP servers
+
+Migration `20261117100000_create_mcp_servers` (#1050, epic #1049): `mcp_servers` holds the remote MCP servers of a workspace (name, transport
+`streamable-http` or `sse`, address, authentication kind `none`, `header` or the reserved `oauth`, the NAMES of the headers, the header values
+as ONE sealed JSON in `headers_ciphertext`, `headers_nonce` and `headers_key_version`, `revision`, the last test `test_status` with its error code and time, and
+`tools_snapshot`, the JSON of what the last successful test listed). Check constraints keep the transport and the kind to their lists, the sealed
+columns present exactly for the kind `header`, and the test status in line with its error code and time. A name is unique per workspace whatever its case. Expand
+only: one new table, nothing existing changes. The OAuth data of #1051 will live in a table of its own keyed by the server, so this table needs no
+rewrite. **Customer data, workspace scoped** (`mcp-servers-repository.ts`, classified in `scoping.test.ts`, covered row by row in
+`scoped-isolation.integration.test.ts`); `created_by` is an audit pointer that a user merge moves to the acting admin (`github-signin/merge.ts`).
+The repository decides, under a lock, the maximum per workspace, the compare and swap on `revision` for a change and for the record of a test, and the
+removal: `removeUnlessUsed` refuses while the CURRENT version of a lane that is not archived names the server under a key `mcp` (a lane's own or a step's; #1052
+adds the field and takes `for key share` on the server's row when it saves a document). See `src/mcp/README.md`.
+
 ## Workspace scoping
 
 Every repository that reads or writes customer data is created for one workspace:

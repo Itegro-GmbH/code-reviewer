@@ -7,7 +7,7 @@
 // daily work (Projects, Runs), then a separator, then the workspace administration (Connections, Members, Settings); #168 says
 // Members stays a top-level item. The first place is the QA area, which the product names (`qaAreaName`, #757): its address is
 // `/projects` in every product. The factory (#925) has the list of its app shell instead: ToDos (with the count of what waits for
-// the person), Projects, Runs, Profiles, Runners, Settings. Its workspace administration (members, the GitHub App, billing) is one
+// the person), Projects, Runs, Profiles, Runners, MCP (#1050), Settings. Its workspace administration (members, the GitHub App, billing) is one
 // place, Settings, with tabs; there are no favorites and no lanes outside a project.
 import {
   createCapabilitySet,
@@ -60,6 +60,8 @@ const FACTORY_NAV_GROUPS: readonly { items: readonly NavPlace[] }[] = [
       { path: "/runs", label: "Runs", capability: "review" },
       { path: "/profiles", label: "Profiles", capability: "implementer" },
       { path: "/runners", label: "Runners", capability: "implementer" },
+      // The MCP servers of the workspace (#1050): the tools an agent may use, next to the machines it runs on.
+      { path: "/mcp", label: "MCP", capability: "implementer" },
       { path: "/settings", label: "Settings" },
     ],
   },

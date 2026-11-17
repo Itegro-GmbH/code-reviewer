@@ -245,6 +245,15 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
+  // The MCP servers of a workspace (#1050, epic #1049): the page (the menu tab MCP), the list and the add, the change and the removal of a
+  // server, and its connection test. Only a factory has agents that use them.
+  { route: "/api/w/[workspace]/mcp/servers", class: "implementer" },
+  { route: "/api/w/[workspace]/mcp/servers/[serverId]", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/test",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/mcp", class: "implementer" },
   // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
   // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
   // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review

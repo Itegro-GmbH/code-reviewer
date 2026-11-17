@@ -135,6 +135,11 @@ describe("the route classification", () => {
       "/api/w/[workspace]/implementer/tasks": "implementer",
       // #756-T09: the page of the form belongs to the capability too.
       "/w/[workspace]/implementer": "implementer",
+      // #1050: the MCP registry (page and routes) belongs to the capability: a deployment without it has no such path.
+      "/w/[workspace]/mcp": "implementer",
+      "/api/w/[workspace]/mcp/servers": "implementer",
+      "/api/w/[workspace]/mcp/servers/[serverId]": "implementer",
+      "/api/w/[workspace]/mcp/servers/[serverId]/test": "implementer",
     };
     for (const [route, expectedClass] of Object.entries(expected))
       expect(classOfRoute(route), route).toBe(expectedClass);

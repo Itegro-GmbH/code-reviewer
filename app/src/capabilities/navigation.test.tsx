@@ -179,8 +179,10 @@ describe("the sidebar of the factory (#925)", () => {
     "implementer",
   ]);
 
-  // #925: the sidebar of the factory is the prototype's: ToDos, Projects, Runs, Profiles, Runners, Settings, in that order.
-  it("is ToDos, Projects, Runs, Profiles, Runners and Settings for the factory, with the addresses of the pages", () => {
+  // #925: the sidebar of the factory is the prototype's: ToDos, Projects, Runs, Profiles, Runners, Settings, in that order; #1050 adds MCP
+  // after Runners (the servers an agent may use, as the runners are the machines it runs on).
+  // #1050
+  it("is ToDos, Projects, Runs, Profiles, Runners, MCP and Settings for the factory, with the addresses of the pages", () => {
     expect(
       navItemsFor("/w/acme", identityFor("factory"), WITH_IMPLEMENTER).map(
         (item) => [item.label, item.href],
@@ -191,8 +193,18 @@ describe("the sidebar of the factory (#925)", () => {
       ["Runs", "/w/acme/runs"],
       ["Profiles", "/w/acme/profiles"],
       ["Runners", "/w/acme/runners"],
+      ["MCP", "/w/acme/mcp"],
       ["Settings", "/w/acme/settings"],
     ]);
+  });
+
+  // #1050
+  it("has no MCP place without the capability implementer: code-review.com keeps its sidebar", () => {
+    const labels = navItemsFor("/w/acme", identityFor("code-review-com")).map(
+      (item) => item.label,
+    );
+
+    expect(labels).not.toContain("MCP");
   });
 
   // #925

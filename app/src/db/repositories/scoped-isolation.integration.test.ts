@@ -45,6 +45,7 @@ import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
+import { createMcpServersRepository } from "./mcp-servers-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
@@ -86,6 +87,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     runners: createRunnersRepository(db, workspaceId),
     jira: createJiraConnectionsRepository(db, workspaceId),
     jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
+    mcp: createMcpServersRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -648,7 +650,22 @@ async function seed(
     projectKey: "PROJ",
     secretHash: `hash-${tag}`,
   });
+  // An MCP server (#1050) in every workspace, with sealed headers: the other workspace's is there to be read, changed, tested and removed.
+  await repos.mcp.create(
+    {
+      id: `mcp-${tag}`,
+      name: `mcp ${tag}`,
+      transport: "streamable-http",
+      url: `https://mcp.example.com/${tag}`,
+      authKind: "header",
+      headerNames: ["Authorization"],
+      sealed: { ciphertext: `c-${tag}`, nonce: `n-${tag}`, keyVersion: 1 },
+      createdBy: null,
+    },
+    50,
+  );
   return {
+    mcpServerId: `mcp-${tag}`,
     jiraWebhookId: `jira-webhook-${tag}`,
     jiraWebhookProjectId: `jira-project-${tag}`,
     jiraConnectionId: `jira-${tag}`,
@@ -882,6 +899,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .execute(),
     jiraConnections: await db
       .selectFrom("jira_connections")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    mcpServers: await db
+      .selectFrom("mcp_servers")
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
@@ -2958,6 +2981,76 @@ const CASES: Case[] = [
   {
     name: "jira.removeUnlessUsed",
     run: (a, b) => a.jira.removeUnlessUsed(b.jiraConnectionId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // MCP servers (#1050-T03): B's servers are not A's to read, change, test or remove, and their sealed headers are B's alone
+  {
+    name: "mcp.list",
+    run: (a) => a.mcp.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([expect.objectContaining({ id: a.mcpServerId })]),
+  },
+  {
+    name: "mcp.get",
+    run: (a, b) => a.mcp.get(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcp.readHeaders",
+    run: (a, b) => a.mcp.readHeaders(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // The same name as B's server: this workspace gets a row of its own.
+    name: "mcp.create",
+    run: (a) =>
+      a.mcp.create(
+        {
+          id: "mcp-a-second",
+          name: "mcp b",
+          transport: "sse",
+          url: "https://mcp.example.com/a2",
+          authKind: "none",
+          headerNames: [],
+          sealed: null,
+          createdBy: null,
+        },
+        50,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "mcp.update",
+    run: (a, b) =>
+      a.mcp.update(b.mcpServerId, 1, {
+        name: "taken over",
+        transport: "sse",
+        url: "https://mcp.example.com/evil",
+        authKind: "none",
+        headerNames: [],
+        sealed: null,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "mcp.recordTest",
+    run: (a, b) =>
+      a.mcp.recordTest(b.mcpServerId, 1, {
+        ok: false,
+        code: "mcp_test_timeout",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "mcp.lanesUsing",
+    run: (a, b) => a.mcp.lanesUsing(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "mcp.removeUnlessUsed",
+    run: (a, b) => a.mcp.removeUnlessUsed(b.mcpServerId),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ removed: false, reason: "not_found" }),
   },

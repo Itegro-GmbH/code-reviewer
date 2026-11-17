@@ -70,6 +70,7 @@ async function rowsOfEveryOldTable(
       table.name === "runner_registration_tokens" ||
       table.name === "jira_connections" ||
       table.name === "jira_webhooks" ||
+      table.name === "mcp_servers" ||
       table.name === "job_rings"
     )
       continue;
