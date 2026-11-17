@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it } from "vitest";
-import { mcpTestEndpointsAllowed } from "./config.ts";
+import {
+  logMcpTestEndpoints,
+  mcpTestEndpointsAllowed,
+  mcpTestEndpointsLine,
+} from "./config.ts";
 import { checkMcpUrl } from "./url.ts";
 
 const PRODUCTION = { allowTestEndpoints: false } as const;
@@ -110,5 +114,44 @@ describe("the test flag", () => {
       expect(mcpTestEndpointsAllowed({ ALLOW_TEST_MCP_ENDPOINTS: value })).toBe(
         false,
       );
+  });
+
+  // #1050-T02
+  it("is never on in a production deployment, even when it is set", () => {
+    const env = {
+      ALLOW_TEST_MCP_ENDPOINTS: "true",
+      VERCEL_ENV: "production",
+    };
+
+    expect(mcpTestEndpointsAllowed(env)).toBe(false);
+    expect(mcpTestEndpointsAllowed({ ...env, VERCEL_ENV: "preview" })).toBe(
+      true,
+    );
+    expect(
+      mcpTestEndpointsAllowed({ ...env, VERCEL_ENV: " production " }),
+    ).toBe(false);
+  });
+
+  it("says at the start when it is on, and when it is set but ignored, and says nothing when it is off", () => {
+    expect(mcpTestEndpointsLine({ ALLOW_TEST_MCP_ENDPOINTS: "true" })).toMatch(
+      /on: plain http and this machine/,
+    );
+    expect(
+      mcpTestEndpointsLine({
+        ALLOW_TEST_MCP_ENDPOINTS: "true",
+        VERCEL_ENV: "production",
+      }),
+    ).toMatch(/ignored/);
+    expect(mcpTestEndpointsLine({})).toBeNull();
+    expect(
+      mcpTestEndpointsLine({ ALLOW_TEST_MCP_ENDPOINTS: "false" }),
+    ).toBeNull();
+
+    const lines: string[] = [];
+    logMcpTestEndpoints({ ALLOW_TEST_MCP_ENDPOINTS: "true" }, (line) =>
+      lines.push(line),
+    );
+    logMcpTestEndpoints({}, (line) => lines.push(line));
+    expect(lines).toHaveLength(1);
   });
 });

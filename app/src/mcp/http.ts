@@ -93,8 +93,15 @@ export function createMcpRouteHandlers(
 ): McpRouteHandlers {
   const mayManage = (access: WorkspaceAccess) => can(access.role, "manage_mcp");
 
-  async function unavailable(): Promise<Response> {
-    console.error("[mcp] MCP_UNAVAILABLE: the request was not served.");
+  /** The class of the error is logged, never its message (it may hold a value of the request) and never the stack. */
+  function unavailable(error: unknown): Response {
+    const kind =
+      error instanceof Error && /^[A-Za-z0-9_]{1,60}$/.test(error.name)
+        ? error.name
+        : typeof error;
+    console.error(
+      `[mcp] MCP_UNAVAILABLE: the request was not served (${kind}).`,
+    );
     return refusal("unavailable");
   }
 
@@ -114,8 +121,8 @@ export function createMcpRouteHandlers(
           { servers: await deps.serviceFor(access.workspace.id).list() },
           { headers: NO_STORE },
         );
-      } catch {
-        return unavailable();
+      } catch (error) {
+        return unavailable(error);
       }
     },
 
@@ -130,8 +137,8 @@ export function createMcpRouteHandlers(
             .create({ id: access.user.id }, body.value),
           201,
         );
-      } catch {
-        return unavailable();
+      } catch (error) {
+        return unavailable(error);
       }
     },
 
@@ -145,8 +152,8 @@ export function createMcpRouteHandlers(
             .serviceFor(access.workspace.id)
             .update(serverId, body.value),
         );
-      } catch {
-        return unavailable();
+      } catch (error) {
+        return unavailable(error);
       }
     },
 
@@ -160,8 +167,8 @@ export function createMcpRouteHandlers(
         return result.ok
           ? Response.json({ removed: true }, { headers: NO_STORE })
           : refusal(result.error, result);
-      } catch {
-        return unavailable();
+      } catch (error) {
+        return unavailable(error);
       }
     },
 
@@ -172,8 +179,8 @@ export function createMcpRouteHandlers(
         return answer(
           await deps.serviceFor(access.workspace.id).test(serverId),
         );
-      } catch {
-        return unavailable();
+      } catch (error) {
+        return unavailable(error);
       }
     },
   };

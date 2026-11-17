@@ -58,6 +58,8 @@ export async function register(): Promise<void> {
   const { registerJiraMirrorSync } =
     await import("./tracker/jira-mirror-sync.ts");
   registerJiraMirrorSync(jiraMirrorSyncFor);
+  const { logMcpTestEndpoints } = await import("./mcp/config.ts");
+  logMcpTestEndpoints(process.env);
   const { warnAboutDebounce } = await import("./webhooks/debounce-config.ts");
   warnAboutDebounce(process.env);
 }
