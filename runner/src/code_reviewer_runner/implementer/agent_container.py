@@ -221,14 +221,17 @@ def trust_environment(rule: NetworkRule) -> dict[str, str]:
     }
 
 
-def proxy_environment(rule: NetworkRule, placement: Placement = HOSTED) -> dict[str, str]:
+def proxy_environment(
+    rule: NetworkRule, placement: Placement = HOSTED, *, mcp: bool = False
+) -> dict[str, str]:
     """The variables that point the agent's tools at the network door; none for `off`, where there
     is no door and the container has no variable of any kind. On the Incus backend the door is in
     instance A, at its address on the inner bridge (`Placement`)."""
     if rule.mode == MODE_OFF:
         return {}
     url = placement.network_door_url
-    no_proxy = placement.no_proxy
+    # #1067: the MCP door (a turn with MCP servers) is on the model network like the other doors.
+    no_proxy = placement.no_proxy_for(mcp=mcp)
     return {
         **trust_environment(rule),
         "HTTP_PROXY": url,
@@ -253,6 +256,7 @@ def agent_document(
     nano_cpus: int = 0,
     no_new_privileges: bool = False,
     placement: Placement = HOSTED,
+    mcp: bool = False,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
@@ -279,7 +283,9 @@ def agent_document(
         "Entrypoint": list(AGENT_ENTRYPOINT if entrypoint is None else entrypoint),
         "Cmd": [],
         "User": "0:0",
-        "Env": [f"{name}={value}" for name, value in proxy_environment(rule, placement).items()],
+        "Env": [
+            f"{name}={value}" for name, value in proxy_environment(rule, placement, mcp=mcp).items()
+        ],
         "Hostname": "agent",
         "WorkingDir": AGENT_REPO,
         "Labels": role_labels("agent"),
@@ -467,6 +473,9 @@ class AgentSeams:
     meminfo: str = MEMINFO
     # Which Docker the container is made in (#1017): the VM's, or B's on the Incus backend.
     placement: Placement = HOSTED
+    # #1067: the turn has an MCP door, so the agent's tools do not send its address to the network
+    # door.
+    mcp: bool = False
 
 
 def unavailable(reason: str) -> JobError:
@@ -546,6 +555,7 @@ class AgentContainer:
                     nano_cpus=self._seams.nano_cpus,
                     no_new_privileges=self._seams.no_new_privileges,
                     placement=self._seams.placement,
+                    mcp=self._seams.mcp,
                 ),
                 AGENT_CONTAINER_NAME,
             )
@@ -636,7 +646,7 @@ class AgentContainer:
                 _log.warning("the setup network could not be removed (%s)", error.status)
         self._wait_ready(container)
         self._seal_check(container)
-        wanted = proxy_environment(self._rule, self._seams.placement)
+        wanted = proxy_environment(self._rule, self._seams.placement, mcp=self._seams.mcp)
         if wanted or adopted.setup_environment:
             self.restart_docker(wanted)
 
@@ -811,7 +821,7 @@ class AgentContainer:
         if self._adopted is None:
             return dict(environment)
         base = {entry.partition("=")[0]: "" for entry in self._adopted.setup_environment}
-        base.update(proxy_environment(self._rule, self._seams.placement))
+        base.update(proxy_environment(self._rule, self._seams.placement, mcp=self._seams.mcp))
         return {**base, **environment}
 
     def run_command(

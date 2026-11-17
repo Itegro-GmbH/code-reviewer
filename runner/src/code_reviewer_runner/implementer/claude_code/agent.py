@@ -30,6 +30,7 @@ from typing import Any, Final, Protocol
 from code_reviewer_runner.dynamic_review.adapter import EngineError
 from code_reviewer_runner.dynamic_review.budget import LimitError
 from code_reviewer_runner.implementer.agent import AgentTurn, CommandOutcome, ResumeOutcome
+from code_reviewer_runner.implementer.mcp_config import McpEndpoint
 from code_reviewer_runner.implementer.preface import ResumeMode
 from code_reviewer_runner.implementer.result_channel import (
     AGENT_RESULT_DIRECTORY,
@@ -111,6 +112,7 @@ class ClaudeCodeAgent:
         max_budget_usd: str | None = None,
         resume_from: str | None = None,
         base_url: str | None = None,
+        mcp_endpoints: Sequence[McpEndpoint] = (),
     ) -> None:
         self._place = place
         self._login = login
@@ -122,6 +124,7 @@ class ClaudeCodeAgent:
         self._can_ask = can_ask
         self._budget = max_budget_usd
         self._base_url = base_url
+        self._mcp_endpoints = tuple(mcp_endpoints)
         # A follow-up turn resumes the stored session under its own id.
         self.session_id = resume_from or session_id
         self._resumes = resume_from is not None
@@ -248,6 +251,7 @@ class ClaudeCodeAgent:
             finish_command=None if self._schema is None else finish_server_command(),
             max_budget_usd=None if left is None else _amount_of(self._budget, left),
             instructions=self._instructions,
+            mcp_endpoints=self._mcp_endpoints,
         ).argv()
         environment = claude_environment(self._login, base_url=self._base_url)
         splitter = LineSplitter()

@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from code_reviewer_runner.dynamic_review.model_door_route import (
+    MCP_DOOR_ADDRESS,
+    MCP_DOOR_PORT,
     MODEL_DOOR_ADDRESS,
     MODEL_NETWORK_GATEWAY,
     MODEL_NETWORK_NAME,
@@ -100,11 +102,43 @@ class Placement:
         return f"http://{self.network_door_address}:{self.network_door_port}"
 
     @property
+    def mcp_supported(self) -> bool:
+        """Whether this placement has an MCP door (#1067): hosted and on every VM of the Firecracker
+        backend it is the third container on the model network. On the Incus backend it is #1068
+        (a port the inner wall lets B reach), so a turn there runs without MCP tools and says so."""
+        return not self.split
+
+    @property
+    def mcp_door_address(self) -> str:
+        return MCP_DOOR_ADDRESS
+
+    @property
+    def mcp_door_port(self) -> int:
+        return MCP_DOOR_PORT
+
+    @property
+    def mcp_door_url(self) -> str:
+        """Where the agent's harness finds the MCP endpoints: `<this>/mcp/<server id>`."""
+        return f"http://{self.mcp_door_address}:{self.mcp_door_port}"
+
+    def no_proxy_for(self, *, mcp: bool = False) -> str:
+        """The names the agent's tools do not send to the network door; the MCP door's address too
+        when the turn has one (#1067), otherwise exactly what it was."""
+        names = [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            self.model_door_address,
+            self.network_door_address,
+        ]
+        if mcp:
+            names.append(self.mcp_door_address)
+        return ",".join(names)
+
+    @property
     def no_proxy(self) -> str:
         """The names the agent's tools do not send to the network door."""
-        return ",".join(
-            ("localhost", "127.0.0.1", "::1", self.model_door_address, self.network_door_address)
-        )
+        return self.no_proxy_for()
 
     def environment_api(self) -> DockerApi:
         """The Docker of the setup/agent container and the readers: B's when split, else the VM's

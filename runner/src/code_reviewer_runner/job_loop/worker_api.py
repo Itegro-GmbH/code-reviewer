@@ -103,6 +103,9 @@ WORKER_FEATURES: tuple[str, ...] = (
     # #920: the Worker reads `implementer.canAsk` and offers the agent the question next to the
     # result.
     "implementer_ask",
+    # #1067: the Worker reads `implementer.mcp` (the MCP servers of the agent step), starts the MCP
+    # door with its job credential and configures the harness to talk to the door.
+    "implementer_mcp",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"
@@ -283,6 +286,12 @@ class HttpWorkerApi:
             status=status if isinstance(status, str) else None,
             already_completed=bool(body and body.get("alreadyCompleted") is True),
         )
+
+    @property
+    def worker_app_url(self) -> str:
+        """The app's address this API talks to (#1067): the MCP door calls the same app with the
+        same job credential (`McpAccessApi`)."""
+        return self._base_url
 
     @property
     def supports_steps(self) -> bool:

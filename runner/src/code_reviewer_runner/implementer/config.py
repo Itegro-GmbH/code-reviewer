@@ -25,6 +25,8 @@ from typing import Any
 from code_reviewer_runner.dynamic_review.config import checked_native_provider
 from code_reviewer_runner.dynamic_review.passthrough.families import WireFamily
 
+from .mcp_config import McpEndpoint, opencode_block, opencode_permissions
+
 # The one agent the run may use; the request names it and may name no other.
 IMPLEMENTER_AGENT = "implementer"
 SESSION_TITLE = "code-reviewer-implementer"
@@ -98,6 +100,7 @@ def build_engine_config(
     instructions_path: str,
     door_host: str | None = None,
     finish_command: Sequence[str] | None = None,
+    mcp_endpoints: Sequence[McpEndpoint] = (),
 ) -> dict[str, Any]:
     """The whole engine configuration of one turn, as data the runner writes itself.
 
@@ -111,6 +114,11 @@ def build_engine_config(
     `finish_command` (#843) is the finish tool of a turn that has a result schema: the one MCP
     server of the engine, a stdio process it starts itself in the agent's container, and the
     permission to call it. Without it the config is what it was before result schemas.
+
+    `mcp_endpoints` (#1067) are the MCP servers of the agent step: `remote` servers at the local
+    endpoints of the MCP door and the permission to use their tools. No header, no token and no
+    address of a real server: the door adds the credential outside this container. Without any, the
+    config is what it was before.
     """
     checked_native_provider(
         provider, model_reference, family, proxy_url, capability, door_host=door_host
@@ -120,6 +128,9 @@ def build_engine_config(
     permission = permission_block()
     if finish_command is not None:
         permission.update(finish_permissions())
+    permission.update(opencode_permissions(mcp_endpoints))
+    mcp_block: dict[str, Any] = {} if finish_command is None else finish_mcp_block(finish_command)
+    mcp_block.update(opencode_block(mcp_endpoints))
     return {
         "permission": permission,
         "agent": {
@@ -138,7 +149,7 @@ def build_engine_config(
         "instructions": [instructions_path],
         "skills": {"paths": []},
         "plugin": [],
-        "mcp": {} if finish_command is None else finish_mcp_block(finish_command),
+        "mcp": mcp_block,
         "lsp": False,
         "formatter": False,
         "snapshot": False,
