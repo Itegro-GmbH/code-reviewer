@@ -50,6 +50,7 @@ import { storeSteps, type StepsDeps } from "./steps.ts";
 import {
   MCP_MAX_CALLS_PER_CLAIM,
   instanceInFlightGate,
+  isEventStream,
   releaseWhenDone,
   type InFlightGate,
 } from "../mcp/in-flight.ts";
@@ -262,6 +263,12 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         release = gate.enter(who.job.id);
         if (release === undefined) {
           refusedMcp(who.job.id, "mcp_too_many_concurrent_calls");
+          runtime.refused(
+            who.job,
+            serverId,
+            "mcp_too_many_concurrent_calls",
+            null,
+          );
           return mcpRefusal("mcp_too_many_concurrent_calls", {
             "retry-after": "1",
           });
@@ -274,17 +281,30 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         if (counted === "not_holder") return ended();
         if (counted === "exhausted") {
           refusedMcp(who.job.id, "mcp_call_limit_reached");
+          runtime.refused(who.job, serverId, "mcp_call_limit_reached", null);
           return mcpRefusal("mcp_call_limit_reached");
         }
         const read = await mcp.read();
         if (!read.ok) {
           refusedMcp(who.job.id, "mcp_proxy_request_too_large");
+          runtime.refused(
+            who.job,
+            serverId,
+            "mcp_proxy_request_too_large",
+            null,
+          );
           return mcpRefusal("mcp_proxy_request_too_large");
         }
         const answer = await runtime.handle(who.job, serverId, read.request);
         handedOver = true;
         // The place is given back when the answer has been read to the end (an event stream answer is in flight until it ends).
-        return releaseWhenDone(answer, release);
+        // A stream's call is recorded when the stream ends, after this function has returned: the function is held open for it from here, inside
+        // the request (`call-trace.ts`).
+        return releaseWhenDone(
+          answer,
+          release,
+          isEventStream(answer) ? runtime.holdOpen() : undefined,
+        );
       } catch (error) {
         return unexpected("mcp", error);
       } finally {

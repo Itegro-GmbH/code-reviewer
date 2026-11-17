@@ -189,6 +189,8 @@ export function createWorkspaceErasureRepository(
         "tracker_items",
         "tracker_sync_state",
         "implementer_turn_steps",
+        // The record of a job's MCP calls points at the job (#1055).
+        "job_mcp_calls",
         "implementer_session_snapshot_parts",
         "implementer_session_snapshots",
         "implementer_turns",

@@ -172,6 +172,17 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1055: the MCP calls of a run are read like its steps, by every member of the workspace in the address.
+    name: "GET runs/[id]/mcp-calls",
+    route: "/api/w/[workspace]/runs/[id]/mcp-calls",
+    method: "GET",
+    minRole: MINIMUM_ROLE.view,
+    path: (ids) => `/runs/${ids.runId}/mcp-calls`,
+    params: (ids) => ({ id: ids.runId }),
+    file: "runs/[id]/mcp-calls/route.ts",
+    implementer: true,
+  },
+  {
     name: "PUT repositories/[repositoryId]/project",
     route: "/api/w/[workspace]/repositories/[repositoryId]/project",
     method: "PUT",

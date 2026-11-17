@@ -25,6 +25,11 @@ const api = {
     ok: true,
     data: { steps: [], cursor: 0, hasMore: false },
   })),
+  // The MCP calls of a running task (#1055): none have been made.
+  mcpCalls: vi.fn(async () => ({
+    ok: true,
+    data: { calls: [], cursor: 0, hasMore: false, full: false, omitted: 0 },
+  })),
 } as unknown as RunsApi;
 const NONE_DROPPED = { invalid: 0, overflow: 0 };
 const SHA = "b".repeat(40);

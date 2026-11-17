@@ -232,6 +232,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // The steps of a running turn, sent by its runner or Worker for the live view (#745), and read by the Runs page; only a factory
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },
+  // The MCP calls of a run of the Implementer, for the same page (#1055).
+  { route: "/api/w/[workspace]/runs/[id]/mcp-calls", class: "implementer" },
   { route: "/api/runners/v1/jobs/[id]/steps", class: "implementer" },
   // A customer's own runner (#854): the exchange of a registration token, what the runner says about itself, the renewal of its
   // credential; and, for a member of the workspace, the list, a registration token and the revoking of a runner.

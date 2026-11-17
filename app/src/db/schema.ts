@@ -1290,6 +1290,30 @@ export interface ImplementerTurnStepsTable {
 }
 
 /**
+ * One MCP call of the agent through the proxy of the Worker API, or one refusal of such a call (#1055, epic #1049): what `McpCallMeta` holds
+ * and nothing the agent or the server said. `seq` is the order the rows were written in (a Postgres identity); `server_id` is not a foreign
+ * key (the server may be removed, the record stays) and `server_name` is its name at the call. At most 2000 rows for a job.
+ */
+export interface JobMcpCallsTable {
+  seq: Generated<number>;
+  job_id: string;
+  workspace_id: string;
+  server_id: string;
+  server_name: string;
+  rpc_method: string | null;
+  tool: string | null;
+  status: number;
+  /** `ok`, `cancelled`, or a stable code of the proxy or of the route. */
+  outcome: string;
+  duration_ms: number;
+  request_bytes: number;
+  response_bytes: number;
+  /** Further refusals of the same kind counted on this row instead of stored (only `mcp_too_many_concurrent_calls`); 0 otherwise. */
+  suppressed: Generated<number>;
+  created_at: string;
+}
+
+/**
  * The conversation of an Implementer session (#839): one row for each session, replaced by the snapshot of each turn. `data` is the
  * engine's export (JSON, redacted by the runner, gzipped) as base64 text; `turn_number` and `job_id` say which turn it came from.
  */
@@ -1831,6 +1855,7 @@ export interface Database {
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
   implementer_turn_steps: ImplementerTurnStepsTable;
+  job_mcp_calls: JobMcpCallsTable;
   implementer_session_snapshots: ImplementerSessionSnapshotsTable;
   implementer_session_snapshot_parts: ImplementerSessionSnapshotPartsTable;
   implementer_environments: ImplementerEnvironmentsTable;
