@@ -17,7 +17,12 @@ import {
 } from "./mcp-servers-repository.ts";
 import { createWorkflowsRepository } from "./workflows-repository.ts";
 
-const SEALED = { ciphertext: "c1", nonce: "n1", keyVersion: 1 };
+// Not hex: ids and timestamps in the JSON must not be able to contain the marker by chance.
+const SEALED = {
+  ciphertext: "zz-ciphertext",
+  nonce: "zz-nonce",
+  keyVersion: 1,
+};
 
 const server = (
   id: string,
@@ -87,7 +92,7 @@ describe("the MCP servers repository", () => {
       "Atlassian",
       "linear",
     ]);
-    expect(JSON.stringify(await a.list())).not.toContain("c1");
+    expect(JSON.stringify(await a.list())).not.toContain("zz-ciphertext");
     expect(await a.readHeaders("s-1")).toMatchObject({ sealed: SEALED });
     expect((await a.readHeaders("s-2"))?.sealed).toBeNull();
   });

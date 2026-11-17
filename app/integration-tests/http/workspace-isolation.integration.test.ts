@@ -1051,7 +1051,7 @@ const ENTRIES: Entry[] = [
     method: "PUT",
     minRole: MINIMUM_ROLE.manage_mcp,
     path: (ids) => `/mcp/servers/${ids.mcpServerId}`,
-    body: () => ({ ...MCP_FORM, name: "Renamed" }),
+    body: () => ({ ...MCP_FORM, name: "Renamed", revision: 1 }),
     params: (ids) => ({ serverId: ids.mcpServerId }),
     file: "mcp/servers/[serverId]/route.ts",
     implementer: true,
