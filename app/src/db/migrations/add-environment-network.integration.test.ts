@@ -45,6 +45,7 @@ async function rowsOfEveryTable(
       table.name === "runner_registration_tokens" ||
       table.name === "jira_connections" ||
       table.name === "jira_webhooks" ||
+      table.name === "mcp_servers" ||
       table.name === "job_rings" ||
       table.name === "tracker_items" ||
       table.name === "tracker_sync_state"

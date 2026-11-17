@@ -1716,6 +1716,40 @@ export interface JiraWebhooksTable {
   updated_at: string;
 }
 
+/**
+ * An MCP server of a workspace (#1050, epic #1049): a remote server (Streamable HTTP or SSE) the factory's agents may use, with how to
+ * authenticate and what the last connection test found (src/db/repositories/mcp-servers-repository.ts, src/mcp/). The headers of
+ * the `header` authentication are sealed in the three `headers_*` columns and never leave the server.
+ */
+export interface McpServersTable {
+  id: string;
+  workspace_id: string;
+  name: string;
+  /** `streamable-http` or `sse` (MCP_TRANSPORTS). */
+  transport: string;
+  url: string;
+  /** `none`, `header` or `oauth` (reserved for #1051; MCP_AUTH_KINDS). */
+  auth_kind: string;
+  /** JSON array of the header names, for the kind `header`; null otherwise. */
+  header_names: string | null;
+  /** The sealed JSON of the header values (the encrypted value and its tag, base64); null unless the kind is `header`. */
+  headers_ciphertext: string | null;
+  headers_nonce: string | null;
+  headers_key_version: number | null;
+  /** Counts the changes of the configuration; a test result is stored only for the revision it tested. */
+  revision: ColumnType<number, number | undefined, number>;
+  /** `untested`, `ok` or `failed`. */
+  test_status: ColumnType<string, string | undefined, string>;
+  tested_at: string | null;
+  /** The stable code of why the last test failed (src/mcp/errors.ts); null unless it failed. */
+  test_error_code: string | null;
+  /** The JSON of what the last successful test listed; kept after a later failure. */
+  tools_snapshot: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1739,6 +1773,7 @@ export interface Database {
   workspace_secrets: WorkspaceSecretsTable;
   jira_connections: JiraConnectionsTable;
   jira_webhooks: JiraWebhooksTable;
+  mcp_servers: McpServersTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;

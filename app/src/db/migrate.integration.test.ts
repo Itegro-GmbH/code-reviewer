@@ -163,6 +163,7 @@ describe("the migrations of both epics", () => {
       "20261114150000_widen_workflow_run_trigger_for_status",
       "20261114160000_create_jira_connections",
       "20261114180000_create_jira_webhooks",
+      "20261117100000_create_mcp_servers",
     ]);
   });
 
@@ -228,6 +229,7 @@ describe("starting the database", () => {
       "jobs",
       "kysely_migration",
       "kysely_migration_lock",
+      "mcp_servers",
       "model_catalog_entries",
       "model_enablements",
       "model_price_confirmations",
