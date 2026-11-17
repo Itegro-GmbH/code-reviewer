@@ -29,6 +29,8 @@ export const MCP_INPUT_CODES = [
   "mcp_auth_invalid",
   /** Authentication `oauth` with a client id or secret that is empty, too long or has characters other than visible ASCII, or a secret without an id. */
   "mcp_oauth_client_invalid",
+  /** Authentication `oauth` with a client ID but no issuer, or an issuer that is not an https address without a query or fragment. */
+  "mcp_oauth_issuer_invalid",
   /** Editing: a client secret kept that the server does not have, or that was not entered for this client and address: enter it again. */
   "mcp_oauth_secret_required",
   /** Authentication `header` without a header, more headers than allowed, or a list that is not a list of name and value. */
@@ -77,6 +79,7 @@ export const MCP_ERROR_STATUS: Record<McpErrorCode, number> = {
   mcp_url_private: 422,
   mcp_auth_invalid: 422,
   mcp_oauth_client_invalid: 422,
+  mcp_oauth_issuer_invalid: 422,
   mcp_oauth_secret_required: 422,
   mcp_headers_invalid: 422,
   mcp_header_name_invalid: 422,
@@ -109,6 +112,7 @@ export const MCP_INPUT_FIELD: Record<
   mcp_url_private: "url",
   mcp_auth_invalid: "auth",
   mcp_oauth_client_invalid: "auth",
+  mcp_oauth_issuer_invalid: "auth",
   mcp_oauth_secret_required: "auth",
   mcp_headers_invalid: "headers",
   mcp_header_name_invalid: "headers",

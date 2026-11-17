@@ -13,6 +13,10 @@
 // A connection is saved for the REVISION of the server it was started for (`saveConnection`): the callback of a flow that was started before the
 // address was changed does not store tokens for the new address (the server row is locked `for share`, which an edit's `for no key update` waits
 // for). `dropFor` and `replaceManualClient` are what the registry's own update calls in ITS transaction (mcp-servers-repository.ts).
+//
+// What discovery found and the OAuth client of a flow are written ONLY together with the tokens that flow produced (`saveConnection`, one
+// statement): the row's discovery and client always describe the grant its tokens are, so a "Reconnect" that is abandoned, or that finds another
+// authorization server, changes nothing about a connection that works. A started flow keeps its own discovery and client in its state.
 import "server-only";
 import { type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
@@ -104,13 +108,11 @@ export type McpOAuthClient = {
 export type McpOAuthChange =
   { kind: "drop" } | { kind: "replace-manual"; client: McpOAuthClient };
 
-export type SaveMcpOAuthStart = {
-  discovery: McpOAuthDiscovery;
-  /** Undefined keeps the client the row has (a manual one, or a dynamic one registered for the same issuer and callback). */
-  client?: McpOAuthClient;
-};
-
 export type SaveMcpOAuthConnection = {
+  /** What discovery found when the flow started: the grant is for these endpoints. */
+  discovery: McpOAuthDiscovery;
+  /** The OAuth client the flow used: the grant is for this client. */
+  client: McpOAuthClient;
   sealedTokens: SealedBlob;
   accessExpiresAt: Date;
   scopes: string[];
@@ -135,15 +137,9 @@ export type McpOAuthRepository = {
   /** The connection with its sealed values and the version of the pair. */
   readSecrets(serverId: string): Promise<McpOAuthSecrets | undefined>;
   /**
-   * Keeps what discovery found and the client for the flow that is about to start (the callback uses these, not a second discovery). False
-   * when the server is not there or is no longer at `expectedRevision`.
+   * Stores the grant of a finished flow (the discovery and the client it was made with, and the sealed token pair) in ONE statement, creating
+   * the row when the server has none; false when the server is not there, is no longer at `expectedRevision` or no longer uses OAuth.
    */
-  saveStart(
-    serverId: string,
-    expectedRevision: number,
-    input: SaveMcpOAuthStart,
-  ): Promise<boolean>;
-  /** Stores the token pair of a finished flow when the server is still at `expectedRevision` and has its row; false otherwise. */
   saveConnection(
     serverId: string,
     expectedRevision: number,
@@ -163,7 +159,10 @@ export type McpOAuthRepository = {
   ): Promise<T>;
 };
 
-function parseDiscovery(text: string | null): McpOAuthDiscovery | null {
+/** The discovery as JSON text (the column, or what a started flow keeps in its state); null when it is not a discovery. */
+export function parseMcpOAuthDiscovery(
+  text: string | null,
+): McpOAuthDiscovery | null {
   if (text === null) return null;
   try {
     const value = JSON.parse(text) as Partial<McpOAuthDiscovery> | null;
@@ -213,7 +212,7 @@ function toStored(row: Selectable<McpOauthConnectionsTable>): StoredMcpOAuth {
       ? row.status
       : "unconnected",
     errorCode: row.error_code,
-    discovery: parseDiscovery(row.discovery),
+    discovery: parseMcpOAuthDiscovery(row.discovery),
     clientSource: isOneOf(MCP_OAUTH_CLIENT_SOURCES, row.client_source)
       ? row.client_source
       : null,
@@ -414,58 +413,39 @@ export function createMcpOAuthRepository(
       return row === undefined ? undefined : toSecrets(row);
     },
 
-    async saveStart(serverId, expectedRevision, input) {
-      const at = formatTimestamp(now());
-      return db.transaction().execute(async (trx) => {
-        if (!(await serverAt(trx, serverId, expectedRevision))) return false;
-        const discovery = JSON.stringify(input.discovery);
-        const client =
-          input.client === undefined ? {} : clientColumns(input.client);
-        await trx
-          .insertInto("mcp_oauth_connections")
-          .values({
-            server_id: serverId,
-            workspace_id: workspaceId,
-            status: "unconnected",
-            discovery,
-            ...client,
-            created_at: at,
-            updated_at: at,
-          })
-          .onConflict((conflict) =>
-            conflict.column("server_id").doUpdateSet({
-              discovery,
-              ...client,
-              updated_at: at,
-            }),
-          )
-          .execute();
-        return true;
-      });
-    },
-
     async saveConnection(serverId, expectedRevision, input) {
       const at = formatTimestamp(now());
       return db.transaction().execute(async (trx) => {
         if (!(await serverAt(trx, serverId, expectedRevision))) return false;
+        const grant = {
+          status: "connected",
+          error_code: null,
+          discovery: JSON.stringify(input.discovery),
+          ...clientColumns(input.client),
+          tokens_ciphertext: input.sealedTokens.ciphertext,
+          tokens_nonce: input.sealedTokens.nonce,
+          tokens_key_version: input.sealedTokens.keyVersion,
+          access_expires_at: formatTimestamp(input.accessExpiresAt),
+          scopes: input.scopes.join(" "),
+          connected_by: input.connectedBy,
+          updated_at: at,
+        };
         const result = await trx
-          .updateTable("mcp_oauth_connections")
-          .set((eb) => ({
-            status: "connected",
-            error_code: null,
-            tokens_ciphertext: input.sealedTokens.ciphertext,
-            tokens_nonce: input.sealedTokens.nonce,
-            tokens_key_version: input.sealedTokens.keyVersion,
-            token_version: eb("token_version", "+", 1),
-            access_expires_at: formatTimestamp(input.accessExpiresAt),
-            scopes: input.scopes.join(" "),
-            connected_by: input.connectedBy,
-            updated_at: at,
-          }))
-          .where("workspace_id", "=", workspaceId)
-          .where("server_id", "=", serverId)
+          .insertInto("mcp_oauth_connections")
+          .values({
+            server_id: serverId,
+            workspace_id: workspaceId,
+            ...grant,
+            created_at: at,
+          })
+          .onConflict((conflict) =>
+            conflict.column("server_id").doUpdateSet((eb) => ({
+              ...grant,
+              token_version: eb("mcp_oauth_connections.token_version", "+", 1),
+            })),
+          )
           .executeTakeFirst();
-        return Number(result.numUpdatedRows) > 0;
+        return Number(result.numInsertedOrUpdatedRows ?? 0) > 0;
       });
     },
 

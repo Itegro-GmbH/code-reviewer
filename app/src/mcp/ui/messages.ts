@@ -91,6 +91,10 @@ export const PAGE_COPY = {
   oauthClientRegistered: "Registered by this server when it connects",
   oauthClientManual: "Entered by an Owner or Admin",
   oauthScopes: "Scopes",
+  oauthClientIssuer: "Issuer",
+  oauthClientIssuerLabel: "Issuer (required with a client ID)",
+  oauthClientIssuerHint:
+    "The https address of the authorization server the client belongs to. The client secret is sent only to this server: Connect refuses when the MCP server names another one.",
   oauthClientIdLabel: "OAuth client ID (optional)",
   oauthClientSecretLabel: "OAuth client secret (optional)",
   oauthClientHint:
@@ -99,7 +103,14 @@ export const PAGE_COPY = {
     `Register this redirect address for the client: ${callbackUrl}`,
   oauthSecretKept: "Stored. Leave empty to keep it.",
   oauthSecretReenter:
-    "The address, the transport or the client ID changed: enter the secret again.",
+    "The address, the transport, the client ID or the issuer changed: enter the secret again.",
+  consentTitle: (host: string) => `Continue to ${host}?`,
+  consentBody: (server: string, host: string) =>
+    `You are about to be sent to ${host} to let this workspace use ${server}. Check that this is the authorization server you expect.`,
+  consentScopes: "Access asked for",
+  consentNoScopes: "No scope is named; the authorization server decides.",
+  consentContinue: "Continue",
+  consentCancel: "Cancel",
   oauthChangeNote:
     "Changing the address, the transport or the client ends the connection: connect again afterwards.",
 } as const;
@@ -132,8 +143,10 @@ const failureCopy = (): Record<McpErrorCode, string> => ({
   mcp_auth_invalid: "Choose no authentication, a header or OAuth.",
   mcp_oauth_client_invalid:
     "The client ID or secret is empty where it must not be, too long, or has characters other than visible ASCII. A secret needs a client ID.",
+  mcp_oauth_issuer_invalid:
+    "The issuer must be the https address of the authorization server the client ID belongs to, without a query or fragment.",
   mcp_oauth_secret_required:
-    "A stored client secret is only kept for the same address, transport and client ID. Enter the secret again.",
+    "A stored client secret is only kept for the same address, transport, client ID and issuer. Enter the secret again.",
   mcp_headers_invalid: "Add at least one header, and at most ten.",
   mcp_header_name_invalid:
     "A header name has characters that are not allowed, or appears twice.",
@@ -174,6 +187,8 @@ const oauthFailureCopy: Record<McpOAuthFailureCode, string> = {
     "The authorization server refused to register this application. Edit the server and enter a client ID (and secret) instead.",
   mcp_oauth_unreachable:
     "The authorization server could not be reached or did not answer in time. Try again.",
+  mcp_oauth_issuer_mismatch:
+    "The client ID and secret you entered are for another authorization server than the one this server names, so they were not sent there. Edit the server and enter the issuer of the authorization server the client belongs to.",
 };
 
 /** How the way back from the authorization server ended (shown once on the page). */

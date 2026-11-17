@@ -13,7 +13,7 @@ import {
 } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CapabilitiesProvider } from "../../capabilities/context.tsx";
 import { ProductIdentityProvider } from "../../product-identity/context.tsx";
 import { identityFor } from "../../product-identity/identities.ts";
@@ -113,7 +113,12 @@ function fakeApi(
         server: { ...LINEAR, id, name: id === "s3" ? "New one" : LINEAR.name },
       }),
     connect: async () =>
-      ok({ ok: true as const, url: "https://as.example.com/authorize?x=1" }),
+      ok({
+        ok: true as const,
+        url: "https://as.example.com/authorize?x=1",
+        issuerHost: "as.example.com",
+        scopes: ["issues:read", "issues:write"],
+      }),
     ...overrides,
   };
   return { api, sent, removed };
@@ -299,7 +304,40 @@ describe("adding a server", () => {
     expect(sent[0]?.auth).toEqual({
       kind: "oauth",
       clientId: "",
+      issuer: "",
       clientSecret: "",
+    });
+  });
+
+  // #1051-T01
+  it("asks for the issuer of an entered client and sends it with the client", async () => {
+    const user = userEvent.setup();
+    const { api, sent } = fakeApi([]);
+    show(api, true);
+
+    await user.click(
+      await screen.findByRole("button", { name: /add mcp server/i }),
+    );
+    await user.selectOptions(screen.getByLabelText("Authentication"), "oauth");
+    await user.type(screen.getByLabelText("Name"), "Notion");
+    await user.type(
+      screen.getByLabelText("Address"),
+      "https://mcp.notion.example/mcp",
+    );
+    await user.type(screen.getByLabelText(/OAuth client ID/), "abc");
+    await user.type(
+      screen.getByLabelText(/Issuer \(required/),
+      "https://auth.notion.example",
+    );
+    await user.type(screen.getByLabelText(/OAuth client secret/), "s3cret");
+    expect(screen.getByText(/sent only to this server/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(sent[0]?.auth).toEqual({
+      kind: "oauth",
+      clientId: "abc",
+      issuer: "https://auth.notion.example",
+      clientSecret: "s3cret",
     });
   });
 });
@@ -318,6 +356,7 @@ const OAUTH: McpServerView = {
     errorCode: null,
     clientSource: null,
     clientId: null,
+    clientIssuer: null,
     hasClientSecret: false,
     scopes: [],
     connectedAt: null,
@@ -378,9 +417,54 @@ describe("a server that uses OAuth", () => {
       within(notion).getByRole("button", { name: "Connect Notion" }),
     );
 
+    // The person sees where the browser goes and what is asked for, and confirms before it leaves.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(
+      within(dialog).getByText("Continue to as.example.com?"),
+    ).toBeTruthy();
+    expect(within(dialog).getByText(/issues:read issues:write/)).toBeTruthy();
+    expect(visited).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Continue" }));
+
     await waitFor(() =>
       expect(visited).toEqual(["https://as.example.com/authorize?x=1"]),
     );
+  });
+
+  // #1051-T01
+  it("goes nowhere when the person cancels at the confirmation, and says when no scope is named", async () => {
+    const user = userEvent.setup();
+    const visited: string[] = [];
+    show(
+      fakeApi([OAUTH], {
+        connect: async () =>
+          ok({
+            ok: true as const,
+            url: "https://as.example.com/authorize?x=1",
+            issuerHost: "as.example.com",
+            scopes: [],
+          }),
+      }).api,
+      true,
+      { navigate: (url) => visited.push(url) },
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Connect Notion" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/No scope is named/)).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(visited).toEqual([]);
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Connect Notion",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
   });
 
   it("says why a connection could not be started, in a sentence of our own", async () => {
@@ -410,8 +494,9 @@ describe("a server that uses OAuth", () => {
   });
 
   // #1051-T01
-  it("tests the server once when the browser comes back from the consent page, and shows what the round trip said", async () => {
+  it("tests the server once when the browser comes back from the consent page, shows what the round trip said, and takes the result out of the address so a reload does not test again", async () => {
     const tested: string[] = [];
+    const clearRoundTrip = vi.fn();
     show(
       fakeApi([CONNECTED], {
         test: async (id) => {
@@ -427,7 +512,7 @@ describe("a server that uses OAuth", () => {
         },
       }).api,
       true,
-      { roundTrip: { code: "connected", serverId: "s10" } },
+      { roundTrip: { code: "connected", serverId: "s10" }, clearRoundTrip },
     );
 
     expect(
@@ -436,6 +521,17 @@ describe("a server that uses OAuth", () => {
       ),
     ).toBeTruthy();
     await waitFor(() => expect(tested).toEqual(["s10"]));
+    expect(clearRoundTrip).toHaveBeenCalledTimes(1);
+  });
+
+  // #1051-T03
+  it("leaves the address alone when there was no round trip", async () => {
+    const clearRoundTrip = vi.fn();
+    show(fakeApi([OAUTH]).api, true, { clearRoundTrip });
+
+    await screen.findByRole("heading", { name: "Notion" });
+
+    expect(clearRoundTrip).not.toHaveBeenCalled();
   });
 
   // #1051-T03

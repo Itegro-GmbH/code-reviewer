@@ -88,6 +88,9 @@ export function ServerDialog({
   );
   // An OAuth client entered by hand; its secret is write-only like a header value.
   const [clientId, setClientId] = useState(server?.oauth?.clientId ?? "");
+  const [clientIssuer, setClientIssuer] = useState(
+    server?.oauth?.clientIssuer ?? "",
+  );
   const [clientSecret, setClientSecret] = useState("");
   const [counter, setCounter] = useState(server?.headers.length ?? 1);
   const [rows, setRows] = useState<Row[]>(
@@ -112,10 +115,11 @@ export function ServerDialog({
   const isStored = (row: Row) =>
     row.storedAs !== null && row.storedAs === row.name;
   const keepable = (row: Row) => isStored(row) && !reachChanged;
-  /** A stored client secret stays only for the same address, transport and client id. */
+  /** A stored client secret stays only for the same address, transport, client id and issuer. */
   const secretStored =
     server?.oauth?.hasClientSecret === true &&
-    server.oauth.clientId === clientId.trim();
+    server.oauth.clientId === clientId.trim() &&
+    server.oauth.clientIssuer === clientIssuer.trim();
   const secretKeepable = secretStored && !reachChanged;
   const errorAt = (field: string) =>
     failure?.field === field ? failure.text : undefined;
@@ -167,6 +171,7 @@ export function ServerDialog({
             ? {
                 kind: "oauth",
                 clientId: clientId.trim(),
+                issuer: clientIssuer.trim(),
                 clientSecret,
                 ...(clientSecret === "" && secretKeepable
                   ? { keepClientSecret: true }
@@ -324,6 +329,22 @@ export function ServerDialog({
                   autoComplete="off"
                   spellCheck={false}
                 />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor={`${ids}-cissuer`}>
+                  {PAGE_COPY.oauthClientIssuerLabel}
+                </FieldLabel>
+                <Input
+                  id={`${ids}-cissuer`}
+                  value={clientIssuer}
+                  onChange={(event) => setClientIssuer(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="https://auth.example.com"
+                />
+                <p className="text-sm text-muted-foreground">
+                  {PAGE_COPY.oauthClientIssuerHint}
+                </p>
               </Field>
               <Field>
                 <FieldLabel htmlFor={`${ids}-csecret`}>

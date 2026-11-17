@@ -293,11 +293,14 @@ function manualClient(
   appSecret: string,
   serverId: string,
   clientId: string,
+  issuer: string,
   secret: string | null,
 ): McpOAuthClient {
   return {
     source: "manual",
     clientId,
+    // The client is for this authorization server only; Connect refuses a discovery that names another one.
+    registeredIssuer: issuer,
     authMethod: secret === null ? "none" : "client_secret_basic",
     sealedSecret:
       secret === null
@@ -308,8 +311,8 @@ function manualClient(
 
 /**
  * The change an edit makes to a server that uses OAuth. What was issued to the old address, transport or client goes (`drop`): the tokens are
- * for ONE resource and ONE client, so an edit cannot point a stored grant at another place. A kept client secret is for the same address and
- * the same client id only.
+ * for ONE resource and ONE client, so an edit cannot point a stored grant at another place. A kept client secret is for the same address, the
+ * same client id and the same issuer only.
  */
 function planOAuthUpdate(
   appSecret: string,
@@ -344,6 +347,7 @@ function planOAuthUpdate(
     if (
       sameClient === null ||
       sameClient.clientId !== client.clientId ||
+      sameClient.registeredIssuer !== client.issuer ||
       !sameClient.hasClientSecret
     )
       return { refused: "mcp_oauth_secret_required" };
@@ -353,13 +357,20 @@ function planOAuthUpdate(
   if (
     sameClient !== null &&
     sameClient.clientId === client.clientId &&
+    sameClient.registeredIssuer === client.issuer &&
     secret === null &&
     !sameClient.hasClientSecret
   )
     return change();
   return change({
     kind: "replace-manual",
-    client: manualClient(appSecret, serverId, client.clientId, secret),
+    client: manualClient(
+      appSecret,
+      serverId,
+      client.clientId,
+      client.issuer,
+      secret,
+    ),
   });
 }
 
@@ -483,6 +494,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
                   appSecret,
                   id,
                   auth.client.clientId,
+                  auth.client.issuer,
                   // `keep` is refused on a new server (`allowKeep: false`).
                   auth.client.secret !== null && "value" in auth.client.secret
                     ? auth.client.secret.value

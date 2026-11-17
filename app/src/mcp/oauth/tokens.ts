@@ -13,7 +13,10 @@
 //    open because it has another `APP_SECRET`) changes nothing: `mcp_oauth_unavailable`, and the operator's log says why. One wrong setting
 //    must not break a connection for good.
 // A broken connection, and a connection that was made for another address than the server has now, make no call at all. The tokens were issued
-// for ONE resource: they are never sent anywhere else.
+// for ONE resource: they are never sent anywhere else. Nor to another authorization server or as another client: the sealed pair records the
+// issuer, the token endpoint and the client id of the grant, and a row whose discovery or client says otherwise makes no call.
+// The access token is renewed `min(5 minutes, half its lifetime)` before it ends, so a token that lives only a few minutes is not renewed on
+// every use.
 // Nothing here logs a token or a secret; the logs hold a code and the server id.
 import "server-only";
 import { decryptSecret, encryptSecret } from "../../crypto/secret-box.ts";
@@ -28,14 +31,32 @@ import type { OAuthHttp } from "./endpoint-http.ts";
 import type { McpOAuthBrokenCode, McpOAuthUseCode } from "./errors.ts";
 import { refreshGrant, type OAuthClientAuth } from "./token-endpoint.ts";
 
-/** The access token is renewed when it ends within this long: a call never starts with a token about to run out. */
+/** The access token is renewed when it ends within this long (or within half its lifetime, when that is shorter): a call never starts with a token about to run out. */
 export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/** The margin of a token that lives `lifetimeMs`: a short-lived token is not renewed on every use. */
+export function refreshMarginMs(lifetimeMs: number): number {
+  return Math.min(REFRESH_MARGIN_MS, lifetimeMs / 2);
+}
 
 const TABLE = "mcp_oauth_connections";
 const TOKENS = "tokens";
 const CLIENT = "client";
 
-type Pair = { accessToken: string; refreshToken: string | null };
+/** What a grant was made with: the sealed pair carries it, so tokens are only ever used with the authorization server and client that issued them. */
+export type GrantBinding = {
+  issuer: string;
+  tokenEndpoint: string;
+  clientId: string;
+};
+
+export type OAuthPair = {
+  accessToken: string;
+  refreshToken: string | null;
+  /** How long the access token lives, as the authorization server said when it issued it. */
+  lifetimeMs: number;
+  grant: GrantBinding;
+};
 
 const blob = (sealed: {
   ciphertext: string;
@@ -51,7 +72,7 @@ const blob = (sealed: {
 export function sealOAuthTokens(
   appSecret: string,
   serverId: string,
-  pair: Pair,
+  pair: OAuthPair,
 ): SealedBlob {
   return blob(
     encryptSecret(
@@ -97,7 +118,7 @@ function openPair(
   appSecret: string,
   serverId: string,
   sealed: SealedBlob,
-): Pair | null {
+): OAuthPair | null {
   try {
     const value: unknown = JSON.parse(
       decryptSecret(
@@ -112,11 +133,28 @@ function openPair(
       "accessToken" in value &&
       typeof value.accessToken === "string" &&
       "refreshToken" in value &&
-      (value.refreshToken === null || typeof value.refreshToken === "string")
+      (value.refreshToken === null || typeof value.refreshToken === "string") &&
+      "lifetimeMs" in value &&
+      typeof value.lifetimeMs === "number" &&
+      "grant" in value &&
+      typeof value.grant === "object" &&
+      value.grant !== null &&
+      "issuer" in value.grant &&
+      typeof value.grant.issuer === "string" &&
+      "tokenEndpoint" in value.grant &&
+      typeof value.grant.tokenEndpoint === "string" &&
+      "clientId" in value.grant &&
+      typeof value.grant.clientId === "string"
     )
       return {
         accessToken: value.accessToken,
         refreshToken: value.refreshToken,
+        lifetimeMs: value.lifetimeMs,
+        grant: {
+          issuer: value.grant.issuer,
+          tokenEndpoint: value.grant.tokenEndpoint,
+          clientId: value.grant.clientId,
+        },
       };
     return null;
   } catch {
@@ -161,10 +199,10 @@ export function createMcpOAuthTokens({
   log = (line) => console.error(line),
 }: McpOAuthTokensOptions): McpOAuthTokens {
   type Current =
-    { ok: true; pair: Pair } | Extract<UseOAuthTokenResult, { ok: false }>;
+    { ok: true; pair: OAuthPair } | Extract<UseOAuthTokenResult, { ok: false }>;
   type Checked =
     | { kind: "done"; result: Current }
-    | { kind: "renew"; secrets: McpOAuthSecrets; pair: Pair };
+    | { kind: "renew"; secrets: McpOAuthSecrets; pair: OAuthPair };
 
   function check(
     read: McpOAuthSecrets | undefined,
@@ -203,9 +241,18 @@ export function createMcpOAuthTokens({
       );
       return done({ ok: false, error: "mcp_oauth_unavailable" });
     }
+    // The grant is for the authorization server and the client its pair says; a row that now names others sends nothing anywhere.
+    if (
+      oauth.discovery.issuer !== pair.grant.issuer ||
+      oauth.discovery.tokenEndpoint !== pair.grant.tokenEndpoint ||
+      oauth.clientId !== pair.grant.clientId
+    ) {
+      log(`[mcp] MCP_OAUTH_GRANT_MISMATCH: server ${serverId}.`);
+      return done({ ok: false, error: "mcp_oauth_not_connected" });
+    }
     const ends = Date.parse(oauth.accessExpiresAt ?? "") - now().getTime();
     const mustRenew =
-      !(ends > REFRESH_MARGIN_MS) ||
+      !(ends > refreshMarginMs(pair.lifetimeMs)) ||
       (rejected !== null && pair.accessToken === rejected);
     return mustRenew
       ? { kind: "renew", secrets: read, pair }
@@ -269,9 +316,11 @@ export function createMcpOAuthTokens({
         return { ok: false, error: "mcp_oauth_unavailable" } as const;
       }
       // A refresh token may rotate; an answer without one keeps the one that was sent.
-      const renewed: Pair = {
+      const renewed: OAuthPair = {
         accessToken: result.grant.accessToken,
         refreshToken: result.grant.refreshToken ?? pair.refreshToken,
+        lifetimeMs: result.grant.expiresInSeconds * 1000,
+        grant: pair.grant,
       };
       const stored = await writes.replaceTokens(
         secrets.tokenVersion,

@@ -5,17 +5,19 @@
 // It holds, in three groups:
 //
 // - what discovery found (`discovery`, JSON, nothing secret): the resource, the authorization server's issuer and endpoints (RFC 9728, RFC 8414),
-//   the scopes to ask for. Kept so the callback uses the endpoints the person was sent to, never a second discovery;
+//   the scopes to ask for. Written together with the tokens of the flow that produced them (a started flow keeps its own in its state), so
+//   the row's discovery is always the grant's;
 // - the OAuth client: either entered by an Owner or Admin (`client_source = 'manual'`, the fallback when the authorization server has no dynamic
 //   registration) or registered by this server (`'dynamic'`, RFC 7591; `registered_issuer` and `registered_redirect_uri` say what it was
-//   registered for, so another issuer or callback registers again). A client secret, when there is one, is sealed in the three `client_secret_*`
+//   registered for, so another issuer or callback registers again). For an entered client `registered_issuer` is the authorization server
+//   it was entered for: its secret is sent to no other. A client secret, when there is one, is sealed in the three `client_secret_*`
 //   columns;
 // - the token pair, ONE sealed JSON text (AES-256-GCM, `src/crypto/secret-box.ts`; the table, the row id = the server id and the field `tokens`
 //   are bound into the ciphertext), replaced in one statement. `token_version` counts the writes of the pair: a refresh only replaces the
 //   version it read (compare and swap), so two refreshes cannot overwrite each other. `access_expires_at` is not secret and lets the code decide
 //   whether a refresh is due without opening the seal.
 //
-// `status` is `unconnected` (a row for the client or the discovery only: no tokens yet), `connected` or `broken` (the authorization server
+// `status` is `unconnected` (a row for an entered client only: no tokens yet), `connected` or `broken` (the authorization server
 // refused the refresh token: mended by connecting again; the old pair stays in the row until then). The constraints make the groups agree.
 // A row exists only for a server with the kind `oauth`; the registry deletes it when the address, the transport or the kind changes (the
 // tokens were issued for another resource).

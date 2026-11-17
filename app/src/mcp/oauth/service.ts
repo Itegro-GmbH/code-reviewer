@@ -3,17 +3,20 @@
 // "Connect" of an MCP server of the kind `oauth` (#1051, epic #1049): the authorization code flow with PKCE of the MCP authorization specification.
 //
 // 1. `startConnect` (an Owner or Admin): discovery (`discovery.ts`), the OAuth client (one an Owner or Admin entered, or the one registered
-//    dynamically the first time, `registration.ts`), what was found and the client kept in the connection's row, a signed state (`mcp-connect`: the
-//    workspace, the person, a single-use nonce, 10 minutes, bound to the browser session; it keeps the PKCE verifier and names the server and its
-//    REVISION) and the address of the consent page.
+//    dynamically the first time, `registration.ts`), a signed state (`mcp-connect`: the workspace, the person, a single-use nonce, 10 minutes,
+//    bound to the browser session; it keeps the PKCE verifier, names the server and its REVISION and carries what discovery found and the
+//    client, `flow.ts`) and the address of the consent page, with the host of the authorization server and the scopes for the page to confirm.
+//    The row is not written: an abandoned or a second flow changes nothing about a connection that works.
 // 2. The authorization server sends the browser to `<public URL>/api/mcp/oauth/callback?code&state`. `completeCallback` uses the state up first
 //    (a wrong, used, expired or foreign state refuses at once and nothing is exchanged), checks the person is still an Owner or Admin, that the
 //    server is still at the revision the flow started for (an edit in between ends the flow: the address may be another one now), that `iss`
-//    (RFC 9207) is the issuer that was discovered, exchanges the code with the verifier and the `resource`, and seals the pair.
+//    (RFC 9207) is the issuer that was discovered, exchanges the code with the verifier and the `resource`, and seals the pair. The rate limit
+//    is hit before the state is used up, so a person who has to wait keeps a state that works.
 //
 // Tokens are sealed in the connection's row (`tokens.ts`) and never leave the server: no answer, page, state, log line or error holds one. A
-// state never carries an address; where the browser lands is a fixed page (`http.ts`). The endpoints the callback uses are the ones kept at the
-// start, so a second discovery cannot move the flow somewhere else.
+// state never carries an address of its own making; where the browser lands is a fixed page (`http.ts`). The endpoints and the client the callback
+// uses are the ones of THIS flow's state, so neither a second discovery nor a second flow can move it somewhere else; discovery, client and
+// tokens reach the row together, in one statement (`saveConnection`).
 import "server-only";
 import type { Kysely } from "kysely";
 import { createMcpOAuthRepository } from "../../db/repositories/mcp-oauth-repository.ts";
@@ -27,6 +30,8 @@ import { can } from "../../workspaces/permissions.ts";
 import { buildAuthorizationUrl } from "./authorization-url.ts";
 import { mcpOAuthCallbackUrl } from "./callback-url.ts";
 import { discoverOAuth } from "./discovery.ts";
+import { flowData, readFlow } from "./flow.ts";
+import { issuerHost } from "./issuer.ts";
 import type { OAuthHttp } from "./endpoint-http.ts";
 import type { McpOAuthFailureCode, McpOAuthResultCode } from "./errors.ts";
 import { createPkce } from "./pkce.ts";
@@ -50,7 +55,14 @@ export type StartConnectFailure =
   | "unavailable";
 
 export type StartConnectResult =
-  | { ok: true; url: string }
+  | {
+      ok: true;
+      url: string;
+      /** The host of the authorization server the browser is sent to: the page shows it before it goes. */
+      issuerHost: string;
+      /** The scopes the consent page will be asked for. */
+      scopes: string[];
+    }
   | { ok: false; error: StartConnectFailure; retryAfterSeconds?: number };
 
 export type McpOAuthCallbackResult = {
@@ -88,10 +100,6 @@ export type McpOAuthServiceOptions = {
   now?: () => Date;
   log?: (line: string) => void;
 };
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const CODE_MAX_LENGTH = 2048;
 
@@ -163,13 +171,21 @@ export function createMcpOAuthService({
       if (!found.ok) return { ok: false, error: found.code };
       const { discovery } = found;
 
-      // The client: the one an Owner or Admin entered, else the one registered for this issuer and callback, else a new registration.
-      const rows = connections(workspaceId);
-      const existing = await rows.readSecrets(serverId);
-      let client: McpOAuthClient | undefined;
-      let auth: OAuthClientAuth;
+      // The client: the one an Owner or Admin entered (for ONE authorization server), else the one registered for this issuer and callback, else
+      // a new registration. Nothing is written for the start: the row keeps discovery and client only with the tokens of a finished flow, and
+      // this flow carries its own in its state.
+      const existing = await connections(workspaceId).readSecrets(serverId);
       const stored = existing?.oauth;
+      let client: McpOAuthClient | undefined;
+      let auth: OAuthClientAuth | undefined;
+      const unreadable = () =>
+        log(
+          `[mcp] MCP_OAUTH_CLIENT_UNREADABLE: check APP_SECRET (server ${serverId}).`,
+        );
       if (stored?.clientSource === "manual" && stored.clientId !== null) {
+        // The secret goes to the authorization server it was entered for and to no other.
+        if (stored.registeredIssuer !== discovery.issuer)
+          return { ok: false, error: "mcp_oauth_issuer_mismatch" };
         let secret: string | null = null;
         if (existing?.clientSecret != null) {
           secret = openOAuthClientSecret(
@@ -178,9 +194,7 @@ export function createMcpOAuthService({
             existing.clientSecret,
           );
           if (secret === null) {
-            log(
-              `[mcp] MCP_OAUTH_CLIENT_UNREADABLE: check APP_SECRET (server ${serverId}).`,
-            );
+            unreadable();
             return { ok: false, error: "unavailable" };
           }
         }
@@ -198,6 +212,10 @@ export function createMcpOAuthService({
           clientId: stored.clientId,
           authMethod: method,
           sealedSecret: existing?.clientSecret ?? null,
+          registeredIssuer: stored.registeredIssuer,
+          ...(stored.registeredRedirectUri === null
+            ? {}
+            : { registeredRedirectUri: stored.registeredRedirectUri }),
         };
       } else if (
         stored?.clientSource === "dynamic" &&
@@ -207,25 +225,35 @@ export function createMcpOAuthService({
         stored.registeredRedirectUri === redirectUri
       ) {
         let secret: string | null = null;
+        let readable = true;
         if (existing?.clientSecret != null) {
           secret = openOAuthClientSecret(
             appSecret,
             serverId,
             existing.clientSecret,
           );
-          if (secret === null) {
-            log(
-              `[mcp] MCP_OAUTH_CLIENT_UNREADABLE: check APP_SECRET (server ${serverId}).`,
-            );
-            return { ok: false, error: "unavailable" };
-          }
+          readable = secret !== null;
         }
-        auth = {
-          clientId: stored.clientId,
-          clientSecret: secret,
-          method: stored.clientAuthMethod,
-        };
-      } else {
+        if (readable) {
+          auth = {
+            clientId: stored.clientId,
+            clientSecret: secret,
+            method: stored.clientAuthMethod,
+          };
+          client = {
+            source: "dynamic",
+            clientId: stored.clientId,
+            authMethod: stored.clientAuthMethod,
+            sealedSecret: existing?.clientSecret ?? null,
+            registeredIssuer: stored.registeredIssuer,
+            registeredRedirectUri: stored.registeredRedirectUri,
+          };
+        } else {
+          // A registration this process cannot open (another APP_SECRET) is worth nothing: register again instead of blocking Connect for good.
+          unreadable();
+        }
+      }
+      if (client === undefined || auth === undefined) {
         const registered = await registerClient(
           discovery,
           { redirectUri, clientName },
@@ -254,12 +282,6 @@ export function createMcpOAuthService({
         };
       }
 
-      const kept = await rows.saveStart(serverId, server.revision, {
-        discovery,
-        ...(client === undefined ? {} : { client }),
-      });
-      if (!kept) return { ok: false, error: "mcp_server_changed" };
-
       const pkce = createPkce();
       const state = await signedStates.issue({
         purpose: "mcp-connect",
@@ -267,10 +289,17 @@ export function createMcpOAuthService({
         sessionId: actor.sessionId,
         workspaceId,
         codeVerifier: pkce.verifier,
-        data: { serverId, revision: server.revision },
+        data: flowData({
+          serverId,
+          revision: server.revision,
+          discovery,
+          client,
+        }),
       });
       return {
         ok: true,
+        issuerHost: issuerHost(discovery.issuer),
+        scopes: discovery.scopes,
         url: buildAuthorizationUrl(discovery, {
           clientId: auth.clientId,
           redirectUri,
@@ -283,27 +312,37 @@ export function createMcpOAuthService({
     async completeCallback(actor, query) {
       if (typeof query.state !== "string" || query.state === "")
         return done(null, null, "state_invalid");
-      // The state is used up first: a forged, used, expired or foreign one ends here, before anything is asked of the authorization server.
-      const consumed = await signedStates.consume({
+      const presented = {
         purpose: "mcp-connect",
         value: query.state,
         userId: actor.id,
         sessionId: actor.sessionId,
-      });
+      } as const;
+      // The state is looked at without using it up, then the rate limit is hit, then the state is used up: a person who is told to wait still
+      // has a state that works. A forged, used, expired or foreign state ends here, before anything is asked of the authorization server.
+      const peeked = await signedStates.peek(presented);
+      const peekedFlow = peeked.ok ? readFlow(peeked.data) : null;
+      if (!peeked.ok || peeked.workspaceId === null || peekedFlow === null)
+        return done(null, null, "state_invalid");
+      const limit = await hitMcpOAuthLimit(
+        rateLimits,
+        "callback",
+        actor.id,
+        now(),
+      );
+      if (!limit.allowed)
+        return done(peeked.workspaceId, peekedFlow.serverId, "rate_limited");
+      const consumed = await signedStates.consume(presented);
+      const flow = consumed.ok ? readFlow(consumed.data) : null;
       if (
         !consumed.ok ||
         consumed.workspaceId === null ||
         consumed.codeVerifier === null ||
-        !isObject(consumed.data) ||
-        typeof consumed.data.serverId !== "string" ||
-        typeof consumed.data.revision !== "number"
+        flow === null
       )
         return done(null, null, "state_invalid");
       const { workspaceId, codeVerifier } = consumed;
-      const { serverId, revision } = consumed.data as {
-        serverId: string;
-        revision: number;
-      };
+      const { serverId, revision, discovery, client } = flow;
       if (!(await administers(actor.id, workspaceId)))
         return done(null, null, "workspace_role_required");
       const server = await servers(workspaceId).get(serverId);
@@ -326,18 +365,6 @@ export function createMcpOAuthService({
         query.code.length > CODE_MAX_LENGTH
       )
         return fail("mcp_oauth_authorization_refused");
-      const rows = connections(workspaceId);
-      const secrets = await rows.readSecrets(serverId);
-      const discovery = secrets?.oauth.discovery ?? null;
-      const clientId = secrets?.oauth.clientId ?? null;
-      const method = secrets?.oauth.clientAuthMethod ?? null;
-      if (
-        secrets === undefined ||
-        discovery === null ||
-        clientId === null ||
-        method === null
-      )
-        return fail("mcp_server_changed");
       // RFC 9207: an authorization server that says it sends `iss` must, and the one it sends is the issuer that was discovered, so a
       // response from another authorization server (a mix-up) is not accepted. A wrong `iss` is refused whether it was announced or not.
       const iss = query.iss;
@@ -348,20 +375,14 @@ export function createMcpOAuthService({
             iss.replace(/\/+$/, "") !== discovery.issuer))
       )
         return fail("mcp_oauth_authorization_refused");
-      const limit = await hitMcpOAuthLimit(
-        rateLimits,
-        "callback",
-        actor.id,
-        now(),
-      );
-      if (!limit.allowed) return fail("rate_limited");
 
+      // The endpoints and the client are the ones this flow was started with (its state), never what the row holds now.
       let clientSecret: string | null = null;
-      if (secrets.clientSecret !== null) {
+      if (client.sealedSecret !== null) {
         clientSecret = openOAuthClientSecret(
           appSecret,
           serverId,
-          secrets.clientSecret,
+          client.sealedSecret,
         );
         if (clientSecret === null) {
           log(
@@ -372,7 +393,11 @@ export function createMcpOAuthService({
       }
       const token = await exchangeCode(
         discovery,
-        { clientId, clientSecret, method },
+        {
+          clientId: client.clientId,
+          clientSecret,
+          method: client.authMethod,
+        },
         { code: query.code, redirectUri, verifier: codeVerifier },
         http,
       );
@@ -392,17 +417,29 @@ export function createMcpOAuthService({
         );
       }
       const { grant } = token;
-      const saved = await rows.saveConnection(serverId, revision, {
-        sealedTokens: sealOAuthTokens(appSecret, serverId, {
-          accessToken: grant.accessToken,
-          refreshToken: grant.refreshToken,
-        }),
-        accessExpiresAt: new Date(
-          now().getTime() + grant.expiresInSeconds * 1000,
-        ),
-        scopes: grant.scopes ?? discovery.scopes,
-        connectedBy: actor.id,
-      });
+      const saved = await connections(workspaceId).saveConnection(
+        serverId,
+        revision,
+        {
+          discovery,
+          client,
+          sealedTokens: sealOAuthTokens(appSecret, serverId, {
+            accessToken: grant.accessToken,
+            refreshToken: grant.refreshToken,
+            lifetimeMs: grant.expiresInSeconds * 1000,
+            grant: {
+              issuer: discovery.issuer,
+              tokenEndpoint: discovery.tokenEndpoint,
+              clientId: client.clientId,
+            },
+          }),
+          accessExpiresAt: new Date(
+            now().getTime() + grant.expiresInSeconds * 1000,
+          ),
+          scopes: grant.scopes ?? discovery.scopes,
+          connectedBy: actor.id,
+        },
+      );
       return saved
         ? done(workspaceId, serverId, "connected")
         : fail("mcp_server_changed");

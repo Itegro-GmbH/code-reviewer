@@ -690,7 +690,7 @@ async function seed(
     },
     50,
   );
-  await repos.mcpOAuth.saveStart(`mcp-oauth-${tag}`, 1, {
+  await repos.mcpOAuth.saveConnection(`mcp-oauth-${tag}`, 1, {
     discovery: {
       resource: `https://mcp-oauth.example.com/${tag}`,
       issuer: "https://as.example.com",
@@ -701,8 +701,17 @@ async function seed(
       issParameter: false,
       authMethods: ["client_secret_basic"],
     },
-  });
-  await repos.mcpOAuth.saveConnection(`mcp-oauth-${tag}`, 1, {
+    client: {
+      source: "manual",
+      clientId: `client-${tag}`,
+      authMethod: "client_secret_basic",
+      sealedSecret: {
+        ciphertext: `cs-${tag}`,
+        nonce: `ns-${tag}`,
+        keyVersion: 1,
+      },
+      registeredIssuer: "https://as.example.com",
+    },
     sealedTokens: {
       ciphertext: `ct-${tag}`,
       nonce: `nt-${tag}`,
@@ -3132,9 +3141,9 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
-    name: "mcpOAuth.saveStart",
+    name: "mcpOAuth.saveConnection",
     run: (a, b) =>
-      a.mcpOAuth.saveStart(b.mcpOAuthServerId, 1, {
+      a.mcpOAuth.saveConnection(b.mcpOAuthServerId, 1, {
         discovery: {
           resource: "https://evil.example.com/mcp",
           issuer: "https://evil.example.com",
@@ -3145,13 +3154,12 @@ const CASES: Case[] = [
           issParameter: false,
           authMethods: [],
         },
-      }),
-    expectAnswer: (answer) => expect(answer).toBe(false),
-  },
-  {
-    name: "mcpOAuth.saveConnection",
-    run: (a, b) =>
-      a.mcpOAuth.saveConnection(b.mcpOAuthServerId, 1, {
+        client: {
+          source: "manual",
+          clientId: "evil",
+          authMethod: "none",
+          sealedSecret: null,
+        },
         sealedTokens: { ciphertext: "x", nonce: "y", keyVersion: 1 },
         accessExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
         scopes: [],

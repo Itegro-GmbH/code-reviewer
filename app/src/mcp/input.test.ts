@@ -84,12 +84,31 @@ describe("the form of an MCP server", () => {
       ok: true,
       value: { auth: { kind: "oauth", client: null } },
     });
-    expect(parse({ kind: "oauth", clientId: "c-1" })).toMatchObject({
+    expect(
+      parse({
+        kind: "oauth",
+        clientId: "c-1",
+        issuer: "https://auth.example.com/",
+      }),
+    ).toMatchObject({
       ok: true,
-      value: { auth: { client: { clientId: "c-1", secret: null } } },
+      value: {
+        auth: {
+          client: {
+            clientId: "c-1",
+            issuer: "https://auth.example.com",
+            secret: null,
+          },
+        },
+      },
     });
     expect(
-      parse({ kind: "oauth", clientId: "c-1", clientSecret: "s3cret" }),
+      parse({
+        kind: "oauth",
+        clientId: "c-1",
+        issuer: "https://auth.example.com/",
+        clientSecret: "s3cret",
+      }),
     ).toMatchObject({
       ok: true,
       value: {
@@ -97,7 +116,15 @@ describe("the form of an MCP server", () => {
       },
     });
     expect(
-      parse({ kind: "oauth", clientId: "c-1", keepClientSecret: true }, true),
+      parse(
+        {
+          kind: "oauth",
+          clientId: "c-1",
+          issuer: "https://auth.example.com/",
+          keepClientSecret: true,
+        },
+        true,
+      ),
     ).toMatchObject({
       ok: true,
       value: { auth: { client: { secret: { keep: true } } } },
@@ -121,32 +148,90 @@ describe("the form of an MCP server", () => {
     expect(code({ kind: "oauth", clientSecret: "s" })).toBe(
       "mcp_oauth_client_invalid",
     );
-    expect(code({ kind: "oauth", clientId: "a b" })).toBe(
+    const issuer = "https://auth.example.com";
+    expect(code({ kind: "oauth", clientId: "a b", issuer })).toBe(
       "mcp_oauth_client_invalid",
     );
-    expect(code({ kind: "oauth", clientId: "x".repeat(513) })).toBe(
+    expect(code({ kind: "oauth", clientId: "x".repeat(513), issuer })).toBe(
       "mcp_oauth_client_invalid",
     );
-    expect(code({ kind: "oauth", clientId: 7 })).toBe(
+    expect(code({ kind: "oauth", clientId: 7, issuer })).toBe(
       "mcp_oauth_client_invalid",
     );
     expect(
-      code({ kind: "oauth", clientId: "c", clientSecret: "line\nbreak" }),
+      code({
+        kind: "oauth",
+        clientId: "c",
+        issuer,
+        clientSecret: "line\nbreak",
+      }),
     ).toBe("mcp_oauth_client_invalid");
-    expect(code({ kind: "oauth", clientId: "c", keepClientSecret: true })).toBe(
-      "mcp_oauth_client_invalid",
-    );
+    expect(
+      code({ kind: "oauth", clientId: "c", issuer, keepClientSecret: true }),
+    ).toBe("mcp_oauth_client_invalid");
     expect(
       code(
         {
           kind: "oauth",
           clientId: "c",
+          issuer,
           clientSecret: "s",
           keepClientSecret: true,
         },
         true,
       ),
     ).toBe("mcp_oauth_client_invalid");
+    // An issuer without a client is a form that contradicts itself.
+    expect(code({ kind: "oauth", issuer })).toBe("mcp_oauth_client_invalid");
+  });
+
+  // #1051-T01
+  it("requires the issuer of an OAuth client an Owner entered: https, no credentials, query or fragment", () => {
+    const code = (auth: unknown, allowTestEndpoints = false) => {
+      const result = parseMcpServerInput(
+        {
+          name: "Linear",
+          transport: "streamable-http",
+          url: "https://mcp.example.com/mcp",
+          auth,
+        },
+        { allowKeep: false, allowTestEndpoints },
+      );
+      return result.ok ? "ok" : result.code;
+    };
+    const client = { kind: "oauth", clientId: "c", clientSecret: "s" };
+
+    expect(code(client)).toBe("mcp_oauth_issuer_invalid");
+    expect(code({ ...client, issuer: "not a url" })).toBe(
+      "mcp_oauth_issuer_invalid",
+    );
+    for (const issuer of [
+      "http://auth.example.com",
+      "https://user:pw@auth.example.com",
+      "https://auth.example.com?x=1",
+      "https://auth.example.com#frag",
+      "ftp://auth.example.com",
+    ])
+      expect(code({ ...client, issuer })).toBe("mcp_oauth_issuer_invalid");
+    expect(code({ ...client, issuer: 7 })).toBe("mcp_oauth_issuer_invalid");
+    // Plain http only for the test flag.
+    expect(code({ ...client, issuer: "http://127.0.0.1:9" }, true)).toBe("ok");
+    // The issuer is kept in the form discovery gives (no trailing slash, path kept).
+    const parsed = parseMcpServerInput(
+      {
+        name: "Linear",
+        transport: "streamable-http",
+        url: "https://mcp.example.com/mcp",
+        auth: { ...client, issuer: " https://Auth.Example.com/tenant/ " },
+      },
+      { allowKeep: false, allowTestEndpoints: false },
+    );
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: {
+        auth: { client: { issuer: "https://auth.example.com/tenant" } },
+      },
+    });
   });
 
   it("refuses headers that are missing, too many, duplicated, forbidden or malformed", () => {

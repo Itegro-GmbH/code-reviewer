@@ -17,6 +17,8 @@ export type McpOAuthView = {
   clientSource: McpOAuthClientSource | null;
   /** The id of a client an Owner or Admin entered (it is not a secret); null otherwise. */
   clientId: string | null;
+  /** The authorization server an entered client is pinned to (an issuer address, not a secret); null otherwise. */
+  clientIssuer: string | null;
   /** Whether a client secret is stored (its value never leaves the server). */
   hasClientSecret: boolean;
   /** The scopes the authorization server granted. */
@@ -32,6 +34,7 @@ export function toOAuthView(stored: StoredMcpOAuth | undefined): McpOAuthView {
       errorCode: null,
       clientSource: null,
       clientId: null,
+      clientIssuer: null,
       hasClientSecret: false,
       scopes: [],
       connectedAt: null,
@@ -41,6 +44,8 @@ export function toOAuthView(stored: StoredMcpOAuth | undefined): McpOAuthView {
     errorCode: stored.errorCode,
     clientSource: stored.clientSource,
     clientId: stored.clientSource === "manual" ? stored.clientId : null,
+    clientIssuer:
+      stored.clientSource === "manual" ? stored.registeredIssuer : null,
     hasClientSecret: stored.clientSource === "manual" && stored.hasClientSecret,
     scopes: stored.scopes,
     connectedAt: stored.status === "connected" ? stored.updatedAt : null,

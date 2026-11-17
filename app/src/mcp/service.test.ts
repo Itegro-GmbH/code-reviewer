@@ -180,6 +180,7 @@ describe("a change of an MCP server that uses OAuth", () => {
   const manual = {
     clientSource: "manual",
     clientId: "c-1",
+    registeredIssuer: "https://auth.example.com",
     hasClientSecret: true,
   } as const;
 
@@ -208,6 +209,7 @@ describe("a change of an MCP server that uses OAuth", () => {
         current(oauthServer, {
           clientSource: "dynamic",
           clientId: "d",
+          registeredIssuer: "https://as.example.com",
           hasClientSecret: false,
         }),
       ),
@@ -226,6 +228,7 @@ describe("a change of an MCP server that uses OAuth", () => {
     const dynamic = {
       clientSource: "dynamic",
       clientId: "d",
+      registeredIssuer: "https://as.example.com",
       hasClientSecret: false,
     } as const;
 
@@ -238,14 +241,18 @@ describe("a change of an MCP server that uses OAuth", () => {
   });
 
   it("keeps a client secret only for the same address and client id, and replaces the client otherwise", () => {
-    const keep = { clientId: "c-1", keepClientSecret: true };
+    const keep = {
+      clientId: "c-1",
+      issuer: "https://auth.example.com",
+      keepClientSecret: true,
+    };
 
     expect(
       plan(form({}, keep), current(oauthServer, manual)),
     ).not.toHaveProperty("oauth");
     expect(
       plan(
-        form({}, { clientId: "c-2", keepClientSecret: true }),
+        form({}, { ...keep, clientId: "c-2" }),
         current(oauthServer, manual),
       ),
     ).toEqual({
@@ -261,7 +268,14 @@ describe("a change of an MCP server that uses OAuth", () => {
       refused: "mcp_oauth_secret_required",
     });
     const replaced = plan(
-      form({}, { clientId: "c-1", clientSecret: "new-secret" }),
+      form(
+        {},
+        {
+          clientId: "c-1",
+          issuer: "https://auth.example.com",
+          clientSecret: "new-secret",
+        },
+      ),
       current(oauthServer, manual),
     );
     expect(replaced).toMatchObject({
@@ -270,11 +284,50 @@ describe("a change of an MCP server that uses OAuth", () => {
         client: {
           source: "manual",
           clientId: "c-1",
+          registeredIssuer: "https://auth.example.com",
           authMethod: "client_secret_basic",
         },
       },
     });
     // The secret is sealed, never in the change as text.
     expect(JSON.stringify(replaced)).not.toContain("new-secret");
+  });
+
+  // #1051-T01
+  it("pins an entered client to its issuer: a kept secret does not follow the client to another authorization server", () => {
+    const moved = {
+      ...{ clientId: "c-1" },
+      issuer: "https://other.example.com",
+    };
+
+    // The same client id at another issuer: the secret was entered for the first one.
+    expect(
+      plan(
+        form({}, { ...moved, keepClientSecret: true }),
+        current(oauthServer, manual),
+      ),
+    ).toEqual({ refused: "mcp_oauth_secret_required" });
+    // Entering it again replaces the client, and the new client is pinned to the new issuer.
+    expect(
+      plan(
+        form({}, { ...moved, clientSecret: "again" }),
+        current(oauthServer, manual),
+      ),
+    ).toMatchObject({
+      oauth: {
+        kind: "replace-manual",
+        client: {
+          clientId: "c-1",
+          registeredIssuer: "https://other.example.com",
+        },
+      },
+    });
+    // A public client (no secret) at another issuer is a different client too: the old grant goes.
+    expect(
+      plan(
+        form({}, { ...moved }),
+        current(oauthServer, { ...manual, hasClientSecret: false }),
+      ),
+    ).toMatchObject({ oauth: { kind: "replace-manual" } });
   });
 });

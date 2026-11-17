@@ -102,6 +102,8 @@ export type McpFake = {
   sawBearer(token: string): boolean;
   /** Streamable HTTP sessions that are open. */
   openSessions(): number;
+  /** OAuth: from now on the protected-resource metadata names this authorization server (a server that moved to another one). */
+  setAuthorizationServer(issuer: string): void;
   close(): Promise<void>;
 };
 
@@ -418,6 +420,10 @@ export async function startMcpFake(
       ),
     sawBearer: (token) => seenBearers.has(token),
     openSessions: () => sessions.size,
+    setAuthorizationServer(issuer) {
+      if (options.oauth !== undefined)
+        options.oauth = { ...options.oauth, authorizationServer: issuer };
+    },
     async close() {
       for (const response of [...hanging, ...streams.values()])
         response.destroy();

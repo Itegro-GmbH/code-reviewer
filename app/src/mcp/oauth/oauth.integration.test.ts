@@ -5,6 +5,9 @@
 // a refresh the authorization server refuses ends the connection and a wrong client does not; a wrong, used or foreign state is refused; and no
 // token ever leaves the server. The route handlers and services are the real ones.
 import { describe, expect, it } from "vitest";
+import { startOAuthFake } from "../../../../fakes/mcp/oauth.ts";
+import { createRateLimitsRepository } from "../../db/repositories/rate-limits-repository.ts";
+import { cleanUpAfterTest } from "../../test-support/test-database.ts";
 import { createMcpOAuthHarness } from "../../test-support/mcp-oauth-harness.ts";
 import { REFRESH_MARGIN_MS } from "./tokens.ts";
 
@@ -145,6 +148,7 @@ describe("Connect of an MCP server that uses OAuth", () => {
       auth: {
         kind: "oauth",
         clientId: "entered-client",
+        issuer: h.as.issuer,
         clientSecret: "entered-secret",
       },
       revision: server.revision,
@@ -564,5 +568,361 @@ describe("the state of the round trip", () => {
 
     expect(response.headers.get("location")).toBe("/login");
     expect(h.as.requests()).toEqual([]);
+  });
+});
+
+/** What a person pressing "Connect" gets back, without walking on. */
+async function pressConnect(
+  h: Awaited<ReturnType<typeof createMcpOAuthHarness>>,
+  ws: Awaited<ReturnType<typeof createMcpOAuthHarness>>["workspace"] extends (
+    ...args: never[]
+  ) => Promise<infer W>
+    ? W
+    : never,
+  owner: Awaited<ReturnType<typeof h.person>>,
+  serverId: string,
+) {
+  const response = await h
+    .handlers(owner)
+    .connect(
+      new Request("https://factory.example.test/api", { method: "POST" }),
+      h.accessOf(owner, ws, "owner"),
+      serverId,
+    );
+  return {
+    status: response.status,
+    body: (await response.json()) as {
+      url?: string;
+      error?: string;
+      issuerHost?: string;
+      scopes?: string[];
+    },
+  };
+}
+
+/** The row of the connection as the database holds it: what a flow that is not finished must not touch. */
+async function rowOf(
+  h: Awaited<ReturnType<typeof createMcpOAuthHarness>>,
+  serverId: string,
+) {
+  return h.db
+    .selectFrom("mcp_oauth_connections")
+    .selectAll()
+    .where("server_id", "=", serverId)
+    .executeTakeFirstOrThrow();
+}
+
+describe("a Reconnect of a connection that works", () => {
+  // #1051-T01
+  it("leaves the connection untouched when it is abandoned: the next call refreshes against the endpoint and with the client it was made with", async () => {
+    const { h, ws, owner, server, tokens } = await connected({
+      authorizationServer: { accessTokenTtlSeconds: 3600 },
+    });
+    const before = await rowOf(h, server.id);
+    const second = await startOAuthFake({ registeredClient: "confidential" });
+    cleanUpAfterTest(() => second.close());
+    // The MCP server now names another authorization server (it moved); the person presses Reconnect and never comes back.
+    h.mcp.setAuthorizationServer(second.issuer);
+    const started = await pressConnect(h, ws, owner, server.id);
+    expect(started.body.url).toBeTruthy();
+    expect(new URL(started.body.url ?? "").origin).toBe(second.origin);
+
+    expect(await rowOf(h, server.id)).toEqual(before);
+    expect((await h.registry(ws.id).list())[0]?.oauth?.status).toBe(
+      "connected",
+    );
+
+    // The token ends: the refresh goes to the first authorization server, as the first client, and the other one hears nothing of it.
+    h.clock.time += HOUR;
+    const used = await tokens.use(server.id, { serverUrl: h.mcp.url });
+
+    expect(used.ok).toBe(true);
+    expect(
+      h.as.requests().filter((r) => r.grantType === "refresh_token"),
+    ).toHaveLength(1);
+    expect(
+      second.requests().filter((r) => r.grantType === "refresh_token"),
+    ).toEqual([]);
+    expect(second.lastIssued()).toBeNull();
+  });
+
+  // #1051-T01
+  it("does not send the old tokens to a newly discovered token endpoint, and a refused Reconnect does not break the connection", async () => {
+    const { h, ws, owner, server, tokens } = await connected({
+      authorizationServer: { accessTokenTtlSeconds: 3600 },
+    });
+    const second = await startOAuthFake();
+    cleanUpAfterTest(() => second.close());
+    h.mcp.setAuthorizationServer(second.issuer);
+    second.setConsent("deny");
+
+    // The person goes to the new consent page and says no.
+    const walked = await h.walk(owner, ws, "owner", server.id);
+    expect(walked.landing).toContain("mcp=access_denied");
+    h.clock.time += HOUR;
+    const used = await tokens.use(server.id, { serverUrl: h.mcp.url });
+
+    expect(used.ok).toBe(true);
+    expect(second.requests().filter((r) => r.path === "/token")).toEqual([]);
+    expect((await h.registry(ws.id).list())[0]?.oauth?.status).toBe(
+      "connected",
+    );
+  });
+
+  // #1051-T01
+  it("lets two flows that run at once each use their own discovery and client", async () => {
+    const { h, ws, owner, server, tokens } = await connected({
+      authorizationServer: { accessTokenTtlSeconds: 3600 },
+    });
+    const second = await startOAuthFake({ accessTokenTtlSeconds: 3600 });
+    cleanUpAfterTest(() => second.close());
+    const firstRegistrations = h.as.registrations();
+
+    // Flow A starts against the first authorization server and waits at its consent page; meanwhile flow B starts and finishes against
+    // another one (the MCP server's metadata changed). Then A comes back.
+    let flowB: Awaited<ReturnType<typeof h.walk>> | undefined;
+    const flowA = await h.walk(owner, ws, "owner", server.id, {
+      between: async () => {
+        h.mcp.setAuthorizationServer(second.issuer);
+        flowB = await h.walk(owner, ws, "owner", server.id);
+      },
+    });
+
+    expect(flowB?.landing).toContain("mcp=connected");
+    expect(flowA.landing).toContain("mcp=connected");
+    // Each code was exchanged at the token endpoint of the authorization server that issued it, with the client registered there.
+    const exchangeA = h.as
+      .requests()
+      .filter((r) => r.grantType === "authorization_code")
+      .at(-1);
+    const exchangeB = second
+      .requests()
+      .filter((r) => r.grantType === "authorization_code");
+    expect(exchangeB).toHaveLength(1);
+    expect(exchangeA?.clientId).toBeTruthy();
+    expect(exchangeB[0]?.clientId).toBeTruthy();
+    expect(exchangeA?.clientId).not.toBe(exchangeB[0]?.clientId);
+    expect(second.registrations()).toBe(1);
+    expect(h.as.registrations()).toBe(firstRegistrations);
+    // A finished last: the row is A's grant, whole. Its refresh goes to the first authorization server only.
+    const row = await rowOf(h, server.id);
+    expect(row.client_id).toBe(exchangeA?.clientId);
+    expect(row.discovery).toContain(h.as.issuer);
+    h.clock.time += HOUR;
+    const used = await tokens.use(server.id, { serverUrl: h.mcp.url });
+    expect(used.ok).toBe(true);
+    expect(
+      second.requests().filter((r) => r.grantType === "refresh_token"),
+    ).toEqual([]);
+  });
+
+  // #1051-T02
+  it("makes no call with a pair whose grant is for another authorization server, endpoint or client than the row names", async () => {
+    const { h, ws, server, tokens } = await connected();
+    const row = await rowOf(h, server.id);
+    const requestsBefore = h.as.requests().length;
+    await h.db
+      .updateTable("mcp_oauth_connections")
+      .set({
+        discovery: (row.discovery ?? "").replace("/token", "/other-token"),
+      })
+      .where("server_id", "=", server.id)
+      .execute();
+
+    const used = await tokens.use(server.id, { serverUrl: h.mcp.url });
+
+    expect(used).toEqual({ ok: false, error: "mcp_oauth_not_connected" });
+    expect(
+      h.logs.some((line) => line.includes("MCP_OAUTH_GRANT_MISMATCH")),
+    ).toBe(true);
+    expect(h.as.requests()).toHaveLength(requestsBefore);
+    expect(ws.id).toBeTruthy();
+  });
+});
+
+describe("the issuer an entered client is pinned to", () => {
+  const enter = async (
+    h: Awaited<ReturnType<typeof createMcpOAuthHarness>>,
+    ws: Parameters<typeof pressConnect>[1],
+    server: { id: string; revision: number },
+    issuer: string,
+  ) => {
+    h.as.addClient({
+      clientId: "entered-client",
+      clientSecret: "entered-secret",
+    });
+    const edited = await h.registry(ws.id).update(server.id, {
+      name: "Fake OAuth",
+      transport: "streamable-http",
+      url: h.mcp.url,
+      auth: {
+        kind: "oauth",
+        clientId: "entered-client",
+        issuer,
+        clientSecret: "entered-secret",
+      },
+      revision: server.revision,
+    });
+    if (!edited.ok) throw new Error(edited.error);
+  };
+
+  // #1051-T01
+  it("refuses to send the client secret to an authorization server the discovery names but the client was not entered for", async () => {
+    const { h, ws, owner } = await setup({
+      authorizationServer: { registration: false },
+    });
+    const server = await h.addServer(ws, owner);
+    await enter(h, ws, server, "https://auth.elsewhere.example.com");
+
+    const started = await pressConnect(h, ws, owner, server.id);
+
+    expect(started.status).toBe(422);
+    expect(started.body).toEqual({ error: "mcp_oauth_issuer_mismatch" });
+    // Nothing reached the authorization server: no registration, no consent, no token request, no client authentication.
+    expect(h.as.requests().filter((r) => r.clientId !== null)).toEqual([]);
+    expect(h.as.requests().filter((r) => r.path === "/token")).toEqual([]);
+    expect(h.logs.join("\n")).not.toContain("entered-secret");
+  });
+
+  // #1051-T01
+  it("connects when the issuer is the one that was discovered (a trailing slash does not matter), and tells the page where it goes", async () => {
+    const { h, ws, owner } = await setup({
+      scopes: ["issues:read"],
+      authorizationServer: { registration: false },
+    });
+    const server = await h.addServer(ws, owner);
+    await enter(h, ws, server, `${h.as.issuer}/`);
+
+    const started = await pressConnect(h, ws, owner, server.id);
+
+    expect(started.status).toBe(200);
+    expect(started.body).toMatchObject({
+      issuerHost: new URL(h.as.issuer).host,
+      scopes: ["issues:read"],
+    });
+    const walked = await h.walk(owner, ws, "owner", server.id);
+    expect(walked.landing).toContain("mcp=connected");
+  });
+});
+
+describe("the client of a Reconnect", () => {
+  // #1051-T01
+  it("registers a new client when the stored registration cannot be opened (another APP_SECRET), instead of blocking Connect for good", async () => {
+    const { h, ws, owner, server } = await connected({
+      authorizationServer: { registeredClient: "confidential" },
+    });
+    expect(h.as.registrations()).toBe(1);
+    await h.db
+      .updateTable("mcp_oauth_connections")
+      .set({ client_secret_ciphertext: "not-a-ciphertext" })
+      .where("server_id", "=", server.id)
+      .execute();
+
+    const again = await h.walk(owner, ws, "owner", server.id);
+
+    expect(again.landing).toContain("mcp=connected");
+    expect(h.as.registrations()).toBe(2);
+    expect(
+      h.logs.some((line) => line.includes("MCP_OAUTH_CLIENT_UNREADABLE")),
+    ).toBe(true);
+  });
+
+  // #1051-T01
+  it("does not register in place of a client an Owner entered whose secret cannot be opened", async () => {
+    const { h, ws, owner } = await setup({
+      authorizationServer: { registration: false },
+    });
+    const server = await h.addServer(ws, owner);
+    h.as.addClient({
+      clientId: "entered-client",
+      clientSecret: "entered-secret",
+    });
+    const edited = await h.registry(ws.id).update(server.id, {
+      name: "Fake OAuth",
+      transport: "streamable-http",
+      url: h.mcp.url,
+      auth: {
+        kind: "oauth",
+        clientId: "entered-client",
+        issuer: h.as.issuer,
+        clientSecret: "entered-secret",
+      },
+      revision: server.revision,
+    });
+    if (!edited.ok) throw new Error(edited.error);
+    await h.db
+      .updateTable("mcp_oauth_connections")
+      .set({ client_secret_ciphertext: "not-a-ciphertext" })
+      .where("server_id", "=", server.id)
+      .execute();
+
+    const started = await pressConnect(h, ws, owner, server.id);
+
+    expect(started).toMatchObject({
+      status: 503,
+      body: { error: "unavailable" },
+    });
+  });
+});
+
+describe("the margin before an access token ends", () => {
+  // #1051-T02
+  it("is half the lifetime of a short-lived token, so it is not renewed on every use", async () => {
+    const { h, server, tokens } = await connected({
+      authorizationServer: { accessTokenTtlSeconds: 120 },
+    });
+    const refreshes = () =>
+      h.as.requests().filter((r) => r.grantType === "refresh_token").length;
+
+    await tokens.use(server.id, { serverUrl: h.mcp.url });
+    await tokens.use(server.id, { serverUrl: h.mcp.url });
+    expect(refreshes()).toBe(0);
+
+    // 30 s in: 90 s are left, more than the margin of 60 s.
+    h.clock.time += 30 * 1000;
+    await tokens.use(server.id, { serverUrl: h.mcp.url });
+    expect(refreshes()).toBe(0);
+
+    // 61 s in: 59 s are left, within the margin.
+    h.clock.time += 31 * 1000;
+    await tokens.use(server.id, { serverUrl: h.mcp.url });
+    expect(refreshes()).toBe(1);
+  });
+});
+
+describe("the rate limit of the callback", () => {
+  // #1051-T03
+  it("is hit before the state is used up: a person who has to wait keeps a state that works", async () => {
+    const { h, ws, owner, server } = await setup().then(async (parts) => ({
+      ...parts,
+      server: await parts.h.addServer(parts.ws, parts.owner),
+    }));
+    const limits = createRateLimitsRepository(h.db);
+    let replayed = "";
+    const blocked = await h.walk(owner, ws, "owner", server.id, {
+      tamper: (q) => {
+        replayed = q.toString();
+      },
+      between: async () => {
+        for (let index = 0; index < 20; index += 1)
+          await limits.hit(
+            `mcp-oauth-callback:user:${owner.id}`,
+            10 * 60 * 1000,
+          );
+      },
+    });
+    expect(blocked.landing).toContain("mcp=rate_limited");
+    expect(h.as.requests().filter((r) => r.path === "/token")).toEqual([]);
+
+    await h.db.deleteFrom("rate_limits").execute();
+    const retried = await h
+      .handlers(owner)
+      .callback(
+        new Request(
+          `https://factory.example.test/api/mcp/oauth/callback?${replayed}`,
+        ),
+      );
+
+    expect(retried.headers.get("location")).toContain("mcp=connected");
   });
 });

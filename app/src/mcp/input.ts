@@ -5,6 +5,7 @@
 // A header value is never echoed in a result and never part of a code. When a server is edited, a header may be kept without its value
 // (`keep`): the stored, sealed value stays (the page only ever knows a name and a mask).
 import type { McpInputCode } from "./errors.ts";
+import { normalizeIssuer } from "./oauth/issuer.ts";
 import { checkMcpUrl } from "./url.ts";
 
 export const MCP_TRANSPORTS = ["streamable-http", "sse"] as const;
@@ -59,6 +60,8 @@ const OAUTH_CLIENT_TEXT = /^[\u0021-\u007e]+$/;
 /** The OAuth client an Owner or Admin entered when the authorization server cannot register one (null: the server registers itself). */
 export type McpOAuthClientInput = {
   clientId: string;
+  /** The authorization server the client belongs to (normalized, `oauth/issuer.ts`): the secret is sent to no other. */
+  issuer: string;
   secret: { value: string } | { keep: true } | null;
 };
 
@@ -146,35 +149,49 @@ function optionalText(value: unknown): string | null | undefined {
 function parseOAuthClient(
   auth: Record<string, unknown>,
   allowKeep: boolean,
+  allowPlainHttp: boolean,
 ):
   | { ok: true; client: McpOAuthClientInput | null }
   | { ok: false; code: McpInputCode } {
   const invalid = { ok: false, code: "mcp_oauth_client_invalid" } as const;
   const clientId = optionalText(auth.clientId);
   const secret = optionalText(auth.clientSecret);
+  const issuerText = optionalText(auth.issuer);
   if (clientId === undefined || secret === undefined) return invalid;
+  if (issuerText === undefined)
+    return { ok: false, code: "mcp_oauth_issuer_invalid" };
   const keep = auth.keepClientSecret === true;
   if (clientId === null)
-    return secret === null && !keep ? { ok: true, client: null } : invalid;
+    return secret === null && !keep && issuerText === null
+      ? { ok: true, client: null }
+      : invalid;
   if (
     clientId.length > MCP_OAUTH_CLIENT_ID_MAX_LENGTH ||
     !OAUTH_CLIENT_TEXT.test(clientId)
   )
     return invalid;
+  // A client is for ONE authorization server: its issuer is required, so a secret is never sent to one the person did not name.
+  const issuer =
+    issuerText === null ? null : normalizeIssuer(issuerText, allowPlainHttp);
+  if (issuer === null) return { ok: false, code: "mcp_oauth_issuer_invalid" };
   if (keep) {
     if (!allowKeep) return invalid;
     // A kept secret and a new one at once is a form that contradicts itself.
     return secret === null
-      ? { ok: true, client: { clientId, secret: { keep: true } } }
+      ? { ok: true, client: { clientId, issuer, secret: { keep: true } } }
       : invalid;
   }
-  if (secret === null) return { ok: true, client: { clientId, secret: null } };
+  if (secret === null)
+    return { ok: true, client: { clientId, issuer, secret: null } };
   if (
     secret.length > MCP_OAUTH_CLIENT_SECRET_MAX_LENGTH ||
     !OAUTH_CLIENT_TEXT.test(secret)
   )
     return invalid;
-  return { ok: true, client: { clientId, secret: { value: secret } } };
+  return {
+    ok: true,
+    client: { clientId, issuer, secret: { value: secret } },
+  };
 }
 
 /**
@@ -203,7 +220,11 @@ export function parseMcpServerInput(
   if (!isRecord(raw.auth)) return { ok: false, code: "mcp_auth_invalid" };
   const kind = raw.auth.kind;
   if (kind === "oauth") {
-    const client = parseOAuthClient(raw.auth, options.allowKeep);
+    const client = parseOAuthClient(
+      raw.auth,
+      options.allowKeep,
+      options.allowTestEndpoints,
+    );
     if (!client.ok) return { ok: false, code: client.code };
     return {
       ok: true,

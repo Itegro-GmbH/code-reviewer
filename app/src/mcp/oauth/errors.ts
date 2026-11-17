@@ -24,6 +24,8 @@ export const MCP_OAUTH_FAILURE_CODES = [
   "mcp_oauth_registration_failed",
   /** The authorization server could not be reached or did not answer in time. */
   "mcp_oauth_unreachable",
+  /** The client an Owner or Admin entered is for another authorization server than the one this server's discovery found: its secret is not sent there. */
+  "mcp_oauth_issuer_mismatch",
 ] as const;
 export type McpOAuthFailureCode = (typeof MCP_OAUTH_FAILURE_CODES)[number];
 

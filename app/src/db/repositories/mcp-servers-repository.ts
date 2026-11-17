@@ -102,7 +102,7 @@ export type CurrentMcpServer = {
   /** The client of the OAuth connection the server has (#1051), without any sealed value; null when it has none. */
   oauth: Pick<
     StoredMcpOAuth,
-    "clientSource" | "clientId" | "hasClientSecret"
+    "clientSource" | "clientId" | "hasClientSecret" | "registeredIssuer"
   > | null;
 };
 
@@ -446,6 +446,7 @@ export function createMcpServersRepository(
                     "client_source",
                     "client_id",
                     "client_secret_ciphertext",
+                    "registered_issuer",
                   ])
                   .where("workspace_id", "=", workspaceId)
                   .where("server_id", "=", id)
@@ -466,6 +467,7 @@ export function createMcpServersRepository(
                               ? connection.client_source
                               : null,
                           clientId: connection.client_id,
+                          registeredIssuer: connection.registered_issuer,
                           hasClientSecret:
                             connection.client_secret_ciphertext !== null,
                         },

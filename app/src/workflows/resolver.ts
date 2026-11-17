@@ -55,6 +55,8 @@ export type McpServerInfo = {
   name: string;
   /** The result of the last connection test; `failed` is a broken server (a warning where a lane names it). */
   status: "untested" | "ok" | "failed";
+  /** An OAuth server's connection (#1051); left out for a server that does not use OAuth. `broken` and `unconnected` are warned about like `failed`. */
+  oauth?: "unconnected" | "connected" | "broken";
 };
 
 export type WorkflowResolver = {

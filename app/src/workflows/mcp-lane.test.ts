@@ -304,6 +304,27 @@ describe("a lane that names MCP servers", () => {
     ]);
   });
 
+  // #1051-T02
+  it("warns about an OAuth server whose grant ended or that nobody connected, not about a connected one", () => {
+    const oauth = (id: string, name: string, state: McpServerInfo["oauth"]) =>
+      ({ id, name, status: "untested", oauth: state }) as McpServerInfo;
+    const servers = [
+      oauth(GITHUB, "Ended", "broken"),
+      oauth(LINEAR, "Waiting", "unconnected"),
+      oauth(SENTRY, "Fine", "connected"),
+    ];
+
+    const result = check(lane([GITHUB, LINEAR, SENTRY]), servers);
+
+    expect(result.valid).toBe(true);
+    expect(result.warnings?.map((w) => [w.path, w.code])).toEqual([
+      ["/mcp/0", "mcp_server_broken"],
+      ["/mcp/1", "mcp_server_broken"],
+    ]);
+    expect(result.warnings?.[0]?.message).toContain("Reconnect");
+    expect(result.warnings?.[1]?.message).toContain("not connected");
+  });
+
   // #1052-T02
   it("does not call a server broken that was never tested", () => {
     expect(check(lane([LINEAR])).warnings).toBeUndefined();

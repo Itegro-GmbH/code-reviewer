@@ -36,6 +36,7 @@ export const MCP_OAUTH_START_STATUS: Record<StartConnectFailure, number> = {
   mcp_oauth_client_required: 422,
   mcp_oauth_registration_failed: 503,
   mcp_oauth_unreachable: 503,
+  mcp_oauth_issuer_mismatch: 422,
   rate_limited: 429,
   unavailable: 503,
 };
@@ -125,7 +126,15 @@ export function createMcpOAuthRouteHandlers(
           serverId,
         );
         return result.ok
-          ? Response.json({ ok: true, url: result.url }, { headers: NO_STORE })
+          ? Response.json(
+              {
+                ok: true,
+                url: result.url,
+                issuerHost: result.issuerHost,
+                scopes: result.scopes,
+              },
+              { headers: NO_STORE },
+            )
           : refusal(result.error, result.retryAfterSeconds);
       } catch {
         console.error(

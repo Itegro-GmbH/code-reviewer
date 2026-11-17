@@ -61,6 +61,8 @@ const connection = (
     Parameters<ReturnType<typeof createMcpOAuthRepository>["saveConnection"]>[2]
   > = {},
 ) => ({
+  discovery: DISCOVERY,
+  client: dynamicClient,
   sealedTokens: SEALED,
   accessExpiresAt: new Date("2026-11-17T11:00:00.000Z"),
   scopes: ["a"],
@@ -70,49 +72,49 @@ const connection = (
 
 describe("the OAuth connections of MCP servers", () => {
   // #1051-T01
-  it("keeps what discovery found and the client for the start, then the sealed pair for the callback", async () => {
+  it("keeps discovery, the client and the sealed pair together, created and replaced in one statement", async () => {
     const { oauth } = await setup();
     expect(await oauth.get("s1")).toBeUndefined();
 
-    expect(
-      await oauth.saveStart("s1", 1, {
-        discovery: DISCOVERY,
-        client: dynamicClient,
-      }),
-    ).toBe(true);
-    expect(await oauth.get("s1")).toMatchObject({
-      status: "unconnected",
-      discovery: DISCOVERY,
-      clientSource: "dynamic",
-      clientId: "client-1",
-      clientAuthMethod: "none",
-      hasClientSecret: false,
-      accessExpiresAt: null,
-    });
     expect(await oauth.saveConnection("s1", 1, connection())).toBe(true);
 
     const read = await oauth.readSecrets("s1");
     expect(read).toMatchObject({
       tokens: SEALED,
-      tokenVersion: 2,
+      tokenVersion: 1,
       oauth: {
         status: "connected",
+        discovery: DISCOVERY,
+        clientSource: "dynamic",
+        clientId: "client-1",
+        clientAuthMethod: "none",
+        hasClientSecret: false,
         scopes: ["a"],
         accessExpiresAt: "2026-11-17T11:00:00.000Z",
       },
     });
-    // A start again keeps the client and the pair when no new client is given.
+    // A second grant (a reconnect) replaces the discovery, the client and the pair together and counts the version.
+    const other = { ciphertext: "c9", nonce: "n9", keyVersion: 1 };
     expect(
-      await oauth.saveStart("s1", 1, {
-        discovery: { ...DISCOVERY, scopes: ["b"] },
-      }),
+      await oauth.saveConnection(
+        "s1",
+        1,
+        connection({
+          sealedTokens: other,
+          discovery: {
+            ...DISCOVERY,
+            tokenEndpoint: "https://as2.example.com/token",
+          },
+          client: { ...dynamicClient, clientId: "client-2" },
+        }),
+      ),
     ).toBe(true);
     expect(await oauth.readSecrets("s1")).toMatchObject({
-      tokens: SEALED,
+      tokens: other,
+      tokenVersion: 2,
       oauth: {
-        status: "connected",
-        clientId: "client-1",
-        discovery: { scopes: ["b"] },
+        clientId: "client-2",
+        discovery: { tokenEndpoint: "https://as2.example.com/token" },
       },
     });
   });
@@ -120,10 +122,7 @@ describe("the OAuth connections of MCP servers", () => {
   // #1051-T03
   it("stores nothing for a server that was edited since the flow began, or that no longer uses OAuth", async () => {
     const { oauth, servers } = await setup();
-    await oauth.saveStart("s1", 1, {
-      discovery: DISCOVERY,
-      client: dynamicClient,
-    });
+    expect(await oauth.saveConnection("s1", 1, connection())).toBe(true);
     const edited = await servers.update("s1", 1, {
       name: "Notion",
       transport: "streamable-http",
@@ -136,9 +135,6 @@ describe("the OAuth connections of MCP servers", () => {
     expect(edited.ok).toBe(true);
 
     expect(await oauth.saveConnection("s1", 1, connection())).toBe(false);
-    expect(await oauth.saveStart("s1", 1, { discovery: DISCOVERY })).toBe(
-      false,
-    );
     // The edit took the connection along.
     expect(await oauth.get("s1")).toBeUndefined();
     const none = await servers.update("s1", 2, {
@@ -156,10 +152,6 @@ describe("the OAuth connections of MCP servers", () => {
   // #1051-T02
   it("replaces the pair only for the version that was read, and marks a connection broken for that version only", async () => {
     const { oauth } = await setup();
-    await oauth.saveStart("s1", 1, {
-      discovery: DISCOVERY,
-      client: dynamicClient,
-    });
     await oauth.saveConnection("s1", 1, connection());
     const version = (await oauth.readSecrets("s1"))?.tokenVersion ?? 0;
     const renewed = { ciphertext: "c2", nonce: "n2", keyVersion: 1 };
@@ -206,10 +198,6 @@ describe("the OAuth connections of MCP servers", () => {
   // #1051-T02
   it("serializes two refreshes of one server: the second waits for the first", async () => {
     const { oauth } = await setup();
-    await oauth.saveStart("s1", 1, {
-      discovery: DISCOVERY,
-      client: dynamicClient,
-    });
     await oauth.saveConnection("s1", 1, connection());
     const order: string[] = [];
     let release: () => void = () => undefined;
@@ -237,10 +225,6 @@ describe("the OAuth connections of MCP servers", () => {
 
   it("holds the client an Owner entered with its sealed secret, and replaces the whole connection when it changes", async () => {
     const { oauth, servers, workspaceId, db } = await setup();
-    await oauth.saveStart("s1", 1, {
-      discovery: DISCOVERY,
-      client: dynamicClient,
-    });
     await oauth.saveConnection("s1", 1, connection());
 
     const changed = await servers.update("s1", 1, {
@@ -286,10 +270,7 @@ describe("the OAuth connections of MCP servers", () => {
 
   it("goes with its server when the server is removed", async () => {
     const { oauth, servers } = await setup();
-    await oauth.saveStart("s1", 1, {
-      discovery: DISCOVERY,
-      client: dynamicClient,
-    });
+    await oauth.saveConnection("s1", 1, connection());
 
     expect(await servers.removeUnlessUsed("s1")).toEqual({ removed: true });
 

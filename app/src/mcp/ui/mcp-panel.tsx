@@ -41,6 +41,15 @@ const goTo = (url: string) => {
   window.location.assign(url);
 };
 
+/** Takes the round trip's result (`?mcp=<code>&server=<id>`) out of the address, so a reload does not show it or test the server again. */
+const clearRoundTripFromAddress = () => {
+  window.history.replaceState(
+    window.history.state,
+    "",
+    window.location.pathname,
+  );
+};
+
 /** What a round trip through an authorization server said, as the page got it in its address (`?mcp=<code>&server=<id>`). */
 export type McpRoundTrip = { code: string; serverId: string | null };
 
@@ -51,6 +60,7 @@ export function McpPanel({
   roundTrip = null,
   api: apiProp,
   navigate = goTo,
+  clearRoundTrip = clearRoundTripFromAddress,
 }: {
   workspaceSlug: string;
   /** Whether the person may add, change, test and remove servers (`manage_mcp`); the page asks the matrix. */
@@ -63,6 +73,8 @@ export function McpPanel({
   api?: McpApi;
   /** Only tests pass this. */
   navigate?: (url: string) => void;
+  /** Only tests pass this: what removes the round trip's result from the address. */
+  clearRoundTrip?: () => void;
 }) {
   const product = useProductIdentity();
   const [defaultApi] = useState(() => browserMcpApi(workspaceSlug));
@@ -97,6 +109,7 @@ export function McpPanel({
       callbackUrl={callbackUrl}
       roundTrip={roundTrip}
       navigate={navigate}
+      clearRoundTrip={clearRoundTrip}
     />
   );
 }
@@ -195,6 +208,7 @@ function Servers({
   callbackUrl,
   roundTrip,
   navigate,
+  clearRoundTrip,
 }: {
   api: McpApi;
   canManage: boolean;
@@ -202,6 +216,7 @@ function Servers({
   callbackUrl: string | undefined;
   roundTrip: McpRoundTrip | null;
   navigate: (url: string) => void;
+  clearRoundTrip: () => void;
 }) {
   const product = useProductIdentity();
   const [servers, setServers] = useState(initial);
@@ -216,6 +231,13 @@ function Servers({
     roundTripServer?.id ?? null,
   );
   const [connecting, setConnecting] = useState<string | null>(null);
+  // What the person confirms before the browser leaves for the authorization server: its host and the scopes asked for.
+  const [consent, setConsent] = useState<{
+    server: McpServerView;
+    url: string;
+    host: string;
+    scopes: string[];
+  } | null>(null);
   const roundTripText =
     roundTrip === null ? null : describeMcpOAuthResult(roundTrip.code);
   const connectedNow = roundTrip?.code === "connected";
@@ -273,12 +295,19 @@ function Servers({
       );
       return;
     }
-    // The page is left for the consent page; the button stays busy until it is.
-    navigate(result.data.url);
+    setConnecting(null);
+    setConsent({
+      server,
+      url: result.data.url,
+      host: result.data.issuerHost,
+      scopes: result.data.scopes,
+    });
   }
 
   const testedAfterRoundTrip = useRef(false);
   useEffect(() => {
+    // The result of a round trip is shown once: it leaves the address, so a reload neither shows it again nor tests the server again.
+    if (roundTrip !== null) clearRoundTrip();
     if (roundTripServer === undefined || testedAfterRoundTrip.current) return;
     testedAfterRoundTrip.current = true;
     void finishTest(roundTripServer);
@@ -410,7 +439,7 @@ function Servers({
                     </dt>
                     <dd className="break-all">
                       {server.oauth.clientSource === "manual"
-                        ? `${PAGE_COPY.oauthClientManual}${server.oauth.clientId === null ? "" : `: ${server.oauth.clientId}`}`
+                        ? `${PAGE_COPY.oauthClientManual}${server.oauth.clientId === null ? "" : `: ${server.oauth.clientId}`}${server.oauth.clientIssuer === null ? "" : ` · ${PAGE_COPY.oauthClientIssuer}: ${server.oauth.clientIssuer}`}`
                         : PAGE_COPY.oauthClientRegistered}
                     </dd>
                     {server.oauth.scopes.length === 0 ? null : (
@@ -467,6 +496,47 @@ function Servers({
           if (created && saved.oauth === null) void test(saved);
         }}
       />
+
+      <AlertDialog
+        open={consent !== null}
+        onOpenChange={(open) => {
+          if (!open) setConsent(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {PAGE_COPY.consentTitle(consent?.host ?? "")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {PAGE_COPY.consentBody(
+                consent?.server.name ?? "",
+                consent?.host ?? "",
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <p className="text-sm break-words">
+            <span className="font-semibold">{PAGE_COPY.consentScopes}: </span>
+            {consent === null || consent.scopes.length === 0
+              ? PAGE_COPY.consentNoScopes
+              : consent.scopes.join(" ")}
+          </p>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{PAGE_COPY.consentCancel}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (consent === null) return;
+                // The page is left for the consent page; the button stays busy until it is.
+                setConnecting(consent.server.id);
+                navigate(consent.url);
+                setConsent(null);
+              }}
+            >
+              {PAGE_COPY.consentContinue}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={toRemove !== null}
