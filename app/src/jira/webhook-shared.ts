@@ -11,7 +11,7 @@ import { createTrackerRepository } from "../db/repositories/tracker-repository.t
 import { createWebhookDeliveriesRepository } from "../db/repositories/webhook-deliveries-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { createJiraMirror } from "./mirror.ts";
-import { getAtlassianConfig } from "./shared.ts";
+import { getAtlassianConfig, jiraStatusesFor } from "./shared.ts";
 import {
   createJiraWebhookHandler,
   type JiraAnswerTaker,
@@ -46,6 +46,7 @@ export function getJiraWebhookHandler(
         mirror: createJiraMirror({
           tracker: createTrackerRepository(db, workspaceId),
         }),
+        statusesOf: jiraStatusesFor(workspaceId),
         ...(options.statusesFor === undefined
           ? {}
           : { statuses: options.statusesFor(workspaceId) }),

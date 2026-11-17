@@ -14,7 +14,10 @@ export type JiraStatusCategory = "new" | "indeterminate" | "done";
 
 export type JiraStatus = {
   id: string;
+  /** The name as the connected user reads it (localized when the user's language is not English). */
   name: string;
+  /** The name Jira keeps for every language (#1058), when it says one. */
+  untranslatedName?: string;
   category: JiraStatusCategory;
 };
 
@@ -38,7 +41,7 @@ export type JiraProjectReader = {
     connectionId: string,
     projectKey: string,
   ): Promise<{ ok: true; project: JiraProject } | JiraReadFailure>;
-  /** The statuses of the project's workflows, all issue types together, each name once, in the order Jira lists them. */
+  /** The statuses of the project's workflows, all issue types together, each status once (by id), in the order Jira lists them. */
   listStatuses(
     connectionId: string,
     projectKey: string,
@@ -185,13 +188,17 @@ export function createJiraProjectReader({
             !isRecord(status) ||
             typeof status.id !== "string" ||
             typeof status.name !== "string" ||
-            seen.has(status.name)
+            seen.has(status.id)
           )
             continue;
-          seen.add(status.name);
+          seen.add(status.id);
           statuses.push({
             id: status.id,
             name: status.name,
+            ...(typeof status.untranslatedName === "string" &&
+            status.untranslatedName !== ""
+              ? { untranslatedName: status.untranslatedName }
+              : {}),
             category: categoryOf(status),
           });
         }

@@ -15,6 +15,7 @@ import {
   createJiraStatusTrigger,
   type JiraStatusMove,
 } from "./jira-status-trigger.ts";
+import type { StatusRef } from "../workflows/status-match.ts";
 import type { StatusTicket } from "./status-trigger.ts";
 
 const MOVE: JiraStatusMove = {
@@ -64,9 +65,11 @@ function harness(
   lanes: { id: string; document: string }[],
   options: {
     project?: "none" | "inactive" | "github" | "other-key";
-    ticket?: StatusTicket | undefined | "none";
+    ticket?: (StatusTicket & { statusId?: string }) | undefined | "none";
     readFails?: boolean;
     repository?: "none";
+    /** The statuses of the project; "unreadable" for a Jira that cannot be asked, left out for a trigger wired without them. */
+    statuses?: StatusRef[] | "unreadable";
   } = {},
 ) {
   const created: NewWorkflowRun[] = [];
@@ -75,6 +78,12 @@ function harness(
   const reads: string[] = [];
   const written = new Map<string, StoredWorkflowRun>();
   const trigger = createJiraStatusTrigger({
+    ...(options.statuses === undefined
+      ? {}
+      : {
+          statusesOf: async () =>
+            options.statuses === "unreadable" ? undefined : options.statuses,
+        }),
     runs: {
       async createRun(input) {
         const earlier = written.get(input.clientRequestId);
@@ -285,5 +294,129 @@ describe("which lanes of a Jira project a status change starts", () => {
       "jira_unavailable",
     );
     expect(down.created).toEqual([]);
+  });
+});
+
+// #1058: Jira names a status in the user's language in a REST answer and by the name it keeps for every language in a webhook delivery; the id
+// is the same in both.
+describe("a status that Jira names in two languages", () => {
+  const GERMAN: StatusRef[] = [
+    { id: "10100", name: "Zu erledigen", untranslatedName: "To Do" },
+    { id: "10101", name: "In Arbeit", untranslatedName: "In Progress" },
+  ];
+  const DELIVERY: JiraStatusMove = {
+    ...MOVE,
+    from: "In Progress",
+    fromId: "10101",
+    to: "To Do",
+    toId: "10100",
+  };
+  const german = { ...TICKET, status: "Zu erledigen", statusId: "10100" };
+  const lane = (to: string) => [
+    { id: "wf-1", document: doc({ ...READY, to }) },
+  ];
+
+  // #1058-T01
+  it("starts the lane that waits for the localized name, and gives the run the localized names", async () => {
+    const { trigger, created } = harness(lane("Zu erledigen"), {
+      statuses: GERMAN,
+      ticket: german,
+    });
+    expect(await trigger.start("d1", DELIVERY)).toMatchObject({ started: 1 });
+    const input = JSON.parse(created[0]?.triggerInput ?? "{}") as {
+      ticket: { status: string };
+      status: unknown;
+    };
+    expect(input.ticket.status).toBe("Zu erledigen");
+    expect(input.status).toEqual({ from: "In Arbeit", to: "Zu erledigen" });
+  });
+
+  // #1058-T02
+  it("starts the lane that waits for the untranslated name", async () => {
+    const { trigger } = harness(lane("To Do"), {
+      statuses: GERMAN,
+      ticket: german,
+    });
+    expect(await trigger.start("d1", DELIVERY)).toMatchObject({ started: 1 });
+  });
+
+  // #1058
+  it("matches the name case-insensitively and trimmed, and a `from` the same way", async () => {
+    const { trigger } = harness(
+      [
+        {
+          id: "wf-1",
+          document: doc({ ...READY, to: " zu ERLEDIGEN ", from: "In Arbeit" }),
+        },
+      ],
+      { statuses: GERMAN, ticket: german },
+    );
+    expect(await trigger.start("d1", DELIVERY)).toMatchObject({ started: 1 });
+  });
+
+  // #1058
+  it("starts nothing for another status, or a `from` that was another one", async () => {
+    const other = harness(lane("Erledigt"), {
+      statuses: [...GERMAN, { id: "10102", name: "Erledigt" }],
+      ticket: german,
+    });
+    expect(await other.trigger.start("d1", DELIVERY)).toMatchObject({
+      matched: 0,
+      started: 0,
+    });
+    expect(other.reads).toEqual([]);
+
+    const wrongFrom = harness(
+      [
+        {
+          id: "wf-1",
+          document: doc({ ...READY, to: "Zu erledigen", from: "Erledigt" }),
+        },
+      ],
+      { statuses: GERMAN, ticket: german },
+    );
+    expect(await wrongFrom.trigger.start("d1", DELIVERY)).toMatchObject({
+      matched: 0,
+    });
+  });
+
+  // #1058-T03
+  it("stops a delivery for a status the issue has left, comparing the ids", async () => {
+    const { trigger, created, lines } = harness(lane("Zu erledigen"), {
+      statuses: GERMAN,
+      ticket: { ...TICKET, status: "In Arbeit", statusId: "10101" },
+    });
+    expect(await trigger.start("d1", DELIVERY)).toMatchObject({
+      matched: 1,
+      started: 0,
+      skipped: 1,
+    });
+    expect(created).toEqual([]);
+    expect(lines.join("\n")).toContain("no longer has the status");
+  });
+
+  // #1058
+  it("still compares the names as they are spelled when the project's statuses cannot be read", async () => {
+    const same = harness(lane("To Do"), {
+      statuses: "unreadable",
+      ticket: { ...TICKET, status: "To Do" },
+    });
+    expect(await same.trigger.start("d1", DELIVERY)).toMatchObject({
+      started: 1,
+    });
+    // The ticket's id decides when both sides have one, whatever the names say.
+    const ids = harness(lane("To Do"), {
+      statuses: "unreadable",
+      ticket: german,
+    });
+    expect(await ids.trigger.start("d1", DELIVERY)).toMatchObject({
+      started: 1,
+    });
+  });
+
+  // #1058
+  it("keeps working for a delivery without ids and a trigger without the statuses: the names decide", async () => {
+    const { trigger } = harness(lane("Ready for agent"));
+    expect(await trigger.start("d1", MOVE)).toMatchObject({ started: 1 });
   });
 });
