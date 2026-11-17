@@ -456,6 +456,8 @@ describe("what is recorded for each call", () => {
     const meta = calls[0] as McpCallMeta;
     expect(meta).toMatchObject({
       serverId: "11111111-1111-4111-8111-111111111111",
+      // #1055: the name as it was at the call, for the run's trace (the server may be renamed or removed later).
+      serverName: "Issues",
       transport: "streamable-http",
       rpcMethod: "tools/call",
       tool: "get_issue",

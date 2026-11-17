@@ -77,6 +77,8 @@ export type McpCallMeta = {
   /** The job the call belongs to; null where the caller gave none. */
   jobId: string | null;
   serverId: string;
+  /** The name of the server as it is now (the run's trace keeps it: the server may be renamed or removed later). */
+  serverName: string;
   transport: string;
   /** The JSON-RPC method of the call (`tools/call`, `tools/list`, …), cleaned and cut to 100 characters like a tool name; null for a DELETE. */
   rpcMethod: string | null;
@@ -319,6 +321,7 @@ export function createMcpProxy(options: McpProxyOptions): McpProxy {
       options.onCall?.({
         jobId: jobId ?? null,
         serverId: server.id,
+        serverName: server.name,
         transport: server.transport,
         rpcMethod: message?.label ?? null,
         tool: message?.tool ?? null,

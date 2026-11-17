@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
+import type { McpCallRecord } from "../db/repositories/job-mcp-calls-repository.ts";
 import { createMcpCredentials } from "./credentials.ts";
 import { createJobMcp, type JobMcpDeps, type McpJob } from "./job-proxy.ts";
 import { createMcpProxy, type McpCallMeta } from "./proxy.ts";
@@ -58,6 +59,8 @@ function deps(options: {
   /** Every read of the table of servers, by kind and id. */
   reads?: string[];
   lines?: string[];
+  /** #1055: what is recorded for the run's trace outside the proxy (a refusal before the proxy). */
+  recorded?: McpCallRecord[];
 }): JobMcpDeps {
   const document = JSON.stringify({
     name: "Lane",
@@ -112,6 +115,7 @@ function deps(options: {
     },
     credentials: createMcpCredentials({ appSecret: APP_SECRET }),
     log: (line) => options.lines?.push(line),
+    recordCall: (_jobId, record) => options.recorded?.push(record),
     proxy: createMcpProxy({
       fetch: createGuardedFetch({ allowLoopback: true }),
       allowTestEndpoints: true,
@@ -342,5 +346,99 @@ describe("what a call costs the database and what a refusal leaves in the log", 
     ]);
     expect(lines.join("\n")).not.toContain(SECRET);
     expect(lines.join("\n")).not.toContain(server.url);
+  });
+});
+
+// #1055-T06: a refusal before the proxy is recorded for the run's trace as such, with the status and the code the agent's side got.
+describe("what a refusal before the proxy leaves in the run's trace", () => {
+  const rpcCall = (name: string) =>
+    call("tools/call", 1, { name, arguments: { needle: "secret-argument" } });
+
+  it("records a server the step may not use (404) with the tool that was asked for, and no argument", async () => {
+    const recorded: McpCallRecord[] = [];
+    const mcp = createJobMcp(
+      deps({
+        servers: [row(A, "Issues", "https://a.example.com/mcp")],
+        lane: [A],
+        recorded,
+      }),
+    );
+    const answer = await mcp.handle(job, GONE, rpcCall("get_issue"));
+    expect(answer.status).toBe(404);
+    expect(recorded).toEqual([
+      {
+        serverId: GONE,
+        serverName: "",
+        rpcMethod: "tools/call",
+        tool: "get_issue",
+        status: 404,
+        outcome: "mcp_server_unavailable",
+        durationMs: 0,
+        requestBytes: expect.any(Number),
+        responseBytes: 0,
+      },
+    ]);
+    expect(JSON.stringify(recorded)).not.toContain("secret-argument");
+  });
+
+  it("records a broken credential (503) with the name of the server, and the server is not called", async () => {
+    const server = await fake();
+    const recorded: McpCallRecord[] = [];
+    const broken = deps({
+      servers: [row(A, "Issues", server.url)],
+      lane: [A],
+      recorded,
+    });
+    const answer = await createJobMcp({
+      ...broken,
+      credentials: createMcpCredentials({ appSecret: "x".repeat(40) }),
+    }).handle(job, A, rpcCall("get_issue"));
+    expect(answer.status).toBe(503);
+    expect(recorded).toMatchObject([
+      {
+        serverId: A,
+        serverName: "Issues",
+        tool: "get_issue",
+        status: 503,
+        outcome: "mcp_credential_broken",
+      },
+    ]);
+    expect(server.requests()).toEqual([]);
+  });
+
+  it("records a refusal of the route (a limit) through `refused`, once, with the code and its status", async () => {
+    const recorded: McpCallRecord[] = [];
+    const mcp = createJobMcp(
+      deps({
+        servers: [row(A, "Issues", "https://a.example.com/mcp")],
+        lane: [A],
+        recorded,
+      }),
+    );
+    mcp.refused(job, A, "mcp_call_limit_reached", rpcCall("get_issue").body);
+    mcp.refused(job, A, "mcp_too_many_concurrent_calls", null);
+    expect(recorded).toMatchObject([
+      { status: 429, outcome: "mcp_call_limit_reached", tool: "get_issue" },
+      { status: 429, outcome: "mcp_too_many_concurrent_calls", tool: null },
+    ]);
+  });
+
+  it("does not record a call the route did not count as one: a GET and a server id that is not one", async () => {
+    const recorded: McpCallRecord[] = [];
+    const mcp = createJobMcp(
+      deps({
+        servers: [row(A, "Issues", "https://a.example.com/mcp")],
+        lane: [A],
+        recorded,
+      }),
+    );
+    await mcp.handle(job, A, {
+      method: "GET",
+      body: null,
+      sessionId: null,
+      protocolVersion: null,
+    });
+    mcp.refused(job, "../not-an-id", "mcp_server_unavailable", null);
+    expect(recorded).toEqual([]);
   });
 });

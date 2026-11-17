@@ -41,6 +41,8 @@ function setup(
     request: McpProxyRequest;
   }[] = [];
   const workspaces: string[] = [];
+  const refusals: { serverId: string; code: string; body: string | null }[] =
+    [];
   const job = {
     id: "22222222-2222-4222-8222-222222222222",
     workspaceId: "w1",
@@ -74,6 +76,14 @@ function setup(
             workspaces.push(workspaceId);
             return {
               serversOf: () => Promise.resolve({ servers: [], unavailable: 0 }),
+              refused: (
+                _job: unknown,
+                serverId: string,
+                code: string,
+                body: string | null,
+              ) => {
+                refusals.push({ serverId, code, body });
+              },
               handle: (
                 handledJob: { id: string },
                 serverId: string,
@@ -93,6 +103,7 @@ function setup(
     api: createWorkerApi(deps),
     handled,
     workspaces,
+    refusals,
     job,
     counts,
     lines,
@@ -296,6 +307,7 @@ describe("the credential of one job cannot reach another job's servers", () => {
       logger: { info: () => {}, error: () => {} },
       jobMcp: () => ({
         serversOf: () => Promise.resolve({ servers: [], unavailable: 0 }),
+        refused: () => {},
         handle: (handledJob: { id: string }) => {
           handled.push(handledJob.id);
           return Promise.resolve(new Response("{}", { status: 200 }));
@@ -352,6 +364,22 @@ describe("the limits of the MCP route", () => {
     expect(counts).toEqual([{ jobId: job.id, limit: MCP_MAX_CALLS_PER_CLAIM }]);
     expect(lines.join("\n")).toContain(`job=${job.id}`);
     expect(lines.join("\n")).toContain("mcp_call_limit_reached");
+  });
+
+  // #1055-T06
+  it("hands each refusal of a limit to the runtime for the run's trace, with the server and the code", async () => {
+    const exhausted = setup({ counted: "exhausted" });
+    await exhausted.api.mcp(post(), exhausted.job.id, SERVER);
+    expect(exhausted.refusals).toEqual([
+      { serverId: SERVER, code: "mcp_call_limit_reached", body: null },
+    ]);
+
+    const busy = setup({ maxConcurrent: 1 });
+    busy.gate.enter(busy.job.id);
+    await busy.api.mcp(post(), busy.job.id, SERVER);
+    expect(busy.refusals).toEqual([
+      { serverId: SERVER, code: "mcp_too_many_concurrent_calls", body: null },
+    ]);
   });
 
   it("counts a call that is allowed, and a claim that ended since the credential was checked is 409", async () => {

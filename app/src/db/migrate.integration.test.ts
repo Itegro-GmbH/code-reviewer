@@ -166,6 +166,7 @@ describe("the migrations of both epics", () => {
       "20261117100000_create_mcp_servers",
       "20261117140000_create_mcp_oauth_connections",
       "20261117150000_add_job_mcp_calls",
+      "20261117160000_create_job_mcp_calls",
     ]);
   });
 
@@ -226,6 +227,7 @@ describe("starting the database", () => {
       "job_claimed_keys",
       "job_comments",
       "job_dispatches",
+      "job_mcp_calls",
       "job_rings",
       "job_vm_runs",
       "jobs",

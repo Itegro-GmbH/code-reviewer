@@ -16,7 +16,9 @@
 import type { McpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import type { WorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
+import type { McpCallRecord } from "../db/repositories/job-mcp-calls-repository.ts";
 import { effectiveMcpServers } from "../workflows/mcp.ts";
+import { recordOfRefusal } from "./call-record.ts";
 import { mcpRefusal, type McpRouteRefusal } from "./refusal.ts";
 import type { McpCredentials } from "./credentials.ts";
 import type { McpProxy, McpProxyRequest } from "./proxy.ts";
@@ -34,6 +36,11 @@ export type JobMcpDeps = {
   proxy: McpProxy;
   /** Where a refusal before the proxy is written (one line, no value). */
   log?: (line: string) => void;
+  /**
+   * #1055: where the record of a call for the run's trace goes: a refusal before the proxy here, the proxy's own calls through its `onCall`
+   * (the wiring is `job-shared.ts`). Called without waiting; it must not throw.
+   */
+  recordCall?: (jobId: string, record: McpCallRecord) => void;
 };
 
 export type JobMcpServers = {
@@ -49,6 +56,16 @@ export type JobMcp = {
     serverId: string,
     request: McpProxyRequest,
   ): Promise<Response>;
+  /**
+   * #1055: a refusal of the route (a limit, a body that is too large, a server id that is not the job's) goes into the run's trace like the
+   * ones `handle` makes itself. Nothing is recorded for a server id that is not one (it would be text of the agent's choosing).
+   */
+  refused(
+    job: McpJob,
+    serverId: string,
+    code: McpRouteRefusal,
+    body: string | null,
+  ): void;
 };
 
 const NONE: JobMcpServers = { servers: [], unavailable: 0 };
@@ -57,11 +74,37 @@ const NONE: JobMcpServers = { servers: [], unavailable: 0 };
 const LOGGABLE_ID = /^[0-9a-fA-F-]{36}$/;
 
 export function createJobMcp(deps: JobMcpDeps): JobMcp {
+  function trace(
+    job: McpJob,
+    serverId: string,
+    code: McpRouteRefusal,
+    body: string | null,
+    serverName?: string,
+  ): void {
+    if (!LOGGABLE_ID.test(serverId)) return;
+    try {
+      deps.recordCall?.(
+        job.id,
+        recordOfRefusal({
+          serverId,
+          code,
+          body,
+          ...(serverName === undefined ? {} : { serverName }),
+        }),
+      );
+    } catch {
+      // A failed record never changes the answer the agent gets.
+    }
+  }
+
   function refuse(
     job: McpJob,
     serverId: string,
     code: McpRouteRefusal,
+    request?: McpProxyRequest,
+    serverName?: string,
   ): Response {
+    trace(job, serverId, code, request?.body ?? null, serverName);
     deps.log?.(
       `[mcp-proxy] job=${job.id} server=${LOGGABLE_ID.test(serverId) ? serverId : "-"} refused: ${code}`,
     );
@@ -101,6 +144,10 @@ export function createJobMcp(deps: JobMcpDeps): JobMcp {
   return {
     serversOf,
 
+    refused(job, serverId, code, body) {
+      trace(job, serverId, code, body);
+    },
+
     async handle(job, serverId, request) {
       // The server's own stream is not offered: no lookup, no unsealing.
       if (request.method === "GET")
@@ -110,13 +157,20 @@ export function createJobMcp(deps: JobMcpDeps): JobMcp {
         });
       // The step must name the server, at the time of this call: asked of the lane, before the table of servers is read at all.
       if (!(await idsOf(job)).includes(serverId))
-        return refuse(job, serverId, "mcp_server_unavailable");
+        return refuse(job, serverId, "mcp_server_unavailable", request);
       // Removed since (or never there, or another workspace's): the scoped repository does not have it.
       const stored = await deps.mcpServers.readHeaders(serverId);
       if (stored === undefined)
-        return refuse(job, serverId, "mcp_server_unavailable");
+        return refuse(job, serverId, "mcp_server_unavailable", request);
       const credential = await deps.credentials.headersFor(stored);
-      if (!credential.ok) return refuse(job, serverId, credential.code);
+      if (!credential.ok)
+        return refuse(
+          job,
+          serverId,
+          credential.code,
+          request,
+          stored.server.name,
+        );
       return deps.proxy.forward({
         jobId: job.id,
         server: stored.server,

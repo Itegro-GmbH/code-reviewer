@@ -151,6 +151,24 @@ export async function seedWorkspaceForDeletion(
       updated_at: "2026-10-10T23:52:00.000Z",
     })
     .execute();
+  // #1055: an MCP call of that job (the run's trace); it points at the job too, so the erasure removes it before the jobs.
+  await db
+    .insertInto("job_mcp_calls")
+    .values({
+      job_id: finished.id,
+      workspace_id: workspaceId,
+      server_id: `mcp-server-${tag}`,
+      server_name: `Server ${tag}`,
+      rpc_method: "tools/call",
+      tool: `tool-${tag}`,
+      status: 200,
+      outcome: "ok",
+      duration_ms: 5,
+      request_bytes: 10,
+      response_bytes: 20,
+      created_at: "2026-10-10T23:52:00.000Z",
+    })
+    .execute();
   // #818-T05: an environment of the Implementer, which the erasure removes with the rest.
   await createImplementerEnvironmentsRepository(db, workspaceId).create(
     {
