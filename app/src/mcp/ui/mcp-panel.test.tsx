@@ -4,7 +4,14 @@
 // The MCP page (#1050), with a stand-in for the routes: the list with address, transport, header NAMES with a mask, the last test and its
 // tools; adding a server with a header secret (tested at once, the secret only on its way to the route); keeping a stored header on an edit;
 // removing after a confirmation, and the refusal that names the lanes; read only for a member; and the sentence of every refusal.
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import type { ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { CapabilitiesProvider } from "../../capabilities/context.tsx";
@@ -50,6 +57,7 @@ const LINEAR: McpServerView = {
   testedAt: "2026-11-17T09:00:00.000Z",
   testErrorCode: null,
   tools: TOOLS,
+  oauth: null,
   createdAt: "2026-11-17T08:00:00.000Z",
   updatedAt: "2026-11-17T09:00:00.000Z",
 };
@@ -104,16 +112,27 @@ function fakeApi(
       ok({
         server: { ...LINEAR, id, name: id === "s3" ? "New one" : LINEAR.name },
       }),
+    connect: async () =>
+      ok({ ok: true as const, url: "https://as.example.com/authorize?x=1" }),
     ...overrides,
   };
   return { api, sent, removed };
 }
 
-function show(api: McpApi, canManage: boolean) {
+function show(
+  api: McpApi,
+  canManage: boolean,
+  extra: Partial<ComponentProps<typeof McpPanel>> = {},
+) {
   return render(
     <CapabilitiesProvider capabilities={["review", "implementer"]}>
       <ProductIdentityProvider product={identityFor("factory")}>
-        <McpPanel workspaceSlug="acme" canManage={canManage} api={api} />
+        <McpPanel
+          workspaceSlug="acme"
+          canManage={canManage}
+          api={api}
+          {...extra}
+        />
       </ProductIdentityProvider>
     </CapabilitiesProvider>,
   );
@@ -250,18 +269,193 @@ describe("adding a server", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
   });
 
-  it("offers no authentication kind that is not available yet", async () => {
+  // #1051-T01
+  it("offers OAuth, with an optional client of its own, and sends the form without a secret in the list", async () => {
     const user = userEvent.setup();
-    show(fakeApi([]).api, true);
+    const { api, sent } = fakeApi([]);
+    show(api, true, {
+      callbackUrl: "https://factory.example.test/api/mcp/oauth/callback",
+    });
 
     await user.click(
       await screen.findByRole("button", { name: /add mcp server/i }),
     );
+    await user.selectOptions(screen.getByLabelText("Authentication"), "oauth");
+    await user.type(screen.getByLabelText("Name"), "Notion");
+    await user.type(
+      screen.getByLabelText("Address"),
+      "https://mcp.notion.example/mcp",
+    );
+
+    // Nothing to enter for a server that registers clients itself, and the redirect address is shown for one that does not.
+    expect(screen.getByText(/leave both empty/i)).toBeTruthy();
+    expect(
+      screen.getByText(
+        /https:\/\/factory\.example\.test\/api\/mcp\/oauth\/callback/,
+      ),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(sent[0]?.auth).toEqual({
+      kind: "oauth",
+      clientId: "",
+      clientSecret: "",
+    });
+  });
+});
+
+const OAUTH: McpServerView = {
+  ...LINEAR,
+  id: "s9",
+  name: "Notion",
+  auth: "oauth",
+  headers: [],
+  status: "untested",
+  testedAt: null,
+  tools: null,
+  oauth: {
+    status: "unconnected",
+    errorCode: null,
+    clientSource: null,
+    clientId: null,
+    hasClientSecret: false,
+    scopes: [],
+    connectedAt: null,
+  },
+};
+const CONNECTED: McpServerView = {
+  ...OAUTH,
+  id: "s10",
+  name: "Linear OAuth",
+  oauth: {
+    ...OAUTH.oauth!,
+    status: "connected",
+    connectedAt: "2026-11-17T10:00:00.000Z",
+    scopes: ["issues:read"],
+  },
+};
+const BROKEN_OAUTH: McpServerView = {
+  ...CONNECTED,
+  id: "s11",
+  name: "Sentry",
+  oauth: {
+    ...CONNECTED.oauth!,
+    status: "broken",
+    errorCode: "mcp_oauth_refresh_refused",
+    connectedAt: null,
+  },
+};
+
+describe("a server that uses OAuth", () => {
+  const card = async (name: string) =>
+    (await screen.findByRole("heading", { name })).closest("li") as HTMLElement;
+
+  // #1051-T01
+  it("shows its state, offers Connect, Reconnect for a broken one, and sends the browser to the consent page", async () => {
+    const user = userEvent.setup();
+    const visited: string[] = [];
+    show(fakeApi([OAUTH, CONNECTED, BROKEN_OAUTH]).api, true, {
+      navigate: (url) => visited.push(url),
+    });
+
+    const notion = await card("Notion");
+    expect(within(notion).getByText(/not connected yet/i)).toBeTruthy();
+    expect(
+      within(await card("Linear OAuth")).getByText(
+        /Connected\. 2026-11-17 10:00 UTC/,
+      ),
+    ).toBeTruthy();
+    expect(
+      within(await card("Sentry")).getByText(/ended the grant/i),
+    ).toBeTruthy();
+    expect(
+      within(await card("Sentry")).getByRole("button", {
+        name: "Reconnect Sentry",
+      }),
+    ).toBeTruthy();
+
+    await user.click(
+      within(notion).getByRole("button", { name: "Connect Notion" }),
+    );
+
+    await waitFor(() =>
+      expect(visited).toEqual(["https://as.example.com/authorize?x=1"]),
+    );
+  });
+
+  it("says why a connection could not be started, in a sentence of our own", async () => {
+    const user = userEvent.setup();
+    show(
+      fakeApi([OAUTH], {
+        connect: async () => refused(422, "mcp_oauth_client_required"),
+      }).api,
+      true,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Connect Notion" }),
+    );
 
     expect(
-      (screen.getByRole("option", { name: /OAuth/ }) as HTMLOptionElement)
-        .disabled,
-    ).toBe(true);
+      await screen.findByText(/cannot register this application by itself/),
+    ).toBeTruthy();
+  });
+
+  it("offers no Connect button to a member", async () => {
+    show(fakeApi([OAUTH]).api, false);
+
+    await screen.findByRole("heading", { name: "Notion" });
+
+    expect(screen.queryByRole("button", { name: /connect/i })).toBeNull();
+  });
+
+  // #1051-T01
+  it("tests the server once when the browser comes back from the consent page, and shows what the round trip said", async () => {
+    const tested: string[] = [];
+    show(
+      fakeApi([CONNECTED], {
+        test: async (id) => {
+          tested.push(id);
+          return ok({
+            server: {
+              ...CONNECTED,
+              status: "ok",
+              testedAt: "2026-11-17T10:01:00.000Z",
+              tools: TOOLS,
+            },
+          });
+        },
+      }).api,
+      true,
+      { roundTrip: { code: "connected", serverId: "s10" } },
+    );
+
+    expect(
+      await screen.findByText(
+        /Connected\. The server's tools are being listed/,
+      ),
+    ).toBeTruthy();
+    await waitFor(() => expect(tested).toEqual(["s10"]));
+  });
+
+  // #1051-T03
+  it("shows a refusal of the round trip as a problem and tests nothing", async () => {
+    const tested: string[] = [];
+    show(
+      fakeApi([OAUTH], {
+        test: async (id) => {
+          tested.push(id);
+          return ok({ server: OAUTH });
+        },
+      }).api,
+      true,
+      { roundTrip: { code: "state_invalid", serverId: null } },
+    );
+
+    expect(
+      await screen.findByText(/link was used before, expired/),
+    ).toBeTruthy();
+    expect(tested).toEqual([]);
   });
 });
 

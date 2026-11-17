@@ -59,6 +59,7 @@ export function ServerDialog({
   api,
   open,
   server,
+  callbackUrl,
   onClose,
   onSaved,
 }: {
@@ -66,6 +67,8 @@ export function ServerDialog({
   open: boolean;
   /** The server to change, or null to add one. */
   server: McpServerView | null;
+  /** The redirect address an OAuth client has to be registered for (shown as a hint). */
+  callbackUrl?: string;
   onClose: () => void;
   onSaved: (saved: McpServerView, created: boolean) => void;
 }) {
@@ -76,9 +79,16 @@ export function ServerDialog({
     server?.transport ?? "streamable-http",
   );
   const [url, setUrl] = useState(server?.url ?? "");
-  const [auth, setAuth] = useState<"none" | "header">(
-    server?.auth === "header" ? "header" : server === null ? "header" : "none",
+  const [auth, setAuth] = useState<"none" | "header" | "oauth">(
+    server?.auth === "header" || server?.auth === "oauth"
+      ? server.auth
+      : server === null
+        ? "header"
+        : "none",
   );
+  // An OAuth client entered by hand; its secret is write-only like a header value.
+  const [clientId, setClientId] = useState(server?.oauth?.clientId ?? "");
+  const [clientSecret, setClientSecret] = useState("");
   const [counter, setCounter] = useState(server?.headers.length ?? 1);
   const [rows, setRows] = useState<Row[]>(
     server !== null && server.auth === "header"
@@ -102,6 +112,11 @@ export function ServerDialog({
   const isStored = (row: Row) =>
     row.storedAs !== null && row.storedAs === row.name;
   const keepable = (row: Row) => isStored(row) && !reachChanged;
+  /** A stored client secret stays only for the same address, transport and client id. */
+  const secretStored =
+    server?.oauth?.hasClientSecret === true &&
+    server.oauth.clientId === clientId.trim();
+  const secretKeepable = secretStored && !reachChanged;
   const errorAt = (field: string) =>
     failure?.field === field ? failure.text : undefined;
 
@@ -127,6 +142,20 @@ export function ServerDialog({
       });
       return;
     }
+    if (
+      auth === "oauth" &&
+      secretStored &&
+      reachChanged &&
+      clientSecret === ""
+    ) {
+      setFailure({
+        text: describeMcpFailure(product, {
+          code: "mcp_oauth_secret_required",
+        }),
+        field: "auth",
+      });
+      return;
+    }
     const form: McpServerForm = {
       name,
       transport,
@@ -134,14 +163,23 @@ export function ServerDialog({
       auth:
         auth === "none"
           ? { kind: "none" }
-          : {
-              kind: "header",
-              headers: rows.map((row) =>
-                row.value === "" && keepable(row)
-                  ? { name: row.name, keep: true as const }
-                  : { name: row.name, value: row.value },
-              ),
-            },
+          : auth === "oauth"
+            ? {
+                kind: "oauth",
+                clientId: clientId.trim(),
+                clientSecret,
+                ...(clientSecret === "" && secretKeepable
+                  ? { keepClientSecret: true }
+                  : {}),
+              }
+            : {
+                kind: "header",
+                headers: rows.map((row) =>
+                  row.value === "" && keepable(row)
+                    ? { name: row.name, keep: true as const }
+                    : { name: row.name, value: row.value },
+                ),
+              },
       ...(server === null ? {} : { revision: server.revision }),
     };
     setBusy(true);
@@ -253,19 +291,75 @@ export function ServerDialog({
               id={`${ids}-auth`}
               value={auth}
               onChange={(event) =>
-                setAuth(event.target.value === "none" ? "none" : "header")
+                setAuth(
+                  event.target.value === "none"
+                    ? "none"
+                    : event.target.value === "oauth"
+                      ? "oauth"
+                      : "header",
+                )
               }
             >
               <option value="none">{AUTH_COPY.none}</option>
               <option value="header">{AUTH_COPY.header}</option>
-              <option value="oauth" disabled>
-                {AUTH_COPY.oauth} ({PAGE_COPY.oauthLater})
-              </option>
+              <option value="oauth">{AUTH_COPY.oauth}</option>
             </NativeSelect>
             {errorAt("auth") === undefined ? null : (
               <FieldError>{errorAt("auth")}</FieldError>
             )}
           </Field>
+          {auth === "oauth" ? (
+            <fieldset className="flex flex-col gap-3 border-0 p-0">
+              <legend className="mb-2 text-sm font-semibold">
+                {PAGE_COPY.oauthClient}
+              </legend>
+              <Field>
+                <FieldLabel htmlFor={`${ids}-cid`}>
+                  {PAGE_COPY.oauthClientIdLabel}
+                </FieldLabel>
+                <Input
+                  id={`${ids}-cid`}
+                  value={clientId}
+                  onChange={(event) => setClientId(event.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor={`${ids}-csecret`}>
+                  {PAGE_COPY.oauthClientSecretLabel}
+                </FieldLabel>
+                <Input
+                  id={`${ids}-csecret`}
+                  type="password"
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  value={clientSecret}
+                  placeholder={
+                    secretKeepable
+                      ? PAGE_COPY.oauthSecretKept
+                      : secretStored
+                        ? PAGE_COPY.oauthSecretReenter
+                        : undefined
+                  }
+                  onChange={(event) => setClientSecret(event.target.value)}
+                />
+              </Field>
+              <p className="text-sm text-muted-foreground">
+                {PAGE_COPY.oauthClientHint}
+              </p>
+              {callbackUrl === undefined ? null : (
+                <p className="text-sm break-all text-muted-foreground">
+                  {PAGE_COPY.oauthCallbackHint(callbackUrl)}
+                </p>
+              )}
+              {editing ? (
+                <p className="text-sm text-muted-foreground">
+                  {PAGE_COPY.oauthChangeNote}
+                </p>
+              ) : null}
+            </fieldset>
+          ) : null}
           {auth === "header" ? (
             <fieldset className="flex flex-col gap-3 border-0 p-0">
               <legend className="mb-2 text-sm font-semibold">

@@ -10,7 +10,6 @@ import { checkMcpUrl } from "./url.ts";
 export const MCP_TRANSPORTS = ["streamable-http", "sse"] as const;
 export type McpTransport = (typeof MCP_TRANSPORTS)[number];
 
-/** `oauth` is reserved for #1051: the column accepts it, the registry does not offer it yet. */
 export const MCP_AUTH_KINDS = ["none", "header", "oauth"] as const;
 export type McpAuthKind = (typeof MCP_AUTH_KINDS)[number];
 
@@ -52,6 +51,17 @@ const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
 export type McpHeaderInput =
   { name: string; value: string } | { name: string; keep: true };
 
+export const MCP_OAUTH_CLIENT_ID_MAX_LENGTH = 512;
+export const MCP_OAUTH_CLIENT_SECRET_MAX_LENGTH = 4096;
+// RFC 6749, appendix A: a client id and a secret are visible ASCII.
+const OAUTH_CLIENT_TEXT = /^[\u0021-\u007e]+$/;
+
+/** The OAuth client an Owner or Admin entered when the authorization server cannot register one (null: the server registers itself). */
+export type McpOAuthClientInput = {
+  clientId: string;
+  secret: { value: string } | { keep: true } | null;
+};
+
 export type McpServerInput = {
   name: string;
   transport: McpTransport;
@@ -62,7 +72,8 @@ export type McpServerInput = {
         kind: "header";
         /** In the order the person gave them; at least one. */
         headers: McpHeaderInput[];
-      };
+      }
+    | { kind: "oauth"; client: McpOAuthClientInput | null };
 };
 
 export type ParseMcpInputResult =
@@ -126,6 +137,46 @@ function parseHeaders(
   return { ok: true, headers };
 }
 
+/** An optional text of the form: absent or empty is "not entered". */
+function optionalText(value: unknown): string | null | undefined {
+  if (value === undefined || value === null || value === "") return null;
+  return typeof value === "string" ? value : undefined;
+}
+
+function parseOAuthClient(
+  auth: Record<string, unknown>,
+  allowKeep: boolean,
+):
+  | { ok: true; client: McpOAuthClientInput | null }
+  | { ok: false; code: McpInputCode } {
+  const invalid = { ok: false, code: "mcp_oauth_client_invalid" } as const;
+  const clientId = optionalText(auth.clientId);
+  const secret = optionalText(auth.clientSecret);
+  if (clientId === undefined || secret === undefined) return invalid;
+  const keep = auth.keepClientSecret === true;
+  if (clientId === null)
+    return secret === null && !keep ? { ok: true, client: null } : invalid;
+  if (
+    clientId.length > MCP_OAUTH_CLIENT_ID_MAX_LENGTH ||
+    !OAUTH_CLIENT_TEXT.test(clientId)
+  )
+    return invalid;
+  if (keep) {
+    if (!allowKeep) return invalid;
+    // A kept secret and a new one at once is a form that contradicts itself.
+    return secret === null
+      ? { ok: true, client: { clientId, secret: { keep: true } } }
+      : invalid;
+  }
+  if (secret === null) return { ok: true, client: { clientId, secret: null } };
+  if (
+    secret.length > MCP_OAUTH_CLIENT_SECRET_MAX_LENGTH ||
+    !OAUTH_CLIENT_TEXT.test(secret)
+  )
+    return invalid;
+  return { ok: true, client: { clientId, secret: { value: secret } } };
+}
+
 /**
  * Reads the JSON of the add or edit form. `allowKeep` is true when a server is edited: a header may then be `{ name, keep: true }`.
  * `allowTestEndpoints` is the test flag (`config.ts`).
@@ -151,8 +202,19 @@ export function parseMcpServerInput(
   if (!url.ok) return { ok: false, code: url.code };
   if (!isRecord(raw.auth)) return { ok: false, code: "mcp_auth_invalid" };
   const kind = raw.auth.kind;
-  if (kind === "oauth")
-    return { ok: false, code: "mcp_auth_oauth_unavailable" };
+  if (kind === "oauth") {
+    const client = parseOAuthClient(raw.auth, options.allowKeep);
+    if (!client.ok) return { ok: false, code: client.code };
+    return {
+      ok: true,
+      value: {
+        name,
+        transport,
+        url: url.url,
+        auth: { kind: "oauth", client: client.client },
+      },
+    };
+  }
   if (kind === "none")
     return {
       ok: true,

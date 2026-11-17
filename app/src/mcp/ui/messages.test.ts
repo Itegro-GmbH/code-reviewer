@@ -5,7 +5,12 @@ import { identityFor } from "../../product-identity/identities.ts";
 import { GENERIC_FAILURE } from "../../ui/transport-messages.ts";
 import { MCP_ERROR_CODES, MCP_TEST_ERROR_CODES } from "../errors.ts";
 import {
+  MCP_OAUTH_FAILURE_CODES,
+  MCP_OAUTH_RESULT_CODES,
+} from "../oauth/errors.ts";
+import {
   describeMcpFailure,
+  describeMcpOAuthResult,
   describeTestFailure,
   PAGE_COPY,
 } from "./messages.ts";
@@ -29,6 +34,19 @@ describe("the copy of the MCP page", () => {
       "The test failed.",
     );
     expect(describeTestFailure(null)).toBe("The test failed.");
+  });
+
+  // #1051-T01
+  it("has a sentence of its own for every way starting a connection can fail and every way the consent round trip can end", () => {
+    for (const code of MCP_OAUTH_FAILURE_CODES)
+      expect(describeMcpFailure(factory, { code }), code).not.toBe(
+        GENERIC_FAILURE,
+      );
+    for (const code of MCP_OAUTH_RESULT_CODES)
+      expect(describeMcpOAuthResult(code), code).not.toBeNull();
+    // A code in the address that is not ours is no sentence: nothing a request said is shown.
+    expect(describeMcpOAuthResult("<script>")).toBeNull();
+    expect(describeMcpOAuthResult(undefined)).toBeNull();
   });
 
   // #1050-T03

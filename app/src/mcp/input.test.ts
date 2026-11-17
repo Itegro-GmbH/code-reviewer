@@ -58,10 +58,95 @@ describe("the form of an MCP server", () => {
     );
     expect(codeOf(valid({ url: "https://10.1.2.3/" }))).toBe("mcp_url_private");
     expect(codeOf(valid({ auth: { kind: "basic" } }))).toBe("mcp_auth_invalid");
-    expect(codeOf(valid({ auth: { kind: "oauth" } }))).toBe(
-      "mcp_auth_oauth_unavailable",
-    );
     expect(codeOf("nope")).toBe("mcp_name_invalid");
+  });
+
+  // #1051-T01
+  it("accepts OAuth without a client (the server registers itself) and with one entered by hand", () => {
+    const parse = (auth: unknown, allowKeep = false) =>
+      parseMcpServerInput(
+        {
+          name: "Linear",
+          transport: "streamable-http",
+          url: "https://mcp.example.com/mcp",
+          auth,
+        },
+        { allowKeep, allowTestEndpoints: false },
+      );
+
+    expect(parse({ kind: "oauth" })).toMatchObject({
+      ok: true,
+      value: { auth: { kind: "oauth", client: null } },
+    });
+    expect(
+      parse({ kind: "oauth", clientId: "", clientSecret: "" }),
+    ).toMatchObject({
+      ok: true,
+      value: { auth: { kind: "oauth", client: null } },
+    });
+    expect(parse({ kind: "oauth", clientId: "c-1" })).toMatchObject({
+      ok: true,
+      value: { auth: { client: { clientId: "c-1", secret: null } } },
+    });
+    expect(
+      parse({ kind: "oauth", clientId: "c-1", clientSecret: "s3cret" }),
+    ).toMatchObject({
+      ok: true,
+      value: {
+        auth: { client: { clientId: "c-1", secret: { value: "s3cret" } } },
+      },
+    });
+    expect(
+      parse({ kind: "oauth", clientId: "c-1", keepClientSecret: true }, true),
+    ).toMatchObject({
+      ok: true,
+      value: { auth: { client: { secret: { keep: true } } } },
+    });
+  });
+
+  it("refuses an OAuth client that is malformed, a secret without an id, and a kept secret on a new server", () => {
+    const code = (auth: unknown, allowKeep = false) => {
+      const result = parseMcpServerInput(
+        {
+          name: "Linear",
+          transport: "streamable-http",
+          url: "https://mcp.example.com/mcp",
+          auth,
+        },
+        { allowKeep, allowTestEndpoints: false },
+      );
+      return result.ok ? "ok" : result.code;
+    };
+
+    expect(code({ kind: "oauth", clientSecret: "s" })).toBe(
+      "mcp_oauth_client_invalid",
+    );
+    expect(code({ kind: "oauth", clientId: "a b" })).toBe(
+      "mcp_oauth_client_invalid",
+    );
+    expect(code({ kind: "oauth", clientId: "x".repeat(513) })).toBe(
+      "mcp_oauth_client_invalid",
+    );
+    expect(code({ kind: "oauth", clientId: 7 })).toBe(
+      "mcp_oauth_client_invalid",
+    );
+    expect(
+      code({ kind: "oauth", clientId: "c", clientSecret: "line\nbreak" }),
+    ).toBe("mcp_oauth_client_invalid");
+    expect(code({ kind: "oauth", clientId: "c", keepClientSecret: true })).toBe(
+      "mcp_oauth_client_invalid",
+    );
+    expect(
+      code(
+        {
+          kind: "oauth",
+          clientId: "c",
+          clientSecret: "s",
+          keepClientSecret: true,
+        },
+        true,
+      ),
+    ).toBe("mcp_oauth_client_invalid");
   });
 
   it("refuses headers that are missing, too many, duplicated, forbidden or malformed", () => {

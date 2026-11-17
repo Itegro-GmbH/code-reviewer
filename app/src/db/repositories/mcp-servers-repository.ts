@@ -21,6 +21,13 @@ import { sql, type Kysely, type Selectable } from "kysely";
 import { formatTimestamp } from "../codecs.ts";
 import type { Database, McpServersTable } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import {
+  dropMcpOAuth,
+  replaceManualMcpOAuthClient,
+  type McpOAuthChange,
+  type McpOAuthClient,
+  type StoredMcpOAuth,
+} from "./mcp-oauth-repository.ts";
 
 export const MCP_TEST_STATUSES = ["untested", "ok", "failed"] as const;
 export type McpTestStatus = (typeof MCP_TEST_STATUSES)[number];
@@ -76,18 +83,27 @@ export type NewMcpServer = McpServerFields & {
   id: string;
   /** The sealed headers; null unless the kind is `header`. */
   sealed: SealedHeaders | null;
+  /** For the kind `oauth`: the client an Owner or Admin entered (the fallback when the authorization server has no dynamic registration). */
+  oauthClient?: McpOAuthClient;
   createdBy: string | null;
 };
 
 export type McpServerChange = McpServerFields & {
   /** The new sealed headers; undefined keeps the stored ones (the kind stays `header` and no value changed). */
   sealed?: SealedHeaders | null;
+  /** What happens to the OAuth connection in the same transaction (#1051); undefined leaves it alone. Any change makes the last test stale. */
+  oauth?: McpOAuthChange;
 };
 
 /** The row an update starts from, read under the row lock: the server and its sealed headers. */
 export type CurrentMcpServer = {
   server: StoredMcpServer;
   sealed: SealedHeaders | null;
+  /** The client of the OAuth connection the server has (#1051), without any sealed value; null when it has none. */
+  oauth: Pick<
+    StoredMcpOAuth,
+    "clientSource" | "clientId" | "hasClientSecret"
+  > | null;
 };
 
 /**
@@ -388,6 +404,14 @@ export function createMcpServersRepository(
             })
             .returningAll()
             .executeTakeFirstOrThrow();
+          if (input.oauthClient !== undefined)
+            await replaceManualMcpOAuthClient(
+              trx,
+              workspaceId,
+              input.id,
+              input.oauthClient,
+              now(),
+            );
           return { ok: true as const, server: toStored(row) };
         });
       } catch (error) {
@@ -414,11 +438,37 @@ export function createMcpServersRepository(
             return { ok: false as const, reason: "not_found" as const };
           if (current.revision !== expectedRevision)
             return { ok: false as const, reason: "changed" as const };
+          const connection =
+            typeof requested === "function"
+              ? await trx
+                  .selectFrom("mcp_oauth_connections")
+                  .select([
+                    "client_source",
+                    "client_id",
+                    "client_secret_ciphertext",
+                  ])
+                  .where("workspace_id", "=", workspaceId)
+                  .where("server_id", "=", id)
+                  .executeTakeFirst()
+              : undefined;
           const change =
             typeof requested === "function"
               ? requested({
                   server: toStored(current),
                   sealed: sealedOf(current),
+                  oauth:
+                    connection === undefined
+                      ? null
+                      : {
+                          clientSource:
+                            connection.client_source === "manual" ||
+                            connection.client_source === "dynamic"
+                              ? connection.client_source
+                              : null,
+                          clientId: connection.client_id,
+                          hasClientSecret:
+                            connection.client_secret_ciphertext !== null,
+                        },
                 })
               : requested;
           if ("refused" in change)
@@ -436,7 +486,8 @@ export function createMcpServersRepository(
             current.transport !== change.transport ||
             current.auth_kind !== change.authKind ||
             current.header_names !== headerNames ||
-            change.sealed !== undefined;
+            change.sealed !== undefined ||
+            change.oauth !== undefined;
           const sealed =
             change.sealed === undefined ? sealedOf(current) : change.sealed;
           const row = await trx
@@ -466,6 +517,17 @@ export function createMcpServersRepository(
             .where("id", "=", id)
             .returningAll()
             .executeTakeFirstOrThrow();
+          // The tokens were issued for the address, the transport and the client the server had: they go with any change of these.
+          if (change.oauth?.kind === "drop")
+            await dropMcpOAuth(trx, workspaceId, id);
+          else if (change.oauth?.kind === "replace-manual")
+            await replaceManualMcpOAuthClient(
+              trx,
+              workspaceId,
+              id,
+              change.oauth.client,
+              now(),
+            );
           return { ok: true as const, server: toStored(row) };
         });
       } catch (error) {

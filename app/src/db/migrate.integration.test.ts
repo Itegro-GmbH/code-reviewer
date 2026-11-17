@@ -164,6 +164,7 @@ describe("the migrations of both epics", () => {
       "20261114160000_create_jira_connections",
       "20261114180000_create_jira_webhooks",
       "20261117100000_create_mcp_servers",
+      "20261117140000_create_mcp_oauth_connections",
     ]);
   });
 
@@ -229,6 +230,7 @@ describe("starting the database", () => {
       "jobs",
       "kysely_migration",
       "kysely_migration_lock",
+      "mcp_oauth_connections",
       "mcp_servers",
       "model_catalog_entries",
       "model_enablements",

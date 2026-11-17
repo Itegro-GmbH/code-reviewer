@@ -5,7 +5,7 @@
 // values are shown as a mask and are never sent to the browser), the last connection test and the tools it found; a button that tests the
 // connection; and, for an Owner or Admin, the dialogs that add, change and remove a server. It talks to the routes of #1050 only (`api.ts`),
 // and shows no text from an answer: every refusal is a fixed sentence for its code (`messages.ts`).
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/button.tsx";
 import { StatusRegion } from "../../components/status-region.tsx";
 import { Alert, AlertDescription } from "../../components/ui/alert.tsx";
@@ -27,6 +27,7 @@ import { browserMcpApi, type McpApi } from "./api.ts";
 import {
   AUTH_COPY,
   describeMcpFailure,
+  describeMcpOAuthResult,
   describeTestFailure,
   PAGE_COPY,
   TRANSPORT_COPY,
@@ -35,16 +36,33 @@ import { ServerDialog } from "./server-dialog.tsx";
 
 const loadList = (api: McpApi) => api.list();
 
+/** Where the browser goes to the consent page of the authorization server. */
+const goTo = (url: string) => {
+  window.location.assign(url);
+};
+
+/** What a round trip through an authorization server said, as the page got it in its address (`?mcp=<code>&server=<id>`). */
+export type McpRoundTrip = { code: string; serverId: string | null };
+
 export function McpPanel({
   workspaceSlug,
   canManage,
+  callbackUrl,
+  roundTrip = null,
   api: apiProp,
+  navigate = goTo,
 }: {
   workspaceSlug: string;
   /** Whether the person may add, change, test and remove servers (`manage_mcp`); the page asks the matrix. */
   canManage: boolean;
+  /** The redirect address an OAuth client has to be registered for. */
+  callbackUrl?: string;
+  /** What the browser brought back from an authorization server, if it did; the page validated the code. */
+  roundTrip?: McpRoundTrip | null;
   /** Only tests pass this. */
   api?: McpApi;
+  /** Only tests pass this. */
+  navigate?: (url: string) => void;
 }) {
   const product = useProductIdentity();
   const [defaultApi] = useState(() => browserMcpApi(workspaceSlug));
@@ -72,7 +90,14 @@ export function McpPanel({
       </div>
     );
   return (
-    <Servers api={api} canManage={canManage} initial={loaded.data.servers} />
+    <Servers
+      api={api}
+      canManage={canManage}
+      initial={loaded.data.servers}
+      callbackUrl={callbackUrl}
+      roundTrip={roundTrip}
+      navigate={navigate}
+    />
   );
 }
 
@@ -111,7 +136,34 @@ function ToolList({ server }: { server: McpServerView }) {
   );
 }
 
+function OAuthStatus({ server }: { server: McpServerView }) {
+  const oauth = server.oauth;
+  if (oauth === null) return null;
+  const text =
+    oauth.status === "connected"
+      ? PAGE_COPY.oauthConnected
+      : oauth.status === "broken"
+        ? PAGE_COPY.oauthBroken
+        : PAGE_COPY.oauthUnconnected;
+  return (
+    <p
+      className={
+        oauth.status === "broken"
+          ? "text-sm text-destructive"
+          : "text-sm text-muted-foreground"
+      }
+    >
+      {text}
+      {oauth.status === "connected" && oauth.connectedAt !== null
+        ? ` ${formatUtc(oauth.connectedAt)}.`
+        : ""}
+    </p>
+  );
+}
+
 function TestStatus({ server }: { server: McpServerView }) {
+  // A server that is not connected has nothing to test: its state says what to do.
+  if (server.oauth !== null && server.oauth.status !== "connected") return null;
   if (server.status === "untested")
     return (
       <p className="text-sm text-muted-foreground">{PAGE_COPY.neverTested}</p>
@@ -140,18 +192,39 @@ function Servers({
   api,
   canManage,
   initial,
+  callbackUrl,
+  roundTrip,
+  navigate,
 }: {
   api: McpApi;
   canManage: boolean;
   initial: McpServerView[];
+  callbackUrl: string | undefined;
+  roundTrip: McpRoundTrip | null;
+  navigate: (url: string) => void;
 }) {
   const product = useProductIdentity();
   const [servers, setServers] = useState(initial);
   const [dialog, setDialog] = useState<"add" | McpServerView | null>(null);
   const [toRemove, setToRemove] = useState<McpServerView | null>(null);
-  const [testing, setTesting] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
+  // A person who just came back from the consent page sees the tools at once: the connection is tested once, from the first render on.
+  const roundTripServer =
+    roundTrip?.code === "connected" && canManage
+      ? initial.find((entry) => entry.id === roundTrip.serverId)
+      : undefined;
+  const [testing, setTesting] = useState<string | null>(
+    roundTripServer?.id ?? null,
+  );
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const roundTripText =
+    roundTrip === null ? null : describeMcpOAuthResult(roundTrip.code);
+  const connectedNow = roundTrip?.code === "connected";
+  const [notice, setNotice] = useState<string | null>(
+    connectedNow ? roundTripText : null,
+  );
+  const [problem, setProblem] = useState<string | null>(
+    connectedNow ? null : roundTripText,
+  );
 
   const replace = (server: McpServerView) =>
     setServers((current) => {
@@ -166,6 +239,11 @@ function Servers({
     setNotice(null);
     setProblem(null);
     setTesting(server.id);
+    await finishTest(server);
+  }
+
+  /** The part of a test after it began: the call and what it says. */
+  async function finishTest(server: McpServerView) {
     const result = await api.test(server.id);
     setTesting(null);
     if (!result.ok) {
@@ -179,6 +257,34 @@ function Servers({
     }
     replace(result.data.server);
   }
+
+  async function connect(server: McpServerView) {
+    setNotice(null);
+    setProblem(null);
+    setConnecting(server.id);
+    const result = await api.connect(server.id);
+    if (!result.ok) {
+      setConnecting(null);
+      setProblem(
+        describeMcpFailure(product, {
+          code: result.code,
+          status: result.status,
+        }),
+      );
+      return;
+    }
+    // The page is left for the consent page; the button stays busy until it is.
+    navigate(result.data.url);
+  }
+
+  const testedAfterRoundTrip = useRef(false);
+  useEffect(() => {
+    if (roundTripServer === undefined || testedAfterRoundTrip.current) return;
+    testedAfterRoundTrip.current = true;
+    void finishTest(roundTripServer);
+    // The round trip happens once per page load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function remove(server: McpServerView) {
     setToRemove(null);
@@ -234,10 +340,30 @@ function Servers({
                   <h3 className="text-lg leading-7 font-semibold break-words">
                     {server.name}
                   </h3>
+                  <OAuthStatus server={server} />
                   <TestStatus server={server} />
                 </div>
                 {canManage ? (
                   <div className="flex flex-wrap gap-2">
+                    {server.oauth === null ? null : (
+                      <Button
+                        variant={
+                          server.oauth.status === "connected"
+                            ? "secondary"
+                            : "primary"
+                        }
+                        size="sm"
+                        aria-label={`${server.oauth.status === "unconnected" ? PAGE_COPY.connect : PAGE_COPY.reconnect} ${server.name}`}
+                        disabled={connecting !== null}
+                        onClick={() => void connect(server)}
+                      >
+                        {connecting === server.id
+                          ? PAGE_COPY.connecting
+                          : server.oauth.status === "unconnected"
+                            ? PAGE_COPY.connect
+                            : PAGE_COPY.reconnect}
+                      </Button>
+                    )}
                     <Button
                       variant="secondary"
                       size="sm"
@@ -277,6 +403,28 @@ function Servers({
                   {PAGE_COPY.authentication}
                 </dt>
                 <dd>{AUTH_COPY[server.auth] ?? server.auth}</dd>
+                {server.oauth === null ? null : (
+                  <>
+                    <dt className="text-muted-foreground">
+                      {PAGE_COPY.oauthClient}
+                    </dt>
+                    <dd className="break-all">
+                      {server.oauth.clientSource === "manual"
+                        ? `${PAGE_COPY.oauthClientManual}${server.oauth.clientId === null ? "" : `: ${server.oauth.clientId}`}`
+                        : PAGE_COPY.oauthClientRegistered}
+                    </dd>
+                    {server.oauth.scopes.length === 0 ? null : (
+                      <>
+                        <dt className="text-muted-foreground">
+                          {PAGE_COPY.oauthScopes}
+                        </dt>
+                        <dd className="font-mono break-all">
+                          {server.oauth.scopes.join(" ")}
+                        </dd>
+                      </>
+                    )}
+                  </>
+                )}
                 {server.auth === "header" ? (
                   <>
                     <dt className="text-muted-foreground">
@@ -308,14 +456,15 @@ function Servers({
         api={api}
         open={dialog !== null}
         server={dialog === null || dialog === "add" ? null : dialog}
+        callbackUrl={callbackUrl}
         onClose={() => setDialog(null)}
         onSaved={(saved, created) => {
           setDialog(null);
           setProblem(null);
           replace(saved);
           setNotice(created ? PAGE_COPY.added : PAGE_COPY.saved);
-          // A new server is tested at once: that is what the person wants to know.
-          if (created) void test(saved);
+          // A new server is tested at once: that is what the person wants to know. One that needs OAuth has to be connected first.
+          if (created && saved.oauth === null) void test(saved);
         }}
       />
 

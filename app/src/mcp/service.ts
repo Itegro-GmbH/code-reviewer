@@ -19,6 +19,12 @@ import {
   SecretBoxError,
 } from "../crypto/secret-box.ts";
 import type {
+  McpOAuthChange,
+  McpOAuthClient,
+  McpOAuthRepository,
+  StoredMcpOAuth,
+} from "../db/repositories/mcp-oauth-repository.ts";
+import type {
   CurrentMcpServer,
   LaneUsingMcpServer,
   McpServerChange,
@@ -30,9 +36,15 @@ import type {
 } from "../db/repositories/mcp-servers-repository.ts";
 import type { RateLimitsRepository } from "../db/repositories/rate-limits-repository.ts";
 import { secondsLeft } from "../auth/sign-in-limit.ts";
-import { testMcpServer, type McpTestOptions } from "./client.ts";
+import {
+  testMcpServer,
+  type McpTestOptions,
+  type McpTestResult,
+} from "./client.ts";
 import type { McpErrorCode } from "./errors.ts";
 import { parseMcpServerInput, type McpServerInput } from "./input.ts";
+import { createMcpOAuthTokens, sealOAuthClientSecret } from "./oauth/tokens.ts";
+import { toOAuthView, type McpOAuthView } from "./oauth/view.ts";
 
 /** How many servers a workspace may hold. */
 export const MCP_SERVERS_MAX = 50;
@@ -58,11 +70,16 @@ export type McpServerView = {
   testErrorCode: string | null;
   /** What the last successful test listed. */
   tools: McpToolsSnapshot | null;
+  /** The OAuth connection of a server of the kind `oauth` (#1051); null for the other kinds. */
+  oauth: McpOAuthView | null;
   createdAt: string;
   updatedAt: string;
 };
 
-export function toView(server: StoredMcpServer): McpServerView {
+export function toView(
+  server: StoredMcpServer,
+  oauth?: StoredMcpOAuth,
+): McpServerView {
   return {
     id: server.id,
     name: server.name,
@@ -75,6 +92,7 @@ export function toView(server: StoredMcpServer): McpServerView {
     testedAt: server.testedAt,
     testErrorCode: server.testErrorCode,
     tools: server.snapshot,
+    oauth: server.authKind === "oauth" ? toOAuthView(oauth) : null,
     createdAt: server.createdAt,
     updatedAt: server.updatedAt,
   };
@@ -106,6 +124,8 @@ export type McpService = {
 export type McpServiceOptions = {
   workspaceId: string;
   repository: McpServersRepository;
+  /** The OAuth connections of the workspace's servers (#1051). */
+  oauth: McpOAuthRepository;
   rateLimits: RateLimitsRepository;
   appSecret: string;
   /** The guarded fetch of the connection test. */
@@ -206,17 +226,24 @@ export function planMcpUpdate(
   log: (line: string) => void,
 ): McpServerChange | { refused: McpErrorCode } {
   const { auth } = input;
-  if (auth.kind === "none") return { ...fieldsOf(input), sealed: null };
+  // The tokens and the client were made for the address, the transport and the kind the server had: they go with a change of these.
+  const leavesOAuth = current.server.authKind === "oauth";
+  const dropped = (change: McpServerChange): McpServerChange =>
+    leavesOAuth ? { ...change, oauth: { kind: "drop" } } : change;
+  if (auth.kind === "oauth")
+    return planOAuthUpdate(appSecret, serverId, current, input);
+  if (auth.kind === "none")
+    return dropped({ ...fieldsOf(input), sealed: null });
   const keeps = auth.headers.some((header) => "keep" in header);
   if (!keeps)
-    return {
+    return dropped({
       ...fieldsOf(input),
       sealed: sealHeaders(
         appSecret,
         serverId,
         auth.headers as { name: string; value: string }[],
       ),
-    };
+    });
   if (
     current.server.url !== input.url ||
     current.server.transport !== input.transport
@@ -251,18 +278,96 @@ export function planMcpUpdate(
         "keep" in header && header.name === current.server.headerNames[index],
     ) &&
     auth.headers.length === current.server.headerNames.length;
-  return unchanged
-    ? fieldsOf(input)
-    : {
-        ...fieldsOf(input),
-        sealed: sealHeaders(appSecret, serverId, resolved),
-      };
+  return dropped(
+    unchanged
+      ? fieldsOf(input)
+      : {
+          ...fieldsOf(input),
+          sealed: sealHeaders(appSecret, serverId, resolved),
+        },
+  );
+}
+
+/** The client an Owner or Admin entered, as the row keeps it (the secret sealed for the server's row). */
+function manualClient(
+  appSecret: string,
+  serverId: string,
+  clientId: string,
+  secret: string | null,
+): McpOAuthClient {
+  return {
+    source: "manual",
+    clientId,
+    authMethod: secret === null ? "none" : "client_secret_basic",
+    sealedSecret:
+      secret === null
+        ? null
+        : sealOAuthClientSecret(appSecret, serverId, secret),
+  };
+}
+
+/**
+ * The change an edit makes to a server that uses OAuth. What was issued to the old address, transport or client goes (`drop`): the tokens are
+ * for ONE resource and ONE client, so an edit cannot point a stored grant at another place. A kept client secret is for the same address and
+ * the same client id only.
+ */
+function planOAuthUpdate(
+  appSecret: string,
+  serverId: string,
+  current: CurrentMcpServer,
+  input: McpServerInput,
+): McpServerChange | { refused: McpErrorCode } {
+  const { auth } = input;
+  if (auth.kind !== "oauth") throw new Error("An OAuth form is expected.");
+  const change = (oauth?: McpOAuthChange): McpServerChange => ({
+    ...fieldsOf(input),
+    // A server that was a header server has no sealed headers any more.
+    sealed: null,
+    ...(oauth === undefined ? {} : { oauth }),
+  });
+  const had = current.oauth;
+  const moved =
+    current.server.authKind !== "oauth" ||
+    current.server.url !== input.url ||
+    current.server.transport !== input.transport;
+  const sameClient = !moved && had?.clientSource === "manual" ? had : null;
+  const { client } = auth;
+  if (client === null) {
+    // No client entered: the server registers itself. An entered one that is taken away takes its tokens with it; a moved server too.
+    return change(
+      had === null || (!moved && had.clientSource !== "manual")
+        ? undefined
+        : { kind: "drop" },
+    );
+  }
+  if (client.secret !== null && "keep" in client.secret) {
+    if (
+      sameClient === null ||
+      sameClient.clientId !== client.clientId ||
+      !sameClient.hasClientSecret
+    )
+      return { refused: "mcp_oauth_secret_required" };
+    return change();
+  }
+  const secret = client.secret === null ? null : client.secret.value;
+  if (
+    sameClient !== null &&
+    sameClient.clientId === client.clientId &&
+    secret === null &&
+    !sameClient.hasClientSecret
+  )
+    return change();
+  return change({
+    kind: "replace-manual",
+    client: manualClient(appSecret, serverId, client.clientId, secret),
+  });
 }
 
 export function createMcpService(options: McpServiceOptions): McpService {
   const {
     workspaceId,
     repository,
+    oauth,
     rateLimits,
     appSecret,
     allowTestEndpoints,
@@ -270,6 +375,21 @@ export function createMcpService(options: McpServiceOptions): McpService {
     newId = () => crypto.randomUUID(),
     log = (line) => console.error(line),
   } = options;
+  const oauthTokens = createMcpOAuthTokens({
+    repository: oauth,
+    appSecret,
+    http: { fetch: options.fetch, allowTestEndpoints },
+    now,
+    log,
+  });
+
+  /** A server as the page shows it, with its OAuth connection when it uses one. */
+  async function viewOf(server: StoredMcpServer): Promise<McpServerView> {
+    return toView(
+      server,
+      server.authKind === "oauth" ? await oauth.get(server.id) : undefined,
+    );
+  }
 
   async function hitTestLimit(): Promise<McpServiceFailure | null> {
     const instance = await rateLimits.hit("mcp-test:all", MCP_TEST_WINDOW_MS);
@@ -294,9 +414,47 @@ export function createMcpService(options: McpServiceOptions): McpService {
     });
   }
 
+  /** The test of a server that uses OAuth: with its access token, renewed first when it ends soon, and once more when the server says no. */
+  async function testWithOAuth(
+    serverId: string,
+    serverUrl: string,
+    run: (headers: Record<string, string>) => Promise<McpTestResult>,
+  ): Promise<McpTestResult> {
+    let rejected: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const used = await oauthTokens.use(serverId, {
+        serverUrl,
+        ...(rejected === undefined ? {} : { rejected }),
+      });
+      if (!used.ok)
+        return {
+          ok: false,
+          code:
+            used.error === "mcp_oauth_not_connected"
+              ? "mcp_test_oauth_not_connected"
+              : used.error === "mcp_oauth_broken"
+                ? "mcp_test_oauth_broken"
+                : "mcp_test_oauth_unavailable",
+        };
+      const token = used.accessToken.reveal();
+      const result = await run({ authorization: `Bearer ${token}` });
+      // The authorization server ended the token early (or the resource server revoked it): one renewal, then the answer stands.
+      if (result.ok || result.code !== "mcp_test_unauthorized") return result;
+      rejected = token;
+    }
+    return { ok: false, code: "mcp_test_unauthorized" };
+  }
+
   return {
     async list() {
-      return (await repository.list()).map(toView);
+      const [servers, connections] = await Promise.all([
+        repository.list(),
+        oauth.list(),
+      ]);
+      const byServer = new Map(
+        connections.map((connection) => [connection.serverId, connection]),
+      );
+      return servers.map((server) => toView(server, byServer.get(server.id)));
     },
 
     async create(actor, raw) {
@@ -319,6 +477,19 @@ export function createMcpService(options: McpServiceOptions): McpService {
                   auth.headers as { name: string; value: string }[],
                 )
               : null,
+          ...(auth.kind === "oauth" && auth.client !== null
+            ? {
+                oauthClient: manualClient(
+                  appSecret,
+                  id,
+                  auth.client.clientId,
+                  // `keep` is refused on a new server (`allowKeep: false`).
+                  auth.client.secret !== null && "value" in auth.client.secret
+                    ? auth.client.secret.value
+                    : null,
+                ),
+              }
+            : {}),
           createdBy: actor.id,
         },
         MCP_SERVERS_MAX,
@@ -329,7 +500,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
             ? "mcp_name_taken"
             : "mcp_limit_reached",
         );
-      return { ok: true, value: toView(created.server) };
+      return { ok: true, value: await viewOf(created.server) };
     },
 
     async update(id, raw) {
@@ -359,7 +530,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
               : "mcp_server_not_found",
         );
       }
-      return { ok: true, value: toView(changed.server) };
+      return { ok: true, value: await viewOf(changed.server) };
     },
 
     async remove(id) {
@@ -387,22 +558,31 @@ export function createMcpService(options: McpServiceOptions): McpService {
           log(`[mcp] MCP_HEADERS_UNREADABLE: server ${id} (test).`);
         } else headers = opened;
       }
-      const result = unreadable
-        ? ({ ok: false, code: "mcp_test_credentials_unreadable" } as const)
-        : await testMcpServer(
-            {
-              url: server.url,
-              transport: server.transport === "sse" ? "sse" : "streamable-http",
-              headers: Object.fromEntries(
+      const target = {
+        url: server.url,
+        transport:
+          server.transport === "sse"
+            ? ("sse" as const)
+            : ("streamable-http" as const),
+      };
+      const runTest = (extra: Record<string, string>) =>
+        testMcpServer(
+          {
+            ...target,
+            headers: {
+              ...Object.fromEntries(
                 headers.map((header) => [header.name, header.value]),
               ),
+              ...extra,
             },
-            {
-              fetch: options.fetch,
-              allowTestEndpoints,
-              ...options.testLimits,
-            },
-          );
+          },
+          { fetch: options.fetch, allowTestEndpoints, ...options.testLimits },
+        );
+      const result = unreadable
+        ? ({ ok: false, code: "mcp_test_credentials_unreadable" } as const)
+        : server.authKind === "oauth"
+          ? await testWithOAuth(id, server.url, runTest)
+          : await runTest({});
       const recorded = await repository.recordTest(
         id,
         server.revision,
@@ -423,7 +603,7 @@ export function createMcpService(options: McpServiceOptions): McpService {
       const fresh = await repository.get(id);
       return fresh === undefined
         ? fail("mcp_server_not_found")
-        : { ok: true, value: toView(fresh) };
+        : { ok: true, value: await viewOf(fresh) };
     },
   };
 }

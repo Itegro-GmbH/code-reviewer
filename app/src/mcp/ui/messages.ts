@@ -15,6 +15,12 @@ import {
   type McpErrorCode,
   type McpTestErrorCode,
 } from "../errors.ts";
+import {
+  isMcpOAuthResultCode,
+  MCP_OAUTH_FAILURE_CODES,
+  type McpOAuthFailureCode,
+  type McpOAuthResultCode,
+} from "../oauth/errors.ts";
 
 export const PAGE_COPY = {
   title: "MCP",
@@ -74,7 +80,28 @@ export const PAGE_COPY = {
     "The address or the transport changed: enter this value again.",
   addHeader: "Add header",
   removeHeader: "Remove header",
-  oauthLater: "OAuth follows in a later version.",
+  connect: "Connect",
+  reconnect: "Reconnect",
+  connecting: "Opening the consent page…",
+  oauthUnconnected: "Not connected yet. Connect to grant access.",
+  oauthConnected: "Connected.",
+  oauthBroken:
+    "The authorization server ended the grant. Reconnect to grant access again.",
+  oauthClient: "OAuth client",
+  oauthClientRegistered: "Registered by this server when it connects",
+  oauthClientManual: "Entered by an Owner or Admin",
+  oauthScopes: "Scopes",
+  oauthClientIdLabel: "OAuth client ID (optional)",
+  oauthClientSecretLabel: "OAuth client secret (optional)",
+  oauthClientHint:
+    "Leave both empty: the server registers this application itself. Enter a client only if its authorization server has no dynamic registration.",
+  oauthCallbackHint: (callbackUrl: string) =>
+    `Register this redirect address for the client: ${callbackUrl}`,
+  oauthSecretKept: "Stored. Leave empty to keep it.",
+  oauthSecretReenter:
+    "The address, the transport or the client ID changed: enter the secret again.",
+  oauthChangeNote:
+    "Changing the address, the transport or the client ends the connection: connect again afterwards.",
 } as const;
 
 export const TRANSPORT_COPY: Record<string, string> = {
@@ -102,8 +129,11 @@ const failureCopy = (): Record<McpErrorCode, string> => ({
     "The address must not have a query string, because a key in it would be shown to everybody. Use a header for the key.",
   mcp_url_private:
     "The address names this machine or a private or internal network. Only public servers can be used.",
-  mcp_auth_invalid: "Choose no authentication or a header.",
-  mcp_auth_oauth_unavailable: PAGE_COPY.oauthLater,
+  mcp_auth_invalid: "Choose no authentication, a header or OAuth.",
+  mcp_oauth_client_invalid:
+    "The client ID or secret is empty where it must not be, too long, or has characters other than visible ASCII. A secret needs a client ID.",
+  mcp_oauth_secret_required:
+    "A stored client secret is only kept for the same address, transport and client ID. Enter the secret again.",
   mcp_headers_invalid: "Add at least one header, and at most ten.",
   mcp_header_name_invalid:
     "A header name has characters that are not allowed, or appears twice.",
@@ -127,6 +157,51 @@ const failureCopy = (): Record<McpErrorCode, string> => ({
   rate_limited: "Too many connection tests. Wait a few minutes and try again.",
   unavailable: "The server could not be changed right now. Try again.",
 });
+
+/** Why starting "Connect" did not work: what is wrong with the server or its authorization server. */
+const oauthFailureCopy: Record<McpOAuthFailureCode, string> = {
+  mcp_oauth_not_oauth:
+    "This server does not use OAuth. Change its authentication first.",
+  mcp_oauth_discovery_failed:
+    "The server does not say which authorization server to use, or its answer is not what the OAuth standards describe. Check the address and that the server supports OAuth.",
+  mcp_oauth_address_refused:
+    "An address the server named for OAuth is private, internal or not https, so it was not called.",
+  mcp_oauth_pkce_unsupported:
+    "The authorization server does not support PKCE with S256, so it cannot be used safely.",
+  mcp_oauth_client_required:
+    "The authorization server cannot register this application by itself. Edit the server and enter a client ID (and secret) from its authorization server.",
+  mcp_oauth_registration_failed:
+    "The authorization server refused to register this application. Edit the server and enter a client ID (and secret) instead.",
+  mcp_oauth_unreachable:
+    "The authorization server could not be reached or did not answer in time. Try again.",
+};
+
+/** How the way back from the authorization server ended (shown once on the page). */
+const oauthResultCopy: Record<McpOAuthResultCode, string> = {
+  connected: "Connected. The server's tools are being listed.",
+  state_invalid:
+    "The connection was not made: the link was used before, expired, or was started in another browser session. Start again.",
+  access_denied: "Access was not granted.",
+  mcp_oauth_authorization_refused:
+    "The authorization server did not grant access. Start again.",
+  mcp_oauth_client_refused:
+    "The authorization server does not accept the OAuth client. Check the client ID and secret.",
+  workspace_role_required: "Only an Owner or an Admin can connect a server.",
+  mcp_server_not_found: "This server does not exist any more.",
+  mcp_server_changed:
+    "The server was changed while you were at the consent page. Start again.",
+  mcp_oauth_unreachable:
+    "The authorization server could not be reached or did not answer in time. Try again.",
+  mcp_oauth_address_refused:
+    "An address of the authorization server is private, internal or not https, so it was not called.",
+  rate_limited: "Too many attempts. Wait a few minutes and try again.",
+  unavailable: "The connection could not be made right now. Try again.",
+};
+
+/** The sentence for the result code in the address of the page, or null when it is none of ours. */
+export function describeMcpOAuthResult(code: unknown): string | null {
+  return isMcpOAuthResultCode(code) ? oauthResultCopy[code] : null;
+}
 
 const CROSS_SITE_CODES = ["cross_site_request"];
 const TOO_LARGE_CODES = ["body_too_large"];
@@ -162,6 +237,8 @@ export function describeMcpFailure(
   if (failure.code === "mcp_server_in_use" && (failure.lanes?.length ?? 0) > 0)
     return PAGE_COPY.inUse(describeLanes(failure.lanes ?? []));
   if (hasCopy(failure.code)) return failureCopy()[failure.code];
+  if ((MCP_OAUTH_FAILURE_CODES as readonly string[]).includes(failure.code))
+    return oauthFailureCopy[failure.code as McpOAuthFailureCode];
   if (CROSS_SITE_CODES.includes(failure.code))
     return CROSS_SITE_REQUEST_RELOAD_PAGE;
   if (TOO_LARGE_CODES.includes(failure.code))
@@ -195,6 +272,11 @@ const testCopy: Record<McpTestErrorCode, string> = {
   mcp_test_too_large: "The server's answer is larger than the test reads.",
   mcp_test_credentials_unreadable:
     "The stored headers cannot be read any more. Enter them again.",
+  mcp_test_oauth_not_connected: "Not connected yet. Connect the server first.",
+  mcp_test_oauth_broken:
+    "The authorization server ended the grant. Reconnect the server.",
+  mcp_test_oauth_unavailable:
+    "The access could not be renewed right now. Try again; if it keeps failing, the operator's log says why.",
 };
 
 /** The sentence for how a test ended; an unknown code (a newer server) is a plain failure. */

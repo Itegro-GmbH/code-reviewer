@@ -45,6 +45,7 @@ import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
+import { createMcpOAuthRepository } from "./mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "./mcp-servers-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
@@ -88,6 +89,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     jira: createJiraConnectionsRepository(db, workspaceId),
     jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
     mcp: createMcpServersRepository(db, workspaceId),
+    mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -664,7 +666,54 @@ async function seed(
     },
     50,
   );
+  // An MCP server that uses OAuth (#1051) in every workspace, with a client, what discovery found and a sealed token pair.
+  await repos.mcp.create(
+    {
+      id: `mcp-oauth-${tag}`,
+      name: `mcp oauth ${tag}`,
+      transport: "streamable-http",
+      url: `https://mcp-oauth.example.com/${tag}`,
+      authKind: "oauth",
+      headerNames: [],
+      sealed: null,
+      oauthClient: {
+        source: "manual",
+        clientId: `client-${tag}`,
+        authMethod: "client_secret_basic",
+        sealedSecret: {
+          ciphertext: `cs-${tag}`,
+          nonce: `ns-${tag}`,
+          keyVersion: 1,
+        },
+      },
+      createdBy: null,
+    },
+    50,
+  );
+  await repos.mcpOAuth.saveStart(`mcp-oauth-${tag}`, 1, {
+    discovery: {
+      resource: `https://mcp-oauth.example.com/${tag}`,
+      issuer: "https://as.example.com",
+      authorizationEndpoint: "https://as.example.com/authorize",
+      tokenEndpoint: "https://as.example.com/token",
+      registrationEndpoint: null,
+      scopes: [],
+      issParameter: false,
+      authMethods: ["client_secret_basic"],
+    },
+  });
+  await repos.mcpOAuth.saveConnection(`mcp-oauth-${tag}`, 1, {
+    sealedTokens: {
+      ciphertext: `ct-${tag}`,
+      nonce: `nt-${tag}`,
+      keyVersion: 1,
+    },
+    accessExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
+    scopes: [],
+    connectedBy: null,
+  });
   return {
+    mcpOAuthServerId: `mcp-oauth-${tag}`,
     mcpServerId: `mcp-${tag}`,
     jiraWebhookId: `jira-webhook-${tag}`,
     jiraWebhookProjectId: `jira-project-${tag}`,
@@ -908,6 +957,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    mcpOAuthConnections: await db
+      .selectFrom("mcp_oauth_connections")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("server_id")
       .execute(),
     jiraWebhooks: await db
       .selectFrom("jira_webhooks")
@@ -2989,7 +3044,10 @@ const CASES: Case[] = [
     name: "mcp.list",
     run: (a) => a.mcp.list(),
     expectAnswer: (answer, a) =>
-      expect(answer).toEqual([expect.objectContaining({ id: a.mcpServerId })]),
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.mcpServerId }),
+        expect.objectContaining({ id: a.mcpOAuthServerId }),
+      ]),
   },
   {
     name: "mcp.get",
@@ -3053,6 +3111,76 @@ const CASES: Case[] = [
     run: (a, b) => a.mcp.removeUnlessUsed(b.mcpServerId),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // The OAuth connections of MCP servers (#1051-T01): B's client, discovery and sealed tokens are not A's to read, start, store or refresh
+  {
+    name: "mcpOAuth.list",
+    run: (a) => a.mcpOAuth.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ serverId: a.mcpOAuthServerId }),
+      ]),
+  },
+  {
+    name: "mcpOAuth.get",
+    run: (a, b) => a.mcpOAuth.get(b.mcpOAuthServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcpOAuth.readSecrets",
+    run: (a, b) => a.mcpOAuth.readSecrets(b.mcpOAuthServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcpOAuth.saveStart",
+    run: (a, b) =>
+      a.mcpOAuth.saveStart(b.mcpOAuthServerId, 1, {
+        discovery: {
+          resource: "https://evil.example.com/mcp",
+          issuer: "https://evil.example.com",
+          authorizationEndpoint: "https://evil.example.com/authorize",
+          tokenEndpoint: "https://evil.example.com/token",
+          registrationEndpoint: null,
+          scopes: [],
+          issParameter: false,
+          authMethods: [],
+        },
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "mcpOAuth.saveConnection",
+    run: (a, b) =>
+      a.mcpOAuth.saveConnection(b.mcpOAuthServerId, 1, {
+        sealedTokens: { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        accessExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
+        scopes: [],
+        connectedBy: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "mcpOAuth.withLockedTokens",
+    run: (a, b) =>
+      a.mcpOAuth.withLockedTokens(
+        b.mcpOAuthServerId,
+        async (locked, writes) => ({
+          locked,
+          replaced: await writes.replaceTokens(
+            1,
+            { ciphertext: "x", nonce: "y", keyVersion: 1 },
+            new Date("2027-01-01T00:00:00.000Z"),
+            null,
+          ),
+          broken: await writes.markBroken(1, "mcp_oauth_refresh_refused"),
+        }),
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({
+        locked: undefined,
+        replaced: false,
+        broken: false,
+      }),
   },
   // Jira webhooks (#1039): B's registrations are not A's to read, change or remove, and A cannot register one on B's connection
   {

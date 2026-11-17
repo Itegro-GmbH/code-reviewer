@@ -32,7 +32,8 @@ async function snapshot(
 ): Promise<Record<string, unknown[]>> {
   const result: Record<string, unknown[]> = {};
   for (const table of await db.introspection.getTables()) {
-    if (table.name === "mcp_servers") continue;
+    if (table.name === "mcp_servers" || table.name === "mcp_oauth_connections")
+      continue;
     const { rows } =
       await sql<unknown>`select * from ${sql.table(table.name)} order by 1`.execute(
         db,
@@ -46,7 +47,7 @@ async function columns(db: Kysely<Database>): Promise<string[]> {
   const { rows } = await sql<{
     name: string;
   }>`select table_name || '.' || column_name as name
-    from information_schema.columns where table_schema = 'public' and table_name <> 'mcp_servers' order by 1`.execute(
+    from information_schema.columns where table_schema = 'public' and table_name not in ('mcp_servers', 'mcp_oauth_connections') order by 1`.execute(
     db,
   );
   return rows.map((row) => row.name);
@@ -117,7 +118,10 @@ describe("the MCP servers migration", () => {
     expect((await migrateToLatest(db, migrationProvider)).executed).toEqual([]);
     const before = await columns(db);
 
-    await (await migrationProvider.getMigrations())[THIS]?.down?.(db);
+    // The OAuth table of #1051 references the servers: it is taken back first, in the reverse order of the migrations.
+    const all = await migrationProvider.getMigrations();
+    await all["20261117140000_create_mcp_oauth_connections"]?.down?.(db);
+    await all[THIS]?.down?.(db);
 
     const { rows } = await sql<{
       name: string;
