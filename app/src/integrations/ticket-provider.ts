@@ -42,6 +42,8 @@ export type TicketRead = {
   type: string;
   /** The status of the ticket as its platform names it (Jira's own status name, #1039); absent where the platform gives none (GitHub issues). */
   status?: string;
+  /** The platform's id of that status where it has one (Jira, #1058): the same in every language, unlike the name; absent otherwise. */
+  statusId?: string;
 };
 
 /** A board of a ticket container as the picker of a new project needs it (#922). */

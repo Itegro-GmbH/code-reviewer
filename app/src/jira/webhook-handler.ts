@@ -37,13 +37,18 @@ import type {
   WebhookDeliveryOutcome,
 } from "../db/repositories/webhook-deliveries-repository.ts";
 import { parseAnswerCommand } from "../integrations/comment-command.ts";
+import { nameOfStatusId, type StatusRef } from "../workflows/status-match.ts";
 import { readLimitedBody } from "../webhooks/limited-body.ts";
 import {
   consoleWebhookLogger,
   type WebhookLogger,
 } from "../webhooks/logger.ts";
 import type { JiraMirror } from "./mirror.ts";
-import { parseJiraDelivery, type JiraComment } from "./webhook-events.ts";
+import {
+  parseJiraDelivery,
+  type JiraChange,
+  type JiraComment,
+} from "./webhook-events.ts";
 import { verifyJiraDelivery } from "./webhook-verify.ts";
 
 /** 1 MiB: a Jira payload is a few kilobytes (the issue without `expand`, a changelog). */
@@ -91,6 +96,8 @@ export type JiraStatusStarter = {
       issueKey: string;
       from: string | null;
       to: string;
+      fromId?: string;
+      toId?: string;
       actor?: { accountId: string; name: string };
     },
   ): Promise<{
@@ -132,6 +139,14 @@ export type JiraWorkspaceCollaborators = {
   /** The full name of the repository the code lives in (where the mirror's rows sit); undefined for none. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   mirror: JiraMirror;
+  /**
+   * The statuses of a Jira project (id, name, untranslated name), to write the mirror with the name the picker and the full read use (#1058):
+   * a delivery carries the name Jira keeps for every language. Left out or undefined: the delivery's own name is written. Never throws.
+   */
+  statusesOf?(source: {
+    connectionId: string;
+    projectKey: string;
+  }): Promise<readonly StatusRef[] | undefined>;
   /** Left out where a server has no workflow engine: a status change is then only written into the ticket mirror. */
   statuses?: JiraStatusStarter;
   /** Left out where a server has no workflow engine: a comment `/answer …` is then only written into the ticket mirror's issue. */
@@ -306,13 +321,30 @@ export function createJiraWebhookHandler(
         return accepted("ignored");
       }
 
+      // The status name of the mirror is the one the REST API gives (the picker's and the full read's), found by the status id.
+      let forMirror: JiraChange = change;
+      if (
+        change.kind === "issue_changed" &&
+        change.issue.statusId !== undefined
+      ) {
+        const statuses = await workspace
+          .statusesOf?.({
+            connectionId: registration.connectionId,
+            projectKey: registration.projectKey,
+          })
+          .catch(() => undefined);
+        const name = nameOfStatusId(statuses ?? [], change.issue.statusId);
+        if (name !== undefined && name !== change.issue.status)
+          forMirror = { ...change, issue: { ...change.issue, status: name } };
+      }
+
       let mirrored = false;
       let mirrorFailure: { error: unknown } | undefined;
       try {
         mirrored =
           (await workspace.mirror.apply(
             { repositoryId: project.repositoryId, repoFullName },
-            change,
+            forMirror,
           )) === "updated";
       } catch (error) {
         logger.error(
@@ -334,6 +366,12 @@ export function createJiraWebhookHandler(
           issueKey: change.issue.key,
           from: change.status.from,
           to: change.status.to,
+          ...(change.status.fromId === undefined
+            ? {}
+            : { fromId: change.status.fromId }),
+          ...(change.status.toId === undefined
+            ? {}
+            : { toId: change.status.toId }),
           ...(change.actor === undefined ? {} : { actor: change.actor }),
         });
         if (result.matched > 0)

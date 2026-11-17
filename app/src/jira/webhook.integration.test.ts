@@ -27,6 +27,8 @@ import {
 } from "../workflow-runs/jira-status-trigger.ts";
 import { createJiraIssueReader } from "./issue-reader.ts";
 import { createJiraMirror } from "./mirror.ts";
+import { createJiraProjectReader } from "./projects.ts";
+import { createJiraStatusDirectory } from "./status-directory.ts";
 import {
   createJiraActivationHook,
   createJiraDeactivationHook,
@@ -79,13 +81,41 @@ const LANE = {
   ],
 };
 
-async function world() {
+// #1058: a site whose user reads Jira in German: the REST API names the statuses in German, a webhook delivery with the name Jira keeps.
+const GERMAN_STATUSES = [
+  {
+    id: "10100",
+    name: "Zu erledigen",
+    untranslatedName: "To Do",
+    category: "new" as const,
+  },
+  { id: "10101", name: "In Arbeit", untranslatedName: "In Progress" },
+  {
+    id: "10102",
+    name: "Erledigt",
+    untranslatedName: "Done",
+    category: "done" as const,
+  },
+];
+
+async function world(options: { german?: boolean } = {}) {
   const h = await createJiraHarness({
     atlassian: {
       sites: [SITE],
       projects: {
         [SITE.id]: [
-          { id: "10000", key: "PROJ", name: "Project" },
+          {
+            id: "10000",
+            key: "PROJ",
+            name: "Project",
+            ...(options.german === true
+              ? {
+                  issueTypes: [
+                    { id: "1", name: "Task", statuses: GERMAN_STATUSES },
+                  ],
+                }
+              : {}),
+          },
           { id: "10001", key: "NEW", name: "Next project" },
         ],
       },
@@ -99,7 +129,11 @@ async function world() {
   await h.walk(owner, workspace, "owner");
   const [connection] = await h.jira.service.list(workspace.id);
   if (connection === undefined) throw new Error("not connected");
-  h.atlassian.setIssues(SITE.id, [ISSUE]);
+  h.atlassian.setIssues(SITE.id, [
+    options.german === true
+      ? { ...ISSUE, status: { name: "In Arbeit" } }
+      : ISSUE,
+  ]);
 
   const integration = await createIntegrationsRepository(
     h.db,
@@ -150,7 +184,11 @@ async function world() {
   });
   const provider = createJiraTicketProvider({ readerFor: async () => reader });
   const kicked: string[] = [];
+  const statusesOf = createJiraStatusDirectory({
+    reader: createJiraProjectReader({ tokens }),
+  }).statusesOf;
   const statuses = createJiraStatusTrigger({
+    statusesOf,
     runs,
     workflows,
     async projectOf(projectId) {
@@ -197,6 +235,7 @@ async function world() {
       projects,
       repositoryName: async (id) => (await repositories.get(id))?.fullName,
       mirror: createJiraMirror({ tracker }),
+      statusesOf: statusesOf,
       statuses,
     }),
     logger,
@@ -219,7 +258,7 @@ async function world() {
     },
   });
 
-  async function createJiraProject() {
+  async function createJiraProject(laneTo = "Ready for agent") {
     const project = await service.createProject(repository.id, null, {
       connectionId: connection.id,
       projectKey: "PROJ",
@@ -227,7 +266,10 @@ async function world() {
     const lane = await workflows.create(
       {
         name: "Jira status lane",
-        document: JSON.stringify(LANE),
+        document: JSON.stringify({
+          ...LANE,
+          triggers: [{ id: "ready", kind: "ticket.statusChanged", to: laneTo }],
+        }),
         createdBy: owner.id,
         projectId: project.id,
       },
@@ -467,6 +509,79 @@ describe("registering the webhook of a Jira source", () => {
       status: "pending",
       errorCode: "jira_webhook_limit",
     });
+  });
+});
+
+// #1058: Jira localizes the status names it answers a REST call with (the user's language), a webhook delivery carries the names Jira keeps
+// for every language. The lane's status is compared by the status's id, so either spelling starts it.
+describe("a delivery of a Jira site whose user reads Jira in German", () => {
+  async function movedToDo(laneTo: string) {
+    const w = await world({ german: true });
+    await w.createJiraProject(laneTo);
+    const hook = await w.hook();
+    // The person moves LAT-57 to "Zu erledigen"; the delivery says "To Do" (the id is the same).
+    w.h.atlassian.setIssueStatus(SITE.id, "PROJ-7", { name: "Zu erledigen" });
+    const answer = await w.h.atlassian.deliver(
+      hook.id,
+      w.moveTo("To Do", "In Progress"),
+    );
+    return { w, hook, answer };
+  }
+
+  // #1058-T01
+  it("starts the lane that waits for the localized name the picker offers, and writes that name into the mirror", async () => {
+    const { w, answer } = await movedToDo("Zu erledigen");
+
+    expect(answer.body).toEqual({
+      status: "accepted",
+      outcome: "workflow_runs_started",
+    });
+    const runs = await w.runsOf();
+    expect(runs).toHaveLength(1);
+    const input = JSON.parse(String(runs[0]?.trigger_input)) as {
+      ticket: { status: string };
+      status: { from: string; to: string };
+    };
+    expect(input.ticket.status).toBe("Zu erledigen");
+    expect(input.status).toEqual({ from: "In Arbeit", to: "Zu erledigen" });
+    // #1058-T05: the mirror holds the name the picker and the resync use, not the one of the delivery.
+    expect(await w.tracker.getItem(w.repository.id, 7)).toMatchObject({
+      boardStatus: "Zu erledigen",
+    });
+  });
+
+  // #1058-T02
+  it("starts the lane that waits for the untranslated name too", async () => {
+    const { w, answer } = await movedToDo("To Do");
+
+    expect(answer.body).toEqual({
+      status: "accepted",
+      outcome: "workflow_runs_started",
+    });
+    expect(await w.runsOf()).toHaveLength(1);
+  });
+
+  // #1058-T03
+  it("stops a late delivery for a status the issue no longer has, and one for another status than the lane waits for", async () => {
+    const w = await world({ german: true });
+    await w.createJiraProject("Zu erledigen");
+    const hook = await w.hook();
+
+    // The issue was moved on to "In Arbeit" before the delivery for "To Do" was handled: the stale guard reads that.
+    const late = await w.h.atlassian.deliver(
+      hook.id,
+      w.moveTo("To Do", "In Progress"),
+    );
+    expect(late.body).toEqual({
+      status: "accepted",
+      outcome: "tracker_updated",
+    });
+    expect(await w.runsOf()).toEqual([]);
+
+    // A move to "Erledigt" is not the lane's status.
+    w.h.atlassian.setIssueStatus(SITE.id, "PROJ-7", { name: "Erledigt" });
+    await w.h.atlassian.deliver(hook.id, w.moveTo("Done", "To Do"));
+    expect(await w.runsOf()).toEqual([]);
   });
 });
 

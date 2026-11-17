@@ -95,7 +95,9 @@ export function statusNamesVia({
         jira.connectionId,
         jira.projectKey,
       );
-      return result.ok ? result.statuses.map((status) => status.name) : [];
+      return result.ok
+        ? [...new Set(result.statuses.map((status) => status.name))]
+        : [];
     } catch {
       return [];
     }

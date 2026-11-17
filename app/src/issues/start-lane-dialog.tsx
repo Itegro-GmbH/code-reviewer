@@ -43,6 +43,8 @@ export function StartLaneDialog({
   workspaceSlug,
   repo,
   issueNumber,
+  provider = "github",
+  ticketKey,
   lanes,
   onOpenChange,
   onCloseAutoFocus,
@@ -53,6 +55,10 @@ export function StartLaneDialog({
   repo: string;
   /** The issue to start on; the dialog is open while it is set. */
   issueNumber: number | null;
+  /** The provider of the project's ticket source (`github`, `jira`): the reference is built for it. */
+  provider?: string;
+  /** The text key of the ticket (`LAT-57` for Jira); a GitHub issue's key is its number, the default. */
+  ticketKey?: string;
   lanes: readonly StartLane[];
   onOpenChange: (open: boolean) => void;
   /** Where the focus goes when the dialog has closed (the Start button, see `useReturnFocus`). */
@@ -84,9 +90,9 @@ export function StartLaneDialog({
     setPending(true);
     setProblem(null);
     const ticket = formatTicketRef({
-      provider: "github",
+      provider,
       repo,
-      key: String(issueNumber),
+      key: ticketKey ?? String(issueNumber),
     });
     const key = `${lane.workflowId}:${ticket}`;
     const clientRequestId = requestIds.current.get(key) ?? newClientRequestId();
@@ -117,6 +123,12 @@ export function StartLaneDialog({
   if (issueNumber !== null && issueNumber !== lastNumber)
     setLastNumber(issueNumber);
   const shownNumber = issueNumber ?? lastNumber ?? 0;
+  const [lastKey, setLastKey] = useState(ticketKey);
+  if (ticketKey !== undefined && ticketKey !== lastKey) setLastKey(ticketKey);
+  const shownLabel =
+    provider === "jira" && lastKey !== undefined
+      ? lastKey
+      : `issue #${String(shownNumber)}`;
 
   return (
     <Dialog
@@ -131,7 +143,7 @@ export function StartLaneDialog({
         {...(onCloseAutoFocus === undefined ? {} : { onCloseAutoFocus })}
       >
         <DialogHeader>
-          <DialogTitle>{START_LANE_COPY.title(shownNumber)}</DialogTitle>
+          <DialogTitle>{START_LANE_COPY.title(shownLabel)}</DialogTitle>
           <DialogDescription>{START_LANE_COPY.description}</DialogDescription>
         </DialogHeader>
         {lanes.length === 0 ? (

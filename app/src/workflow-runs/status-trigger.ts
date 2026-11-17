@@ -161,6 +161,12 @@ export function matchStatusLanes(
     maxBudgetUsd: number;
     log: (line: string) => void;
     result: StatusTriggerResult;
+    /**
+     * Whether the status a trigger waits for (`to`, `from`) is the one the move has. Left out: the names are equal. The Jira front compares
+     * by status id, because Jira localizes names (#1058).
+     */
+    sameTo?: (wanted: string) => boolean;
+    sameFrom?: (wanted: string) => boolean;
   },
 ): MatchedStatusLane[] {
   const { result, log } = context;
@@ -170,8 +176,10 @@ export function matchStatusLanes(
     const trigger = read?.triggers.find(
       (candidate) =>
         candidate.kind === STATUS_TRIGGER_KIND &&
-        candidate.to === move.to &&
-        (candidate.from === undefined || candidate.from === move.from),
+        candidate.to !== undefined &&
+        (context.sameTo?.(candidate.to) ?? candidate.to === move.to) &&
+        (candidate.from === undefined ||
+          (context.sameFrom?.(candidate.from) ?? candidate.from === move.from)),
     );
     const document =
       read === undefined || trigger === undefined

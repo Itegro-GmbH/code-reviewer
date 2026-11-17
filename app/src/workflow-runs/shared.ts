@@ -64,6 +64,7 @@ import {
   createJiraStatusTrigger,
   jiraProjectView,
   type JiraStatusTrigger,
+  type JiraStatusTriggerDependencies,
 } from "./jira-status-trigger.ts";
 import { latestRunSamples } from "./samples.ts";
 import {
@@ -572,12 +573,15 @@ export function jiraStatusTriggerFor(
   workspaceId: string,
   /** The Jira ticket provider (`jira/shared.ts`): the route that wires the Jira webhook hands it in. */
   jira: TicketProvider,
+  /** The statuses of a Jira project (`jira/shared.ts` `jiraStatusesFor`): lanes compare a status by its id, because Jira localizes names (#1058). */
+  statusesOf?: JiraStatusTriggerDependencies["statusesOf"],
 ): JiraStatusTrigger {
   const db = getDatabase();
   const projects = createProjectsRepository(db, workspaceId);
   const reads = githubReads(workspaceId, ticketProvidersWith([jira]));
   const repositories = createRepositoriesRepository(db, workspaceId);
   return createJiraStatusTrigger({
+    ...(statusesOf === undefined ? {} : { statusesOf }),
     runs: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
     async projectOf(projectId) {

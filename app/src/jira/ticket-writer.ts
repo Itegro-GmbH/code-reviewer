@@ -17,13 +17,14 @@ import {
   type TicketProvider,
   type TicketProviderErrorCode,
 } from "../integrations/ticket-provider.ts";
+import { statusIdsNamed } from "../workflows/status-match.ts";
 import { isJiraIssueKey } from "./issue.ts";
 import {
   extractMarkers,
   markdownToAdf,
   plainTextToAdf,
 } from "./markdown-adf.ts";
-import type { JiraProjectReader } from "./projects.ts";
+import type { JiraProjectReader, JiraStatus } from "./projects.ts";
 import type { JiraTokens } from "./tokens.ts";
 
 /** The comment property the markers of a comment are kept under. */
@@ -397,17 +398,58 @@ export function createJiraTicketWriter(
         throw failureOf(read.status);
       }
       const issue = await jsonOf(read);
-      const current =
+      const now =
         isRecord(issue) &&
         isRecord(issue.fields) &&
         isRecord(issue.fields.status) &&
         typeof issue.fields.status.name === "string"
-          ? issue.fields.status.name
+          ? {
+              name: issue.fields.status.name,
+              id:
+                typeof issue.fields.status.id === "string"
+                  ? issue.fields.status.id
+                  : undefined,
+              untranslatedName:
+                typeof issue.fields.status.untranslatedName === "string"
+                  ? issue.fields.status.untranslatedName
+                  : undefined,
+            }
           : undefined;
-      if (current === undefined) throw fail("ticket_unavailable");
+      if (now === undefined) throw fail("ticket_unavailable");
+
+      // Jira names a status in the language of the connected user and keeps one name for every language: a name says little, the id of the
+      // status says which one is meant (#1058). The names are compared first, the project's statuses are read only when they do not decide.
+      const named = (ref: {
+        name: string;
+        untranslatedName?: string | undefined;
+      }) =>
+        ref.name.trim().toLowerCase() === wanted ||
+        ref.untranslatedName?.trim().toLowerCase() === wanted;
+      let wantedIds: ReadonlySet<string> | undefined;
+      let projectStatuses: JiraStatus[] | undefined;
+      const resolveIds = async (): Promise<ReadonlySet<string>> => {
+        if (wantedIds !== undefined) return wantedIds;
+        const known = await deps.statuses.listStatuses(
+          connectionId,
+          projectKey,
+        );
+        projectStatuses = known.ok ? known.statuses : undefined;
+        wantedIds = statusIdsNamed(projectStatuses ?? [], status);
+        return wantedIds;
+      };
+      const isWanted = async (
+        ref: {
+          id: string | undefined;
+          name: string;
+          untranslatedName?: string | undefined;
+        },
+        byId: boolean,
+      ): Promise<boolean> =>
+        named(ref) ||
+        (byId && ref.id !== undefined && (await resolveIds()).has(ref.id));
+
       // Already there: nothing to do (the step may be made again).
-      if (current.trim().toLowerCase() === wanted)
-        return { kind: "moved", status: current };
+      if (named(now)) return { kind: "moved", status: now.name };
 
       const offered = await call(connectionId, `${path}/transitions`, {
         headers: { accept: "application/json" },
@@ -418,7 +460,13 @@ export function createJiraTicketWriter(
         throw failureOf(offered.status);
       }
       const list = await jsonOf(offered);
-      const transitions: { id: string; to: string; hasScreen: boolean }[] = [];
+      const transitions: {
+        id: string;
+        to: string;
+        toId: string | undefined;
+        toUntranslated: string | undefined;
+        hasScreen: boolean;
+      }[] = [];
       if (isRecord(list) && Array.isArray(list.transitions))
         for (const transition of list.transitions as unknown[])
           if (
@@ -431,26 +479,51 @@ export function createJiraTicketWriter(
             transitions.push({
               id: transition.id,
               to: transition.to.name,
+              toId:
+                typeof transition.to.id === "string"
+                  ? transition.to.id
+                  : undefined,
+              toUntranslated:
+                typeof transition.to.untranslatedName === "string"
+                  ? transition.to.untranslatedName
+                  : undefined,
               hasScreen: transition.hasScreen === true,
             });
-      // A transition without a screen first: one that needs fields cannot be done from here.
-      const found = transitions
-        .filter((transition) => transition.to.trim().toLowerCase() === wanted)
-        .sort((a, b) => Number(a.hasScreen) - Number(b.hasScreen))[0];
-      if (found === undefined) {
-        const known = await deps.statuses.listStatuses(
-          connectionId,
-          projectKey,
-        );
-        if (
-          known.ok &&
-          !known.statuses.some(
-            (candidate) => candidate.name.trim().toLowerCase() === wanted,
+      const targets = async (byId: boolean) => {
+        const reached: typeof transitions = [];
+        for (const transition of transitions)
+          if (
+            await isWanted(
+              {
+                id: transition.toId,
+                name: transition.to,
+                untranslatedName: transition.toUntranslated,
+              },
+              byId,
+            )
           )
+            reached.push(transition);
+        // A transition without a screen first: one that needs fields cannot be done from here.
+        return reached.sort(
+          (x, y) => Number(x.hasScreen) - Number(y.hasScreen),
+        );
+      };
+      // By name first (no call); the project's statuses are read only when no name decides.
+      const found = (await targets(false))[0] ?? (await targets(true))[0];
+      if (found === undefined) {
+        // The ticket may be in the status already, under the other language's name.
+        if (await isWanted(now, true))
+          return { kind: "moved", status: now.name };
+        await resolveIds();
+        if (
+          projectStatuses !== undefined &&
+          (wantedIds ?? new Set<string>()).size === 0
         )
           return {
             kind: "status_unknown",
-            available: known.statuses.map((candidate) => candidate.name),
+            available: [
+              ...new Set(projectStatuses.map((candidate) => candidate.name)),
+            ],
           };
         return {
           kind: "status_unreachable",

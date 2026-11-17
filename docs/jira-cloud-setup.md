@@ -160,7 +160,7 @@ and is announced again is, as far as the lane can tell, in that status.
 - **A change of the status** in an `jira:issue_updated` (the `status` item of the changelog) starts the lanes of the project that wait for the
   new status (trigger `ticket.statusChanged`, [`docs/workflows.md`](workflows.md#the-status-trigger)). **Whoever made the change starts
   it**, the factory's own transitions included. A creation is no change of status and starts nothing. Before a run starts the factory
-  asks Jira for the issue and checks that it **still has that status** (a late or repeated delivery starts nothing).
+  asks Jira for the issue and checks that it **still has that status** (a late or repeated delivery starts nothing). Statuses are compared **by id**: Jira answers REST calls with names in the connected person's language (`Zu erledigen`) but a delivery carries the name Jira keeps for every language (`To Do`); a lane may name a status either way (#1058).
 
 ### What the factory writes to Jira (#1040)
 

@@ -125,6 +125,40 @@ describe("the start dialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  // #1060-T01
+  it("starts a lane on a Jira ticket with the project's provider and the ticket's key", async () => {
+    const start = vi.fn(async () => ({
+      ok: true as const,
+      data: { run: run({ id: "run-9", workflowId: "wf-1" }) },
+    }));
+    render(
+      <StartLaneDialog
+        workspaceSlug="acme"
+        repo="acme/widgets"
+        issueNumber={57}
+        provider="jira"
+        ticketKey="LAT-57"
+        lanes={[LANE]}
+        onOpenChange={() => undefined}
+        api={apiWith(start)}
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Start a lane on LAT-57" }),
+    ).toBeTruthy();
+    await userEvent.click(
+      screen.getByRole("button", { name: START_LANE_COPY.start }),
+    );
+
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+    expect(start).toHaveBeenCalledWith("wf-1", {
+      trigger: "manual",
+      input: { ticket: "jira:acme/widgets#LAT-57" },
+      clientRequestId: expect.any(String),
+    });
+  });
+
   // #925-T22
   it("keeps the same request id for a retry after a refusal and says why in a sentence", async () => {
     const start = vi

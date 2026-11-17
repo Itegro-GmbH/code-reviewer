@@ -62,7 +62,29 @@ const PROJECT_STATUSES = [
   { id: "5", name: "Done", category: "done" as const },
 ];
 
-async function world(options: { searchPageSize?: number } = {}) {
+// #1058: the same workflow as a site whose user reads Jira in German sees it: the REST API and the transitions name the statuses in German.
+const GERMAN_STATUSES = [
+  {
+    id: "1",
+    name: "Zu erledigen",
+    untranslatedName: "To Do",
+    category: "new" as const,
+  },
+  { id: "3", name: "In Arbeit", untranslatedName: "In Progress" },
+  {
+    id: "5",
+    name: "Erledigt",
+    untranslatedName: "Done",
+    category: "done" as const,
+  },
+];
+
+async function world(
+  options: {
+    searchPageSize?: number;
+    statuses?: typeof PROJECT_STATUSES | typeof GERMAN_STATUSES;
+  } = {},
+) {
   const h = await createJiraHarness({
     atlassian: {
       sites: [SITE],
@@ -73,7 +95,13 @@ async function world(options: { searchPageSize?: number } = {}) {
             id: "10000",
             key: "PROJ",
             name: "Project",
-            issueTypes: [{ id: "1", name: "Task", statuses: PROJECT_STATUSES }],
+            issueTypes: [
+              {
+                id: "1",
+                name: "Task",
+                statuses: options.statuses ?? PROJECT_STATUSES,
+              },
+            ],
           },
         ],
       },
@@ -179,6 +207,66 @@ async function world(options: { searchPageSize?: number } = {}) {
     },
   };
 }
+
+describe("moving a ticket of a site whose user reads Jira in German", () => {
+  // #1058-T04
+  it("finds the transition by the status, whether the lane names it in German or in English", async () => {
+    const w = await world({ statuses: GERMAN_STATUSES });
+    w.h.atlassian.setIssues(SITE.id, [
+      issue(7, { status: { name: "Zu erledigen" } }),
+    ]);
+
+    // The transitions Jira offers name their target in German; the lane says "In Arbeit".
+    expect(
+      await w.run("ticket.setStatus", {
+        ticket: "PROJ-7",
+        status: "In Arbeit",
+      }),
+    ).toEqual({ status: "In Arbeit" });
+    expect(w.h.atlassian.statusOf(SITE.id, "PROJ-7")).toBe("In Arbeit");
+
+    // The untranslated name finds the same status; the ticket is in it already, so nothing is moved.
+    const before = w.h.atlassian
+      .requests()
+      .filter((r) => r.method === "POST").length;
+    expect(
+      await w.run("ticket.setStatus", {
+        ticket: "PROJ-7",
+        status: "In Progress",
+      }),
+    ).toEqual({ status: "In Arbeit" });
+    expect(
+      w.h.atlassian.requests().filter((r) => r.method === "POST").length,
+    ).toBe(before);
+
+    // And a move by the untranslated name from another status.
+    expect(
+      await w.run("ticket.setStatus", { ticket: "PROJ-7", status: "Done" }),
+    ).toEqual({ status: "Erledigt" });
+    expect(w.h.atlassian.statusOf(SITE.id, "PROJ-7")).toBe("Erledigt");
+  });
+
+  // #1058-T04
+  it("names a status of the workflow that no transition leads to by its id, in either language, and a status the workflow lacks as unknown", async () => {
+    const w = await world({ statuses: GERMAN_STATUSES });
+    w.h.atlassian.setIssues(SITE.id, [
+      issue(7, { status: { name: "Zu erledigen" } }),
+    ]);
+    w.h.atlassian.setTransitions(SITE.id, [
+      { id: "21", name: "Start", to: "In Progress", from: ["To Do"] },
+    ]);
+
+    await expect(
+      w.run("ticket.setStatus", { ticket: "PROJ-7", status: "Erledigt" }),
+    ).rejects.toMatchObject({ code: "ticket_status_unreachable" });
+    await expect(
+      w.run("ticket.setStatus", { ticket: "PROJ-7", status: "Done" }),
+    ).rejects.toMatchObject({ code: "ticket_status_unreachable" });
+    await expect(
+      w.run("ticket.setStatus", { ticket: "PROJ-7", status: "Blocked" }),
+    ).rejects.toMatchObject({ code: "ticket_status_unknown" });
+  });
+});
 
 describe("the ticket actions of a lane on a Jira ticket", () => {
   // #1040-T01
