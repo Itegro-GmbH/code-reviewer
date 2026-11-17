@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFake, type McpFake } from "../../../fakes/mcp/server.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
 import type { StoredMcpServer } from "../db/repositories/mcp-servers-repository.ts";
-import { createMcpCredentials } from "./credentials.ts";
+import {
+  createMcpCredentials,
+  oauthCredentialProvider,
+} from "./credentials.ts";
+import type { McpCredentials } from "./credentials.ts";
+import { SecretValue } from "../secrets/secret-value.ts";
 import { createJobMcp, type JobMcpDeps, type McpJob } from "./job-proxy.ts";
 import { createMcpProxy, type McpCallMeta } from "./proxy.ts";
 import { sealHeaders } from "./service.ts";
@@ -58,6 +63,7 @@ function deps(options: {
   /** Every read of the table of servers, by kind and id. */
   reads?: string[];
   lines?: string[];
+  credentials?: McpCredentials;
 }): JobMcpDeps {
   const document = JSON.stringify({
     name: "Lane",
@@ -110,7 +116,8 @@ function deps(options: {
         );
       },
     },
-    credentials: createMcpCredentials({ appSecret: APP_SECRET }),
+    credentials:
+      options.credentials ?? createMcpCredentials({ appSecret: APP_SECRET }),
     log: (line) => options.lines?.push(line),
     proxy: createMcpProxy({
       fetch: createGuardedFetch({ allowLoopback: true }),
@@ -187,6 +194,61 @@ describe("the MCP servers of a job", () => {
 });
 
 describe("a call of the agent for a server of its job", () => {
+  // #1067-T04: the OAuth provider of #1051 is registered, so a server of kind oauth works through the proxy.
+  it("reaches an OAuth server with the fresh token of the OAuth provider, and a broken connection is mcp_credential_broken", async () => {
+    const server = await fake({
+      requiredHeaders: { authorization: "Bearer fresh-oauth-token" },
+    });
+    const oauthRow = {
+      ...row(A, "Issues", server.url),
+      authKind: "oauth" as const,
+      headerNames: [],
+    };
+    const credentials = (broken: boolean) =>
+      createMcpCredentials({
+        appSecret: APP_SECRET,
+        providers: {
+          oauth: oauthCredentialProvider({
+            use: () =>
+              Promise.resolve(
+                broken
+                  ? { ok: false, error: "mcp_oauth_broken" as const }
+                  : {
+                      ok: true,
+                      accessToken: new SecretValue("fresh-oauth-token"),
+                    },
+              ),
+          }),
+        },
+      });
+
+    const ok = await createJobMcp(
+      deps({
+        servers: [oauthRow],
+        lane: [A],
+        credentials: credentials(false),
+      }),
+    ).handle(job, A, call("tools/list", 1));
+    expect(ok.status).toBe(200);
+    expect(server.sawHeader("authorization", "Bearer fresh-oauth-token")).toBe(
+      true,
+    );
+
+    const requestsBefore = server.requests().length;
+    const refused = await createJobMcp(
+      deps({
+        servers: [oauthRow],
+        lane: [A],
+        credentials: credentials(true),
+      }),
+    ).handle(job, A, call("tools/list", 2));
+    expect(refused.status).toBe(503);
+    expect(await refused.text()).toContain("mcp_credential_broken");
+    expect(server.requests().length, "the server was not called").toBe(
+      requestsBefore,
+    );
+  });
+
   it("reaches the server with the credential of the server", async () => {
     const server = await fake({ requiredHeaders: { authorization: SECRET } });
     const calls: McpCallMeta[] = [];

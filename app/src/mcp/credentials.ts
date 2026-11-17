@@ -11,14 +11,15 @@
 // Kinds:
 // - `none`: no header.
 // - `header` (#1050): the sealed headers of the row, opened with the master key.
-// - `oauth` (#1051, in progress): the access token of the server, refreshed when it is about to run out. TODO(#1051): register the provider
-//   with `createMcpCredentials({ providers: { oauth } })`: it receives the server (and its id, so it can read its own table) and returns
-//   `Authorization: Bearer <fresh token>`, or `mcp_credential_broken` when the connection needs a new sign-in. The proxy needs no other
-//   change; until then a server of that kind is `mcp_credential_unsupported` (the registry does not offer the kind either).
+// - `oauth` (#1051): the access token of the server, refreshed when it is about to run out (`oauthCredentialProvider`, registered with
+//   `createMcpCredentials({ providers: { oauth } })` in `job-shared.ts`). `Authorization: Bearer <fresh token>`, or `mcp_credential_broken`
+//   when the connection needs a new sign-in (or cannot give a token now). A deployment that registers no provider answers
+//   `mcp_credential_unsupported` for the kind.
 import type {
   SealedHeaders,
   StoredMcpServer,
 } from "../db/repositories/mcp-servers-repository.ts";
+import type { McpOAuthTokens } from "./oauth/tokens.ts";
 import { openHeaders } from "./service.ts";
 
 export const MCP_CREDENTIAL_FAILURES = [
@@ -65,6 +66,31 @@ export function headerCredentialProvider(
       const headers: Record<string, string> = {};
       for (const { name, value } of opened) headers[name] = value;
       return Promise.resolve({ ok: true, headers });
+    },
+  };
+}
+
+/**
+ * The provider of kind `oauth` (#1051): `Authorization: Bearer <fresh access token>`, renewed by the token store before it ends. Whatever
+ * keeps the store from giving a token (not connected, broken, the authorization server or the key unavailable, a failing database) is the
+ * same answer, `mcp_credential_broken`: the proxy cannot do anything else with it, the admin sees the state on the MCP tab, and no text of
+ * the failure reaches the agent.
+ */
+export function oauthCredentialProvider(
+  tokens: McpOAuthTokens,
+): McpCredentialProvider {
+  return {
+    async headersFor({ server }) {
+      try {
+        const used = await tokens.use(server.id, { serverUrl: server.url });
+        if (!used.ok) return { ok: false, code: "mcp_credential_broken" };
+        return {
+          ok: true,
+          headers: { Authorization: `Bearer ${used.accessToken.reveal()}` },
+        };
+      } catch {
+        return { ok: false, code: "mcp_credential_broken" };
+      }
     },
   };
 }
