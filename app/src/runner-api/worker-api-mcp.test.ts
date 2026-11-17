@@ -32,6 +32,7 @@ function setup(
     maxConcurrent?: number;
   } = {},
 ) {
+  const holds: { opened: number; ended: number } = { opened: 0, ended: 0 };
   const counts: { jobId: string; limit: number }[] = [];
   const lines: string[] = [];
   const gate = createInFlightGate(options.maxConcurrent);
@@ -84,6 +85,12 @@ function setup(
               ) => {
                 refusals.push({ serverId, code, body });
               },
+              holdOpen: () => {
+                holds.opened += 1;
+                return () => {
+                  holds.ended += 1;
+                };
+              },
               handle: (
                 handledJob: { id: string },
                 serverId: string,
@@ -108,6 +115,7 @@ function setup(
     counts,
     lines,
     gate,
+    holds,
   };
 }
 
@@ -308,6 +316,7 @@ describe("the credential of one job cannot reach another job's servers", () => {
       jobMcp: () => ({
         serversOf: () => Promise.resolve({ servers: [], unavailable: 0 }),
         refused: () => {},
+        holdOpen: () => () => {},
         handle: (handledJob: { id: string }) => {
           handled.push(handledJob.id);
           return Promise.resolve(new Response("{}", { status: 200 }));
@@ -453,6 +462,63 @@ describe("the limits of the MCP route", () => {
     controller?.close();
     await second.text();
     await vi.waitFor(() => expect(gate.inFlight(job.id)).toBe(0));
+  });
+
+  // #1055-T01: the record of an event stream call is written when the stream ends, after the handler has returned
+  it("keeps the function alive for the record of an event stream call: registered before the response goes out, let go when the stream has ended", async () => {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const streaming = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              controller = c;
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const { api, job, holds } = setup({ answer: streaming });
+
+    const response = await api.mcp(post(), job.id, SERVER);
+
+    expect(holds).toEqual({ opened: 1, ended: 0 });
+    controller?.enqueue(new TextEncoder().encode("data: x\n\n"));
+    controller?.close();
+    await response.text();
+    await vi.waitFor(() => expect(holds.ended).toBe(1));
+  });
+
+  // #1055-T01
+  it("lets go of the hold when the consumer cancels the stream, after the stream behind it has been let go of", async () => {
+    const order: string[] = [];
+    const streaming = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              order.push("stream cancelled");
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const { api, job, holds } = setup({ answer: streaming });
+    const response = await api.mcp(post(), job.id, SERVER);
+
+    await response.body?.cancel();
+
+    await vi.waitFor(() => expect(holds.ended).toBe(1));
+    expect(order).toEqual(["stream cancelled"]);
+  });
+
+  // #1055-T01
+  it("holds nothing for an answer that is already complete", async () => {
+    const { api, job, holds } = setup();
+
+    await api.mcp(post(), job.id, SERVER);
+
+    expect(holds).toEqual({ opened: 0, ended: 0 });
   });
 
   it("gives the place back when the runtime fails", async () => {

@@ -3,6 +3,7 @@
 // The MCP runtime of a job on the running server (#1053): the real database, the master key, the test flag and the guarded fetch. Server code
 // only; the claim (`runner-api/claim.ts`) and the Worker API's MCP route (`runner-api/worker-api.ts`) call it through `jobMcp` of their deps.
 import "server-only";
+import { after } from "next/server";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
 import { createJobMcpCallsRepository } from "../db/repositories/job-mcp-calls-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
@@ -54,6 +55,15 @@ export function jobMcpFor(workspaceId: string): JobMcp {
   const trace = createCallTrace({
     repository: createJobMcpCallsRepository(db, workspaceId),
     later: runAfterResponse,
+    // The record of an event stream call is written when the stream ends, outside the request: `after()` is registered by the route's handler,
+    // while it still is in the request, with a promise that settles when the write is done (`call-trace.ts`).
+    keepAlive: (held) => {
+      try {
+        after(() => held);
+      } catch {
+        // Outside a request (a script): nothing to keep alive.
+      }
+    },
     log: (line) => console.info(line),
   });
   return createJobMcp({
@@ -63,6 +73,7 @@ export function jobMcpFor(workspaceId: string): JobMcp {
     credentials: createMcpCredentials({ appSecret: resolved.secret }),
     log: (line) => console.info(line),
     recordCall: trace.recordCall,
+    holdOpen: trace.holdOpen,
     proxy: createMcpProxy({
       fetch: guardedFetch(allowTestEndpoints),
       allowTestEndpoints,

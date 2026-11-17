@@ -50,6 +50,7 @@ import { storeSteps, type StepsDeps } from "./steps.ts";
 import {
   MCP_MAX_CALLS_PER_CLAIM,
   instanceInFlightGate,
+  isEventStream,
   releaseWhenDone,
   type InFlightGate,
 } from "../mcp/in-flight.ts";
@@ -297,7 +298,13 @@ export function createWorkerApi(deps: WorkerApiDeps): WorkerApi {
         const answer = await runtime.handle(who.job, serverId, read.request);
         handedOver = true;
         // The place is given back when the answer has been read to the end (an event stream answer is in flight until it ends).
-        return releaseWhenDone(answer, release);
+        // A stream's call is recorded when the stream ends, after this function has returned: the function is held open for it from here, inside
+        // the request (`call-trace.ts`).
+        return releaseWhenDone(
+          answer,
+          release,
+          isEventStream(answer) ? runtime.holdOpen() : undefined,
+        );
       } catch (error) {
         return unexpected("mcp", error);
       } finally {

@@ -41,6 +41,8 @@ export type JobMcpDeps = {
    * (the wiring is `job-shared.ts`). Called without waiting; it must not throw.
    */
   recordCall?: (jobId: string, record: McpCallRecord) => void;
+  /** #1055: keeps the function alive for the record of an event stream call (`CallTrace.holdOpen`); the wiring is `job-shared.ts`. */
+  holdOpen?: () => () => void;
 };
 
 export type JobMcpServers = {
@@ -66,6 +68,11 @@ export type JobMcp = {
     code: McpRouteRefusal,
     body: string | null,
   ): void;
+  /**
+   * #1055: for an answer that is an event stream, called by the route before it returns the response: the record of that call is written when the
+   * stream ends, after the handler has returned, so the function must be held open for it. The returned function says the stream has ended.
+   */
+  holdOpen(): () => void;
 };
 
 const NONE: JobMcpServers = { servers: [], unavailable: 0 };
@@ -146,6 +153,15 @@ export function createJobMcp(deps: JobMcpDeps): JobMcp {
 
     refused(job, serverId, code, body) {
       trace(job, serverId, code, body);
+    },
+
+    holdOpen() {
+      try {
+        return deps.holdOpen?.() ?? (() => {});
+      } catch {
+        // A failed hold never changes the answer the agent gets.
+        return () => {};
+      }
     },
 
     async handle(job, serverId, request) {

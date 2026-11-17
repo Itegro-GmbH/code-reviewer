@@ -43,6 +43,13 @@ export function createInFlightGate(
 /** The gate of this instance, for the Worker API unless a test passes its own. */
 export const instanceInFlightGate: InFlightGate = createInFlightGate();
 
+/** An answer that is a stream: it is not complete when the handler returns it. */
+export function isEventStream(response: Response): boolean {
+  return (response.headers.get("content-type") ?? "")
+    .toLowerCase()
+    .startsWith("text/event-stream");
+}
+
 /**
  * The same response. An event stream answer gives the place back when its body has ended: read to the end, cancelled by the consumer, or
  * broken by an error. Any other answer is already complete (the proxy read it whole, within its cap), so it gives the place back at once.
@@ -50,11 +57,16 @@ export const instanceInFlightGate: InFlightGate = createInFlightGate();
 export function releaseWhenDone(
   response: Response,
   release: () => void,
+  /** Told once when the stream is over and its source let go of (read to the end, cancelled or broken): the proxy has told its call by then. */
+  onEnded: () => void = () => {},
 ): Response {
-  const streaming = (response.headers.get("content-type") ?? "")
-    .toLowerCase()
-    .startsWith("text/event-stream");
-  if (response.body === null || !streaming) {
+  let told = false;
+  const ended = () => {
+    if (told) return;
+    told = true;
+    onEnded();
+  };
+  if (response.body === null || !isEventStream(response)) {
     release();
     return response;
   }
@@ -65,18 +77,21 @@ export function releaseWhenDone(
         const chunk = await reader.read();
         if (chunk.done) {
           release();
+          ended();
           controller.close();
           return;
         }
         controller.enqueue(chunk.value);
       } catch (error) {
         release();
+        ended();
         controller.error(error);
       }
     },
     async cancel(reason) {
       release();
       await reader.cancel(reason).catch(() => undefined);
+      ended();
     },
   });
   return new Response(body, {
