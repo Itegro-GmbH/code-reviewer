@@ -8,7 +8,7 @@
 //     on the stream. The endpoint must be on the origin of the stream, so a stream cannot send the credential somewhere else.
 // A small client of its own and no library: three messages, no sessions kept, and every limit and every address rule is in this file.
 // Bounds: ONE deadline for the whole test, a cap on every body and on the event stream, at most `maxTools` tools of at most `maxPages`
-// pages, and names and descriptions cut to a length. Addresses: every address (the first and each redirect) goes through `checkMcpUrl`,
+// pages, and names and descriptions cut to a length and cleaned of control and bidirectional characters. Addresses: every address (the first and each redirect) goes through `checkMcpUrl`,
 // redirects are followed by hand (at most `MAX_REDIRECTS`), the credential headers are dropped when a redirect leaves the origin, and the
 // connection itself is made by the guarded fetch that is passed in (`dispatch/guarded-fetch.ts`: the name is resolved once and every address is
 // judged, so a name that resolves to a private place is refused at the socket, whatever the text said).
@@ -25,10 +25,13 @@ import { checkMcpUrl } from "./url.ts";
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
 export const MCP_TEST_DEADLINE_MS = 15_000;
 export const MCP_TEST_MAX_RESPONSE_BYTES = 1024 * 1024;
-export const MCP_TEST_MAX_TOOLS = 500;
+export const MCP_TEST_MAX_TOOLS = 100;
 export const MCP_TEST_MAX_PAGES = 20;
-export const MCP_TOOL_NAME_MAX_LENGTH = 200;
-export const MCP_TOOL_DESCRIPTION_MAX_LENGTH = 1000;
+// What a test stores is shipped with every GET of the list (up to 50 servers), so the caps are small: 100 tools of at most 400 characters.
+export const MCP_TOOL_NAME_MAX_LENGTH = 100;
+export const MCP_TOOL_DESCRIPTION_MAX_LENGTH = 300;
+/** One event of an event stream (a whole `tools/list` answer is one event): the answer cap bounds the stream, this bounds one event. */
+export const MCP_TEST_MAX_EVENT_LENGTH = 512 * 1024;
 const MAX_REDIRECTS = 3;
 /** The code a guarded connection's error carries when it refused an address (`dispatch/guarded-fetch.ts`). */
 const REFUSED_ADDRESS_CODE = "DELIVERY_ADDRESS_INTERNAL";
@@ -109,6 +112,17 @@ function failureOf(error: unknown, signal: AbortSignal): McpTestFailure {
   return new McpTestFailure("mcp_test_unreachable");
 }
 
+// Text a server sends is shown to people: line ends and tabs become a space, every other control character and every character that
+// reorders or hides text (bidirectional marks and isolates, zero width characters, the byte order mark) is dropped.
+const WHITESPACE_CONTROL = /[\t\n\r\u2028\u2029]+/g;
+const HIDDEN =
+  /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+
+/** The text of a server with control and bidirectional characters taken out. */
+export function cleanText(value: string): string {
+  return value.replace(WHITESPACE_CONTROL, " ").replace(HIDDEN, "").trim();
+}
+
 type Sent = { response: Response; finalUrl: URL };
 
 export async function testMcpServer(
@@ -120,6 +134,7 @@ export async function testMcpServer(
   );
   const maxBytes = options.maxResponseBytes ?? MCP_TEST_MAX_RESPONSE_BYTES;
   const maxTools = options.maxTools ?? MCP_TEST_MAX_TOOLS;
+  const eventMax = Math.min(maxBytes, MCP_TEST_MAX_EVENT_LENGTH);
   const policy = { allowTestEndpoints: options.allowTestEndpoints };
   let credentials: Record<string, string> = { ...target.headers };
   let nextId = 1;
@@ -183,8 +198,10 @@ export async function testMcpServer(
     }
   }
 
-  function statusFailure(response: Response): void {
+  /** An error status ends the test; the body of the answer is let go first so the connection is not left open. */
+  async function statusFailure(response: Response): Promise<void> {
     if (response.ok) return;
+    await response.body?.cancel().catch(() => undefined);
     if (response.status === 401 || response.status === 403)
       fail("mcp_test_unauthorized");
     fail("mcp_test_http_error");
@@ -279,14 +296,14 @@ export async function testMcpServer(
       headers: jsonHeaders(),
       body: message(method, params, id),
     });
-    statusFailure(response);
+    await statusFailure(response);
     const type = (response.headers.get("content-type") ?? "").toLowerCase();
     if (method === "initialize")
       session = response.headers.get("mcp-session-id");
     if (type.startsWith("application/json"))
       return resultOf(pickResponse(parseJson(await readText(response)), id));
     if (type.startsWith("text/event-stream") && response.body !== null) {
-      const events = createSseEventReader(response.body, maxBytes);
+      const events = createSseEventReader(response.body, maxBytes, eventMax);
       try {
         for (
           let event = await events.next();
@@ -314,7 +331,7 @@ export async function testMcpServer(
       headers: jsonHeaders(),
       body: message(method, undefined, null),
     });
-    statusFailure(response);
+    await statusFailure(response);
     await readText(response);
   }
 
@@ -324,13 +341,13 @@ export async function testMcpServer(
       method: "GET",
       headers: { accept: "text/event-stream" },
     });
-    statusFailure(response);
+    await statusFailure(response);
     const type = (response.headers.get("content-type") ?? "").toLowerCase();
     if (!type.startsWith("text/event-stream") || response.body === null) {
       await response.body?.cancel().catch(() => undefined);
       return fail("mcp_test_protocol_error");
     }
-    stream = createSseEventReader(response.body, maxBytes * 2);
+    stream = createSseEventReader(response.body, maxBytes * 2, eventMax);
     for (;;) {
       let event;
       try {
@@ -362,7 +379,7 @@ export async function testMcpServer(
       headers: jsonHeaders(),
       body,
     });
-    statusFailure(response);
+    await statusFailure(response);
     await readText(response);
   }
 
@@ -397,7 +414,7 @@ export async function testMcpServer(
       : notifyHttp(method);
 
   const text = (value: unknown, max: number): string =>
-    typeof value === "string" ? value.trim().slice(0, max) : "";
+    typeof value === "string" ? cleanText(value).slice(0, max).trim() : "";
 
   try {
     if (target.transport === "sse") await openStream();
