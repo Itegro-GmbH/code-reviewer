@@ -232,6 +232,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
   // The steps of a running turn, sent by its runner or Worker for the live view (#745), and read by the Runs page; only a factory
   // runs turns.
   { route: "/api/w/[workspace]/runs/[id]/steps", class: "implementer" },
+  // The MCP calls of a run of the Implementer, for the same page (#1055).
+  { route: "/api/w/[workspace]/runs/[id]/mcp-calls", class: "implementer" },
   { route: "/api/runners/v1/jobs/[id]/steps", class: "implementer" },
   // A customer's own runner (#854): the exchange of a registration token, what the runner says about itself, the renewal of its
   // credential; and, for a member of the workspace, the list, a registration token and the revoking of a runner.
@@ -245,6 +247,21 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/w/[workspace]/runners", class: "implementer" },
+  // The MCP servers of a workspace (#1050, epic #1049): the page (the menu tab MCP), the list and the add, the change and the removal of a
+  // server, and its connection test. Only a factory has agents that use them.
+  { route: "/api/w/[workspace]/mcp/servers", class: "implementer" },
+  { route: "/api/w/[workspace]/mcp/servers/[serverId]", class: "implementer" },
+  {
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/test",
+    class: "implementer",
+  },
+  { route: "/w/[workspace]/mcp", class: "implementer" },
+  // #1051: "Connect" of an MCP server that uses OAuth: the start, and the callback the authorization server sends the browser to.
+  {
+    route: "/api/w/[workspace]/mcp/servers/[serverId]/connect",
+    class: "implementer",
+  },
+  { route: "/api/mcp/oauth/callback", class: "implementer" },
   // The shell of the factory (#925): the ToDos page and the count on its sidebar link, the profiles page, the tabs of a project's
   // cockpit (the issues tab is the project's own address, which opens the review settings where there is no factory), the tabs of the
   // settings that moved there from `/connections` and `/members` (those stay as they were without the factory), and the review
@@ -282,6 +299,8 @@ export const ROUTE_CLASSES: readonly RouteEntry[] = [
     class: "implementer",
   },
   { route: "/api/workers/v1/jobs/[id]/steps", class: "implementer" },
+  // #1053: the MCP proxy of the agent's door: the app adds the credential of the server.
+  { route: "/api/workers/v1/jobs/[id]/mcp/[server]", class: "implementer" },
   // One part of the session snapshot of a turn, put by its Worker for the follow-up turns (#839).
   { route: "/api/workers/v1/jobs/[id]/session", class: "implementer" },
   // One part of the stored session snapshot, read by the Worker of a follow-up turn (#840).

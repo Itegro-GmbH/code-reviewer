@@ -20,6 +20,7 @@ import {
 } from "../../components/ui/dialog.tsx";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { canonicalJson } from "../../workflows/json.ts";
+import { workspacePath } from "../../workspaces/paths.ts";
 import { BUDGET_DEFAULT_USD } from "../../workflows/limits.ts";
 import {
   browserBuilderApi,
@@ -42,6 +43,7 @@ import {
 } from "./document.ts";
 import { Flow, type AddableKind } from "./flow.tsx";
 import { Inspector, type ProfileOption } from "./inspector.tsx";
+import type { McpServerOption } from "./mcp-edit.ts";
 import { LaneCard, type VersionEntry } from "./lane-card.tsx";
 import { ProblemList } from "./problem-list.tsx";
 import { sortProblems } from "./problems.ts";
@@ -79,6 +81,7 @@ export function LaneBuilder({
   document,
   profiles,
   statuses = [],
+  mcpServers = [],
   startPanel,
   api,
   validateDelayMs = VALIDATE_DEBOUNCE_MS,
@@ -93,6 +96,8 @@ export function LaneBuilder({
   profiles: readonly ProfileOption[];
   /** The status names of the project's board (#1036): what a status trigger offers. Left out: none, the names are typed. */
   statuses?: readonly string[];
+  /** The MCP servers of the workspace (#1052): what the lane card and the agent steps offer. Left out: none. */
+  mcpServers?: readonly McpServerOption[];
   /** The start form(s) of the lane: what "Run now" opens. */
   startPanel: ReactNode;
   /** Only tests pass this. */
@@ -386,6 +391,7 @@ export function LaneBuilder({
             problems={sorted.byNode.get(effective) ?? []}
             profiles={profiles}
             statuses={statuses}
+            mcpServers={mcpServers}
             lookup={lookup}
             headingRef={inspectorHeading}
             onChange={edit}
@@ -405,6 +411,8 @@ export function LaneBuilder({
             doc={doc}
             version={saved.version}
             versions={saved.versions}
+            mcpServers={mcpServers}
+            mcpHref={workspacePath(workspaceSlug, "/mcp")}
             onChange={edit}
           />
         </aside>

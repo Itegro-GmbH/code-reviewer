@@ -90,6 +90,12 @@ export const SEMANTIC_ISSUE_CODES = [
    * limit), must not stop a save. With no such runner online nothing is said: the turn waits for one, as always.
    */
   "no_runner_announces",
+  /** `mcp` of a lane names a server this workspace does not have (one that never existed, was removed, or belongs to another workspace: the answer is the same). `available` lists the ids of the servers there are (#1052). */
+  "mcp_server_unknown",
+  /** `mcp` of an agent step names a server the lane does not name: a step narrows the lane's list, it never adds to it (#1052). */
+  "mcp_server_not_in_lane",
+  /** A lane names an MCP server whose last connection test failed (#1052). A WARNING: the server may be back by the time the lane runs. */
+  "mcp_server_broken",
   /** The result of the step names a field the platform fills in itself. */
   "result_field_reserved",
   /** The run has no repository: a manual trigger must declare the input `repo` (a required text). */

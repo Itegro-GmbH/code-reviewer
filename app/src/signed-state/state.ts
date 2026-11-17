@@ -21,6 +21,8 @@ export const SIGNED_STATE_PURPOSES = [
   "github-picker",
   // Connecting a Jira Cloud site to a workspace (src/jira/): the round trip through Atlassian's consent page (#1037).
   "jira-connect",
+  // Connecting a remote MCP server that uses OAuth (src/mcp/oauth/): the round trip through the authorization server's consent page (#1051).
+  "mcp-connect",
 ] as const;
 export type SignedStatePurpose = (typeof SIGNED_STATE_PURPOSES)[number];
 

@@ -8,6 +8,10 @@
 // service. Every refusal is `{ "error": <code> }` with a stable code; every answer is `no-store`.
 import type { SessionUser } from "../auth/access-policy.ts";
 import { parseRunsFilter, type RunsService } from "./runs-service.ts";
+import {
+  parseMcpCallsQuery,
+  type RunMcpCallsService,
+} from "./mcp-calls-service.ts";
 import { parseStepsQuery, type RunStepsService } from "./steps-service.ts";
 
 export const RUNS_ERROR_CODES = [
@@ -32,6 +36,15 @@ export type RunsRouteDependencies = {
 export type RunStepsRouteDependencies = {
   requireUser: () => Promise<SessionUser>;
   service: RunStepsService;
+};
+
+export type RunMcpCallsRouteDependencies = {
+  requireUser: () => Promise<SessionUser>;
+  service: RunMcpCallsService;
+};
+
+export type RunMcpCallsRouteHandlers = {
+  mcpCalls(request: Request, id: string): Promise<Response>;
 };
 
 export type RunsRouteHandlers = {
@@ -93,6 +106,31 @@ export function createRunStepsRouteHandlers({
       await requireUser();
       const params = new URL(request.url).searchParams;
       const query = parseStepsQuery({
+        after: params.get("after"),
+        limit: params.get("limit"),
+      });
+      if (!query.ok) return refusal("STEPS_QUERY_INVALID");
+      const snapshot = await service.list(id, query.after, query.limit);
+      if (snapshot === undefined) return refusal("RUN_NOT_FOUND");
+      return Response.json(snapshot, { headers: NO_STORE });
+    },
+  };
+}
+
+/**
+ * The handler behind `GET /api/w/:workspace/runs/:id/mcp-calls?after=&limit=` (#1055): the MCP calls of a run of the Implementer after the
+ * cursor. The query has the names of the steps' (`after`, `limit`) and a bad one answers the same `STEPS_QUERY_INVALID`, but `after` may be any `seq` a number holds exactly (`parseMcpCallsQuery`: the table-wide identity is not held to 32 bits). A run that is not a run of
+ * the Implementer of the workspace answers 404 `RUN_NOT_FOUND`.
+ */
+export function createRunMcpCallsRouteHandlers({
+  requireUser,
+  service,
+}: RunMcpCallsRouteDependencies): RunMcpCallsRouteHandlers {
+  return {
+    async mcpCalls(request, id) {
+      await requireUser();
+      const params = new URL(request.url).searchParams;
+      const query = parseMcpCallsQuery({
         after: params.get("after"),
         limit: params.get("limit"),
       });

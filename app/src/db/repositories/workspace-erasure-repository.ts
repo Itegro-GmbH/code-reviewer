@@ -189,6 +189,8 @@ export function createWorkspaceErasureRepository(
         "tracker_items",
         "tracker_sync_state",
         "implementer_turn_steps",
+        // The record of a job's MCP calls points at the job (#1055).
+        "job_mcp_calls",
         "implementer_session_snapshot_parts",
         "implementer_session_snapshots",
         "implementer_turns",
@@ -240,6 +242,9 @@ export function createWorkspaceErasureRepository(
         // The Jira webhooks (#1039) and the Jira connections with their sealed tokens (#1037).
         "jira_webhooks",
         "jira_connections",
+        // The OAuth connections of the MCP servers (#1051; they would go with the servers, but name the table) and the servers (#1050) with their sealed header values.
+        "mcp_oauth_connections",
+        "mcp_servers",
         "workspace_entitlements",
         "plan_handoff_tokens",
         "billing_workspace_settings",

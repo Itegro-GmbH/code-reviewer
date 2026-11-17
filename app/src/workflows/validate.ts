@@ -37,6 +37,7 @@ import {
   sortIssues,
   type Issue,
 } from "./issues.ts";
+import { checkLaneMcp } from "./mcp-check.ts";
 import type { WorkflowResolver } from "./resolver.ts";
 import { validateResultSchema, type ResultSchema } from "./result-schema.ts";
 import { Scope, type Binding, type Env, type StepInfo } from "./scope.ts";
@@ -89,6 +90,7 @@ const DOCUMENT_KEYS = [
   "triggers",
   "budgetUsd",
   "turnTimeLimitMinutes",
+  "mcp",
   "steps",
   "onFailure",
 ];
@@ -801,6 +803,7 @@ export function validateWorkflow(
   );
   const checker: Checker = {
     resolver,
+    laneMcp: checkLaneMcp(document.mcp, resolver, report),
     index,
     report,
     retriggerStatuses,

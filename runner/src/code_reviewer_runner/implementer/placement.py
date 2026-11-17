@@ -7,9 +7,10 @@ setup/agent container all run in **one** Docker (the VM's). On the Incus backend
 instances (`factory_runner/incus/`): **A** (Control, the doors, the inner wall) and **B** (the setup
 and then the agent, the same environment). The placement says which Docker each of them is made in.
 
-* **Control and the two doors: A's Docker.** The doors run with the host network of A, bound to A's
-  address on the inner bridge (ports `MODEL_DOOR_PORT` and `NETWORK_DOOR_PORT_SPLIT`): the inner
-  wall's input chain matches traffic delivered to A itself.
+* **Control and the doors: A's Docker.** The doors (model, network and, for a step with MCP servers,
+  MCP: #1068) run with the host network of A, bound to A's address on the inner bridge (ports
+  `MODEL_DOOR_PORT`, `NETWORK_DOOR_PORT_SPLIT` and `MCP_DOOR_PORT_SPLIT`): the inner wall's input
+  chain matches traffic delivered to A itself.
 * **The setup/agent container and the readers: B's Docker.** Control reaches it through a unix
   socket (`docker_socket`) that the launcher makes in A from B's own with two `proxy` devices: A
   dials B, and B has no connection of any kind to A but the two door ports. The runtime is `runc`
@@ -35,6 +36,8 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from code_reviewer_runner.dynamic_review.model_door_route import (
+    MCP_DOOR_ADDRESS,
+    MCP_DOOR_PORT,
     MODEL_DOOR_ADDRESS,
     MODEL_NETWORK_GATEWAY,
     MODEL_NETWORK_NAME,
@@ -63,6 +66,9 @@ B_DOCKER_SOCKET: Final = "/b-docker.sock"
 # The ports the inner wall lets B reach on A: the model door and the network door.
 MODEL_DOOR_PORT: Final = 8080
 NETWORK_DOOR_PORT_SPLIT: Final = 8081
+# The MCP door (#1068), the third: the one more port the wall opens for B. It listens on A's address
+# like the other two; the job's credential is in its process in A and never in B.
+MCP_DOOR_PORT_SPLIT: Final = 8082
 # What the runtime of the setup, the agent and the readers is in B: there is no Sysbox in an Incus
 # instance.
 SPLIT_RUNTIME: Final = "runc"
@@ -100,11 +106,44 @@ class Placement:
         return f"http://{self.network_door_address}:{self.network_door_port}"
 
     @property
+    def mcp_supported(self) -> bool:
+        """Whether this placement has an MCP door (#1067, #1068): hosted and on every VM of the
+        Firecracker backend it is the third container on the model network; on the Incus backend
+        it is the third door of instance A, behind a port of its own that the inner wall opens."""
+        return True
+
+    @property
+    def mcp_door_address(self) -> str:
+        return self.door_address if self.split else MCP_DOOR_ADDRESS
+
+    @property
+    def mcp_door_port(self) -> int:
+        return MCP_DOOR_PORT_SPLIT if self.split else MCP_DOOR_PORT
+
+    @property
+    def mcp_door_url(self) -> str:
+        """Where the agent's harness finds the MCP endpoints: `<this>/mcp/<server id>`."""
+        return f"http://{self.mcp_door_address}:{self.mcp_door_port}"
+
+    def no_proxy_for(self, *, mcp: bool = False) -> str:
+        """The names the agent's tools do not send to the network door; the MCP door's address too
+        when the turn has one (#1067), otherwise exactly what it was. On Incus (#1068) the three
+        doors share A's address, which is always in the list: the MCP turn adds nothing."""
+        names = [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            self.model_door_address,
+            self.network_door_address,
+        ]
+        if mcp and self.mcp_door_address not in names:
+            names.append(self.mcp_door_address)
+        return ",".join(names)
+
+    @property
     def no_proxy(self) -> str:
         """The names the agent's tools do not send to the network door."""
-        return ",".join(
-            ("localhost", "127.0.0.1", "::1", self.model_door_address, self.network_door_address)
-        )
+        return self.no_proxy_for()
 
     def environment_api(self) -> DockerApi:
         """The Docker of the setup/agent container and the readers: B's when split, else the VM's

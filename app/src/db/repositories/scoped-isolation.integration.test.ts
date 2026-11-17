@@ -45,9 +45,12 @@ import { createProfilesRepository } from "./profiles-repository.ts";
 import { createRunnersRepository } from "./runners-repository.ts";
 import { createJiraConnectionsRepository } from "./jira-connections-repository.ts";
 import { createJiraWebhooksRepository } from "./jira-webhooks-repository.ts";
+import { createMcpOAuthRepository } from "./mcp-oauth-repository.ts";
+import { createMcpServersRepository } from "./mcp-servers-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
+import { createJobMcpCallsRepository } from "./job-mcp-calls-repository.ts";
 
 const SHA = "b".repeat(40);
 const FAILED_SHA = "c".repeat(40);
@@ -77,6 +80,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
     steps: createImplementerStepsRepository(db, workspaceId),
+    mcpCalls: createJobMcpCallsRepository(db, workspaceId),
     snapshots: createImplementerSnapshotsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
@@ -86,6 +90,8 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     runners: createRunnersRepository(db, workspaceId),
     jira: createJiraConnectionsRepository(db, workspaceId),
     jiraWebhooks: createJiraWebhooksRepository(db, workspaceId),
+    mcp: createMcpServersRepository(db, workspaceId),
+    mcpOAuth: createMcpOAuthRepository(db, workspaceId),
     erasure: createWorkspaceErasureRepository(db, workspaceId),
   };
 }
@@ -477,6 +483,19 @@ async function seed(
     );
     if (stored.status !== "ok" || stored.stored !== 2)
       throw new Error("seeding failed");
+    // An MCP call of that turn (#1055): the other workspace has a call to read, count and add to.
+    const recordedCall = await repos.mcpCalls.record(started.turn.jobId, {
+      serverId: `mcp-server-${tag}`,
+      serverName: `Server ${tag}`,
+      rpcMethod: "tools/call",
+      tool: `tool-${tag}`,
+      status: 200,
+      outcome: "ok",
+      durationMs: 5,
+      requestBytes: 10,
+      responseBytes: 20,
+    });
+    if (recordedCall !== "stored") throw new Error("seeding failed");
     // The session snapshot of that turn (#839): one part is in (an upload under way) and the snapshot of the earlier turn is
     // stored, so the other workspace has a snapshot to read and a part to complete or overwrite.
     const first = await repos.snapshots.recordPart(
@@ -648,7 +667,78 @@ async function seed(
     projectKey: "PROJ",
     secretHash: `hash-${tag}`,
   });
+  // An MCP server (#1050) in every workspace, with sealed headers: the other workspace's is there to be read, changed, tested and removed.
+  await repos.mcp.create(
+    {
+      id: `mcp-${tag}`,
+      name: `mcp ${tag}`,
+      transport: "streamable-http",
+      url: `https://mcp.example.com/${tag}`,
+      authKind: "header",
+      headerNames: ["Authorization"],
+      sealed: { ciphertext: `c-${tag}`, nonce: `n-${tag}`, keyVersion: 1 },
+      createdBy: null,
+    },
+    50,
+  );
+  // An MCP server that uses OAuth (#1051) in every workspace, with a client, what discovery found and a sealed token pair.
+  await repos.mcp.create(
+    {
+      id: `mcp-oauth-${tag}`,
+      name: `mcp oauth ${tag}`,
+      transport: "streamable-http",
+      url: `https://mcp-oauth.example.com/${tag}`,
+      authKind: "oauth",
+      headerNames: [],
+      sealed: null,
+      oauthClient: {
+        source: "manual",
+        clientId: `client-${tag}`,
+        authMethod: "client_secret_basic",
+        sealedSecret: {
+          ciphertext: `cs-${tag}`,
+          nonce: `ns-${tag}`,
+          keyVersion: 1,
+        },
+      },
+      createdBy: null,
+    },
+    50,
+  );
+  await repos.mcpOAuth.saveConnection(`mcp-oauth-${tag}`, 1, {
+    discovery: {
+      resource: `https://mcp-oauth.example.com/${tag}`,
+      issuer: "https://as.example.com",
+      authorizationEndpoint: "https://as.example.com/authorize",
+      tokenEndpoint: "https://as.example.com/token",
+      registrationEndpoint: null,
+      scopes: [],
+      issParameter: false,
+      authMethods: ["client_secret_basic"],
+    },
+    client: {
+      source: "manual",
+      clientId: `client-${tag}`,
+      authMethod: "client_secret_basic",
+      sealedSecret: {
+        ciphertext: `cs-${tag}`,
+        nonce: `ns-${tag}`,
+        keyVersion: 1,
+      },
+      registeredIssuer: "https://as.example.com",
+    },
+    sealedTokens: {
+      ciphertext: `ct-${tag}`,
+      nonce: `nt-${tag}`,
+      keyVersion: 1,
+    },
+    accessExpiresAt: new Date("2026-12-01T00:00:00.000Z"),
+    scopes: [],
+    connectedBy: null,
+  });
   return {
+    mcpOAuthServerId: `mcp-oauth-${tag}`,
+    mcpServerId: `mcp-${tag}`,
     jiraWebhookId: `jira-webhook-${tag}`,
     jiraWebhookProjectId: `jira-project-${tag}`,
     jiraConnectionId: `jira-${tag}`,
@@ -886,6 +976,18 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
       .execute(),
+    mcpServers: await db
+      .selectFrom("mcp_servers")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("id")
+      .execute(),
+    mcpOAuthConnections: await db
+      .selectFrom("mcp_oauth_connections")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("server_id")
+      .execute(),
     jiraWebhooks: await db
       .selectFrom("jira_webhooks")
       .selectAll()
@@ -897,6 +999,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    jobMcpCalls: await db
+      .selectFrom("job_mcp_calls")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("seq")
       .execute(),
     implementerTurnSteps: await db
       .selectFrom("implementer_turn_steps")
@@ -2239,6 +2347,51 @@ const CASES: Case[] = [
     run: (a, b) => a.steps.listAfter(taskOf(b).turn.jobId, 0, 100),
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
+  // MCP calls of a job (#1055): B's job takes no call of A's workspace and shows none of its calls to A
+  {
+    name: "mcpCalls.record",
+    run: (a, b) =>
+      a.mcpCalls.record(taskOf(b).turn.jobId, {
+        serverId: "planted",
+        serverName: "Planted by A",
+        rpcMethod: "tools/call",
+        tool: "planted",
+        status: 200,
+        outcome: "ok",
+        durationMs: 1,
+        requestBytes: 1,
+        responseBytes: 1,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
+  },
+  // the refusal of the gate takes its own statement (insert or count): the same wall
+  {
+    name: "mcpCalls.record (gate refusal)",
+    run: (a, b) =>
+      a.mcpCalls.record(taskOf(b).turn.jobId, {
+        serverId: "planted",
+        serverName: "",
+        rpcMethod: null,
+        tool: null,
+        status: 429,
+        outcome: "mcp_too_many_concurrent_calls",
+        durationMs: 0,
+        requestBytes: 0,
+        responseBytes: 0,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
+  },
+  {
+    name: "mcpCalls.listAfter",
+    run: (a, b) => a.mcpCalls.listAfter(taskOf(b).turn.jobId, 0, 100),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "mcpCalls.summary",
+    run: (a, b) => a.mcpCalls.summary(taskOf(b).turn.jobId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ rows: 0, suppressed: 0 }),
+  },
   // implementer session snapshots (#839): B's snapshot is not A's to read, replace or complete, not even with B's lease token
   {
     name: "snapshots.recordPart",
@@ -2960,6 +3113,148 @@ const CASES: Case[] = [
     run: (a, b) => a.jira.removeUnlessUsed(b.jiraConnectionId),
     expectAnswer: (answer) =>
       expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // MCP servers (#1050-T03): B's servers are not A's to read, change, test or remove, and their sealed headers are B's alone
+  {
+    name: "mcp.list",
+    run: (a) => a.mcp.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ id: a.mcpServerId }),
+        expect.objectContaining({ id: a.mcpOAuthServerId }),
+      ]),
+  },
+  {
+    name: "mcp.get",
+    run: (a, b) => a.mcp.get(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcp.readHeaders",
+    run: (a, b) => a.mcp.readHeaders(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    // The same name as B's server: this workspace gets a row of its own.
+    name: "mcp.create",
+    run: (a) =>
+      a.mcp.create(
+        {
+          id: "mcp-a-second",
+          name: "mcp b",
+          transport: "sse",
+          url: "https://mcp.example.com/a2",
+          authKind: "none",
+          headerNames: [],
+          sealed: null,
+          createdBy: null,
+        },
+        50,
+      ),
+    expectAnswer: (answer) => expect(answer).toMatchObject({ ok: true }),
+  },
+  {
+    name: "mcp.update",
+    run: (a, b) =>
+      a.mcp.update(b.mcpServerId, 1, {
+        name: "taken over",
+        transport: "sse",
+        url: "https://mcp.example.com/evil",
+        authKind: "none",
+        headerNames: [],
+        sealed: null,
+      }),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ ok: false, reason: "not_found" }),
+  },
+  {
+    name: "mcp.recordTest",
+    run: (a, b) =>
+      a.mcp.recordTest(b.mcpServerId, 1, {
+        ok: false,
+        code: "mcp_test_timeout",
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "mcp.lanesUsing",
+    run: (a, b) => a.mcp.lanesUsing(b.mcpServerId),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "mcp.removeUnlessUsed",
+    run: (a, b) => a.mcp.removeUnlessUsed(b.mcpServerId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ removed: false, reason: "not_found" }),
+  },
+  // The OAuth connections of MCP servers (#1051-T01): B's client, discovery and sealed tokens are not A's to read, start, store or refresh
+  {
+    name: "mcpOAuth.list",
+    run: (a) => a.mcpOAuth.list(),
+    expectAnswer: (answer, a) =>
+      expect(answer).toEqual([
+        expect.objectContaining({ serverId: a.mcpOAuthServerId }),
+      ]),
+  },
+  {
+    name: "mcpOAuth.get",
+    run: (a, b) => a.mcpOAuth.get(b.mcpOAuthServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcpOAuth.readSecrets",
+    run: (a, b) => a.mcpOAuth.readSecrets(b.mcpOAuthServerId),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
+    name: "mcpOAuth.saveConnection",
+    run: (a, b) =>
+      a.mcpOAuth.saveConnection(b.mcpOAuthServerId, 1, {
+        discovery: {
+          resource: "https://evil.example.com/mcp",
+          issuer: "https://evil.example.com",
+          authorizationEndpoint: "https://evil.example.com/authorize",
+          tokenEndpoint: "https://evil.example.com/token",
+          registrationEndpoint: null,
+          scopes: [],
+          issParameter: false,
+          authMethods: [],
+        },
+        client: {
+          source: "manual",
+          clientId: "evil",
+          authMethod: "none",
+          sealedSecret: null,
+        },
+        sealedTokens: { ciphertext: "x", nonce: "y", keyVersion: 1 },
+        accessExpiresAt: new Date("2027-01-01T00:00:00.000Z"),
+        scopes: [],
+        connectedBy: null,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe(false),
+  },
+  {
+    name: "mcpOAuth.withLockedTokens",
+    run: (a, b) =>
+      a.mcpOAuth.withLockedTokens(
+        b.mcpOAuthServerId,
+        async (locked, writes) => ({
+          locked,
+          replaced: await writes.replaceTokens(
+            1,
+            { ciphertext: "x", nonce: "y", keyVersion: 1 },
+            new Date("2027-01-01T00:00:00.000Z"),
+            null,
+          ),
+          broken: await writes.markBroken(1, "mcp_oauth_refresh_refused"),
+        }),
+      ),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({
+        locked: undefined,
+        replaced: false,
+        broken: false,
+      }),
   },
   // Jira webhooks (#1039): B's registrations are not A's to read, change or remove, and A cannot register one on B's connection
   {

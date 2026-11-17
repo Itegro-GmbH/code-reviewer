@@ -68,6 +68,7 @@ const PUBLIC_ROUTES = [
   // A Worker sends the per-job credential of its claim (src/runner-api/README.md, #320).
   "/api/workers/v1/jobs/[id]",
   "/api/workers/v1/jobs/[id]/heartbeat",
+  "/api/workers/v1/jobs/[id]/mcp/[server]",
   "/api/workers/v1/jobs/[id]/result",
   "/api/workers/v1/jobs/[id]/session",
   "/api/workers/v1/jobs/[id]/resume-session",
@@ -131,6 +132,7 @@ const PROTECTED_ROUTES = [
   "/w/[workspace]/connections",
   "/w/[workspace]/environments",
   "/w/[workspace]/implementer",
+  "/w/[workspace]/mcp",
   "/w/[workspace]/members",
   "/w/[workspace]/projects",
   "/w/[workspace]/projects/[repositoryId]",
@@ -197,6 +199,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/invitations/accept",
   // Where Atlassian sends the browser after the consent page of a Jira connection (#1037, src/jira/): a signed in person only.
   "/api/jira/callback",
+  // Where an MCP server's authorization server sends the browser after the consent page (#1051, src/mcp/oauth/): a signed in person only.
+  "/api/mcp/oauth/callback",
   // The data routes of a workspace: for its members only (src/workspaces/access-runtime.ts).
   "/api/w/[workspace]",
   "/api/w/[workspace]/jira/choose",
@@ -205,6 +209,11 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/jira/connections/[connectionId]",
   // The projects of the Jira site of a connection, for the new-project dialog (#1038).
   "/api/w/[workspace]/jira/connections/[connectionId]/projects",
+  // The MCP servers of a workspace (#1050).
+  "/api/w/[workspace]/mcp/servers",
+  "/api/w/[workspace]/mcp/servers/[serverId]",
+  "/api/w/[workspace]/mcp/servers/[serverId]/test",
+  "/api/w/[workspace]/mcp/servers/[serverId]/connect",
   "/api/w/[workspace]/billing/invoices",
   "/api/w/[workspace]/billing/journal",
   "/api/w/[workspace]/billing/monthly-limit",
@@ -283,6 +292,7 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/runs/[id]",
   "/api/w/[workspace]/runs/[id]/continuation",
   "/api/w/[workspace]/runs/[id]/steps",
+  "/api/w/[workspace]/runs/[id]/mcp-calls",
 ] as const;
 // Files the proxy matcher leaves out on purpose (src/proxy.ts), so no session rule applies to them.
 const OUTSIDE_THE_PROXY = [

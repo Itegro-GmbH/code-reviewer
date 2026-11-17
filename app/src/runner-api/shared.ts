@@ -26,6 +26,7 @@ import { createImplementerStepsRepository } from "../db/repositories/implementer
 import { createJobVmRunsRepository } from "../db/repositories/job-vm-runs-repository.ts";
 import { createRepositoriesRepository } from "../db/repositories/repositories-repository.ts";
 import { getDatabase } from "../db/startup.ts";
+import { jobMcpFor } from "../mcp/job-shared.ts";
 import { buildResume } from "./resume.ts";
 import { integrationRegistry } from "../integrations/registry.ts";
 import { jobEnded, touched } from "../dispatch/maintenance-shared.ts";
@@ -196,6 +197,8 @@ function sharedDeps(): WorkerApiDeps {
     // #588: a selection of a catalog provider made before pins existed is pinned by its first claim, in the job's own workspace.
     providerPins: createProviderPins(reviewSettingsServiceFor),
     claimedKeys,
+    // #1053: the MCP servers of a job's agent step and the proxy for their calls, in the job's own workspace.
+    jobMcp: jobMcpFor,
     // #745: the steps of a running turn, scoped to the job's own workspace.
     steps: (workspaceId) => createImplementerStepsRepository(db, workspaceId),
     // #839: the session snapshot of a turn (follow-up turns), scoped to the job's own workspace.

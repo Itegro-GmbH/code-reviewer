@@ -40,6 +40,11 @@ vi.mock("@/profiles/shared", () => ({
   })),
 }));
 
+// #1052: and its MCP servers for the pickers of the lane card and of an agent step.
+vi.mock("@/mcp/shared", () => ({
+  mcpServiceFor: vi.fn(() => ({ list: async () => [] })),
+}));
+
 // #1036: and the status names of its project's board for a status trigger (#1038: or of its Jira project; one wiring for both).
 vi.mock("@/jira/source-shared", () => ({
   statusNamesFor: vi.fn(() => async () => []),

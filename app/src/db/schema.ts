@@ -256,6 +256,11 @@ export interface JobsTable {
    * every claim, so it only counts for a claim made with a per-job credential. Not a `Job` field.
    */
   worker_fetches: ColumnType<number, number | undefined, number>;
+  /**
+   * #1053: how many calls of the agent's MCP client the Worker of the current claim made through the Worker API's MCP route (capped per
+   * claim). Reset by every claim. Not a `Job` field.
+   */
+  mcp_calls: ColumnType<number, number | undefined, number>;
   /** #397: 1 when the holder of the claim understands that its run can be superseded (the feature `supersede`). */
   accepts_supersede: ColumnType<number, number | undefined, number>;
   /**
@@ -1285,6 +1290,30 @@ export interface ImplementerTurnStepsTable {
 }
 
 /**
+ * One MCP call of the agent through the proxy of the Worker API, or one refusal of such a call (#1055, epic #1049): what `McpCallMeta` holds
+ * and nothing the agent or the server said. `seq` is the order the rows were written in (a Postgres identity); `server_id` is not a foreign
+ * key (the server may be removed, the record stays) and `server_name` is its name at the call. At most 2000 rows for a job.
+ */
+export interface JobMcpCallsTable {
+  seq: Generated<number>;
+  job_id: string;
+  workspace_id: string;
+  server_id: string;
+  server_name: string;
+  rpc_method: string | null;
+  tool: string | null;
+  status: number;
+  /** `ok`, `cancelled`, or a stable code of the proxy or of the route. */
+  outcome: string;
+  duration_ms: number;
+  request_bytes: number;
+  response_bytes: number;
+  /** Further refusals of the same kind counted on this row instead of stored (only `mcp_too_many_concurrent_calls`); 0 otherwise. */
+  suppressed: Generated<number>;
+  created_at: string;
+}
+
+/**
  * The conversation of an Implementer session (#839): one row for each session, replaced by the snapshot of each turn. `data` is the
  * engine's export (JSON, redacted by the runner, gzipped) as base64 text; `turn_number` and `job_id` say which turn it came from.
  */
@@ -1716,6 +1745,80 @@ export interface JiraWebhooksTable {
   updated_at: string;
 }
 
+/**
+ * An MCP server of a workspace (#1050, epic #1049): a remote server (Streamable HTTP or SSE) the factory's agents may use, with how to
+ * authenticate and what the last connection test found (src/db/repositories/mcp-servers-repository.ts, src/mcp/). The headers of
+ * the `header` authentication are sealed in the three `headers_*` columns and never leave the server.
+ */
+export interface McpServersTable {
+  id: string;
+  workspace_id: string;
+  name: string;
+  /** `streamable-http` or `sse` (MCP_TRANSPORTS). */
+  transport: string;
+  url: string;
+  /** `none`, `header` or `oauth` (reserved for #1051; MCP_AUTH_KINDS). */
+  auth_kind: string;
+  /** JSON array of the header names, for the kind `header`; null otherwise. */
+  header_names: string | null;
+  /** The sealed JSON of the header values (the encrypted value and its tag, base64); null unless the kind is `header`. */
+  headers_ciphertext: string | null;
+  headers_nonce: string | null;
+  headers_key_version: number | null;
+  /** Counts the changes of the configuration; a test result is stored only for the revision it tested. */
+  revision: ColumnType<number, number | undefined, number>;
+  /** `untested`, `ok` or `failed`. */
+  test_status: ColumnType<string, string | undefined, string>;
+  tested_at: string | null;
+  /** The stable code of why the last test failed (src/mcp/errors.ts); null unless it failed. */
+  test_error_code: string | null;
+  /** The JSON of what the last successful test listed; kept after a later failure. */
+  tools_snapshot: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * The OAuth connection of an MCP server of the kind `oauth` (#1051, epic #1049): what discovery found, the OAuth client (entered by an Owner or
+ * Admin, or registered dynamically) and the sealed token pair (src/db/repositories/mcp-oauth-repository.ts, src/mcp/oauth/). One row per server;
+ * it goes with the server (cascade). The sealed values never leave the server.
+ */
+export interface McpOauthConnectionsTable {
+  /** The id of the MCP server; also the row id bound into the sealed values. */
+  server_id: string;
+  workspace_id: string;
+  /** `unconnected` (no tokens yet), `connected` or `broken` (MCP_OAUTH_STATUSES). */
+  status: ColumnType<string, string | undefined, string>;
+  /** Why the connection is broken (a code of src/mcp/oauth/errors.ts); null unless it is. */
+  error_code: string | null;
+  /** JSON of what discovery found (resource, issuer, endpoints, scopes); nothing secret. */
+  discovery: string | null;
+  /** `manual` (entered by an Owner or Admin) or `dynamic` (registered by this server); null while there is no client. */
+  client_source: string | null;
+  client_id: string | null;
+  /** `none`, `client_secret_basic` or `client_secret_post`. */
+  client_auth_method: string | null;
+  /** The sealed client secret; null for a public client. */
+  client_secret_ciphertext: string | null;
+  client_secret_nonce: string | null;
+  client_secret_key_version: number | null;
+  /** The issuer and the callback address a dynamic client was registered for. */
+  registered_issuer: string | null;
+  registered_redirect_uri: string | null;
+  /** The sealed token pair; null while `unconnected`. */
+  tokens_ciphertext: string | null;
+  tokens_nonce: string | null;
+  tokens_key_version: number | null;
+  /** Counts the writes of the pair; a refresh only replaces the version it read. */
+  token_version: ColumnType<number, number | undefined, number>;
+  access_expires_at: string | null;
+  scopes: string | null;
+  connected_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Database {
   app_meta: AppMetaTable;
   users: UsersTable;
@@ -1739,6 +1842,8 @@ export interface Database {
   workspace_secrets: WorkspaceSecretsTable;
   jira_connections: JiraConnectionsTable;
   jira_webhooks: JiraWebhooksTable;
+  mcp_servers: McpServersTable;
+  mcp_oauth_connections: McpOauthConnectionsTable;
   workspace_entitlements: WorkspaceEntitlementsTable;
   usage_records: UsageRecordsTable;
   job_claimed_keys: JobClaimedKeysTable;
@@ -1750,6 +1855,7 @@ export interface Database {
   implementer_sessions: ImplementerSessionsTable;
   implementer_turns: ImplementerTurnsTable;
   implementer_turn_steps: ImplementerTurnStepsTable;
+  job_mcp_calls: JobMcpCallsTable;
   implementer_session_snapshots: ImplementerSessionSnapshotsTable;
   implementer_session_snapshot_parts: ImplementerSessionSnapshotPartsTable;
   implementer_environments: ImplementerEnvironmentsTable;

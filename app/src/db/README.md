@@ -579,6 +579,18 @@ migrations are pending, they run in one batch (one transaction), so this migrati
 well, not only the writers of the two leaf tables. A batch that gives up rolls back, and with it that `SHARE` lock. The window is bounded, and a database that ran #771's
 migration in an earlier deployment does not have it.
 
+### MCP calls of a job (#1055)
+
+`20261117160000_create_job_mcp_calls` (sorts after `20261117150000_add_job_mcp_calls`, the migration that was newest when it was written) adds one table and one index of its own; no existing table changes.
+
+- `job_mcp_calls` (`repositories/job-mcp-calls-repository.ts`, scoped): the run's trace of MCP calls, one row for each call the agent made through the MCP proxy of the Worker API and for each refusal of one:
+  server id (not a foreign key: a removed server's calls stay) and name as it was, JSON-RPC method, cleaned tool name, the status the agent got, the outcome (`ok`, `cancelled` or a stable code), duration and sizes.
+  **No argument, answer, header or address**: there is no column for them. `seq` is a Postgres identity (the order rows were written in, like `billing_journal_entries`); the index `(job_id, seq)` serves "the calls after `seq`" and the count for the bound.
+- At most 2000 rows for a job (`MAX_MCP_CALLS_RECORDED_PER_JOB`), checked in the inserting statement (one row more for the refusal that says the call limit was reached; a bound, not an exact number: concurrent inserts may overshoot by the few in flight). Of the refusal "too many calls at once" (not bounded by the claim's call count) only the first 20 of a job get a row; the next ones are counted in `suppressed` of the newest of them, in the same single statement, so a loop cannot take the room of the real calls.
+  `seq` is table-wide, so a cursor on it can pass a row whose transaction commits late: a reader starts 50 of the job's rows before its cursor and merges by `seq`. A job of another workspace takes no row (`unknown_job`); the composite key `(job_id, workspace_id)` to `jobs` holds that in the database too.
+  The erasure of a workspace deletes the rows before the jobs. The rows are kept as long as the job.
+- **Live database.** Expand only: the table is created first, then the index, then the link to `jobs` as the last step (the short lock on `jobs` and `workspaces`, on an empty table); the wait is bounded (`LOCK_TIMEOUT`, `MIGRATION_FAILED`). The running version never reads or writes the table.
+
 ### Implementer turn steps (#745)
 
 `20261104100000_create_implementer_turn_steps` (the live view of the Implementer) adds one table and one index of its own; no existing table changes.
@@ -693,6 +705,29 @@ file, and the migrator refuses to start (`previously executed migration ... is m
 
 3. Start the app: the remaining migrations run as usual. The two encrypted rows of `secrets` named after the removed
    payment provider (`<provider>_api_key`, `<provider>_webhook_secret`) are ignored and may be deleted by hand.
+
+### MCP servers
+
+Migration `20261117100000_create_mcp_servers` (#1050, epic #1049): `mcp_servers` holds the remote MCP servers of a workspace (name, transport
+`streamable-http` or `sse`, address, authentication kind `none`, `header` or `oauth`, the NAMES of the headers, the header values
+as ONE sealed JSON in `headers_ciphertext`, `headers_nonce` and `headers_key_version`, `revision`, the last test `test_status` with its error code and time, and
+`tools_snapshot`, the JSON of what the last successful test listed). Check constraints keep the transport and the kind to their lists, the sealed
+columns present exactly for the kind `header`, and the test status in line with its error code and time. A name is unique per workspace whatever its case. Expand
+only: one new table, nothing existing changes. The OAuth data of #1051 lives in a table of its own keyed by the server (below), so this table needed no
+rewrite. **Customer data, workspace scoped** (`mcp-servers-repository.ts`, classified in `scoping.test.ts`, covered row by row in
+`scoped-isolation.integration.test.ts`); `created_by` is an audit pointer that a user merge moves to the acting admin (`github-signin/merge.ts`).
+The repository decides, under a lock, the maximum per workspace, the compare and swap on `revision` for a change and for the record of a test, and the
+removal: `removeUnlessUsed` refuses while the CURRENT version of a lane that is not archived names the server under a key `mcp` (a lane's own or a step's; #1052
+adds the field and takes `for key share` on the server's row when it saves a document). See `src/mcp/README.md`.
+
+Migration `20261117140000_create_mcp_oauth_connections` (#1051): `mcp_oauth_connections`, one row per server of the kind `oauth` (`server_id` is the key and a
+foreign key with `on delete cascade`). Three groups: what discovery found (`discovery`, JSON, nothing secret: resource, issuer, endpoints, scopes; written with the tokens of the flow that produced them), the OAuth client
+(`client_source` `manual` entered by an Owner or Admin, or `dynamic` registered by the server; the secret sealed in `client_secret_*`; `registered_issuer` and
+`registered_redirect_uri` say what a dynamic client was registered for; for an entered client `registered_issuer` is the authorization server it is pinned to), and the token pair as ONE sealed JSON (`tokens_*`, the table, the server id and the field
+`tokens` bound into the ciphertext) with `token_version` (compare and swap) and `access_expires_at`. `status` is `unconnected`, `connected` or `broken`; check
+constraints keep status, tokens, client and error in line. Expand only: one new table. **Customer data, workspace scoped** (`mcp-oauth-repository.ts`, classified in
+`scoping.test.ts`, covered row by row in `scoped-isolation.integration.test.ts`); `connected_by` is moved by a user merge; the erasure of a workspace deletes it.
+The registry's update deletes or replaces the row in ITS transaction when the address, the transport, the kind or the client changes.
 
 ## Workspace scoping
 

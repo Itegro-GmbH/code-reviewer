@@ -2,7 +2,12 @@
 
 // #844: the workflow document as the engine reads it.
 import { describe, expect, it } from "vitest";
-import { forTrigger, readRunDocument, triggerOf } from "./document.ts";
+import {
+  effectiveMcpServersOfNode,
+  forTrigger,
+  readRunDocument,
+  triggerOf,
+} from "./document.ts";
 
 const GOOD = {
   version: 1,
@@ -124,5 +129,51 @@ describe("the triggers of a document (#916)", () => {
           JSON.stringify({ ...GOOD, trigger: undefined, triggers }),
         ),
       ).toBeUndefined();
+  });
+});
+
+describe("the MCP servers of a run document (#1052)", () => {
+  const BASE = {
+    version: 1,
+    name: "W",
+    trigger: { kind: "manual" },
+    steps: [
+      { id: "a", kind: "agent", profile: "p", mcp: ["s-1"] },
+      { id: "b", kind: "agent", profile: "p" },
+      { id: "c", kind: "agent", profile: "p", mcp: [] },
+    ],
+  };
+
+  // #1052-T01
+  it("reads the lane's list, and a step's effective list is its own narrowed to the lane's, all of the lane's when it names none, none when it is empty", () => {
+    const run = readRunDocument(
+      JSON.stringify({ ...BASE, mcp: ["s-1", "s-2"] }),
+    );
+
+    expect(run?.mcpServers).toEqual(["s-1", "s-2"]);
+    const [a, b, c] = run!.steps;
+    expect(effectiveMcpServersOfNode(run!, a!)).toEqual(["s-1"]);
+    expect(effectiveMcpServersOfNode(run!, b!)).toEqual(["s-1", "s-2"]);
+    expect(effectiveMcpServersOfNode(run!, c!)).toEqual([]);
+    // The list survives putting the pre-steps of a trigger in front.
+    expect(forTrigger(run!, { id: null, kind: "manual" })?.mcpServers).toEqual([
+      "s-1",
+      "s-2",
+    ]);
+  });
+
+  // #1052-T03
+  it("reads a document without `mcp` as one that names no server, and gives every step none", () => {
+    const run = readRunDocument(JSON.stringify(BASE));
+
+    expect(run?.mcpServers).toEqual([]);
+    for (const node of run!.steps)
+      expect(effectiveMcpServersOfNode(run!, node)).toEqual([]);
+  });
+
+  // #1052-T01
+  it("is unusable when `mcp` is no list of texts: a run never starts on a document that opens a door by accident", () => {
+    for (const mcp of ["s-1", { id: "s-1" }, [1], null])
+      expect(readRunDocument(JSON.stringify({ ...BASE, mcp }))).toBeUndefined();
   });
 });

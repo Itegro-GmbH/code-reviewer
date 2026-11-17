@@ -3,6 +3,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { requireImplementerCapability } from "@/implementer/shared";
+import { mcpServiceFor } from "@/mcp/shared";
 import { profileServiceFor } from "@/profiles/shared";
 import { statusNamesFor } from "@/jira/source-shared";
 import { loadWorkflowPage, WorkflowPageContent } from "@/workflow-pages/pages";
@@ -48,6 +49,7 @@ async function WorkflowContent({
     runs: workflowRunServiceFor(workspaceId),
     profiles: profileServiceFor(workspaceId),
     statuses: statusNamesFor(workspaceId),
+    mcp: mcpServiceFor(workspaceId),
   });
   if (data.kind === "not_found") notFound();
   return (

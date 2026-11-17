@@ -292,7 +292,7 @@ test.describe("the pages of the factory", () => {
   });
 
   // #951
-  test("@smoke Profiles, Runners and Settings open from the sidebar", async ({
+  test("@smoke Profiles, Runners, MCP and Settings open from the sidebar", async ({
     page,
   }) => {
     await signInAsFactoryAdmin(page);
@@ -304,6 +304,7 @@ test.describe("the pages of the factory", () => {
       "Runs",
       "Profiles",
       "Runners",
+      "MCP",
       "Settings",
     ]);
 
@@ -315,6 +316,12 @@ test.describe("the pages of the factory", () => {
     await expect(
       page.getByRole("heading", { level: 1, name: "Runners" }),
     ).toBeVisible();
+    // #1050: the MCP servers of the workspace.
+    await nav.getByRole("link", { name: "MCP" }).click();
+    await expect(
+      page.getByRole("heading", { level: 1, name: "MCP" }),
+    ).toBeVisible();
+    await expect(page.getByText("No MCP server yet")).toBeVisible();
     await nav.getByRole("link", { name: "Settings" }).click();
     const sections = page.getByRole("navigation", {
       name: "Settings sections",

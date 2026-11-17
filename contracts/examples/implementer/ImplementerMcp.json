@@ -1,0 +1,7 @@
+{
+  "servers": [
+    { "id": "3f6c0e0a-5d0e-4c53-9d4e-0a6b8a4f2c11", "name": "Linear", "transport": "streamable-http" },
+    { "id": "9a21c7b4-1a8e-4f5a-8c0d-2f7e6b9d3a05", "name": "Legacy Docs", "transport": "sse" }
+  ],
+  "unavailable": 1
+}

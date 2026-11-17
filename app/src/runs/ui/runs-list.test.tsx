@@ -69,6 +69,7 @@ function apiAnswering(
     list: vi.fn(async () => answers.shift() ?? failure),
     detail: vi.fn(),
     steps: vi.fn(),
+    mcpCalls: vi.fn(),
   } as RunsApi & { list: ReturnType<typeof vi.fn> };
 }
 

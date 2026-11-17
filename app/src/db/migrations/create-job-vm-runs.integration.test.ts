@@ -58,6 +58,9 @@ async function rowsOfEveryTable(
       table.name === "runner_registration_tokens" ||
       table.name === "jira_connections" ||
       table.name === "jira_webhooks" ||
+      table.name === "mcp_servers" ||
+      table.name === "mcp_oauth_connections" ||
+      table.name === "job_mcp_calls" ||
       table.name === "job_rings" ||
       table.name === "implementer_turn_steps" ||
       table.name === "implementer_session_snapshots" ||

@@ -10,6 +10,7 @@ import { FormField } from "../../implementer/ui/form-field.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { canonicalJson, isRecord } from "../../workflows/json.ts";
 import { LOOP_ROUNDS_MAX } from "../../workflows/limits.ts";
+import { laneMcpServers } from "../../workflows/mcp.ts";
 import { START_BRANCH_ROOTS } from "../../workflows/connectors.ts";
 import type { ReachWants } from "../../workflows/reach.ts";
 import { TRIGGER_KINDS } from "../../workflows/triggers.ts";
@@ -47,6 +48,12 @@ import {
 import type { Problem } from "./problems.ts";
 import { ProblemList } from "./problem-list.tsx";
 import { SchemaTable } from "./schema-table.tsx";
+import {
+  stepMcpEntries,
+  withStepServer,
+  type McpServerOption,
+} from "./mcp-edit.ts";
+import { McpPicker } from "./mcp-picker.tsx";
 
 export type ProfileOption = { name: string; version: number };
 
@@ -60,6 +67,8 @@ type FieldsProps = {
   profiles: readonly ProfileOption[];
   /** The status names of the project's board (#1036), for the fields of a status trigger; empty: none to offer, the name is typed. */
   statuses: readonly string[];
+  /** The MCP servers of the workspace (#1052), for the picker of an agent step. */
+  mcpServers: readonly McpServerOption[];
   onChange: Change;
 };
 
@@ -364,6 +373,36 @@ function InstructionControl({ doc, pointer, node, onChange }: FieldsProps) {
   );
 }
 
+/** The MCP servers of an agent step (#1052): the lane's servers to narrow to, or the sentence that the lane names none. */
+function McpControl({ doc, pointer, node, mcpServers, onChange }: FieldsProps) {
+  const entries = stepMcpEntries(doc, node, mcpServers);
+  if (entries.length === 0)
+    return (
+      <p className="text-xs text-muted-foreground">
+        {BUILDER_COPY.mcpStepLaneEmpty}
+      </p>
+    );
+  const lane = laneMcpServers(doc);
+  return (
+    <>
+      <McpPicker
+        name={`mcp-${pointer}`}
+        label={BUILDER_COPY.mcpStepTitle}
+        hint={BUILDER_COPY.mcpStepHint}
+        entries={entries}
+        onToggle={(id, checked) =>
+          onChange(withStepServer(doc, pointer, lane, id, checked))
+        }
+      />
+      {entries.every((entry) => !entry.checked) ? (
+        <p className="text-xs text-muted-foreground">
+          {BUILDER_COPY.mcpStepNone}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 function AgentFields(props: FieldsProps) {
   const { doc, pointer, node, problems, onChange } = props;
   const continued = isRecord(node.session);
@@ -396,6 +435,7 @@ function AgentFields(props: FieldsProps) {
         }
       />
       <InstructionControl {...props} />
+      <McpControl {...props} />
       {showEnvironment ? (
         <TextControl
           name="environment"
@@ -634,6 +674,7 @@ export function Inspector({
   problems,
   profiles,
   statuses = [],
+  mcpServers = [],
   lookup,
   headingRef,
   onChange,
@@ -646,6 +687,8 @@ export function Inspector({
   profiles: readonly ProfileOption[];
   /** The status names of the project's board, for a status trigger (#1036). Left out: none are offered. */
   statuses?: readonly string[];
+  /** The MCP servers of the workspace (#1052). Left out: none. */
+  mcpServers?: readonly McpServerOption[];
   /** What the fields ask for the values they can reach: the builder binds it to its document and lane. */
   lookup: ReachLookup;
   /** The builder moves focus here when a card is picked. */
@@ -675,6 +718,7 @@ export function Inspector({
     problems,
     profiles,
     statuses,
+    mcpServers,
     onChange,
   };
   return (

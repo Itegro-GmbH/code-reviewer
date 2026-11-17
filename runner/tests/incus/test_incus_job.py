@@ -187,13 +187,20 @@ def test_narrow_unplugs_bs_outer_nic_and_the_proxy_of_the_host_is_unreachable_fr
 
 
 # #1007-T03
-def test_the_inner_wall_lets_b_reach_only_the_two_doors_of_a(
+def test_the_inner_wall_lets_b_reach_only_the_three_doors_of_a(
     client: StandInClient, settings: IncusSettings
 ) -> None:
     async def scenario() -> Any:
         sandbox, worker, a, b = await running_job(client, settings)
         try:
-            targets = {"door-8080": 8080, "door-8081": 8081, "secrets": 9000, "docker-api": 2375}
+            targets = {
+                "door-8080": 8080,
+                "door-8081": 8081,
+                "door-8082": 8082,
+                "secrets": 9000,
+                "docker-api": 2375,
+                "next-port": 8083,
+            }
 
             async def view() -> dict[str, bool]:
                 return {
@@ -247,10 +254,24 @@ def test_the_inner_wall_lets_b_reach_only_the_two_doors_of_a(
 
     walled, icmp_walled, routed_walled, open_view, icmp_open, again, through, spoofed = go(scenario)
 
-    assert walled == {"door-8080": True, "door-8081": True, "secrets": False, "docker-api": False}
+    assert walled == {
+        "door-8080": True,
+        "door-8081": True,
+        "door-8082": True,
+        "secrets": False,
+        "docker-api": False,
+        "next-port": False,
+    }
     assert icmp_walled is False and routed_walled is False
     # Each block has a control that reached.
-    assert open_view == {"door-8080": True, "door-8081": True, "secrets": True, "docker-api": True}
+    assert open_view == {
+        "door-8080": True,
+        "door-8081": True,
+        "door-8082": True,
+        "secrets": True,
+        "docker-api": True,
+        "next-port": True,
+    }
     assert icmp_open is True
     assert again == walled
     # Through A to the host's proxy: stopped by the wall, reached without it (the control), stopped

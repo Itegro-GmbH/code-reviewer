@@ -48,13 +48,19 @@ from code_reviewer_runner.factory_runner.incus.slots import (
 )
 from code_reviewer_runner.factory_runner.incus.walls import (
     DOOR_PORTS,
+    inner_wall_holds,
     inner_wall_ruleset,
     network_files_a,
     outer_nic,
     slot_addresses,
 )
 from code_reviewer_runner.factory_runner.selftest import Check
-from code_reviewer_runner.implementer.placement import B_DOCKER_SOCKET
+from code_reviewer_runner.implementer.placement import (
+    B_DOCKER_SOCKET,
+    MCP_DOOR_PORT_SPLIT,
+    MODEL_DOOR_PORT,
+    NETWORK_DOOR_PORT_SPLIT,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -240,6 +246,23 @@ def test_the_inner_wall_lets_b_reach_the_two_doors_and_nothing_else_of_a() -> No
     assert input_chain.index('iifname "eth1" drop') > max(
         i for i, line in enumerate(input_chain) if line.endswith("accept") and "eth1" in line
     )
+
+
+# #1068-T03
+def test_the_inner_wall_opens_exactly_one_port_more_for_the_mcp_door_and_nothing_else() -> None:
+    assert DOOR_PORTS == (MODEL_DOOR_PORT, NETWORK_DOOR_PORT_SPLIT, MCP_DOOR_PORT_SPLIT)
+    assert DOOR_PORTS == (8080, 8081, 8082)
+    text = inner_wall_ruleset()
+    accepts = [line.strip() for line in text.splitlines() if "tcp dport" in line]
+    assert accepts == ['iifname "eth1" ip saddr 10.98.0.3 tcp dport { 8080, 8081, 8082 } accept']
+
+
+# #1068-T03
+def test_the_wall_that_was_loaded_is_read_back_with_the_mcp_port_in_it() -> None:
+    assert inner_wall_holds(inner_wall_ruleset())
+    without = inner_wall_ruleset(doors=(8080, 8081))
+    assert not inner_wall_holds(without), "a table that lost the MCP port is not the wall"
+    assert not inner_wall_holds(inner_wall_ruleset(doors=(8080, 8081, 8082, 9000)))
 
 
 def test_the_inner_wall_names_the_address_it_is_given() -> None:

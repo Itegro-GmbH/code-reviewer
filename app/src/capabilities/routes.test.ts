@@ -125,8 +125,10 @@ describe("the route classification", () => {
       "/favicon.ico": "core",
       // #745: the steps of a running turn belong to the capability, on both doors.
       "/api/w/[workspace]/runs/[id]/steps": "implementer",
+      "/api/w/[workspace]/runs/[id]/mcp-calls": "implementer",
       "/api/runners/v1/jobs/[id]/steps": "implementer",
       "/api/workers/v1/jobs/[id]/steps": "implementer",
+      "/api/workers/v1/jobs/[id]/mcp/[server]": "implementer",
       // #755-T14: the routes behind the Implementer form belong to the capability, none of them is core.
       "/api/w/[workspace]/implementer/repositories": "implementer",
       "/api/w/[workspace]/implementer/repositories/[repositoryId]/branches":
@@ -135,6 +137,14 @@ describe("the route classification", () => {
       "/api/w/[workspace]/implementer/tasks": "implementer",
       // #756-T09: the page of the form belongs to the capability too.
       "/w/[workspace]/implementer": "implementer",
+      // #1050: the MCP registry (page and routes) belongs to the capability: a deployment without it has no such path.
+      "/w/[workspace]/mcp": "implementer",
+      "/api/w/[workspace]/mcp/servers": "implementer",
+      "/api/w/[workspace]/mcp/servers/[serverId]": "implementer",
+      "/api/w/[workspace]/mcp/servers/[serverId]/test": "implementer",
+      // #1051: OAuth for MCP servers: the start of "Connect" and the callback of the authorization server.
+      "/api/w/[workspace]/mcp/servers/[serverId]/connect": "implementer",
+      "/api/mcp/oauth/callback": "implementer",
     };
     for (const [route, expectedClass] of Object.entries(expected))
       expect(classOfRoute(route), route).toBe(expectedClass);

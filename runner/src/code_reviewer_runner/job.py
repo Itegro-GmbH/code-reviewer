@@ -97,6 +97,9 @@ _IMPLEMENTER_TOP_LEVEL_FIELDS = {
     # The host's per-VM token for the environment control (#977): only the Worker's job host
     # writes it, on the stdin of the job process; the app never sends one.
     "environmentControlToken",
+    # The job's credential for the MCP door (#1067): the same, only the Worker's job host writes it,
+    # on the stdin of the job process, and only for a turn that has MCP servers.
+    "mcpAccess",
 }
 _CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 _IMPLEMENTER_FIELDS = {
@@ -115,7 +118,14 @@ _IMPLEMENTER_FIELDS = {
     "resultSchema",
     "canAsk",
     "resume",
+    "mcp",
 }
+_MCP_ACCESS_FIELDS = {"appUrl", "jobId", "credential"}
+_MCP_SERVER_FIELDS = {"id", "name", "transport"}
+_MCP_TRANSPORTS = ("streamable-http", "sse")
+_MCP_MAX_SERVERS = 50
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_JOB_CREDENTIAL = re.compile(r"crj_[A-Za-z0-9_-]{43}")
 _IMPLEMENTER_ENVIRONMENT_FIELDS = {"name", "setupScript", "network"}
 # The profile version a turn was started with (#843, `ImplementerProfile` of the contract).
 _IMPLEMENTER_PROFILE_FIELDS = {"name", "version", "instructions", "canPush", "harness"}
@@ -423,6 +433,39 @@ class ImplementerResume:
 
 
 @dataclass(frozen=True)
+class McpServerRef:
+    """One MCP server of the step (`ImplementerMcp.servers` of the contract): its id (what the
+    Worker API's MCP route takes), its name (the key in the harness's configuration, the prefix of
+    its
+    tools) and how the app reaches it. No address and no credential, by design (#1053)."""
+
+    id: str
+    name: str
+    transport: str
+
+
+@dataclass(frozen=True)
+class ImplementerMcp:
+    """`implementer.mcp` (#1053, #1067): the servers of the agent step, and how many servers the
+    lane
+    named that the workspace does not have any more (the turn runs without them, with a note)."""
+
+    servers: tuple[McpServerRef, ...]
+    unavailable: int = 0
+
+
+@dataclass(frozen=True)
+class McpAccess:
+    """What the MCP door needs to call the app (#1067): the app's address, the job's id and the
+    job's credential. Written by the job host into the job process's stdin; it goes on to the door's
+    stdin and nowhere else. Never printed."""
+
+    app_url: str
+    job_id: str
+    credential: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class ImplementerSpec:
     """What an implementer job asks for (#746, `ImplementerJob` of the contract). Closed.
 
@@ -455,6 +498,9 @@ class ImplementerSpec:
     resume: ImplementerResume | None = None
     # #909: the branch the session branch is made from on a first turn; None: the base branch.
     start_branch: str | None = None
+    # #1067: the MCP servers of the agent step; None: the turn has none (every turn of a lane
+    # without `mcp`, and every turn of an app or a Worker that did not name `implementer_mcp`).
+    mcp: ImplementerMcp | None = None
 
 
 class JobError(Exception):
@@ -530,13 +576,19 @@ class ImplementerInput:
     model_access: dict[str, Any] | None = field(default=None, repr=False, compare=False)
     # The host's per-VM token (#977): the environment control sends it in every request.
     control_token: str | None = field(default=None, repr=False)
+    # #1067: the job's credential for the MCP door. Control hands it to the door's stdin and drops
+    # its own copy (`ImplementerSession`); the agent never has it.
+    mcp_access: McpAccess | None = field(default=None, repr=False)
 
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every value that must never appear in an output. A subscription turn (#856) has no key of
         ours: its placeholder `llm` holds an empty one, which is not a secret."""
+        credential = None if self.mcp_access is None else self.mcp_access.credential
         return tuple(
-            value for value in (self.git.token, self.llm.api_key, self.control_token) if value
+            value
+            for value in (self.git.token, self.llm.api_key, self.control_token, credential)
+            if value
         )
 
 
@@ -1141,6 +1193,7 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         can_ask=_implementer_can_ask(spec),
         resume=_implementer_resume(spec, branch),
         start_branch=start_branch,
+        mcp=_implementer_mcp(spec),
     )
 
 
@@ -1364,6 +1417,59 @@ def _implementer_can_ask(spec: dict[str, Any]) -> bool:
     return flag
 
 
+def _implementer_mcp(spec: dict[str, Any]) -> ImplementerMcp | None:
+    """`implementer.mcp` (#1053): the servers of the step. Closed, bounded, and checked as the app's
+    contract says; a document that is not one is refused, free, before anything starts."""
+    if "mcp" not in spec:
+        return None
+    given = _object(spec["mcp"], "implementer.mcp")
+    _check_fields(given, {"servers", "unavailable"}, "implementer.mcp.")
+    raw_servers = given.get("servers")
+    if not isinstance(raw_servers, list) or len(raw_servers) > _MCP_MAX_SERVERS:  # pyright: ignore[reportUnknownArgumentType]
+        raise _invalid(f"implementer.mcp.servers must be a list of at most {_MCP_MAX_SERVERS}")
+    servers: list[McpServerRef] = []
+    for index, item in enumerate(cast("list[Any]", raw_servers)):
+        path = f"implementer.mcp.servers[{index}]"
+        record = _object(item, path)
+        _check_fields(record, _MCP_SERVER_FIELDS, f"{path}.")
+        server_id, name, transport = record.get("id"), record.get("name"), record.get("transport")
+        if not isinstance(server_id, str) or not _UUID.fullmatch(server_id):
+            raise _invalid(f"{path}.id must be a server id")
+        if not isinstance(name, str) or not 1 <= len(name) <= 64:
+            raise _invalid(f"{path}.name must be a string of 1 to 64 characters")
+        if transport not in _MCP_TRANSPORTS:
+            raise _invalid(f"{path}.transport must be one of the contract's transports")
+        servers.append(McpServerRef(server_id.lower(), name, transport))
+    unavailable = given.get("unavailable", 0)
+    if (
+        isinstance(unavailable, bool)
+        or not isinstance(unavailable, int)
+        or not 0 <= unavailable <= _MCP_MAX_SERVERS
+    ):
+        raise _invalid("implementer.mcp.unavailable must be a count")
+    if len({server.id for server in servers}) != len(servers):
+        raise _invalid("implementer.mcp.servers names a server twice")
+    return ImplementerMcp(tuple(servers), unavailable)
+
+
+def _mcp_access(job: dict[str, Any]) -> McpAccess | None:
+    """`mcpAccess` (#1067): written by the job host, never by the app."""
+    if "mcpAccess" not in job:
+        return None
+    given = _object(job["mcpAccess"], "mcpAccess")
+    # Names the field, never a value: the document holds the credential.
+    if set(given) != _MCP_ACCESS_FIELDS:
+        raise _invalid("mcpAccess is not an MCP access")
+    app_url, job_id, credential = given["appUrl"], given["jobId"], given["credential"]
+    if not isinstance(app_url, str) or urlsplit(app_url).scheme not in ("http", "https"):
+        raise _invalid("mcpAccess.appUrl is not an address")
+    if not isinstance(job_id, str) or not _UUID.fullmatch(job_id):
+        raise _invalid("mcpAccess.jobId is not a job id")
+    if not isinstance(credential, str) or not _JOB_CREDENTIAL.fullmatch(credential):
+        raise _invalid("mcpAccess.credential is not a job credential")
+    return McpAccess(app_url, job_id, credential)
+
+
 def _control_token(job: dict[str, Any]) -> str | None:
     if "environmentControlToken" not in job:
         return None
@@ -1376,6 +1482,7 @@ def _control_token(job: dict[str, Any]) -> str | None:
 def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
     control_token = _control_token(job)
+    mcp_access = _mcp_access(job)
     git = _git_access(job)
     spec = _implementer_spec(job, git)
     raw_spec = _section(job, "implementer")
@@ -1395,6 +1502,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
             implementer=spec,
             env=_env(job),
             control_token=control_token,
+            mcp_access=mcp_access,
         )
     # A native job only: its provider may be a provider of the catalog, and the key goes to the
     # address of the entry and to no other.
@@ -1412,6 +1520,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
             "cost": raw_spec["cost"],
         },
         control_token=control_token,
+        mcp_access=mcp_access,
     )
 
 

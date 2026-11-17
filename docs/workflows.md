@@ -69,6 +69,7 @@ An answer you will see while fixing:
 | `trigger` | no | The single trigger of the format before #916. Still accepted: it is read as `triggers` with this one entry and no pre-steps. A document has `triggers` or `trigger`, not both. |
 | `budgetUsd` | no | What the workflow may spend over all its steps, in USD. 20 when left out. Not above the operator's maximum (100 today). |
 | `turnTimeLimitMinutes` | no | How long **one agent turn** may run, in whole minutes: 15 to 60, 60 when left out ([The limits of a lane](#the-limits-of-a-lane)). A number out of that range, or not whole, is `invalid_value`. |
+| `mcp` | no | The MCP servers of the workspace the lane's agents may use: a list of **server ids**, at most 50, each once ([MCP servers of a lane](#mcp-servers-of-a-lane)). Left out: none, as in every lane before #1052 and in the built-in lanes. |
 | `steps` | yes | A list of steps, 1 to 50 in all (counted through branches and loop bodies, `onFailure` included). |
 | `onFailure` | no | Steps that run once after the run ended `failed` or `cancelled`, not after a discard ([After a failure](#after-a-failure-onfailure)). Left out: the run ends at once, as it always did. |
 
@@ -207,6 +208,7 @@ A run of an agent step gets a **profile**, and the profile says who works **and 
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
 | `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one). |
+| `mcp` | no | The MCP servers this step may use: a list of server ids, a **subset of the lane's** `mcp`. Left out: all of the lane's. `[]`: none ([MCP servers of a lane](#mcp-servers-of-a-lane)). |
 | `description` | no | A note. |
 
 **What an agent step yields**, for `{{<id>.<field>}}`: the fields of its `result`, and the **facts** the platform knows without the agent
@@ -216,6 +218,34 @@ the remote). For a profile that may push, `branch` is **always there**: the plat
 the agent made no commit (`commits` is then an empty list). A step run with a profile that may not push has none of these four, and a reference to
 them is refused (`reference_fact_unavailable`). Result fields named `costUsd`, `branch`, `commits`, `headCommit` or `pushed` are refused (`result_field_reserved`). A `result`
 that fails its own check binds its fields as unknown: you get the errors of the schema, not one for every use of a field.
+
+### MCP servers of a lane
+
+*#1052 of epic #1049 (MCP servers for agents). The servers themselves are added on the **MCP** page of the workspace (`app/src/mcp/README.md`); a lane only names them.*
+
+A lane says which of the workspace's MCP servers its agents may use, and an agent step may use fewer. Both are lists of **server ids** (`GET /api/w/<slug>/mcp/servers` lists them with their names; the lane editor offers the servers by name and writes the id, so a rename never changes what a lane may use):
+
+```json
+{
+  "mcp": ["3f6c…", "9a21…"],
+  "steps": [
+    { "id": "implement", "kind": "agent", "profile": "implementer", "instruction": "…" },
+    { "id": "review", "kind": "agent", "profile": "reviewer", "instruction": "…", "mcp": ["3f6c…"] }
+  ]
+}
+```
+
+| Written | An agent step may use |
+| --- | --- |
+| no `mcp` on the lane | nothing, whatever its own list says (a step list is then refused: `mcp_server_not_in_lane`) |
+| lane `mcp`, step without `mcp` | all of the lane's servers |
+| lane `mcp`, step `mcp: [a]` | only `a` (it must be in the lane's list) |
+| lane `mcp`, step `mcp: []` | nothing |
+
+- **Remote servers only**; the credential of a server is never part of the lane or of the sandbox (the runtime, #1053, adds it at the sandbox's door).
+- A server that does not exist **in this workspace** is `mcp_server_unknown`, whether it never existed, was removed, or belongs to another workspace (the answer is the same, so it tells nothing about other workspaces); `available` lists the ids there are. A step that names a server its lane does not name is `mcp_server_not_in_lane`. A server whose last connection test failed, and an OAuth server that is not connected or whose grant ended, is the **warning** `mcp_server_broken`: the lane saves, the editor shows it.
+- Saving a lane that names servers takes a share lock on their rows in the same transaction (`for key share`), so a server cannot be removed between the check and the commit; removing a server is refused while a lane names it (`mcp_server_in_use`, `app/src/mcp/README.md`).
+- Where the runtime reads it: `effectiveMcpServers(document, stepId)` and `effectiveMcpServersOfStep(laneList, step)` in `app/src/workflows/mcp.ts` (pure), and, in the engine, `RunDocument.mcpServers` with `effectiveMcpServersOfNode` (`app/src/workflow-runs/document.ts`). The runtime (#1053): the claim puts the step's servers in the job (`implementer.mcp`) and the app proxies the agent's calls with the server's credential added, see [MCP servers at run time](mcp-runtime.md); the sandbox's network rule is not changed for it.
 
 ### The action (`"kind": "action"`)
 
@@ -1417,7 +1447,7 @@ The builder reads a workflow and edits **the document itself**: there is no seco
 - **Flow** (left). Each trigger is a dashed group with its pre-steps; then the shared steps top down. A loop is a container with its body indented and a footer (until, max rounds, exits); an `if` shows then and else side by side; `onFailure` is a group of its own at the bottom and offers comments, labels and `if` only. The **+** below a card inserts a step of the kind picked (agent step, action, loop, if) after it, at any depth; a step can be added to an empty branch, body or pre-step list too.
 - **Inspector** (right) for the selected node, with the id (editable: references to the old id are **not** renamed, the validator reports them), remove, and move up and down within the list:
   - *trigger*: kind (changing it starts the fields of the new kind), label, cron, or the input as a table of fields (name, type, required);
-  - *agent step*: profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step still has one or the validator asks for it (deprecated since #919: the profile says where it runs; clearing the field removes it, and a new agent step gets none). No model, no key;
+  - *agent step*: **MCP servers** (#1052: the servers of the lane, as checkboxes: all of the lane's until one is unchecked, then the list is written; "none" writes `[]`; a lane without servers shows nothing to pick), profile (the profiles of the workspace, newest or pinned), session (new, or continue an agent step), start branch (a target), the instruction (first and next in a loop body), the result as a table of fields; the environment only where the step still has one or the validator asks for it (deprecated since #919: the profile says where it runs; clearing the field removes it, and a new agent step gets none). No model, no key;
   - *action*: the connector and its inputs, taken from the connector's own spec, so the inputs, the required ones and the **targets** (marked "target · one value", or "target · literal") are the validator's; a list of labels is one entry to a line, or one reference to a list (the text being typed stays as it is, a trailing new line included, while it parses to the same list);
   - *loop*: max rounds (1 to 10) and the `until` condition; *if*: the `when` condition. A condition is an operator (`empty`, `notEmpty`, `equals`, `notEquals`, `all`, `any`, `not`) and its operands or conditions. An operand is text unless its type is set to Number or true/false, so `"3"` stays a text.
 
@@ -1429,7 +1459,7 @@ The builder reads a workflow and edits **the document itself**: there is no seco
   - **Samples** come from the latest run of this lane (any version): the trigger's values and the output of each step that succeeded (the latest round); a value the run did not have has none. They are for orientation only and never part of the document.
 - **Validation on every change.** The document is sent to `POST .../workflows/validate` after a short pause. An error's `path` is a JSON pointer; the node it belongs to is the deepest step or trigger it runs through, which gets a red count on its card, and the inspector of that node shows the error in full: code, path, the validator's message and `available` as chips. Where `available` holds **exactly one** name and the value at `path` is a plain text (`profile_unknown`, `profile_archived`, `profile_version_unknown`, `environment_unknown`, `unknown_connector`, `unknown_trigger_kind`, `session_target_invalid`) the error has a one-click fix; nothing else is guessed. Errors about the lane as a whole (the name, the budget, no steps) show under the header whichever node is picked. The header says "Valid · n steps · $budget", or the number of errors and "not saved".
 - **Header**: **JSON** shows the document read only; **Run now** opens the Start form of the manual trigger (it starts the *saved* version, and says so when there are unsaved changes); **Save as vN** is on only for a document the validator accepted as it stands that differs from the saved one. It is `PUT .../workflows/<id>?expectedVersion=<current>`, so a lane saved by someone else since the page was opened is `WORKFLOW_VERSION_CONFLICT` (the page says so and keeps the changes). A saved document is always one the validator accepts, so the engine runs it.
-- **Lane card** (right column): the limits of the lane (`budgetUsd`, `turnTimeLimitMinutes`; a limit left out shows the default and is written when changed), the versions, and the sentence that a turn ends with done or ask.
+- **Lane card** (right column): the limits of the lane (`budgetUsd`, `turnTimeLimitMinutes`; a limit left out shows the default and is written when changed), the **MCP servers** of the lane (#1052: a checkbox per server of the workspace, by name; a server the lane names that the workspace no longer has is shown as missing and can be taken out; a server whose last test failed is marked broken), the versions, and the sentence that a turn ends with done or ask.
 
 ## Error codes
 
@@ -1479,6 +1509,9 @@ Beyond the form:
 | `runner_needs_own_key` | An agent step runs a profile with a managed model (an entry of the platform's catalog, on the platform's key) in an environment that runs on a runner. A runner works with the workspace's own key. | Use a profile with a model of your own key, or an environment that runs on a platform VM. |
 | `harness_needs_runner` | An agent step runs a profile whose harness is not OpenCode in an environment that runs on a platform VM. Such a harness exists only on a runner. | Use an environment that runs on a runner. |
 | `no_runner_announces` | An agent step runs a profile in an environment that runs on a runner, a runner with the environment's labels is online, and none of those announces the harness, the auth and the model the profile asks for (#973): for example `claude-code` on a subscription with the model `opus` when the online runners announce only `sonnet`. The runners announce `harnesses` entries (`docs/runner.md`, "Routing"). It is a **warning** (`severity: "warning"`, listed in `warnings`, never in `errors`; the workflow is `valid` and saves): a runner that is asleep, or that leaves an entry out for a while (a rate limit), must never block a save. Nothing is said while no runner with the labels is online: the turn waits for one. | Use a model or a harness the runner announces, or start a runner that does; or save anyway, the turn waits. |
+| `mcp_server_unknown` | `mcp` of the lane names a server this workspace does not have: it never existed, it was removed, or it belongs to another workspace (the answer is the same). `available` lists the ids of the servers there are. | Name a server of the MCP page by its id, or take the entry out. |
+| `mcp_server_not_in_lane` | `mcp` of an agent step names a server the lane does not name: a step narrows the lane's list and never adds to it. A step with a list on a lane without `mcp` is this too. `available` lists the lane's servers. | Add the server to the `mcp` of the lane, or take it out of the step. |
+| `mcp_server_broken` | A **warning** (`severity: "warning"`, in `warnings`, never in `errors`; the workflow is `valid` and saves): the lane names an MCP server whose last connection test failed, or an OAuth server that nobody connected or whose grant ended (`broken`). | Test the server again on the MCP page, or connect or reconnect it there, or save anyway. |
 | `result_field_reserved` | A result field named like a platform fact (`costUsd`, `branch`, `commits`, `headCommit`, `pushed`). | Rename it. |
 | `required_field_unknown` | `required` of a result schema names a field that is not in `properties`. | Fix the name or add the property. |
 | `repo_required` | A manual or api trigger without `input` that declares `ticket` (type `ticket`, required) or `repo` as a required text: the run has no repository. | Declare `ticket` or `repo` in `properties` and `required` of the trigger's `input`. |

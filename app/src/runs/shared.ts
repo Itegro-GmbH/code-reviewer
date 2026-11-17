@@ -7,6 +7,7 @@ import "server-only";
 import { isBillingOn } from "../billing/enabled.ts";
 import { createRunPriceSource } from "../billing/run-prices.ts";
 import { createCatalogRepository } from "../db/repositories/catalog-repository.ts";
+import { createJobMcpCallsRepository } from "../db/repositories/job-mcp-calls-repository.ts";
 import { createImplementerStepsRepository } from "../db/repositories/implementer-steps-repository.ts";
 import { createRunsRepository } from "../db/repositories/runs-repository.ts";
 import { getDatabase } from "../db/startup.ts";
@@ -18,6 +19,10 @@ import {
   createRunsService,
   type RunsService,
 } from "./runs-service.ts";
+import {
+  createRunMcpCallsService,
+  type RunMcpCallsService,
+} from "./mcp-calls-service.ts";
 import {
   createRunStepsService,
   type RunStepsService,
@@ -56,5 +61,15 @@ export function runStepsServiceFor(workspaceId: string): RunStepsService {
 export function lastRunSourceFor(workspaceId: string): LastRunSource {
   return createLastRunSource({
     runs: createRunsRepository(getDatabase(), workspaceId),
+  });
+}
+
+/** The MCP calls service of one workspace: what the agent of a run of the Implementer did with MCP tools, for the live view (#1055). */
+export function runMcpCallsServiceFor(workspaceId: string): RunMcpCallsService {
+  const db = getDatabase();
+  return createRunMcpCallsService({
+    runs: createRunsRepository(db, workspaceId),
+    calls: createJobMcpCallsRepository(db, workspaceId),
+    redact: (text) => redactText(text, knownSecretsFromEnv(process.env)),
   });
 }

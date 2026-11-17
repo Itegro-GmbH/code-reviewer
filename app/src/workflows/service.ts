@@ -4,6 +4,8 @@
 // versions of and archive the workflows of ONE workspace. Who may call is the route's (`withWorkspace`); every rule about the data is here.
 // Saving runs the validator first, with the environments of the workspace, and refuses an invalid document with the same list of
 // errors the validate call gives. The document is stored as the JSON text that was validated; every save is a new version.
+import type { McpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
+import type { McpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import type { ImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import type { ProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import type { ProjectsRepository } from "../db/repositories/projects-repository.ts";
@@ -35,6 +37,7 @@ import {
 } from "./limits.ts";
 import { TARGET_ROOTS, type TargetRoot } from "./connectors.ts";
 import { isRecord } from "./json.ts";
+import { mcpServersNamedBy } from "./mcp.ts";
 import { profileInfosOf, profileRefsIn } from "./profile-refs.ts";
 import {
   REACH_WANTS,
@@ -43,7 +46,11 @@ import {
   type ReachWants,
   type ScopeAnswer,
 } from "./reach.ts";
-import { createResolver, type WorkflowResolver } from "./resolver.ts";
+import {
+  createResolver,
+  type McpServerInfo,
+  type WorkflowResolver,
+} from "./resolver.ts";
 import { validateWorkflow, type ValidationResult } from "./validate.ts";
 
 export type WorkflowSummaryView = {
@@ -141,6 +148,13 @@ export type WorkflowServiceDependencies = {
   /** The profiles of the workspace (#843): the names and versions a step may run, and what a version is (may it push, its default result). */
   profiles: Pick<ProfilesRepository, "list" | "versionFacts" | "archivedNames">;
   /**
+   * #1052: the MCP servers of the workspace, so a lane can name only those and the validator can say which are broken. Left out: the
+   * workspace has none, and a lane that names a server is refused (it fails closed).
+   */
+  mcpServers?: Pick<McpServersRepository, "list">;
+  /** #1051: the OAuth connections of those servers, so the validator can warn about one that is broken or not connected. */
+  mcpOAuth?: Pick<McpOAuthRepository, "list">;
+  /**
    * #973: the runners of the workspace that are online now, with what each announces, so the validator can refuse a profile no runner
    * announces (`no_runner_announces`). Left out: the validator does not ask.
    */
@@ -165,11 +179,35 @@ function summaryOf(workflow: StoredWorkflow): WorkflowSummaryView {
   };
 }
 
+/** The servers of the workspace as the validator sees them: the last test, and for an OAuth server the state of its connection. */
+async function mcpServerInfos(
+  servers: Pick<McpServersRepository, "list">,
+  oauth: Pick<McpOAuthRepository, "list"> | undefined,
+): Promise<McpServerInfo[]> {
+  const [list, connections] = await Promise.all([
+    servers.list(),
+    oauth === undefined ? Promise.resolve([]) : oauth.list(),
+  ]);
+  const byServer = new Map(
+    connections.map((connection) => [connection.serverId, connection.status]),
+  );
+  return list.map((server) => ({
+    id: server.id,
+    name: server.name,
+    status: server.testStatus,
+    ...(server.authKind === "oauth"
+      ? { oauth: byServer.get(server.id) ?? ("unconnected" as const) }
+      : {}),
+  }));
+}
+
 export function createWorkflowService({
   workflows,
   projects,
   environments,
   profiles,
+  mcpServers,
+  mcpOAuth,
   onlineRunners,
   maxBudgetUsd = BUDGET_OPERATOR_MAX_USD,
   archivedMax = ARCHIVED_WORKFLOWS_PER_WORKSPACE_MAX,
@@ -190,6 +228,11 @@ export function createWorkflowService({
       environments: known,
       profiles: build(facts),
       archivedProfiles: await profiles.archivedNames(),
+      ...(mcpServers === undefined || mcpServersNamedBy(body).length === 0
+        ? {}
+        : {
+            mcpServers: await mcpServerInfos(mcpServers, mcpOAuth),
+          }),
       ...(onlineRunners === undefined
         ? {}
         : { onlineRunners: await onlineRunners() }),
@@ -304,11 +347,18 @@ export function createWorkflowService({
     };
   }
 
-  /** Validates and returns the text to store; a document the validator refuses is `WORKFLOW_INVALID` with every error. */
-  async function acceptable(
-    body: unknown,
-  ): Promise<{ name: string; text: string }> {
-    const result = await validateDocument(body);
+  /**
+   * Validates and returns the text to store, and the MCP servers it names (the save locks them); a document the validator refuses is
+   * `WORKFLOW_INVALID` with every error.
+   */
+  async function acceptable(body: unknown): Promise<{
+    name: string;
+    text: string;
+    mcpServerIds: string[];
+    refusedWithout: (missing: readonly string[]) => WorkflowError;
+  }> {
+    const resolver = await resolverFor(body);
+    const result = validateWorkflow(body, resolver, { maxBudgetUsd });
     if (!result.valid)
       throw new WorkflowError(
         "WORKFLOW_INVALID",
@@ -321,7 +371,32 @@ export function createWorkflowService({
         "WORKFLOW_BODY_TOO_LARGE",
         "The workflow is too large.",
       );
-    return { name: (body as { name: string }).name, text };
+    return {
+      name: (body as { name: string }).name,
+      text,
+      mcpServerIds: mcpServersNamedBy(body),
+      // A server that was removed after the check and before the save (the save found it missing): the same answer the check would
+      // have given a moment later, with the places.
+      refusedWithout: (missing) => {
+        const gone = new Set(missing);
+        const again = validateWorkflow(
+          body,
+          {
+            ...resolver,
+            mcpServers: () =>
+              (resolver.mcpServers?.() ?? []).filter(
+                (server) => !gone.has(server.id),
+              ),
+          },
+          { maxBudgetUsd },
+        );
+        return new WorkflowError(
+          "WORKFLOW_INVALID",
+          "The workflow does not pass the validator.",
+          { errors: again.errors, truncated: again.truncated },
+        );
+      },
+    };
   }
 
   const notFound = (): WorkflowError =>
@@ -378,12 +453,20 @@ export function createWorkflowService({
         "WORKFLOW_PROJECT_INACTIVE",
         "The project is switched off and takes no new lane.",
       );
-    const { name, text } = await acceptable(body);
+    const { name, text, mcpServerIds, refusedWithout } = await acceptable(body);
     const created = await workflows.create(
-      { name, document: text, createdBy: user.id, projectId: project.id },
+      {
+        name,
+        document: text,
+        createdBy: user.id,
+        projectId: project.id,
+        mcpServerIds,
+      },
       WORKFLOWS_PER_PROJECT_MAX,
     );
     if (!created.ok) {
+      if (created.reason === "mcp_server_missing")
+        throw refusedWithout(created.missing ?? []);
       // Cannot happen after `projectOf`, which read the project of this workspace; the repository says it anyway.
       if (created.reason === "project_not_found")
         throw new WorkflowError(
@@ -523,13 +606,15 @@ export function createWorkflowService({
 
     async update(user, id, body, expectedVersion) {
       checkId(id);
-      const { name, text } = await acceptable(body);
+      const { name, text, mcpServerIds, refusedWithout } =
+        await acceptable(body);
       const saved = await workflows.saveVersion(
         id,
         {
           name,
           document: text,
           createdBy: user.id,
+          mcpServerIds,
           ...(expectedVersion === undefined ? {} : { expectedVersion }),
         },
         VERSIONS_PER_WORKFLOW_MAX,
@@ -560,6 +645,8 @@ export function createWorkflowService({
             "The workflow holds the most versions it may.",
             { maximum: VERSIONS_PER_WORKFLOW_MAX },
           );
+        case "mcp_server_missing":
+          throw refusedWithout(saved.missing ?? []);
       }
     },
   };
