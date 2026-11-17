@@ -111,7 +111,8 @@ export const DRAWER_COPY = {
 } as const;
 
 export const START_LANE_COPY = {
-  title: (number: number) => `Start a lane on issue #${String(number)}`,
+  /** `label`: `issue #12` for a GitHub issue, the key (`LAT-57`) for a Jira issue. */
+  title: (label: string) => `Start a lane on ${label}`,
   description: "Which lane should work on this issue?",
   lane: "Which lane?",
   none: "This project has no lane that can start from an issue by hand. A lane needs a manual trigger that takes a ticket.",
