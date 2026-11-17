@@ -14,6 +14,11 @@
 //    delivery (it is tried again: Jira retries 5xx; a run that exists is not written twice).
 //  - A delivery starts each lane at most once (`jira-<registration>-<identifier>-<workflow>`), and a lane has at most one running run per
 //    ticket (`<repository id>#<KEY-7>`). The run's input is `{ ticket, status: { from, to } }`, the ticket with Jira's own status name.
+import {
+  nameOfStatusId,
+  sameStatus,
+  type StatusRef,
+} from "../workflows/status-match.ts";
 import type { StoredProject } from "../db/repositories/projects-repository.ts";
 import { jiraSourceOf } from "../db/repositories/projects-repository.ts";
 import type { WorkflowsRepository } from "../db/repositories/workflows-repository.ts";
@@ -41,6 +46,12 @@ export type JiraStatusMove = {
   /** The status the issue had before; null when the changelog names none. */
   from: string | null;
   to: string;
+  /**
+   * The ids of the two statuses, when the delivery carries them (#1058). Jira localizes the names a REST call answers with and a delivery
+   * carries the name Jira keeps for every language, so the lane's status is compared by id.
+   */
+  fromId?: string;
+  toId?: string;
   /** Who made the change; absent when the delivery does not say. */
   actor?: { accountId: string; name: string };
 };
@@ -65,11 +76,19 @@ export type JiraStatusTriggerDependencies = Pick<
       })
     | undefined
   >;
-  /** The issue as Jira has it now; undefined when there is none. Throws when Jira cannot be asked. */
+  /** The issue as Jira has it now (`statusId`: the id of its status); undefined when there is none. Throws when Jira cannot be asked. */
   readTicket(
     source: { connectionId: string; projectKey: string; repositoryId: string },
     key: string,
-  ): Promise<StatusTicket | undefined>;
+  ): Promise<(StatusTicket & { statusId?: string }) | undefined>;
+  /**
+   * The statuses of the project's workflows (id, name, untranslated name), read once for a delivery and only when a lane waits for a status
+   * (#1058); undefined when they cannot be read, and the names of the delivery are then compared as they are spelled. Never throws.
+   */
+  statusesOf?(source: {
+    connectionId: string;
+    projectKey: string;
+  }): Promise<readonly StatusRef[] | undefined>;
 };
 
 /** The request id a delivery starts a lane under: the same delivery never makes a second run of the same workflow. */
@@ -116,10 +135,33 @@ export function createJiraStatusTrigger(
         );
         return result;
       }
+      const lanes = await deps.workflows.listProjectWithStatusTrigger(
+        project.id,
+      );
+      // The project's statuses are read once, and only when a lane waits for a status at all.
+      const statuses: readonly StatusRef[] =
+        lanes.length === 0 || deps.statusesOf === undefined
+          ? []
+          : ((await deps.statusesOf(project.jira).catch(() => undefined)) ??
+            []);
+      const delivered = { id: move.toId, name: move.to };
       const matching = matchStatusLanes(
-        await deps.workflows.listProjectWithStatusTrigger(project.id),
+        lanes,
         { to: move.to, from: move.from },
-        { maxBudgetUsd, log, result },
+        {
+          maxBudgetUsd,
+          log,
+          result,
+          // A lane names a status by the name the picker offers (the REST API's, localized) or the untranslated one; the delivery's id says which.
+          sameTo: (wanted) => sameStatus({ name: wanted }, delivered, statuses),
+          sameFrom: (wanted) =>
+            move.from !== null &&
+            sameStatus(
+              { name: wanted },
+              { id: move.fromId, name: move.from },
+              statuses,
+            ),
+        },
       );
       if (matching.length === 0) return result;
 
@@ -142,8 +184,15 @@ export function createJiraStatusTrigger(
         );
         return result;
       }
-      // A delivery that is late or comes again: the issue must still have the status the delivery names.
-      if (ticket.status !== move.to) {
+      // A delivery that is late or comes again: the issue must still have the status the delivery names (the same status by id, whatever
+      // language the name of either side is in).
+      if (
+        !sameStatus(
+          { id: ticket.statusId, name: ticket.status ?? "" },
+          delivered,
+          statuses,
+        )
+      ) {
         result.skipped += matching.length;
         log(
           `[status-trigger] delivery=${deliveryId} starts no run: the issue no longer has the status of the delivery`,
@@ -156,9 +205,10 @@ export function createJiraStatusTrigger(
         result,
         repository,
         triggerInput: JSON.stringify(
+          // The names the lane editor offers: the ticket's own (the REST API's) for the new status, the project's for the old one.
           statusTriggerInput(ticket, repository, {
-            from: move.from ?? "",
-            to: move.to,
+            from: nameOfStatusId(statuses, move.fromId) ?? move.from ?? "",
+            to: ticket.status ?? move.to,
           }),
         ),
         triggerKey: `${repository.id}#${move.issueKey}`,

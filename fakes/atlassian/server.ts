@@ -58,7 +58,13 @@ export type FakeSite = {
 /** A status of a Jira workflow, as `project/<key>/statuses` lists it. */
 export type FakeJiraStatus = {
   id: string;
+  /** The name the REST API gives the connected user: localized when the user's language is not English (`Zu erledigen`). */
   name: string;
+  /**
+   * The name Jira keeps for every language (`To Do`). Set it to fake a localized site: the REST API (`name`) then says the localized one
+   * and a webhook delivery (`fields.status.name`, the changelog's `toString`) says this one, as the live Jira of #1058 does.
+   */
+  untranslatedName?: string;
   /** `new`, `indeterminate` or `done`; default `indeterminate`. */
   category?: "new" | "indeterminate" | "done";
 };
@@ -136,8 +142,17 @@ export type FakeDelivery = {
     | "jira:issue_deleted"
     | "comment_created";
   issueKey: string;
-  /** The changelog items of an update (`field`, `fromString`, `toString`). */
-  changelog?: { field: string; fromString: string | null; toString: string }[];
+  /**
+   * The changelog items of an update (`field`, `fromString`, `toString`). A `status` item also carries the ids Jira sends (`from`, `to`):
+   * given, or looked up by name in the issue's project (the untranslated or the localized name finds the same status).
+   */
+  changelog?: {
+    field: string;
+    fromString: string | null;
+    toString: string;
+    from?: string | null;
+    to?: string | null;
+  }[];
   /** `X-Atlassian-Webhook-Identifier`; default: a new one for each delivery. */
   identifier?: string;
   /** `valid` (default): a JWT signed with the client secret; `none`: no Authorization header; `wrong`: signed with another secret. */
@@ -407,8 +422,23 @@ export async function startAtlassianFake(
     "reporter",
   ];
 
-  /** The REST shape of an issue, without `expand`. */
-  function issueJson(issue: FakeJiraIssue, origin: string, cloudId: string) {
+  /**
+   * The REST shape of an issue, without `expand`. `as` is who asks: the REST API names a status as the connected user reads it (localized),
+   * a webhook delivery with the name Jira keeps for every language, as the live Jira does (#1058).
+   */
+  function issueJson(
+    issue: FakeJiraIssue,
+    origin: string,
+    cloudId: string,
+    as: "rest" | "webhook" = "rest",
+  ) {
+    const known = findStatus(cloudId, issue.key, issue.status.name);
+    const statusName =
+      known === undefined
+        ? issue.status.name
+        : as === "rest"
+          ? known.name
+          : (known.untranslatedName ?? known.name);
     const category = issue.status.category ?? "indeterminate";
     return {
       id: issue.id,
@@ -418,7 +448,8 @@ export async function startAtlassianFake(
         summary: issue.summary,
         description: issue.description ?? null,
         status: {
-          name: issue.status.name,
+          ...(known === undefined ? {} : { id: known.id }),
+          name: statusName,
           statusCategory: { key: category, name: CATEGORY_NAMES[category] },
         },
         issuetype: { name: issue.issueType ?? "Task" },
@@ -474,7 +505,26 @@ export async function startAtlassianFake(
     return created;
   }
 
-  /** The statuses of the project an issue key belongs to: those of its issue types, each name once. */
+  /** The status of an issue's project that a name (the localized or the untranslated one) stands for. */
+  function findStatus(cloudId: string, key: string, name: string) {
+    const wanted = name.trim().toLowerCase();
+    return statusesOfIssue(cloudId, key).find(
+      (status) =>
+        status.name.trim().toLowerCase() === wanted ||
+        status.untranslatedName?.trim().toLowerCase() === wanted,
+    );
+  }
+
+  /** Whether two names are the same status of the issue's project (by id when the project knows them, else by name). */
+  function sameStatus(cloudId: string, key: string, a: string, b: string) {
+    const first = findStatus(cloudId, key, a);
+    const second = findStatus(cloudId, key, b);
+    return first !== undefined && second !== undefined
+      ? first.id === second.id
+      : a === b;
+  }
+
+  /** The statuses of the project an issue key belongs to: those of its issue types, each status once. */
   function statusesOfIssue(cloudId: string, key: string) {
     const projectKey = key.slice(0, key.lastIndexOf("-"));
     const project = (projectsOfSite.get(cloudId) ?? []).find(
@@ -483,7 +533,7 @@ export async function startAtlassianFake(
     const seen = new Map<string, FakeJiraStatus>();
     for (const type of project?.issueTypes ?? DEFAULT_ISSUE_TYPES)
       for (const status of type.statuses)
-        if (!seen.has(status.name)) seen.set(status.name, status);
+        if (!seen.has(status.id)) seen.set(status.id, status);
     return [...seen.values()];
   }
 
@@ -499,9 +549,11 @@ export async function startAtlassianFake(
       }));
     return all.filter(
       (transition) =>
-        transition.to !== issue.status.name &&
+        !sameStatus(cloudId, issue.key, transition.to, issue.status.name) &&
         (transition.from === undefined ||
-          transition.from.includes(issue.status.name)),
+          transition.from.some((from) =>
+            sameStatus(cloudId, issue.key, from, issue.status.name),
+          )),
     );
   }
 
@@ -711,15 +763,16 @@ export async function startAtlassianFake(
           200,
           {
             transitions: transitionsFor(cloudId, issue).map((transition) => {
-              const target = statusesOfIssue(cloudId, key).find(
-                (status) => status.name === transition.to,
-              );
+              const target = findStatus(cloudId, key, transition.to);
               return {
                 id: transition.id,
                 name: transition.name,
                 to: {
                   id: target?.id ?? "0",
-                  name: transition.to,
+                  name: target?.name ?? transition.to,
+                  ...(target?.untranslatedName === undefined
+                    ? {}
+                    : { untranslatedName: target.untranslatedName }),
                   statusCategory: {
                     key: target?.category ?? "indeterminate",
                   },
@@ -762,11 +815,9 @@ export async function startAtlassianFake(
           );
           return true;
         }
-        const target = statusesOfIssue(cloudId, key).find(
-          (status) => status.name === transition.to,
-        );
+        const target = findStatus(cloudId, key, transition.to);
         issue.status = {
-          name: transition.to,
+          name: target?.name ?? transition.to,
           ...(target?.category === undefined
             ? {}
             : { category: target.category }),
@@ -1308,6 +1359,9 @@ export async function startAtlassianFake(
             statuses: type.statuses.map((status) => ({
               id: status.id,
               name: status.name,
+              ...(status.untranslatedName === undefined
+                ? {}
+                : { untranslatedName: status.untranslatedName }),
               statusCategory: {
                 key: status.category ?? "indeterminate",
                 name: CATEGORY_NAMES[status.category ?? "indeterminate"],
@@ -1416,9 +1470,27 @@ export async function startAtlassianFake(
           accountId: account.id,
           displayName: account.name,
         },
-        issue: issueJson(issue, `http://${host}`, hook.cloudId),
+        issue: issueJson(issue, `http://${host}`, hook.cloudId, "webhook"),
         ...(delivery.webhookEvent === "jira:issue_updated"
-          ? { changelog: { id: "1", items: delivery.changelog ?? [] } }
+          ? {
+              changelog: {
+                id: "1",
+                items: (delivery.changelog ?? []).map((item) => {
+                  if (item.field !== "status") return item;
+                  const idOf = (name: string | null) =>
+                    name === null
+                      ? null
+                      : (findStatus(hook.cloudId, delivery.issueKey, name)
+                          ?.id ?? null);
+                  return {
+                    ...item,
+                    fieldtype: "jira",
+                    from: item.from ?? idOf(item.fromString),
+                    to: item.to ?? idOf(item.toString),
+                  };
+                }),
+              },
+            }
           : {}),
         ...(delivery.webhookEvent === "comment_created"
           ? {

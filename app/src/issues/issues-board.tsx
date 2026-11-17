@@ -228,6 +228,10 @@ function LiveBoard({
   const [filter, setFilter] = useState<Filter>("open");
   const [opened, setOpened] = useState<number | null>(null);
   const [starting, setStarting] = useState<number | null>(null);
+  const startingKey =
+    starting === null
+      ? undefined
+      : data.items.find((entry) => entry.number === starting)?.key;
   const reasonId = useId();
   const drawerFocus = useReturnFocus();
   const startFocus = useReturnFocus();
@@ -353,6 +357,8 @@ function LiveBoard({
         workspaceSlug={workspaceSlug}
         repo={data.repo}
         issueNumber={starting}
+        provider={data.provider}
+        {...(startingKey === undefined ? {} : { ticketKey: startingKey })}
         lanes={lanes}
         onOpenChange={(open) => {
           if (!open) setStarting(null);
