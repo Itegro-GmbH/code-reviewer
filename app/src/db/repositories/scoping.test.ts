@@ -30,6 +30,7 @@ const SCOPED = [
   "implementer-repository.ts",
   "implementer-snapshots-repository.ts",
   "implementer-steps-repository.ts",
+  "job-mcp-calls-repository.ts",
   "integrations-repository.ts",
   "invitations-repository.ts",
   "jira-connections-repository.ts",

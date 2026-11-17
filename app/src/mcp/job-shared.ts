@@ -3,15 +3,19 @@
 // The MCP runtime of a job on the running server (#1053): the real database, the master key, the test flag and the guarded fetch. Server code
 // only; the claim (`runner-api/claim.ts`) and the Worker API's MCP route (`runner-api/worker-api.ts`) call it through `jobMcp` of their deps.
 import "server-only";
+import { after } from "next/server";
 import { resolveAppSecret } from "../crypto/app-secret.ts";
+import { createJobMcpCallsRepository } from "../db/repositories/job-mcp-calls-repository.ts";
 import { createMcpOAuthRepository } from "../db/repositories/mcp-oauth-repository.ts";
 import { createMcpServersRepository } from "../db/repositories/mcp-servers-repository.ts";
 import { createWorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
 import { createWorkflowsRepository } from "../db/repositories/workflows-repository.ts";
 import { getDatabase } from "../db/startup.ts";
 import { createGuardedFetch } from "../dispatch/guarded-fetch.ts";
+import { runAfterResponse } from "../dispatch/shared.ts";
 import { mcpTestEndpointsAllowed } from "./config.ts";
 import { cleanText } from "./client.ts";
+import { createCallTrace } from "./call-trace.ts";
 import {
   createMcpCredentials,
   oauthCredentialProvider,
@@ -35,8 +39,8 @@ function guardedFetch(allowLoopback: boolean) {
 }
 
 /**
- * One line for each call: the server, the method, the name of a tool, the status, the duration and the sizes. TODO(#1055): the run's live
- * view and trace read the same `McpCallMeta`; this is where they hook in. Never an argument, an answer, a header or an address.
+ * One line for each call: the server, the method, the name of a tool, the status, the duration and the sizes. The run's live view and trace
+ * read the same `McpCallMeta` (`call-trace.ts`). Never an argument, an answer, a header or an address.
  */
 export function logMcpCall(meta: McpCallMeta): void {
   // The method and the tool come from the agent: cleaned once more here, so no line of a log can be forged whoever calls this.
@@ -52,6 +56,21 @@ export function jobMcpFor(workspaceId: string): JobMcp {
   // The server does not start without it (src/auth/startup.ts); this is the second line.
   if (!resolved.ok) throw new Error(resolved.problem);
   const allowTestEndpoints = mcpTestEndpointsAllowed(process.env);
+  // #1055: each call and each refusal also goes into the job's record for the run's live view, scoped to the job's own workspace.
+  const trace = createCallTrace({
+    repository: createJobMcpCallsRepository(db, workspaceId),
+    later: runAfterResponse,
+    // The record of an event stream call is written when the stream ends, outside the request: `after()` is registered by the route's handler,
+    // while it still is in the request, with a promise that settles when the write is done (`call-trace.ts`).
+    keepAlive: (held) => {
+      try {
+        after(() => held);
+      } catch {
+        // Outside a request (a script): nothing to keep alive.
+      }
+    },
+    log: (line) => console.info(line),
+  });
   return createJobMcp({
     workflowRuns: createWorkflowRunsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
@@ -73,10 +92,15 @@ export function jobMcpFor(workspaceId: string): JobMcp {
       },
     }),
     log: (line) => console.info(line),
+    recordCall: trace.recordCall,
+    holdOpen: trace.holdOpen,
     proxy: createMcpProxy({
       fetch: guardedFetch(allowTestEndpoints),
       allowTestEndpoints,
-      onCall: logMcpCall,
+      onCall: (meta) => {
+        logMcpCall(meta);
+        trace.onCall(meta);
+      },
     }),
   });
 }

@@ -50,6 +50,7 @@ import { createMcpServersRepository } from "./mcp-servers-repository.ts";
 import { createImplementerRepository } from "./implementer-repository.ts";
 import { createImplementerSnapshotsRepository } from "./implementer-snapshots-repository.ts";
 import { createImplementerStepsRepository } from "./implementer-steps-repository.ts";
+import { createJobMcpCallsRepository } from "./job-mcp-calls-repository.ts";
 
 const SHA = "b".repeat(40);
 const FAILED_SHA = "c".repeat(40);
@@ -79,6 +80,7 @@ function reposOf(db: Kysely<Database>, workspaceId: string) {
     notifications: createBillingNotificationsRepository(db, workspaceId),
     implementer: createImplementerRepository(db, workspaceId),
     steps: createImplementerStepsRepository(db, workspaceId),
+    mcpCalls: createJobMcpCallsRepository(db, workspaceId),
     snapshots: createImplementerSnapshotsRepository(db, workspaceId),
     environments: createImplementerEnvironmentsRepository(db, workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
@@ -481,6 +483,19 @@ async function seed(
     );
     if (stored.status !== "ok" || stored.stored !== 2)
       throw new Error("seeding failed");
+    // An MCP call of that turn (#1055): the other workspace has a call to read, count and add to.
+    const recordedCall = await repos.mcpCalls.record(started.turn.jobId, {
+      serverId: `mcp-server-${tag}`,
+      serverName: `Server ${tag}`,
+      rpcMethod: "tools/call",
+      tool: `tool-${tag}`,
+      status: 200,
+      outcome: "ok",
+      durationMs: 5,
+      requestBytes: 10,
+      responseBytes: 20,
+    });
+    if (recordedCall !== "stored") throw new Error("seeding failed");
     // The session snapshot of that turn (#839): one part is in (an upload under way) and the snapshot of the earlier turn is
     // stored, so the other workspace has a snapshot to read and a part to complete or overwrite.
     const first = await repos.snapshots.recordPart(
@@ -984,6 +999,12 @@ async function rowsOf(db: Kysely<Database>, workspaceId: string) {
       .selectAll()
       .where("workspace_id", "=", workspaceId)
       .orderBy("id")
+      .execute(),
+    jobMcpCalls: await db
+      .selectFrom("job_mcp_calls")
+      .selectAll()
+      .where("workspace_id", "=", workspaceId)
+      .orderBy("seq")
       .execute(),
     implementerTurnSteps: await db
       .selectFrom("implementer_turn_steps")
@@ -2325,6 +2346,51 @@ const CASES: Case[] = [
     name: "steps.listAfter",
     run: (a, b) => a.steps.listAfter(taskOf(b).turn.jobId, 0, 100),
     expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  // MCP calls of a job (#1055): B's job takes no call of A's workspace and shows none of its calls to A
+  {
+    name: "mcpCalls.record",
+    run: (a, b) =>
+      a.mcpCalls.record(taskOf(b).turn.jobId, {
+        serverId: "planted",
+        serverName: "Planted by A",
+        rpcMethod: "tools/call",
+        tool: "planted",
+        status: 200,
+        outcome: "ok",
+        durationMs: 1,
+        requestBytes: 1,
+        responseBytes: 1,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
+  },
+  // the refusal of the gate takes its own statement (insert or count): the same wall
+  {
+    name: "mcpCalls.record (gate refusal)",
+    run: (a, b) =>
+      a.mcpCalls.record(taskOf(b).turn.jobId, {
+        serverId: "planted",
+        serverName: "",
+        rpcMethod: null,
+        tool: null,
+        status: 429,
+        outcome: "mcp_too_many_concurrent_calls",
+        durationMs: 0,
+        requestBytes: 0,
+        responseBytes: 0,
+      }),
+    expectAnswer: (answer) => expect(answer).toBe("unknown_job"),
+  },
+  {
+    name: "mcpCalls.listAfter",
+    run: (a, b) => a.mcpCalls.listAfter(taskOf(b).turn.jobId, 0, 100),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    name: "mcpCalls.summary",
+    run: (a, b) => a.mcpCalls.summary(taskOf(b).turn.jobId),
+    expectAnswer: (answer) =>
+      expect(answer).toEqual({ rows: 0, suppressed: 0 }),
   },
   // implementer session snapshots (#839): B's snapshot is not A's to read, replace or complete, not even with B's lease token
   {

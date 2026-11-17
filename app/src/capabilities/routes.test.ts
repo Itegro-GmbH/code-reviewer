@@ -125,6 +125,7 @@ describe("the route classification", () => {
       "/favicon.ico": "core",
       // #745: the steps of a running turn belong to the capability, on both doors.
       "/api/w/[workspace]/runs/[id]/steps": "implementer",
+      "/api/w/[workspace]/runs/[id]/mcp-calls": "implementer",
       "/api/runners/v1/jobs/[id]/steps": "implementer",
       "/api/workers/v1/jobs/[id]/steps": "implementer",
       "/api/workers/v1/jobs/[id]/mcp/[server]": "implementer",

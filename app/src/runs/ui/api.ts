@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The calls the runs pages make to the app's own routes while they poll: the list
-// (`GET /api/w/:workspace/runs`, src/runs/http.ts) one run (`GET /api/w/:workspace/runs/:id`) and the steps of a run of the Implementer (`.../runs/:id/steps`). The
+// (`GET /api/w/:workspace/runs`, src/runs/http.ts) one run (`GET /api/w/:workspace/runs/:id`) the steps of a run of the Implementer (`.../runs/:id/steps`) and its MCP calls (`.../runs/:id/mcp-calls`). The
 // workspace is the one of the page that makes the call. Browser side; no secrets.
 import { workspaceApiPath } from "../../workspaces/paths.ts";
 import {
@@ -9,6 +9,7 @@ import {
   type FetchLike,
   type RequestResult,
 } from "../../ui/json-request.ts";
+import type { McpCallsSnapshot } from "../mcp-calls-view.ts";
 import type { StepsSnapshot } from "../steps-view.ts";
 import type {
   RunDetailSnapshot,
@@ -23,6 +24,8 @@ export type RunsApi = {
   detail(id: string): Promise<RequestResult<RunDetailSnapshot>>;
   /** What the agent of a run of the Implementer did after the cursor `after` (#745, live view). */
   steps(id: string, after: number): Promise<RequestResult<StepsSnapshot>>;
+  /** The MCP calls of a run of the Implementer after the cursor `after` (#1055). */
+  mcpCalls(id: string, after: number): Promise<RequestResult<McpCallsSnapshot>>;
 };
 
 export function createRunsApi(
@@ -54,6 +57,12 @@ export function createRunsApi(
         fetchImpl,
         "GET",
         `${workspaceApiPath(workspaceSlug, `/runs/${encodeURIComponent(id)}/steps`)}?after=${String(after)}`,
+      ),
+    mcpCalls: (id, after) =>
+      requestJson<McpCallsSnapshot>(
+        fetchImpl,
+        "GET",
+        `${workspaceApiPath(workspaceSlug, `/runs/${encodeURIComponent(id)}/mcp-calls`)}?after=${String(after)}`,
       ),
   };
 }

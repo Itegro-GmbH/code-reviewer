@@ -32,6 +32,7 @@ function setup(
     maxConcurrent?: number;
   } = {},
 ) {
+  const holds: { opened: number; ended: number } = { opened: 0, ended: 0 };
   const counts: { jobId: string; limit: number }[] = [];
   const lines: string[] = [];
   const gate = createInFlightGate(options.maxConcurrent);
@@ -41,6 +42,8 @@ function setup(
     request: McpProxyRequest;
   }[] = [];
   const workspaces: string[] = [];
+  const refusals: { serverId: string; code: string; body: string | null }[] =
+    [];
   const job = {
     id: "22222222-2222-4222-8222-222222222222",
     workspaceId: "w1",
@@ -74,6 +77,20 @@ function setup(
             workspaces.push(workspaceId);
             return {
               serversOf: () => Promise.resolve({ servers: [], unavailable: 0 }),
+              refused: (
+                _job: unknown,
+                serverId: string,
+                code: string,
+                body: string | null,
+              ) => {
+                refusals.push({ serverId, code, body });
+              },
+              holdOpen: () => {
+                holds.opened += 1;
+                return () => {
+                  holds.ended += 1;
+                };
+              },
               handle: (
                 handledJob: { id: string },
                 serverId: string,
@@ -93,10 +110,12 @@ function setup(
     api: createWorkerApi(deps),
     handled,
     workspaces,
+    refusals,
     job,
     counts,
     lines,
     gate,
+    holds,
   };
 }
 
@@ -296,6 +315,8 @@ describe("the credential of one job cannot reach another job's servers", () => {
       logger: { info: () => {}, error: () => {} },
       jobMcp: () => ({
         serversOf: () => Promise.resolve({ servers: [], unavailable: 0 }),
+        refused: () => {},
+        holdOpen: () => () => {},
         handle: (handledJob: { id: string }) => {
           handled.push(handledJob.id);
           return Promise.resolve(new Response("{}", { status: 200 }));
@@ -354,6 +375,22 @@ describe("the limits of the MCP route", () => {
     expect(lines.join("\n")).toContain("mcp_call_limit_reached");
   });
 
+  // #1055-T06
+  it("hands each refusal of a limit to the runtime for the run's trace, with the server and the code", async () => {
+    const exhausted = setup({ counted: "exhausted" });
+    await exhausted.api.mcp(post(), exhausted.job.id, SERVER);
+    expect(exhausted.refusals).toEqual([
+      { serverId: SERVER, code: "mcp_call_limit_reached", body: null },
+    ]);
+
+    const busy = setup({ maxConcurrent: 1 });
+    busy.gate.enter(busy.job.id);
+    await busy.api.mcp(post(), busy.job.id, SERVER);
+    expect(busy.refusals).toEqual([
+      { serverId: SERVER, code: "mcp_too_many_concurrent_calls", body: null },
+    ]);
+  });
+
   it("counts a call that is allowed, and a claim that ended since the credential was checked is 409", async () => {
     const counted = setup();
     expect((await counted.api.mcp(post(), counted.job.id, SERVER)).status).toBe(
@@ -390,6 +427,10 @@ describe("the limits of the MCP route", () => {
       error: { message: "mcp_too_many_concurrent_calls" },
     });
     expect(full.handled).toEqual([]);
+    // #1055: the refusal of the door's DELETE is a row of the run's trace like any other refusal.
+    expect(full.refusals.map((entry) => entry.code)).toEqual([
+      "mcp_too_many_concurrent_calls",
+    ]);
 
     const ended = setup({ status: "cancelled" });
     const gone = await ended.api.mcp(
@@ -461,6 +502,63 @@ describe("the limits of the MCP route", () => {
     controller?.close();
     await second.text();
     await vi.waitFor(() => expect(gate.inFlight(job.id)).toBe(0));
+  });
+
+  // #1055-T01: the record of an event stream call is written when the stream ends, after the handler has returned
+  it("keeps the function alive for the record of an event stream call: registered before the response goes out, let go when the stream has ended", async () => {
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const streaming = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              controller = c;
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const { api, job, holds } = setup({ answer: streaming });
+
+    const response = await api.mcp(post(), job.id, SERVER);
+
+    expect(holds).toEqual({ opened: 1, ended: 0 });
+    controller?.enqueue(new TextEncoder().encode("data: x\n\n"));
+    controller?.close();
+    await response.text();
+    await vi.waitFor(() => expect(holds.ended).toBe(1));
+  });
+
+  // #1055-T01
+  it("lets go of the hold when the consumer cancels the stream, after the stream behind it has been let go of", async () => {
+    const order: string[] = [];
+    const streaming = () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              order.push("stream cancelled");
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const { api, job, holds } = setup({ answer: streaming });
+    const response = await api.mcp(post(), job.id, SERVER);
+
+    await response.body?.cancel();
+
+    await vi.waitFor(() => expect(holds.ended).toBe(1));
+    expect(order).toEqual(["stream cancelled"]);
+  });
+
+  // #1055-T01
+  it("holds nothing for an answer that is already complete", async () => {
+    const { api, job, holds } = setup();
+
+    await api.mcp(post(), job.id, SERVER);
+
+    expect(holds).toEqual({ opened: 0, ended: 0 });
   });
 
   it("gives the place back when the runtime fails", async () => {
