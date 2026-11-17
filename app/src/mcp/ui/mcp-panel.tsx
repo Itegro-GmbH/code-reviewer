@@ -23,7 +23,9 @@ import { useRequest } from "../../implementer/ui/use-request.ts";
 import { useProductIdentity } from "../../product-identity/context.tsx";
 import { formatUtc } from "../../ui/format-time.ts";
 import type { McpServerView } from "../service.ts";
+import type { McpCatalogEntry } from "../catalog/entries.ts";
 import { browserMcpApi, type McpApi } from "./api.ts";
+import { CatalogDialog } from "./catalog-dialog.tsx";
 import {
   AUTH_COPY,
   describeMcpFailure,
@@ -221,6 +223,9 @@ function Servers({
   const product = useProductIdentity();
   const [servers, setServers] = useState(initial);
   const [dialog, setDialog] = useState<"add" | McpServerView | null>(null);
+  // The catalog (#1054) is a list to choose from; the choice opens the add dialog prefilled from the entry.
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [preset, setPreset] = useState<McpCatalogEntry | null>(null);
   const [toRemove, setToRemove] = useState<McpServerView | null>(null);
   // A person who just came back from the consent page sees the tools at once: the connection is tested once, from the first render on.
   const roundTripServer =
@@ -351,7 +356,19 @@ function Servers({
           {PAGE_COPY.count(servers.length)}
         </h2>
         {canManage ? (
-          <Button onClick={() => setDialog("add")}>{PAGE_COPY.add}</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setCatalogOpen(true)}>
+              {PAGE_COPY.addFromCatalog}
+            </Button>
+            <Button
+              onClick={() => {
+                setPreset(null);
+                setDialog("add");
+              }}
+            >
+              {PAGE_COPY.add}
+            </Button>
+          </div>
         ) : null}
       </div>
 
@@ -480,20 +497,39 @@ function Servers({
         </ul>
       )}
 
+      <CatalogDialog
+        open={catalogOpen}
+        onClose={() => setCatalogOpen(false)}
+        onChoose={(entry) => {
+          setCatalogOpen(false);
+          setPreset(entry);
+          setDialog("add");
+        }}
+      />
+
       <ServerDialog
-        key={dialog === null || dialog === "add" ? "add" : dialog.id}
+        key={
+          dialog === null || dialog === "add"
+            ? `add:${preset?.id ?? ""}`
+            : dialog.id
+        }
         api={api}
         open={dialog !== null}
         server={dialog === null || dialog === "add" ? null : dialog}
+        preset={dialog === "add" ? preset : null}
         callbackUrl={callbackUrl}
         onClose={() => setDialog(null)}
         onSaved={(saved, created) => {
+          const fromCatalog = dialog === "add" && preset !== null;
           setDialog(null);
+          setPreset(null);
           setProblem(null);
           replace(saved);
           setNotice(created ? PAGE_COPY.added : PAGE_COPY.saved);
-          // A new server is tested at once: that is what the person wants to know. One that needs OAuth has to be connected first.
+          // A new server is tested at once: that is what the person wants to know. One that needs OAuth has to be connected first: a server
+          // chosen from the catalog goes straight to Connect (the person confirms the authorization server before the browser leaves).
           if (created && saved.oauth === null) void test(saved);
+          else if (created && fromCatalog) void connect(saved);
         }}
       />
 
