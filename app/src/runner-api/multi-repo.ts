@@ -14,7 +14,6 @@ import {
   preambleOf,
   type SessionRepo,
 } from "../db/session-repos.ts";
-import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 import type { GitAccess, Integration, RepoRef } from "../integrations/types.ts";
@@ -70,6 +69,9 @@ function entryOf(git: GitAccess, now: Date): GitTokenEntry {
       new Date(now.getTime() + DEFAULT_TOKEN_LIFETIME_MS).toISOString(),
   };
 }
+
+/** The longest instruction a job carries (`INSTRUCTION_MAX_LENGTH` of `implementer/start-input.ts`, and the contract's `maxLength`). */
+export const INSTRUCTION_MAX_LENGTH = 20_000;
 
 const CUT_NOTE = "\n\n[The task was cut here: it did not fit the limit.]";
 
