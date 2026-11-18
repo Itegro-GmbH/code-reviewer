@@ -47,6 +47,7 @@ import {
   TRIGGER_COPY,
 } from "./messages.ts";
 import { githubLinkInRepository } from "./github-link.ts";
+import { jiraIssueLink } from "./jira-link.ts";
 import { RunTrackView } from "./run-track.tsx";
 import { trackOf } from "./run-track.ts";
 import { WorkflowRunStatusBadge } from "./status-badge.tsx";
@@ -225,12 +226,14 @@ function LaneRunRow({
   const duration = laneRunDurationMs(run, now);
   const track = trackOf(run.nodes, run.steps, run.status);
   const ticketUrl =
-    run.ticket?.githubRepository == null
+    run.ticket === null
       ? undefined
-      : githubLinkInRepository(
-          `https://github.com/${run.ticket.githubRepository}/issues/${encodeURIComponent(run.ticket.key)}`,
-          run.ticket.githubRepository,
-        );
+      : run.ticket.githubRepository !== null
+        ? githubLinkInRepository(
+            `https://github.com/${run.ticket.githubRepository}/issues/${encodeURIComponent(run.ticket.key)}`,
+            run.ticket.githubRepository,
+          )
+        : jiraIssueLink(run.ticket.jiraSiteUrl, run.ticket.key);
   const runPath = workspacePath(
     workspaceSlug,
     `/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`,

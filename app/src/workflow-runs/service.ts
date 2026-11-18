@@ -24,6 +24,7 @@ import type {
   StoredStepRun,
   StoredWorkflowRun,
   WorkflowRunsRepository,
+  WorkspaceRunRow,
 } from "../db/repositories/workflow-runs-repository.ts";
 import type {
   ProjectsRepository,
@@ -220,6 +221,28 @@ export type LaneStepOfAgentRunView = {
   stepId: string;
 };
 
+/** The Jira site of each repository whose run in these rows is about a Jira ticket: one lookup per repository, none for a page without Jira runs. */
+async function jiraSitesOf(
+  deps: Pick<WorkflowRunServiceDependencies, "jiraSiteUrlOf">,
+  rows: readonly WorkspaceRunRow[],
+): Promise<Map<string, string>> {
+  const sites = new Map<string, string>();
+  const { jiraSiteUrlOf } = deps;
+  if (jiraSiteUrlOf === undefined) return sites;
+  const repositoryIds = new Set(
+    rows
+      .filter((row) => row.run.ticketRef?.startsWith("jira:") === true)
+      .map((row) => row.run.repositoryId),
+  );
+  await Promise.all(
+    [...repositoryIds].map(async (repositoryId) => {
+      const site = await jiraSiteUrlOf(repositoryId);
+      if (site !== undefined) sites.set(repositoryId, site);
+    }),
+  );
+  return sites;
+}
+
 export type WorkflowRunServiceDependencies = {
   runs: WorkflowRunsRepository;
   /** #920: the engine that takes the answer, and (#921) discards a run. Left out: the service has neither `answer` nor `discard`. */
@@ -227,6 +250,12 @@ export type WorkflowRunServiceDependencies = {
   workflows: Pick<WorkflowsRepository, "get">;
   /** The projects of the workspace (#922): the lane's project says which repository its runs may work in. */
   projects: Pick<ProjectsRepository, "getById">;
+  /**
+   * #1086: the address of the Jira site (`https://<site>.atlassian.net`) of the Jira connection that the project of this repository takes its
+   * tickets from, or undefined when the project has no Jira source or the connection is gone. Reads the stored connection only, never Jira.
+   * Left out: Jira tickets of the lane runs list are shown without a link.
+   */
+  jiraSiteUrlOf?(repositoryId: string): Promise<string | undefined>;
   /** The full name of a repository of the workspace (`owner/name`), or undefined when there is none; names the project's repository in a refusal. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   /**
@@ -853,8 +882,9 @@ export function createWorkflowRunService(
         limit: query.limit,
         ...(query.after === undefined ? {} : { after: query.after }),
       });
+      const jiraSiteUrls = await jiraSitesOf(deps, page.rows);
       return {
-        runs: page.rows.map(listItemOf),
+        runs: page.rows.map((row) => listItemOf(row, jiraSiteUrls)),
         nextCursor: page.next === null ? null : encodeCursor(page.next),
         now: new Date().toISOString(),
       };
