@@ -53,6 +53,7 @@ function item(
       title: "Cache the thing",
       key: "128",
       githubRepository: "acme/widgets",
+      jiraSiteUrl: null,
     },
     nodes: [
       {
@@ -173,6 +174,7 @@ describe("a row of the lane runs list", () => {
               title: "Hostile",
               key: "1",
               githubRepository: repository,
+              jiraSiteUrl: null,
             },
           }),
         ]),
@@ -182,6 +184,34 @@ describe("a row of the lane runs list", () => {
       [],
     );
     expect(screen.getAllByText("#1")).toHaveLength(3);
+  });
+
+  // #1086-T05
+  it("links a Jira ticket to its issue on the site of the project's connection, and shows it as text without a usable site", () => {
+    const jira = (jiraSiteUrl: string | null) =>
+      item({
+        id: jiraSiteUrl ?? "none",
+        ticket: {
+          label: "LAT-58",
+          title: "Jira title",
+          key: "LAT-58",
+          githubRepository: null,
+          jiraSiteUrl,
+        },
+      });
+    renderList(
+      page([
+        jira("https://acme.atlassian.net"),
+        jira(null),
+        jira("http://acme.atlassian.net"),
+      ]),
+    );
+
+    const links = screen.getAllByRole("link", { name: /Open the ticket/ });
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "https://acme.atlassian.net/browse/LAT-58",
+    ]);
+    expect(screen.getAllByText("LAT-58")).toHaveLength(3);
   });
 
   // #1078-T62
@@ -221,6 +251,7 @@ describe("a row of the lane runs list", () => {
             title: hostile,
             key: "1",
             githubRepository: null,
+            jiraSiteUrl: null,
           },
           nodes: [
             {
@@ -253,6 +284,7 @@ describe("a row of the lane runs list", () => {
             title: null,
             key: "LAT-58",
             githubRepository: null,
+            jiraSiteUrl: null,
           },
           project: { id: "r", name: null },
         }),

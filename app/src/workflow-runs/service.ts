@@ -24,6 +24,7 @@ import type {
   StoredStepRun,
   StoredWorkflowRun,
   WorkflowRunsRepository,
+  WorkspaceRunRow,
 } from "../db/repositories/workflow-runs-repository.ts";
 import type {
   ProjectsRepository,
@@ -54,6 +55,7 @@ import {
 import { parseStepAsk, type StepAsk } from "./ask.ts";
 import type { WorkflowEngine } from "./engine.ts";
 import { WorkflowRunError } from "./errors.ts";
+import type { JiraSiteOfRepository } from "./jira-site.ts";
 import {
   encodeCursor,
   listItemOf,
@@ -220,6 +222,36 @@ export type LaneStepOfAgentRunView = {
   stepId: string;
 };
 
+/**
+ * The Jira site of each repository whose run in these rows is about a Jira ticket: one lookup per repository, none for a page without Jira
+ * runs. A lookup that fails leaves that repository without a site (its tickets show as text): the link is cosmetic and the list is polled, so
+ * it must not take the page down.
+ */
+async function jiraSitesOf(
+  deps: Pick<WorkflowRunServiceDependencies, "jiraSiteUrlOf">,
+  rows: readonly WorkspaceRunRow[],
+): Promise<Map<string, JiraSiteOfRepository>> {
+  const sites = new Map<string, JiraSiteOfRepository>();
+  const { jiraSiteUrlOf } = deps;
+  if (jiraSiteUrlOf === undefined) return sites;
+  const repositoryIds = new Set(
+    rows
+      .filter((row) => row.run.ticketRef?.startsWith("jira:") === true)
+      .map((row) => row.run.repositoryId),
+  );
+  await Promise.all(
+    [...repositoryIds].map(async (repositoryId) => {
+      try {
+        const site = await jiraSiteUrlOf(repositoryId);
+        if (site !== undefined) sites.set(repositoryId, site);
+      } catch {
+        // No link for this repository's tickets; the list itself is fine.
+      }
+    }),
+  );
+  return sites;
+}
+
 export type WorkflowRunServiceDependencies = {
   runs: WorkflowRunsRepository;
   /** #920: the engine that takes the answer, and (#921) discards a run. Left out: the service has neither `answer` nor `discard`. */
@@ -227,6 +259,15 @@ export type WorkflowRunServiceDependencies = {
   workflows: Pick<WorkflowsRepository, "get">;
   /** The projects of the workspace (#922): the lane's project says which repository its runs may work in. */
   projects: Pick<ProjectsRepository, "getById">;
+  /**
+   * #1086: the address of the Jira site (`https://<site>.atlassian.net`) of the Jira connection that the project of this repository takes its
+   * tickets from now, with the key of that Jira project; undefined when the project has no Jira source or the connection is gone. Reads the
+   * stored connection only, never Jira. The list links a ticket only when its key starts with that project key. A call that throws leaves the
+   * tickets of that repository unlinked. Left out: Jira tickets of the lane runs list are shown without a link.
+   */
+  jiraSiteUrlOf?(
+    repositoryId: string,
+  ): Promise<JiraSiteOfRepository | undefined>;
   /** The full name of a repository of the workspace (`owner/name`), or undefined when there is none; names the project's repository in a refusal. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
   /**
@@ -853,8 +894,9 @@ export function createWorkflowRunService(
         limit: query.limit,
         ...(query.after === undefined ? {} : { after: query.after }),
       });
+      const jiraSites = await jiraSitesOf(deps, page.rows);
       return {
-        runs: page.rows.map(listItemOf),
+        runs: page.rows.map((row) => listItemOf(row, jiraSites)),
         nextCursor: page.next === null ? null : encodeCursor(page.next),
         now: new Date().toISOString(),
       };

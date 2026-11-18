@@ -7,6 +7,7 @@ import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
+import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import {
@@ -51,6 +52,7 @@ import {
   createGithubConnectors,
   type GithubActionTarget,
 } from "./github-connectors.ts";
+import { jiraSiteLookup } from "./jira-site.ts";
 import { createTurnReader } from "./turn-reader.ts";
 import { DEFAULT_TICKET_PROVIDER } from "./ticket-target.ts";
 import { createRunTicketTargets } from "./run-ticket-targets.ts";
@@ -348,13 +350,17 @@ export function workflowRunServiceFor(
 ): WorkflowRunService {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
+  const projects = createProjectsRepository(db, workspaceId);
+  const jiraConnections = createJiraConnectionsRepository(db, workspaceId);
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
     // #920: the engine that takes an answer from the page of the run.
     engine: lazyAnswerEngine(workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
-    projects: createProjectsRepository(db, workspaceId),
+    projects,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    // #1086: the site of a Jira ticket's link, from the stored connection of the project's source (never a call to Jira).
+    jiraSiteUrlOf: jiraSiteLookup({ projects, jiraConnections }),
     ...githubReads(workspaceId, ticketProvidersWith(extraTicketProviders)),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>
