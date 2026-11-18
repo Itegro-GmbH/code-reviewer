@@ -52,6 +52,7 @@ import {
   createGithubConnectors,
   type GithubActionTarget,
 } from "./github-connectors.ts";
+import { jiraSiteLookup } from "./jira-site.ts";
 import { createTurnReader } from "./turn-reader.ts";
 import { DEFAULT_TICKET_PROVIDER } from "./ticket-target.ts";
 import { createRunTicketTargets } from "./run-ticket-targets.ts";
@@ -359,17 +360,7 @@ export function workflowRunServiceFor(
     projects,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
     // #1086: the site of a Jira ticket's link, from the stored connection of the project's source (never a call to Jira).
-    jiraSiteUrlOf: async (repositoryId) => {
-      const jira = jiraSourceOf(
-        (await projects.get(repositoryId))?.ticketSource ?? {
-          provider: "github",
-          repositoryId,
-          board: null,
-        },
-      );
-      if (jira === null) return undefined;
-      return (await jiraConnections.get(jira.connectionId))?.siteUrl;
-    },
+    jiraSiteUrlOf: jiraSiteLookup({ projects, jiraConnections }),
     ...githubReads(workspaceId, ticketProvidersWith(extraTicketProviders)),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>

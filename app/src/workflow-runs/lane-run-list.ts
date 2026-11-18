@@ -15,6 +15,7 @@ import {
   type WorkspaceRunStatusFilter,
 } from "../db/workflow-run-filters.ts";
 import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import type { JiraSiteOfRepository } from "./jira-site.ts";
 import { WorkflowRunError } from "./errors.ts";
 import { laneNodesOfRun, type LaneNodeView } from "./lane-nodes.ts";
 import { MICRO_USD_PER_USD, RUNS_LISTED_MAX } from "./limits.ts";
@@ -178,7 +179,7 @@ export function readListQuery(raw: RawLaneRunsQuery): LaneRunsQuery {
 function ticketOf(
   ref: string | null,
   title: string | null,
-  jiraSiteUrl: string | undefined,
+  jiraSite: JiraSiteOfRepository | undefined,
 ): LaneRunListItemView["ticket"] {
   if (ref === null) return null;
   const parsed = parseTicketRef(ref);
@@ -190,17 +191,23 @@ function ticketOf(
     title,
     key,
     githubRepository: github ? repo : null,
-    jiraSiteUrl: provider === "jira" ? (jiraSiteUrl ?? null) : null,
+    // The site is the project's current one: a key of another Jira project (the project was pointed elsewhere since) gets no link.
+    jiraSiteUrl:
+      provider === "jira" &&
+      jiraSite !== undefined &&
+      key.startsWith(`${jiraSite.projectKey}-`)
+        ? jiraSite.siteUrl
+        : null,
   };
 }
 
 /**
- * One row of the list. `jiraSiteUrls` holds the site address of the Jira connection of a project, by the id of its repository; only a run
+ * One row of the list. `jiraSites` holds the site address and the Jira project key of the project's Jira source, by the id of its repository; only a run
  * about a Jira ticket looks it up.
  */
 export function listItemOf(
   row: WorkspaceRunRow,
-  jiraSiteUrls: ReadonlyMap<string, string> = new Map(),
+  jiraSites: ReadonlyMap<string, JiraSiteOfRepository> = new Map(),
 ): LaneRunListItemView {
   const { run } = row;
   return {
@@ -216,7 +223,7 @@ export function listItemOf(
     ticket: ticketOf(
       run.ticketRef,
       row.ticket?.title ?? null,
-      jiraSiteUrls.get(run.repositoryId),
+      jiraSites.get(run.repositoryId),
     ),
     nodes: laneNodesOfRun(row.document ?? undefined, {
       id: run.triggerId,

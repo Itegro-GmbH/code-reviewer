@@ -50,8 +50,9 @@ function serviceWith(
       ? {
           async jiraSiteUrlOf(repositoryId: string) {
             lookups.push(repositoryId);
+            if (repositoryId === "repo-boom") throw new Error("db down");
             return repositoryId === "repo-1"
-              ? "https://acme.atlassian.net"
+              ? { siteUrl: "https://acme.atlassian.net", projectKey: "LAT" }
               : undefined;
           },
         }
@@ -98,5 +99,37 @@ describe("listWorkspace and the Jira site", () => {
       false,
     ).listWorkspace({});
     expect(without.runs[0]?.ticket?.jiraSiteUrl).toBeNull();
+  });
+
+  // #1086-T09
+  it("links no ticket of a project that was pointed at another Jira project since the run", async () => {
+    const view = await serviceWith(
+      [
+        rowOf("a", "repo-1", "jira:acme/widgets#OLD-9"),
+        rowOf("b", "repo-1", "jira:acme/widgets#LAT-9"),
+      ],
+      [],
+    ).listWorkspace({});
+
+    expect(view.runs.map((run) => run.ticket?.jiraSiteUrl)).toEqual([
+      null,
+      "https://acme.atlassian.net",
+    ]);
+  });
+
+  // #1086-T10
+  it("lists the runs without a link for a repository whose site lookup fails, the others keep theirs", async () => {
+    const view = await serviceWith(
+      [
+        rowOf("a", "repo-boom", "jira:acme/boom#LAT-1"),
+        rowOf("b", "repo-1", "jira:acme/widgets#LAT-2"),
+      ],
+      [],
+    ).listWorkspace({});
+
+    expect(view.runs.map((run) => run.ticket?.jiraSiteUrl)).toEqual([
+      null,
+      "https://acme.atlassian.net",
+    ]);
   });
 });

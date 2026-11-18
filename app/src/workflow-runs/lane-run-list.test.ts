@@ -195,7 +195,9 @@ describe("listItemOf", () => {
 
   // #1086-T04
   it("carries the Jira site of the repository of the run for a Jira ticket, and never for a GitHub issue", () => {
-    const sites = new Map([["repo-1", "https://acme.atlassian.net"]]);
+    const sites = new Map([
+      ["repo-1", { siteUrl: "https://acme.atlassian.net", projectKey: "LAT" }],
+    ]);
 
     expect(
       listItemOf(
@@ -204,6 +206,21 @@ describe("listItemOf", () => {
       ).ticket?.jiraSiteUrl,
     ).toBe("https://acme.atlassian.net");
     expect(listItemOf(row(), sites).ticket?.jiraSiteUrl).toBeNull();
+  });
+
+  // #1086-T08
+  it("links no Jira ticket whose key is of another Jira project than the project's current source", () => {
+    const sites = new Map([
+      ["repo-1", { siteUrl: "https://beta.atlassian.net", projectKey: "LAT" }],
+    ]);
+    const of = (ref: string) =>
+      listItemOf(row({ run: stored({ ticketRef: ref }) }), sites).ticket
+        ?.jiraSiteUrl;
+
+    expect(of("jira:acme/widgets#OLD-58")).toBeNull();
+    // A key that only starts with the same letters is another project.
+    expect(of("jira:acme/widgets#LATE-58")).toBeNull();
+    expect(of("jira:acme/widgets#LAT-58")).toBe("https://beta.atlassian.net");
   });
 
   // #1078-T48
