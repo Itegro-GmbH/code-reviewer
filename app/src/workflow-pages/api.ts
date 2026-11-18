@@ -133,3 +133,6 @@ export function browserWorkflowRunsApi(workspaceSlug: string): WorkflowRunsApi {
 
 /** How often the run page asks again while the run runs. */
 export const WORKFLOW_RUN_POLL_MS = 3000;
+
+/** How often the list of lane runs asks again when every active run only waits for an answer (people answer in minutes or days, not seconds). */
+export const LANE_RUNS_WAITING_POLL_MS = 30_000;

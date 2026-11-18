@@ -26,6 +26,19 @@ export type LaneNodeView = {
   connector: string | null;
   /** The ids of every node inside this one (branches and bodies), in document order; empty for an agent step and an action. */
   innerIds: string[];
+  /**
+   * A loop: its direct body, in document order, each with what is inside it; empty for any other node. The rounds of a loop are read
+   * from these (`workflow-pages/run-track.ts`): a row of a step counts over the whole run, so only the direct children say how often
+   * the body has begun.
+   */
+  body: LaneBodyChild[];
+};
+
+export type LaneBodyChild = {
+  id: string;
+  kind: LaneNodeView["kind"];
+  /** The ids of every node inside the child, depth first. */
+  innerIds: string[];
 };
 
 const NODE_KINDS: ReadonlySet<string> = new Set([
@@ -54,13 +67,14 @@ function innerIdsOf(node: RunDocument["steps"][number], depth = 0): string[] {
   ]);
 }
 
+const kindOf = (kind: string): LaneNodeView["kind"] =>
+  NODE_KINDS.has(kind) ? (kind as LaneNodeView["kind"]) : "unsupported";
+
 /** The nodes of a document as a run started by `trigger` walks them. */
 export function laneNodesOf(document: RunDocument): LaneNodeView[] {
   return document.steps.map((node) => ({
     id: node.id,
-    kind: NODE_KINDS.has(node.kind)
-      ? (node.kind as LaneNodeView["kind"])
-      : "unsupported",
+    kind: kindOf(node.kind),
     note: noteOf(node.description),
     connector:
       node.kind === "action" &&
@@ -69,6 +83,14 @@ export function laneNodesOf(document: RunDocument): LaneNodeView[] {
         ? node.connector.slice(0, 80)
         : null,
     innerIds: innerIdsOf(node),
+    body:
+      node.kind === "loop"
+        ? childrenOf(node).map((child) => ({
+            id: child.id,
+            kind: kindOf(child.kind),
+            innerIds: innerIdsOf(child),
+          }))
+        : [],
   }));
 }
 

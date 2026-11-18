@@ -34,6 +34,7 @@ import type {
 } from "../workflow-runs/lane-run-list.ts";
 import {
   browserWorkflowRunsApi,
+  LANE_RUNS_WAITING_POLL_MS,
   WORKFLOW_RUN_POLL_MS,
   type LaneRunsQuery,
   type WorkflowRunsApi,
@@ -44,6 +45,7 @@ import {
   LANE_RUNS_COPY as COPY,
   PAGE_COPY,
 } from "./messages.ts";
+import { githubLinkInRepository } from "./github-link.ts";
 import { RunTrackView } from "./run-track.tsx";
 import { trackOf } from "./run-track.ts";
 import { WorkflowRunStatusBadge } from "./status-badge.tsx";
@@ -51,6 +53,26 @@ import { formatRelativeTime, formatUsd, laneRunDurationMs } from "./view.ts";
 
 const isActive = (run: Pick<LaneRunListItemView, "status">): boolean =>
   run.status === "running" || run.status === "waiting";
+
+/** Every active run of the page only waits for an answer: nothing moves until somebody gives one, so the page asks less often. */
+const onlyWaiting = (snapshot: LaneRunListView): boolean =>
+  snapshot.runs.some(isActive) &&
+  snapshot.runs.every((run) => !isActive(run) || run.status === "waiting");
+
+/**
+ * The runs of the pages in the order they were read, each run once, at the place it first appeared. A run can show up on two pages: the
+ * list is sorted by status first, so a run that ends between two reads moves from the active runs to the ended ones.
+ */
+export function mergeRunPages(
+  ...pages: readonly (readonly LaneRunListItemView[])[]
+): LaneRunListItemView[] {
+  const seen = new Set<string>();
+  return pages.flat().filter((run) => {
+    if (seen.has(run.id)) return false;
+    seen.add(run.id);
+    return true;
+  });
+}
 
 export function LaneRunsList({
   workspaceSlug,
@@ -76,7 +98,8 @@ export function LaneRunsList({
     fetchLatest: () => api.listWorkspace(filter),
     // Polls while any run of the first page is running or waits for an answer (an answer is given on the run page or on the ticket).
     isSettled: (snapshot) => !snapshot.runs.some(isActive),
-    activeIntervalMs: WORKFLOW_RUN_POLL_MS,
+    activeIntervalMs: (snapshot) =>
+      onlyWaiting(snapshot) ? LANE_RUNS_WAITING_POLL_MS : WORKFLOW_RUN_POLL_MS,
     idleIntervalMs: null,
   });
   // The pages after the first: read when asked, not polled. A run that moved up to the first page meanwhile is shown once, there.
@@ -86,11 +109,7 @@ export function LaneRunsList({
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
-  const firstIds = new Set(data.runs.map((run) => run.id));
-  const runs = [
-    ...data.runs,
-    ...(more?.runs ?? []).filter((run) => !firstIds.has(run.id)),
-  ];
+  const runs = mergeRunPages(data.runs, more?.runs ?? []);
   const nextCursor = more === null ? data.nextCursor : more.nextCursor;
 
   async function loadMore(): Promise<void> {
@@ -104,7 +123,7 @@ export function LaneRunsList({
       return;
     }
     setMore({
-      runs: [...(more?.runs ?? []), ...result.data.runs],
+      runs: mergeRunPages(more?.runs ?? [], result.data.runs),
       nextCursor: result.data.nextCursor,
     });
   }
@@ -182,6 +201,13 @@ function LaneRunRow({
   const failure = describeRunFailure(run.errorCode);
   const duration = laneRunDurationMs(run, now);
   const track = trackOf(run.nodes, run.steps, run.status);
+  const ticketUrl =
+    run.ticket?.githubRepository == null
+      ? undefined
+      : githubLinkInRepository(
+          `https://github.com/${run.ticket.githubRepository}/issues/${encodeURIComponent(run.ticket.key)}`,
+          run.ticket.githubRepository,
+        );
   const runPath = workspacePath(
     workspaceSlug,
     `/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`,
@@ -197,11 +223,11 @@ function LaneRunRow({
           <span className="text-muted-foreground">{COPY.noTicket}</span>
         ) : (
           <>
-            {run.ticket.url === null ? (
+            {ticketUrl === undefined ? (
               <span className="font-medium">{run.ticket.label}</span>
             ) : (
               <a
-                href={run.ticket.url}
+                href={ticketUrl}
                 target="_blank"
                 rel="noreferrer noopener"
                 className="font-medium"

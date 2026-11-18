@@ -286,10 +286,8 @@ describe("the lane runs of a workspace", () => {
       ...(first.next === null ? {} : { after: first.next }),
     });
 
-    // `c` ended and is no longer on top, so it comes again later; `b` and `a` must not be lost.
-    expect(second.rows.map((row) => row.run.id)).toEqual(
-      expect.arrayContaining([b.id, a.id]),
-    );
+    // `c` ended and is no longer on top, so it comes again later, once; `b` and `a` are not lost and not repeated.
+    expect(second.rows.map((row) => row.run.id)).toEqual([b.id, a.id, c.id]);
   });
 
   // #1078-T95
@@ -325,6 +323,73 @@ describe("the lane runs of a workspace", () => {
     ]);
     expect(await ids({ repositoryId: mine.repository.id })).toHaveLength(5);
     expect(await ids({ repositoryId: "no-such-repository" })).toEqual([]);
+  });
+
+  // #1078-T98
+  it("finds nothing for the project or lane of another workspace, and does not mix it with an own filter", async () => {
+    const { mine, theirs } = await setup();
+    await mine.run();
+    await mine.run({ status: "failed" });
+    await theirs.run();
+    const ids = async (
+      filter: Parameters<typeof mine.runs.listWorkspaceRuns>[0]["filter"],
+    ) => (await mine.runs.listWorkspaceRuns({ filter, limit: 20 })).rows.length;
+
+    expect(await ids({ repositoryId: theirs.repository.id })).toBe(0);
+    expect(await ids({ workflowId: theirs.workflowId })).toBe(0);
+    expect(
+      await ids({
+        repositoryId: theirs.repository.id,
+        workflowId: mine.workflowId,
+      }),
+    ).toBe(0);
+    expect(
+      await ids({
+        repositoryId: mine.repository.id,
+        workflowId: theirs.workflowId,
+        status: "active",
+      }),
+    ).toBe(0);
+    expect(await ids({ repositoryId: mine.repository.id })).toBe(2);
+  });
+
+  // #1078-T99
+  it("breaks a tie of the start by the id, newest id first, and pages through the tie without repeating or skipping a run", async () => {
+    const { mine, db } = await setup();
+    const made = [
+      await mine.run(),
+      await mine.run(),
+      await mine.run(),
+      await mine.run({ status: "succeeded" }),
+      await mine.run({ status: "succeeded" }),
+      await mine.run({ status: "failed" }),
+    ];
+    await db
+      .updateTable("workflow_runs")
+      .set({ created_at: "2026-11-18T08:30:00.000Z" })
+      .execute();
+    const active = made.slice(0, 3).map((run) => run.id);
+    const ended = made.slice(3).map((run) => run.id);
+    const expected = [
+      ...active.toSorted().toReversed(),
+      ...ended.toSorted().toReversed(),
+    ];
+
+    const seen: string[] = [];
+    let after:
+      | Awaited<ReturnType<typeof mine.runs.listWorkspaceRuns>>["next"]
+      | undefined;
+    for (let pages = 0; pages < 10; pages += 1) {
+      const page = await mine.runs.listWorkspaceRuns({
+        limit: 2,
+        ...(after === undefined || after === null ? {} : { after }),
+      });
+      seen.push(...page.rows.map((row) => row.run.id));
+      if (page.next === null) break;
+      after = page.next;
+    }
+
+    expect(seen).toEqual(expected);
   });
 
   // #1078-T96
@@ -368,18 +433,27 @@ describe("the lane runs of a workspace", () => {
   // #1078-T97
   it("reads a page of runs with the same few queries however many runs it holds", async () => {
     const { db, workspaceId, mine } = await setup();
-    for (let index = 0; index < 12; index += 1)
-      await mine.run({ ticketRef: `github:acme/widgets#${String(index + 1)}` });
     const { counter, plugin } = queryCounter();
     const counted = createWorkflowRunsRepository(
       db.withPlugin(plugin),
       workspaceId,
     );
+    const queriesFor = async (count: number) => {
+      counter.queries = 0;
+      const { rows } = await counted.listWorkspaceRuns({ limit: 50 });
+      expect(rows).toHaveLength(count);
+      return counter.queries;
+    };
+    for (let index = 0; index < 3; index += 1)
+      await mine.run({ ticketRef: `github:acme/widgets#${String(index + 1)}` });
+    const small = await queriesFor(3);
+    for (let index = 3; index < 15; index += 1)
+      await mine.run({ ticketRef: `github:acme/widgets#${String(index + 1)}` });
+    const large = await queriesFor(15);
 
-    const { rows } = await counted.listWorkspaceRuns({ limit: 12 });
-
-    expect(rows).toHaveLength(12);
-    // The runs with their lane and repository, then the steps, the versions and the tickets: one query each.
-    expect(counter.queries).toBeLessThanOrEqual(4);
+    // The runs that go on and the ended ones (two reads, each with their lane and repository), then the steps, the versions and the
+    // tickets: one query each, whatever the page holds.
+    expect(small).toBeLessThanOrEqual(5);
+    expect(large).toBe(small);
   });
 });

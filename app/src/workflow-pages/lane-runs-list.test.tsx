@@ -17,7 +17,11 @@ import type {
   LaneRunListItemView,
   LaneRunListView,
 } from "../workflow-runs/lane-run-list.ts";
-import { WORKFLOW_RUN_POLL_MS, type WorkflowRunsApi } from "./api.ts";
+import {
+  LANE_RUNS_WAITING_POLL_MS,
+  WORKFLOW_RUN_POLL_MS,
+  type WorkflowRunsApi,
+} from "./api.ts";
 import { LaneRunsList } from "./lane-runs-list.tsx";
 import { LANE_RUNS_COPY } from "./messages.ts";
 
@@ -45,7 +49,8 @@ function item(
     ticket: {
       label: "#128",
       title: "Cache the thing",
-      url: "https://github.com/acme/widgets/issues/128",
+      key: "128",
+      githubRepository: "acme/widgets",
     },
     nodes: [
       {
@@ -54,6 +59,7 @@ function item(
         note: "Plan",
         connector: null,
         innerIds: [],
+        body: [],
       },
       {
         id: "review",
@@ -61,6 +67,7 @@ function item(
         note: "Review",
         connector: null,
         innerIds: [],
+        body: [],
       },
       {
         id: "ship",
@@ -68,6 +75,7 @@ function item(
         note: null,
         connector: "pr.merge",
         innerIds: [],
+        body: [],
       },
     ],
     steps: [
@@ -152,6 +160,28 @@ describe("a row of the lane runs list", () => {
     ).toBe("/w/acme/workflows/wf-1/runs/run-1");
   });
 
+  // #1078-T75
+  it("makes the ticket link through the repository of the ticket only: a reference that walks out of it is shown as text", () => {
+    for (const repository of ["../..", "./..", "a/b/../../c"])
+      renderList(
+        page([
+          item({
+            ticket: {
+              label: "#1",
+              title: "Hostile",
+              key: "1",
+              githubRepository: repository,
+            },
+          }),
+        ]),
+      );
+
+    expect(screen.queryAllByRole("link", { name: /Open the ticket/ })).toEqual(
+      [],
+    );
+    expect(screen.getAllByText("#1")).toHaveLength(3);
+  });
+
   // #1078-T62
   it("gives the step track a text alternative with the position and the state of the current step", () => {
     renderList(page([item()]));
@@ -184,7 +214,12 @@ describe("a row of the lane runs list", () => {
         item({
           laneName: hostile,
           project: { id: "repo-1", name: hostile },
-          ticket: { label: "#1", title: hostile, url: null },
+          ticket: {
+            label: "#1",
+            title: hostile,
+            key: "1",
+            githubRepository: null,
+          },
           nodes: [
             {
               id: "a",
@@ -192,6 +227,7 @@ describe("a row of the lane runs list", () => {
               note: hostile,
               connector: null,
               innerIds: [],
+              body: [],
             },
           ],
           steps: [{ id: "a", kind: "agent", status: "running", round: 1 }],
@@ -210,7 +246,12 @@ describe("a row of the lane runs list", () => {
         item({ id: "a", ticket: null }),
         item({
           id: "b",
-          ticket: { label: "LAT-58", title: null, url: null },
+          ticket: {
+            label: "LAT-58",
+            title: null,
+            key: "LAT-58",
+            githubRepository: null,
+          },
           project: { id: "r", name: null },
         }),
       ]),
@@ -311,7 +352,7 @@ describe("while a run is active", () => {
       ok(page([item({ status: "waiting" })])),
     ]);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+      await vi.advanceTimersByTimeAsync(LANE_RUNS_WAITING_POLL_MS);
     });
     expect(waiting.api.listWorkspace).toHaveBeenCalled();
     cleanup();
@@ -328,7 +369,88 @@ describe("while a run is active", () => {
   });
 });
 
+describe("how often the list asks", () => {
+  // #1078-T72
+  it("asks slowly while every active run only waits for an answer, and at the pace of a running run otherwise", async () => {
+    const waiting = renderList(page([item({ status: "waiting" })]), [
+      ok(page([item({ status: "waiting" })])),
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS * 5);
+    });
+    expect(waiting.api.listWorkspace).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        LANE_RUNS_WAITING_POLL_MS - WORKFLOW_RUN_POLL_MS * 5,
+      );
+    });
+    expect(waiting.api.listWorkspace).toHaveBeenCalledTimes(1);
+    cleanup();
+
+    const mixed = renderList(
+      page([
+        item({ id: "run-1", status: "waiting" }),
+        item({ id: "run-2", status: "running" }),
+      ]),
+      [ok(page([item({ id: "run-1", status: "waiting" })]))],
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(mixed.api.listWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  // #1078-T73
+  it("speeds up again when a waiting run starts to run", async () => {
+    const { api } = renderList(page([item({ status: "waiting" })]), [
+      ok(page([item({ status: "running" })])),
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LANE_RUNS_WAITING_POLL_MS);
+    });
+    expect(api.listWorkspace).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+    expect(api.listWorkspace).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("more runs", () => {
+  // #1078-T74
+  it("shows a run once when pages that were read at different times overlap", async () => {
+    const ended = (id: string) =>
+      item({
+        id,
+        status: "succeeded",
+        finishedAt: "2026-11-18T11:59:00.000Z",
+      });
+    const { container } = renderList(
+      page([ended("run-a"), ended("run-b")], "cursor-1"),
+      [
+        // a run that ended between two reads is on the page after the cursor and was on the first one
+        ok(page([ended("run-b"), ended("run-c")], "cursor-2")),
+        ok(page([ended("run-c"), ended("run-d")])),
+      ],
+    );
+
+    for (let pages = 0; pages < 2; pages += 1) {
+      fireEvent.click(
+        screen.getByRole("button", { name: LANE_RUNS_COPY.loadMore }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+
+    expect(
+      [...container.querySelectorAll("tbody tr")].map((row) =>
+        row.getAttribute("data-run-id"),
+      ),
+    ).toEqual(["run-a", "run-b", "run-c", "run-d"]);
+  });
+
   // #1078-T70
   it("loads the next page with the cursor and appends it, and offers no more after the last", async () => {
     const { api, container } = renderList(

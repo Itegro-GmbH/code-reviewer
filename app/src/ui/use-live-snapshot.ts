@@ -23,8 +23,11 @@ export type LiveSnapshotOptions<T> = {
   fetchLatest: () => Promise<RequestResult<T>>;
   /** True when nothing is going to change any more (no run waiting or running). */
   isSettled: (data: T) => boolean;
-  /** The wait between requests while something can still change. */
-  activeIntervalMs: number;
+  /**
+   * The wait between requests while something can still change. A function reads it off the newest data (a list that only waits for
+   * people may ask less often); it is called with the data on screen each time a request is scheduled, and it may change on every render.
+   */
+  activeIntervalMs: number | ((data: T) => number);
   /** The wait between requests once everything is settled; null stops polling then. */
   idleIntervalMs: number | null;
 };
@@ -72,11 +75,14 @@ export function useLiveSnapshot<T>(
 
   // The effect reads the newest data and callbacks without being restarted by every change.
   const dataRef = useRef(data);
-  const callbacks = useRef({ fetchLatest, isSettled });
+  const callbacks = useRef({ fetchLatest, isSettled, activeIntervalMs });
   useEffect(() => {
     dataRef.current = data;
-    callbacks.current = { fetchLatest, isSettled };
+    callbacks.current = { fetchLatest, isSettled, activeIntervalMs };
   });
+  // Only a fixed wait restarts the polling when it changes; a function is read through `callbacks`.
+  const fixedIntervalMs =
+    typeof activeIntervalMs === "number" ? activeIntervalMs : null;
 
   // True once polling has started at least once: a later start is a page that is shown again or one
   // with new server data, and it asks at once instead of waiting a whole interval.
@@ -89,9 +95,10 @@ export function useLiveSnapshot<T>(
     let failuresInARow = 0;
 
     function delayNow(): number | null {
-      return callbacks.current.isSettled(dataRef.current)
-        ? idleIntervalMs
-        : activeIntervalMs;
+      const { isSettled: settled, activeIntervalMs: active } =
+        callbacks.current;
+      if (settled(dataRef.current)) return idleIntervalMs;
+      return typeof active === "number" ? active : active(dataRef.current);
     }
 
     function schedule() {
@@ -153,7 +160,7 @@ export function useLiveSnapshot<T>(
       clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [initial, activeIntervalMs, idleIntervalMs]);
+  }, [initial, fixedIntervalMs, idleIntervalMs]);
 
   return {
     data,

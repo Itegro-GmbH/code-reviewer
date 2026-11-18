@@ -158,7 +158,8 @@ describe("listItemOf", () => {
       ticket: {
         label: "#128",
         title: "Cache the thing",
-        url: "https://github.com/acme/widgets/issues/128",
+        key: "128",
+        githubRepository: "acme/widgets",
       },
       budgetUsd: 20,
       spentUsd: 1.5,
@@ -183,7 +184,11 @@ describe("listItemOf", () => {
       row({ run: stored({ ticketRef: "jira:acme/widgets#LAT-58" }) }),
     );
 
-    expect(item.ticket).toMatchObject({ label: "LAT-58", url: null });
+    expect(item.ticket).toMatchObject({
+      label: "LAT-58",
+      key: "LAT-58",
+      githubRepository: null,
+    });
   });
 
   // #1078-T48

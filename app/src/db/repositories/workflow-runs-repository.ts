@@ -471,6 +471,9 @@ export type WorkflowRunsRepository = {
 };
 
 /** The statuses a filter of the workspace list stands for. */
+/** The statuses of a run that goes on: the runs of these come first in the list of the workspace. */
+const ACTIVE_STATUSES: readonly WorkflowRunStatus[] = ["running", "waiting"];
+
 const STATUSES_OF_FILTER: Record<
   WorkspaceRunStatusFilter,
   WorkflowRunStatus[]
@@ -778,73 +781,86 @@ export function createWorkflowRunsRepository(
     },
 
     async listWorkspaceRuns({ filter = {}, limit, after }) {
-      // Active runs (running, waiting for an answer) on top: rank 0, every other run rank 1.
-      const rank = sql<number>`case when workflow_runs.status in ('running', 'waiting') then 0 else 1 end`;
-      let query = db
-        .selectFrom("workflow_runs")
-        .innerJoin("workflows", (join) =>
-          join
-            .onRef("workflows.id", "=", "workflow_runs.workflow_id")
-            .onRef("workflows.workspace_id", "=", "workflow_runs.workspace_id"),
-        )
-        .leftJoin("repositories", (join) =>
-          join
-            .onRef("repositories.id", "=", "workflow_runs.repository_id")
-            .onRef(
-              "repositories.workspace_id",
-              "=",
-              "workflow_runs.workspace_id",
-            ),
-        )
-        .selectAll("workflow_runs")
-        .select([
-          "workflows.name as lane_name",
-          "repositories.full_name as repository_name",
-        ])
-        .where("workflow_runs.workspace_id", "=", workspaceId);
-      if (filter.status !== undefined)
-        query = query.where(
-          "workflow_runs.status",
-          "in",
-          STATUSES_OF_FILTER[filter.status],
-        );
-      if (filter.repositoryId !== undefined)
-        query = query.where(
-          "workflow_runs.repository_id",
-          "=",
-          filter.repositoryId,
-        );
-      if (filter.workflowId !== undefined)
-        query = query.where(
-          "workflow_runs.workflow_id",
-          "=",
-          filter.workflowId,
-        );
-      if (after !== undefined) {
-        const afterRank = after.active ? 0 : 1;
-        query = query.where((eb) =>
-          eb.or([
-            eb(rank, ">", afterRank),
-            eb.and([
-              eb(rank, "=", afterRank),
-              eb.or([
-                eb("workflow_runs.created_at", "<", after.createdAt),
-                eb.and([
-                  eb("workflow_runs.created_at", "=", after.createdAt),
-                  eb("workflow_runs.id", "<", after.id),
-                ]),
+      // Active runs (running, waiting for an answer) on top, then every other run, each part newest first. The two parts are two reads
+      // that each follow an index (`workflow_runs_active_index`, `workflow_runs_workspace_index`) and stop at the limit: the active
+      // ones first, and the others only for what the page still lacks. One `order by case …` could not use an index.
+      const read = (active: boolean, room: number) => {
+        let statuses: readonly WorkflowRunStatus[] | undefined =
+          filter.status === undefined
+            ? undefined
+            : STATUSES_OF_FILTER[filter.status].filter(
+                (status) => ACTIVE_STATUSES.includes(status) === active,
+              );
+        if (statuses?.length === 0) return undefined;
+        let query = db
+          .selectFrom("workflow_runs")
+          .innerJoin("workflows", (join) =>
+            join
+              .onRef("workflows.id", "=", "workflow_runs.workflow_id")
+              .onRef(
+                "workflows.workspace_id",
+                "=",
+                "workflow_runs.workspace_id",
+              ),
+          )
+          .leftJoin("repositories", (join) =>
+            join
+              .onRef("repositories.id", "=", "workflow_runs.repository_id")
+              .onRef(
+                "repositories.workspace_id",
+                "=",
+                "workflow_runs.workspace_id",
+              ),
+          )
+          .selectAll("workflow_runs")
+          .select([
+            "workflows.name as lane_name",
+            "repositories.full_name as repository_name",
+          ])
+          .where("workflow_runs.workspace_id", "=", workspaceId);
+        statuses = statuses ?? (active ? ACTIVE_STATUSES : undefined);
+        query =
+          statuses !== undefined
+            ? query.where("workflow_runs.status", "in", [...statuses])
+            : query.where("workflow_runs.status", "not in", [
+                ...ACTIVE_STATUSES,
+              ]);
+        if (filter.repositoryId !== undefined)
+          query = query.where(
+            "workflow_runs.repository_id",
+            "=",
+            filter.repositoryId,
+          );
+        if (filter.workflowId !== undefined)
+          query = query.where(
+            "workflow_runs.workflow_id",
+            "=",
+            filter.workflowId,
+          );
+        // The cursor only cuts the part it was taken in; the part after it starts from its newest run.
+        if (after !== undefined && after.active === active)
+          query = query.where((eb) =>
+            eb.or([
+              eb("workflow_runs.created_at", "<", after.createdAt),
+              eb.and([
+                eb("workflow_runs.created_at", "=", after.createdAt),
+                eb("workflow_runs.id", "<", after.id),
               ]),
             ]),
-          ]),
-        );
-      }
+          );
+        return query
+          .orderBy("workflow_runs.created_at", "desc")
+          .orderBy("workflow_runs.id", "desc")
+          .limit(room)
+          .execute();
+      };
       // One more than asked for tells whether there is a next page.
-      const found = await query
-        .orderBy(rank)
-        .orderBy("workflow_runs.created_at", "desc")
-        .orderBy("workflow_runs.id", "desc")
-        .limit(limit + 1)
-        .execute();
+      const found: Awaited<ReturnType<typeof read>> = [];
+      // A cursor from the part of the ended runs leaves the active ones behind it.
+      if (after === undefined || after.active)
+        found.push(...((await read(true, limit + 1)) ?? []));
+      if (found.length < limit + 1)
+        found.push(...((await read(false, limit + 1 - found.length)) ?? []));
       const page = found.slice(0, limit);
       const last = page.at(-1);
       const next: WorkspaceRunsCursor | null =

@@ -54,6 +54,39 @@ describe("laneNodesOfRun", () => {
     expect(nodes.find((node) => node.id === "plan")?.innerIds).toEqual([]);
   });
 
+  // #1078-T06
+  it("lists the direct body of a loop, with what is inside each child, and no body for any other node", () => {
+    const nested = JSON.stringify({
+      triggers: [{ id: "t", kind: "manual" }],
+      steps: [
+        {
+          id: "outer",
+          kind: "loop",
+          maxRounds: 2,
+          body: [
+            { id: "work", kind: "agent" },
+            {
+              id: "inner",
+              kind: "loop",
+              maxRounds: 3,
+              body: [{ id: "deep", kind: "action" }],
+            },
+          ],
+        },
+        { id: "plain", kind: "agent" },
+      ],
+    });
+
+    const [outer, plain] = laneNodesOfRun(nested, { id: "t", kind: "manual" });
+
+    expect(outer?.innerIds).toEqual(["work", "inner", "deep"]);
+    expect(outer?.body).toEqual([
+      { id: "work", kind: "agent", innerIds: [] },
+      { id: "inner", kind: "loop", innerIds: ["deep"] },
+    ]);
+    expect(plain?.body).toEqual([]);
+  });
+
   // #1078-T02
   it("leaves the pre-steps of another trigger out", () => {
     const nodes = laneNodesOfRun(document, {

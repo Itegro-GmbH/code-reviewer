@@ -60,7 +60,7 @@ export async function loadLaneRunsPage(
   searchParams: Record<string, string | string[] | undefined>,
   deps: {
     runs: Pick<WorkflowRunService, "listWorkspace">;
-    workflows: Pick<WorkflowService, "list">;
+    workflows: Pick<WorkflowService, "list" | "get">;
     projects: Pick<ProjectService, "listProjects">;
   },
 ): Promise<LaneRunsPageData> {
@@ -108,14 +108,28 @@ export async function loadLaneRunsPage(
     const name = named.get(id);
     if (name !== undefined) projects.set(id, name);
   }
+  // The lanes of the projects are the ones that are not archived. The runs of an archived lane are still listed, and the address may name
+  // one, so the select has them too: from the runs on this page, and for the lane the address names from the lane itself (the service
+  // answers for the workspace only, so an id of another workspace is no lane here and adds none).
+  const lanes = new Map<string, string>();
+  for (const lane of laneLists.flatMap((list) => list.workflows))
+    lanes.set(lane.id, lane.name);
+  for (const run of snapshot.runs)
+    if (!lanes.has(run.workflowId)) lanes.set(run.workflowId, run.laneName);
+  if (filter.lane !== undefined && !lanes.has(filter.lane)) {
+    const named = await deps.workflows.get(filter.lane).then(
+      (lane) => lane.name,
+      () => undefined,
+    );
+    if (named !== undefined) lanes.set(filter.lane, named);
+  }
   return {
     kind: "ready",
     filter,
     snapshot,
     projects: [...projects].map(([id, name]) => ({ id, name })),
-    lanes: laneLists
-      .flatMap((list) => list.workflows)
-      .map((lane) => ({ id: lane.id, name: lane.name }))
+    lanes: [...lanes]
+      .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   };
 }

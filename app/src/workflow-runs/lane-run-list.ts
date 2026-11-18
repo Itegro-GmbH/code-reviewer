@@ -67,8 +67,9 @@ export type LaneRunListItemView = {
     label: string;
     /** The title from the ticket mirror, or null when the mirror does not hold the ticket. The words of whoever opened it: text only. */
     title: string | null;
-    /** The page of the ticket on its platform, or null where it is not known (a Jira site is not known to the list). */
-    url: string | null;
+    /** The reference of the ticket as the engine wrote it: its key, and the `owner/name` of its repository for a GitHub issue (null for any other provider, whose site the list does not know). The page makes the link with `githubLinkInRepository`. */
+    key: string;
+    githubRepository: string | null;
   } | null;
   /** The top-level nodes of the version of the lane the run started with; empty when that version cannot be read any more. */
   nodes: LaneNodeView[];
@@ -165,7 +166,8 @@ export function readListQuery(raw: RawLaneRunsQuery): LaneRunsQuery {
 
 /**
  * The ticket of a run as the list shows it. The reference was written by the engine (`github:owner/repo#128`, `jira:…#PROJ-7`); one that
- * does not parse shows no ticket rather than a made-up one. A link exists only for GitHub, where the reference names the page.
+ * does not parse shows no ticket rather than a made-up one. A link exists only for GitHub, where the reference names the page; the page makes it
+ * (`workflow-pages/github-link.ts`, the one place that links into a repository), so the view hands over the parts.
  */
 function ticketOf(
   ref: string | null,
@@ -179,7 +181,8 @@ function ticketOf(
   return {
     label: github ? `#${key}` : key,
     title,
-    url: github ? `https://github.com/${repo}/issues/${key}` : null,
+    key,
+    githubRepository: github ? repo : null,
   };
 }
 

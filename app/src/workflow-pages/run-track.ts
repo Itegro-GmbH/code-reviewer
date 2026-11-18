@@ -5,7 +5,10 @@
 // branches of an `if`, the body of a `loop`: `LaneNodeView.innerIds`). The list of lane runs draws one dot for each node; the run page
 // (#1079) and the step panel (#1080) read the same mapping. Pure: no clock, no network; the inputs are what the run routes answer
 // (`LaneNodeView` of `workflow-runs/lane-nodes.ts` and the id, kind, status and round of every step).
-import type { LaneNodeView } from "../workflow-runs/lane-nodes.ts";
+import type {
+  LaneBodyChild,
+  LaneNodeView,
+} from "../workflow-runs/lane-nodes.ts";
 import { TRACK_COPY } from "./messages.ts";
 
 /**
@@ -32,7 +35,7 @@ export type TrackStep = {
   note: string | null;
   connector: string | null;
   state: TrackState;
-  /** How often the node ran: the rounds of a loop (1 for any other node, and for a node that has not run). */
+  /** How often a loop went round, or goes round now (1 for any other node, and for a loop that has not started). */
   rounds: number;
 };
 
@@ -79,10 +82,38 @@ export function trackOf(
       note: node.note,
       connector: node.connector,
       state: stateOf(node, rows, counted, index === lastReached, runStatus),
-      rounds: Math.max(1, ...rows.map((row) => row.round)),
+      rounds: roundsOf(node, steps),
     };
   });
   return { steps: track, current: currentOf(track) };
+}
+
+/**
+ * The rounds of a top-level loop: the most any step of its direct body has begun. `StepRow.round` counts a step over the whole run
+ * (the engine's `roundOf`), so a loop in the body, which starts again with every round of the one around it, cannot be read from the
+ * rows of the steps inside it. An agent, an action and an `if` write one row each time, a loop writes one when it ends, so a loop in
+ * the body counts one more while its own body is going on (a row of something inside it that is newer than its last end). `steps` are
+ * in the order they were written. Any other node, and a loop none of whose steps has begun, has 1 round.
+ */
+function roundsOf(node: LaneNodeView, steps: readonly TrackStepRow[]): number {
+  if (node.kind !== "loop") return 1;
+  return Math.max(1, ...node.body.map((child) => visitsOf(child, steps)));
+}
+
+function visitsOf(
+  child: LaneBodyChild,
+  steps: readonly TrackStepRow[],
+): number {
+  const own = steps.flatMap((step, index) =>
+    step.id === child.id ? [index] : [],
+  );
+  if (child.kind !== "loop") return own.length;
+  const inner = new Set(child.innerIds);
+  const lastEnd = own.at(-1) ?? -1;
+  const going = steps.some(
+    (step, index) => index > lastEnd && inner.has(step.id),
+  );
+  return own.length + (going ? 1 : 0);
 }
 
 function stateOf(
