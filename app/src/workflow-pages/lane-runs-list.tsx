@@ -126,7 +126,10 @@ export function LaneRunsList({
   const [loadFailed, setLoadFailed] = useState(false);
   const runs = mergeRunPages(data.runs, more?.runs ?? []);
   // The nodes of a lane version never change, so the entries of every page read so far can be pooled.
-  const laneNodes = { ...more?.laneNodes, ...data.laneNodes };
+  const laneNodes = useMemo(
+    () => ({ ...more?.laneNodes, ...data.laneNodes }),
+    [more?.laneNodes, data.laneNodes],
+  );
   const nextCursor = more === null ? data.nextCursor : more.nextCursor;
 
   async function loadMore(): Promise<void> {

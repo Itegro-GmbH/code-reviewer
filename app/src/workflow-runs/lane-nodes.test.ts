@@ -192,4 +192,11 @@ describe("the nodes of a response, once for each lane version", () => {
     expect(laneNodesFor(byKey, null)).toEqual([]);
     expect(laneNodesFor(byKey, "b")).toEqual([]);
   });
+
+  // #1087-T12
+  it("finds none in a response of an older server, which has neither the entries nor the key", () => {
+    expect(laneNodesFor(undefined, "a")).toEqual([]);
+    expect(laneNodesFor({}, undefined)).toEqual([]);
+    expect(laneNodesFor(undefined, undefined)).toEqual([]);
+  });
 });

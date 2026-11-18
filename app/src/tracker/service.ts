@@ -22,6 +22,7 @@ import type { ProjectService } from "../projects/service.ts";
 import type { SyncState } from "../projects/ui/sync-staleness.ts";
 import {
   createLaneNodesIndex,
+  laneNodesKey,
   laneNodesOfRun,
   type LaneNodesByKey,
   type LaneNodesIndex,
@@ -178,7 +179,7 @@ const nodesCache = new Map<
 
 function laneNodesOfProgress(progress: RunLaneProgress): LaneNodeView[] {
   if (progress.document === null) return [];
-  const key = `${progress.workflowId}@${String(progress.workflowVersion)}|${progress.triggerKind}|${progress.triggerId ?? ""}`;
+  const key = laneNodesKey(progress);
   const cached = nodesCache.get(key);
   if (cached !== undefined && cached.document === progress.document)
     return cached.nodes;

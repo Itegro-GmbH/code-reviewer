@@ -29,7 +29,8 @@ export function LaneTrack({
   laneNodes,
 }: {
   lane: TicketLane;
-  laneNodes: TicketList["laneNodes"];
+  /** Absent in the response of an older server (#1087): no track then. */
+  laneNodes: TicketList["laneNodes"] | undefined;
 }) {
   const nodes = laneNodesFor(laneNodes, lane.nodesKey);
   if (nodes.length === 0) return null;

@@ -130,12 +130,15 @@ export function laneNodesKey(run: {
   return `${run.workflowId}@${String(run.workflowVersion)}|${run.triggerKind}|${run.triggerId ?? ""}`;
 }
 
-/** What a view does with a run's `nodesKey`: the nodes of its entry, none for a run without a key (or for a key the response lacks). */
+/**
+ * What a view does with a run's `nodesKey`: the nodes of its entry, none for a run without a key (or for a key the response lacks). A
+ * response of an older server has neither `laneNodes` nor `nodesKey` (#1087): it shows no track, and does not crash the page.
+ */
 export function laneNodesFor(
-  byKey: LaneNodesByKey,
-  nodesKey: string | null,
+  byKey: LaneNodesByKey | undefined,
+  nodesKey: string | null | undefined,
 ): readonly LaneNodeView[] {
-  return nodesKey === null ? [] : (byKey[nodesKey] ?? []);
+  return nodesKey == null || byKey === undefined ? [] : (byKey[nodesKey] ?? []);
 }
 
 export type LaneNodesIndex = {
