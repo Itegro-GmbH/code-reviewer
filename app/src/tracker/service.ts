@@ -159,16 +159,43 @@ export type TrackerServiceDependencies = {
   jira?: JiraMirrorSync;
 };
 
+/**
+ * The nodes of a lane version as `laneNodesOfRun` reads them, kept for the next poll: the board asks every few seconds and a version of a
+ * lane never changes, so the document is parsed once for each (version, trigger) and not once for each ticket of each poll. An entry holds
+ * the text it was made from and is used only for the same text (an id that names another text is read again). Bounded: the oldest goes.
+ */
+const NODES_CACHE_MAX = 128;
+const nodesCache = new Map<
+  string,
+  { document: string; nodes: LaneNodeView[] }
+>();
+
+function laneNodesOfProgress(progress: RunLaneProgress): LaneNodeView[] {
+  if (progress.document === null) return [];
+  const key = `${progress.workflowId}@${String(progress.workflowVersion)}|${progress.triggerKind}|${progress.triggerId ?? ""}`;
+  const cached = nodesCache.get(key);
+  if (cached !== undefined && cached.document === progress.document)
+    return cached.nodes;
+  const nodes = laneNodesOfRun(progress.document, {
+    id: progress.triggerId,
+    kind: progress.triggerKind,
+  });
+  nodesCache.delete(key);
+  nodesCache.set(key, { document: progress.document, nodes });
+  if (nodesCache.size > NODES_CACHE_MAX) {
+    const oldest = nodesCache.keys().next();
+    if (!oldest.done) nodesCache.delete(oldest.value);
+  }
+  return nodes;
+}
+
 /** The nodes and the step summaries of an active run for the board (#1080); a run whose progress was not read shows no track. */
 function laneProgressView(
   progress: RunLaneProgress | undefined,
 ): Pick<TicketLane, "nodes" | "steps"> {
   if (progress === undefined) return { nodes: [], steps: [] };
   return {
-    nodes: laneNodesOfRun(progress.document ?? undefined, {
-      id: progress.triggerId,
-      kind: progress.triggerKind,
-    }),
+    nodes: laneNodesOfProgress(progress),
     steps: progress.steps.map((step) => ({
       id: step.stepId,
       kind: step.kind,

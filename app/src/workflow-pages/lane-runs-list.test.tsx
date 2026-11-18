@@ -45,6 +45,8 @@ function item(
     laneName: "Ship it",
     status: "running",
     errorCode: null,
+    trigger: "ticket.labeled",
+    actorLogin: "ada",
     project: { id: "repo-1", name: "acme/widgets" },
     ticket: {
       label: "#128",
@@ -524,14 +526,14 @@ describe("more runs", () => {
 });
 
 describe("the Runs section of a lane's page (#1080)", () => {
-  function renderInLane(initial: LaneRunListView) {
+  function renderInLane(initial: LaneRunListView, canStart = true) {
     const listWorkspace = vi.fn(async () => ok(initial));
     const api = { listWorkspace } as unknown as WorkflowRunsApi;
     render(
       <LaneRunsList
         workspaceSlug="acme"
         filter={{ lane: "wf-1" }}
-        inLane
+        inLane={{ canStart }}
         initial={initial}
         api={api}
       />,
@@ -571,10 +573,45 @@ describe("the Runs section of a lane's page (#1080)", () => {
   });
 
   // #1080-T32
-  it("says that the lane has not run yet, not that a filter matched nothing", () => {
-    renderInLane(page([]));
-
-    expect(screen.getByText(LANE_RUNS_COPY.emptyInLane)).toBeTruthy();
+  it("says that the lane has not run yet, not that a filter matched nothing, and promises Run now only where it is offered", () => {
+    renderInLane(page([]), true);
+    expect(screen.getByText(LANE_RUNS_COPY.emptyInLaneStartable)).toBeTruthy();
     expect(screen.queryByText(LANE_RUNS_COPY.emptyFiltered)).toBeNull();
+    cleanup();
+
+    // A member who may not start, or an archived lane (the page offers no start): no promise of the button.
+    renderInLane(page([]), false);
+    expect(screen.getByText(LANE_RUNS_COPY.emptyInLane)).toBeTruthy();
+    expect(LANE_RUNS_COPY.emptyInLane).not.toContain("Run now");
+    expect(screen.queryByText(LANE_RUNS_COPY.emptyInLaneStartable)).toBeNull();
+  });
+
+  // #1080-T33
+  it("has no column for the lane and the project, which are the page's own, and still shows what started each run", () => {
+    renderInLane(
+      page([
+        item(),
+        item({ id: "run-2", trigger: "manual", actorLogin: "grace" }),
+      ]),
+    );
+
+    const headers = screen
+      .getAllByRole("columnheader")
+      .map((header) => header.textContent);
+    expect(headers).not.toContain(LANE_RUNS_COPY.columnLane);
+    expect(headers).not.toContain(LANE_RUNS_COPY.columnProject);
+    expect(headers).toContain(LANE_RUNS_COPY.columnTrigger);
+    const [first, second] = screen
+      .getAllByRole("row")
+      .filter((row) => row.hasAttribute("data-run-id"));
+    expect(within(first as HTMLElement).getByText("ada")).toBeTruthy();
+    expect(
+      within(first as HTMLElement).getByText("A label on a ticket"),
+    ).toBeTruthy();
+    // By hand: the trigger, not a second line with the login.
+    expect(
+      within(second as HTMLElement).getByText("Started by hand"),
+    ).toBeTruthy();
+    expect(within(second as HTMLElement).queryByText("grace")).toBeNull();
   });
 });

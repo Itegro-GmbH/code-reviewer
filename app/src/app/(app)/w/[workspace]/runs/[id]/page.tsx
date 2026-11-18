@@ -11,6 +11,7 @@ import {
 } from "@/runs/ui/run-detail-page";
 import { getCapabilities } from "@/capabilities/shared";
 import { AgentRunLaneNotice } from "@/workflow-pages/agent-run-lane-notice";
+import { laneStepOfAgentRunPage } from "@/workflow-pages/agent-run-lane-step";
 import { workflowRunServiceFor } from "@/workflow-runs/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 
@@ -54,12 +55,12 @@ async function RunContent({
   const task = data.snapshot.run.implementer;
   // #1080: a task that is a step of a lane run says so and links to the lane run at that step. Only a deployment with lanes asks, and only
   // for a task; the lookup is the workspace's own (a job of another workspace is no step here).
-  const laneStep =
-    task !== undefined && getCapabilities().has("implementer")
-      ? await workflowRunServiceFor(workspaceId).laneStepOfAgentRun(
-          data.snapshot.run.id,
-        )
-      : undefined;
+  const laneStep = await laneStepOfAgentRunPage({
+    hasImplementer: getCapabilities().has("implementer"),
+    isTask: task !== undefined,
+    runId: data.snapshot.run.id,
+    runs: () => workflowRunServiceFor(workspaceId),
+  });
   return (
     <>
       <RunDetailPageContent

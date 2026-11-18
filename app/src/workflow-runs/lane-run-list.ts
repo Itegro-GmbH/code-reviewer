@@ -59,6 +59,9 @@ export type LaneRunListItemView = {
   laneName: string;
   status: WorkspaceRunRow["run"]["status"];
   errorCode: string | null;
+  /** What started the run, and the login it acts as (the person who started it, or who put the label on); display only. */
+  trigger: WorkspaceRunRow["run"]["triggerKind"];
+  actorLogin: string;
   /** The repository the run works on: the project of the list. `name` is `owner/name`, null when the repository is gone. */
   project: { id: string; name: string | null };
   /** The ticket the run is about; null for a run that is about none. */
@@ -195,6 +198,8 @@ export function listItemOf(row: WorkspaceRunRow): LaneRunListItemView {
     laneName: row.laneName,
     status: run.status,
     errorCode: run.errorCode,
+    trigger: run.triggerKind,
+    actorLogin: run.actorLogin,
     project: { id: run.repositoryId, name: row.repositoryName },
     ticket: ticketOf(run.ticketRef, row.ticket?.title ?? null),
     nodes: laneNodesOfRun(row.document ?? undefined, {

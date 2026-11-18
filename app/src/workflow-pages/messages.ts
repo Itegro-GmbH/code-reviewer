@@ -360,8 +360,10 @@ export const LANE_RUNS_COPY = {
   emptyDescription:
     "A run starts when a ticket gets the label or status a lane waits for, or when someone starts a lane by hand. Open a project and its Lanes tab to set one up.",
   emptyFiltered: "No lane run matches this filter.",
-  emptyInLane:
+  emptyInLane: "This lane has not run yet. Wait for its trigger.",
+  emptyInLaneStartable:
     "This lane has not run yet. Start it with Run now, or wait for its trigger.",
+  columnTrigger: "Trigger",
   invalidFilterTitle: "This filter is not valid",
   invalidFilterDescription:
     "The status, project or lane in the address is not one this page knows.",

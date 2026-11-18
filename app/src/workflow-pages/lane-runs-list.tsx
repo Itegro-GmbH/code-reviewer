@@ -44,6 +44,7 @@ import {
   describeRunPollFailure,
   LANE_RUNS_COPY as COPY,
   PAGE_COPY,
+  TRIGGER_COPY,
 } from "./messages.ts";
 import { githubLinkInRepository } from "./github-link.ts";
 import { RunTrackView } from "./run-track.tsx";
@@ -78,15 +79,19 @@ export function LaneRunsList({
   workspaceSlug,
   filter,
   initial,
-  inLane = false,
+  inLane,
   api: apiProp,
 }: {
   workspaceSlug: string;
   /** What the address asked for: the list keeps to it while it polls and when it loads more. */
   filter: LaneRunsQuery;
   initial: LaneRunListView;
-  /** The list is the Runs section of one lane's page (#1080): `filter.lane` is the page's own, so an empty list is no filter's doing. */
-  inLane?: boolean;
+  /**
+   * The list is the Runs section of one lane's page (#1080): `filter.lane` is the page's own, so an empty list is no filter's doing, and the
+   * lane and the project are the page's too (no column for them). `canStart` is whether the page offers to start the lane (a member who may,
+   * a lane that is not archived and has a form): the empty text promises "Run now" only then.
+   */
+  inLane?: { canStart: boolean };
   /** Only tests pass this. */
   api?: WorkflowRunsApi;
 }) {
@@ -134,7 +139,7 @@ export function LaneRunsList({
   const filtered =
     filter.status !== undefined ||
     filter.project !== undefined ||
-    (filter.lane !== undefined && !inLane);
+    (filter.lane !== undefined && inLane === undefined);
   return (
     <div className="flex flex-col gap-4">
       <StatusRegion label={COPY.updating}>
@@ -148,9 +153,11 @@ export function LaneRunsList({
             <EmptyDescription>
               {filtered
                 ? COPY.emptyFiltered
-                : inLane
-                  ? COPY.emptyInLane
-                  : COPY.emptyDescription}
+                : inLane === undefined
+                  ? COPY.emptyDescription
+                  : inLane.canStart
+                    ? COPY.emptyInLaneStartable
+                    : COPY.emptyInLane}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -160,10 +167,15 @@ export function LaneRunsList({
           <TableHeader>
             <TableRow>
               <TableHead scope="col">{COPY.columnTicket}</TableHead>
-              <TableHead scope="col">{COPY.columnLane}</TableHead>
-              <TableHead scope="col">{COPY.columnProject}</TableHead>
+              {inLane === undefined ? (
+                <>
+                  <TableHead scope="col">{COPY.columnLane}</TableHead>
+                  <TableHead scope="col">{COPY.columnProject}</TableHead>
+                </>
+              ) : null}
               <TableHead scope="col">{COPY.columnSteps}</TableHead>
               <TableHead scope="col">{COPY.columnStatus}</TableHead>
+              <TableHead scope="col">{COPY.columnTrigger}</TableHead>
               <TableHead scope="col">{COPY.columnStarted}</TableHead>
               <TableHead scope="col">{COPY.columnDuration}</TableHead>
               <TableHead scope="col">{COPY.columnSpent}</TableHead>
@@ -176,6 +188,7 @@ export function LaneRunsList({
                 run={run}
                 now={data.now}
                 workspaceSlug={workspaceSlug}
+                inLane={inLane !== undefined}
               />
             ))}
           </TableBody>
@@ -200,10 +213,13 @@ function LaneRunRow({
   run,
   now,
   workspaceSlug,
+  inLane,
 }: {
   run: LaneRunListItemView;
   now: string;
   workspaceSlug: string;
+  /** On the page of one lane the row has no lane and project cell, and the ticket column links to the run. */
+  inLane: boolean;
 }) {
   const failure = describeRunFailure(run.errorCode);
   const duration = laneRunDurationMs(run, now);
@@ -249,32 +265,53 @@ function LaneRunRow({
           </>
         )}
       </TableCell>
-      <TableCell className="align-top whitespace-normal text-xs">
-        <Link
-          href={runPath}
-          className="font-medium"
-          aria-label={`${COPY.openRun}: ${run.laneName}, ${COPY.version} ${String(run.workflowVersion)}, ${formatUtc(run.createdAt)}`}
-        >
-          {run.laneName}
-        </Link>
-        <span className="block text-muted-foreground">
-          {COPY.version} {run.workflowVersion}
-        </span>
-      </TableCell>
-      <TableCell className="align-top whitespace-normal text-xs">
-        {run.project.name ?? (
-          <span className="text-muted-foreground">{COPY.projectGone}</span>
-        )}
-      </TableCell>
+      {inLane ? null : (
+        <>
+          <TableCell className="align-top whitespace-normal text-xs">
+            <Link
+              href={runPath}
+              className="font-medium"
+              aria-label={`${COPY.openRun}: ${run.laneName}, ${COPY.version} ${String(run.workflowVersion)}, ${formatUtc(run.createdAt)}`}
+            >
+              {run.laneName}
+            </Link>
+            <span className="block text-muted-foreground">
+              {COPY.version} {run.workflowVersion}
+            </span>
+          </TableCell>
+          <TableCell className="align-top whitespace-normal text-xs">
+            {run.project.name ?? (
+              <span className="text-muted-foreground">{COPY.projectGone}</span>
+            )}
+          </TableCell>
+        </>
+      )}
       <TableCell className="min-w-36 max-w-56 align-top whitespace-normal">
         <RunTrackView track={track} />
       </TableCell>
       <TableCell className="align-top whitespace-normal">
-        <WorkflowRunStatusBadge status={run.status} />
+        {inLane ? (
+          // The lane cell, which links to the run elsewhere, is not in this row: the status is the link.
+          <Link
+            href={runPath}
+            className="no-underline"
+            aria-label={`${COPY.openRun}: ${run.laneName}, ${COPY.version} ${String(run.workflowVersion)}, ${formatUtc(run.createdAt)}`}
+          >
+            <WorkflowRunStatusBadge status={run.status} />
+          </Link>
+        ) : (
+          <WorkflowRunStatusBadge status={run.status} />
+        )}
         {failure === null ? null : (
           <span className="mt-1 block text-xs text-muted-foreground">
             {failure}
           </span>
+        )}
+      </TableCell>
+      <TableCell className="align-top whitespace-normal text-xs">
+        {TRIGGER_COPY[run.trigger]}
+        {run.trigger === "manual" ? null : (
+          <span className="block text-muted-foreground">{run.actorLogin}</span>
         )}
       </TableCell>
       <TableCell className="align-top whitespace-normal text-xs">

@@ -167,6 +167,9 @@ export type TicketRunSummary = {
  */
 export type RunLaneProgress = {
   runId: string;
+  workflowId: string;
+  /** The version of the lane the run started with: with `workflowId`, the key of the version's document (a version never changes). */
+  workflowVersion: number;
   triggerId: string | null;
   triggerKind: RunTriggerKind;
   /** The rows of its steps in the order they were written. */
@@ -396,13 +399,15 @@ export type WorkflowRunsRepository = {
    */
   summarizeTickets(ticketRefs: readonly string[]): Promise<TicketRunSummary[]>;
   /**
-   * #1080: where each of these runs of the workspace stands in its lane, in one query for the steps and one for the versions of the whole
-   * set, never one for each run. A run that is not this workspace's is not in the answer.
+   * #1080: where each of these runs of the workspace stands in its lane, in one query for the runs, one for the steps and one for the
+   * versions of the whole set, never one for each run. A run that is not this workspace's is not in the answer.
    */
   laneProgressOfRuns(runIds: readonly string[]): Promise<RunLaneProgress[]>;
   /**
-   * #1080: the lane step the agent run `jobId` (the job of an Implementer turn) belongs to: the step that holds that job, or the turn of that
-   * job. Undefined for a job that no step of this workspace holds, and for a job of another workspace.
+   * #1080: the lane step the agent run `jobId` (the job of an Implementer turn) belongs to: the step that holds that job, or else the step
+   * that holds a turn of the same Implementer session (a step keeps only its newest job and turn: after an answer it holds the follow-up
+   * turn, and the job of the question is found through the session). Undefined for a job that no step of this workspace holds, and for a job
+   * of another workspace. An agent run of no lane costs two index reads and finds nothing.
    */
   findLaneStepOfJob(jobId: string): Promise<LaneStepOfJob | undefined>;
   listSteps(runId: string): Promise<StoredStepRun[]>;
@@ -564,6 +569,28 @@ async function mirroredTickets(
   }
   return found;
 }
+
+/**
+ * The ids of the turns of the Implementer session that the turn of `jobId` belongs to (#1080), as a subquery: the turn is read by its job
+ * (`implementer_turns_job_unique`) and the turns of its session by `implementer_turns_session_number_unique`. Empty for a job with no turn.
+ * Both reads are inside the workspace.
+ */
+const sessionTurnsOfJob = (
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  jobId: string,
+) =>
+  db
+    .selectFrom("implementer_turns as session_turn")
+    .select("session_turn.id")
+    .where("session_turn.workspace_id", "=", workspaceId)
+    .where("session_turn.session_id", "=", (eb) =>
+      eb
+        .selectFrom("implementer_turns as job_turn")
+        .select("job_turn.session_id")
+        .where("job_turn.workspace_id", "=", workspaceId)
+        .where("job_turn.job_id", "=", jobId),
+    );
 
 /** The key of a version of a lane's document in the map `versionDocuments` answers. */
 const versionKey = (workflowId: string, version: number): string =>
@@ -1076,9 +1103,17 @@ export function createWorkflowRunsRepository(
         summary.spentMicroUsd += run.spent_micro_usd;
         summaries.set(ref, summary);
       }
-      // The newest running or waiting run of a ticket is its active one.
-      for (const run of [...running].sort((a, b) =>
-        a.created_at < b.created_at ? 1 : -1,
+      // The active run of a ticket is the one that waits for an answer (it needs somebody), else the newest one that runs; of two equals the
+      // one with the greater id, so the choice does not depend on the order the rows were read in.
+      for (const run of [...running].sort(
+        (a, b) =>
+          Number(b.status === "waiting") - Number(a.status === "waiting") ||
+          (a.created_at < b.created_at
+            ? 1
+            : a.created_at > b.created_at
+              ? -1
+              : 0) ||
+          (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
       )) {
         const summary = summaries.get(run.ticket_ref as string);
         if (summary === undefined || summary.activeRun !== null) continue;
@@ -1118,6 +1153,8 @@ export function createWorkflowRunsRepository(
       ]);
       return runs.map((run) => ({
         runId: run.id,
+        workflowId: run.workflow_id,
+        workflowVersion: run.workflow_version,
         triggerId: run.trigger_id,
         triggerKind: run.trigger_kind as RunTriggerKind,
         steps: summaries.get(run.id) ?? [],
@@ -1128,44 +1165,46 @@ export function createWorkflowRunsRepository(
     },
 
     async findLaneStepOfJob(jobId) {
-      // The step that holds the job; failing that, the step that holds the turn of the job (a step keeps only its newest job, but the
-      // turn is looked up from the job, so the filter stays inside the workspace on both sides).
-      const row = await db
-        .selectFrom("workflow_step_runs")
-        .innerJoin(
-          "workflow_runs",
-          "workflow_runs.id",
-          "workflow_step_runs.run_id",
-        )
-        .innerJoin("workflows", "workflows.id", "workflow_runs.workflow_id")
-        .select([
-          "workflow_step_runs.run_id as run_id",
-          "workflow_step_runs.step_id as step_id",
-          "workflow_runs.workflow_id as workflow_id",
-          "workflows.name as lane_name",
-        ])
-        .where("workflow_step_runs.workspace_id", "=", workspaceId)
-        .where("workflow_runs.workspace_id", "=", workspaceId)
-        .where("workflows.workspace_id", "=", workspaceId)
-        .where((eb) =>
-          eb.or([
-            eb("workflow_step_runs.job_id", "=", jobId),
-            eb(
-              "workflow_step_runs.turn_id",
-              "in",
-              eb
-                .selectFrom("implementer_turns")
-                .select("implementer_turns.id")
-                .where("implementer_turns.workspace_id", "=", workspaceId)
-                .where("implementer_turns.job_id", "=", jobId),
-            ),
-          ]),
-        )
-        // A job belongs to one step; were two to claim it, the one written last is where the work is now.
-        .orderBy("workflow_step_runs.created_at", "desc")
-        .orderBy("workflow_step_runs.id", "desc")
-        .limit(1)
+      // Every table is filtered by the workspace, so a job of another workspace names no step.
+      const stepsOfLane = () =>
+        db
+          .selectFrom("workflow_step_runs")
+          .innerJoin(
+            "workflow_runs",
+            "workflow_runs.id",
+            "workflow_step_runs.run_id",
+          )
+          .innerJoin("workflows", "workflows.id", "workflow_runs.workflow_id")
+          .select([
+            "workflow_step_runs.run_id as run_id",
+            "workflow_step_runs.step_id as step_id",
+            "workflow_runs.workflow_id as workflow_id",
+            "workflows.name as lane_name",
+          ])
+          .where("workflow_step_runs.workspace_id", "=", workspaceId)
+          .where("workflow_runs.workspace_id", "=", workspaceId)
+          .where("workflows.workspace_id", "=", workspaceId);
+      // A step is found by its job first: the unique index `workflow_step_runs_job_unique`, one lookup, and the only one an agent run of no
+      // lane costs besides the turn of its job below.
+      let row = await stepsOfLane()
+        .where("workflow_step_runs.job_id", "=", jobId)
         .executeTakeFirst();
+      if (row === undefined) {
+        // A step keeps only its newest job and turn: `attachAnswerTurn` moves both to the follow-up turn of the same session when someone
+        // answers. So the job of the first turn is found through the session: the turn of the job (`implementer_turns_job_unique`), the turns of
+        // its session (`implementer_turns_session_number_unique`), the step that holds one of them (`workflow_step_runs_turn_index`).
+        row = await stepsOfLane()
+          .where(
+            "workflow_step_runs.turn_id",
+            "in",
+            sessionTurnsOfJob(db, workspaceId, jobId),
+          )
+          // A session is one step's; were two to claim it, the one written last is where the work is now.
+          .orderBy("workflow_step_runs.created_at", "desc")
+          .orderBy("workflow_step_runs.id", "desc")
+          .limit(1)
+          .executeTakeFirst();
+      }
       return row === undefined
         ? undefined
         : {

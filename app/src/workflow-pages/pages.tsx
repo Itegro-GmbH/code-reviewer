@@ -237,7 +237,12 @@ export function WorkflowPageContent({
         <LaneRunsList
           workspaceSlug={workspaceSlug}
           filter={{ lane: workflow.id }}
-          inLane
+          inLane={{
+            canStart:
+              mayStart &&
+              workflow.archivedAt === null &&
+              (data.form.kind === "form" || data.form.kind === "forms"),
+          }}
           initial={data.runs}
           {...(api === undefined ? {} : { api })}
         />

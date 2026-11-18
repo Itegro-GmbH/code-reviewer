@@ -16,7 +16,10 @@ import {
   twoAgentSteps,
   type EngineHarness,
 } from "../test-support/workflow-engine-harness.ts";
+import { sha } from "../test-support/jobs.ts";
 import { addWorkspace } from "../test-support/workspaces.ts";
+import type { AskChannel } from "../workflow-runs/engine.ts";
+import { parseStepAsk } from "../workflow-runs/ask.ts";
 import { createWorkflowService } from "../workflows/service.ts";
 import { createWorkflowRunService } from "../workflow-runs/service.ts";
 import type { WorkflowRunsApi } from "./api.ts";
@@ -141,12 +144,20 @@ describe("the progress of an active run, for the ticket board", () => {
   });
 });
 
+/** A channel for the questions that posts nothing: the run waits, and an answer goes on. */
+const SILENT_ASKS: AskChannel = {
+  asked: async () => ({ commentId: "9001" }),
+  answered: async () => {},
+  superseded: async () => {},
+  cancelled: async () => {},
+  discarded: async () => {},
+};
+
 describe("the lane step of an agent run", () => {
   // #1080-T60
-  it("finds the lane, the run and the step by the job of the agent run, and by its turn when the step holds another job", async () => {
+  it("finds the lane, the run and the step by the job of the agent run", async () => {
     const app = await startEngineHarness();
     const { workflow, runId } = await startedRun(app);
-    const { db } = app.h;
     const jobId = await app.finishTurn({
       agentResult: { summary: "Plan." },
       costUsd: 0.1,
@@ -159,23 +170,58 @@ describe("the lane step of an agent run", () => {
       laneName: "Two agents",
       stepId: "plan",
     });
+  });
 
-    // The step holds no job any more (it went on with another one): the turn of the job still names the step.
-    const turn = await db
-      .selectFrom("implementer_turns")
-      .select("id")
-      .where("job_id", "=", jobId)
-      .executeTakeFirstOrThrow();
-    await db
-      .updateTable("workflow_step_runs")
-      .set({ job_id: null, turn_id: turn.id })
+  // #1080-T62
+  it("still finds the step from the first job after an answer moved the step on to the follow-up turn of the same session", async () => {
+    const app = await startEngineHarness({ asks: SILENT_ASKS });
+    const { workflow, runId } = await startedRun(app);
+    const { db } = app.h;
+    app.h.fake.addBranch("acme/widgets", `workflow/${runId}/plan`, sha("c"));
+    // The agent asks, the run waits, somebody answers: the engine starts the next turn of the session with a new job.
+    const first = await app.finishTurn({
+      agentAsk: { question: "Retry which failures?" },
+      costUsd: 0.1,
+    });
+    await app.engine.jobEnded(first);
+    const waiting = (await app.stateOf(runId)).steps.findLast(
+      (step) => step.status === "waiting",
+    );
+    expect(waiting?.ask).not.toBeNull();
+    await app.engine.answer(runId, {
+      text: "Both.",
+      by: "a",
+      via: "ui",
+      question: {
+        stepRunId: waiting?.id ?? "none",
+        n: parseStepAsk(waiting?.ask ?? null)?.n ?? 1,
+      },
+    });
+    await app.engine.advance(runId);
+    const row = await db
+      .selectFrom("workflow_step_runs")
+      .select(["job_id", "turn_id"])
       .where("run_id", "=", runId)
       .where("step_id", "=", "plan")
-      .execute();
-    expect(await own.runs.laneStepOfAgentRun(jobId)).toMatchObject({
+      .executeTakeFirstOrThrow();
+    // The step now holds the follow-up job and turn, not the ones of the question.
+    expect(row.job_id).not.toBeNull();
+    expect(row.job_id).not.toBe(first);
+    const own = servicesOf(app, app.workspaceId);
+    const expected = {
+      workflowId: workflow.id,
       runId,
+      laneName: "Two agents",
       stepId: "plan",
-    });
+    };
+
+    expect(await own.runs.laneStepOfAgentRun(first)).toEqual(expected);
+    expect(await own.runs.laneStepOfAgentRun(row.job_id as string)).toEqual(
+      expected,
+    );
+    // Another workspace finds neither.
+    const foreign = servicesOf(app, await addWorkspace(db, "other"));
+    expect(await foreign.runs.laneStepOfAgentRun(first)).toBeUndefined();
   });
 
   // #1080-T61
@@ -193,5 +239,57 @@ describe("the lane step of an agent run", () => {
     expect(await own.runs.laneStepOfAgentRun("no-such-job")).toBeUndefined();
     expect(await own.runs.laneStepOfAgentRun("")).toBeUndefined();
     expect(await own.runs.laneStepOfAgentRun("x".repeat(500))).toBeUndefined();
+  });
+});
+
+describe("the active run of a ticket", () => {
+  // #1080-T63
+  it("is the run that waits for an answer, else the newest one, and of two equals the greater id", async () => {
+    const app = await startEngineHarness();
+    const { db } = app.h;
+    const ref = "github:acme/widgets#7";
+    const lanes = [];
+    for (const name of ["First", "Second", "Third"]) {
+      lanes.push(await app.saveWorkflow({ ...twoAgentSteps(), name }));
+    }
+    const runs = [];
+    for (const [index, lane] of lanes.entries()) {
+      const { run } = await app.start(lane.id, {
+        clientRequestId: `run-${String(index)}`,
+      });
+      runs.push(run.id);
+    }
+    const [oldest, middle, newest] = runs as [string, string, string];
+    const set = (id: string, values: Record<string, string>) =>
+      db
+        .updateTable("workflow_runs")
+        .set({ ticket_ref: ref, ...values })
+        .where("id", "=", id)
+        .execute();
+    const active = async () =>
+      (
+        await createWorkflowRunsRepository(
+          db,
+          app.workspaceId,
+        ).summarizeTickets([ref])
+      )[0]?.activeRun?.runId;
+    await set(oldest, { created_at: "2026-11-18T10:00:00.000Z" });
+    await set(middle, { created_at: "2026-11-18T11:00:00.000Z" });
+    await set(newest, { created_at: "2026-11-18T12:00:00.000Z" });
+
+    // all three run: the newest
+    expect(await active()).toBe(newest);
+
+    // the oldest waits for an answer: it needs somebody, so it is the one the ticket shows
+    await set(oldest, { status: "waiting" });
+    expect(await active()).toBe(oldest);
+
+    // two that wait: the newest of them
+    await set(middle, { status: "waiting" });
+    expect(await active()).toBe(middle);
+
+    // the same time: the greater id, whatever the order the rows are read in
+    await set(oldest, { created_at: "2026-11-18T11:00:00.000Z" });
+    expect(await active()).toBe([oldest, middle].sort().at(-1));
   });
 });

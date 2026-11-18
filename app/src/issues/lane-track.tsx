@@ -8,12 +8,18 @@ import { trackOf } from "../workflow-pages/run-track.ts";
 import type { TicketLane } from "../tracker/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 
-/** The run page of the lane run on a ticket: the same address the Runs list links to. */
+/**
+ * The run page of the lane run on a ticket: the address the Runs list links to, opened at the step the run is at (`?step=`), so the page
+ * lands where the work is. A run with no step yet opens at the page's own default.
+ */
 export function laneRunPath(workspaceSlug: string, lane: TicketLane): string {
-  return workspacePath(
+  const path = workspacePath(
     workspaceSlug,
     `/workflows/${encodeURIComponent(lane.workflowId)}/runs/${encodeURIComponent(lane.runId)}`,
   );
+  return lane.step === null
+    ? path
+    : `${path}?step=${encodeURIComponent(lane.step)}`;
 }
 
 /** The track of the run, or nothing when the lane version of the run cannot be read (no nodes to draw it on). */

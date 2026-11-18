@@ -488,7 +488,7 @@ describe("the lane run on a ticket of the board (#1080)", () => {
       row
         .getByRole("link", { name: "Open the run of Issue to PR" })
         .getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-9/runs/run-9");
+    ).toBe("/w/acme/workflows/wf-9/runs/run-9?step=review");
   });
 
   // #1080-T11
@@ -503,7 +503,7 @@ describe("the lane run on a ticket of the board (#1080)", () => {
       row
         .getByRole("link", { name: "Open the run of Issue to PR" })
         .getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1?step=implement");
   });
 
   // #1080-T12
@@ -513,6 +513,76 @@ describe("the lane run on a ticket of the board (#1080)", () => {
     const row = within(rowOf(1));
     expect(row.queryByRole("img")).toBeNull();
     expect(row.queryByRole("link", { name: /Open the run/ })).toBeNull();
+  });
+
+  // #1080-T14
+  it("opens the run page without a step for a run that has written none yet", () => {
+    board({
+      initial: ticketList([
+        ticket(2, { lane: { ...TRACKED_LANE, step: null, steps: [] } }),
+      ]),
+    });
+
+    expect(
+      within(rowOf(2))
+        .getByRole("link", { name: "Open the run of Issue to PR" })
+        .getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-9/runs/run-9");
+  });
+
+  // #1080-T15
+  it("draws a run that waits in the second round of a loop with a loop in it, and leaves the step of onFailure out", () => {
+    const node = (id: string, kind: "agent" | "action" | "loop") => ({
+      id,
+      kind,
+      note: null,
+      connector: null,
+      innerIds: [] as string[],
+      body: [] as { id: string; kind: typeof kind; innerIds: string[] }[],
+    });
+    const loop = {
+      ...node("outer", "loop"),
+      innerIds: ["work", "inner", "deep"],
+      body: [
+        { id: "work", kind: "agent" as const, innerIds: [] },
+        { id: "inner", kind: "loop" as const, innerIds: ["deep"] },
+      ],
+    };
+    const step = (
+      id: string,
+      kind: "agent" | "action" | "loop",
+      status: "succeeded" | "waiting",
+    ) => ({ id, kind, status, round: 1 });
+    board({
+      initial: ticketList([
+        ticket(2, {
+          lane: {
+            ...TRACKED_LANE,
+            status: "waiting",
+            step: "work",
+            nodes: [node("plan", "agent"), loop, node("ship", "action")],
+            steps: [
+              step("plan", "agent", "succeeded"),
+              step("work", "agent", "succeeded"),
+              step("deep", "action", "succeeded"),
+              step("inner", "loop", "succeeded"),
+              step("work", "agent", "waiting"),
+              // a step of `onFailure`: no node of the lane
+              step("notify", "action", "succeeded"),
+            ],
+          },
+        }),
+      ]),
+    });
+
+    const track = within(rowOf(2)).getByRole("img", {
+      name: /^Step 2 of 3/,
+    });
+    expect(
+      [...track.querySelectorAll("[data-state]")].map((segment) =>
+        segment.getAttribute("data-state"),
+      ),
+    ).toEqual(["done", "waiting", "not_reached"]);
   });
 
   // #1080-T13

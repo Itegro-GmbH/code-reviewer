@@ -156,7 +156,7 @@ describe("the issue drawer", () => {
       within(drawer)
         .getByRole("link", { name: "Open the run" })
         .getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1?step=implement");
     await waitFor(() =>
       expect(within(drawer).getByText("Questions")).toBeTruthy(),
     );
@@ -253,7 +253,7 @@ describe("the lane block of the drawer (#1080)", () => {
     ).toEqual(["done", "running", "not_reached"]);
     expect(
       block.getByRole("link", { name: "Open the run" }).getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-9/runs/run-9");
+    ).toBe("/w/acme/workflows/wf-9/runs/run-9?step=review");
   });
 
   // #1080-T21
@@ -264,6 +264,6 @@ describe("the lane block of the drawer (#1080)", () => {
     expect(block.queryByRole("img")).toBeNull();
     expect(
       block.getByRole("link", { name: "Open the run" }).getAttribute("href"),
-    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1?step=implement");
   });
 });
