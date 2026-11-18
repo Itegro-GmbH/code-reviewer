@@ -159,7 +159,7 @@ function sameRepos(
   base?: string,
 ): boolean {
   if (task.repos === undefined)
-    return stored === null && base === task.baseBranch;
+    return (stored ?? null) === null && base === task.baseBranch;
   return (
     stored !== null &&
     stored.length === task.repos.length &&
