@@ -16,7 +16,6 @@ import {
   GENERIC_FAILURE,
   UNEXPECTED_RESPONSE_COPY,
 } from "../ui/transport-messages.ts";
-import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import {
   RUN_FAILURE_CODES,
   WORKFLOW_OWNER_GONE_TEXT,
@@ -361,6 +360,10 @@ export const LANE_RUNS_COPY = {
   emptyDescription:
     "A run starts when a ticket gets the label or status a lane waits for, or when someone starts a lane by hand. Open a project and its Lanes tab to set one up.",
   emptyFiltered: "No lane run matches this filter.",
+  emptyInLane: "This lane has not run yet. Wait for its trigger.",
+  emptyInLaneStartable:
+    "This lane has not run yet. Start it with Run now, or wait for its trigger.",
+  columnTrigger: "Trigger",
   invalidFilterTitle: "This filter is not valid",
   invalidFilterDescription:
     "The status, project or lane in the address is not one this page knows.",
@@ -372,7 +375,6 @@ export const PAGE_COPY = {
   workflowUpdated: "Last saved",
   runsHeading: "Runs",
   runsEmpty: "This workflow has not been run yet.",
-  runsShowing: `The newest ${String(RUNS_LISTED_MAX)} runs are shown.`,
   columnStatus: "Status",
   columnStarted: "Started",
   columnTrigger: "Trigger",
@@ -520,6 +522,14 @@ export const START_COPY = {
   ticketHint:
     "github:owner/repo#128, an issue of one of the repositories of this workspace.",
   triggerHeading: "Start through",
+} as const;
+
+/** The note on an agent run that is a step of a lane run (#1080). */
+export const AGENT_RUN_LANE_COPY = {
+  label: "Lane run",
+  belongsTo: (lane: string, step: string) =>
+    `This agent run is the step "${step}" of the lane ${lane}.`,
+  open: "Open the lane run at this step",
 } as const;
 
 const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {

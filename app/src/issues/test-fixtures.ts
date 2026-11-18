@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // Tickets as the issues route gives them, for the tests of the Issues tab (#925).
-import type { TicketList, TicketListItem } from "../tracker/service.ts";
+import type {
+  TicketLane,
+  TicketList,
+  TicketListItem,
+} from "../tracker/service.ts";
 import type { StartLane } from "./start-lanes.ts";
 
 export function ticket(
@@ -60,4 +64,43 @@ export const LANE: StartLane = {
   firstSteps: ["Action: ticket.labels", "Repeat: up to 3 rounds"],
   budgetUsd: 20,
   turnTimeLimitMinutes: 60,
+};
+
+/** A lane run on a ticket with its track (#1080): three steps, the first done, the second running. */
+export const TRACKED_LANE: TicketLane = {
+  runId: "run-9",
+  workflowId: "wf-9",
+  name: "Issue to PR",
+  step: "review",
+  status: "running",
+  nodes: [
+    {
+      id: "implement",
+      kind: "agent",
+      note: "Implement",
+      connector: null,
+      innerIds: [],
+      body: [],
+    },
+    {
+      id: "review",
+      kind: "agent",
+      note: "Review",
+      connector: null,
+      innerIds: [],
+      body: [],
+    },
+    {
+      id: "merge",
+      kind: "action",
+      note: null,
+      connector: "pr.merge",
+      innerIds: [],
+      body: [],
+    },
+  ],
+  steps: [
+    { id: "implement", kind: "agent", status: "succeeded", round: 1 },
+    { id: "review", kind: "agent", status: "running", round: 1 },
+  ],
 };

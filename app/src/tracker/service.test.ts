@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 import { describe, expect, it, vi } from "vitest";
+import type {
+  RunLaneProgress,
+  TicketRunSummary,
+} from "../db/repositories/workflow-runs-repository.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import { TrackerError } from "./errors.ts";
+import { trackOf } from "../workflow-pages/run-track.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
 import {
   createTrackerService,
@@ -61,22 +66,58 @@ async function setup(
     lastFullSyncAt: "2026-11-06T09:00:00.000Z",
   });
 
-  const summarizeTickets = vi.fn(async (refs: readonly string[]) =>
-    refs.includes(ticketRefOf("acme/widgets", 1))
-      ? [
-          {
-            ticketRef: ticketRefOf("acme/widgets", 1),
-            spentMicroUsd: 1_234_567,
-            activeRun: {
+  const summarizeTickets = vi.fn(
+    async (refs: readonly string[]): Promise<TicketRunSummary[]> =>
+      refs.includes(ticketRefOf("acme/widgets", 1))
+        ? [
+            {
+              ticketRef: ticketRefOf("acme/widgets", 1),
+              spentMicroUsd: 1_234_567,
+              activeRun: {
+                runId: "run-1",
+                workflowId: "wf-1",
+                workflowName: "Implement",
+                stepId: "review",
+                status: "running" as const,
+              },
+            },
+          ]
+        : [],
+  );
+  const laneProgressOfRuns = vi.fn(
+    async (runIds: readonly string[]): Promise<RunLaneProgress[]> =>
+      runIds.includes("run-1")
+        ? [
+            {
               runId: "run-1",
               workflowId: "wf-1",
-              workflowName: "Implement",
-              stepId: "review",
-              status: "running" as const,
+              workflowVersion: 1,
+              triggerId: "by-hand",
+              triggerKind: "manual" as const,
+              steps: [
+                {
+                  stepId: "implement",
+                  kind: "agent" as const,
+                  status: "succeeded" as const,
+                  round: 1,
+                },
+                {
+                  stepId: "review",
+                  kind: "agent" as const,
+                  status: "running" as const,
+                  round: 1,
+                },
+              ],
+              document: JSON.stringify({
+                triggers: [{ id: "by-hand", kind: "manual" }],
+                steps: [
+                  { id: "implement", kind: "agent", description: "Implement" },
+                  { id: "review", kind: "agent", description: "Review" },
+                ],
+              }),
             },
-          },
-        ]
-      : [],
+          ]
+        : [],
   );
   const run = vi.fn(async () => ({
     status: "done" as const,
@@ -123,11 +164,11 @@ async function setup(
             } as never),
     },
     tracker,
-    runs: { summarizeTickets },
+    runs: { summarizeTickets, laneProgressOfRuns },
     sync: { run: options.sync ?? run },
     ...(options.jira === undefined ? {} : { jira: options.jira }),
   });
-  return { service, run, summarizeTickets, tracker };
+  return { service, run, summarizeTickets, laneProgressOfRuns, tracker };
 }
 
 async function writeTicket(
@@ -200,9 +241,220 @@ describe("the list of the tickets of a project's repository", () => {
         name: "Implement",
         step: "review",
         status: "running",
+        // #1080-T01: the nodes of the lane version and the step summaries, for the board's track.
+        nodes: [
+          expect.objectContaining({ id: "implement", note: "Implement" }),
+          expect.objectContaining({ id: "review", note: "Review" }),
+        ],
+        steps: [
+          { id: "implement", kind: "agent", status: "succeeded", round: 1 },
+          { id: "review", kind: "agent", status: "running", round: 1 },
+        ],
       },
       costUsd: 1.234567,
     });
+  });
+
+  // #1080-T02
+  it("reads the progress of all the active runs of the page in one call, and asks for no run when none is active", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+
+    await service.listIssues("r-1", OPEN);
+
+    expect(laneProgressOfRuns).toHaveBeenCalledTimes(1);
+    expect(laneProgressOfRuns).toHaveBeenCalledWith(["run-1"]);
+
+    laneProgressOfRuns.mockClear();
+    summarizeTickets.mockResolvedValueOnce([]);
+    await service.listIssues("r-1", OPEN);
+    expect(laneProgressOfRuns).toHaveBeenCalledWith([]);
+  });
+
+  // #1080-T03
+  it("shows no track for a run whose lane version cannot be read, and still names the lane", async () => {
+    const { service, laneProgressOfRuns } = await setup();
+    laneProgressOfRuns.mockResolvedValueOnce([
+      {
+        runId: "run-1",
+        workflowId: "wf-1",
+        workflowVersion: 1,
+        triggerId: "by-hand",
+        triggerKind: "manual" as const,
+        steps: [],
+        document: null as never,
+      },
+    ]);
+
+    const list = await service.listIssues("r-1", OPEN);
+
+    expect(list.items[1]?.lane).toMatchObject({
+      name: "Implement",
+      nodes: [],
+      steps: [],
+    });
+  });
+
+  // #1080-T04
+  it("gives the board the nodes and steps of a run in a nested loop, with an onFailure step and a question that waits, so its track is the run page's", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+    summarizeTickets.mockResolvedValueOnce([
+      {
+        ticketRef: ticketRefOf("acme/widgets", 1),
+        spentMicroUsd: 0,
+        activeRun: {
+          runId: "run-1",
+          workflowId: "wf-1",
+          workflowName: "Nested",
+          stepId: "work",
+          status: "waiting" as const,
+        },
+      },
+    ]);
+    laneProgressOfRuns.mockResolvedValueOnce([
+      {
+        runId: "run-1",
+        workflowId: "wf-nested",
+        workflowVersion: 2,
+        triggerId: "by-hand",
+        triggerKind: "manual" as const,
+        steps: [
+          { stepId: "plan", kind: "agent", status: "succeeded", round: 1 },
+          { stepId: "work", kind: "agent", status: "succeeded", round: 1 },
+          { stepId: "deep", kind: "action", status: "succeeded", round: 1 },
+          { stepId: "inner", kind: "loop", status: "succeeded", round: 1 },
+          // the second round of the outer loop: the agent asks, and waits
+          { stepId: "work", kind: "agent", status: "waiting", round: 2 },
+          // a step of `onFailure` belongs to no node
+          { stepId: "notify", kind: "action", status: "succeeded", round: 1 },
+        ] as const,
+        document: JSON.stringify({
+          triggers: [{ id: "by-hand", kind: "manual" }],
+          steps: [
+            { id: "plan", kind: "agent" },
+            {
+              id: "outer",
+              kind: "loop",
+              maxRounds: 3,
+              body: [
+                { id: "work", kind: "agent" },
+                {
+                  id: "inner",
+                  kind: "loop",
+                  maxRounds: 2,
+                  body: [{ id: "deep", kind: "action" }],
+                },
+              ],
+            },
+            { id: "ship", kind: "action", connector: "pr.merge" },
+          ],
+          onFailure: [{ id: "notify", kind: "action" }],
+        }),
+      },
+    ]);
+
+    const lane = (await service.listIssues("r-1", OPEN)).items[1]?.lane;
+
+    expect(lane?.nodes.map((node) => node.id)).toEqual([
+      "plan",
+      "outer",
+      "ship",
+    ]);
+    const track = trackOf(lane?.nodes ?? [], lane?.steps ?? [], "waiting");
+    expect(
+      track.steps.map((step) => [step.id, step.state, step.rounds]),
+    ).toEqual([
+      ["plan", "done", 1],
+      // the outer loop has begun its second round, and its agent waits for the answer
+      ["outer", "waiting", 2],
+      ["ship", "not_reached", 1],
+    ]);
+    expect(track.current).toBe(1);
+  });
+
+  // #1080-T05
+  it("parses the lane version once for every ticket on it and on the next poll", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+    const document = JSON.stringify({
+      triggers: [{ id: "by-hand", kind: "manual" }],
+      steps: [{ id: "only", kind: "agent" }],
+    });
+    const progress = (runId: string) => ({
+      runId,
+      workflowId: "wf-shared",
+      workflowVersion: 7,
+      triggerId: "by-hand",
+      triggerKind: "manual" as const,
+      steps: [],
+      document,
+    });
+    const active = (ref: string, runId: string) => ({
+      ticketRef: ref,
+      spentMicroUsd: 0,
+      activeRun: {
+        runId,
+        workflowId: "wf-shared",
+        workflowName: "Shared",
+        stepId: "only",
+        status: "running" as const,
+      },
+    });
+    const both = [
+      active(ticketRefOf("acme/widgets", 3), "run-3"),
+      active(ticketRefOf("acme/widgets", 1), "run-1"),
+    ];
+    summarizeTickets.mockResolvedValue(both);
+    laneProgressOfRuns.mockResolvedValue([
+      progress("run-3"),
+      progress("run-1"),
+    ]);
+
+    const first = await service.listIssues("r-1", OPEN);
+    const second = await service.listIssues("r-1", OPEN);
+
+    const nodes = first.items.map((item) => item.lane?.nodes);
+    expect(nodes[0]).toHaveLength(1);
+    expect(nodes[1]).toBe(nodes[0]);
+    expect(second.items[0]?.lane?.nodes).toBe(nodes[0]);
+  });
+
+  // #1080-T06
+  it("reads a lane version again when the same id names another document", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+    const progress = (steps: string[]) => ({
+      runId: "run-1",
+      workflowId: "wf-edited",
+      workflowVersion: 1,
+      triggerId: "by-hand",
+      triggerKind: "manual" as const,
+      steps: [],
+      document: JSON.stringify({
+        triggers: [{ id: "by-hand", kind: "manual" }],
+        steps: steps.map((id) => ({ id, kind: "agent" })),
+      }),
+    });
+    summarizeTickets.mockResolvedValue([
+      {
+        ticketRef: ticketRefOf("acme/widgets", 1),
+        spentMicroUsd: 0,
+        activeRun: {
+          runId: "run-1",
+          workflowId: "wf-edited",
+          workflowName: "Edited",
+          stepId: null,
+          status: "running" as const,
+        },
+      },
+    ]);
+    laneProgressOfRuns.mockResolvedValueOnce([progress(["a"])]);
+    const one = await service.listIssues("r-1", OPEN);
+    laneProgressOfRuns.mockResolvedValueOnce([progress(["a", "b"])]);
+    const two = await service.listIssues("r-1", OPEN);
+
+    expect(one.items[1]?.lane?.nodes.map((node) => node.id)).toEqual(["a"]);
+    expect(two.items[1]?.lane?.nodes.map((node) => node.id)).toEqual([
+      "a",
+      "b",
+    ]);
   });
 
   // #954
