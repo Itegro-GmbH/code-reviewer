@@ -17,6 +17,7 @@ import type {
   VmStartRequest,
   FindingPriority,
   ImplementerNetworkReport,
+  ImplementerRepoResult,
   ImplementerResult,
   ImplementerResumeReason,
   ImplementerResumeResult,
@@ -634,11 +635,11 @@ function parseImplementerCommits(
   check: Checker,
   value: unknown,
   field: string,
+  limit: number = IMPLEMENTER_RESULT_LIMITS.commits,
 ): ImplementerResult["commits"] | undefined {
   if (value === undefined) return check.fail(field, "required");
   if (!Array.isArray(value)) return check.fail(field, "invalid");
-  if (value.length > IMPLEMENTER_RESULT_LIMITS.commits)
-    return check.fail(field, "too_long");
+  if (value.length > limit) return check.fail(field, "too_long");
   const before = check.fields.length;
   const commits: ImplementerResult["commits"] = [];
   value.forEach((entry: unknown, index) => {
@@ -664,11 +665,11 @@ function parseImplementerFiles(
   check: Checker,
   value: unknown,
   field: string,
+  limit: number = IMPLEMENTER_RESULT_LIMITS.filesChanged,
 ): ImplementerResult["filesChanged"] | undefined {
   if (value === undefined) return check.fail(field, "required");
   if (!Array.isArray(value)) return check.fail(field, "invalid");
-  if (value.length > IMPLEMENTER_RESULT_LIMITS.filesChanged)
-    return check.fail(field, "too_long");
+  if (value.length > limit) return check.fail(field, "too_long");
   const before = check.fields.length;
   const files: ImplementerResult["filesChanged"] = [];
   value.forEach((entry: unknown, index) => {
@@ -710,11 +711,11 @@ function parseImplementerBranches(
   check: Checker,
   value: unknown,
   field: string,
+  limit: number = IMPLEMENTER_RESULT_LIMITS.branches,
 ): NonNullable<ImplementerResult["branches"]> | undefined {
   if (value === undefined) return [];
   if (!Array.isArray(value)) return check.fail(field, "invalid");
-  if (value.length > IMPLEMENTER_RESULT_LIMITS.branches)
-    return check.fail(field, "too_long");
+  if (value.length > limit) return check.fail(field, "too_long");
   const before = check.fields.length;
   const branches: NonNullable<ImplementerResult["branches"]> = [];
   value.forEach((entry: unknown, index) => {
@@ -1055,6 +1056,202 @@ function parseNetworkConnections(
   return check.fields.length > before ? undefined : connections;
 }
 
+/** The most of a repository's lists in a multi-repository report (`ImplementerRepoResult` in the contract): shorter than the single form's, ten repositories share one report. */
+const REPO_RESULT_LIMITS = { commits: 100, filesChanged: 250, branches: 25 };
+const MAX_REPOS = 10;
+const MAX_MOUNT_NAME_CHARS = 202;
+const MAX_FULL_NAME_CHARS = 201;
+
+/** A count of what the runner cut (`commitsTruncated`, `filesTruncated`): a whole number, optional. */
+function truncatedCount(
+  check: Checker,
+  source: Record_,
+  key: string,
+  field: string,
+): number | undefined | null {
+  const value = source[key];
+  if (value === undefined) return null;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > MAX_BRANCHES_DROPPED
+  )
+    return check.fail(field, "invalid");
+  return value;
+}
+
+/**
+ * `implementer.repos` of a result (#1092, `ImplementerRepoResult`): one closed entry for each repository of the job, in the order of the job,
+ * one to ten. Whether they are the job's repositories is checked with the job (`implementer-report.ts`).
+ */
+function parseImplementerRepos(
+  check: Checker,
+  value: unknown,
+  field: string,
+): ImplementerRepoResult[] | undefined {
+  if (!Array.isArray(value)) return check.fail(field, "invalid");
+  if (value.length < 1 || value.length > MAX_REPOS)
+    return check.fail(field, "invalid");
+  const before = check.fields.length;
+  const repos: ImplementerRepoResult[] = [];
+  value.forEach((entry: unknown, index) => {
+    const where = `${field}[${String(index)}]`;
+    const prefix = `${where}.`;
+    if (!isRecord(entry)) {
+      check.fail(where, "invalid");
+      return;
+    }
+    refuseUnknownKeys(
+      check,
+      entry,
+      [
+        "name",
+        "fullName",
+        "base",
+        "branch",
+        "created",
+        "baseCommit",
+        "headCommit",
+        "pushed",
+        "branches",
+        "branchesDropped",
+        "commits",
+        "filesChanged",
+        "commitsTruncated",
+        "filesTruncated",
+        "checkedOut",
+      ],
+      prefix,
+    );
+    const name = check.string(entry, "name", `${prefix}name`, {
+      min: 1,
+      max: MAX_MOUNT_NAME_CHARS,
+      stripControls: true,
+    });
+    const fullName = check.string(entry, "fullName", `${prefix}fullName`, {
+      min: 3,
+      max: MAX_FULL_NAME_CHARS,
+      stripControls: true,
+    });
+    const base = check.string(entry, "base", `${prefix}base`, {
+      min: 1,
+      max: MAX_BRANCH_NAME_CHARS,
+      stripControls: true,
+    });
+    const branch = check.string(entry, "branch", `${prefix}branch`, {
+      min: 1,
+      max: MAX_BRANCH_NAME_CHARS,
+      stripControls: true,
+    });
+    const created = entry.created;
+    if (typeof created !== "boolean")
+      check.fail(
+        `${prefix}created`,
+        created === undefined ? "required" : "invalid",
+      );
+    const baseCommit = commitSha(
+      check,
+      entry,
+      "baseCommit",
+      `${prefix}baseCommit`,
+    );
+    const headCommit =
+      entry.headCommit === null
+        ? null
+        : commitSha(check, entry, "headCommit", `${prefix}headCommit`);
+    const pushed = entry.pushed;
+    if (typeof pushed !== "boolean")
+      check.fail(
+        `${prefix}pushed`,
+        pushed === undefined ? "required" : "invalid",
+      );
+    const branches = parseImplementerBranches(
+      check,
+      entry.branches,
+      `${prefix}branches`,
+      REPO_RESULT_LIMITS.branches,
+    );
+    const branchesDropped = parseImplementerBranchesDropped(
+      check,
+      entry.branchesDropped,
+      `${prefix}branchesDropped`,
+    );
+    const commits = parseImplementerCommits(
+      check,
+      entry.commits,
+      `${prefix}commits`,
+      REPO_RESULT_LIMITS.commits,
+    );
+    const filesChanged = parseImplementerFiles(
+      check,
+      entry.filesChanged,
+      `${prefix}filesChanged`,
+      REPO_RESULT_LIMITS.filesChanged,
+    );
+    const commitsTruncated = truncatedCount(
+      check,
+      entry,
+      "commitsTruncated",
+      `${prefix}commitsTruncated`,
+    );
+    const filesTruncated = truncatedCount(
+      check,
+      entry,
+      "filesTruncated",
+      `${prefix}filesTruncated`,
+    );
+    const checkedOut =
+      entry.checkedOut === undefined || entry.checkedOut === null
+        ? null
+        : check.string(entry, "checkedOut", `${prefix}checkedOut`, {
+            min: 1,
+            max: MAX_BRANCH_NAME_CHARS,
+            stripControls: true,
+          });
+    if (typeof pushed === "boolean" && headCommit !== undefined)
+      if (pushed && headCommit === null)
+        check.fail(`${prefix}pushed`, "invalid");
+    if (
+      name === undefined ||
+      fullName === undefined ||
+      base === undefined ||
+      branch === undefined ||
+      typeof created !== "boolean" ||
+      baseCommit === undefined ||
+      headCommit === undefined ||
+      typeof pushed !== "boolean" ||
+      branches === undefined ||
+      branchesDropped === undefined ||
+      commits === undefined ||
+      filesChanged === undefined ||
+      commitsTruncated === undefined ||
+      filesTruncated === undefined ||
+      checkedOut === undefined
+    )
+      return;
+    repos.push({
+      name,
+      fullName,
+      base,
+      branch,
+      created,
+      baseCommit,
+      headCommit,
+      pushed,
+      // Kept only when the runner sent them, as the single form's are.
+      ...(entry.branches === undefined ? {} : { branches }),
+      ...(branchesDropped === null ? {} : { branchesDropped }),
+      commits,
+      filesChanged,
+      ...(commitsTruncated === null ? {} : { commitsTruncated }),
+      ...(filesTruncated === null ? {} : { filesTruncated }),
+      ...(entry.checkedOut === undefined ? {} : { checkedOut }),
+    });
+  });
+  return check.fields.length > before ? undefined : repos;
+}
+
 /**
  * The implementer block of a result (#754, `ImplementerResult` in the contract): closed, every field required, the bounds of the
  * schema. Absent is "no block" (a failure before the runner had a repository, and every job that is not a turn); `null` is not
@@ -1090,6 +1287,7 @@ function parseImplementerResult(
       "resume",
       "agentResult",
       "agentAsk",
+      "repos",
     ],
     prefix,
   );
@@ -1172,6 +1370,11 @@ function parseImplementerResult(
   // #920: the question the agent ended the turn with, within its bounds, or none; one that is not is left out, like a result.
   const agentAsk =
     value.agentAsk === undefined ? undefined : boundAgentAsk(value.agentAsk);
+  // #1092: the report of a turn on several repositories; the old fields above are the first repository's copy.
+  const repos =
+    value.repos === undefined
+      ? undefined
+      : parseImplementerRepos(check, value.repos, `${prefix}repos`);
   if (typeof pushed === "boolean" && headCommit !== undefined) {
     if (pushed && headCommit === null) check.fail(`${prefix}pushed`, "invalid");
     const last = commits?.at(-1);
@@ -1192,6 +1395,7 @@ function parseImplementerResult(
     (value.setup !== undefined && setup === undefined) ||
     (value.network !== undefined && network === undefined) ||
     (value.resume !== undefined && resume === undefined) ||
+    (value.repos !== undefined && repos === undefined) ||
     checkedOut === undefined
   )
     return undefined;
@@ -1213,6 +1417,7 @@ function parseImplementerResult(
     ...(resume === undefined ? {} : { resume }),
     ...(agentResult === undefined ? {} : { agentResult }),
     ...(agentAsk === undefined ? {} : { agentAsk }),
+    ...(repos === undefined ? {} : { repos }),
   };
 }
 

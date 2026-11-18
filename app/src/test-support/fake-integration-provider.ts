@@ -330,7 +330,7 @@ export function fakeIntegrationProvider(
       return createGitAccess({
         provider: "github",
         baseUrl: "https://fake.test/api",
-        token: `fake-${accessOptions?.readOnly === true ? "read" : "write"}-token-for-${repo.fullName}`,
+        token: `fake-${accessOptions?.readOnly === true ? "read" : "write"}-token-for-${[repo, ...(accessOptions?.alsoRepos ?? [])].map((entry) => entry.fullName).join("+")}`,
         authType: "token",
         botLogin: "fake-reviewer[bot]",
         expiresAt: "2026-10-10T13:00:00.000Z",

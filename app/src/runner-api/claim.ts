@@ -45,6 +45,14 @@ import {
 } from "../network-rule/network.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
+import type { SessionRepo } from "../implementer/session-repos.ts";
+import {
+  buildMultiRepo,
+  MultiRepoRefusal,
+  type MultiRepoDeps,
+  type MultiRepoParts,
+} from "./multi-repo.ts";
+import { breakOfJobRule, type JobDocument } from "./multi-repo-job.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
 import type {
   GitAccess,
@@ -366,8 +374,8 @@ type Prepared =
       response: ClaimResponse;
       entryModel: string | null;
       native: boolean;
-      /** #753: the write token of a turn, which the claim remembers before the input leaves and switches off if it cannot. */
-      writeToken: GitTokenEntry | null;
+      /** #753: the write tokens of a turn (#1092: one for each installation of a turn on several repositories), which the claim remembers before the input leaves and switches off if it cannot. */
+      writeTokens: GitTokenEntry[];
     }
   /** #320: the claim of a Dispatcher: the credential and no input. */
   | { kind: "split"; response: SplitClaimResponse }
@@ -400,6 +408,8 @@ export type Checked = {
     baseBranch: string;
     /** #909: the branch the session branch is made from when that is not the base; null: the tip of the base. */
     startBranch: string | null;
+    /** #1092: the repositories of a session of several, as the first turn resolved them; null for a session of one repository. */
+    repos: SessionRepo[] | null;
     /** The https address the runner clones from and pushes to, with no credential in it (`cloneUrlOf`). */
     cloneUrl: string;
     /** #918: how long the turn may run, in seconds (`timeLimitSecondsOf`). */
@@ -438,12 +448,28 @@ export type Built = {
   /** #578: the input carries a native model entry (`dynamic.modelEntry`); remembered for the report. */
   native: boolean;
   /**
-   * #753: the write token of a turn of the Implementer (the same value as `input.git.token`), or null. The caller remembers it
+   * #753: the write tokens of a turn of the Implementer (the first is the same value as `input.git.token`; #1092: a turn on several
+   * repositories has one for each installation, `input.git.tokens`), or none. The caller remembers it
    * before the input leaves and switches it off when the input does not (`revokeUndelivered`). For a profile that may not push (#843)
    * it is a token that can only read: it is kept in the same ledger, so it ends with the turn like the other.
    */
-  writeToken: GitTokenEntry | null;
+  writeTokens: GitTokenEntry[];
 };
+
+/** What the builder of a turn on several repositories needs from the claim (`multi-repo.ts`); `revoke` switches off tokens that were made and not handed out. */
+function multiRepoDeps(deps: ClaimDeps, job: Job): MultiRepoDeps {
+  return {
+    repositories: deps.repositories,
+    integrations: deps.integrations,
+    registry: deps.registry,
+    cloneUrlOf,
+    isGithub: (integration) => PLATFORM_OF[integration.type] === "github",
+    revoke: async (tokens) => {
+      for (const entry of tokens) await deps.revokeUndelivered(job, entry);
+    },
+    now: deps.now,
+  };
+}
 
 function refuse(errorCode: string, detail?: string): Refusal {
   return detail === undefined
@@ -1101,7 +1127,12 @@ export async function checkJob(
       return refuse("implementer_config_invalid", "reason=clone_url");
     try {
       const held = await provider.installationPermissions(integration);
-      if (!held.contentsWrite) return refuse("git_write_not_granted");
+      // #1092: a turn on several repositories that may not push needs no right to write (the builder asks per installation when it does).
+      if (
+        !held.contentsWrite &&
+        !(turn.session.repos !== null && turn.turn.profile?.canPush === false)
+      )
+        return refuse("git_write_not_granted");
     } catch (error) {
       return unreadable(
         deps,
@@ -1130,6 +1161,7 @@ export async function checkJob(
         branch: turn.session.branch,
         baseBranch: turn.session.baseBranch,
         startBranch: turn.session.startBranch,
+        repos: turn.session.repos,
         cloneUrl,
         timeLimitSeconds: timeLimitSecondsOf(turn.turn),
         environment:
@@ -1289,6 +1321,17 @@ export async function buildJobInput(
     !features.includes("implementer_start_branch")
   )
     return refuse("implementer_engine_unavailable", "reason=start_branch");
+  // #1092: the same for a session of several repositories. A Worker that does not read `repos` would refuse the job; the claim
+  // (`acceptsMultiRepo`) never hands such a turn to a caller without the feature, so this is a Worker that disagrees with its Dispatcher: the turn
+  // ends here, free, and the message names the feature.
+  if (
+    implementer?.repos != null &&
+    !features.includes("implementer_multi_repo")
+  )
+    return refuse(
+      "implementer_engine_unavailable",
+      "reason=implementer_multi_repo",
+    );
   if (costLimit.enforced === "none")
     deps.logger.info(
       `[runner-api] job=${job.id} carries no cost limit: the runner names neither claim feature cost_limit nor operator_cost_limit, so a Dynamic Review is held only to the runner's own RUNNER_DYNAMIC_MAX_COST_USD and a Diff Review to none`,
@@ -1337,16 +1380,37 @@ export async function buildJobInput(
           startedByWorkflow: implementer.startedByWorkflow,
         });
   let git: GitAccess;
+  // #1092: a session of several repositories: its repositories, one token for each installation and the instruction with the preamble.
+  let multi: MultiRepoParts | undefined;
   try {
-    git = revealGitAccess(
-      job.reviewKind === "implementer"
-        ? await provider.implementerAccess(integration, repo, {
-            // #843: a profile that may not push gets a token that cannot, whatever the Worker does.
-            readOnly: implementer?.profile?.canPush === false,
-          })
-        : await provider.jobAccess(integration, repo),
-    );
+    if (implementer?.repos != null) {
+      multi = await buildMultiRepo(multiRepoDeps(deps, job), {
+        workspaceId: job.workspaceId,
+        session: { repos: implementer.repos },
+        resume: implementer.resume,
+        canPush: implementer.profile?.canPush !== false,
+        instruction: implementer.instruction,
+      });
+      git = {
+        provider: "github",
+        baseUrl: multi.git.baseUrl,
+        token: multi.git.token,
+        authType: "token",
+        botLogin: multi.git.botLogin,
+        expiresAt: multi.tokenExpiresAt,
+      };
+    } else
+      git = revealGitAccess(
+        job.reviewKind === "implementer"
+          ? await provider.implementerAccess(integration, repo, {
+              // #843: a profile that may not push gets a token that cannot, whatever the Worker does.
+              readOnly: implementer?.profile?.canPush === false,
+            })
+          : await provider.jobAccess(integration, repo),
+      );
   } catch (error) {
+    if (error instanceof MultiRepoRefusal)
+      return refuse(error.errorCode, error.detail);
     if (!(error instanceof IntegrationError)) throw error;
     deps.logger.error(
       `[runner-api] job=${job.id} credentials could not be created: ${describeError(error)}`,
@@ -1359,9 +1423,17 @@ export async function buildJobInput(
       };
     return refuse(accessFailureCode(error));
   }
+  // Every token of the turn, for the ledger: one for a single repository, one for each installation for several (#1092).
+  const writeTokens: GitTokenEntry[] =
+    multi === undefined ? [writeTokenOf(git)] : multi.ledger;
+  const revokeAll = async (): Promise<void> => {
+    for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
+  };
   // The runner needs the login the bot acts as; only the access itself can say.
-  if (git.provider !== "github" || git.botLogin === null)
+  if (git.provider !== "github" || git.botLogin === null) {
+    await revokeAll();
     return refuse("git_access_failed");
+  }
 
   // Nothing below may fail without the write token of a turn being switched off: it is not yet in the input that would carry it (#753).
   let llmAccess: ReturnType<typeof revealLlmAccess>;
@@ -1395,7 +1467,7 @@ export async function buildJobInput(
         ? await deps.attemptedShas(job)
         : { shas: [], truncated: false };
   } catch (error) {
-    await deps.revokeUndelivered(job, writeTokenOf(git));
+    await revokeAll();
     throw error;
   }
 
@@ -1408,13 +1480,21 @@ export async function buildJobInput(
       ? {
           reviewKind: "implementer",
           implementer: {
-            repo: { fullName: repo.fullName, cloneUrl: implementer.cloneUrl },
-            baseBranch: implementer.baseBranch,
-            ...(implementer.startBranch === null
-              ? {}
-              : { startBranch: implementer.startBranch }),
-            branch: implementer.branch,
-            instruction: implementer.instruction,
+            // #1092: the repositories of the session, or the one repository of today; never both.
+            ...(multi === undefined
+              ? {
+                  repo: {
+                    fullName: repo.fullName,
+                    cloneUrl: implementer.cloneUrl,
+                  },
+                  baseBranch: implementer.baseBranch,
+                  ...(implementer.startBranch === null
+                    ? {}
+                    : { startBranch: implementer.startBranch }),
+                  branch: implementer.branch,
+                }
+              : { repos: multi.repos }),
+            instruction: multi?.instruction ?? implementer.instruction,
             limits: { timeLimitSeconds: implementer.timeLimitSeconds },
             cost,
             modelEntry,
@@ -1462,8 +1542,12 @@ export async function buildJobInput(
               : {
                   resume: {
                     turn: implementer.resume.turn,
-                    branches: implementer.resume.branches,
-                    checkout: implementer.resume.checkout,
+                    ...(implementer.resume.repos === undefined
+                      ? {
+                          branches: implementer.resume.branches,
+                          checkout: implementer.resume.checkout,
+                        }
+                      : { repos: implementer.resume.repos }),
                     snapshot: implementer.resume.snapshot,
                     ...(implementer.resume.previousSummary === undefined
                       ? {}
@@ -1481,6 +1565,7 @@ export async function buildJobInput(
             baseUrl: git.baseUrl,
             token: git.token,
             botLogin: git.botLogin,
+            ...(multi === undefined ? {} : { tokens: multi.tokens }),
           },
           llm: {
             provider: selection.provider,
@@ -1542,13 +1627,25 @@ export async function buildJobInput(
             },
             env: {},
           };
+  // #1092: the claim holds its own job to the rules of the contract that the schema cannot state (token ids and use, the names, the clone
+  // addresses, the resume), so that a rule the app breaks is the app's refusal and never a runner's `invalid_job`.
+  if (multi !== undefined) {
+    const broken = breakOfJobRule(input as unknown as JobDocument);
+    if (broken !== null) {
+      deps.logger.error(
+        `[runner-api] job=${job.id} the multi-repository job breaks a rule of the contract: ${broken}`,
+      );
+      await revokeAll();
+      return refuse("implementer_config_invalid", `reason=job_rule:${broken}`);
+    }
+  }
   return {
     kind: "built",
     input,
     tokenExpiresAt: git.expiresAt,
     entryModel: managed ? selection.model : null,
     native: modelEntry !== null,
-    writeToken: implementer === null ? null : writeTokenOf(git),
+    writeTokens: implementer === null ? [] : writeTokens,
   };
 }
 
@@ -1628,8 +1725,8 @@ export type SubscriptionBuilt = {
   kind: "built-subscription";
   input: SubscriptionJobInput;
   tokenExpiresAt: string | null;
-  /** The write token of the turn (the same value as `input.git.token`): remembered before the input leaves, switched off when it does not. */
-  writeToken: GitTokenEntry;
+  /** The write tokens of the turn (the first is the same value as `input.git.token`): remembered before the input leaves, switched off when it does not. */
+  writeTokens: GitTokenEntry[];
 };
 
 /**
@@ -1677,6 +1774,15 @@ export async function buildSubscriptionJob(
     !features.includes("implementer_start_branch")
   )
     return refuse("implementer_engine_unavailable", "reason=start_branch");
+  // #1092: a session of several repositories needs a Worker that reads `repos`, as a hosted turn does.
+  if (
+    turn.session.repos !== null &&
+    !features.includes("implementer_multi_repo")
+  )
+    return refuse(
+      "implementer_engine_unavailable",
+      "reason=implementer_multi_repo",
+    );
 
   const repository = await deps
     .repositories(job.workspaceId)
@@ -1705,7 +1811,11 @@ export async function buildSubscriptionJob(
     return refuse("implementer_config_invalid", "reason=clone_url");
   try {
     const held = await provider.installationPermissions(integration);
-    if (!held.contentsWrite) return refuse("git_write_not_granted");
+    if (
+      !held.contentsWrite &&
+      !(turn.session.repos !== null && turn.turn.profile.canPush === false)
+    )
+      return refuse("git_write_not_granted");
   } catch (error) {
     return unreadable(
       deps,
@@ -1729,14 +1839,45 @@ export async function buildSubscriptionJob(
   const startedByWorkflow = await deps.startedByWorkflow(job);
   const mcp = await mcpBlockOf(deps, { job, features, startedByWorkflow });
 
-  let git: GitAccess;
+  // The resume of a follow-up comes first: a turn on several repositories asks it which working branches an earlier turn pushed (#1092).
+  let resume: ResumeBlock | null;
   try {
-    git = revealGitAccess(
-      await provider.implementerAccess(integration, repo, {
-        readOnly: turn.turn.profile.canPush === false,
-      }),
-    );
+    resume =
+      turn.turn.number >= 2 ? await deps.implementerResume(job, turn) : null;
   } catch (error) {
+    deps.logger.error(
+      `[runner-api] job=${job.id} the resume could not be built: ${describeError(error)}`,
+    );
+    throw error;
+  }
+  let git: GitAccess;
+  let multi: MultiRepoParts | undefined;
+  try {
+    if (turn.session.repos !== null) {
+      multi = await buildMultiRepo(multiRepoDeps(deps, job), {
+        workspaceId: job.workspaceId,
+        session: { repos: turn.session.repos },
+        resume,
+        canPush: turn.turn.profile.canPush,
+        instruction: turn.turn.instruction,
+      });
+      git = {
+        provider: "github",
+        baseUrl: multi.git.baseUrl,
+        token: multi.git.token,
+        authType: "token",
+        botLogin: multi.git.botLogin,
+        expiresAt: multi.tokenExpiresAt,
+      };
+    } else
+      git = revealGitAccess(
+        await provider.implementerAccess(integration, repo, {
+          readOnly: turn.turn.profile.canPush === false,
+        }),
+      );
+  } catch (error) {
+    if (error instanceof MultiRepoRefusal)
+      return refuse(error.errorCode, error.detail);
     if (!(error instanceof IntegrationError)) throw error;
     deps.logger.error(
       `[runner-api] job=${job.id} credentials could not be created: ${describeError(error)}`,
@@ -1749,28 +1890,28 @@ export async function buildSubscriptionJob(
       };
     return refuse(accessFailureCode(error));
   }
-  if (git.provider !== "github" || git.botLogin === null)
+  const writeTokens: GitTokenEntry[] =
+    multi === undefined ? [writeTokenOf(git)] : multi.ledger;
+  if (git.provider !== "github" || git.botLogin === null) {
+    for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
     return refuse("git_access_failed");
-
-  let resume: ResumeBlock | null;
-  try {
-    resume =
-      turn.turn.number >= 2 ? await deps.implementerResume(job, turn) : null;
-  } catch (error) {
-    await deps.revokeUndelivered(job, writeTokenOf(git));
-    throw error;
   }
+
   const profile = turn.turn.profile;
   const input: SubscriptionJobInput = {
     reviewKind: "implementer",
     implementer: {
-      repo: { fullName: repo.fullName, cloneUrl },
-      baseBranch: turn.session.baseBranch,
-      ...(turn.session.startBranch === null
-        ? {}
-        : { startBranch: turn.session.startBranch }),
-      branch: turn.session.branch,
-      instruction: turn.turn.instruction,
+      ...(multi === undefined
+        ? {
+            repo: { fullName: repo.fullName, cloneUrl },
+            baseBranch: turn.session.baseBranch,
+            ...(turn.session.startBranch === null
+              ? {}
+              : { startBranch: turn.session.startBranch }),
+            branch: turn.session.branch,
+          }
+        : { repos: multi.repos }),
+      instruction: multi?.instruction ?? turn.turn.instruction,
       limits: { timeLimitSeconds: timeLimitSecondsOf(turn.turn) },
       subscription: {
         model: choice.model,
@@ -1801,8 +1942,9 @@ export async function buildSubscriptionJob(
         : {
             resume: {
               turn: resume.turn,
-              branches: resume.branches,
-              checkout: resume.checkout,
+              ...(resume.repos === undefined
+                ? { branches: resume.branches, checkout: resume.checkout }
+                : { repos: resume.repos }),
               snapshot: resume.snapshot,
               ...(resume.previousSummary === undefined
                 ? {}
@@ -1816,9 +1958,20 @@ export async function buildSubscriptionJob(
       baseUrl: git.baseUrl,
       token: git.token,
       botLogin: git.botLogin,
+      ...(multi === undefined ? {} : { tokens: multi.tokens }),
     },
     env: {},
   };
+  if (multi !== undefined) {
+    const broken = breakOfJobRule(input as unknown as JobDocument);
+    if (broken !== null) {
+      deps.logger.error(
+        `[runner-api] job=${job.id} the multi-repository job breaks a rule of the contract: ${broken}`,
+      );
+      for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
+      return refuse("implementer_config_invalid", `reason=job_rule:${broken}`);
+    }
+  }
   deps.logger.info(
     `[runner-api] job=${job.id} selection harness=claude-code key=device`,
   );
@@ -1826,7 +1979,7 @@ export async function buildSubscriptionJob(
     kind: "built-subscription",
     input,
     tokenExpiresAt: git.expiresAt,
-    writeToken: writeTokenOf(git),
+    writeTokens,
   };
 }
 
@@ -1941,7 +2094,7 @@ async function prepare(
     kind: "ready",
     entryModel: built.entryModel,
     native: built.native,
-    writeToken: built.writeToken,
+    writeTokens: built.writeTokens,
     response: {
       version: RUNNER_API_VERSION,
       job: {
@@ -2108,6 +2261,10 @@ export async function handleClaim(
       ...(!split && features.includes("supersede")
         ? { acceptsSupersede: true }
         : {}),
+      // #1092: a turn on several repositories goes only to a caller that reads `implementer.repos`; for any other it waits in the queue.
+      ...(features.includes("implementer_multi_repo")
+        ? { acceptsMultiRepo: true }
+        : {}),
       ...(target.customerRunner === undefined
         ? {}
         : { customerRunner: target.customerRunner }),
@@ -2124,7 +2281,7 @@ export async function handleClaim(
 
     // Whatever goes wrong from here on, the job is given back instead of staying under a lease that
     // nobody uses (it would only run out after two minutes). The write token of a turn that was made is switched off then (#753).
-    let writeToken: GitTokenEntry | null = null;
+    let writeTokens: GitTokenEntry[] = [];
     const beforeStart = await noInputHandedOut(deps, claimed.job);
     try {
       const prepared = await prepare(
@@ -2136,7 +2293,7 @@ export async function handleClaim(
         target.llmProviders,
         target.customerRunner !== undefined,
       );
-      if (prepared.kind === "ready") writeToken = prepared.writeToken;
+      if (prepared.kind === "ready") writeTokens = prepared.writeTokens;
 
       if (prepared.kind === "refused") {
         await endJob(
@@ -2192,11 +2349,11 @@ export async function handleClaim(
         );
       await deps.claimedKeys.rememberNative(claimed.job.id, prepared.native);
       // The token is remembered (sealed) before it leaves, so the end of the turn can switch it off (#753).
-      if (prepared.writeToken !== null)
+      for (const entry of prepared.writeTokens)
         await deps.claimedKeys.rememberGitToken(
           claimed.job.id,
-          prepared.writeToken.token,
-          prepared.writeToken.expiresAt,
+          entry.token,
+          entry.expiresAt,
         );
       deps.logger.info(
         `[runner-api] ${origin.label} job=${claimed.job.id} command=${claimed.job.command}`,
@@ -2206,8 +2363,8 @@ export async function handleClaim(
       deps.logger.error(
         `[runner-api] ${origin.label} job=${claimed.job.id} failed: ${describeError(error)}`,
       );
-      if (writeToken !== null)
-        await deps.revokeUndelivered(claimed.job, writeToken);
+      for (const entry of writeTokens)
+        await deps.revokeUndelivered(claimed.job, entry);
       await giveBack(deps, claimed, "claim_failed", undefined, beforeStart);
       return errorResponse(500, "RUNNER_INTERNAL_ERROR");
     }

@@ -229,12 +229,23 @@ export function createGithubAppProvider(
       // accepted it is its own stable code, and nothing broader is tried instead.
       try {
         const config = await getConfig();
-        const repositoryIds = jobTokenRepositoryIds(repo.externalId);
-        if (repo.integrationId !== integration.id || repositoryIds === null)
+        // #1092: a turn on several repositories gets one token per installation, made for exactly the repositories of the turn that
+        // belong to it: every one of them must be this integration's and have a usable id.
+        const covered = [repo, ...(accessOptions?.alsoRepos ?? [])];
+        const ids = covered.map((entry) =>
+          jobTokenRepositoryIds(entry.externalId),
+        );
+        if (
+          covered.some((entry) => entry.integrationId !== integration.id) ||
+          ids.some((entry) => entry === null)
+        )
           throw new IntegrationError(
             "INTEGRATION_ACCESS_SCOPE_REFUSED",
             "The repository does not belong to this integration or has no usable id.",
           );
+        const repositoryIds = [
+          ...new Set(ids.flatMap((entry) => entry ?? [])),
+        ];
         const minted = await (
           await getClient()
         ).mintInstallationToken(integration.externalId, {

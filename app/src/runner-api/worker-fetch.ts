@@ -81,7 +81,7 @@ export async function handleFetch(
 
   const claimed = { job, leaseToken };
   // The write token of a turn of the Implementer, once it is made: switched off if the input cannot be handed to the Worker (#753).
-  let writeToken: GitTokenEntry | null = null;
+  let writeTokens: GitTokenEntry[] = [];
   // Asked before anything is made: whether an earlier fetch of this turn handed an input to a Worker (#753).
   const beforeStart = await noInputHandedOut(deps, job);
   try {
@@ -141,7 +141,7 @@ export async function handleFetch(
       });
     }
 
-    writeToken = outcome.writeToken;
+    writeTokens = outcome.writeTokens;
     if (outcome.kind === "built-subscription") {
       // No key of ours to remember: the login is the device's (#856).
       await deps.claimedKeys.rememberNative(job.id, false);
@@ -154,11 +154,11 @@ export async function handleFetch(
       await deps.claimedKeys.rememberNative(job.id, outcome.native);
     }
     // The token is remembered (sealed) before it leaves, so the end of the turn can switch it off (#753).
-    if (outcome.writeToken !== null)
+    for (const entry of outcome.writeTokens)
       await deps.claimedKeys.rememberGitToken(
         job.id,
-        outcome.writeToken.token,
-        outcome.writeToken.expiresAt,
+        entry.token,
+        entry.expiresAt,
       );
     const current = await deps.queue.get(job.id);
     if (current?.leaseExpiresAt == null)
@@ -191,7 +191,7 @@ export async function handleFetch(
     deps.logger.error(
       `[worker-api] fetch job=${job.id} failed: ${describeError(error)}`,
     );
-    if (writeToken !== null) await deps.revokeUndelivered(job, writeToken);
+    for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
     await giveBack(deps, claimed, "claim_failed", undefined, beforeStart);
     return errorResponse(500, "RUNNER_INTERNAL_ERROR");
   }

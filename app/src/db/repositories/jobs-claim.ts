@@ -33,6 +33,11 @@ export type JobClaim = {
   leaseToken: string;
   /** #397: the holder understands that its run can be superseded (the feature `supersede`). */
   acceptsSupersede?: boolean;
+  /**
+   * #1092: the caller named the claim feature `implementer_multi_repo` (it reads `implementer.repos`). Without it a turn of a session of several
+   * repositories is not a candidate: it stays queued, as a job for a runner with other labels does, and nothing fails.
+   */
+  acceptsMultiRepo?: boolean;
   now: Date;
   leaseExpiresAt: Date;
 };
@@ -174,6 +179,18 @@ function claimQuery(
           select 1 from implementer_turns as routed
           where routed.job_id = due.id and ${accessRule(entries, "routed")}
         )`;
+  // #1092: a job whose session has `repos` goes only to a caller that reads them; for any other it is not a candidate (no error, no attempt).
+  const multiRepoRule =
+    claim.acceptsMultiRepo === true
+      ? sql``
+      : sql`and not exists (
+          select 1
+          from implementer_turns as multi_turn
+          join implementer_sessions as multi_session
+            on multi_session.id = multi_turn.session_id
+           and multi_session.workspace_id = multi_turn.workspace_id
+          where multi_turn.job_id = due.id and multi_session.repos is not null
+        )`;
   return sql<Selectable<JobsTable>>`
     update jobs
     set status = 'running',
@@ -194,6 +211,7 @@ function claimQuery(
         and due.review_kind in (${kinds})
         ${jobId === undefined ? sql`` : sql`and due.id = ${jobId}`}
         ${routing}
+        ${multiRepoRule}
         and due.run_after <= ${now}
         and not exists (
           select 1

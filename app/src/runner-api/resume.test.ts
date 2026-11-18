@@ -121,7 +121,7 @@ describe("the branches of a follow-up turn", () => {
     ]);
 
     expect(resume.branches).toHaveLength(MAX_RESUME_BRANCHES);
-    expect(resume.branches[0]).toEqual({ name: "feature/x", head: sha("f") });
+    expect(resume.branches?.[0]).toEqual({ name: "feature/x", head: sha("f") });
   });
 
   // #841-U06

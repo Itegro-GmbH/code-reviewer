@@ -156,6 +156,7 @@ function sharedDeps(): WorkerApiDeps {
       return buildResume({
         turnNumber: turn.number,
         sessionBranch: session.branch,
+        repos: session.repos,
         history: history.filter((entry) => entry.number < turn.number),
         sessionSummary: session.summary,
         hasSnapshot:
