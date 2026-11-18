@@ -4,6 +4,7 @@
 // and the validator never disagree about which inputs a connector has, which are required and which are targets. Pure helpers.
 import {
   BUILT_IN_CONNECTORS,
+  PULL_REQUEST_OPENING_CONNECTORS,
   type ConnectorSpec,
   type InputSpec,
 } from "../../workflows/connectors.ts";
@@ -111,6 +112,13 @@ export function withConnector(node: Doc, connector: string): Doc {
             ? []
             : "";
   }
+  // #1094: a pull request step starts with the branch to open it from (`head`), as it always did; `repos` is the other way to write it.
+  if (
+    PULL_REQUEST_OPENING_CONNECTORS.includes(connector) &&
+    next.head === undefined &&
+    next.repos === undefined
+  )
+    next.head = "";
   return next;
 }
 

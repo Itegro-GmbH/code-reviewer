@@ -156,6 +156,44 @@ function ActionOutcome({
   if (result === undefined) return null;
   return (
     <div data-slot="step-action-result" className="flex flex-col gap-1 text-sm">
+      {result.pullRequests === undefined ? null : (
+        <div data-slot="step-pull-requests" className="flex flex-col gap-1">
+          <p className="font-semibold">{PAGE_COPY.stepPullRequests}</p>
+          <ul className="flex flex-col gap-2">
+            {result.pullRequests.map((pr) => (
+              <li
+                key={pr.fullName}
+                data-state={pr.state}
+                className="break-words"
+              >
+                <span>{pr.fullName}</span>{" "}
+                {pr.state === "skipped" ? (
+                  <span className="text-muted-foreground">
+                    {PAGE_COPY.stepPrSkipped}
+                    {pr.reason === undefined
+                      ? ""
+                      : `: ${PAGE_COPY.stepPrReason[pr.reason]}`}
+                  </span>
+                ) : (
+                  <>
+                    <GithubLink href={pr.url}>
+                      {pr.number === undefined ? "" : `#${String(pr.number)}`}
+                    </GithubLink>{" "}
+                    <span className="text-muted-foreground">
+                      {pr.state === "existing"
+                        ? PAGE_COPY.stepPrExisting
+                        : PAGE_COPY.stepPrOpened}
+                    </span>
+                  </>
+                )}
+                <span className="block text-xs text-muted-foreground">
+                  {pr.head} → {pr.base}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {result.url === undefined && result.urlText === undefined ? null : (
         <p>
           <GithubLink href={result.url}>
@@ -198,6 +236,38 @@ function AgentOutcome({
         >
           {result.summary}
         </p>
+      )}
+      {result.repos === undefined ? null : (
+        <div data-slot="step-agent-repos" className="flex flex-col gap-1">
+          <p className="font-semibold">{PAGE_COPY.stepRepos}</p>
+          <ul className="flex flex-col gap-2">
+            {result.repos.map((repo) => (
+              <li key={repo.fullName} className="break-words">
+                <span>{repo.fullName}</span>{" "}
+                <span className="text-muted-foreground">
+                  {repo.branch === repo.base ? (
+                    <>
+                      {PAGE_COPY.stepRepoDirect} {repo.base}
+                    </>
+                  ) : (
+                    <>
+                      <GithubLink href={repo.branchUrl}>
+                        {repo.branch}
+                      </GithubLink>{" "}
+                      {PAGE_COPY.stepRepoFrom} {repo.base}
+                    </>
+                  )}
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  {PAGE_COPY.stepRepoCommits(repo.commits)},{" "}
+                  {repo.pushed
+                    ? PAGE_COPY.stepRepoPushed
+                    : PAGE_COPY.stepRepoNotPushed}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {result.branch === undefined ? null : (
         <p>

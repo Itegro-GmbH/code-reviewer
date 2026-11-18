@@ -44,6 +44,8 @@ import {
 import { Flow, type AddableKind } from "./flow.tsx";
 import { Inspector, type ProfileOption } from "./inspector.tsx";
 import type { McpServerOption } from "./mcp-edit.ts";
+import { RepoProvider, type RepoPickerApi } from "./repos-context.tsx";
+import { createImplementerApi } from "../../implementer/ui/api.ts";
 import { LaneCard, type VersionEntry } from "./lane-card.tsx";
 import { ProblemList } from "./problem-list.tsx";
 import { sortProblems } from "./problems.ts";
@@ -84,6 +86,7 @@ export function LaneBuilder({
   mcpServers = [],
   startPanel,
   api,
+  repoApi,
   validateDelayMs = VALIDATE_DEBOUNCE_MS,
 }: {
   workspaceSlug: string;
@@ -102,6 +105,8 @@ export function LaneBuilder({
   startPanel: ReactNode;
   /** Only tests pass this. */
   api?: BuilderApi;
+  /** Only tests pass this: the repositories and branches the repository list of an agent step offers (#1094). The routes of the Implementer form otherwise. */
+  repoApi?: RepoPickerApi;
   validateDelayMs?: number;
 }) {
   const product = useProductIdentity();
@@ -109,6 +114,12 @@ export function LaneBuilder({
   const calls = useMemo(
     () => api ?? browserBuilderApi(workspaceSlug),
     [api, workspaceSlug],
+  );
+  const repoCalls = useMemo<RepoPickerApi>(
+    () =>
+      repoApi ??
+      createImplementerApi((url, init) => fetch(url, init), workspaceSlug),
+    [repoApi, workspaceSlug],
   );
   const initial = useMemo(() => normalise(document), [document]);
   const [doc, setDoc] = useState<Doc | undefined>(initial);
@@ -295,128 +306,130 @@ export function LaneBuilder({
   );
 
   return (
-    <div className="flex flex-col gap-4" data-slot="lane-builder">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div data-slot="validity">{status}</div>
-        <span role="status" aria-live="polite" className="sr-only">
-          {announcement}
-        </span>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="secondary"
-            aria-pressed={showJson}
-            onClick={() => setShowJson(!showJson)}
-          >
-            {showJson ? BUILDER_COPY.jsonHide : BUILDER_COPY.jsonShow}
-          </Button>
-          <Dialog>
-            <DialogTrigger asChild>
-              <Button variant="secondary">{BUILDER_COPY.runNow}</Button>
-            </DialogTrigger>
-            <DialogContent className="max-h-[85vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>{BUILDER_COPY.runNowTitle}</DialogTitle>
-                <DialogDescription>
-                  {dirty
-                    ? BUILDER_COPY.runNowUnsaved
-                    : BUILDER_COPY.runNowSaved}
-                </DialogDescription>
-              </DialogHeader>
-              {startPanel}
-            </DialogContent>
-          </Dialog>
-          <Button
-            variant="primary"
-            disabled={!valid || !dirty}
-            loading={saving}
-            loadingLabel="Saving"
-            onClick={() => void save()}
-          >
-            Save as v{saved.version + 1}
-          </Button>
+    <RepoProvider api={repoCalls}>
+      <div className="flex flex-col gap-4" data-slot="lane-builder">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div data-slot="validity">{status}</div>
+          <span role="status" aria-live="polite" className="sr-only">
+            {announcement}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              aria-pressed={showJson}
+              onClick={() => setShowJson(!showJson)}
+            >
+              {showJson ? BUILDER_COPY.jsonHide : BUILDER_COPY.jsonShow}
+            </Button>
+            <Dialog>
+              <DialogTrigger asChild>
+                <Button variant="secondary">{BUILDER_COPY.runNow}</Button>
+              </DialogTrigger>
+              <DialogContent className="max-h-[85vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>{BUILDER_COPY.runNowTitle}</DialogTitle>
+                  <DialogDescription>
+                    {dirty
+                      ? BUILDER_COPY.runNowUnsaved
+                      : BUILDER_COPY.runNowSaved}
+                  </DialogDescription>
+                </DialogHeader>
+                {startPanel}
+              </DialogContent>
+            </Dialog>
+            <Button
+              variant="primary"
+              disabled={!valid || !dirty}
+              loading={saving}
+              loadingLabel="Saving"
+              onClick={() => void save()}
+            >
+              Save as v{saved.version + 1}
+            </Button>
+          </div>
         </div>
-      </div>
-      {saveError === undefined ? null : (
-        <Alert variant="destructive">{saveError}</Alert>
-      )}
-      {justSaved ? (
-        <Alert variant="success" role="status">
-          {BUILDER_COPY.saved}
-        </Alert>
-      ) : null}
-      {current && answer === undefined ? (
-        <Alert variant="warning" role="status">
-          {BUILDER_COPY.couldNotCheck}
-        </Alert>
-      ) : null}
-      {sorted.document.length === 0 ? null : (
-        <ProblemList
-          doc={doc}
-          problems={sorted.document}
-          onChange={edit}
-          heading={BUILDER_COPY.documentErrors}
-        />
-      )}
-      {warned.document.length === 0 ? null : (
-        <ProblemList
-          doc={doc}
-          problems={warned.document}
-          onChange={edit}
-          heading={BUILDER_COPY.documentWarnings}
-          severity="warning"
-        />
-      )}
-      {showJson ? (
-        <pre
-          aria-label={BUILDER_COPY.jsonLabel}
-          className="max-h-80 overflow-auto rounded-xl bg-raised p-4 font-mono text-xs"
-        >
-          {JSON.stringify(doc, null, 2)}
-        </pre>
-      ) : null}
-      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
-        <div ref={flowBox} className="min-w-0">
-          <Flow
+        {saveError === undefined ? null : (
+          <Alert variant="destructive">{saveError}</Alert>
+        )}
+        {justSaved ? (
+          <Alert variant="success" role="status">
+            {BUILDER_COPY.saved}
+          </Alert>
+        ) : null}
+        {current && answer === undefined ? (
+          <Alert variant="warning" role="status">
+            {BUILDER_COPY.couldNotCheck}
+          </Alert>
+        ) : null}
+        {sorted.document.length === 0 ? null : (
+          <ProblemList
             doc={doc}
-            selected={effective}
-            problems={sorted}
-            onSelect={select}
-            onAdd={add}
-          />
-        </div>
-        <aside className="flex min-w-0 flex-col gap-4">
-          <Inspector
-            doc={doc}
-            pointer={effective}
-            problems={sorted.byNode.get(effective) ?? []}
-            profiles={profiles}
-            statuses={statuses}
-            mcpServers={mcpServers}
-            lookup={lookup}
-            headingRef={inspectorHeading}
+            problems={sorted.document}
             onChange={edit}
-            onRemove={remove}
-            onMove={move}
+            heading={BUILDER_COPY.documentErrors}
           />
-          {(warned.byNode.get(effective) ?? []).length === 0 ? null : (
-            <ProblemList
+        )}
+        {warned.document.length === 0 ? null : (
+          <ProblemList
+            doc={doc}
+            problems={warned.document}
+            onChange={edit}
+            heading={BUILDER_COPY.documentWarnings}
+            severity="warning"
+          />
+        )}
+        {showJson ? (
+          <pre
+            aria-label={BUILDER_COPY.jsonLabel}
+            className="max-h-80 overflow-auto rounded-xl bg-raised p-4 font-mono text-xs"
+          >
+            {JSON.stringify(doc, null, 2)}
+          </pre>
+        ) : null}
+        <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
+          <div ref={flowBox} className="min-w-0">
+            <Flow
               doc={doc}
-              problems={warned.byNode.get(effective) ?? []}
-              onChange={edit}
-              heading={BUILDER_COPY.warningsHeading}
-              severity="warning"
+              selected={effective}
+              problems={sorted}
+              onSelect={select}
+              onAdd={add}
             />
-          )}
-          <LaneCard
-            doc={doc}
-            version={saved.version}
-            versions={saved.versions}
-            mcpServers={mcpServers}
-            mcpHref={workspacePath(workspaceSlug, "/mcp")}
-            onChange={edit}
-          />
-        </aside>
+          </div>
+          <aside className="flex min-w-0 flex-col gap-4">
+            <Inspector
+              doc={doc}
+              pointer={effective}
+              problems={sorted.byNode.get(effective) ?? []}
+              profiles={profiles}
+              statuses={statuses}
+              mcpServers={mcpServers}
+              lookup={lookup}
+              headingRef={inspectorHeading}
+              onChange={edit}
+              onRemove={remove}
+              onMove={move}
+            />
+            {(warned.byNode.get(effective) ?? []).length === 0 ? null : (
+              <ProblemList
+                doc={doc}
+                problems={warned.byNode.get(effective) ?? []}
+                onChange={edit}
+                heading={BUILDER_COPY.warningsHeading}
+                severity="warning"
+              />
+            )}
+            <LaneCard
+              doc={doc}
+              version={saved.version}
+              versions={saved.versions}
+              mcpServers={mcpServers}
+              mcpHref={workspacePath(workspaceSlug, "/mcp")}
+              onChange={edit}
+            />
+          </aside>
+        </div>
       </div>
-    </div>
+    </RepoProvider>
   );
 }

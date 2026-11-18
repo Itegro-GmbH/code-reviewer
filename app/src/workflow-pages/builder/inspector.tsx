@@ -54,6 +54,7 @@ import {
   type McpServerOption,
 } from "./mcp-edit.ts";
 import { McpPicker } from "./mcp-picker.tsx";
+import { ReposControl } from "./repos-control.tsx";
 
 export type ProfileOption = { name: string; version: number };
 
@@ -434,6 +435,13 @@ function AgentFields(props: FieldsProps) {
           )
         }
       />
+      <ReposControl
+        doc={doc}
+        pointer={pointer}
+        node={node}
+        continued={continued}
+        onChange={onChange}
+      />
       <InstructionControl {...props} />
       <McpControl {...props} />
       {showEnvironment ? (
@@ -544,6 +552,12 @@ function ActionFields({ doc, pointer, node, statuses, onChange }: FieldsProps) {
       {spec === undefined
         ? null
         : inputsOf(spec).map(([name, input]) => {
+            // #1094: a pull request step with `repos` opens each pull request from the branch of its entry: no `head`, no `base`.
+            if (
+              node.repos !== undefined &&
+              (name === "head" || name === "base")
+            )
+              return null;
             const control = controlOf(name, input);
             const label = `${name}${input.required ? "" : " (optional)"}`;
             // The status a `ticket.setStatus` step sets (#1040): a choice among the statuses of the project's board or Jira workflow

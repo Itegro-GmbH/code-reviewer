@@ -63,6 +63,25 @@ export const BUILDER_COPY = {
   mcpStepNone: "This step uses no MCP server.",
   mcpStepLaneEmpty:
     "The lane names no MCP server, so this step has none. Pick servers on the lane card; a step can then use fewer of them.",
+  reposTitle: "Repositories",
+  reposHint:
+    "Left empty, the step works in the repository of the run on a branch the platform makes. With entries, it works on each of these repositories (one session, one budget) and pushes what it commits at the end of every turn.",
+  reposContinued:
+    "A step that continues a session keeps the repositories of that session, so it takes none of its own.",
+  reposAdd: "Add a repository",
+  reposRemove: "Remove repository",
+  reposLoadFailed:
+    "The repositories of the workspace could not be loaded. Type the name as owner/name.",
+  reposPick: "Repository",
+  reposOther: "Another repository (a name or a value)",
+  reposBase: "Base branch",
+  reposBaseDefault: "The default branch of the repository",
+  reposBaseOther: "Another branch (a name or a value)",
+  reposBranch: "Branch (optional)",
+  reposBranchHint:
+    "Created from the base if it does not exist, continued if it does, e.g. feature/{{trigger.ticket.key}}. Left empty, the agent works directly on the base branch and its commits are pushed to it (branch protection may refuse that).",
+  reposReadOnly: "No write access",
+  reposLimit: (max: number): string => `At most ${String(max)} repositories.`,
   mcpBroken: "Last test failed. The lane can still name it.",
   mcpMissing: "No longer in this workspace. Uncheck it to take it out.",
   mcpOutside: "Not in the lane. Uncheck it to take it out.",
@@ -119,6 +138,9 @@ export const TARGET_ROOT_WORDS: Record<string, string> = {
   ticket: "the ticket the run is about",
   defaultBranch: "the default branch of the repository",
   branch: "the branch of an agent step",
+  repository: "the repository the run is about",
+  ticketKey: "the key of the ticket the run is about",
+  repos: "the repositories of an agent step that may push",
   pullRequest: "the pull request an action opened",
 };
 

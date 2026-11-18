@@ -205,6 +205,60 @@ describe("what the workflow pages take from a run", () => {
       });
     });
 
+    // #1094-T40
+    it("shows every repository of a step with several, each branch linked to its own repository, and not the single branch twice", () => {
+      const result = agentResultOf(
+        {
+          kind: "agent",
+          output: {
+            costUsd: 1,
+            branch: "feature/7",
+            repos: [
+              {
+                fullName: "acme/widgets",
+                base: "main",
+                branch: "feature/7",
+                commits: ["a1", "a2"],
+                headCommit: "a2",
+                pushed: true,
+              },
+              {
+                fullName: "acme/shared",
+                base: "develop",
+                branch: "develop",
+                commits: [],
+                headCommit: "b1",
+                pushed: false,
+              },
+              { fullName: "not a repository", base: "x", branch: "y" },
+              "nonsense",
+            ],
+          },
+        },
+        REPO,
+      );
+      expect(result).toEqual({
+        repos: [
+          {
+            fullName: "acme/widgets",
+            base: "main",
+            branch: "feature/7",
+            branchUrl: "https://github.com/acme/widgets/tree/feature/7",
+            commits: 2,
+            pushed: true,
+          },
+          {
+            fullName: "acme/shared",
+            base: "develop",
+            branch: "develop",
+            commits: 0,
+            pushed: false,
+          },
+        ],
+        fields: { costUsd: 1 },
+      });
+    });
+
     it("shows nothing for a step that returned nothing", () => {
       expect(
         agentResultOf({ kind: "agent", output: null }, REPO),
@@ -213,6 +267,90 @@ describe("what the workflow pages take from a run", () => {
         agentResultOf({ kind: "agent", output: {} }, REPO),
       ).toBeUndefined();
     });
+  });
+});
+
+describe("the result of a pull request step with several repositories", () => {
+  // #1094-T41
+  it("lists the pull requests per repository with their state and the reason of a skipped one, linked only into their own repository", () => {
+    const result = actionResultOf(
+      {
+        kind: "action",
+        output: {
+          number: 5,
+          url: "https://github.com/acme/widgets/pull/5",
+          existing: false,
+          pullRequests: [
+            {
+              fullName: "acme/widgets",
+              base: "main",
+              head: "feature/7",
+              state: "opened",
+              number: 5,
+              url: "https://github.com/acme/widgets/pull/5",
+            },
+            {
+              fullName: "acme/shared",
+              base: "develop",
+              head: "feature/7",
+              state: "existing",
+              number: 9,
+              url: "https://github.com/acme/shared/pull/9",
+            },
+            {
+              fullName: "acme/docs",
+              base: "main",
+              head: "main",
+              state: "skipped",
+              reason: "direct",
+            },
+            {
+              fullName: "acme/evil",
+              base: "main",
+              head: "x",
+              state: "opened",
+              number: 1,
+              url: "https://github.com/someone/else/pull/1",
+            },
+            { fullName: "acme/bad", base: "main", head: "x", state: "weird" },
+          ],
+        },
+      },
+      REPO,
+    );
+    expect(result?.pullRequests).toEqual([
+      {
+        fullName: "acme/widgets",
+        base: "main",
+        head: "feature/7",
+        state: "opened",
+        number: 5,
+        url: "https://github.com/acme/widgets/pull/5",
+      },
+      {
+        fullName: "acme/shared",
+        base: "develop",
+        head: "feature/7",
+        state: "existing",
+        number: 9,
+        url: "https://github.com/acme/shared/pull/9",
+      },
+      {
+        fullName: "acme/docs",
+        base: "main",
+        head: "main",
+        state: "skipped",
+        reason: "direct",
+      },
+      // An address that is not in the repository the entry names is not linked.
+      {
+        fullName: "acme/evil",
+        base: "main",
+        head: "x",
+        state: "opened",
+        number: 1,
+      },
+    ]);
   });
 });
 

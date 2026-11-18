@@ -425,6 +425,49 @@ function TaskResult({
         )}
       </Section>
       <AgentResult task={task} settled={settled} />
+      {task.repos.length === 0 ? null : (
+        <Section title="Repositories">
+          <p className="text-sm text-muted-foreground">
+            This task worked on {task.repos.length} repositories. The branch,
+            the commits and the files below are those of the first one.
+          </p>
+          <ul data-slot="run-repos" className="flex flex-col gap-2 text-sm">
+            {task.repos.map((repo) => (
+              <li
+                key={repo.fullName}
+                data-repo-result={repo.pushed ? "pushed" : "not-pushed"}
+                className="break-words"
+              >
+                <MaybeLink href={repo.url}>{repo.fullName}</MaybeLink>{" "}
+                <span className="text-muted-foreground">
+                  {repo.branch === repo.base ? (
+                    <>
+                      worked directly on <code>{repo.base}</code>
+                    </>
+                  ) : (
+                    <>
+                      <MaybeLink href={repo.branchUrl}>{repo.branch}</MaybeLink>{" "}
+                      from <code>{repo.base}</code>
+                      {repo.created ? " (made by this turn)" : " (continued)"}
+                    </>
+                  )}
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  {repo.commits} {repo.commits === 1 ? "commit" : "commits"},{" "}
+                  {repo.files} {repo.files === 1 ? "file" : "files"} changed,{" "}
+                  {repo.pushed ? "pushed" : "not pushed"}
+                  {repo.shortSha === null ? null : (
+                    <>
+                      {" "}
+                      <code className="font-mono">{repo.shortSha}</code>
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
       {task.branches.shown.length === 0 &&
       task.branches.dropped.invalid === 0 &&
       task.branches.dropped.overflow === 0 ? null : (

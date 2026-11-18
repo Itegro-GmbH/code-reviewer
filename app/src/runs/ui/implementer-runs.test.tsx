@@ -71,6 +71,7 @@ function task(
     waitingForRunner: null,
     summary: "Added a health endpoint.",
     environment: null,
+    repos: [],
     commits: {
       shown: [
         {
@@ -322,6 +323,57 @@ describe("the detail page of an implementer run", () => {
     expect(rejected?.textContent).toContain("never overwrites a branch");
     expect(rejected?.querySelector("a")).toBeNull();
     expect(list?.textContent).toContain("the task's branch");
+  });
+
+  // #1094-T71
+  it("lists every repository of a task of several, each with its branch link, and none for a task of one", () => {
+    const { container } = renderDetail(
+      detail({
+        implementer: task({
+          repos: [
+            {
+              fullName: "acme/widgets",
+              url: "https://github.com/acme/widgets",
+              base: "main",
+              branch: "feature/7",
+              branchUrl: "https://github.com/acme/widgets/tree/feature/7",
+              created: true,
+              commits: 2,
+              files: 1,
+              pushed: true,
+              shortSha: SHA.slice(0, 7),
+            },
+            {
+              fullName: "acme/shared",
+              url: "https://github.com/acme/shared",
+              base: "develop",
+              branch: "develop",
+              branchUrl: null,
+              created: false,
+              commits: 0,
+              files: 0,
+              pushed: false,
+              shortSha: null,
+            },
+          ],
+        }),
+      }),
+    );
+    const list = container.querySelector('[data-slot="run-repos"]');
+    expect(list?.querySelectorAll("li")).toHaveLength(2);
+    expect(
+      screen.getByRole("link", { name: "feature/7" }).getAttribute("href"),
+    ).toBe("https://github.com/acme/widgets/tree/feature/7");
+    expect(list?.textContent).toContain("2 commits, 1 file changed, pushed");
+    expect(list?.textContent).toContain("worked directly on develop");
+    expect(list?.textContent).toContain(
+      "0 commits, 0 files changed, not pushed",
+    );
+  });
+
+  it("shows no list of repositories for a task of one", () => {
+    const { container } = renderDetail(detail({ implementer: task() }));
+    expect(container.querySelector('[data-slot="run-repos"]')).toBeNull();
   });
 
   it("shows no list of branches for a task that pushed none", () => {
