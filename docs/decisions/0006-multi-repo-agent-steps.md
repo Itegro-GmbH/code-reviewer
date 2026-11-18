@@ -224,8 +224,19 @@ are `ErrorCode`s of the runner contract.
 - **Repository access of the person.** "Any active repository of the workspace" is checked at workspace level (the GitHub App's
   installation). A manual input `repo` is free text typed by a member of the workspace, who may have no access to that
   repository on GitHub; the run's own repository has the same property today, but now every repository is free text. Not decided here.
-- **`{{trigger.ticket.key}}`.** The epic's example uses it; the validator in #1092 must say which tickets have a key (a Jira issue
-  does) and what a GitHub issue gives (its number).
+- **`{{trigger.ticket.key}}`.** *Settled in #1092:* every ticket has a text key (a Jira issue its key, `PROJ-123`; a GitHub issue its number as text), which is
+  what `TICKET_TYPE` already says, so the validator takes `{{trigger.ticket.key}}` and `{{trigger.ticket.number}}` (0 for a Jira ticket) in the `branch` of an entry.
+
+## Notes from the implementation of the app side (#1092)
+
+- **The session's `branch` column.** A session has a unique branch per repository (`implementer_sessions_repository_branch_unique`), and a lane may name the same working
+  branch again (a retry, a second round). A session with `repos` therefore keeps the platform's own session name (`workflow/<run>/<step>`) in that column: it is a key and no
+  git branch. The repositories, as resolved, are in the new column `repos` (expand-only migration `20261118160000`); the first one is the session's `repository_id`.
+  Everything that wants a git branch reads it from `repos` (the facts, the claim, the resume), not from `branch`.
+- **Size limit.** The limit of the app for the body of an Implementer report (`IMPLEMENTER_MAX_BODY_BYTES`) is derived from the single form's worst case and is about 27 MB, so
+  there was nothing to raise to 4 MiB: it is unchanged.
+- **Direct work and read access.** For a profile that may not push the installation need not have the right to write, in the start of the task, the follow-up and the claim
+  alike; the token is then a read-only one.
 
 ## Out of scope
 
