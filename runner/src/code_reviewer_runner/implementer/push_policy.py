@@ -77,12 +77,14 @@ class Selection:
 
 
 def select_branches(
-    local_branches: list[str], *, form_branch: str, limit: int = MAX_PUSHED_BRANCHES
+    local_branches: list[str], *, form_branch: str, limit: int | None = None
 ) -> Selection:
     """The branches the final push takes, out of the local branches of the agent's repository.
     **The one place for a rule about which branches are pushed.** Today only the name checks and
     `PUSH_EXCLUDED_BRANCHES` decide."""
     unique = sorted(set(local_branches))
+    # Read at the call, so that the limit is the module's current one (a test lowers it).
+    limit = MAX_PUSHED_BRANCHES if limit is None else limit
     # The task's branch first, then alphabetical: what the limit drops is the end of this order.
     ordered = sorted(unique, key=lambda name: (name != form_branch, name))
     names: list[str] = []

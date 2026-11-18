@@ -99,7 +99,7 @@ from .history import (
     parse_name_status,
 )
 from .push_guard import SecretScanner
-from .push_policy import MAX_PUSHED_BRANCHES, branch_name_problem, select_branches
+from .push_policy import branch_name_problem, select_branches
 from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
@@ -329,7 +329,7 @@ class WorkspaceSpec:
     branch_exists: bool = False
     # The most branches the final push reports for this repository (a multi-repository report is
     # shared by up to ten of them).
-    max_branches: int = MAX_PUSHED_BRANCHES
+    max_branches: int | None = None
 
     @property
     def multi(self) -> bool:
