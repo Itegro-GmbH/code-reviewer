@@ -1022,6 +1022,36 @@ describe("the freshness check, where a partial re-run cannot skip it", () => {
     );
   });
 
+  // #1098: the persist job writes the same pair as the stage job, with the same fallback; a typo in an input name would persist `none` silently.
+  it("persists the pair from the build or, when the build output is empty (a reused pair), from the decision, and the action hands the list on", () => {
+    const write = stepsOf(job("persist")).find(
+      (step) => step.uses === "./.github/actions/infisical-write-snapshot-pair",
+    );
+    for (const [name, output] of [
+      ["snapshot-id", "snapshot-id"],
+      ["image-digest", "image-digest"],
+      ["commit", "commit"],
+      ["sysbox", "sysbox"],
+      ["worker-features", "worker-features"],
+    ] as const)
+      expect(write?.with?.[name], name).toBe(
+        `\${{ needs.snapshot-build.outputs.${output} || needs.snapshot-decide.outputs.${output} }}`,
+      );
+    // The build output comes first: a rebuild's list wins; with no rebuild the build job is skipped, its output is empty and the
+    // decision's (the live pair's own) list is used. `||` does not fall back to anything else, so a missing one is `none` downstream.
+    expect(String(write?.with?.["worker-features"])).toMatch(
+      /^\$\{\{ needs\.snapshot-build\.outputs\.worker-features \|\| needs\.snapshot-decide\.outputs\.worker-features \}\}$/,
+    );
+    const action = readText(
+      ".github/actions/infisical-write-snapshot-pair/action.yml",
+    );
+    expect(action).toContain("worker-features:");
+    expect(action).toContain(
+      "PAIR_WORKER_FEATURES: ${{ inputs.worker-features }}",
+    );
+    expect(action).toContain("PAIR_SYSBOX: ${{ inputs.sysbox }}");
+  });
+
   // #403-T23
   it("is a composite action that reads the head of main with the job's own token and takes the override as an input only", () => {
     const text = readText(".github/actions/check-current-commit/action.yml");

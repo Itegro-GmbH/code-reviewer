@@ -301,8 +301,8 @@ describe("snapshot:ops persist", () => {
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
     ).toEqual([
-      "unproven",
       "none",
+      "unproven",
       NEW.snapshotId,
       NEW.imageDigest,
       NEW.commit,
@@ -336,8 +336,8 @@ describe("snapshot:ops persist", () => {
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
     ).toEqual([
-      "unproven",
       "none",
+      "unproven",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
@@ -373,8 +373,8 @@ describe("snapshot:ops persist", () => {
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
     ).toEqual([
-      "unproven",
       "none",
+      "unproven",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
@@ -406,8 +406,8 @@ describe("snapshot:ops persist", () => {
       .filter((r) => r.url.pathname.startsWith("/api/v4/secrets/"))
       .map((r) => (r.body as { secretValue: string }).secretValue);
     expect(values).toEqual([
-      "unproven",
       "none",
+      "unproven",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,

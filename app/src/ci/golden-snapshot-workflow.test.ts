@@ -258,6 +258,15 @@ describe("golden snapshot workflow", () => {
     expect(show.run).not.toContain("will not start a Sysbox container");
   });
 
+  // #1098: a snapshot whose image lists no feature is shown, never failed; the multi-repo jobs then wait, so the first release is checked by eye.
+  it("shows a snapshot without a Worker feature as a warning annotation of the run and does not fail on it", () => {
+    const show = stepNamed("Show the record");
+    expect(show.run).toContain("::warning title=Worker features none::");
+    expect(show.run).toContain('[ "$features" = "none" ]');
+    expect(show.run).toContain(".workerFeatures");
+    expect(show.run).not.toMatch(/::error|exit 1/);
+  });
+
   // #330-extra-workflow
   it("does not ignore a failure of any step", () => {
     for (const step of job.steps)

@@ -369,8 +369,9 @@ Its role is exactly this, and nothing more (create a custom role and add the ide
 - **Grant the fifth name, `SANDBOX_WORKER_FEATURES`, before the release that carries the Dispatcher's feature gate (#1098).** Same
   rule and same consequence as for the fourth name above: the persist job writes the list first (cleared to `none`) and *creates* the
   key on that first write, and a role without it makes `persist` fail after the promotion (the run is red, `cleanup` is skipped, every
-  later release stays red until the grant is made and the run's failed jobs are re-run). Nothing live breaks meanwhile: the staged
-  Dispatcher deployment carries the list as its own variable.
+  later release stays red until the grant is made and the run's failed jobs are re-run). It is the very first write, so a missing
+  grant fails before anything else in Infisical changed (no cleared verdict next to the old snapshot id). Nothing live breaks
+  meanwhile: the staged Dispatcher deployment carries the list as its own variable.
 - **The condition on the five secret names (`$in` the five names) is recommended hardening**: it makes the write
   path unable to touch any other key of `/dispatcher` even if the code that calls it were changed. The pipeline does not
   depend on it (the code fixes the five names itself), so a role without it works.
@@ -927,8 +928,8 @@ snapshot it has:
    with the machine identity's write path (section 2.1), after the same freshness check (a pair of an older run must not
    overwrite a newer one; if `main` moved on, the next run finds the live pair and writes it). Secret Sync then carries it
    to the project's variables for deployments made by hand and for the next `vercel pull`. Written also when nothing was
-   rebuilt but the variables are behind the live pair (a repair, below). The four keys are written one after the other,
-   the verdict twice (cleared to `unproven` first, set last): a failure in between leaves a mixed set (a new id with an
+   rebuilt but the variables are behind the live pair (a repair, below). The keys are written one after the other, the list of
+   features first (cleared to `none`, set last), the verdict twice (cleared to `unproven` second, set last): a failure in between leaves a mixed set (a new id with an
    old image id, say), which a deployment made by hand would refuse to start with and which the next run repairs, and
    never a `proven` next to a snapshot nobody proved.
 7. **Clean up** (`cleanup`), **after every promotion of the Dispatcher** (and after persist, when persist had something

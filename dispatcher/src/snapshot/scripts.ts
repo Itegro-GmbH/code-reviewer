@@ -6,7 +6,11 @@
 // token, never leaves the process that calls the platform API.
 import { NO_FEATURES } from "./worker-features.ts";
 import type { PipelineConfig } from "./config.ts";
-import { probeRunArguments } from "./probe-flags.ts";
+import {
+  FEATURES_CONTAINER_NAME,
+  featuresRunArguments,
+  probeRunArguments,
+} from "./probe-flags.ts";
 
 export { probeRunArguments };
 
@@ -470,16 +474,28 @@ timeout 180 docker ${probeRunArguments(config).map(shellQuote).join(" ")}
 /**
  * What the Worker image of this snapshot understands (#1098): its own `WORKER_FEATURES`, the list the Worker names in the
  * details request of every job, printed by the image itself, so that the record says what the image does and not what the
- * commit's source seems to say. No network, nothing writable, no capability: the container runs a one line import of the
- * runner's package, with the image's own interpreter (\`/opt/venv\`), and no job content, credential or secret is near it.
+ * commit's source seems to say. The flags are the shared renderer's, the Worker's own spec (`featuresRunArguments`), with
+ * no network: the container runs a one line import of the runner's package with the image's own interpreter (\`/opt/venv\`),
+ * and no job content, credential or secret is near it. The timeout kills the container, not only the Docker client (the
+ * container has a fixed name, and the trap removes it however the script ends).
  * Prints one \`WORKER_FEATURES <names>\` line (the names comma separated, none for an image that lists none).
  */
 export function workerFeaturesScript(config: PipelineConfig): string {
   const code =
     "from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES; " +
     `print("${WORKER_FEATURES_MARKER} " + (",".join(WORKER_FEATURES) or "${NO_FEATURES}"))`;
+  const args = featuresRunArguments({
+    imageTag: config.imageTag,
+    probeMemory: config.probeMemory,
+    entrypoint: WORKER_PYTHON,
+    code,
+  });
   return `${STRICT}
-timeout 120 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint ${shellQuote(WORKER_PYTHON)} ${shellQuote(config.imageTag)} -c ${shellQuote(code)}
+trap 'docker rm --force ${FEATURES_CONTAINER_NAME} >/dev/null 2>&1 || true' EXIT
+docker rm --force ${FEATURES_CONTAINER_NAME} >/dev/null 2>&1 || true
+status=0
+timeout 120 docker ${args.map(shellQuote).join(" ")} </dev/null || status=$?
+exit "$status"
 `;
 }
 

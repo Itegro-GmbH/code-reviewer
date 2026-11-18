@@ -32,8 +32,10 @@ export type PersistResult =
 const ENVIRONMENT = "prod";
 const SECRET_PATH = "/dispatcher";
 /**
- * The only names this module ever writes, in the order it writes them. The verdict is written twice around the rest: cleared
- * to `unproven` first and set to the pair's own last, so that a write that fails in between leaves a pair that is not
+ * The only names this module ever writes, in the order it writes them. The list of features is cleared to `none` before
+ * anything else: it is the key an identity most likely has no grant for yet (the first release of #1098), so a missing
+ * permission fails here, before any state changed, and never leaves a cleared verdict next to the old snapshot id. The
+ * verdict is written twice around the rest: cleared to `unproven` next and set to the pair's own last, so that a write that fails in between leaves a pair that is not
  * proven (never the `proven` of an older snapshot next to a newer snapshot id), and the Implementer refuses it. The list of
  * the Worker image's features (#1098) is written the same way, cleared to `none` first and set last: a write that fails in
  * between leaves a pair that names no feature that depends on the image, never the list of an older image next to a newer
@@ -45,8 +47,8 @@ function writes(pair: SnapshotPair): Array<[string, string]> {
   const features = PAIR_VARIABLES.workerFeatures;
   const featuresValue = values[features] ?? NO_FEATURES;
   return [
-    [verdict, "unproven"],
     [features, NO_FEATURES],
+    [verdict, "unproven"],
     [PAIR_VARIABLES.snapshotId, values[PAIR_VARIABLES.snapshotId] ?? ""],
     [PAIR_VARIABLES.imageDigest, values[PAIR_VARIABLES.imageDigest] ?? ""],
     [PAIR_VARIABLES.commit, values[PAIR_VARIABLES.commit] ?? ""],

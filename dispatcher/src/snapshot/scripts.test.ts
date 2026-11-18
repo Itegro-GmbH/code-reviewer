@@ -23,6 +23,7 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "../launchers/container-spec.ts";
 import { renderDockerRunArguments } from "../launchers/container.ts";
+import { featuresRunArguments } from "./probe-flags.ts";
 import { resolveConfig } from "./config.ts";
 import {
   EXIT_ANCHOR_MISSING,
@@ -639,14 +640,59 @@ exit 0`;
 
 describe("the Worker features step of the check VM", () => {
   // #1098-T05
-  it("runs the image's own interpreter without network, capabilities or a writable root, and prints the image's list", () => {
+  it("runs the image's own interpreter under the Worker's own container spec, only without network, and prints the image's list", () => {
     const script = workerFeaturesScript(config);
-    expect(script).toContain("--network none");
-    expect(script).toContain("--read-only");
-    expect(script).toContain("--cap-drop ALL");
-    expect(script).toContain(`--entrypoint ${shellQuote(WORKER_PYTHON)}`);
+    const args = featuresRunArguments({
+      imageTag: config.imageTag,
+      probeMemory: config.probeMemory,
+      entrypoint: WORKER_PYTHON,
+      code: "print(1)",
+    });
+    // The Worker's spec, as the probe renders it: the two flags that differ are the network and the entrypoint.
+    const probe = probeRunArguments(config);
+    const without = (list: string[]) =>
+      list.filter(
+        (arg, i) =>
+          arg !== "--name" &&
+          list[i - 1] !== "--name" &&
+          arg !== "--entrypoint" &&
+          list[i - 1] !== "--entrypoint",
+      );
+    const flags = (list: string[]) =>
+      without(list.slice(0, list.indexOf(config.imageTag)));
+    expect(flags(args).filter((arg) => arg !== "none")).toEqual(
+      flags(probe).filter((arg) => arg !== "bridge"),
+    );
+    const joined = args.join(" ");
+    for (const flag of [
+      "--network none",
+      "--read-only",
+      "--cap-drop ALL",
+      "--security-opt no-new-privileges:true",
+      "--pids-limit 512",
+      "--env HOME=/home/runner",
+      "--tmpfs /tmp:",
+      "--tmpfs /home/runner:",
+      `--entrypoint ${WORKER_PYTHON}`,
+    ])
+      expect(joined, flag).toContain(flag);
+    expect(joined).not.toContain("--network bridge");
     expect(script).toContain(shellQuote(config.imageTag));
     expect(script).toContain("WORKER_FEATURES");
+    // The entrypoint is in front of the image, the code after it.
+    expect(args.at(-3)).toBe(config.imageTag);
+    expect(args.at(-2)).toBe("-c");
+  });
+
+  // #1098-T05: a timeout only kills the client of Docker; the container must go with it.
+  it("removes its named container when the timeout hits or the script ends otherwise", () => {
+    const script = workerFeaturesScript(config);
+    expect(script).toMatch(
+      /^trap 'docker rm --force code-reviewer-worker-features /m,
+    );
+    expect(script).toContain("'--name' 'code-reviewer-worker-features'");
+    expect(script).toContain("timeout 120 docker ");
+    expect(script).toContain("</dev/null");
   });
 
   // #1098-T05: the step imports the Worker's list by name; a rename in the runner must fail here, not as an empty list in a release.

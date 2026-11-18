@@ -95,8 +95,8 @@ describe("writing the snapshot pair to Infisical", () => {
     expect(lookup.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
     const writes = seen.filter((entry) => entry.method === "PATCH");
     expect(writes.map((entry) => entry.url.pathname.split("/").pop())).toEqual([
-      "SANDBOX_SYSBOX_PROOF",
       "SANDBOX_WORKER_FEATURES",
+      "SANDBOX_SYSBOX_PROOF",
       "SANDBOX_SNAPSHOT_ID",
       "SANDBOX_IMAGE_DIGEST",
       "SANDBOX_SNAPSHOT_COMMIT",
@@ -117,8 +117,8 @@ describe("writing the snapshot pair to Infisical", () => {
     // proven, never the `proven` of an older snapshot next to a newer snapshot id.
     // #1098: the list of the image's features goes the same way (cleared to `none` first, set last), and an empty one stays `none`.
     expect(writes.map((entry) => entry.body?.secretValue)).toEqual([
-      "unproven",
       "none",
+      "unproven",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
@@ -148,8 +148,8 @@ describe("writing the snapshot pair to Infisical", () => {
     );
     expect(created.map((entry) => entry.url.pathname.split("/").pop())).toEqual(
       [
-        "SANDBOX_SYSBOX_PROOF",
         "SANDBOX_WORKER_FEATURES",
+        "SANDBOX_SYSBOX_PROOF",
         "SANDBOX_IMAGE_DIGEST",
         "SANDBOX_SNAPSHOT_COMMIT",
         "SANDBOX_SYSBOX_PROOF",
@@ -195,6 +195,29 @@ describe("writing the snapshot pair to Infisical", () => {
       .filter((entry) => entry.url.pathname.endsWith("/SANDBOX_SYSBOX_PROOF"))
       .map((entry) => entry.body?.secretValue);
     expect(verdicts).toEqual(["unproven"]);
+  });
+
+  // #1098: a missing grant on the list of features fails before anything else was written, so that no cleared verdict stays
+  // behind next to the old snapshot id.
+  it("writes the list of features first, so that a missing grant on it changes nothing", async () => {
+    const { fetch, seen } = infisical(
+      (entry) =>
+        entry.method === "PATCH" &&
+        entry.url.pathname.endsWith("/SANDBOX_WORKER_FEATURES")
+          ? Response.json({ message: "forbidden" }, { status: 403 })
+          : undefined,
+      ALL,
+    );
+
+    expect(await persistPair(TARGET, PAIR, fetch)).toEqual({
+      ok: false,
+      code: "infisical_write_failed",
+    });
+
+    const attempts = seen
+      .filter((entry) => entry.url.pathname.startsWith("/api/v4/secrets/"))
+      .map((entry) => entry.url.pathname.split("/").pop());
+    expect(attempts).toEqual(["SANDBOX_WORKER_FEATURES"]);
   });
 
   // #403-T15

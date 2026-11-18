@@ -9,7 +9,7 @@ import { createLogger } from "./core/logger.ts";
 import type { Launcher, Logger } from "./core/types.ts";
 import type { LauncherContext, ReaperSetup } from "./launchers/sandbox-env.ts";
 import { createAppClient } from "./core/app-client.ts";
-import { parseWorkerFeatures } from "./snapshot/worker-features.ts";
+import { imageClaimFeatures } from "./core/claim-features.ts";
 import { liveJobVmsByApp } from "./reaper/live-vms.ts";
 import { createReaper } from "./reaper/reaper.ts";
 import { mountReaperRoute } from "./reaper/route.ts";
@@ -92,12 +92,12 @@ export function composeDispatcher(
     ...(options.env.SANDBOX_SNAPSHOT_ID === undefined
       ? {}
       : { snapshotId: options.env.SANDBOX_SNAPSHOT_ID }),
-    // #1098: what the Worker image of the snapshot lists. Read only with a snapshot, and never an error: a value nobody can
-    // read is the empty list, and the claim then names no feature that depends on the image.
-    workerFeatures:
+    // #1098: the claim features the Worker image of the snapshot allows, parsed once here. Read only with a snapshot, and never
+    // an error: a value nobody can read is the empty list, and the claim then names no feature that depends on the image.
+    imageFeatures:
       options.env.SANDBOX_SNAPSHOT_ID === undefined
         ? []
-        : parseWorkerFeatures(options.env.SANDBOX_WORKER_FEATURES),
+        : imageClaimFeatures(options.env.SANDBOX_WORKER_FEATURES),
   });
   if (setup !== undefined) {
     // One client per app: a VM's job is asked about at the app its tenant tag names and at no other (#730).

@@ -157,11 +157,21 @@ jobs:
           if [ "$sysbox" != "proven" ]; then
             echo "::warning title=Sysbox unproven::The golden snapshot was recorded without a passing Sysbox proof. Reviews are not affected. The verdict travels with the snapshot pair, and an Implementer turn does not start on a snapshot whose verdict is not proven (sandbox_unproven, free). The log of the build step names the reasons."
           fi
+          # An image that lists no feature (or whose list the build could not read) is a snapshot for everything that does not depend on
+          # the list: the Dispatcher then names no claim feature (implementer_multi_repo) and such jobs wait in the queue. It never fails a run.
+          features="$(jq -r '(.workerFeatures // []) | if length == 0 then "none" else join(",") end' "$RUNNER_TEMP/golden-snapshot.json")"
+          if [ "$features" = "none" ]; then
+            echo "::warning title=Worker features none::The golden snapshot was recorded with no Worker feature (the image lists none, or the build could not read its list: see worker_features_unreadable in the build log). Reviews are not affected. The Dispatcher names no claim feature that depends on the image, so multi-repo Implementer jobs wait in the queue until a snapshot lists implementer_multi_repo."
+          fi
           {
             echo "### Golden snapshot"
             echo
             if [ "$sysbox" != "proven" ]; then
               echo "**Sysbox unproven.** Reviews are not affected; see the warning of this job and docs/golden-snapshot.md, section Sysbox."
+              echo
+            fi
+            if [ "$features" = "none" ]; then
+              echo "**Worker features: none.** Multi-repo Implementer jobs wait in the queue; see the warning of this job and docs/golden-snapshot.md, step 11a."
               echo
             fi
             echo "Not wired into anything yet. A deployment makes it current after its canary passed and the promotion went through (docs/deployment-vercel.md, section 5.1)."
