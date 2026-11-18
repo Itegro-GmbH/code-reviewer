@@ -1572,7 +1572,7 @@ def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_se
         ).create()
 
 
-# -- several repositories in one turn (#1093) -------------------------------------------------------
+# -- several repositories in one turn (#1093) ---------------------------------------------------
 
 MULTI_PLACES = places_of(("acme__app", "shared-lib"))
 

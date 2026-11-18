@@ -389,7 +389,7 @@ def test_a_preface_without_base_and_start_has_no_note() -> None:
 
 
 # #1093-T70
-def test_the_first_turn_of_several_repositories_gets_a_note_about_the_layout_and_the_instruction() -> (
+def test_the_first_turn_of_several_repositories_gets_a_note_of_the_layout_and_the_instruction() -> (
     None
 ):
     parts = multi_first_turn_parts(INSTRUCTION)

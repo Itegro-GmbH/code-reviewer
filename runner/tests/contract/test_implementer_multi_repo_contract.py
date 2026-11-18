@@ -427,3 +427,19 @@ def test_a_pushed_repository_has_a_head_commit() -> None:
 def test_the_feature_is_in_the_file() -> None:
     schema: Document = _load(SCHEMA_PATH)
     assert "implementer_multi_repo" in schema["$defs"]["KnownClaimFeature"]["enum"]
+
+
+def test_the_report_validator_of_the_runner_accepts_the_example_result() -> None:
+    from code_reviewer_runner.implementer.report import valid_block
+
+    block: Document = _load(MULTI / "RunnerResult.json")["implementer"]
+    assert valid_block(block) is not None
+
+
+def test_the_worker_and_the_factory_runner_name_the_feature() -> None:
+    from code_reviewer_runner.factory_runner.app_client import FEATURE_MULTI_REPO
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    schema: Document = _load(SCHEMA_PATH)
+    known = schema["$defs"]["KnownClaimFeature"]["enum"]
+    assert FEATURE_MULTI_REPO in WORKER_FEATURES and FEATURE_MULTI_REPO in known

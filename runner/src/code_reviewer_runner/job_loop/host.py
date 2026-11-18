@@ -48,7 +48,7 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from code_reviewer_runner.capabilities import (
     ENGINE_DYNAMIC,
@@ -381,6 +381,14 @@ def _secrets_in(raw_input: Mapping[str, Any]) -> list[str]:
     for section, key in (("git", "token"), ("llm", "apiKey")):
         part = as_object(raw_input.get(section))
         value = part.get(key) if part else None
+        if isinstance(value, str) and value.strip():
+            values.append(value)
+    # #1093: a multi-repository job has one git token for each installation (`git.tokens`).
+    git = as_object(raw_input.get("git"))
+    tokens: object = git.get("tokens") if git else None
+    for item in cast("list[object]", tokens) if isinstance(tokens, list) else []:
+        entry = as_object(item)
+        value = entry.get("token") if entry else None
         if isinstance(value, str) and value.strip():
             values.append(value)
     return values

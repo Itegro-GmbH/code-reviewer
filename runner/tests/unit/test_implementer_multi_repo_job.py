@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: LicenseRef-Proprietary
 
 """The parser of a multi-repository implementer job (#1093, epic #1090, ADR 0006), beside the shared
-negative corpus of `tests/contract/test_implementer_multi_repo_contract.py`: what a parsed job holds,
-the tokens of each repository, the per-repository resume, the names and the single form that must
-stay as it was."""
+negative corpus of `tests/contract/test_implementer_multi_repo_contract.py`: what a parsed job
+holds, the tokens of each repository, the per-repository resume, the names and the single form
+that must stay as it was."""
 
 import json
 from pathlib import Path
@@ -163,3 +163,14 @@ def test_a_name_that_cannot_be_a_mount_is_none(name: str) -> None:
 
 def test_a_dot_directory_name_that_is_plain_is_a_mount() -> None:
     assert is_mount_name(".github") and is_mount_name("a.b-c_d")
+
+
+# #1093-T31
+def test_the_job_host_masks_every_git_token_of_a_multi_repository_job() -> None:
+    from code_reviewer_runner.job_loop.host import _secrets_in  # pyright: ignore[reportPrivateUsage]
+
+    secrets = _secrets_in(_job())
+
+    assert "example-git-write-token-1" in secrets
+    assert "example-git-write-token-2" in secrets
+    assert "example-llm-key" in secrets

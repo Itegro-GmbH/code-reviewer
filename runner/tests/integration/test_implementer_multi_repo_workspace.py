@@ -11,6 +11,7 @@ each repository, and that one rejected repository does not keep the others from 
 """
 
 from collections.abc import Sequence
+from typing import Any, cast
 from pathlib import Path
 
 import pytest
@@ -431,7 +432,8 @@ def test_a_turn_that_fails_after_the_set_up_reports_every_repository(rig: MultiR
     block = _early_block(workspace)
 
     assert block is not None
-    entries = {entry["name"]: entry for entry in block["repos"]}
+    repos: list[dict[str, Any]] = cast("list[dict[str, Any]]", block["repos"])
+    entries = {entry["name"]: entry for entry in repos}
     assert entries["app"]["created"] is True and entries["app"]["pushed"] is False
     assert entries["lib"]["created"] is False and entries["lib"]["pushed"] is True
     assert entries["lib"]["baseCommit"] == repos[2].origin.tip("feature/x")
