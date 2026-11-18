@@ -462,7 +462,7 @@ function IssueRow({
             >
               {item.lane.name}
             </Link>
-            <LaneTrack lane={item.lane} />
+            <LaneTrack lane={item.lane} laneNodes={list.laneNodes} />
             {item.lane.step === null ? null : (
               <span className="text-xs text-muted-foreground">
                 {BOARD_COPY.step(item.lane.step)}

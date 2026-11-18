@@ -23,7 +23,7 @@ const running = {
   name: "Issue to PR",
   step: "implement",
   status: "running" as const,
-  nodes: [],
+  nodesKey: null,
   steps: [],
 };
 

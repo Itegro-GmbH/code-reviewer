@@ -55,6 +55,7 @@ describe("loadLaneRunsPage", () => {
   const snapshot = (runs: object[]): LaneRunListView =>
     ({
       runs,
+      laneNodes: {},
       nextCursor: null,
       now: "2026-11-18T12:00:00.000Z",
     }) as LaneRunListView;

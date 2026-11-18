@@ -109,3 +109,64 @@ export function laneNodesOfRun(
   const walked = forTrigger(document, trigger);
   return walked === undefined ? [] : laneNodesOf(walked);
 }
+
+/**
+ * The nodes of the lane versions a response mentions, once for each (#1087): a board or a list with many runs of one lane would
+ * otherwise repeat the same nodes with every run. A run holds the key of its entry (`nodesKey`) and a view looks the nodes up by it
+ * (`laneNodesFor`). A version that cannot be read has no entry (and no key): the run shows no track.
+ */
+export type LaneNodesByKey = Record<string, LaneNodeView[]>;
+
+/**
+ * The key of the nodes a run walks: the lane, its version and the trigger that started the run. The trigger belongs to the key because
+ * the pre-steps of a trigger are part of the nodes (`forTrigger`), so two runs of one version can walk different nodes.
+ */
+export function laneNodesKey(run: {
+  workflowId: string;
+  workflowVersion: number;
+  triggerKind: string;
+  triggerId: string | null;
+}): string {
+  return `${run.workflowId}@${String(run.workflowVersion)}|${run.triggerKind}|${run.triggerId ?? ""}`;
+}
+
+/** What a view does with a run's `nodesKey`: the nodes of its entry, none for a run without a key (or for a key the response lacks). */
+export function laneNodesFor(
+  byKey: LaneNodesByKey,
+  nodesKey: string | null,
+): readonly LaneNodeView[] {
+  return nodesKey === null ? [] : (byKey[nodesKey] ?? []);
+}
+
+export type LaneNodesIndex = {
+  /** The entries collected so far: what the response carries as `laneNodes`. */
+  byKey: LaneNodesByKey;
+  /**
+   * The key for the nodes of `run`, or null when there are none. `read` is called only the first time a key is seen, so a response reads
+   * (and holds) the nodes of a lane version once, however many runs it has.
+   */
+  refer(
+    run: Parameters<typeof laneNodesKey>[0],
+    read: () => LaneNodeView[],
+  ): string | null;
+};
+
+export function createLaneNodesIndex(): LaneNodesIndex {
+  const byKey: LaneNodesByKey = {};
+  const unreadable = new Set<string>();
+  return {
+    byKey,
+    refer(run, read) {
+      const key = laneNodesKey(run);
+      if (key in byKey) return key;
+      if (unreadable.has(key)) return null;
+      const nodes = read();
+      if (nodes.length === 0) {
+        unreadable.add(key);
+        return null;
+      }
+      byKey[key] = nodes;
+      return key;
+    },
+  };
+}

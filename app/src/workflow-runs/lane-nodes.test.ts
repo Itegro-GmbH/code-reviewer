@@ -2,8 +2,13 @@
 
 // The top-level nodes of a lane version as a run walks them (#1078): the pre-steps of the trigger first, the ids inside branches and
 // bodies, the words taken from the document cut and folded.
-import { describe, expect, it } from "vitest";
-import { laneNodesOfRun } from "./lane-nodes.ts";
+import { describe, expect, it, vi } from "vitest";
+import {
+  createLaneNodesIndex,
+  laneNodesFor,
+  laneNodesKey,
+  laneNodesOfRun,
+} from "./lane-nodes.ts";
 
 const document = JSON.stringify({
   name: "Ship it",
@@ -130,5 +135,61 @@ describe("laneNodesOfRun", () => {
     expect(laneNodesOfRun(document, { id: "gone", kind: "manual" })).toEqual(
       [],
     );
+  });
+});
+
+describe("the nodes of a response, once for each lane version", () => {
+  const run = (
+    overrides: Partial<Parameters<typeof laneNodesKey>[0]> = {},
+  ) => ({
+    workflowId: "wf-1",
+    workflowVersion: 3,
+    triggerKind: "manual",
+    triggerId: "by-hand" as string | null,
+    ...overrides,
+  });
+
+  // #1087-T05
+  it("keys the nodes by lane, version and trigger, because the pre-steps of the trigger are part of them", () => {
+    expect(laneNodesKey(run())).toBe("wf-1@3|manual|by-hand");
+    expect(laneNodesKey(run({ triggerId: null }))).toBe("wf-1@3|manual|");
+    expect(laneNodesKey(run({ workflowVersion: 4 }))).not.toBe(
+      laneNodesKey(run()),
+    );
+    expect(
+      laneNodesKey(run({ triggerId: "label", triggerKind: "ticket.labeled" })),
+    ).not.toBe(laneNodesKey(run()));
+  });
+
+  // #1087-T06
+  it("reads a version once, and gives a version without nodes no entry and no key", () => {
+    const index = createLaneNodesIndex();
+    const read = vi.fn(() =>
+      laneNodesOfRun(document, { id: "by-hand", kind: "manual" }),
+    );
+
+    const first = index.refer(run(), read);
+    const again = index.refer(run(), read);
+    const gone = vi.fn(() => []);
+    const none = index.refer(run({ workflowVersion: 1 }), gone);
+    index.refer(run({ workflowVersion: 1 }), gone);
+
+    expect(first).toBe("wf-1@3|manual|by-hand");
+    expect(again).toBe(first);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(none).toBeNull();
+    expect(gone).toHaveBeenCalledTimes(1);
+    expect(Object.keys(index.byKey)).toEqual([first]);
+  });
+
+  // #1087-T07
+  it("looks the nodes of a run up by its key, and finds none for no key or a key the response lacks", () => {
+    const byKey = {
+      a: laneNodesOfRun(document, { id: "by-hand", kind: "manual" }),
+    };
+
+    expect(laneNodesFor(byKey, "a")).toBe(byKey.a);
+    expect(laneNodesFor(byKey, null)).toEqual([]);
+    expect(laneNodesFor(byKey, "b")).toEqual([]);
   });
 });

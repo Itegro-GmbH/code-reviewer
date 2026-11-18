@@ -30,7 +30,7 @@ const RUNNING = {
   name: "Issue to PR",
   step: "implement",
   status: "running" as const,
-  nodes: [],
+  nodesKey: null,
   steps: [],
 };
 
@@ -554,25 +554,32 @@ describe("the lane run on a ticket of the board (#1080)", () => {
       status: "succeeded" | "waiting",
     ) => ({ id, kind, status, round: 1 });
     board({
-      initial: ticketList([
-        ticket(2, {
-          lane: {
-            ...TRACKED_LANE,
-            status: "waiting",
-            step: "work",
-            nodes: [node("plan", "agent"), loop, node("ship", "action")],
-            steps: [
-              step("plan", "agent", "succeeded"),
-              step("work", "agent", "succeeded"),
-              step("deep", "action", "succeeded"),
-              step("inner", "loop", "succeeded"),
-              step("work", "agent", "waiting"),
-              // a step of `onFailure`: no node of the lane
-              step("notify", "action", "succeeded"),
-            ],
+      initial: ticketList(
+        [
+          ticket(2, {
+            lane: {
+              ...TRACKED_LANE,
+              status: "waiting",
+              step: "work",
+              nodesKey: "nested",
+              steps: [
+                step("plan", "agent", "succeeded"),
+                step("work", "agent", "succeeded"),
+                step("deep", "action", "succeeded"),
+                step("inner", "loop", "succeeded"),
+                step("work", "agent", "waiting"),
+                // a step of `onFailure`: no node of the lane
+                step("notify", "action", "succeeded"),
+              ],
+            },
+          }),
+        ],
+        {
+          laneNodes: {
+            nested: [node("plan", "agent"), loop, node("ship", "action")],
           },
-        }),
-      ]),
+        },
+      ),
     });
 
     const track = within(rowOf(2)).getByRole("img", {
