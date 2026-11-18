@@ -5,6 +5,7 @@
 // the not-found page and nothing of any other run. The trail starts at the Runs list (the area root,
 // epic #165 breadcrumb rule); the repository name is untrusted GitHub text, rendered as text.
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { Breadcrumbs } from "../../components/breadcrumbs.tsx";
 import { Button } from "../../components/button.tsx";
 import { PageHeader } from "../../components/page-header.tsx";
@@ -30,11 +31,14 @@ export async function loadRunDetailPage(
 export function RunDetailPageContent({
   workspaceSlug,
   data,
+  notice,
   api,
 }: {
   /** The workspace of the page: every link and call stays in it. */
   workspaceSlug: string;
   data: Extract<RunDetailPageData, { kind: "ready" }>;
+  /** A note under the header that the page's route adds (#1080: the lane run this agent run is a step of). The Runs know nothing of it. */
+  notice?: ReactNode;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: RunsApi;
 }) {
@@ -65,6 +69,7 @@ export function RunDetailPageContent({
           </Button>
         }
       />
+      {notice}
       {/* Keyed on the run. The polled data is tied to the server data it was fetched next to, so a
           page that stays mounted behind another one (Cache Components) and is shown again with
           fresh server data starts from that data. */}

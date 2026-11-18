@@ -522,3 +522,59 @@ describe("more runs", () => {
     expect(document.querySelectorAll("tbody tr")).toHaveLength(1);
   });
 });
+
+describe("the Runs section of a lane's page (#1080)", () => {
+  function renderInLane(initial: LaneRunListView) {
+    const listWorkspace = vi.fn(async () => ok(initial));
+    const api = { listWorkspace } as unknown as WorkflowRunsApi;
+    render(
+      <LaneRunsList
+        workspaceSlug="acme"
+        filter={{ lane: "wf-1" }}
+        inLane
+        initial={initial}
+        api={api}
+      />,
+    );
+    return { listWorkspace };
+  }
+
+  // #1080-T30
+  it("lists the runs of the lane with the same track and a link to each run", () => {
+    renderInLane(page([item(), item({ id: "run-2", status: "succeeded" })]));
+
+    const rows = screen
+      .getAllByRole("row")
+      .filter((row) => row.hasAttribute("data-run-id"));
+    expect(rows.map((row) => row.getAttribute("data-run-id"))).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+    const first = within(rows[0] as HTMLElement);
+    expect(
+      first.getByRole("img", { name: "Step 2 of 3: Review, running" }),
+    ).toBeTruthy();
+    expect(
+      first.getByRole("link", { name: /^Open the run/ }).getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
+  });
+
+  // #1080-T31
+  it("asks for the runs of this lane again while one is active, and keeps to the lane", async () => {
+    const { listWorkspace } = renderInLane(page([item()]));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WORKFLOW_RUN_POLL_MS);
+    });
+
+    expect(listWorkspace).toHaveBeenCalledWith({ lane: "wf-1" });
+  });
+
+  // #1080-T32
+  it("says that the lane has not run yet, not that a filter matched nothing", () => {
+    renderInLane(page([]));
+
+    expect(screen.getByText(LANE_RUNS_COPY.emptyInLane)).toBeTruthy();
+    expect(screen.queryByText(LANE_RUNS_COPY.emptyFiltered)).toBeNull();
+  });
+});

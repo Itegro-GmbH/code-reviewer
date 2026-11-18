@@ -40,6 +40,7 @@ import {
   type IssuesApi,
 } from "./api.ts";
 import { IssueDrawer } from "./issue-drawer.tsx";
+import { LaneTrack, laneRunPath } from "./lane-track.tsx";
 import { useReturnFocus } from "./return-focus.ts";
 import { BOARD_COPY, TILES_COPY, WAITS_COPY } from "./messages.ts";
 import { StartLaneDialog } from "./start-lane-dialog.tsx";
@@ -454,7 +455,14 @@ function IssueRow({
           </span>
         ) : (
           <div className="flex flex-col gap-1">
-            <span className="font-semibold break-words">{item.lane.name}</span>
+            <Link
+              href={laneRunPath(workspaceSlug, item.lane)}
+              aria-label={BOARD_COPY.openRun(item.lane.name)}
+              className="font-semibold break-words"
+            >
+              {item.lane.name}
+            </Link>
+            <LaneTrack lane={item.lane} />
             {item.lane.step === null ? null : (
               <span className="text-xs text-muted-foreground">
                 {BOARD_COPY.step(item.lane.step)}

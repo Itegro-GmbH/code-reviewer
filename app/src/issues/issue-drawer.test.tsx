@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { run, step } from "../workflow-pages/test-fixtures.ts";
 import type { IssuesApi } from "./api.ts";
 import { IssueDrawer } from "./issue-drawer.tsx";
-import { ticket, ticketList } from "./test-fixtures.ts";
+import { TRACKED_LANE, ticket, ticketList } from "./test-fixtures.ts";
 
 afterEach(cleanup);
 
@@ -25,6 +25,8 @@ const LANE = {
   name: "Issue to PR",
   step: "implement",
   status: "waiting" as const,
+  nodes: [],
+  steps: [],
 };
 
 function apiWith(result: Awaited<ReturnType<IssuesApi["run"]>>): IssuesApi {
@@ -232,5 +234,36 @@ describe("the issue drawer", () => {
     );
 
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("the lane block of the drawer (#1080)", () => {
+  // #1080-T20
+  it("draws the same step track as the board and links to the run", () => {
+    open(ticket(12, { title: "Cache the catalog", lane: TRACKED_LANE }));
+
+    const block = within(screen.getByRole("dialog"));
+    const track = block.getByRole("img", {
+      name: "Step 2 of 3: Review, running",
+    });
+    expect(
+      [...track.querySelectorAll("[data-state]")].map((segment) =>
+        segment.getAttribute("data-state"),
+      ),
+    ).toEqual(["done", "running", "not_reached"]);
+    expect(
+      block.getByRole("link", { name: "Open the run" }).getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-9/runs/run-9");
+  });
+
+  // #1080-T21
+  it("shows no track when the lane version cannot be read, and still links the run", () => {
+    open(ticket(12, { title: "Cache the catalog", lane: LANE }));
+
+    const block = within(screen.getByRole("dialog"));
+    expect(block.queryByRole("img")).toBeNull();
+    expect(
+      block.getByRole("link", { name: "Open the run" }).getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
   });
 });

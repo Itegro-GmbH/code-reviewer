@@ -9,6 +9,9 @@ import {
   loadRunDetailPage,
   RunDetailPageContent,
 } from "@/runs/ui/run-detail-page";
+import { getCapabilities } from "@/capabilities/shared";
+import { AgentRunLaneNotice } from "@/workflow-pages/agent-run-lane-notice";
+import { workflowRunServiceFor } from "@/workflow-runs/shared";
 import { requireWorkspace } from "@/workspaces/access-runtime";
 
 export const metadata: Metadata = { title: "Run" };
@@ -49,9 +52,30 @@ async function RunContent({
   // #841: the "Continue" form under a task, for the newest turn of its session (the form asks for it and shows nothing for another run).
   // It is mounted here and not in the run page content: the Runs importing the Implementer would be a new import cycle (`src/ci/import-cycles`).
   const task = data.snapshot.run.implementer;
+  // #1080: a task that is a step of a lane run says so and links to the lane run at that step. Only a deployment with lanes asks, and only
+  // for a task; the lookup is the workspace's own (a job of another workspace is no step here).
+  const laneStep =
+    task !== undefined && getCapabilities().has("implementer")
+      ? await workflowRunServiceFor(workspaceId).laneStepOfAgentRun(
+          data.snapshot.run.id,
+        )
+      : undefined;
   return (
     <>
-      <RunDetailPageContent workspaceSlug={workspaceSlug} data={data} />
+      <RunDetailPageContent
+        workspaceSlug={workspaceSlug}
+        data={data}
+        {...(laneStep === undefined
+          ? {}
+          : {
+              notice: (
+                <AgentRunLaneNotice
+                  workspaceSlug={workspaceSlug}
+                  step={laneStep}
+                />
+              ),
+            })}
+      />
       {task === undefined ? null : (
         <div className="mt-8">
           <ContinueForm

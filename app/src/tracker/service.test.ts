@@ -78,6 +78,38 @@ async function setup(
         ]
       : [],
   );
+  const laneProgressOfRuns = vi.fn(async (runIds: readonly string[]) =>
+    runIds.includes("run-1")
+      ? [
+          {
+            runId: "run-1",
+            triggerId: "by-hand",
+            triggerKind: "manual" as const,
+            steps: [
+              {
+                stepId: "implement",
+                kind: "agent" as const,
+                status: "succeeded" as const,
+                round: 1,
+              },
+              {
+                stepId: "review",
+                kind: "agent" as const,
+                status: "running" as const,
+                round: 1,
+              },
+            ],
+            document: JSON.stringify({
+              triggers: [{ id: "by-hand", kind: "manual" }],
+              steps: [
+                { id: "implement", kind: "agent", description: "Implement" },
+                { id: "review", kind: "agent", description: "Review" },
+              ],
+            }),
+          },
+        ]
+      : [],
+  );
   const run = vi.fn(async () => ({
     status: "done" as const,
     next: null,
@@ -123,11 +155,11 @@ async function setup(
             } as never),
     },
     tracker,
-    runs: { summarizeTickets },
+    runs: { summarizeTickets, laneProgressOfRuns },
     sync: { run: options.sync ?? run },
     ...(options.jira === undefined ? {} : { jira: options.jira }),
   });
-  return { service, run, summarizeTickets, tracker };
+  return { service, run, summarizeTickets, laneProgressOfRuns, tracker };
 }
 
 async function writeTicket(
@@ -200,8 +232,54 @@ describe("the list of the tickets of a project's repository", () => {
         name: "Implement",
         step: "review",
         status: "running",
+        // #1080-T01: the nodes of the lane version and the step summaries, for the board's track.
+        nodes: [
+          expect.objectContaining({ id: "implement", note: "Implement" }),
+          expect.objectContaining({ id: "review", note: "Review" }),
+        ],
+        steps: [
+          { id: "implement", kind: "agent", status: "succeeded", round: 1 },
+          { id: "review", kind: "agent", status: "running", round: 1 },
+        ],
       },
       costUsd: 1.234567,
+    });
+  });
+
+  // #1080-T02
+  it("reads the progress of all the active runs of the page once, and not at all when none is active", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+
+    await service.listIssues("r-1", OPEN);
+
+    expect(laneProgressOfRuns).toHaveBeenCalledTimes(1);
+    expect(laneProgressOfRuns).toHaveBeenCalledWith(["run-1"]);
+
+    laneProgressOfRuns.mockClear();
+    summarizeTickets.mockResolvedValueOnce([]);
+    await service.listIssues("r-1", OPEN);
+    expect(laneProgressOfRuns).toHaveBeenCalledWith([]);
+  });
+
+  // #1080-T03
+  it("shows no track for a run whose lane version cannot be read, and still names the lane", async () => {
+    const { service, laneProgressOfRuns } = await setup();
+    laneProgressOfRuns.mockResolvedValueOnce([
+      {
+        runId: "run-1",
+        triggerId: "by-hand",
+        triggerKind: "manual" as const,
+        steps: [],
+        document: null as never,
+      },
+    ]);
+
+    const list = await service.listIssues("r-1", OPEN);
+
+    expect(list.items[1]?.lane).toMatchObject({
+      name: "Implement",
+      nodes: [],
+      steps: [],
     });
   });
 

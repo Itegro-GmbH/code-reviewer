@@ -15,12 +15,8 @@ import { WorkflowError } from "../workflows/errors.ts";
 import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { WorkflowRunError } from "../workflow-runs/errors.ts";
-import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
-import type {
-  RunSummaryView,
-  RunView,
-  WorkflowRunService,
-} from "../workflow-runs/service.ts";
+import type { LaneRunListView } from "../workflow-runs/lane-run-list.ts";
+import type { RunView, WorkflowRunService } from "../workflow-runs/service.ts";
 import type { RunsApi } from "../runs/ui/api.ts";
 import type { WorkflowRunsApi } from "./api.ts";
 import type { BuilderApi } from "./builder/api.ts";
@@ -30,7 +26,7 @@ import type { McpServerOption } from "./builder/mcp-edit.ts";
 import type { McpService } from "../mcp/service.ts";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
-import { WorkflowRunsList } from "./runs-list.tsx";
+import { LaneRunsList } from "./lane-runs-list.tsx";
 import { StartForm } from "./start-form.tsx";
 import { startFormOf, type StartFormSpec } from "./start-form-spec.ts";
 
@@ -63,7 +59,8 @@ export type WorkflowPageData =
         "id" | "name" | "version" | "archivedAt" | "versions" | "document"
       >;
       form: StartFormSpec;
-      runs: RunSummaryView[];
+      /** The first page of the runs of this lane (#1080): the list of the Runs page, filtered by the lane. */
+      runs: LaneRunListView;
       /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
       profiles: ProfileOption[];
       /** The status names of the board of the lane's project (#1036): what a status trigger offers; empty when the project has no board. */
@@ -76,7 +73,7 @@ export async function loadWorkflowPage(
   workflowId: string,
   deps: {
     workflows: Pick<WorkflowService, "get">;
-    runs: Pick<WorkflowRunService, "list">;
+    runs: Pick<WorkflowRunService, "listWorkspace">;
     /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
     profiles?: Pick<ProfileService, "list">;
     /** #1036: the status names of the board of a project; never throws. Left out, the builder offers none and the names are typed. */
@@ -87,7 +84,8 @@ export async function loadWorkflowPage(
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
     workflow: await deps.workflows.get(workflowId),
-    runs: (await deps.runs.list(workflowId)).runs,
+    // The lane is known to be this workspace's (the read above), and the list reads this workspace's runs only.
+    runs: await deps.runs.listWorkspace({ lane: workflowId }),
   }));
   if (found === undefined) return { kind: "not_found" };
   const { workflow, runs } = found;
@@ -236,17 +234,13 @@ export function WorkflowPageContent({
         <h2 id="runs-heading" className="text-xl font-semibold">
           {PAGE_COPY.runsHeading}
         </h2>
-        <WorkflowRunsList
+        <LaneRunsList
           workspaceSlug={workspaceSlug}
-          workflowId={workflow.id}
-          initial={{ runs: data.runs }}
+          filter={{ lane: workflow.id }}
+          inLane
+          initial={data.runs}
           {...(api === undefined ? {} : { api })}
         />
-        {data.runs.length < RUNS_LISTED_MAX ? null : (
-          <p className="text-sm text-muted-foreground">
-            {PAGE_COPY.runsShowing}
-          </p>
-        )}
       </section>
     </>
   );

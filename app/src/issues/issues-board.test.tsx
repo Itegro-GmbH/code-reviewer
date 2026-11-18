@@ -15,7 +15,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ISSUES_POLL, type IssuesApi } from "./api.ts";
 import { IssuesBoard } from "./issues-board.tsx";
-import { LANE, ticket, ticketList } from "./test-fixtures.ts";
+import { LANE, TRACKED_LANE, ticket, ticketList } from "./test-fixtures.ts";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
@@ -30,6 +30,8 @@ const RUNNING = {
   name: "Issue to PR",
   step: "implement",
   status: "running" as const,
+  nodes: [],
+  steps: [],
 };
 
 const LIST = ticketList([
@@ -460,5 +462,100 @@ describe("the Issues tab", () => {
     expect(running).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(running).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the lane run on a ticket of the board (#1080)", () => {
+  // #1080-T10
+  it("draws the compact step track of an active lane run and links the lane to the run", () => {
+    board({
+      initial: ticketList([
+        ticket(2, { title: "Fix crash", lane: TRACKED_LANE }),
+      ]),
+    });
+
+    const row = within(rowOf(2));
+    const track = row.getByRole("img", {
+      name: "Step 2 of 3: Review, running",
+    });
+    expect(track.querySelectorAll("[data-state]")).toHaveLength(3);
+    expect(
+      [...track.querySelectorAll("[data-state]")].map((segment) =>
+        segment.getAttribute("data-state"),
+      ),
+    ).toEqual(["done", "running", "not_reached"]);
+    expect(
+      row
+        .getByRole("link", { name: "Open the run of Issue to PR" })
+        .getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-9/runs/run-9");
+  });
+
+  // #1080-T11
+  it("leaves the track out when the lane version cannot be read, and still links the run", () => {
+    board({
+      initial: ticketList([ticket(2, { lane: RUNNING })]),
+    });
+
+    const row = within(rowOf(2));
+    expect(row.queryByRole("img")).toBeNull();
+    expect(
+      row
+        .getByRole("link", { name: "Open the run of Issue to PR" })
+        .getAttribute("href"),
+    ).toBe("/w/acme/workflows/wf-1/runs/run-1");
+  });
+
+  // #1080-T12
+  it("shows no track and no run link on a ticket without a lane run", () => {
+    board({ initial: ticketList([ticket(1)]) });
+
+    const row = within(rowOf(1));
+    expect(row.queryByRole("img")).toBeNull();
+    expect(row.queryByRole("link", { name: /Open the run/ })).toBeNull();
+  });
+
+  // #1080-T13
+  it("takes the track from the list it polls: the step moves on with the next answer, no read for each ticket", async () => {
+    vi.useFakeTimers();
+    const moved = {
+      ...TRACKED_LANE,
+      step: "merge",
+      steps: [
+        ...TRACKED_LANE.steps.map((step) => ({
+          ...step,
+          status: "succeeded" as const,
+        })),
+        {
+          id: "merge",
+          kind: "action" as const,
+          status: "running" as const,
+          round: 1,
+        },
+      ],
+    };
+    const list = vi.fn(async () => ({
+      ok: true as const,
+      data: ticketList([ticket(2, { lane: moved })]),
+    }));
+    board({
+      initial: ticketList([ticket(2, { lane: TRACKED_LANE })]),
+      api: { ...api, list },
+    });
+    expect(
+      within(rowOf(2)).getByRole("img", {
+        name: "Step 2 of 3: Review, running",
+      }),
+    ).toBeTruthy();
+
+    await vi.advanceTimersByTimeAsync(ISSUES_POLL.activeMs);
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(api.run).not.toHaveBeenCalled();
+    expect(
+      within(rowOf(2)).getByRole("img", {
+        name: "Step 3 of 3: pr.merge, running",
+      }),
+    ).toBeTruthy();
   });
 });

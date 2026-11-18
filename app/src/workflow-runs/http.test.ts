@@ -74,6 +74,7 @@ function setup(
       calls.push(`listWorkspace ${JSON.stringify(query)}`),
       { runs: [], nextCursor: null, now: "2026-11-18T12:00:00.000Z" }
     ),
+    laneStepOfAgentRun: async () => undefined,
     discard: async (workflowId, runId) => (
       calls.push(`discard ${workflowId} ${runId}`),
       { run: VIEW, outcome: "discarded" }

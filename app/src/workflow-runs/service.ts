@@ -201,6 +201,23 @@ export type WorkflowRunService = {
    * of the lane version. Throws `WORKFLOW_RUN_REQUEST_INVALID` for a status, a limit or a cursor that is none.
    */
   listWorkspace(query: RawLaneRunsQuery): Promise<LaneRunListView>;
+  /**
+   * #1080: the lane step an agent run (the job of an Implementer turn, the id of the page of an agent run) belongs to: the lane, the run and
+   * the step, for the link back to the run page of the lane. Undefined for a job no step of this workspace holds, a job of another
+   * workspace included: the answer never tells the two apart.
+   */
+  laneStepOfAgentRun(
+    jobId: string,
+  ): Promise<LaneStepOfAgentRunView | undefined>;
+};
+
+/** Where an agent run sits in a lane (#1080): the lane's name is the words of whoever named it, text only. */
+export type LaneStepOfAgentRunView = {
+  workflowId: string;
+  runId: string;
+  laneName: string;
+  /** The id of the node the step runs, as `?step=` of the run page takes it. */
+  stepId: string;
 };
 
 export type WorkflowRunServiceDependencies = {
@@ -822,6 +839,11 @@ export function createWorkflowRunService(
       // The turn that goes on starts after the response, like the first steps of a run.
       deps.kick(runId);
       return { run: await view((await deps.runs.getRun(runId)) ?? found) };
+    },
+
+    async laneStepOfAgentRun(jobId) {
+      if (jobId === "" || jobId.length > 128) return undefined;
+      return deps.runs.findLaneStepOfJob(jobId);
     },
 
     async listWorkspace(raw) {

@@ -2612,6 +2612,18 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toBeUndefined(),
   },
   {
+    // #1080: B's run is not A's to follow on a board, with its steps and its lane version.
+    name: "workflowRuns.laneProgressOfRuns",
+    run: (a, b) => a.workflowRuns.laneProgressOfRuns([b.workflowRun.id]),
+    expectAnswer: (answer) => expect(answer).toEqual([]),
+  },
+  {
+    // #1080: B's agent run belongs to no lane step of A.
+    name: "workflowRuns.findLaneStepOfJob",
+    run: (a, b) => a.workflowRuns.findLaneStepOfJob(b.job.id),
+    expectAnswer: (answer) => expect(answer).toBeUndefined(),
+  },
+  {
     // B's request id is no request id of A: A makes its own run.
     name: "workflowRuns.createRun",
     run: (a, b) =>

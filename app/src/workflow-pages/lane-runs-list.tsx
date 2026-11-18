@@ -78,12 +78,15 @@ export function LaneRunsList({
   workspaceSlug,
   filter,
   initial,
+  inLane = false,
   api: apiProp,
 }: {
   workspaceSlug: string;
   /** What the address asked for: the list keeps to it while it polls and when it loads more. */
   filter: LaneRunsQuery;
   initial: LaneRunListView;
+  /** The list is the Runs section of one lane's page (#1080): `filter.lane` is the page's own, so an empty list is no filter's doing. */
+  inLane?: boolean;
   /** Only tests pass this. */
   api?: WorkflowRunsApi;
 }) {
@@ -131,7 +134,7 @@ export function LaneRunsList({
   const filtered =
     filter.status !== undefined ||
     filter.project !== undefined ||
-    filter.lane !== undefined;
+    (filter.lane !== undefined && !inLane);
   return (
     <div className="flex flex-col gap-4">
       <StatusRegion label={COPY.updating}>
@@ -143,7 +146,11 @@ export function LaneRunsList({
           <EmptyHeader>
             <EmptyTitle>{COPY.emptyTitle}</EmptyTitle>
             <EmptyDescription>
-              {filtered ? COPY.emptyFiltered : COPY.emptyDescription}
+              {filtered
+                ? COPY.emptyFiltered
+                : inLane
+                  ? COPY.emptyInLane
+                  : COPY.emptyDescription}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
