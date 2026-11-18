@@ -26,6 +26,8 @@ import {
  *   opened the issue wrote those);
  * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way (a Jira ticket is `{{trigger.ticket}}`, #1040);
  * - `defaultBranch`: `{{trigger.repo.defaultBranch}}` or `{{trigger.ticket.repo.defaultBranch}}`;
+ * - `repository` (#1092): `{{trigger.ticket.repo.fullName}}` or `{{trigger.repo.fullName}}`, the repository the run is about (`owner/name`);
+ * - `ticketKey` (#1092): `{{trigger.ticket.key}}` or `{{trigger.ticket.number}}`, the key of the ticket (a GitHub issue's key is its number), for a branch name;
  * - `branch`: `{{<agent step>.branch}}`, the branch the platform made;
  * - `pullRequest` (#917): `{{<action>.number}}` of a `pullRequest.open` action, the pull request the platform opened.
  *
@@ -38,6 +40,8 @@ export const TARGET_ROOTS = [
   "defaultBranch",
   "branch",
   "pullRequest",
+  "repository",
+  "ticketKey",
 ] as const;
 export type TargetRoot = (typeof TARGET_ROOTS)[number];
 
@@ -47,6 +51,17 @@ export const START_BRANCH_ROOTS: readonly TargetRoot[] = [
   "defaultBranch",
   "branch",
 ];
+
+/**
+ * #1092: where a reference in the `repo`, the `base` and the `branch` of an entry of the `repos` of an agent step may start. They decide what the
+ * agent works on and where its commits go, so they are targets: a literal, or a value the platform or the caller vouches for.
+ */
+export const REPOS_REPO_ROOTS: readonly TargetRoot[] = ["input", "repository"];
+export const REPOS_BASE_ROOTS: readonly TargetRoot[] = [
+  "input",
+  "defaultBranch",
+];
+export const REPOS_BRANCH_ROOTS: readonly TargetRoot[] = ["input", "ticketKey"];
 
 export type InputSpec = {
   type: ValueType;

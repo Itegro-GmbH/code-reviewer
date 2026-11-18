@@ -13,7 +13,14 @@ import {
   checkText,
   type TargetCheck,
 } from "./check-values.ts";
-import { COST_FACT, FACT_NAMES, FACT_TYPES, PUSH_FACTS } from "./facts.ts";
+import {
+  COST_FACT,
+  FACT_NAMES,
+  FACT_TYPES,
+  PUSH_FACTS,
+  REPOS_FACT,
+  REPOS_FACT_TYPE,
+} from "./facts.ts";
 import {
   FAILURE_ID,
   ON_FAILURE_CONNECTORS,
@@ -47,6 +54,9 @@ import {
 import {
   GITHUB_ISSUE_LABELS,
   PROJECT_MEMBERS,
+  REPOS_BASE_ROOTS,
+  REPOS_BRANCH_ROOTS,
+  REPOS_REPO_ROOTS,
   START_BRANCH_ROOTS,
   TICKET_LABELS,
   TICKET_REQUEST_REVIEW,
@@ -54,6 +64,11 @@ import {
   type ConnectorSpec,
 } from "./connectors.ts";
 import { literalText, parseTemplate } from "./template.ts";
+import {
+  SESSION_REPOS_MAX,
+  deriveMountNames,
+  firstRepeat,
+} from "../implementer/session-repos.ts";
 import {
   firstOf,
   type Binding,
@@ -270,6 +285,8 @@ function setupOf(
 export function agentBinding(
   node: Record<string, unknown>,
   resolver: WorkflowResolver,
+  /** #1092: the step works on several repositories (its own `repos`, or those of the session it continues). */
+  withRepos = Array.isArray(node.repos),
 ): Binding {
   const id = node.id as string;
   const found = findProfile(node.profile, resolver);
@@ -287,7 +304,8 @@ export function agentBinding(
     schema === undefined
       ? []
       : Object.entries(objectTypeOf(schema).fields).filter(
-          ([name]) => !FACT_NAMES.includes(name),
+          ([name]) =>
+            !FACT_NAMES.includes(name) && !(withRepos && name === REPOS_FACT),
         );
   const facts = canPush ? [COST_FACT, ...PUSH_FACTS] : [COST_FACT];
   for (const name of facts)
@@ -295,6 +313,9 @@ export function agentBinding(
       name,
       { type: FACT_TYPES[name] as FieldType["type"], required: true },
     ]);
+  // #1092: the list of the repositories of a step that has several; like the push facts it exists for a profile that may push only.
+  if (withRepos && canPush)
+    entries.push([REPOS_FACT, { type: REPOS_FACT_TYPE, required: true }]);
   const fields: Record<string, FieldType> = Object.fromEntries(entries);
   const reason = `The profile ${shown(String(node.profile))} may not push, so ${shown(id)} yields no branch, no commits, no head commit and no push state. Use a profile that may push, or reference the result of the step.`;
   return {
@@ -303,12 +324,18 @@ export function agentBinding(
     type: { kind: "object", fields },
     unavailable: canPush
       ? {}
-      : Object.fromEntries(PUSH_FACTS.map((name) => [name, reason])),
+      : Object.fromEntries(
+          [...PUSH_FACTS, ...(withRepos ? [REPOS_FACT] : [])].map((name) => [
+            name,
+            reason,
+          ]),
+        ),
     // A result that failed its check is reported where it is written; its fields are unknown, not missing.
     ...(node.result !== undefined && declared === undefined
       ? { open: true }
       : {}),
     agent: setupOf(node, resolver),
+    ...(withRepos ? { repos: true as const } : {}),
   };
 }
 
@@ -370,6 +397,7 @@ const AGENT_KEYS = [
   "instruction",
   "session",
   "branch",
+  "repos",
   "result",
   "mcp",
 ];
@@ -835,6 +863,182 @@ function checkStartBranch(
   });
 }
 
+/** Whether the step goes on in the session of an agent step that has `repos` (#1092): its `{{<step>.repos}}` is the session's list. */
+function continuesRepos(node: Record<string, unknown>, env: Env): boolean {
+  const session = node.session;
+  if (!isRecord(session) || typeof session.continue !== "string") return false;
+  return env.scope.get(session.continue)?.repos === true;
+}
+
+/** A repository as GitHub names it: an owner and a name, letters, digits, `_`, `.` and `-` (the claim and the runner hold the clone address to it). */
+const REPOSITORY_FULL_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/**
+ * `repos` (#1092, epic #1090, ADR 0006): one to ten entries `{ repo, base?, branch? }`. All three decide what the agent works on and where its
+ * commits go, so they are targets. Beside `branch` and `session` it is refused; two literals that name one repository (without regard to
+ * case) are `repo_duplicate`; when every entry is a literal, two that mount under one name are `repo_name_clash`. A reference is looked at
+ * again when the step runs (the engine), where it gives a repository or does not (`repo_invalid`).
+ */
+function checkRepos(
+  node: Record<string, unknown>,
+  path: string,
+  c: Checker,
+  env: Env,
+  state: StepState,
+): void {
+  const value = node.repos;
+  if (value === undefined) return;
+  const where = pointer(path, "repos");
+  if (!Array.isArray(value)) {
+    c.report(
+      issue(
+        where,
+        "wrong_type",
+        `'repos' is a list of repositories, not ${jsonTypeName(value)}.`,
+      ),
+    );
+    return;
+  }
+  if (node.branch !== undefined)
+    c.report(
+      issue(
+        where,
+        "repos_with_branch",
+        "A step with 'repos' names its branches in each entry, so it takes no 'branch' of its own (the branch a session of its own starts from). Take one of the two out.",
+      ),
+    );
+  if (node.session !== undefined && node.session !== "new")
+    c.report(
+      issue(
+        where,
+        "repos_with_session_continue",
+        "A step that goes on in a session (session.continue) keeps the repositories of that session, so it takes no 'repos'. Use 'repos' on a step that starts a session of its own.",
+      ),
+    );
+  if (value.length === 0)
+    c.report(
+      issue(
+        where,
+        "invalid_value",
+        "'repos' names at least one repository, or is left out.",
+      ),
+    );
+  if (value.length > SESSION_REPOS_MAX)
+    c.report(
+      issue(
+        where,
+        "limit_exceeded",
+        `A step may work on ${SESSION_REPOS_MAX} repositories at most; this one has ${value.length}.`,
+      ),
+    );
+  const literals: { at: string; name: string }[] = [];
+  let allLiteral = true;
+  for (const [index, entry] of value
+    .slice(0, SESSION_REPOS_MAX + 1)
+    .entries()) {
+    if (c.halted()) break;
+    const at = pointer(where, index);
+    if (!isRecord(entry)) {
+      c.report(
+        issue(
+          at,
+          "wrong_type",
+          `An entry of 'repos' is an object with a 'repo', not ${jsonTypeName(entry)}.`,
+        ),
+      );
+      allLiteral = false;
+      continue;
+    }
+    keysOf(entry, ["repo", "base", "branch"], at, c);
+    const repoAt = pointer(at, "repo");
+    const repo = entry.repo;
+    if (repo === undefined) {
+      missing(at, "repo", "the repository, like owner/name.", c);
+      allLiteral = false;
+    } else if (typeof repo !== "string") {
+      c.report(
+        issue(
+          repoAt,
+          "wrong_type",
+          `'repo' is a text, not ${jsonTypeName(repo)}.`,
+        ),
+      );
+      allLiteral = false;
+    } else {
+      checkInput(repo, STRING, repoAt, c, reachOf(env, repoAt, state), {
+        input: "repo",
+        roots: REPOS_REPO_ROOTS,
+      });
+      const parsed = parseTemplate(repo);
+      const literal =
+        parsed.problems.length > 0 ? undefined : literalText(parsed);
+      if (literal === undefined) allLiteral = false;
+      else if (!REPOSITORY_FULL_NAME.test(literal)) {
+        allLiteral = false;
+        c.report(
+          issue(
+            repoAt,
+            "invalid_value",
+            "'repo' is a repository like owner/name: the owner, a slash and the name.",
+          ),
+        );
+      } else literals.push({ at: repoAt, name: literal });
+    }
+    for (const [field, roots, text] of [
+      ["base", REPOS_BASE_ROOTS, false],
+      ["branch", REPOS_BRANCH_ROOTS, true],
+    ] as const) {
+      const given = entry[field];
+      if (given === undefined) continue;
+      const givenAt = pointer(at, field);
+      if (typeof given !== "string") {
+        c.report(
+          issue(
+            givenAt,
+            "wrong_type",
+            `'${field}' is a text, not ${jsonTypeName(given)}.`,
+          ),
+        );
+        continue;
+      }
+      if (given.trim() === "")
+        c.report(
+          issue(
+            givenAt,
+            "invalid_value",
+            `'${field}' is the name of a branch, not an empty text.`,
+          ),
+        );
+      checkInput(given, STRING, givenAt, c, reachOf(env, givenAt, state), {
+        input: field,
+        roots,
+        ...(text ? { text: true as const } : {}),
+      });
+    }
+  }
+  const repeat = firstRepeat(literals.map((entry) => entry.name));
+  if (repeat >= 0) {
+    c.report(
+      issue(
+        (literals[repeat] as { at: string }).at,
+        "repo_duplicate",
+        "Two entries of 'repos' name the same repository (a repository is the same one whatever the case of its name). Name each repository once.",
+      ),
+    );
+    return;
+  }
+  if (!allLiteral || literals.length !== value.length) return;
+  const clash = firstRepeat(deriveMountNames(literals.map((e) => e.name)));
+  if (clash >= 0)
+    c.report(
+      issue(
+        (literals[clash] as { at: string }).at,
+        "repo_name_clash",
+        "Two repositories of 'repos' would be mounted under the same name (the name of the repository, or owner__name when two have the same name). Leave one out.",
+      ),
+    );
+}
+
 function checkAgent(
   node: Record<string, unknown>,
   path: string,
@@ -856,6 +1060,7 @@ function checkAgent(
   checkInstruction(node, path, c, env, state);
   checkSession(node, path, c, env, state);
   checkStartBranch(node, path, c, env, state);
+  checkRepos(node, path, c, env, state);
   checkStepMcp(node, path, c.laneMcp ?? new Set(), c.report);
   if (node.result === undefined) return;
   const where = pointer(path, "result");
@@ -866,13 +1071,16 @@ function checkAgent(
       ? node.result.properties
       : {};
   for (const name of Object.keys(properties))
-    if (FACT_NAMES.includes(name))
+    if (
+      FACT_NAMES.includes(name) ||
+      (name === REPOS_FACT && node.repos !== undefined)
+    )
       c.report(
         issue(
           pointer(where, "properties", name),
           "result_field_reserved",
           `${shown(name)} is filled in by the platform for every agent step. Name the field of the result differently.`,
-          FACT_NAMES,
+          [...FACT_NAMES, ...(node.repos === undefined ? [] : [REPOS_FACT])],
         ),
       );
 }
@@ -1380,7 +1588,14 @@ export function checkSteps(
     switch (kind) {
       case "agent":
         checkAgent(node, at, c, env, state);
-        if (withId !== undefined) bind(agentBinding(withId, c.resolver));
+        if (withId !== undefined)
+          bind(
+            agentBinding(
+              withId,
+              c.resolver,
+              Array.isArray(node.repos) || continuesRepos(node, env),
+            ),
+          );
         continue;
       case "action":
         checkAction(node, at, c, env, state);

@@ -1090,6 +1090,11 @@ export interface ImplementerSessionsTable {
   >;
   /** The new branch, unique within the repository. */
   branch: string;
+  /**
+   * #1092: the repositories of a session of several repositories, as JSON text (`SessionRepo[]`, src/implementer/session-repos.ts), as the first
+   * turn resolved them; null for a session of one repository. The first one is `repository_id`; `branch` is then the platform's own name.
+   */
+  repos: ColumnType<string | null, string | null | undefined, string | null>;
   /** The last commit pushed to `branch`; null until a turn pushed one. */
   head_commit: string | null;
   /** `running` while a turn is queued or running, `idle` once a turn has ended. */

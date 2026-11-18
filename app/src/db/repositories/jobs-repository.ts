@@ -694,6 +694,7 @@ export function createJobsRepository(
         baseBranch: input.baseBranch,
         startBranch: input.startBranch ?? null,
         branch: input.branch,
+        repos: input.repos ?? null,
         instruction: input.instruction,
         modelChoice: input.modelChoice,
         costLimitCents: input.costLimitCents,

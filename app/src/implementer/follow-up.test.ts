@@ -46,6 +46,7 @@ function session(
     baseBranch: "main",
     startBranch: null,
     branch: "implementer/abc123",
+    repos: null,
     headCommit: TIP,
     status: "idle",
     opencodeSessionId: null,

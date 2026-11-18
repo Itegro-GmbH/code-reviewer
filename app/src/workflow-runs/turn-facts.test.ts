@@ -65,6 +65,7 @@ const SESSION: StoredImplementerSession = {
   baseBranch: "main",
   startBranch: null,
   branch: "workflow/run-1/work",
+  repos: null,
   headCommit: null,
   status: "idle",
   opencodeSessionId: null,

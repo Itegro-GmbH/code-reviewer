@@ -126,6 +126,15 @@ const STEP_FAILURE_TEXT: Record<
   environment_not_found: "The environment of the step does not exist.",
   environment_mismatch:
     "The step names another environment than its profile runs in.",
+  repo_duplicate: "Two repositories of the step are the same repository.",
+  repo_name_clash:
+    "Two repositories of the step would be mounted under the same name.",
+  repo_invalid: "A repository of the step is not a repository (owner/name).",
+  branch_invalid: "A branch of the step is not the name of a branch.",
+  repo_not_available:
+    "A repository of the step is not one the workspace's GitHub App can reach (or write to).",
+  base_branch_not_found:
+    "A repository of the step has no branch with the name of its base.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:

@@ -11,6 +11,7 @@ import type { JobKind, ProjectReviewKind } from "../job-kind/job-kind.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { StoredResultSchema } from "../db/agent-result.ts";
+import type { SessionRepo } from "../implementer/session-repos.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,
@@ -123,6 +124,8 @@ export type EnqueueImplementerTurnInput = {
   baseSha: string;
   /** The new branch; one session per branch and repository. */
   branch: string;
+  /** #1092: the repositories of a session of several repositories, resolved (the first is `repositoryId`); null or left out: one repository. */
+  repos?: readonly SessionRepo[] | null;
   instruction: string;
   modelChoice: ModelChoice;
   /** The customer's cost limit for the turn in cents; null when none was asked for. */

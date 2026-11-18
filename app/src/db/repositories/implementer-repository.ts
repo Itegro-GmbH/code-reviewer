@@ -37,6 +37,11 @@ import type {
   ImplementerTurnsTable,
 } from "../schema.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
+import {
+  parseSessionRepos,
+  serializeSessionRepos,
+  type SessionRepo,
+} from "../../implementer/session-repos.ts";
 import type { AgentResultValue, StoredResultSchema } from "../agent-result.ts";
 
 /** A session as the rest of the app sees it. Timestamps are ISO 8601 text in UTC. */
@@ -51,6 +56,11 @@ export type StoredImplementerSession = {
   /** #909: the branch the session branch was made from when that is not the base; null: the tip of the base. */
   startBranch: string | null;
   branch: string;
+  /**
+   * #1092: the repositories of a session of several repositories, as the first turn resolved them; null for a session of one repository.
+   * The first one is `repositoryId`, and `branch` is then the platform's own name for the session (no git branch).
+   */
+  repos: SessionRepo[] | null;
   /** The last commit pushed to the branch; null until a turn has pushed one. */
   headCommit: string | null;
   /** `running` from the start of the first turn until a turn has ended. */
@@ -197,6 +207,8 @@ export type NewImplementerTask = {
   startBranch?: string | null;
   /** The new branch; one session per branch and repository. */
   branch: string;
+  /** #1092: the repositories of a session of several repositories, resolved; left out or null for one repository. `repositoryId` is the first. */
+  repos?: readonly SessionRepo[] | null;
   instruction: string;
   modelChoice: ModelChoice;
   costLimitCents: number | null;
@@ -396,6 +408,7 @@ function sessionFrom(
     baseBranch: row.base_branch,
     startBranch: row.start_branch,
     branch: row.branch,
+    repos: parseSessionRepos(row.repos),
     headCommit: row.head_commit,
     status: row.status,
     opencodeSessionId: row.opencode_session_id,
@@ -700,6 +713,10 @@ export function createImplementerRepository(
             base_branch: task.baseBranch,
             start_branch: task.startBranch ?? null,
             branch: task.branch,
+            repos:
+              task.repos === undefined || task.repos === null
+                ? null
+                : serializeSessionRepos(task.repos),
             status: "running",
             created_by: task.createdBy,
             created_at: timestamp,
