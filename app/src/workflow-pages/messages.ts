@@ -16,7 +16,6 @@ import {
   GENERIC_FAILURE,
   UNEXPECTED_RESPONSE_COPY,
 } from "../ui/transport-messages.ts";
-import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
 import {
   RUN_FAILURE_CODES,
   WORKFLOW_OWNER_GONE_TEXT,
@@ -291,12 +290,91 @@ export const COST_COPY = {
   basisHeading: "Where the costs come from",
 } as const;
 
+/** The compact step track of a lane run (#1078): the text alternative of the dots and the words for a node that has no note of its own. */
+export const TRACK_COPY = {
+  /** The kind of a node, for a node whose author gave it no note and which calls no connector. */
+  kind: {
+    agent: "Agent step",
+    action: "Action",
+    if: "Condition",
+    loop: "Repeat",
+    unsupported: "Step",
+  },
+  /** How a node stands, as a word to put after its name. */
+  state: {
+    done: "done",
+    running: "running",
+    waiting: "waiting for an answer",
+    failed: "failed",
+    skipped: "skipped",
+    not_reached: "not reached",
+  },
+  notStarted: "No step has started yet",
+  noLane: "The steps of this lane version are not available",
+  position: (
+    index: number,
+    total: number,
+    title: string,
+    state: string,
+  ): string => `Step ${String(index)} of ${String(total)}: ${title}, ${state}`,
+} as const;
+
+/** The Lane runs tab of the Runs page (#1078): the tabs, the filters, the columns and the sentences of an empty list. */
+export const LANE_RUNS_COPY = {
+  tabsLabel: "Kind of run",
+  tabLanes: "Lane runs",
+  tabAgents: "Agent runs",
+  listLabel: "Lane runs",
+  filterStatus: "Status",
+  filterProject: "Project",
+  filterLane: "Lane",
+  anyStatus: "All statuses",
+  anyProject: "All projects",
+  anyLane: "All lanes",
+  statuses: {
+    active: "Active",
+    waiting: "Waiting for an answer",
+    ended: "Ended",
+    failed: "Failed",
+  },
+  resetFilter: "Reset filter",
+  columnTicket: "Ticket",
+  columnLane: "Lane",
+  columnProject: "Project",
+  columnSteps: "Steps",
+  columnStatus: "Status",
+  columnStarted: "Started",
+  columnDuration: "Duration",
+  columnSpent: "Spent of budget",
+  noTicket: "No ticket",
+  ticketUntitled: "Title not known",
+  openTicket: "Open the ticket",
+  projectGone: "Repository not available",
+  version: "version",
+  openRun: "Open the run",
+  notAvailable: "—",
+  loadMore: "Show more runs",
+  loadingMore: "Loading more runs",
+  updating: "Updating the lane runs",
+  emptyTitle: "No lane runs yet",
+  emptyDescription:
+    "A run starts when a ticket gets the label or status a lane waits for, or when someone starts a lane by hand. Open a project and its Lanes tab to set one up.",
+  emptyFiltered: "No lane run matches this filter.",
+  emptyInLane: "This lane has not run yet. Wait for its trigger.",
+  emptyInLaneStartable:
+    "This lane has not run yet. Start it with Run now, or wait for its trigger.",
+  columnTrigger: "Trigger",
+  invalidFilterTitle: "This filter is not valid",
+  invalidFilterDescription:
+    "The status, project or lane in the address is not one this page knows.",
+  loadMoreFailed: "The next runs could not be loaded. Try again.",
+} as const;
+
 export const PAGE_COPY = {
   workflowVersion: "Version",
   workflowUpdated: "Last saved",
   runsHeading: "Runs",
   runsEmpty: "This workflow has not been run yet.",
-  runsShowing: `The newest ${String(RUNS_LISTED_MAX)} runs are shown.`,
   columnStatus: "Status",
   columnStarted: "Started",
   columnTrigger: "Trigger",
@@ -360,6 +438,68 @@ export const PAGE_COPY = {
     "A stop was asked for before runs could be discarded: the agent is told to stop and the run ends when it has. You can discard the run instead.",
 } as const;
 
+/** The run as the lane's flow, and the panel of one step (#1079). */
+export const FLOW_COPY = {
+  flowHeading: "Where the run stands",
+  flowLabel: "The lane, with where this run stands on each step",
+  otherSteps: "Other steps of this run (not in the lane of this version)",
+  /** The word a node carries for its state: the state is never told by the colour alone. */
+  state: {
+    done: "Done",
+    running: "Running",
+    waiting: "Waiting for an answer",
+    failed: "Failed",
+    skipped: "Skipped",
+    notReached: "Not reached",
+  },
+  /** What a state means for a node that has no row to show (the panel says it in a sentence). */
+  stateNote: {
+    done: "This step is done.",
+    running: "This step is running now.",
+    waiting: "This step waits for an answer.",
+    failed: "This step failed.",
+    skipped:
+      "This step was skipped: the run took another way (a condition sent it to the other branch, or the trigger that started the run is another one).",
+    notReached: "The run has not got to this step.",
+  },
+  current: "Current step",
+  triggerUsed: "Started this run",
+  triggerUnused: "Not used in this run",
+  round: (round: number, maxRounds: number | undefined): string =>
+    maxRounds === undefined
+      ? `Round ${String(round)}`
+      : `Round ${String(round)} of max ${String(maxRounds)}`,
+  panelLabel: "Details of the selected step",
+  panelClose: "Close the details",
+  panelHint: "Select a step in the flow to see its details.",
+  step: "Step",
+  kind: "Kind",
+  definition: "In the lane",
+  status: "Status",
+  startedAt: "Started",
+  finishedAt: "Finished",
+  duration: "Took",
+  cost: "Cost",
+  profile: "Profile",
+  rounds: "Rounds",
+  roundsHeading: "All rounds",
+  roundsEarlier: "Earlier rounds",
+  resultHeading: "Result",
+  nothingYet: "Nothing yet.",
+  agentRun: "Open the agent's run (live view)",
+  noTicket: "No ticket",
+  ticket: "Ticket",
+  lane: "Lane",
+  duration_run: "Duration",
+  kindName: {
+    trigger: "Trigger",
+    agent: "Agent step",
+    action: "Action",
+    loop: "Loop",
+    if: "Condition",
+  },
+} as const;
+
 export const START_COPY = {
   heading: "Start a run",
   intro:
@@ -382,6 +522,14 @@ export const START_COPY = {
   ticketHint:
     "github:owner/repo#128, an issue of one of the repositories of this workspace.",
   triggerHeading: "Start through",
+} as const;
+
+/** The note on an agent run that is a step of a lane run (#1080). */
+export const AGENT_RUN_LANE_COPY = {
+  label: "Lane run",
+  belongsTo: (lane: string, step: string) =>
+    `This agent run is the step "${step}" of the lane ${lane}.`,
+  open: "Open the lane run at this step",
 } as const;
 
 const START_FAILURE_TEXT: Record<WorkflowRunErrorCode, string> = {

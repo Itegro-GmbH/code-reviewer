@@ -234,6 +234,8 @@ const PROTECTED_DATA_ROUTES = [
   "/api/w/[workspace]/workflows/scope",
   // The runs of a workflow (#844).
   "/api/w/[workspace]/workflows/[workflowId]/runs",
+  // The runs of every lane of the workspace, for the Runs page (#1078).
+  "/api/w/[workspace]/workflow-runs",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]",
   "/api/w/[workspace]/workflows/[workflowId]/runs/[runId]/cancel",
   // Discard, pause and resume a run (#921).

@@ -7,11 +7,15 @@ import {
   agentResultOf,
   controlResultOf,
   costBasesOf,
+  formatRelativeTime,
   formatUsd,
+  laneRunDurationMs,
   neverRan,
   readableMessageOf,
   repositoryOfRun,
+  runDurationMs,
   spentShare,
+  ticketOfRun,
   stepDurationMs,
   URL_TEXT_MAX_CHARS,
 } from "./view.ts";
@@ -194,9 +198,10 @@ describe("what the workflow pages take from a run", () => {
           REPO,
         ),
       ).toEqual({
+        summary: "<b>Cached</b>",
         branch: "workflow/run-1/plan",
         branchUrl: "https://github.com/acme/widgets/tree/workflow/run-1/plan",
-        fields: { summary: "<b>Cached</b>", costUsd: 0.5 },
+        fields: { costUsd: 0.5 },
       });
     });
 
@@ -380,5 +385,143 @@ describe("the form that starts a run", () => {
     expect(
       controlResultOf({ kind: "action", output: { taken: "then" } }),
     ).toBeUndefined();
+  });
+});
+
+describe("the times of the lane runs list (#1078)", () => {
+  const NOW = "2026-11-18T12:00:00.000Z";
+
+  // #1078-T50
+  it("says how long ago a run started, against the clock it is given", () => {
+    expect(formatRelativeTime("2026-11-18T11:59:50.000Z", NOW)).toBe(
+      "just now",
+    );
+    expect(formatRelativeTime("2026-11-18T11:48:00.000Z", NOW)).toBe(
+      "12 min ago",
+    );
+    expect(formatRelativeTime("2026-11-18T09:00:00.000Z", NOW)).toBe("3 h ago");
+    expect(formatRelativeTime("2026-11-16T12:00:00.000Z", NOW)).toBe("2 d ago");
+    expect(formatRelativeTime("2026-11-01T12:00:00.000Z", NOW)).toBe(
+      "2026-11-01 12:00 UTC",
+    );
+    expect(formatRelativeTime("nope", NOW)).toBe("unknown time");
+    // A start a little after the clock (two servers) never reads as negative.
+    expect(formatRelativeTime("2026-11-18T12:00:05.000Z", NOW)).toBe(
+      "just now",
+    );
+  });
+
+  // #1078-T51
+  it("counts the duration to the end of a run that ended and to now for an active one", () => {
+    const base = { createdAt: "2026-11-18T11:00:00.000Z" };
+
+    expect(
+      laneRunDurationMs(
+        {
+          ...base,
+          status: "succeeded",
+          finishedAt: "2026-11-18T11:30:00.000Z",
+        },
+        NOW,
+      ),
+    ).toBe(30 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "running", finishedAt: null }, NOW),
+    ).toBe(60 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "waiting", finishedAt: null }, NOW),
+    ).toBe(60 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "failed", finishedAt: null }, NOW),
+    ).toBeNull();
+  });
+});
+
+// #1079-T13
+describe("the ticket of a run", () => {
+  const ticket = {
+    key: "15",
+    number: 15,
+    title: "<b>Cache it</b>",
+    url: "https://github.com/acme/widgets/issues/15",
+  };
+
+  it("reads the ref and the title, and links an address of the run's own repository", () => {
+    expect(ticketOfRun({ input: { ticket } }, REPO)).toEqual({
+      ref: "#15",
+      title: "<b>Cache it</b>",
+      url: "https://github.com/acme/widgets/issues/15",
+    });
+  });
+
+  it("reads the same ticket of a run a label started and of one started by hand", () => {
+    expect(
+      ticketOfRun({ input: { ticket, issue: 15, repo: {} } }, REPO)?.ref,
+    ).toBe("#15");
+    expect(
+      ticketOfRun({ input: { input: { repo: REPO }, ticket } }, REPO)?.ref,
+    ).toBe("#15");
+  });
+
+  it("writes a ref that is no number as it is, and falls back to the number when there is no key", () => {
+    expect(
+      ticketOfRun({ input: { ticket: { key: "PROJ-123", title: "t" } } }, REPO)
+        ?.ref,
+    ).toBe("PROJ-123");
+    expect(ticketOfRun({ input: { ticket: { number: 7 } } }, REPO)?.ref).toBe(
+      "#7",
+    );
+  });
+
+  it("links no address of another host, another repository or another kind, and links nothing without a repository", () => {
+    for (const url of [
+      "https://evil.example/acme/widgets/issues/15",
+      "https://github.com/other/repo/issues/15",
+      "javascript:alert(1)",
+      "https://acme.atlassian.net/browse/PROJ-1",
+    ])
+      expect(
+        ticketOfRun({ input: { ticket: { ...ticket, url } } }, REPO)?.url,
+      ).toBeUndefined();
+    expect(ticketOfRun({ input: { ticket } }, undefined)?.url).toBeUndefined();
+  });
+
+  it("is none for a run with no ticket, or an input that is not what the engine writes", () => {
+    expect(ticketOfRun({ input: { repo: REPO } }, REPO)).toBeUndefined();
+    expect(ticketOfRun({ input: null }, REPO)).toBeUndefined();
+    expect(ticketOfRun({ input: { ticket: "15" } }, REPO)).toBeUndefined();
+    expect(
+      ticketOfRun({ input: { ticket: { title: "t" } } }, REPO),
+    ).toBeUndefined();
+  });
+});
+
+// #1079-T14
+describe("how long a run took", () => {
+  it("is the time from its start to its end, and none while it runs", () => {
+    expect(
+      runDurationMs({
+        createdAt: "2026-11-05T10:00:00.000Z",
+        finishedAt: "2026-11-05T10:05:00.000Z",
+      }),
+    ).toBe(300_000);
+    expect(
+      runDurationMs({
+        createdAt: "2026-11-05T10:00:00.000Z",
+        finishedAt: null,
+      }),
+    ).toBeNull();
+  });
+});
+
+// #1079-T15
+describe("the summary of an agent", () => {
+  it("is taken out of the fields and kept as text, and an empty one is left in the fields", () => {
+    expect(
+      agentResultOf({ kind: "agent", output: { summary: "Did it." } }, REPO),
+    ).toEqual({ summary: "Did it." });
+    expect(
+      agentResultOf({ kind: "agent", output: { summary: "  " } }, REPO),
+    ).toEqual({ fields: { summary: "  " } });
   });
 });

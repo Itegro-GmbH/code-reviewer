@@ -167,6 +167,8 @@ describe("the migrations of both epics", () => {
       "20261117140000_create_mcp_oauth_connections",
       "20261117150000_add_job_mcp_calls",
       "20261117160000_create_job_mcp_calls",
+      "20261118120000_workflow_runs_workspace_list_indexes",
+      "20261118140000_workflow_step_runs_turn_index",
     ]);
   });
 

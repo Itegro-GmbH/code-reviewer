@@ -12,6 +12,7 @@ The **Issues** tab of a project's cockpit: the table of the issues of its ticket
 | `issues-board.tsx`      | The tiles, the table (polls like the runs list), the filter, and the drawer and the dialog it opens                                                                                                               |
 | `issue-drawer.tsx`      | The side sheet (Radix dialog: focus trap, Escape, focus returns to the row's button via `return-focus.ts`)                                                                                                        |
 | `start-lane-dialog.tsx` | The one question "Which lane?", the lane's facts and limits, and the start through the lane's start route with the issue as `ticket`                                                                              |
+| `lane-track.tsx`        | The compact step track of the lane run on a ticket (#1080), drawn from the `nodes` and `steps` the list carries (the board and the drawer both use it), and `laneRunPath`, the link to the run                    |
 | `return-focus.ts`       | `useReturnFocus`: the board remembers the button that opened the drawer or the start dialog (controlled dialogs have no Trigger) and hands the focus back to it                                                   |
 | `messages.ts`           | The words around GitHub's own                                                                                                                                                                                     |
 

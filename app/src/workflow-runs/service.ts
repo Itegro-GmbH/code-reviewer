@@ -55,6 +55,13 @@ import { parseStepAsk, type StepAsk } from "./ask.ts";
 import type { WorkflowEngine } from "./engine.ts";
 import { WorkflowRunError } from "./errors.ts";
 import {
+  encodeCursor,
+  listItemOf,
+  readListQuery,
+  type LaneRunListView,
+  type RawLaneRunsQuery,
+} from "./lane-run-list.ts";
+import {
   MICRO_USD_PER_USD,
   RUNS_LISTED_MAX,
   TRIGGER_INPUT_MAX_CHARS,
@@ -188,6 +195,29 @@ export type WorkflowRunService = {
   ): Promise<{ run: RunView }>;
   /** The newest runs of a workflow, without their steps. */
   list(workflowId: string): Promise<{ runs: RunSummaryView[] }>;
+  /**
+   * #1078: the runs of every lane of the workspace, the active ones first, then the newest first, one page at a time (`nextCursor` goes into
+   * the `cursor` of the next request), with what the list shows of each: lane, project, ticket and the summaries of the steps with the nodes
+   * of the lane version. Throws `WORKFLOW_RUN_REQUEST_INVALID` for a status, a limit or a cursor that is none.
+   */
+  listWorkspace(query: RawLaneRunsQuery): Promise<LaneRunListView>;
+  /**
+   * #1080: the lane step an agent run (the job of an Implementer turn, the id of the page of an agent run) belongs to: the lane, the run and
+   * the step, for the link back to the run page of the lane. Undefined for a job no step of this workspace holds, a job of another
+   * workspace included: the answer never tells the two apart.
+   */
+  laneStepOfAgentRun(
+    jobId: string,
+  ): Promise<LaneStepOfAgentRunView | undefined>;
+};
+
+/** Where an agent run sits in a lane (#1080): the lane's name is the words of whoever named it, text only. */
+export type LaneStepOfAgentRunView = {
+  workflowId: string;
+  runId: string;
+  laneName: string;
+  /** The id of the node the step runs, as `?step=` of the run page takes it. */
+  stepId: string;
 };
 
 export type WorkflowRunServiceDependencies = {
@@ -809,6 +839,25 @@ export function createWorkflowRunService(
       // The turn that goes on starts after the response, like the first steps of a run.
       deps.kick(runId);
       return { run: await view((await deps.runs.getRun(runId)) ?? found) };
+    },
+
+    async laneStepOfAgentRun(jobId) {
+      if (jobId === "" || jobId.length > 128) return undefined;
+      return deps.runs.findLaneStepOfJob(jobId);
+    },
+
+    async listWorkspace(raw) {
+      const query = readListQuery(raw);
+      const page = await deps.runs.listWorkspaceRuns({
+        filter: query.filter,
+        limit: query.limit,
+        ...(query.after === undefined ? {} : { after: query.after }),
+      });
+      return {
+        runs: page.rows.map(listItemOf),
+        nextCursor: page.next === null ? null : encodeCursor(page.next),
+        now: new Date().toISOString(),
+      };
     },
 
     async list(workflowId) {

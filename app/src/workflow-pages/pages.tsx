@@ -15,12 +15,9 @@ import { WorkflowError } from "../workflows/errors.ts";
 import type { WorkflowService, WorkflowView } from "../workflows/service.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import { WorkflowRunError } from "../workflow-runs/errors.ts";
-import { RUNS_LISTED_MAX } from "../workflow-runs/limits.ts";
-import type {
-  RunSummaryView,
-  RunView,
-  WorkflowRunService,
-} from "../workflow-runs/service.ts";
+import type { LaneRunListView } from "../workflow-runs/lane-run-list.ts";
+import type { RunView, WorkflowRunService } from "../workflow-runs/service.ts";
+import type { RunsApi } from "../runs/ui/api.ts";
 import type { WorkflowRunsApi } from "./api.ts";
 import type { BuilderApi } from "./builder/api.ts";
 import { LaneBuilder } from "./builder/builder.tsx";
@@ -29,7 +26,7 @@ import type { McpServerOption } from "./builder/mcp-edit.ts";
 import type { McpService } from "../mcp/service.ts";
 import { PAGE_COPY, START_COPY } from "./messages.ts";
 import { WorkflowRunDetail } from "./run-detail.tsx";
-import { WorkflowRunsList } from "./runs-list.tsx";
+import { LaneRunsList } from "./lane-runs-list.tsx";
 import { StartForm } from "./start-form.tsx";
 import { startFormOf, type StartFormSpec } from "./start-form-spec.ts";
 
@@ -62,7 +59,8 @@ export type WorkflowPageData =
         "id" | "name" | "version" | "archivedAt" | "versions" | "document"
       >;
       form: StartFormSpec;
-      runs: RunSummaryView[];
+      /** The first page of the runs of this lane (#1080): the list of the Runs page, filtered by the lane. */
+      runs: LaneRunListView;
       /** The profiles of the workspace that can be run: what the builder's profile field offers (#926). */
       profiles: ProfileOption[];
       /** The status names of the board of the lane's project (#1036): what a status trigger offers; empty when the project has no board. */
@@ -75,7 +73,7 @@ export async function loadWorkflowPage(
   workflowId: string,
   deps: {
     workflows: Pick<WorkflowService, "get">;
-    runs: Pick<WorkflowRunService, "list">;
+    runs: Pick<WorkflowRunService, "listWorkspace">;
     /** Left out, the builder offers no list of profiles and the profile of a step is typed. */
     profiles?: Pick<ProfileService, "list">;
     /** #1036: the status names of the board of a project; never throws. Left out, the builder offers none and the names are typed. */
@@ -86,7 +84,8 @@ export async function loadWorkflowPage(
 ): Promise<WorkflowPageData> {
   const found = await orNotFound(async () => ({
     workflow: await deps.workflows.get(workflowId),
-    runs: (await deps.runs.list(workflowId)).runs,
+    // The lane is known to be this workspace's (the read above), and the list reads this workspace's runs only.
+    runs: await deps.runs.listWorkspace({ lane: workflowId }),
   }));
   if (found === undefined) return { kind: "not_found" };
   const { workflow, runs } = found;
@@ -235,17 +234,18 @@ export function WorkflowPageContent({
         <h2 id="runs-heading" className="text-xl font-semibold">
           {PAGE_COPY.runsHeading}
         </h2>
-        <WorkflowRunsList
+        <LaneRunsList
           workspaceSlug={workspaceSlug}
-          workflowId={workflow.id}
-          initial={{ runs: data.runs }}
+          filter={{ lane: workflow.id }}
+          inLane={{
+            canStart:
+              mayStart &&
+              workflow.archivedAt === null &&
+              (data.form.kind === "form" || data.form.kind === "forms"),
+          }}
+          initial={data.runs}
           {...(api === undefined ? {} : { api })}
         />
-        {data.runs.length < RUNS_LISTED_MAX ? null : (
-          <p className="text-sm text-muted-foreground">
-            {PAGE_COPY.runsShowing}
-          </p>
-        )}
       </section>
     </>
   );
@@ -259,7 +259,31 @@ export type RunPageData =
       kind: "ready";
       workflow: Pick<WorkflowView, "id" | "name">;
       run: RunView;
+      /**
+       * The lane document of the version the run uses (#1079), what the flow draws; null when that version cannot be read (the page then
+       * lists the steps).
+       */
+      document: unknown;
     };
+
+async function laneOfVersion(
+  workflows: Pick<WorkflowService, "get">,
+  workflowId: string,
+  version: number,
+  current: Pick<WorkflowView, "documentVersion" | "document">,
+): Promise<unknown> {
+  if (current.documentVersion === version) return current.document;
+  try {
+    return (await workflows.get(workflowId, version)).document;
+  } catch (error) {
+    if (
+      error instanceof WorkflowError &&
+      error.code === "WORKFLOW_VERSION_NOT_FOUND"
+    )
+      return null;
+    throw error;
+  }
+}
 
 export async function loadRunPage(
   workflowId: string,
@@ -274,10 +298,19 @@ export async function loadRunPage(
     run: await deps.runs.get(workflowId, runId),
   }));
   if (found === undefined) return { kind: "not_found" };
+  // The lane as it was when the run started: the run keeps the version it uses, whatever has been saved since. The same service, so the
+  // workspace's scope holds; a version that cannot be read is no reason to hide the run.
+  const document = await laneOfVersion(
+    deps.workflows,
+    workflowId,
+    found.run.workflowVersion,
+    found.workflow,
+  );
   return {
     kind: "ready",
     workflow: { id: found.workflow.id, name: found.workflow.name },
     run: found.run,
+    document,
   };
 }
 
@@ -285,11 +318,14 @@ export function RunPageContent({
   workspaceSlug,
   data,
   api,
+  runsApi,
 }: {
   workspaceSlug: string;
   data: Extract<RunPageData, { kind: "ready" }>;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
+  /** Only tests pass this, for the same reason: the MCP calls of an agent step's job. */
+  runsApi?: RunsApi;
 }) {
   const { workflow, run } = data;
   const workflowHref = workspacePath(
@@ -325,7 +361,10 @@ export function RunPageContent({
         workspaceSlug={workspaceSlug}
         workflowId={workflow.id}
         initial={{ run }}
+        laneName={workflow.name}
+        document={data.document}
         {...(api === undefined ? {} : { api })}
+        {...(runsApi === undefined ? {} : { runsApi })}
       />
     </>
   );

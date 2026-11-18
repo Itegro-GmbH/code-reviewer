@@ -149,7 +149,7 @@ describe("the Runs page", () => {
     ]);
     expect(
       screen.getByRole("link", { name: "Reset filter" }).getAttribute("href"),
-    ).toBe("/w/acme/runs");
+    ).toBe("/w/acme/runs?view=agents");
   });
 
   // #175-T01
@@ -319,7 +319,7 @@ describe("the page of one run", () => {
     const crumbs = screen.getByRole("navigation", { name: "breadcrumb" });
     expect(
       within(crumbs).getByRole("link", { name: "Runs" }).getAttribute("href"),
-    ).toBe("/w/acme/runs");
+    ).toBe("/w/acme/runs?view=agents");
     expect(
       within(crumbs)
         .getByText(`acme/gadgets #${String(job.prNumber)}`)

@@ -30,6 +30,7 @@ import {
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 afterEach(cleanup);
@@ -252,6 +253,10 @@ describe("the pages with real data", () => {
       <RunPageContent workspaceSlug="acme" data={page} api={NO_POLL} />,
     );
 
+    // The flow selects the step that runs now (the second one); the first one is the step this test is about.
+    fireEvent.click(
+      container.querySelector("[data-node-step=plan]") as HTMLElement,
+    );
     const basis = container.querySelector("[data-slot=cost-basis]");
     expect(basis?.getAttribute("data-basis")).toBe("limit");
     expect(

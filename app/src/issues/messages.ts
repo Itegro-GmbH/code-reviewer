@@ -25,6 +25,7 @@ export const BOARD_COPY = {
   filterAll: "All issues",
   noLane: "No lane",
   step: (step: string) => `at ${step}`,
+  openRun: (lane: string) => `Open the run of ${lane}`,
   noBoardStatus: "not on a board",
   updateFailed:
     "Updating failed. The list shows the last data it got; it keeps trying.",

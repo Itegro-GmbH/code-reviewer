@@ -14,6 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from "../../components/ui/table.tsx";
+import { agentRunsPath } from "../../runs/ui/agent-runs-path.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
 import { formatUtc } from "../../ui/format-time.ts";
 import { StartReviewDialog } from "../../manual-reviews/ui/start-review-dialog.tsx";
@@ -46,10 +47,7 @@ function LastRunStatus({
         {" · "}
         <Link
           className="text-muted-foreground"
-          href={workspacePath(
-            workspaceSlug,
-            `/runs?repository=${encodeURIComponent(repositoryId)}`,
-          )}
+          href={agentRunsPath(workspaceSlug, { repository: repositoryId })}
         >
           All runs
         </Link>

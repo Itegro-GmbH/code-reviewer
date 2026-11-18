@@ -35,6 +35,7 @@ import {
 import { formatUtc } from "../../ui/format-time.ts";
 import { useLiveSnapshot } from "../../ui/use-live-snapshot.ts";
 import { workspacePath } from "../../workspaces/paths.ts";
+import { agentRunsPath } from "./agent-runs-path.ts";
 import { RunPriceText } from "../../workspace-billing/ui/run-price.tsx";
 import { formatDuration } from "../run-duration.ts";
 import { isSettled } from "../run-status.ts";
@@ -215,9 +216,7 @@ export function RunsEmptyState({
         </EmptyHeader>
         <EmptyContent>
           <Button asChild variant="secondary">
-            <Link href={workspacePath(workspaceSlug, "/runs")}>
-              Reset filter
-            </Link>
+            <Link href={agentRunsPath(workspaceSlug)}>Reset filter</Link>
           </Button>
         </EmptyContent>
       </Empty>

@@ -101,6 +101,17 @@
   --info-foreground: var(--page);
   --info-soft: var(--surface);
 
+  /* The state of a node of a lane run (#1079): calm hues for done, running, waiting and failed, each with a soft ground the text of the
+   * same name reads on (4.5:1). A state is never told by the hue alone: the node also carries a symbol and the word. */
+  --flow-done: #1f7a46;
+  --flow-done-soft: #eaf6ee;
+  --flow-running: #2457a6;
+  --flow-running-soft: #e8f0fb;
+  --flow-waiting: #8a5a00;
+  --flow-waiting-soft: #fdf6e3;
+  --flow-failed: #b42318;
+  --flow-failed-soft: #fdeceb;
+
   /* Charts (shadcn blocks expect the set; the app draws none): the neutral steps. */
   --chart-1: var(--fg);
   --chart-2: var(--fg-muted);
@@ -173,6 +184,15 @@
     --info: var(--fg);
     --info-foreground: var(--page);
     --info-soft: var(--surface);
+
+    --flow-done: #6fd49a;
+    --flow-done-soft: #08170f;
+    --flow-running: #82b1f5;
+    --flow-running-soft: #08121f;
+    --flow-waiting: #f2c66d;
+    --flow-waiting-soft: #131209;
+    --flow-failed: #ff8f84;
+    --flow-failed-soft: #1e0d0b;
 
     /* Charts (shadcn blocks expect the set; the app draws none): the neutral steps. */
     --chart-1: var(--fg);
@@ -247,6 +267,15 @@
   --info-foreground: var(--page);
   --info-soft: var(--surface);
 
+  --flow-done: #6fd49a;
+  --flow-done-soft: #08170f;
+  --flow-running: #82b1f5;
+  --flow-running-soft: #08121f;
+  --flow-waiting: #f2c66d;
+  --flow-waiting-soft: #131209;
+  --flow-failed: #ff8f84;
+  --flow-failed-soft: #1e0d0b;
+
   /* Charts (shadcn blocks expect the set; the app draws none): the neutral steps. */
   --chart-1: var(--fg);
   --chart-2: var(--fg-muted);
@@ -320,6 +349,14 @@
   --color-info: var(--info);
   --color-info-foreground: var(--info-foreground);
   --color-info-soft: var(--info-soft);
+  --color-flow-done: var(--flow-done);
+  --color-flow-done-soft: var(--flow-done-soft);
+  --color-flow-running: var(--flow-running);
+  --color-flow-running-soft: var(--flow-running-soft);
+  --color-flow-waiting: var(--flow-waiting);
+  --color-flow-waiting-soft: var(--flow-waiting-soft);
+  --color-flow-failed: var(--flow-failed);
+  --color-flow-failed-soft: var(--flow-failed-soft);
   --color-overlay: var(--overlay);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);

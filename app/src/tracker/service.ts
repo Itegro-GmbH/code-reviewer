@@ -12,11 +12,19 @@ import type {
   TrackerItemState,
   TrackerRepository,
 } from "../db/repositories/tracker-repository.ts";
-import type { WorkflowRunsRepository } from "../db/repositories/workflow-runs-repository.ts";
+import type {
+  RunLaneProgress,
+  WorkflowRunsRepository,
+} from "../db/repositories/workflow-runs-repository.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import type { ProjectService } from "../projects/service.ts";
 import type { SyncState } from "../projects/ui/sync-staleness.ts";
+import {
+  laneNodesOfRun,
+  type LaneNodeView,
+} from "../workflow-runs/lane-nodes.ts";
+import type { StepSummaryView } from "../workflow-runs/lane-run-list.ts";
 import { TrackerError } from "./errors.ts";
 import { TRACKER_PROVIDER } from "./mirror.ts";
 import type { SyncProgress, TrackerSync } from "./sync.ts";
@@ -31,6 +39,13 @@ export type TicketLane = {
   /** The step that runs now, or asks (or the next one that waits); null before the first step is written. */
   step: string | null;
   status: "running" | "waiting";
+  /**
+   * The top-level nodes of the version of the lane the run started with (#1080), what the board's step track is drawn on; empty when that
+   * version cannot be read any more (the track is then left out).
+   */
+  nodes: LaneNodeView[];
+  /** The summaries of the steps the run has written so far, in the order they were written (#1080). */
+  steps: StepSummaryView[];
 };
 
 /** One ticket of the list: the provider's fields as the cache holds them, plus what is read at the time of the question. */
@@ -139,10 +154,56 @@ export type TrackerServiceDependencies = {
     TrackerRepository,
     "listItems" | "listItemsByNumbers" | "getSyncState" | "newestWriteAt"
   >;
-  runs: Pick<WorkflowRunsRepository, "summarizeTickets">;
+  runs: Pick<WorkflowRunsRepository, "summarizeTickets" | "laneProgressOfRuns">;
   sync: TrackerSync;
   jira?: JiraMirrorSync;
 };
+
+/**
+ * The nodes of a lane version as `laneNodesOfRun` reads them, kept for the next poll: the board asks every few seconds and a version of a
+ * lane never changes, so the document is parsed once for each (version, trigger) and not once for each ticket of each poll. An entry holds
+ * the text it was made from and is used only for the same text (an id that names another text is read again). Bounded: the oldest goes.
+ */
+const NODES_CACHE_MAX = 128;
+const nodesCache = new Map<
+  string,
+  { document: string; nodes: LaneNodeView[] }
+>();
+
+function laneNodesOfProgress(progress: RunLaneProgress): LaneNodeView[] {
+  if (progress.document === null) return [];
+  const key = `${progress.workflowId}@${String(progress.workflowVersion)}|${progress.triggerKind}|${progress.triggerId ?? ""}`;
+  const cached = nodesCache.get(key);
+  if (cached !== undefined && cached.document === progress.document)
+    return cached.nodes;
+  const nodes = laneNodesOfRun(progress.document, {
+    id: progress.triggerId,
+    kind: progress.triggerKind,
+  });
+  nodesCache.delete(key);
+  nodesCache.set(key, { document: progress.document, nodes });
+  if (nodesCache.size > NODES_CACHE_MAX) {
+    const oldest = nodesCache.keys().next();
+    if (!oldest.done) nodesCache.delete(oldest.value);
+  }
+  return nodes;
+}
+
+/** The nodes and the step summaries of an active run for the board (#1080); a run whose progress was not read shows no track. */
+function laneProgressView(
+  progress: RunLaneProgress | undefined,
+): Pick<TicketLane, "nodes" | "steps"> {
+  if (progress === undefined) return { nodes: [], steps: [] };
+  return {
+    nodes: laneNodesOfProgress(progress),
+    steps: progress.steps.map((step) => ({
+      id: step.stepId,
+      kind: step.kind,
+      status: step.status,
+      round: step.round,
+    })),
+  };
+}
 
 const MAX_ID_LENGTH = 128;
 const MICRO = 1_000_000;
@@ -265,6 +326,16 @@ export function createTrackerService(
           )
         ).map((summary) => [summary.ticketRef, summary]),
       );
+      // Where each active run stands in its lane: one read of the steps and one of the lane versions for every active run of the page.
+      const progress = new Map(
+        (
+          await deps.runs.laneProgressOfRuns(
+            [...summaries.values()].flatMap((summary) =>
+              summary.activeRun === null ? [] : [summary.activeRun.runId],
+            ),
+          )
+        ).map((entry) => [entry.runId, entry]),
+      );
       return {
         provider: jira === null ? TRACKER_PROVIDER : "jira",
         repositoryId: repository.id,
@@ -317,6 +388,7 @@ export function createTrackerService(
                       summary.activeRun.status === "waiting"
                         ? "waiting"
                         : "running",
+                    ...laneProgressView(progress.get(summary.activeRun.runId)),
                   },
             costUsd: (summary?.spentMicroUsd ?? 0) / MICRO,
           };

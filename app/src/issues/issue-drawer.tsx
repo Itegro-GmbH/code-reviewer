@@ -24,6 +24,7 @@ import type { TicketList, TicketListItem } from "../tracker/service.ts";
 import type { RunView } from "../workflow-runs/service.ts";
 import { WorkflowRunStatusBadge } from "../workflow-pages/status-badge.tsx";
 import { browserIssuesApi, type IssuesApi } from "./api.ts";
+import { LaneTrack, laneRunPath } from "./lane-track.tsx";
 import { DRAWER_COPY } from "./messages.ts";
 import {
   formatSince,
@@ -398,18 +399,14 @@ function LaneSection({
           <WorkflowRunStatusBadge status={run.run.status} />
         ) : null}
       </div>
+      <LaneTrack lane={lane} />
       {lane.step === null ? null : (
         <span className="text-muted-foreground">
           at <span className="font-mono">{lane.step}</span>
         </span>
       )}
       <Button asChild variant="secondary" size="sm" className="self-start">
-        <Link
-          href={workspacePath(
-            workspaceSlug,
-            `/workflows/${encodeURIComponent(lane.workflowId)}/runs/${encodeURIComponent(lane.runId)}`,
-          )}
-        >
+        <Link href={laneRunPath(workspaceSlug, lane)}>
           {DRAWER_COPY.openRun}
         </Link>
       </Button>

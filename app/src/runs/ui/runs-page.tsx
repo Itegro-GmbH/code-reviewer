@@ -18,7 +18,7 @@ import {
 } from "../../components/ui/empty.tsx";
 import type { ProjectService } from "../../projects/service.ts";
 import { noRunsYet, type LastRunSource } from "../../projects/ui/list-view.ts";
-import { workspacePath } from "../../workspaces/paths.ts";
+import { agentRunsPath } from "./agent-runs-path.ts";
 import { parseRunsFilter, type RunsService } from "../runs-service.ts";
 import type { RunsSnapshot } from "../run-view.ts";
 import type { RunsApi, RunsFilter } from "./api.ts";
@@ -113,9 +113,7 @@ export function RunsPageContent({
         </EmptyHeader>
         <EmptyContent>
           <Button asChild variant="secondary">
-            <Link href={workspacePath(workspaceSlug, "/runs")}>
-              Reset filter
-            </Link>
+            <Link href={agentRunsPath(workspaceSlug)}>Reset filter</Link>
           </Button>
         </EmptyContent>
       </Empty>

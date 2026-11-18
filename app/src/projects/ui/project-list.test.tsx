@@ -241,7 +241,7 @@ describe("the project list with repositories", () => {
 
     expect(
       screen.getByRole("link", { name: "All runs" }).getAttribute("href"),
-    ).toBe("/w/acme/runs?repository=repo%20with%20space");
+    ).toBe("/w/acme/runs?view=agents&repository=repo%20with%20space");
   });
 
   // CR-34-T01

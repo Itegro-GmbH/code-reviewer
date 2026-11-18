@@ -4,6 +4,7 @@
 // step's output is data from outside the page (an agent's result, what a connector got from GitHub): this file only picks the few
 // values the page shows, checks their types, and decides which of them may become a link; the components render them as text.
 import { isRecord } from "../workflows/json.ts";
+import { formatUtc } from "../ui/format-time.ts";
 import { formatMoney } from "../workspace-billing/money.ts";
 import type { RunView, StepView } from "../workflow-runs/service.ts";
 import { githubBranchLink, githubLinkInRepository } from "./github-link.ts";
@@ -33,6 +34,47 @@ export function repositoryOfRun(
   return isRecord(repo) && typeof repo.fullName === "string"
     ? repo.fullName
     : undefined;
+}
+
+/** The ticket a run is about, as the run stored it (`ticket.ts`): everything is text from whoever opened it. */
+export type RunTicket = {
+  /** How the ticket is called: `#15` for a GitHub issue, `PROJ-123` for a Jira one. */
+  ref: string;
+  title?: string;
+  /** A link to GitHub, only to an address of the run's own repository. */
+  url?: string;
+};
+
+/** The ticket of a run that has one (a `ticket` in its input, #916), or undefined. The address is linked through `github-link.ts` only. */
+export function ticketOfRun(
+  run: Pick<RunView, "input">,
+  repository: string | undefined,
+): RunTicket | undefined {
+  if (!isRecord(run.input) || !isRecord(run.input.ticket)) return undefined;
+  const { key, number, title, url } = run.input.ticket;
+  const name =
+    typeof key === "string" && key !== ""
+      ? key
+      : typeof number === "number" && Number.isInteger(number) && number > 0
+        ? String(number)
+        : undefined;
+  if (name === undefined) return undefined;
+  const link = githubLinkInRepository(url, repository);
+  return {
+    ref: /^\d+$/.test(name) ? `#${name}` : name,
+    ...(typeof title === "string" && title !== "" ? { title } : {}),
+    ...(link === undefined ? {} : { url: link }),
+  };
+}
+
+/** How long a run took, or null while it runs or when the times do not fit together. */
+export function runDurationMs(
+  run: Pick<RunView, "createdAt" | "finishedAt">,
+): number | null {
+  return stepDurationMs({
+    startedAt: run.createdAt,
+    finishedAt: run.finishedAt,
+  });
 }
 
 /** How long a finished step took, or null when it did not start, did not finish, or the times do not fit together. */
@@ -148,6 +190,8 @@ export function controlResultOf(
 
 /** What an agent step returned: the branch it pushed to (a link when the repository is known), and the rest of the output as data. */
 export type AgentResult = {
+  /** What the agent said it did, as the text it is (the `summary` of its result). */
+  summary?: string;
   branch?: string;
   branchUrl?: string;
   /** The output without the facts the page shows itself, for the collapsed JSON; undefined when there is nothing left. */
@@ -162,7 +206,9 @@ export function agentResultOf(
 ): AgentResult | undefined {
   if (step.kind !== "agent" || !isRecord(step.output)) return undefined;
   const result: AgentResult = {};
-  const { branch } = step.output;
+  const { branch, summary } = step.output;
+  if (typeof summary === "string" && summary.trim() !== "")
+    result.summary = summary;
   if (typeof branch === "string" && branch !== "") {
     result.branch = branch;
     const link = githubBranchLink(repository, branch);
@@ -170,11 +216,47 @@ export function agentResultOf(
   }
   const rest = Object.fromEntries(
     Object.entries(step.output).filter(
-      ([name]) => !(SHOWN_FACTS as readonly string[]).includes(name),
+      ([name]) =>
+        !(SHOWN_FACTS as readonly string[]).includes(name) &&
+        !(name === "summary" && result.summary !== undefined),
     ),
   );
   if (Object.keys(rest).length > 0) result.fields = rest;
-  return result.branch === undefined && result.fields === undefined
-    ? undefined
-    : result;
+  return Object.keys(result).length === 0 ? undefined : result;
+}
+
+/**
+ * How long ago a time was, against a clock the caller hands in (the server's time of answering, so the page the server rendered and the
+ * browser say the same): "just now", "12 min ago", "3 h ago", "2 d ago", and the date once it is over a week. A time that cannot be read
+ * is "unknown time".
+ */
+export function formatRelativeTime(iso: string, nowIso: string): string {
+  const then = Date.parse(iso);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(then) || Number.isNaN(now)) return "unknown time";
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${String(Math.max(1, minutes))} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${String(hours)} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${String(days)} d ago`;
+  return formatUtc(iso);
+}
+
+/**
+ * How long a lane run took, or has been going: from its start to its end, or to `nowIso` while it is active (running or waiting for an
+ * answer). Null for a run that ended without an end time, and for times that cannot be read.
+ */
+export function laneRunDurationMs(
+  run: { status: string; createdAt: string; finishedAt: string | null },
+  nowIso: string,
+): number | null {
+  const start = Date.parse(run.createdAt);
+  if (Number.isNaN(start)) return null;
+  const active = run.status === "running" || run.status === "waiting";
+  const end = Date.parse(run.finishedAt ?? (active ? nowIso : ""));
+  if (Number.isNaN(end) || end < start) return null;
+  return end - start;
 }
