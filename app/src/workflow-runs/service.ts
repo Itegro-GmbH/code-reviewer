@@ -55,6 +55,13 @@ import { parseStepAsk, type StepAsk } from "./ask.ts";
 import type { WorkflowEngine } from "./engine.ts";
 import { WorkflowRunError } from "./errors.ts";
 import {
+  encodeCursor,
+  listItemOf,
+  readListQuery,
+  type LaneRunListView,
+  type RawLaneRunsQuery,
+} from "./lane-run-list.ts";
+import {
   MICRO_USD_PER_USD,
   RUNS_LISTED_MAX,
   TRIGGER_INPUT_MAX_CHARS,
@@ -188,6 +195,12 @@ export type WorkflowRunService = {
   ): Promise<{ run: RunView }>;
   /** The newest runs of a workflow, without their steps. */
   list(workflowId: string): Promise<{ runs: RunSummaryView[] }>;
+  /**
+   * #1078: the runs of every lane of the workspace, the active ones first, then the newest first, one page at a time (`nextCursor` goes into
+   * the `cursor` of the next request), with what the list shows of each: lane, project, ticket and the summaries of the steps with the nodes
+   * of the lane version. Throws `WORKFLOW_RUN_REQUEST_INVALID` for a status, a limit or a cursor that is none.
+   */
+  listWorkspace(query: RawLaneRunsQuery): Promise<LaneRunListView>;
 };
 
 export type WorkflowRunServiceDependencies = {
@@ -809,6 +822,20 @@ export function createWorkflowRunService(
       // The turn that goes on starts after the response, like the first steps of a run.
       deps.kick(runId);
       return { run: await view((await deps.runs.getRun(runId)) ?? found) };
+    },
+
+    async listWorkspace(raw) {
+      const query = readListQuery(raw);
+      const page = await deps.runs.listWorkspaceRuns({
+        filter: query.filter,
+        limit: query.limit,
+        ...(query.after === undefined ? {} : { after: query.after }),
+      });
+      return {
+        runs: page.rows.map(listItemOf),
+        nextCursor: page.next === null ? null : encodeCursor(page.next),
+        now: new Date().toISOString(),
+      };
     },
 
     async list(workflowId) {

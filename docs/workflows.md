@@ -740,6 +740,11 @@ have, `422 WORKFLOW_RUN_TRIGGER_NOT_MANUAL` for a trigger that is not started by
 - **The version is pinned.** The run uses the version the workflow has at the start; saving a new version later changes nothing under it.
 - `GET /api/w/<slug>/workflows/<id>/runs/<runId>` answers `200 {"run": {...}}` with the steps; `GET .../runs` lists the newest 50 runs of the workflow
   (without steps). A run of another workspace, or of another workflow, is `404`.
+- `GET /api/w/<slug>/workflow-runs` (#1078) lists the runs of **every** lane of the workspace for the Lane runs tab of the Runs page: the active ones (running, waiting for an answer) first,
+  then the newest first, `limit` at a time (25 by default, 50 at most). Filters: `status` (`active` = running or waiting, `waiting`, `ended` = succeeded, failed, cancelled or discarded, `failed`), `project` (the id of
+  the repository the run works on) and `lane` (the workflow id); `cursor` is the `nextCursor` of the page before. A status, limit or cursor that is none is `400 WORKFLOW_RUN_REQUEST_INVALID`.
+  The answer is `{ runs, nextCursor, now }`; a run has its lane name and version, project, ticket (label, the title from the ticket mirror, the link for a GitHub ticket), budget and spent, the id, kind, status and round of every step
+  (no output, no cost) and the top-level nodes of the lane version it started with. Whoever may start a run may read the list (the right of the other run routes).
 
 ### A question: `done` or `ask` (#920)
 
@@ -1375,6 +1380,13 @@ not exist.
     trigger is not the manual one, shows a note instead of the form.
   - The list of runs has the status, the start, the trigger (started by hand, through the API, or by a label), what was spent of the budget and the version of the
     workflow the run started with. It is updated every few seconds while a run runs.
+- **Lane runs** (`/w/<slug>/runs`, the tab **Lane runs**, #1078; `?view=lanes|agents` picks the tab, Lane runs is the default where the deployment has the `implementer` capability, **Agent runs** is the list of reviews and Implementer
+  runs as before): the runs of every lane of the workspace, the active ones on top, then the newest first. A row has the ticket (its reference like `#123` or `LAT-58`, the title when the ticket mirror holds it, a link to the ticket
+  for a GitHub ticket), the lane with its version, the project, a **compact step track**, the status, how long ago it started, how long it has taken and what it spent of its budget; the lane name links to the run page. The track has one
+  small segment for each top-level node of the lane version the run started with, filled by how the node stands (done, running, waiting for an answer, failed, skipped, not reached; the current step is ringed) and the name of the
+  current step as text; its text alternative reads "Step 2 of 4: Review, running". A step belongs to the node whose id it carries or that contains it, so the rows of a loop's body and of the branch an `if` took belong to the loop and the `if`; a
+  branch that was not taken (its rows are `skipped`) leaves the node as it is. The filters are in the address (`status`, `project`, `lane`). While any listed run is active the list asks again every few seconds, like the run page; more
+  runs are loaded on request. The mapping of step rows onto nodes is `workflow-pages/run-track.ts`; the run page (#1079) and the step panel (#1080) read it as well.
 - **One run** (`/w/<slug>/workflows/<id>/runs/<runId>`): the page polls `GET .../runs/<runId>` every 3 seconds while the run runs, as the live view of an
   Implementer run does, and stops when it ends.
   - **Status.** `running`, `waiting` (for an answer to a question of the agent, #920), `succeeded`, `failed`, `discarded` (#921) or `cancelled` (the old stop, legacy). Every run that is not discarded has a button **Discard this run** ([Discarding a run](#discarding-a-run)) with the note "A run is active or discarded. Discard when the agent went the wrong way and you want to start over in a new run."; a run that is active also has **Pause after this step** (**Resume** while it is paused, [Pausing a run](#pausing-a-run)). A discarded run says "Discarded: no longer active, nothing counts against the ticket. Start a fresh run when you want." and has no button; the list of runs keeps it, greyed. A failed run or step is told in a sentence for its code (`budget_exhausted` is "the budget of the run is

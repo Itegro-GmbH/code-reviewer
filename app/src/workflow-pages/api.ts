@@ -8,9 +8,20 @@ import {
   type RequestResult,
 } from "../ui/json-request.ts";
 import { workspaceApiPath } from "../workspaces/paths.ts";
+import type { LaneRunListView } from "../workflow-runs/lane-run-list.ts";
 import type { RunSummaryView, RunView } from "../workflow-runs/service.ts";
 
+/** The filters of the list of lane runs (#1078): the same words the address of the Runs page and the route use. */
+export type LaneRunsQuery = {
+  status?: string;
+  project?: string;
+  lane?: string;
+  cursor?: string;
+};
+
 export type WorkflowRunsApi = {
+  /** #1078: the runs of every lane of the workspace, one page; `cursor` is the `nextCursor` of the page before. */
+  listWorkspace(query: LaneRunsQuery): Promise<RequestResult<LaneRunListView>>;
   /** The newest runs of a workflow, without their steps. */
   list(workflowId: string): Promise<RequestResult<{ runs: RunSummaryView[] }>>;
   /** One run with its steps. */
@@ -72,6 +83,17 @@ export function createWorkflowRunsApi(
       `${runsPath(workflowId)}/${encodeURIComponent(runId)}/${action}`,
     );
   return {
+    listWorkspace: (query) => {
+      const params = new URLSearchParams();
+      for (const [name, value] of Object.entries(query))
+        if (value !== undefined && value !== "") params.set(name, value);
+      const text = params.toString();
+      return requestJson<LaneRunListView>(
+        fetchImpl,
+        "GET",
+        `${workspaceApiPath(workspaceSlug, "/workflow-runs")}${text === "" ? "" : `?${text}`}`,
+      );
+    },
     list: (workflowId) =>
       requestJson<{ runs: RunSummaryView[] }>(
         fetchImpl,
