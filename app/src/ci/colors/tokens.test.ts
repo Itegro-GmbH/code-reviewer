@@ -124,6 +124,11 @@ const CONTRAST_PAIRS: [string, string, number][] = [
   ["--flow-running", "--background", 4.5],
   ["--flow-waiting", "--background", 4.5],
   ["--flow-failed", "--background", 4.5],
+  // The state words in the panel (`StateMark`) sit on the card.
+  ["--flow-done", "--card", 4.5],
+  ["--flow-running", "--card", 4.5],
+  ["--flow-waiting", "--card", 4.5],
+  ["--flow-failed", "--card", 4.5],
   ["--input", "--background", 3],
   ["--ring", "--background", 3],
   // #633: supporting text and the warning marker on every ground of the board.

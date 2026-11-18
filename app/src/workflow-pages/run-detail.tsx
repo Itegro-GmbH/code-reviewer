@@ -415,19 +415,49 @@ function RunFlowView({
   // What the address names is only looked up in the lane (`selectionOf`), never used as it is. A person's own choice stays; until there is
   // one the selection follows the run (the current step moves on while it runs).
   const fromAddress = useSearchParams()?.get("step") ?? null;
+  const known = (stepId: string | null): stepId is string =>
+    stepId !== null && states.byStepId.has(stepId);
   const [chosen, setChosen] = useState<string | null>(fromAddress);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  // The step the sheet is open for (a narrow screen only): a link to a step of the lane opens it, as a click does.
+  const [sheetFor, setSheetFor] = useState<string | null>(
+    known(fromAddress) ? fromAddress : null,
+  );
+  // The address can change under the page (a link inside the app to another step of the same run): the selection follows it. A click
+  // writes its own step to the address, which is no change.
+  const [seen, setSeen] = useState(fromAddress);
+  if (seen !== fromAddress) {
+    setSeen(fromAddress);
+    if (fromAddress !== null) {
+      setChosen(fromAddress);
+      if (known(fromAddress)) setSheetFor(fromAddress);
+    }
+  }
   const selected = selectionOf(states, chosen);
   const found =
     selected === undefined ? undefined : states.byStepId.get(selected);
   function select(stepId: string): void {
     setChosen(stepId);
-    setSheetOpen(true);
+    setSheetFor(stepId);
     writeStepToAddress(stepId);
+  }
+  // A closed sheet has no trigger that Radix could hand the focus back to: the node that opened it gets it, so that a keyboard or screen
+  // reader user goes on where they were in the flow.
+  function focusNodeOf(event: Event): void {
+    event.preventDefault();
+    if (selected === undefined) return;
+    const node = [
+      ...document.querySelectorAll<HTMLElement>("[data-node-step]"),
+    ].find((each) => each.getAttribute("data-node-step") === selected);
+    node?.focus();
   }
   // A step run the lane has no node for (the lane of this version does not name it) has no place in the flow: it is listed under it, so
   // that nothing a run did, and no question it asks, is out of reach.
   const apart = run.steps.filter((step) => !states.byStepId.has(step.id));
+  // The panel is named by its heading; a lane without a node has no heading, and the region is named by a label instead.
+  const labelOf =
+    found === undefined
+      ? { "aria-label": FLOW_COPY.panelLabel }
+      : { "aria-labelledby": headingId };
   const panel =
     found === undefined ? (
       <p className="text-sm text-muted-foreground">{FLOW_COPY.panelHint}</p>
@@ -460,19 +490,25 @@ function RunFlowView({
           />
         </Section>
         {narrow ? (
-          <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+          <Sheet
+            open={sheetFor !== null}
+            onOpenChange={(open) => {
+              if (!open) setSheetFor(null);
+            }}
+          >
             <SheetContent
               side="right"
               className="w-full overflow-y-auto p-4 sm:max-w-md"
-              aria-labelledby={headingId}
+              {...labelOf}
               aria-describedby={undefined}
+              onCloseAutoFocus={focusNodeOf}
             >
               {panel}
             </SheetContent>
           </Sheet>
         ) : (
           <aside
-            aria-labelledby={headingId}
+            {...labelOf}
             data-slot="step-panel-region"
             className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto"
           >

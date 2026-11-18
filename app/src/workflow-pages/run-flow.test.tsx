@@ -10,8 +10,10 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
+import { cloneElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunsApi } from "../runs/ui/api.ts";
 import type { McpCallsSnapshot } from "../runs/mcp-calls-view.ts";
@@ -80,7 +82,7 @@ function show(
     runsApi?: RunsApi;
   } = {},
 ) {
-  const view = render(
+  const element = (
     <WorkflowRunDetail
       workspaceSlug="acme"
       workflowId="wf-1"
@@ -96,13 +98,16 @@ function show(
       document={"document" in props ? props.document : shippedLane()}
       api={props.api ?? ({ run: vi.fn() } as unknown as WorkflowRunsApi)}
       runsApi={props.runsApi ?? noCalls()}
-    />,
+    />
   );
+  const view = render(element);
+  // The router renders the page again when the address changes: the same page, read again.
+  const again = () => view.rerender(cloneElement(element));
   const node = (id: string) =>
     view.container.querySelector(`[data-node-step="${id}"]`) as HTMLElement;
   const panel = () =>
     view.container.querySelector("[data-slot=step-panel]") as HTMLElement;
-  return { ...view, node, panel };
+  return { ...view, node, panel, again };
 }
 
 const MIDWAY = (): StepView[] =>
@@ -286,6 +291,19 @@ describe("the step that is selected", () => {
     const unknown = show(MIDWAY());
     expect(unknown.panel().getAttribute("data-step")).toBe("implement");
     expect(unknown.container.querySelector("img")).toBeNull();
+  });
+
+  // #1079-T20
+  it("follows the address when it changes under the page, to a step the lane has and not to one it lacks", () => {
+    window.history.replaceState(null, "", "/?step=start");
+    const { panel, again } = show(MIDWAY());
+    expect(panel().getAttribute("data-step")).toBe("start");
+    window.history.replaceState(null, "", "/?step=mark");
+    again();
+    expect(panel().getAttribute("data-step")).toBe("mark");
+    window.history.replaceState(null, "", "/?step=nope");
+    again();
+    expect(panel().getAttribute("data-step")).toBe("implement");
   });
 
   // #1079-T20
@@ -558,6 +576,18 @@ describe("a lane that cannot be drawn", () => {
   });
 });
 
+describe("a lane without a node", () => {
+  // #1079-T28
+  it("names the panel region by a label, not by a heading that is not there", () => {
+    show([], {}, { document: {} });
+    const region = screen.getByRole("complementary");
+    expect(region.getAttribute("aria-labelledby")).toBeNull();
+    expect(region.getAttribute("aria-label")).toBe(
+      "Details of the selected step",
+    );
+  });
+});
+
 describe("a narrow screen", () => {
   function narrow(matches: boolean) {
     vi.stubGlobal("matchMedia", (query: string) => ({
@@ -582,6 +612,43 @@ describe("a narrow screen", () => {
       dialog.querySelector("[data-slot=step-panel]")?.getAttribute("data-step"),
     ).toBe("review");
     expect(window.location.search).toBe("?step=review");
+  });
+
+  // #1079-T28
+  it("opens the sheet for a link to a step, on first render and when the address changes", async () => {
+    narrow(true);
+    window.history.replaceState(null, "", "/?step=review");
+    const { again, unmount } = show(MIDWAY());
+    expect(screen.getByRole("dialog", { name: "review" })).toBeTruthy();
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    window.history.replaceState(null, "", "/?step=start");
+    await act(async () => {
+      again();
+    });
+    expect(screen.getByRole("dialog", { name: "start" })).toBeTruthy();
+    unmount();
+    // A step the lane does not have opens nothing.
+    window.history.replaceState(null, "", "/?step=nope");
+    show(MIDWAY());
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // #1079-T28
+  it("gives the focus back to the node that opened the sheet when it closes", async () => {
+    narrow(true);
+    const { node } = show(MIDWAY());
+    await act(async () => {
+      fireEvent.click(node("review"));
+    });
+    expect(screen.getByRole("dialog", { name: "review" })).toBeTruthy();
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(node("review")));
   });
 
   // #1079-T28
