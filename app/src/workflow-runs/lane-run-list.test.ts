@@ -7,12 +7,14 @@ import type {
   WorkspaceRunRow,
 } from "../db/repositories/workflow-runs-repository.ts";
 import { WorkflowRunError } from "./errors.ts";
+import { createLaneNodesIndex } from "./lane-nodes.ts";
 import {
   decodeCursor,
   encodeCursor,
   LANE_RUNS_PAGE_DEFAULT,
   LANE_RUNS_PAGE_MAX,
   listItemOf,
+  listRunsOf,
   readListQuery,
 } from "./lane-run-list.ts";
 
@@ -165,7 +167,11 @@ describe("listItemOf", () => {
       budgetUsd: 20,
       spentUsd: 1.5,
     });
-    expect(item.nodes.map((node) => node.id)).toEqual(["plan", "ship"]);
+    const index = createLaneNodesIndex();
+    expect(listItemOf(row(), { index }).nodesKey).toBe("wf-1@2|manual|by-hand");
+    expect(
+      index.byKey["wf-1@2|manual|by-hand"]?.map((node) => node.id),
+    ).toEqual(["plan", "ship"]);
     expect(item.steps).toEqual([
       { id: "plan", kind: "agent", status: "running", round: 1 },
     ]);
@@ -202,10 +208,10 @@ describe("listItemOf", () => {
     expect(
       listItemOf(
         row({ run: stored({ ticketRef: "jira:acme/widgets#LAT-58" }) }),
-        sites,
+        { sites },
       ).ticket?.jiraSiteUrl,
     ).toBe("https://acme.atlassian.net");
-    expect(listItemOf(row(), sites).ticket?.jiraSiteUrl).toBeNull();
+    expect(listItemOf(row(), { sites }).ticket?.jiraSiteUrl).toBeNull();
   });
 
   // #1086-T08
@@ -214,7 +220,7 @@ describe("listItemOf", () => {
       ["repo-1", { siteUrl: "https://beta.atlassian.net", projectKey: "LAT" }],
     ]);
     const of = (ref: string) =>
-      listItemOf(row({ run: stored({ ticketRef: ref }) }), sites).ticket
+      listItemOf(row({ run: stored({ ticketRef: ref }) }), { sites }).ticket
         ?.jiraSiteUrl;
 
     expect(of("jira:acme/widgets#OLD-58")).toBeNull();
@@ -233,6 +239,58 @@ describe("listItemOf", () => {
     );
 
     expect(item.ticket).toBeNull();
-    expect(item.nodes).toEqual([]);
+    expect(item.nodesKey).toBeNull();
+  });
+});
+
+describe("listRunsOf", () => {
+  // #1087-T03
+  it("holds the nodes of a lane version once, however many runs it has, and names them by key", () => {
+    const list = listRunsOf([
+      row({ run: stored({ id: "run-3" }) }),
+      row({ run: stored({ id: "run-2" }) }),
+      row({ run: stored({ id: "run-1", workflowVersion: 1 }) }),
+    ]);
+
+    expect(list.runs.map((run) => run.nodesKey)).toEqual([
+      "wf-1@2|manual|by-hand",
+      "wf-1@2|manual|by-hand",
+      "wf-1@1|manual|by-hand",
+    ]);
+    expect(Object.keys(list.laneNodes)).toEqual([
+      "wf-1@2|manual|by-hand",
+      "wf-1@1|manual|by-hand",
+    ]);
+    expect(JSON.stringify(list.runs)).not.toContain('"innerIds"');
+  });
+
+  // #1087-T04
+  it("gives a run whose version cannot be read no key and no entry", () => {
+    const list = listRunsOf([
+      row({ run: stored({ id: "run-2", workflowVersion: 1 }), document: null }),
+      row({ run: stored({ id: "run-1" }) }),
+    ]);
+
+    expect(list.runs.map((run) => run.nodesKey)).toEqual([
+      null,
+      "wf-1@2|manual|by-hand",
+    ]);
+    expect(Object.keys(list.laneNodes)).toEqual(["wf-1@2|manual|by-hand"]);
+  });
+
+  // #1087-T05
+  it("passes the Jira sites on to every row, next to the nodes", () => {
+    const sites = new Map([
+      ["repo-1", { siteUrl: "https://acme.atlassian.net", projectKey: "LAT" }],
+    ]);
+    const list = listRunsOf(
+      [row({ run: stored({ ticketRef: "jira:acme/widgets#LAT-58" }) })],
+      sites,
+    );
+
+    expect(list.runs[0]?.ticket?.jiraSiteUrl).toBe(
+      "https://acme.atlassian.net",
+    );
+    expect(list.runs[0]?.nodesKey).toBe("wf-1@2|manual|by-hand");
   });
 });

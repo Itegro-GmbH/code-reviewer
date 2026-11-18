@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 // The compact step track of the lane run that is on a ticket (#1080, epic #1077): the track of the Runs list (`workflow-pages/run-track`),
-// drawn from the nodes and the step summaries the list of tickets carries for each active run, so the board needs no read for each ticket.
+// drawn from the nodes (once for each lane version, `TicketList.laneNodes`, #1087) and the step summaries the list of tickets carries for each active run, so the board needs no read for each ticket.
 // The board and the drawer both draw it, and both link to the run page of the lane (`laneRunPath`).
 import { RunTrackView } from "../workflow-pages/run-track.tsx";
 import { trackOf } from "../workflow-pages/run-track.ts";
-import type { TicketLane } from "../tracker/service.ts";
+import type { TicketLane, TicketList } from "../tracker/service.ts";
+import { laneNodesFor } from "../workflow-runs/lane-nodes.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 
 /**
@@ -23,7 +24,15 @@ export function laneRunPath(workspaceSlug: string, lane: TicketLane): string {
 }
 
 /** The track of the run, or nothing when the lane version of the run cannot be read (no nodes to draw it on). */
-export function LaneTrack({ lane }: { lane: TicketLane }) {
-  if (lane.nodes.length === 0) return null;
-  return <RunTrackView track={trackOf(lane.nodes, lane.steps, lane.status)} />;
+export function LaneTrack({
+  lane,
+  laneNodes,
+}: {
+  lane: TicketLane;
+  /** Absent in the response of an older server (#1087): no track then. */
+  laneNodes: TicketList["laneNodes"] | undefined;
+}) {
+  const nodes = laneNodesFor(laneNodes, lane.nodesKey);
+  if (nodes.length === 0) return null;
+  return <RunTrackView track={trackOf(nodes, lane.steps, lane.status)} />;
 }

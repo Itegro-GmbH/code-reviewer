@@ -14,6 +14,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RequestResult } from "../ui/json-request.ts";
 import type {
+  LaneNodesByKey,
+  LaneNodeView,
+} from "../workflow-runs/lane-nodes.ts";
+import type {
   LaneRunListItemView,
   LaneRunListView,
 } from "../workflow-runs/lane-run-list.ts";
@@ -35,6 +39,34 @@ afterEach(() => {
 
 const NOW = "2026-11-18T12:00:00.000Z";
 
+const NODES_KEY = "wf-1@3|ticket.labeled|label";
+const NODES: LaneNodeView[] = [
+  {
+    id: "plan",
+    kind: "agent",
+    note: "Plan",
+    connector: null,
+    innerIds: [],
+    body: [],
+  },
+  {
+    id: "review",
+    kind: "agent",
+    note: "Review",
+    connector: null,
+    innerIds: [],
+    body: [],
+  },
+  {
+    id: "ship",
+    kind: "action",
+    note: null,
+    connector: "pr.merge",
+    innerIds: [],
+    body: [],
+  },
+];
+
 function item(
   overrides: Partial<LaneRunListItemView> = {},
 ): LaneRunListItemView {
@@ -55,32 +87,7 @@ function item(
       githubRepository: "acme/widgets",
       jiraSiteUrl: null,
     },
-    nodes: [
-      {
-        id: "plan",
-        kind: "agent",
-        note: "Plan",
-        connector: null,
-        innerIds: [],
-        body: [],
-      },
-      {
-        id: "review",
-        kind: "agent",
-        note: "Review",
-        connector: null,
-        innerIds: [],
-        body: [],
-      },
-      {
-        id: "ship",
-        kind: "action",
-        note: null,
-        connector: "pr.merge",
-        innerIds: [],
-        body: [],
-      },
-    ],
+    nodesKey: NODES_KEY,
     steps: [
       { id: "plan", kind: "agent", status: "succeeded", round: 1 },
       { id: "review", kind: "agent", status: "running", round: 1 },
@@ -96,7 +103,8 @@ function item(
 const page = (
   runs: LaneRunListItemView[],
   nextCursor: string | null = null,
-): LaneRunListView => ({ runs, nextCursor, now: NOW });
+  laneNodes: LaneNodesByKey = { [NODES_KEY]: NODES },
+): LaneRunListView => ({ runs, laneNodes, nextCursor, now: NOW });
 const ok = (view: LaneRunListView): RequestResult<LaneRunListView> => ({
   ok: true,
   data: view,
@@ -242,18 +250,24 @@ describe("a row of the lane runs list", () => {
   it("shows what people typed as text, never as markup", () => {
     const hostile = "<img src=x onerror=alert(1)><script>alert(2)</script>";
     const { container } = renderList(
-      page([
-        item({
-          laneName: hostile,
-          project: { id: "repo-1", name: hostile },
-          ticket: {
-            label: "#1",
-            title: hostile,
-            key: "1",
-            githubRepository: null,
-            jiraSiteUrl: null,
-          },
-          nodes: [
+      page(
+        [
+          item({
+            laneName: hostile,
+            project: { id: "repo-1", name: hostile },
+            ticket: {
+              label: "#1",
+              title: hostile,
+              key: "1",
+              githubRepository: null,
+              jiraSiteUrl: null,
+            },
+            steps: [{ id: "a", kind: "agent", status: "running", round: 1 }],
+          }),
+        ],
+        null,
+        {
+          [NODES_KEY]: [
             {
               id: "a",
               kind: "agent",
@@ -263,9 +277,8 @@ describe("a row of the lane runs list", () => {
               body: [],
             },
           ],
-          steps: [{ id: "a", kind: "agent", status: "running", round: 1 }],
-        }),
-      ]),
+        },
+      ),
     );
 
     expect(container.querySelector("img, script")).toBeNull();
@@ -483,6 +496,35 @@ describe("more runs", () => {
         row.getAttribute("data-run-id"),
       ),
     ).toEqual(["run-a", "run-b", "run-c", "run-d"]);
+  });
+
+  // #1087-T08
+  it("draws a run of a later page on the nodes that page brings, and keeps the nodes of the earlier pages", async () => {
+    const OTHER_KEY = "wf-2@1|manual|by-hand";
+    const other = (id: string) =>
+      item({ id, workflowId: "wf-2", nodesKey: OTHER_KEY });
+    const { container } = renderList(
+      page([item({ id: "run-a" })], "cursor-1"),
+      [
+        ok(
+          page([other("run-b")], null, {
+            [OTHER_KEY]: [NODES[0] as LaneNodeView],
+          }),
+        ),
+      ],
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: LANE_RUNS_COPY.loadMore }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const segments = (id: string) =>
+      container.querySelectorAll(`tr[data-run-id="${id}"] [data-state]`).length;
+    expect(segments("run-a")).toBe(3);
+    expect(segments("run-b")).toBe(1);
   });
 
   // #1078-T70

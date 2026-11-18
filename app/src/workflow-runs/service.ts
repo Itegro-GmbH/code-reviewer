@@ -58,7 +58,7 @@ import { WorkflowRunError } from "./errors.ts";
 import type { JiraSiteOfRepository } from "./jira-site.ts";
 import {
   encodeCursor,
-  listItemOf,
+  listRunsOf,
   readListQuery,
   type LaneRunListView,
   type RawLaneRunsQuery,
@@ -896,7 +896,7 @@ export function createWorkflowRunService(
       });
       const jiraSites = await jiraSitesOf(deps, page.rows);
       return {
-        runs: page.rows.map((row) => listItemOf(row, jiraSites)),
+        ...listRunsOf(page.rows, jiraSites),
         nextCursor: page.next === null ? null : encodeCursor(page.next),
         now: new Date().toISOString(),
       };

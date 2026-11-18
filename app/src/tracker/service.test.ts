@@ -9,6 +9,7 @@ import { IntegrationError } from "../integrations/errors.ts";
 import type { Integration } from "../integrations/types.ts";
 import { TrackerError } from "./errors.ts";
 import { trackOf } from "../workflow-pages/run-track.ts";
+import { laneNodesFor } from "../workflow-runs/lane-nodes.ts";
 import { createFakeTrackerRepository } from "./fake-tracker-repository.ts";
 import {
   createTrackerService,
@@ -216,6 +217,13 @@ describe("the list of the tickets of a project's repository", () => {
       sync: { lastFullSyncAt: "2026-11-06T09:00:00.000Z", inProgress: false },
     });
     expect(list.items.map((item) => item.number)).toEqual([3, 1]);
+    // #1087-T01: the nodes of the lane version are in the list once, under the key the lane names.
+    expect(list.laneNodes).toEqual({
+      "wf-1@1|manual|by-hand": [
+        expect.objectContaining({ id: "implement", note: "Implement" }),
+        expect.objectContaining({ id: "review", note: "Review" }),
+      ],
+    });
     expect(list.items[1]).toEqual({
       key: "1",
       number: 1,
@@ -241,11 +249,8 @@ describe("the list of the tickets of a project's repository", () => {
         name: "Implement",
         step: "review",
         status: "running",
-        // #1080-T01: the nodes of the lane version and the step summaries, for the board's track.
-        nodes: [
-          expect.objectContaining({ id: "implement", note: "Implement" }),
-          expect.objectContaining({ id: "review", note: "Review" }),
-        ],
+        // #1080-T01: the key of the nodes of the lane version and the step summaries, for the board's track.
+        nodesKey: "wf-1@1|manual|by-hand",
         steps: [
           { id: "implement", kind: "agent", status: "succeeded", round: 1 },
           { id: "review", kind: "agent", status: "running", round: 1 },
@@ -289,9 +294,10 @@ describe("the list of the tickets of a project's repository", () => {
 
     expect(list.items[1]?.lane).toMatchObject({
       name: "Implement",
-      nodes: [],
+      nodesKey: null,
       steps: [],
     });
+    expect(list.laneNodes).toEqual({});
   });
 
   // #1080-T04
@@ -352,14 +358,12 @@ describe("the list of the tickets of a project's repository", () => {
       },
     ]);
 
-    const lane = (await service.listIssues("r-1", OPEN)).items[1]?.lane;
+    const list = await service.listIssues("r-1", OPEN);
+    const lane = list.items[1]?.lane;
+    const nodes = laneNodesFor(list.laneNodes, lane?.nodesKey ?? null);
 
-    expect(lane?.nodes.map((node) => node.id)).toEqual([
-      "plan",
-      "outer",
-      "ship",
-    ]);
-    const track = trackOf(lane?.nodes ?? [], lane?.steps ?? [], "waiting");
+    expect(nodes.map((node) => node.id)).toEqual(["plan", "outer", "ship"]);
+    const track = trackOf(nodes, lane?.steps ?? [], "waiting");
     expect(
       track.steps.map((step) => [step.id, step.state, step.rounds]),
     ).toEqual([
@@ -411,10 +415,15 @@ describe("the list of the tickets of a project's repository", () => {
     const first = await service.listIssues("r-1", OPEN);
     const second = await service.listIssues("r-1", OPEN);
 
-    const nodes = first.items.map((item) => item.lane?.nodes);
-    expect(nodes[0]).toHaveLength(1);
-    expect(nodes[1]).toBe(nodes[0]);
-    expect(second.items[0]?.lane?.nodes).toBe(nodes[0]);
+    const keys = first.items.map((item) => item.lane?.nodesKey);
+    expect(keys[0]).toBe("wf-shared@7|manual|by-hand");
+    expect(keys[1]).toBe(keys[0]);
+    expect(Object.keys(first.laneNodes)).toEqual([keys[0]]);
+    expect(first.laneNodes["wf-shared@7|manual|by-hand"]).toHaveLength(1);
+    // the parse is kept for the next poll: the same nodes, not a copy
+    expect(second.laneNodes["wf-shared@7|manual|by-hand"]).toBe(
+      first.laneNodes["wf-shared@7|manual|by-hand"],
+    );
   });
 
   // #1080-T06
@@ -450,11 +459,60 @@ describe("the list of the tickets of a project's repository", () => {
     laneProgressOfRuns.mockResolvedValueOnce([progress(["a", "b"])]);
     const two = await service.listIssues("r-1", OPEN);
 
-    expect(one.items[1]?.lane?.nodes.map((node) => node.id)).toEqual(["a"]);
-    expect(two.items[1]?.lane?.nodes.map((node) => node.id)).toEqual([
-      "a",
-      "b",
+    const idsOf = (list: typeof one) =>
+      laneNodesFor(list.laneNodes, list.items[1]?.lane?.nodesKey ?? null).map(
+        (node) => node.id,
+      );
+    expect(idsOf(one)).toEqual(["a"]);
+    expect(idsOf(two)).toEqual(["a", "b"]);
+  });
+
+  // #1087-T02
+  it("holds one entry for each lane version, and gives a run on another version its own", async () => {
+    const { service, laneProgressOfRuns, summarizeTickets } = await setup();
+    const progress = (runId: string, version: number, ids: string[]) => ({
+      runId,
+      workflowId: "wf-versions",
+      workflowVersion: version,
+      triggerId: "by-hand",
+      triggerKind: "manual" as const,
+      steps: [],
+      document: JSON.stringify({
+        triggers: [{ id: "by-hand", kind: "manual" }],
+        steps: ids.map((id) => ({ id, kind: "agent" })),
+      }),
+    });
+    const active = (number: number, runId: string) => ({
+      ticketRef: ticketRefOf("acme/widgets", number),
+      spentMicroUsd: 0,
+      activeRun: {
+        runId,
+        workflowId: "wf-versions",
+        workflowName: "Versions",
+        stepId: null,
+        status: "running" as const,
+      },
+    });
+    summarizeTickets.mockResolvedValue([
+      active(3, "run-3"),
+      active(1, "run-1"),
     ]);
+    laneProgressOfRuns.mockResolvedValue([
+      progress("run-3", 1, ["a"]),
+      progress("run-1", 2, ["a", "b"]),
+    ]);
+
+    const list = await service.listIssues("r-1", OPEN);
+
+    expect(list.items.map((item) => item.lane?.nodesKey)).toEqual([
+      "wf-versions@1|manual|by-hand",
+      "wf-versions@2|manual|by-hand",
+    ]);
+    expect(
+      Object.values(list.laneNodes).map((nodes) =>
+        nodes.map((node) => node.id),
+      ),
+    ).toEqual([["a"], ["a", "b"]]);
   });
 
   // #954

@@ -21,7 +21,11 @@ import type { Integration } from "../integrations/types.ts";
 import type { ProjectService } from "../projects/service.ts";
 import type { SyncState } from "../projects/ui/sync-staleness.ts";
 import {
+  createLaneNodesIndex,
+  laneNodesKey,
   laneNodesOfRun,
+  type LaneNodesByKey,
+  type LaneNodesIndex,
   type LaneNodeView,
 } from "../workflow-runs/lane-nodes.ts";
 import type { StepSummaryView } from "../workflow-runs/lane-run-list.ts";
@@ -40,10 +44,11 @@ export type TicketLane = {
   step: string | null;
   status: "running" | "waiting";
   /**
-   * The top-level nodes of the version of the lane the run started with (#1080), what the board's step track is drawn on; empty when that
-   * version cannot be read any more (the track is then left out).
+   * The key of the top-level nodes of the version of the lane the run started with (#1080), what the board's step track is drawn on: the
+   * entry of `TicketList.laneNodes`, which holds the nodes once for each lane version (#1087). Null when that version cannot be read any
+   * more (the track is then left out).
    */
-  nodes: LaneNodeView[];
+  nodesKey: string | null;
   /** The summaries of the steps the run has written so far, in the order they were written (#1080). */
   steps: StepSummaryView[];
 };
@@ -88,6 +93,8 @@ export type TicketList = {
   repositoryId: string;
   repo: string;
   items: TicketListItem[];
+  /** The top-level nodes of the lane versions the runs of the page started with, once for each; a lane names its entry by `nodesKey` (#1087). */
+  laneNodes: LaneNodesByKey;
   /**
    * Where the cache stands: when the last full sync ended, whether one is under way, and when a row was last written (a delivery, or the
    * sync). A `lastWriteAt` that is not after `lastFullSyncAt` says no delivery has arrived since the sync (#932): what the hint in Setup
@@ -172,7 +179,7 @@ const nodesCache = new Map<
 
 function laneNodesOfProgress(progress: RunLaneProgress): LaneNodeView[] {
   if (progress.document === null) return [];
-  const key = `${progress.workflowId}@${String(progress.workflowVersion)}|${progress.triggerKind}|${progress.triggerId ?? ""}`;
+  const key = laneNodesKey(progress);
   const cached = nodesCache.get(key);
   if (cached !== undefined && cached.document === progress.document)
     return cached.nodes;
@@ -189,13 +196,14 @@ function laneNodesOfProgress(progress: RunLaneProgress): LaneNodeView[] {
   return nodes;
 }
 
-/** The nodes and the step summaries of an active run for the board (#1080); a run whose progress was not read shows no track. */
+/** The nodes key and the step summaries of an active run for the board (#1080); a run whose progress was not read shows no track. */
 function laneProgressView(
   progress: RunLaneProgress | undefined,
-): Pick<TicketLane, "nodes" | "steps"> {
-  if (progress === undefined) return { nodes: [], steps: [] };
+  index: LaneNodesIndex,
+): Pick<TicketLane, "nodesKey" | "steps"> {
+  if (progress === undefined) return { nodesKey: null, steps: [] };
   return {
-    nodes: laneNodesOfProgress(progress),
+    nodesKey: index.refer(progress, () => laneNodesOfProgress(progress)),
     steps: progress.steps.map((step) => ({
       id: step.stepId,
       kind: step.kind,
@@ -336,6 +344,7 @@ export function createTrackerService(
           )
         ).map((entry) => [entry.runId, entry]),
       );
+      const nodesIndex = createLaneNodesIndex();
       return {
         provider: jira === null ? TRACKER_PROVIDER : "jira",
         repositoryId: repository.id,
@@ -388,11 +397,16 @@ export function createTrackerService(
                       summary.activeRun.status === "waiting"
                         ? "waiting"
                         : "running",
-                    ...laneProgressView(progress.get(summary.activeRun.runId)),
+                    ...laneProgressView(
+                      progress.get(summary.activeRun.runId),
+                      nodesIndex,
+                    ),
                   },
             costUsd: (summary?.spentMicroUsd ?? 0) / MICRO,
           };
         }),
+        // After the items: they fill the index.
+        laneNodes: nodesIndex.byKey,
         sync: await stateOf(repository.id),
       };
     },

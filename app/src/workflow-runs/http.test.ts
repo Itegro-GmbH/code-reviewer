@@ -72,7 +72,12 @@ function setup(
     ),
     listWorkspace: async (query) => (
       calls.push(`listWorkspace ${JSON.stringify(query)}`),
-      { runs: [], nextCursor: null, now: "2026-11-18T12:00:00.000Z" }
+      {
+        runs: [],
+        laneNodes: {},
+        nextCursor: null,
+        now: "2026-11-18T12:00:00.000Z",
+      }
     ),
     laneStepOfAgentRun: async () => undefined,
     discard: async (workflowId, runId) => (
@@ -436,6 +441,7 @@ describe("the workspace list handler (#1078)", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toEqual({
       runs: [],
+      laneNodes: {},
       nextCursor: null,
       now: "2026-11-18T12:00:00.000Z",
     });

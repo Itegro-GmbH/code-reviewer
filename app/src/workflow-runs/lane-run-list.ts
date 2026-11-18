@@ -17,7 +17,12 @@ import {
 import { parseTicketRef } from "../workflows/ticket-ref.ts";
 import type { JiraSiteOfRepository } from "./jira-site.ts";
 import { WorkflowRunError } from "./errors.ts";
-import { laneNodesOfRun, type LaneNodeView } from "./lane-nodes.ts";
+import {
+  createLaneNodesIndex,
+  laneNodesOfRun,
+  type LaneNodesByKey,
+  type LaneNodesIndex,
+} from "./lane-nodes.ts";
 import { MICRO_USD_PER_USD, RUNS_LISTED_MAX } from "./limits.ts";
 
 /** How many runs a page holds when the request does not say. */
@@ -77,8 +82,11 @@ export type LaneRunListItemView = {
     /** The address of the Jira site the ticket lives on (`https://<site>.atlassian.net`), from the Jira connection of the project; null for a GitHub issue and when the project's connection is not known. The page makes the link with `jiraIssueLink`. */
     jiraSiteUrl: string | null;
   } | null;
-  /** The top-level nodes of the version of the lane the run started with; empty when that version cannot be read any more. */
-  nodes: LaneNodeView[];
+  /**
+   * The key of the top-level nodes of the version of the lane the run started with, in the `laneNodes` of the list (#1087); null when
+   * that version cannot be read any more.
+   */
+  nodesKey: string | null;
   steps: StepSummaryView[];
   budgetUsd: number;
   spentUsd: number;
@@ -88,6 +96,8 @@ export type LaneRunListItemView = {
 
 export type LaneRunListView = {
   runs: LaneRunListItemView[];
+  /** The top-level nodes of the lane versions the runs started with, once for each; a run names its entry by `nodesKey` (#1087). */
+  laneNodes: LaneNodesByKey;
   /** The `cursor` of the request for the next page; null on the last page. */
   nextCursor: string | null;
   /** When the list was read: the clock the relative times and the running durations of the page are counted against. */
@@ -201,13 +211,21 @@ function ticketOf(
   };
 }
 
-/**
- * One row of the list. `jiraSites` holds the site address and the Jira project key of the project's Jira source, by the id of its repository; only a run
- * about a Jira ticket looks it up.
- */
+/** What `listItemOf` and `listRunsOf` need besides the row. */
+export type ListItemOptions = {
+  /** Gets the nodes of the lane version of the row (once for each version); the row names them by key. */
+  index?: LaneNodesIndex;
+  /** The site address and the Jira project key of the project's Jira source, by the id of its repository; only a run about a Jira ticket looks it up. */
+  sites?: ReadonlyMap<string, JiraSiteOfRepository>;
+};
+
+/** One row of the list; the nodes of its lane version are put into `options.index` (once for each version) and the row names them by key. */
 export function listItemOf(
   row: WorkspaceRunRow,
-  jiraSites: ReadonlyMap<string, JiraSiteOfRepository> = new Map(),
+  {
+    index = createLaneNodesIndex(),
+    sites = new Map<string, JiraSiteOfRepository>(),
+  }: ListItemOptions = {},
 ): LaneRunListItemView {
   const { run } = row;
   return {
@@ -223,12 +241,14 @@ export function listItemOf(
     ticket: ticketOf(
       run.ticketRef,
       row.ticket?.title ?? null,
-      jiraSites.get(run.repositoryId),
+      sites.get(run.repositoryId),
     ),
-    nodes: laneNodesOfRun(row.document ?? undefined, {
-      id: run.triggerId,
-      kind: run.triggerKind,
-    }),
+    nodesKey: index.refer(run, () =>
+      laneNodesOfRun(row.document ?? undefined, {
+        id: run.triggerId,
+        kind: run.triggerKind,
+      }),
+    ),
     steps: row.steps.map((step) => ({
       id: step.stepId,
       kind: step.kind,
@@ -239,5 +259,17 @@ export function listItemOf(
     spentUsd: run.spentMicroUsd / MICRO_USD_PER_USD,
     createdAt: run.createdAt,
     finishedAt: run.finishedAt,
+  };
+}
+
+/** The rows of a page as the list answers them: the runs and the nodes of their lane versions, each version once. */
+export function listRunsOf(
+  rows: readonly WorkspaceRunRow[],
+  sites?: ReadonlyMap<string, JiraSiteOfRepository>,
+): Pick<LaneRunListView, "runs" | "laneNodes"> {
+  const index = createLaneNodesIndex();
+  return {
+    runs: rows.map((row) => listItemOf(row, { index, sites })),
+    laneNodes: index.byKey,
   };
 }
