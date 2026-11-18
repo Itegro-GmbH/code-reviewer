@@ -640,7 +640,8 @@ describe("the operator guide states what the owner decided", () => {
       "runner/src/code_reviewer_runner/implementer/git_workspace.py",
     );
     expect(workspace).toContain("REASON_NOT_FAST_FORWARD");
-    expect(workspace).not.toContain("BRANCH_EXISTS");
+    // #1093: the one place the code is re-used is the multi-repository entry whose branch "does not exist" and does.
+    expect(workspace.match(/ErrorCode\.BRANCH_EXISTS/g) ?? []).toHaveLength(1);
     expect(workspace).not.toContain("BRANCH_VIOLATION");
   });
 
