@@ -46,6 +46,14 @@ What a session is, and is not, after the follow-ups (`docs/implementer.md`, "Ses
 - **The conversation comes back or a summary does.** `runner-api/resume.ts` builds what the next turn is told; the runner imports the snapshot or falls back to
   `summary_only`. The app never reads the snapshot except to hand it to the next turn of the same session.
 
+## Several repositories per session (#1092, epic #1090)
+
+A step of a lane with `repos` starts a session on up to ten repositories (`docs/workflows.md`, "Several repositories in one step"; `docs/decisions/0006-multi-repo-agent-steps.md`).
+
+- **Only the engine starts one.** `validateStartInput` takes `repos` only under the trust of a workflow step (`workflowStep`), never from a request body. The engine has found each repository by full name in the workspace (`repositoryByName`) and filled in the references; `startTask` then checks each repository in order (`resolveRepos` of `service.ts`): the repository and its active integration, the right to write when the profile may push, the base branch (the default branch when none is named). A refusal carries the place of the repository in `repoIndex`, and the engine ends the step with `repo_not_available` or `base_branch_not_found`. Whether a working branch exists is not asked here: the claim decides `branchExists`.
+- **The session keeps the list** as resolved (`implementer_sessions.repos`, `../db/session-repos.ts`: repository id, full name, mount name, base, branch). The first repository is the session's `repository_id`; the session's `branch` is the platform's own name (`workflow/<run>/<step>`), a key and no git branch, because a lane may name the same working branch again. A follow-up (an answer, `session.continue`, a resume) takes the list from the session and never resolves a name, a base or a branch again (`tipOfRepos` in `follow-up.ts` only checks that every repository and base is still there).
+- **The claim** builds the job from the stored list (`../runner-api/multi-repo.ts`) and only hands it to a caller that named `implementer_multi_repo`.
+
 ## Routes
 
 The four routes of the first task (the follow-up routes are above) are for every member (`start_implementer_task`, minimum role `member`; one line in `workspaces/permissions.ts` raises
