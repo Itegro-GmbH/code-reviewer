@@ -68,6 +68,14 @@ export const SEMANTIC_ISSUE_CODES = [
   "instruction_next_outside_loop",
   /** `session.continue` names no agent step that ran before on every path. */
   "session_target_invalid",
+  /** #1092: an agent step has `repos` next to its `branch` (the start branch of a session of its own). */
+  "repos_with_branch",
+  /** #1092: an agent step has `repos` next to `session` (a session that goes on keeps the repositories of the session it continues). */
+  "repos_with_session_continue",
+  /** #1092: two entries of `repos` name one repository, compared without regard to case. */
+  "repo_duplicate",
+  /** #1092: the mount names of two repositories of `repos` (`app` or `<owner>__<name>`) are equal without regard to case. */
+  "repo_name_clash",
   /** The profile does not exist (`available` names those that do). */
   "profile_unknown",
   /** The profile was archived (`available` names those that can be run). */

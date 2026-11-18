@@ -44,6 +44,8 @@ const COLUMNS_ADDED_LATER: Record<string, readonly string[]> = {
     "queued_first_failed_at",
     // #909: the branch a session branch is made from apart from its base; null for every session that exists.
     "start_branch",
+    // #1092: the repositories of a session of several repositories; null for every session that exists (one repository).
+    "repos",
   ],
   // #745, step 7: the environment's network rule; every environment that exists reads `off` and no hosts (`DEFAULTS_OF_COLUMNS`).
   // #854: the kind (`hosted`) and the labels (none) of every environment that exists.
@@ -101,6 +103,11 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
   runners: { delivery_mode: "poll" },
   jobs: { mcp_calls: 0 },
 };
+
+/** The names of the columns of `table` that a migration after the one under test added (a test of the columns of every old table leaves them out). */
+export function columnsAddedLater(table: string): readonly string[] {
+  return COLUMNS_ADDED_LATER[table] ?? [];
+}
 
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */
 export function withoutColumnsAddedLater(

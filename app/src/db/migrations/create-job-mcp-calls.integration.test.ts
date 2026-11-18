@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { migrateToLatest } from "../migrate.ts";
 import type { Database } from "../schema.ts";
 import { migrationProvider } from "./index.ts";
+import { columnsAddedLater } from "../../test-support/columns-added-later.ts";
 import {
   connectPostgres,
   createEmptyTestDatabase,
@@ -49,7 +50,12 @@ async function columnsOfEveryOldTable(
   const result: Record<string, string[]> = {};
   for (const table of await db.introspection.getTables()) {
     if (table.name === "job_mcp_calls") continue;
-    result[table.name] = table.columns.map((column) => column.name).sort();
+    // A column a later migration added (#1092: the repositories of a session) is no change this migration made.
+    const later = columnsAddedLater(table.name);
+    result[table.name] = table.columns
+      .map((column) => column.name)
+      .filter((name) => !later.includes(name))
+      .sort();
   }
   return result;
 }

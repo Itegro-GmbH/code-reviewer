@@ -4,17 +4,16 @@
 // (contracts/runner-api.v1.json and contracts/workflow.v1.json). Only the contract is checked here (Ajv, no database): the examples are
 // valid, the job form is `repos` or `repo`, never both and never neither, the tokens, the resume and the result follow the job, and the
 // lists the app keeps in TypeScript equal those of the file. The shared negative corpus (contracts/examples/implementer-multi-repo/
-// invalid/, the same files the runner's contract test reads) must be rejected: by the schema where it can state the rule, by the
-// reference rules of test-support/multi-repo-rules.ts where it cannot. Nothing in the app sends or reads `repos` yet (#1092).
+// invalid/, the same files the runner's contract test reads) must be rejected: by the schema where it can state the rule, and by the app's real
+// code where it cannot (#1092): a job by the rules the claim holds its own job to (`multi-repo-job.ts`), a lane step by the validator.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  applyPatch,
-  breakOfJobRule,
-  breakOfLaneRule,
-  deriveMountNames,
-} from "../test-support/multi-repo-rules.ts";
+import { deriveMountNames } from "../db/session-repos.ts";
+import { applyPatch } from "../test-support/multi-repo-rules.ts";
+import { FAKE_RESOLVER } from "../workflows/test-fixtures.ts";
+import { validateWorkflow } from "../workflows/validate.ts";
+import { breakOfJobRule } from "./multi-repo-job.ts";
 import {
   CONTRACTS_DIRECTORY,
   createContractValidator,
@@ -34,6 +33,19 @@ function example(folder: string, name: string): Document {
   );
   if (found === undefined) throw new Error(`no example ${name}`);
   return structuredClone(found.document) as Document;
+}
+
+/** The codes the validator reports for an agent step of the corpus, put into a workflow that is otherwise valid. */
+function laneCodes(step: Document): string[] {
+  const document = {
+    version: 1,
+    name: "Corpus",
+    trigger: { kind: "ticket.labeled", label: "ready" },
+    steps: [{ environment: "node", ...step }],
+  };
+  return validateWorkflow(document, FAKE_RESOLVER).errors.map(
+    (found) => found.code,
+  );
 }
 
 const multiJob = () => example("implementer-multi-repo", "RunnerJobInput");
@@ -543,16 +555,21 @@ describe("the shared negative corpus of multi-repository jobs and lanes", () => 
     const accepted = schema.check(entry.definition, document);
     if (entry.layer === "schema") {
       expect(accepted.valid, entry.why).toBe(false);
+      // The validator refuses the same lane, with the code the case names where it has one of its own.
+      if (lane) {
+        const codes = laneCodes(document);
+        expect(codes.length, entry.why).toBeGreaterThan(0);
+        if (entry.error !== "invalid_lane")
+          expect(codes, entry.why).toContain(entry.error);
+      }
       return;
     }
-    // A rule the schema cannot state: the schema takes the document and a rule breaks it.
+    // A rule the schema cannot state: the schema takes the document and a rule of the app's real code breaks it.
     expect(
       accepted.valid,
       `${name}: the schema refuses it (${accepted.errors}), so the case belongs to layer 'schema'`,
     ).toBe(true);
-    expect(
-      lane ? breakOfLaneRule(document) : breakOfJobRule(document),
-      entry.why,
-    ).toBe(entry.rule);
+    if (lane) expect(laneCodes(document), entry.why).toContain(entry.rule);
+    else expect(breakOfJobRule(document), entry.why).toBe(entry.rule);
   });
 });

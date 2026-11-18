@@ -20,3 +20,44 @@ export function implementerBlockProblems(
     ? [{ field: "result.implementer", code: "required" }]
     : [];
 }
+
+/** What the report of a repository has to say about the repository of the job it belongs to (the stored resolution of the session). */
+type JobRepo = { name: string; fullName: string; base: string; branch: string };
+
+/**
+ * #1092, ADR 0006: the `repos` of a report are held to the job (`ImplementerRepoResult` in the contract). A job of several repositories gets
+ * exactly one entry for each, in the order of the job, with the job's `name`, `fullName`, `base` and `branch`, and the old fields of the
+ * block are the first entry's copy (`baseCommit`, `headCommit`, `pushed`); a job of one repository gets no `repos`. A block that fails
+ * this is refused whole: what the workflow reads from it (`{{step.repos}}`, the head commits, `resume.repos` by name, the pull requests of
+ * a later step) would drop or swap repositories silently. `jobRepos` is null for a session of one repository. Field names only, never a value.
+ */
+export function implementerReposProblems(
+  jobRepos: readonly JobRepo[] | null,
+  block: RunnerResult["implementer"],
+): FieldError[] {
+  if (block === undefined) return [];
+  const where = "result.implementer.repos";
+  if (jobRepos === null)
+    return block.repos === undefined ? [] : [{ field: where, code: "invalid" }];
+  const reported = block.repos;
+  if (reported === undefined) return [{ field: where, code: "required" }];
+  if (reported.length !== jobRepos.length)
+    return [{ field: where, code: "invalid" }];
+  const problems: FieldError[] = [];
+  jobRepos.forEach((expected, index) => {
+    const entry = reported[index];
+    if (entry === undefined) return;
+    for (const key of ["name", "fullName", "base", "branch"] as const)
+      if (entry[key] !== expected[key])
+        problems.push({
+          field: `${where}[${String(index)}].${key}`,
+          code: "invalid",
+        });
+  });
+  const first = reported[0];
+  if (first !== undefined)
+    for (const key of ["baseCommit", "headCommit", "pushed"] as const)
+      if (first[key] !== block[key])
+        problems.push({ field: `result.implementer.${key}`, code: "invalid" });
+  return problems;
+}

@@ -223,7 +223,7 @@ that fails its own check binds its fields as unknown: you get the errors of the 
 
 ### Several repositories in one step
 
-*#1090, #1091. The format and the contract are fixed here and in [ADR 0006](decisions/0006-multi-repo-agent-steps.md); the validator and the engine follow in #1092, the pull request step and the lane editor in #1094. A document that uses `repos` is refused (`unknown_field`) until then.*
+*#1090, #1091, #1092. The format and the contract are fixed here and in [ADR 0006](decisions/0006-multi-repo-agent-steps.md); the validator, the engine and the claim are built (#1092), the pull request step and the lane editor follow in #1094 (until then the editor shows `repos` as JSON and the pull request step still opens a pull request from `{{<step>.branch}}`, the first repository's).*
 
 An agent step with `repos` works on **several repositories at once**, in one session, one conversation and one budget:
 
@@ -293,7 +293,7 @@ The step fails when GitHub refuses a pull request for another reason; the others
 pull request needs the reserved `forEach` step; `ticket.requestReview` asks for the first one. The token of the step is made for the repositories it opens a
 pull request in, with the rights of today (Pull requests: Read and write, Contents: Read-only).
 
-**Codes.** The validator and the engine report these with #1092, and the table of semantic codes below gets their rows then (a test holds that table to the codes the validator has; the codes are listed once, with who emits them and when, in [`implementer.md`](implementer.md#several-repositories-in-one-turn-1090) and the ADR): `repos_with_branch` and `repos_with_session_continue` (the step has `repos` next to `branch` or `session.continue`), `repo_duplicate` (two entries name one repository, without regard to case), `repo_name_clash` (the derived mount names of two repositories are equal without regard to case), and, when the step runs and before the agent starts, free of charge, `repo_invalid` and `branch_invalid` (a reference gave no repository or no branch name), `repo_not_available` (the workspace has no active installation of the GitHub App for a repository, or the profile may push and the installation cannot write to it) and `base_branch_not_found`. `result_field_reserved` also covers a result field `repos` in a step that has `repos`.
+**Codes.** The validator and the engine report these (#1092; the table of semantic codes below has the rows of the validator's, and a test holds that table to the codes the validator has; the codes are listed once, with who emits them and when, in [`implementer.md`](implementer.md#several-repositories-in-one-turn-1090) and the ADR): `repos_with_branch` and `repos_with_session_continue` (the step has `repos` next to `branch` or `session.continue`), `repo_duplicate` (two entries name one repository, without regard to case), `repo_name_clash` (the derived mount names of two repositories are equal without regard to case), and, when the step runs and before the agent starts, free of charge, `repo_invalid` and `branch_invalid` (a reference gave no repository or no branch name), `repo_not_available` (the workspace has no active installation of the GitHub App for a repository, or the profile may push and the installation cannot write to it) and `base_branch_not_found`. `result_field_reserved` also covers a result field `repos` in a step that has `repos`.
 
 **Not in version 1:** repositories of another workspace or provider, more than ten repositories, a `repos` that is built at run time, and a step that adds
 repositories to a session that has begun.
@@ -1389,6 +1389,12 @@ A run that ends failed has `errorCode`; a step that failed has `errorCode` and a
 | `profile_not_found` | step | The profile is gone, archived or has no such version. |
 | `environment_not_found` | step | The environment (the profile's, or the step's for a profile version without one) is not one of the workspace. |
 | `environment_mismatch` | step | The step names another environment than the profile version it runs ([`profiles.md`](profiles.md#where-profiles-meet-workflows)): the lane was saved against an older version, or the environment of the profile changed since. No turn starts. Take `environment` out of the step. |
+| `repo_duplicate` | step | Two entries of `repos` are one repository without regard to case once their references are filled in (#1092). Nothing starts, free of charge. |
+| `repo_name_clash` | step | The mount names of two repositories of `repos` are equal without regard to case after the derivation (#1092). Nothing starts, free of charge. |
+| `repo_invalid` | step | A reference in the `repo` of an entry of `repos` gave no repository (`owner/name`) (#1092). Nothing starts, free of charge. |
+| `branch_invalid` | step | A `branch` or `base` of an entry of `repos` gave no name of a branch (#1092). Nothing starts, free of charge. |
+| `repo_not_available` | step | The workspace has no active installation of the GitHub App for a repository of `repos`, or the profile may push and the installation has not accepted the right to write (#1092). Nothing starts, free of charge. |
+| `base_branch_not_found` | step | A repository of `repos` has no branch with the name of its `base` (#1092). Nothing starts, free of charge. |
 | `agent_start_failed` | step | The Implementer refused the turn (the code and text of the refusal are in the log of the engine, not in the step), or it could not be started for an hour. |
 | `turn_unreadable` | step | The turn, its job or its stored schema cannot be read. |
 | `no_result` | step | No result, or one that does not fit the schema. |
@@ -1602,6 +1608,10 @@ Beyond the form:
 | `condition_value_not_in_enum` | A text compared with a choice of names that can never hold it. | Use one of `available`. |
 | `instruction_next_outside_loop` | `instruction.next` in a step that is not in a loop. | Use a plain text, or put the step in a loop. |
 | `session_target_invalid` | `session.continue` names no agent step that ran before on every path, or one with another profile name or environment, or the step itself where it is not a direct step of a loop body; or a step with both `session.continue` and `branch`. | Use one of `available`, with the same profile and environment; or drop `branch` (a session that goes on keeps its branch). |
+| `repos_with_branch` | An agent step has `repos` and the `branch` of a session of its own (#1092). Reported at `repos`. | Take one of them out: with `repos` the branches are named in each entry. |
+| `repos_with_session_continue` | An agent step has `repos` and a `session` that is not `"new"` (`{"continue": …}`, or an object without `continue`, #1092). Reported at `repos`. | Leave `repos` out: a session that goes on keeps the repositories of the session it continues. |
+| `repo_duplicate` | Two entries of `repos` are one repository without regard to case (`Acme/App` and `acme/app`, #1092). Reported at the `repo` of the second. The engine reports the same for the filled-in references, as a failure of the step. | Name each repository once. |
+| `repo_name_clash` | Every entry of `repos` is a literal and two of them mount under one name without regard to case after the derivation (`acme/app`, `x/app` and `acme/acme__app` all give `acme__app`, #1092). Reported at the `repo` of the later one. The engine reports it for references, as a failure of the step. | Leave one of them out. |
 | `profile_unknown` | No such profile. | Use one of `available`. |
 | `profile_archived` | The profile exists but is archived: no step may run it. | Use one of `available`. |
 | `profile_version_unknown` | The profile has no such version. | Use one of `available`, or leave the version out. |

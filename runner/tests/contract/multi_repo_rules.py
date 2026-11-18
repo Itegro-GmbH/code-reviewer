@@ -5,8 +5,8 @@
 A small reference implementation for the shared negative corpus
 (contracts/examples/implementer-multi-repo/invalid/). The real checks are the app's lane validation
 and claim (#1092) and the runner's parser (#1093); they must reject every case of the corpus with
-the same rule. The TypeScript twin is app/src/test-support/multi-repo-rules.ts: change both
-together.
+the same rule. The app's side is its real code (workflows/check-steps.ts and
+runner-api/multi-repo-job.ts), which reads the same corpus: change them together.
 """
 
 import copy

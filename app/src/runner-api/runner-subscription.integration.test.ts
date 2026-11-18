@@ -9,6 +9,13 @@ import {
   OPENCODE_ACCESS,
 } from "../test-support/runner-access.ts";
 import { describe, expect, it } from "vitest";
+import {
+  cloneFromTheFake,
+  otherName,
+  secondInstallation,
+  sessionRepo,
+  WRITE,
+} from "../test-support/multi-repo-claim.ts";
 import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
 import type {
   SplitClaimResponse,
@@ -286,6 +293,161 @@ describe("the claim of a turn on the harness claude-code", () => {
     const response = await h.claim(claimOf(runner.credential));
 
     expect(response.status).toBe(204);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+  });
+});
+
+// #1092 (review finding 4): a turn of several repositories on a device's login is built when the Worker fetches it (`buildSubscriptionJob`), with the same tokens,
+// ledger and guards as a hosted turn.
+describe("the fetch of a turn on several repositories on the harness claude-code", () => {
+  const MULTI_FEATURES = [...NOW_FEATURES, "implementer_multi_repo"];
+  const multiClaimOf = (credential: string) => ({
+    token: credential,
+    engines: ["implementer"],
+    features: ["implementer_multi_repo"],
+  });
+
+  async function setup(options: { canPush?: boolean } = {}) {
+    const h = await start();
+    const runner = await h.registerRunner({ labels: ["box"], manifest: BOTH });
+    const second = await secondInstallation(h);
+    await cloneFromTheFake(h);
+    const turn = await h.enqueueTurn({
+      modelChoice: CLAUDE_MODEL,
+      runnerEnvironment: RUNNER_ENV,
+      profile: { ...PROFILE, canPush: options.canPush ?? true },
+      repos: [
+        sessionRepo(h.repositoryId, h.repository.fullName),
+        sessionRepo(second.repositoryId, "other/docs"),
+        sessionRepo(h.otherRepositoryId, await otherName(h)),
+      ],
+    });
+    return { h, runner, turn };
+  }
+
+  async function fetchWith(
+    h: Awaited<ReturnType<typeof start>>,
+    credential: string,
+    features: string[],
+  ) {
+    const claim = await h.claim(multiClaimOf(credential));
+    expect(claim.status).toBe(200);
+    const { job } = (await claim.json()) as SplitClaimResponse;
+    return {
+      claim: job,
+      response: await h.worker.details(
+        job.id,
+        job.credential,
+        features.join(","),
+      ),
+    };
+  }
+
+  // #1092-T110
+  it("is not claimed by a runner that does not name the feature: the turn waits", async () => {
+    const { h, runner, turn } = await setup();
+
+    expect((await h.claim(claimOf(runner.credential))).status).toBe(204);
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
+  // #1092-T111
+  it("hands the Worker the repositories and one token for each installation, remembered with their connections before they leave", async () => {
+    const { h, runner, turn } = await setup();
+
+    const { claim, response } = await fetchWith(
+      h,
+      runner.credential,
+      MULTI_FEATURES,
+    );
+
+    expect(claim.id).toBe(turn.job.id);
+    const input = (await turnInput(response)) as unknown as {
+      git: { token: string; tokens: Array<{ id: string; token: string }> };
+      implementer: { repos: Array<{ tokenId: string }> };
+    };
+    expect(input.implementer.repos).toHaveLength(3);
+    expect(input.git.tokens).toHaveLength(2);
+    expect(input.git.token).toBe(input.git.tokens[0]?.token);
+    expect(h.issuedJobTokens()).toHaveLength(2);
+    const ledger = await h.claimedKeys.gitTokensOf(claim.id);
+    expect(ledger.map((entry) => entry.token).sort()).toEqual(
+      input.git.tokens.map((entry) => entry.token).sort(),
+    );
+    expect(new Set(ledger.map((entry) => entry.integrationId)).size).toBe(2);
+  });
+
+  // #1092-T112
+  it("ends the turn implementer_engine_unavailable, free, when the Worker does not name the feature, before a token exists", async () => {
+    const { h, runner, turn } = await setup();
+
+    const { response } = await fetchWith(h, runner.credential, NOW_FEATURES);
+
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.logLines().join("\n")).toContain("implementer_multi_repo");
+  });
+
+  // #1092-T113
+  it("makes tokens that cannot write when the profile may not push, and asks for no right to write", async () => {
+    const { h, runner } = await setup({ canPush: false });
+    for (const id of [4242, 4243])
+      h.fake.setInstallationPermissions(id, { ...WRITE, contents: "read" });
+
+    const { response } = await fetchWith(h, runner.credential, MULTI_FEATURES);
+
+    expect(response.status).toBe(200);
+    expect(
+      h.fake.tokenRequests().map((request) => request.permissions?.contents),
+    ).toEqual(["read", "read"]);
+  });
+
+  // #1092-T114
+  it("refuses a profile that may push on an installation that has not accepted the right to write, before a token exists", async () => {
+    const { h, runner, turn } = await setup();
+    h.fake.setInstallationPermissions(4243, { ...WRITE, contents: "read" });
+
+    const { response } = await fetchWith(h, runner.credential, MULTI_FEATURES);
+
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "git_write_not_granted",
+    });
+  });
+
+  // #1092-T115 (review finding 3)
+  it("ends a turn whose stored repositories cannot be read", async () => {
+    const { h, runner, turn } = await setup();
+    await h.db
+      .updateTable("implementer_sessions")
+      .set({ repos: "[not json" })
+      .where("id", "=", turn.session.id)
+      .execute();
+
+    const claim = await h.claim(multiClaimOf(runner.credential));
+
+    // Refused at the claim (before the Worker exists) or at the fetch: never run on the first repository alone.
+    if (claim.status === 200) {
+      const { job } = (await claim.json()) as SplitClaimResponse;
+      const response = await h.worker.details(
+        job.id,
+        job.credential,
+        MULTI_FEATURES.join(","),
+      );
+      expect(response.status).toBe(409);
+    }
+    expect(h.issuedJobTokens()).toEqual([]);
     expect(await h.queue.get(turn.job.id)).toMatchObject({
       status: "failed",
       errorCode: "implementer_config_invalid",

@@ -21,10 +21,25 @@ export const ID_MAX_LENGTH = 128;
 export const RESULT_SCHEMA_MAX_CHARS = 128 * 1024;
 const MODEL_FIELD_MAX_LENGTH = 200;
 
+/**
+ * #1092: one repository of a step of a lane with `repos`, as the engine resolved the entry: the repository of the workspace, and the base
+ * and the branch as far as the step named them (left out: the repository's default branch, and the base again).
+ */
+export type StartRepo = {
+  repositoryId: string;
+  base?: string;
+  branch?: string;
+};
+
 export type StartInput = {
   repositoryId: string;
-  /** The branch the work is compared with and merged into. */
+  /** The branch the work is compared with and merged into. With `repos`: not used (each repository has its own base). */
   baseBranch: string;
+  /**
+   * #1092: the repositories of a step with `repos` (one to ten, the first is `repositoryId`). Only a workflow step may send it (never a
+   * request body). `branch` is then the platform's own name for the session, which keeps the unique index of the branch and is no git branch.
+   */
+  repos?: StartRepo[];
   /** #909: the branch the new branch is made from when that is not the base (a step of a workflow that continues another's branch); left out: the tip of the base. */
   startBranch?: string;
   branch: string;
@@ -106,6 +121,39 @@ export const WORKFLOW_REQUEST_ID_PREFIX = "wf-";
 /** What only code inside the app may set (never a request body): the engine starts its own turns under the reserved prefix. */
 export type InputTrust = { workflowStep?: boolean };
 
+/** The `repos` of a step: null when the body has none, undefined when it is not a list of one to ten entries each with a repository id. */
+function readRepos(value: unknown): StartRepo[] | null | undefined {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 10)
+    return undefined;
+  const repos: StartRepo[] = [];
+  for (const entry of value as unknown[]) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      return undefined;
+    const { repositoryId, base, branch, ...rest } = entry as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(rest).length > 0 ||
+      typeof repositoryId !== "string" ||
+      repositoryId === "" ||
+      repositoryId.length > ID_MAX_LENGTH ||
+      (base !== undefined &&
+        (typeof base !== "string" || !BRANCH_NAME.test(base))) ||
+      (branch !== undefined &&
+        (typeof branch !== "string" || !BRANCH_NAME.test(branch)))
+    )
+      return undefined;
+    repos.push({
+      repositoryId,
+      ...(base === undefined ? {} : { base: base as string }),
+      ...(branch === undefined ? {} : { branch: branch as string }),
+    });
+  }
+  return repos;
+}
+
 export function validateStartInput(
   body: unknown,
   trust: InputTrust = {},
@@ -120,7 +168,17 @@ export function validateStartInput(
     code: ImplementerIssue["code"],
   ) => void issues.push({ field, code });
 
-  const repositoryId = fields.repositoryId;
+  // #1092: the repositories of a step of a lane; only the engine sends them. `undefined`: not a list of repositories.
+  const sent = trust.workflowStep === true ? readRepos(fields.repos) : null;
+  if (
+    fields.repos !== undefined &&
+    (trust.workflowStep !== true || sent === undefined)
+  )
+    refuse("repos", "invalid");
+  const repos = sent ?? null;
+
+  const repositoryId =
+    repos === null ? fields.repositoryId : repos[0]?.repositoryId;
   if (
     repositoryId === undefined ||
     repositoryId === "" ||
@@ -133,16 +191,22 @@ export function validateStartInput(
   )
     refuse("repositoryId", "invalid");
 
-  const baseBranch = fields.baseBranch;
-  if (baseBranch === undefined || baseBranch === "")
+  // With `repos` each repository has its own base: the one of the session is the first's, resolved by the service.
+  const baseBranch = repos === null ? fields.baseBranch : "";
+  if (repos === null && (baseBranch === undefined || baseBranch === ""))
     refuse("baseBranch", "required");
   // The base branch exists on the platform or the submit is refused; here it only has to be a name the queue can hold.
-  else if (typeof baseBranch !== "string" || !BRANCH_NAME.test(baseBranch))
+  else if (
+    repos === null &&
+    (typeof baseBranch !== "string" || !BRANCH_NAME.test(baseBranch))
+  )
     refuse("baseBranch", "invalid");
 
   // The start branch exists on the platform or the submit is refused; here it only has to be a name the queue can hold.
   const startBranch = fields.startBranch ?? undefined;
-  if (
+  if (repos !== null && startBranch !== undefined)
+    refuse("startBranch", "invalid");
+  else if (
     startBranch !== undefined &&
     (typeof startBranch !== "string" || !BRANCH_NAME.test(startBranch))
   )
@@ -250,6 +314,7 @@ export function validateStartInput(
     value: {
       repositoryId: repositoryId as string,
       baseBranch: baseBranch as string,
+      ...(repos === null ? {} : { repos }),
       ...(startBranch === undefined
         ? {}
         : { startBranch: startBranch as string }),

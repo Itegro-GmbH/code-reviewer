@@ -114,6 +114,42 @@ describe("the token of the Implementer", () => {
     ]);
   });
 
+  // #1092-T90
+  it("makes one token for exactly the repositories of a turn on several repositories that belong to the installation, and no more", async () => {
+    const { fake, provider } = await setup();
+    const gadgets = repoRef(7002, "gadgets");
+
+    await provider.implementerAccess(integration, widgets, {
+      alsoRepos: [gadgets],
+    });
+
+    expect(fake.tokenRequests()).toEqual([
+      expect.objectContaining({
+        installationId: 4242,
+        repositoryIds: [7001, 7002],
+        permissions: { contents: "write", metadata: "read" },
+      }),
+    ]);
+  });
+
+  // #1092-T91
+  it("refuses a repository of another installation among those of the token, and asks GitHub nothing", async () => {
+    const { fake, provider } = await setup();
+    const foreign: RepoRef = {
+      ...repoRef(7002, "gadgets"),
+      integrationId: "integration-2",
+    };
+
+    const error = await failureOf(
+      provider.implementerAccess(integration, widgets, {
+        alsoRepos: [foreign],
+      }),
+    );
+
+    expect(error.code).toBe("INTEGRATION_ACCESS_SCOPE_REFUSED");
+    expect(fake.tokenRequests()).toEqual([]);
+  });
+
   // #843-T197
   it("asks for contents read and metadata read, and no write, for a turn that may not push", async () => {
     const { fake, provider } = await setup();

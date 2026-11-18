@@ -121,6 +121,7 @@ import { migration as addJobMcpCalls } from "./20261117150000_add_job_mcp_calls.
 import { migration as createJobMcpCalls } from "./20261117160000_create_job_mcp_calls.ts";
 import { migration as workflowRunsWorkspaceListIndexes } from "./20261118120000_workflow_runs_workspace_list_indexes.ts";
 import { migration as workflowStepRunsTurnIndex } from "./20261118140000_workflow_step_runs_turn_index.ts";
+import { migration as addImplementerSessionRepos } from "./20261118160000_add_implementer_session_repos.ts";
 import { migration as addImplementerTurnEnvironment } from "./20261102150000_add_implementer_turn_environment.ts";
 import { migration as createImplementerEnvironments } from "./20261102140000_create_implementer_environments.ts";
 import { migration as createImplementerSessionsAndTurns } from "./20261030140000_create_implementer_sessions_and_turns.ts";
@@ -271,6 +272,7 @@ const migrations: Record<string, Migration> = {
   "20261118120000_workflow_runs_workspace_list_indexes":
     workflowRunsWorkspaceListIndexes,
   "20261118140000_workflow_step_runs_turn_index": workflowStepRunsTurnIndex,
+  "20261118160000_add_implementer_session_repos": addImplementerSessionRepos,
 };
 
 export const migrationProvider: MigrationProvider = {

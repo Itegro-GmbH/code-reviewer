@@ -111,6 +111,7 @@ export type ImplementerIssue = {
     | "repositoryId"
     | "baseBranch"
     | "startBranch"
+    | "repos"
     | "branch"
     | "instruction"
     | "model"
@@ -186,6 +187,8 @@ export type ImplementerErrorDetails = {
   maximumCents?: number;
   /** On `IMPLEMENTER_REQUEST_REUSED`: the run of the task the request id made. */
   runId?: string;
+  /** #1092: for a task with `repos`, the place in the list of the repository the refusal is about. */
+  repoIndex?: number;
 };
 
 export class ImplementerError extends Error {
@@ -194,6 +197,8 @@ export class ImplementerError extends Error {
   readonly reason: ModelRefusalReason | undefined;
   readonly maximumCents: number | undefined;
   readonly runId: string | undefined;
+  /** #1092: for a task with `repos`, the place in the list of the repository the refusal is about. */
+  readonly repoIndex: number | undefined;
   /** The message names the code's meaning only, never a value from the request or from the platform. */
   readonly safeMessage = true as const;
 
@@ -209,5 +214,6 @@ export class ImplementerError extends Error {
     this.reason = details.reason;
     this.maximumCents = details.maximumCents;
     this.runId = details.runId;
+    this.repoIndex = details.repoIndex;
   }
 }

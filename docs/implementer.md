@@ -378,7 +378,7 @@ The workspace (`GitWorkspace`) prepares such a turn like this:
 
 ## Several repositories in one turn (#1090)
 
-*#1090, #1091, [ADR 0006](decisions/0006-multi-repo-agent-steps.md). This is the contract both sides are built against: the app in #1092, the runner in #1093. Until they land, no job has `repos` and every turn is the one-repository turn of the sections above.*
+*#1090, #1091, [ADR 0006](decisions/0006-multi-repo-agent-steps.md). This is the contract both sides are built against: the app in #1092 (built: the claim sends `repos` to a caller that names `implementer_multi_repo`), the runner in #1093. A step without `repos` is the one-repository turn of the sections above.*
 
 A job whose `implementer` carries `repos` (`ImplementerJobRepo`, up to ten) works on several repositories in one turn, one session and one conversation. It has **no** `repo`, `baseBranch`, `branch` or `startBranch`: the two forms are exclusive in the schema, and a runner that does not know `repos` refuses the job (the object is closed).
 

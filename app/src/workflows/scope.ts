@@ -43,6 +43,8 @@ export type Binding = {
   connector?: string;
   /** Of an agent step: the profile name and the environment (lower case) it is written with, for the steps that continue its session. */
   agent?: { profile?: string; environment?: string };
+  /** Of an agent step (#1092): it works on several repositories (its own `repos`, or those of the session it continues), so it yields the fact `repos`. */
+  repos?: true;
   /**
    * Of `trigger` when the workflow has several triggers (#916): what each one yields. `type` is what ALL of them yield, the only part
    * the steps after the triggers may read; a field that only some yield is `reference_not_in_scope`, naming a trigger that lacks it.

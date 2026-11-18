@@ -366,6 +366,11 @@ export type ClaimOptions = {
    */
   acceptsSupersede?: boolean;
   /**
+   * #1092: the caller named the claim feature `implementer_multi_repo`: it may be handed a turn of a session of several repositories. Without it
+   * such a turn is never a candidate of the claim (it waits; nothing fails).
+   */
+  acceptsMultiRepo?: boolean;
+  /**
    * #854: the claim is a customer's runner's. It takes only the jobs of `workspaceId` whose required labels are all in `labels` (#971: the
    * labels of a customer's runner never include the reserved namespace `cr:`), and never a job of another kind. Without it the claim is
    * the platform identity's: its labels are the reserved ones, so it takes the hosted jobs and never a turn of a runner environment. #856: and whose
@@ -1173,6 +1178,9 @@ export function createRunnerJobsRepository(
             leaseExpiresAt: new Date(current.getTime() + limits.leaseMs),
             ...(claimOptions.acceptsSupersede === true
               ? { acceptsSupersede: true }
+              : {}),
+            ...(claimOptions.acceptsMultiRepo === true
+              ? { acceptsMultiRepo: true }
               : {}),
           };
           const reviewKinds = reviewKindsForEngines(engines);

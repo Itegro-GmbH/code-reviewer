@@ -147,4 +147,61 @@ describe("the code a failed job is stored with (#754)", () => {
   it("stores a code the build does not know as unknown", () => {
     expect(mapRunnerErrorCode("brand_new_failure")).toBe("unknown");
   });
+
+  // #1092 (review finding 1, ADR 0005 2.17): the report of each repository of a multi-repository turn is masked like the single form's.
+  it("masks the model and the provider in every repository of a multi-repository report, and leaves its name and path alone", () => {
+    const sha = "a".repeat(40);
+    const repo = (name: string, text: string) => ({
+      name,
+      fullName: `acme/${name}`,
+      base: "main",
+      branch: `agent/${text}`,
+      created: true,
+      baseCommit: sha,
+      headCommit: sha,
+      pushed: true,
+      branches: [
+        {
+          name: `agent/${text}`,
+          head: sha,
+          result: "pushed" as const,
+          reason: null,
+        },
+      ],
+      commits: [{ sha, subject: `fix, written by ${text} via openrouter` }],
+      filesChanged: [{ path: `src/${text}.ts`, status: "modified" as const }],
+      checkedOut: `agent/${text}`,
+    });
+    const result = resultOf({
+      implementer: {
+        baseCommit: sha,
+        headCommit: sha,
+        pushed: true,
+        commits: [{ sha, subject: "fix, written by entry-model" }],
+        filesChanged: [],
+        summary: "done by entry-model",
+        opencode: { sessionId: null, version: null },
+        repos: [repo("api", "entry-model"), repo("web", "entry-model")],
+      } as unknown as NonNullable<RunnerResult["implementer"]>,
+    });
+
+    const masked = withoutManagedModel(result, ["entry-model"], true);
+
+    const repos = masked.implementer?.repos ?? [];
+    expect(repos.map((entry) => entry.name)).toEqual(["api", "web"]);
+    for (const entry of repos) {
+      expect(JSON.stringify({ ...entry, filesChanged: [] })).not.toMatch(
+        /entry-model|openrouter/i,
+      );
+      expect(entry.commits[0]?.subject).toBe(
+        "fix, written by [model] via [provider]",
+      );
+      expect(entry.branch).toBe("agent/[model]");
+      expect(entry.checkedOut).toBe("agent/[model]");
+      expect(entry.branches?.[0]?.name).toBe("agent/[model]");
+      // The paths are the repository's and stay, as in the single form.
+      expect(entry.filesChanged[0]?.path).toBe("src/entry-model.ts");
+    }
+    expect(masked.implementer?.summary).toBe("done by [model]");
+  });
 });

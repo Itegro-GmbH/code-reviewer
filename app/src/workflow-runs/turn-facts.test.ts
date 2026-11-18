@@ -65,6 +65,7 @@ const SESSION: StoredImplementerSession = {
   baseBranch: "main",
   startBranch: null,
   branch: "workflow/run-1/work",
+  repos: null,
   headCommit: null,
   status: "idle",
   opencodeSessionId: null,
@@ -721,5 +722,126 @@ describe("a turn that ends with a question (#920)", () => {
       1_000_000,
     );
     expect(without).not.toHaveProperty("asked");
+  });
+});
+
+describe("the facts of a turn on several repositories", () => {
+  const entry = (patch: Record<string, unknown>) => ({
+    name: "app",
+    fullName: "acme/app",
+    base: "main",
+    branch: "feature/x",
+    created: true,
+    baseCommit: SHA_A,
+    headCommit: SHA_C,
+    pushed: true,
+    commits: [{ sha: SHA_C, subject: "two" }],
+    filesChanged: [],
+    ...patch,
+  });
+  const multi = (repos: unknown[]) =>
+    ended({
+      session: {
+        ...SESSION,
+        repos: [
+          {
+            repositoryId: "r-1",
+            fullName: "acme/app",
+            name: "app",
+            base: "main",
+            branch: "feature/x",
+          },
+        ],
+      },
+      jobResult: {
+        usage: { costUsd: 0.25 },
+        implementer: {
+          baseCommit: SHA_A,
+          headCommit: SHA_C,
+          pushed: true,
+          commits: [{ sha: SHA_C, subject: "two" }],
+          repos,
+        },
+      },
+    });
+
+  // #1092-T40
+  it("yields the list repos, and the single facts are the first repository's with its working branch", () => {
+    const outcome = outcomeOfTurn(
+      multi([
+        entry({}),
+        entry({
+          name: "lib",
+          fullName: "acme/lib",
+          branch: "main",
+          created: false,
+          baseCommit: SHA_B,
+          headCommit: null,
+          pushed: false,
+          commits: [],
+        }),
+      ]),
+      999,
+    );
+    expect(outcome).toMatchObject({
+      ok: true,
+      output: {
+        branch: "feature/x",
+        commits: [SHA_C],
+        headCommit: SHA_C,
+        pushed: true,
+        repos: [
+          {
+            fullName: "acme/app",
+            base: "main",
+            branch: "feature/x",
+            commits: [SHA_C],
+            headCommit: SHA_C,
+            pushed: true,
+          },
+          {
+            fullName: "acme/lib",
+            base: "main",
+            branch: "main",
+            commits: [],
+            // The commit the branch started from when the turn made none, never an empty tip.
+            headCommit: SHA_B,
+            pushed: false,
+          },
+        ],
+      },
+    });
+  });
+
+  // #1092-T41
+  it("has no repos for a session of one repository, and drops a result field of that name from a step with repos", () => {
+    const single = outcomeOfTurn(ended(), 999);
+    expect(single).toMatchObject({ ok: true });
+    expect((single as { output: object }).output).not.toHaveProperty("repos");
+
+    const schema = {
+      type: "object" as const,
+      required: ["repos"],
+      properties: { repos: { type: "string" } },
+    };
+    const outcome = outcomeOfTurn(
+      {
+        ...multi([entry({})]),
+        turn: turn({ resultSchema: schema, resultValue: { repos: "agent" } }),
+      },
+      999,
+    );
+    expect(
+      (outcome as unknown as { output: { repos: { fullName: string }[] } })
+        .output.repos,
+    ).toEqual([expect.objectContaining({ fullName: "acme/app" })]);
+  });
+
+  // #1092-T42
+  it("reads nothing but what the runner measured: an entry that is no repository report is left out", () => {
+    const outcome = outcomeOfTurn(multi([entry({}), "x", { name: 3 }]), 999);
+    expect(
+      (outcome as unknown as { output: { repos: unknown[] } }).output.repos,
+    ).toHaveLength(1);
   });
 });

@@ -109,6 +109,18 @@ export const STEP_FAILURE_CODES = [
   "environment_not_found",
   /** The step names another environment than the version of its profile runs in (#919). */
   "environment_mismatch",
+  /** #1092: two entries of `repos` name one repository (without regard to case) once their references are filled in. */
+  "repo_duplicate",
+  /** #1092: the mount names of two repositories of `repos` are equal without regard to case. */
+  "repo_name_clash",
+  /** #1092: a reference in `repo` of an entry of `repos` gave no repository. */
+  "repo_invalid",
+  /** #1092: a reference in `branch` or `base` of an entry of `repos` gave no name of a branch. */
+  "branch_invalid",
+  /** #1092: no active installation of the GitHub App for a repository of `repos`, or the profile may push and the installation cannot write. */
+  "repo_not_available",
+  /** #1092: a repository of `repos` has no branch with the name of its `base`. */
+  "base_branch_not_found",
   /** The Implementer refused the turn, or could not start it. */
   "agent_start_failed",
   /** The turn ended, but its job, its result or its session cannot be read. */

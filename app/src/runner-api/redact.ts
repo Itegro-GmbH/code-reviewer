@@ -148,6 +148,31 @@ function redactImplementer(
       ...file,
       path: redactBlockText(file.path, secrets),
     })),
+    // #1092: the report of each repository of a multi-repository turn has the same texts: branch names, commit subjects and paths.
+    ...(block.repos === undefined
+      ? {}
+      : {
+          repos: block.repos.map((repo) => ({
+            ...repo,
+            branch: redactBlockText(repo.branch, secrets),
+            ...(repo.branches === undefined
+              ? {}
+              : {
+                  branches: repo.branches.map((branch) => ({
+                    ...branch,
+                    name: redactBlockText(branch.name, secrets),
+                  })),
+                }),
+            commits: repo.commits.map((commit) => ({
+              ...commit,
+              subject: redactBlockText(commit.subject, secrets),
+            })),
+            filesChanged: repo.filesChanged.map((file) => ({
+              ...file,
+              path: redactBlockText(file.path, secrets),
+            })),
+          })),
+        }),
     // #843: the result the agent handed in is the agent's text too, every string and every key of it.
     ...(block.agentResult === undefined
       ? {}
