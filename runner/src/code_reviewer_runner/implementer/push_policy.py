@@ -76,11 +76,15 @@ class Selection:
     overflow: int = 0
 
 
-def select_branches(local_branches: list[str], *, form_branch: str) -> Selection:
+def select_branches(
+    local_branches: list[str], *, form_branch: str, limit: int | None = None
+) -> Selection:
     """The branches the final push takes, out of the local branches of the agent's repository.
     **The one place for a rule about which branches are pushed.** Today only the name checks and
     `PUSH_EXCLUDED_BRANCHES` decide."""
     unique = sorted(set(local_branches))
+    # Read at the call, so that the limit is the module's current one (a test lowers it).
+    limit = MAX_PUSHED_BRANCHES if limit is None else limit
     # The task's branch first, then alphabetical: what the limit drops is the end of this order.
     ordered = sorted(unique, key=lambda name: (name != form_branch, name))
     names: list[str] = []
@@ -90,7 +94,7 @@ def select_branches(local_branches: list[str], *, form_branch: str) -> Selection
     for name in ordered:
         if branch_name_problem(name) is not None:
             invalid += 1
-        elif len(names) + len(excluded) >= MAX_PUSHED_BRANCHES:
+        elif len(names) + len(excluded) >= limit:
             # Excluded names are entries of the report too, so they count toward its limit.
             overflow += 1
         elif name in PUSH_EXCLUDED_BRANCHES:

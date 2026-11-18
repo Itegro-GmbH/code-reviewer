@@ -35,10 +35,12 @@ Validation never echoes a value from the job into its error detail: the job hold
 detail ends up in the result JSON and in logs. Details name fields, never contents.
 """
 
+import hmac
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, NoReturn, cast
@@ -63,6 +65,11 @@ from code_reviewer_runner.dynamic_review.prompts import MAX_SKILL_BYTES as MAX_D
 from code_reviewer_runner.implementer import finish_tool
 from code_reviewer_runner.implementer.network_rule import OFF, NetworkRule, RuleError, parse_rule
 from code_reviewer_runner.implementer.push_policy import branch_name_problem
+from code_reviewer_runner.implementer.repo_names import (
+    MAX_REPOS,
+    derive_mount_names,
+    is_mount_name,
+)
 from code_reviewer_runner.llm_providers import (
     LlmProviderSpec,
     provider_for,
@@ -104,6 +111,7 @@ _IMPLEMENTER_TOP_LEVEL_FIELDS = {
 _CONTROL_TOKEN = re.compile(r"[A-Za-z0-9_-]{43,128}")
 _IMPLEMENTER_FIELDS = {
     "repo",
+    "repos",
     "baseBranch",
     "startBranch",
     "branch",
@@ -142,6 +150,7 @@ MAX_PROFILE_INSTRUCTION_CHARS = 20_000
 _IMPLEMENTER_RESUME_REQUIRED = {"turn", "branches", "checkout"}
 _IMPLEMENTER_RESUME_FIELDS = {
     *_IMPLEMENTER_RESUME_REQUIRED,
+    "repos",
     "snapshot",
     "previousSummary",
     "digest",
@@ -160,6 +169,22 @@ MAX_RESUME_DIGEST_BYTES = 16 * 1024
 MAX_SETUP_SCRIPT_BYTES = 64 * 1024
 MAX_ENVIRONMENT_NAME_CHARS = 80
 _IMPLEMENTER_REPO_FIELDS = {"fullName", "cloneUrl"}
+# #1091 (epic #1090): one repository of a multi-repository turn (`ImplementerJobRepo`), one token of
+# the job (`GitToken`) and one repository of a follow-up (`ImplementerResumeRepo`).
+_IMPLEMENTER_JOB_REPO_FIELDS = {
+    "name",
+    "fullName",
+    "cloneUrl",
+    "base",
+    "branch",
+    "branchExists",
+    "tokenId",
+}
+_GIT_TOKEN_FIELDS = {"id", "token"}
+_GIT_TOKEN_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+_IMPLEMENTER_RESUME_REPO_FIELDS = {"name", "branches", "checkout"}
+# The single-repository fields a job with `repos` must not have (the two forms are exclusive).
+_SINGLE_FORM_FIELDS = ("repo", "baseBranch", "branch", "startBranch")
 _IMPLEMENTER_LIMIT_FIELDS = {"timeLimitSeconds"}
 MAX_INSTRUCTION_CHARS = 20_000
 MIN_TIME_LIMIT_SECONDS = 60
@@ -190,7 +215,7 @@ IMPLEMENTER_ENVIRONMENT_NAMES: tuple[str, ...] = (
     IMPLEMENTER_NETWORK_SWITCH_VARIABLE,
 )
 IMPLEMENTER_WORK_DIR = "/work"
-_GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin"}
+_GIT_FIELDS = {"provider", "baseUrl", "token", "botLogin", "tokens"}
 _LLM_FIELDS = {
     "provider",
     "model",
@@ -355,6 +380,26 @@ class ImplementerRepo:
 
 
 @dataclass(frozen=True)
+class ImplementerRepoEntry:
+    """One repository of a multi-repository turn (#1091, `ImplementerJobRepo` of the contract). The
+    app resolved `base` and `branch` (`branch == base` is direct work); `branch_exists` is the app's
+    answer at claim time and the runner follows it."""
+
+    name: str
+    full_name: str
+    clone_url: str
+    base: str
+    branch: str
+    branch_exists: bool
+    token_id: str
+
+    @property
+    def direct(self) -> bool:
+        """Direct work: the agent starts on the base branch and what it commits is pushed to it."""
+        return self.branch == self.base
+
+
+@dataclass(frozen=True)
 class ImplementerLimits:
     time_limit_seconds: int
 
@@ -413,6 +458,17 @@ class ResumeBranch:
 
 
 @dataclass(frozen=True)
+class ResumeRepo:
+    """What a follow-up turn of a multi-repository session is told about one repository (#1091,
+    `ImplementerResumeRepo`): its mount name, the branches the last turn pushed there and the branch
+    the agent was on in it (None: the working branch)."""
+
+    name: str
+    branches: tuple[ResumeBranch, ...]
+    checkout: str | None
+
+
+@dataclass(frozen=True)
 class ImplementerResume:
     """What a follow-up turn is told about the session's branches (#838, `ImplementerResume` of the
     contract): the branches the last turn left on the provider with their last pushed tips, the
@@ -421,8 +477,10 @@ class ImplementerResume:
     provider's tip when it moved; the tips here are only what the earlier turn knew."""
 
     turn: int
-    branches: tuple[ResumeBranch, ...]
-    checkout: str | None
+    # The single form: the branches and the checkout of the one repository. A multi-repository
+    # follow-up (#1091) has `repos` instead and these two stay empty.
+    branches: tuple[ResumeBranch, ...] = ()
+    checkout: str | None = None
     # #840: whether the app holds the engine's conversation of the session (the runner then asks for
     # it and imports it), the last turn's summary and the digest of the earlier turns. The last two
     # are used only when the conversation cannot be: text that came from the agent and from members,
@@ -430,6 +488,16 @@ class ImplementerResume:
     snapshot: bool = False
     previous_summary: str = ""
     digest: str = ""
+    # #1091: the state of every repository of a multi-repository session, in the order of the job.
+    repos: tuple[ResumeRepo, ...] | None = None
+
+    def for_repo(self, name: str) -> "ImplementerResume":
+        """The follow-up as one repository sees it: the single form with that repository's branches
+        and checkout (the conversation fields are the session's, so they stay)."""
+        entry = next((repo for repo in self.repos or () if repo.name == name), None)
+        if entry is None:
+            raise _invalid("implementer.resume.repos has no entry for a repository of the job")
+        return replace(self, branches=entry.branches, checkout=entry.checkout, repos=None)
 
 
 @dataclass(frozen=True)
@@ -501,6 +569,11 @@ class ImplementerSpec:
     # #1067: the MCP servers of the agent step; None: the turn has none (every turn of a lane
     # without `mcp`, and every turn of an app or a Worker that did not name `implementer_mcp`).
     mcp: ImplementerMcp | None = None
+    # #1091 (epic #1090): the repositories of a multi-repository turn, in the order of the job; None
+    # for the turn of one repository, which is exactly as it was. For a multi-repository turn
+    # `repo`,
+    # `base_branch` and `branch` above are those of the first entry (what the old facts refer to).
+    repos: tuple[ImplementerRepoEntry, ...] | None = None
 
 
 class JobError(Exception):
@@ -513,11 +586,29 @@ class JobError(Exception):
 
 
 @dataclass(frozen=True)
+class GitToken:
+    """One installation token of a multi-repository job (#1091, `GitToken` of the contract)."""
+
+    id: str
+    token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
 class GitAccess:
     base_url: str
     token: str
     bot_login: str
     provider: str = "github"
+    # #1091: the tokens of a multi-repository job, one per installation, named by `tokenId`.
+    tokens: tuple[GitToken, ...] = ()
+
+    def token_of(self, token_id: str) -> str:
+        """The token a repository's `tokenId` names. `parse_implementer_input` checked that every
+        `tokenId` has one."""
+        for entry in self.tokens:
+            if entry.id == token_id:
+                return entry.token
+        raise _invalid("a tokenId of implementer.repos names no entry of git.tokens")
 
 
 @dataclass(frozen=True)
@@ -587,7 +678,13 @@ class ImplementerInput:
         credential = None if self.mcp_access is None else self.mcp_access.credential
         return tuple(
             value
-            for value in (self.git.token, self.llm.api_key, self.control_token, credential)
+            for value in (
+                self.git.token,
+                *(entry.token for entry in self.git.tokens),
+                self.llm.api_key,
+                self.control_token,
+                credential,
+            )
             if value
         )
 
@@ -648,9 +745,14 @@ def _checked_url(value: str, field_name: str) -> SplitResult:
     return parts
 
 
-def _git_access(data: dict[str, Any]) -> GitAccess:
+def _git_access(data: dict[str, Any], *, tokens_allowed: bool = False) -> GitAccess:
+    """`git` of a job. `git.tokens` belongs to the Implementer's multi-repository job alone: a
+    review (Diff or Dynamic) never carries it, and one that does is refused, since `ReviewInput`
+    would not mask such tokens (#1093)."""
     git = _section(data, "git")
     _check_fields(git, _GIT_FIELDS, "git.")
+    if "tokens" in git and not tokens_allowed:
+        raise _invalid("git.tokens is only for an implementer job")
     provider = _string(git, "provider", "git.")
     if provider not in PLATFORMS:
         raise _invalid(f"git.provider must be one of: {', '.join(sorted(PLATFORMS))}")
@@ -665,7 +767,28 @@ def _git_access(data: dict[str, Any]) -> GitAccess:
         base_url=base_url,
         token=token,
         bot_login=bot_login if bot_login.endswith("[bot]") else f"{bot_login}[bot]",
+        tokens=_git_tokens(git),
     )
+
+
+def _git_tokens(git: dict[str, Any]) -> tuple[GitToken, ...]:
+    """`git.tokens` of a multi-repository job (#1091): one to ten `{ id, token }` entries. Which
+    repository uses which, and that none is unused, is judged with the repositories
+    (`_check_tokens`)."""
+    if "tokens" not in git:
+        return ()
+    raw: object = git["tokens"]
+    if not isinstance(raw, list) or not 1 <= len(cast("list[object]", raw)) <= MAX_REPOS:
+        raise _invalid(f"git.tokens must be a list of 1 to {MAX_REPOS} tokens")
+    tokens: list[GitToken] = []
+    for item in cast("list[object]", raw):
+        entry = _object(item, "git.tokens[]")
+        _check_fields(entry, _GIT_TOKEN_FIELDS, "git.tokens[].")
+        token_id = _matching(
+            entry.get("id"), _GIT_TOKEN_ID, "git.tokens[].id", "1 to 32 letters, digits, _ or -"
+        )
+        tokens.append(GitToken(token_id, _secret(entry, "token", "git.tokens[].")))
+    return tuple(tokens)
 
 
 def _catalog_llm_access(llm: dict[str, Any], slug: str) -> LlmAccess:
@@ -1112,21 +1235,93 @@ def _implementer_repo(spec: dict[str, Any], git: GitAccess) -> ImplementerRepo:
     never another host, another repository or a loopback address (#762)."""
     repo = _section(spec, "repo")
     _check_fields(repo, _IMPLEMENTER_REPO_FIELDS, "implementer.repo.")
-    full_name = _matching(
-        repo.get("fullName"), _REPO_FULL_NAME, "implementer.repo.fullName", "owner/name"
-    )
-    clone_url = _matching(
-        repo.get("cloneUrl"), _CLONE_URL, "implementer.repo.cloneUrl", "an https URL"
-    )
-    parts = _checked_url(clone_url, "implementer.repo.cloneUrl")
+    return _checked_repository(repo, git, "implementer.repo")
+
+
+def _checked_repository(repo: dict[str, Any], git: GitAccess, path: str) -> ImplementerRepo:
+    """`fullName` and `cloneUrl` of one repository, the address held to the rule of #762 (the host
+    of
+    `git.baseUrl`, the path `/<fullName>[.git]`, https without credentials): the same check for the
+    repository of a single turn and for every entry of `repos`, before any token is sent there."""
+    full_name = _matching(repo.get("fullName"), _REPO_FULL_NAME, f"{path}.fullName", "owner/name")
+    clone_url = _matching(repo.get("cloneUrl"), _CLONE_URL, f"{path}.cloneUrl", "an https URL")
+    parts = _checked_url(clone_url, f"{path}.cloneUrl")
     if parts.netloc != _web_host(git.base_url):
-        raise _invalid("implementer.repo.cloneUrl must point to the host of git.baseUrl")
+        raise _invalid(f"{path}.cloneUrl must point to the host of git.baseUrl")
     if parts.path not in (f"/{full_name}", f"/{full_name}.git"):
         raise _invalid(
-            "implementer.repo.cloneUrl must be https://<host>/<owner>/<name>[.git] of "
-            "implementer.repo.fullName"
+            f"{path}.cloneUrl must be https://<host>/<owner>/<name>[.git] of {path}.fullName"
         )
     return ImplementerRepo(full_name=full_name, clone_url=clone_url)
+
+
+def _implementer_repos(spec: dict[str, Any], git: GitAccess) -> tuple[ImplementerRepoEntry, ...]:
+    """`implementer.repos` (#1091, epic #1090): one to ten repositories, each with its resolved
+    base and branch, whether the branch exists, its mount name and the token that reaches it. The
+    rules the schema cannot state are held here, in this order: the tokens (every `tokenId`
+    resolved, none unused, `git.token` the first repository's), no `fullName` twice and no mount
+    name twice without regard to case, every name the one derived from the `fullName`s, and the
+    clone address of every entry. A breach is `invalid_job`; values are never put in the message."""
+    raw: object = spec["repos"]
+    if not isinstance(raw, list) or not 1 <= len(cast("list[object]", raw)) <= MAX_REPOS:
+        raise _invalid(f"implementer.repos must be a list of 1 to {MAX_REPOS} repositories")
+    entries: list[ImplementerRepoEntry] = []
+    for index, item in enumerate(cast("list[object]", raw)):
+        path = f"implementer.repos[{index}]"
+        given = _object(item, path)
+        _check_fields(given, _IMPLEMENTER_JOB_REPO_FIELDS, f"{path}.")
+        for name in _IMPLEMENTER_JOB_REPO_FIELDS:
+            if name not in given:
+                raise _invalid(f"{path}.{name} is required")
+        name = given["name"]
+        if not isinstance(name, str) or not is_mount_name(name):
+            raise _invalid(f"{path}.name must be a name the repository can be mounted under")
+        exists = given["branchExists"]
+        if not isinstance(exists, bool):
+            raise _invalid(f"{path}.branchExists must be true or false")
+        base = _branch_name(given["base"], f"{path}.base")
+        branch = _pushable_branch_name(given["branch"], f"{path}.branch")
+        token_id = _matching(
+            given["tokenId"], _GIT_TOKEN_ID, f"{path}.tokenId", "1 to 32 letters, digits, _ or -"
+        )
+        # Before the clone address: its host check is the one that would send a token anywhere.
+        repository = _checked_repository(given, git, path)
+        entries.append(
+            ImplementerRepoEntry(
+                name=name,
+                full_name=repository.full_name,
+                clone_url=repository.clone_url,
+                base=base,
+                branch=branch,
+                branch_exists=exists,
+                token_id=token_id,
+            )
+        )
+    _check_tokens(entries, git)
+    if len({entry.full_name.lower() for entry in entries}) != len(entries):
+        raise _invalid("implementer.repos must not name a repository twice")
+    if len({entry.name.lower() for entry in entries}) != len(entries):
+        raise _invalid("implementer.repos must not use a mount name twice")
+    derived = derive_mount_names([entry.full_name for entry in entries])
+    if any(entry.name != name for entry, name in zip(entries, derived, strict=True)):
+        raise _invalid("implementer.repos[].name must be the name derived from the fullName")
+    return tuple(entries)
+
+
+def _check_tokens(entries: Sequence[ImplementerRepoEntry], git: GitAccess) -> None:
+    """The tokens of a multi-repository job: a repeated `id`, a `tokenId` no token has, a token no
+    repository names and a `git.token` that is not the first repository's token are
+    `invalid_job`."""
+    ids = [entry.id for entry in git.tokens]
+    if len(set(ids)) != len(ids):
+        raise _invalid("git.tokens must not use an id twice")
+    if any(entry.token_id not in ids for entry in entries):
+        raise _invalid("implementer.repos[].tokenId must name an entry of git.tokens")
+    used = {entry.token_id for entry in entries}
+    if any(token_id not in used for token_id in ids):
+        raise _invalid("git.tokens must not hold a token no repository uses")
+    if not hmac.compare_digest(git.token_of(entries[0].token_id), git.token):
+        raise _invalid("git.token must be the token of the first repository")
 
 
 def _implementer_limits(spec: dict[str, Any]) -> ImplementerLimits:
@@ -1166,19 +1361,33 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         cost = _job_cost_policy(spec)
         entry = _job_model_entry(spec)
         assert cost is not None and entry is not None  # both are present, so both parse or raise
-    base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
-    branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
-    if branch == base_branch:
-        raise _invalid("implementer.branch must differ from implementer.baseBranch")
-    start_branch = (
-        _branch_name(spec["startBranch"], "implementer.startBranch")
-        if "startBranch" in spec
-        else None
-    )
-    if start_branch == branch:
-        raise _invalid("implementer.branch must differ from implementer.startBranch")
+    if "repos" in spec and git_tokens_absent(git):
+        raise _invalid("git.tokens is required for a job with implementer.repos")
+    repos = _implementer_repos(spec, git) if "repos" in spec else None
+    if repos is None:
+        if not git_tokens_absent(git):
+            raise _invalid("git.tokens is only for a job with implementer.repos")
+        base_branch = _branch_name(spec.get("baseBranch"), "implementer.baseBranch")
+        branch = _pushable_branch_name(spec.get("branch"), "implementer.branch")
+        if branch == base_branch:
+            raise _invalid("implementer.branch must differ from implementer.baseBranch")
+        start_branch = (
+            _branch_name(spec["startBranch"], "implementer.startBranch")
+            if "startBranch" in spec
+            else None
+        )
+        if start_branch == branch:
+            raise _invalid("implementer.branch must differ from implementer.startBranch")
+        repo = _implementer_repo(spec, git)
+    else:
+        for name in _SINGLE_FORM_FIELDS:
+            if name in spec:
+                raise _invalid(f"implementer.{name} is not accepted next to implementer.repos")
+        first = repos[0]
+        repo = ImplementerRepo(full_name=first.full_name, clone_url=first.clone_url)
+        base_branch, branch, start_branch = first.base, first.branch, None
     return ImplementerSpec(
-        repo=_implementer_repo(spec, git),
+        repo=repo,
         base_branch=base_branch,
         branch=branch,
         instruction=instruction,
@@ -1191,71 +1400,143 @@ def _implementer_spec(data: dict[str, Any], git: GitAccess) -> ImplementerSpec:
         profile=profile,
         result_schema=_implementer_result_schema(spec),
         can_ask=_implementer_can_ask(spec),
-        resume=_implementer_resume(spec, branch),
+        resume=_implementer_resume(spec, branch, repos),
         start_branch=start_branch,
         mcp=_implementer_mcp(spec),
+        repos=repos,
     )
 
 
-def _implementer_resume(spec: dict[str, Any], session_branch: str) -> ImplementerResume | None:
-    """The `implementer.resume` object (#838). Closed. Absent is a first turn. The branches are
-    distinct, at most `MAX_RESUME_BRANCHES`, each a branch name with the tip as 40 lower-case hex
-    digits; `checkout` is one of them, or the session branch (the one a turn that pushed nothing
-    still has), or null (the session branch). A value is never put into the message."""
-    if "resume" not in spec:
-        return None
-    given = _object(spec["resume"], "implementer.resume")
-    _check_fields(given, _IMPLEMENTER_RESUME_FIELDS, "implementer.resume.")
-    for name in _IMPLEMENTER_RESUME_REQUIRED:
-        if name not in given:
-            raise _invalid(f"implementer.resume.{name} is required")
-    turn = given["turn"]
-    if isinstance(turn, bool) or not isinstance(turn, int) or not 2 <= turn <= MAX_RESUME_TURN:
-        raise _invalid(
-            f"implementer.resume.turn must be an integer between 2 and {MAX_RESUME_TURN}"
-        )
-    raw: object = given["branches"]
+def git_tokens_absent(git: GitAccess) -> bool:
+    """Whether the job has no `git.tokens`: exactly the jobs with `repos` have them (#1091)."""
+    return not git.tokens
+
+
+def _resume_branches(raw: object, path: str) -> tuple[ResumeBranch, ...]:
+    """The branches a follow-up carries over for one repository: distinct, at most
+    `MAX_RESUME_BRANCHES`, each a branch name that can be pushed with the tip as 40 lower-case hex
+    digits."""
     if not isinstance(raw, list) or len(cast("list[object]", raw)) > MAX_RESUME_BRANCHES:
-        raise _invalid(
-            f"implementer.resume.branches must be a list of at most {MAX_RESUME_BRANCHES} branches"
-        )
+        raise _invalid(f"{path} must be a list of at most {MAX_RESUME_BRANCHES} branches")
     branches: list[ResumeBranch] = []
     for item in cast("list[object]", raw):
-        entry = _object(item, "implementer.resume.branches[]")
-        _check_fields(entry, _IMPLEMENTER_RESUME_BRANCH_FIELDS, "implementer.resume.branches[].")
+        entry = _object(item, f"{path}[]")
+        _check_fields(entry, _IMPLEMENTER_RESUME_BRANCH_FIELDS, f"{path}[].")
         for name in _IMPLEMENTER_RESUME_BRANCH_FIELDS:
             if name not in entry:
-                raise _invalid(f"implementer.resume.branches[].{name} is required")
+                raise _invalid(f"{path}[].{name} is required")
         branches.append(
             ResumeBranch(
-                name=_pushable_branch_name(entry["name"], "implementer.resume.branches[].name"),
+                name=_pushable_branch_name(entry["name"], f"{path}[].name"),
                 head=_matching(
                     entry["head"],
                     _LOWER_SHA,
-                    "implementer.resume.branches[].head",
+                    f"{path}[].head",
                     "a commit id of 40 lower-case hex digits",
                 ),
             )
         )
     names = [branch.name for branch in branches]
     if len(set(names)) != len(names):
-        raise _invalid("implementer.resume.branches must not name a branch twice")
-    checkout: object = given["checkout"]
-    if checkout is not None:
-        checkout = _pushable_branch_name(
-            checkout, "implementer.resume.checkout", "a branch name or null"
-        )
-        if checkout not in names and checkout != session_branch:
+        raise _invalid(f"{path} must not name a branch twice")
+    return tuple(branches)
+
+
+def _resume_checkout(
+    value: object, branches: Sequence[ResumeBranch], session_branch: str, path: str
+) -> str | None:
+    """`checkout` of one repository: one of its branches, the working branch, or null (the working
+    branch)."""
+    if value is None:
+        return None
+    name = _pushable_branch_name(value, path, "a branch name or null")
+    if name not in {branch.name for branch in branches} and name != session_branch:
+        raise _invalid(f"{path} must be one of the branches or the session branch")
+    return name
+
+
+def _resume_repos(
+    given: dict[str, Any], repos: Sequence[ImplementerRepoEntry]
+) -> tuple[ResumeRepo, ...]:
+    """`implementer.resume.repos` (#1091): exactly the repositories of the job, by mount name, in
+    the
+    job's order; a name the job has not, a repeat and a missing entry are `invalid_job`. Each entry
+    follows the rules of the single form for its repository."""
+    raw: object = given["repos"]
+    if not isinstance(raw, list) or len(cast("list[object]", raw)) != len(repos):
+        raise _invalid("implementer.resume.repos must have one entry for every repository")
+    resumed: list[ResumeRepo] = []
+    for index, (item, repo) in enumerate(zip(cast("list[object]", raw), repos, strict=True)):
+        path = f"implementer.resume.repos[{index}]"
+        entry = _object(item, path)
+        _check_fields(entry, _IMPLEMENTER_RESUME_REPO_FIELDS, f"{path}.")
+        for name in _IMPLEMENTER_RESUME_REPO_FIELDS:
+            if name not in entry:
+                raise _invalid(f"{path}.{name} is required")
+        if entry["name"] != repo.name:
             raise _invalid(
-                "implementer.resume.checkout must be one of the branches or the session branch"
+                "implementer.resume.repos must name the repositories of the job in order"
             )
-    assert checkout is None or isinstance(checkout, str)
+        branches = _resume_branches(entry["branches"], f"{path}.branches")
+        resumed.append(
+            ResumeRepo(
+                name=repo.name,
+                branches=branches,
+                checkout=_resume_checkout(
+                    entry["checkout"], branches, repo.branch, f"{path}.checkout"
+                ),
+            )
+        )
+    return tuple(resumed)
+
+
+def _implementer_resume(
+    spec: dict[str, Any],
+    session_branch: str,
+    repos: Sequence[ImplementerRepoEntry] | None = None,
+) -> ImplementerResume | None:
+    """The `implementer.resume` object (#838). Closed. Absent is a first turn. The branches are
+    distinct, at most `MAX_RESUME_BRANCHES`, each a branch name with the tip as 40 lower-case hex
+    digits; `checkout` is one of them, or the session branch (the one a turn that pushed nothing
+    still has), or null (the session branch). A value is never put into the message.
+
+    A multi-repository job (#1091, `repos` is given) has `resume.repos` instead of `branches` and
+    `checkout`, one entry for each repository of the job."""
+    if "resume" not in spec:
+        return None
+    given = _object(spec["resume"], "implementer.resume")
+    _check_fields(given, _IMPLEMENTER_RESUME_FIELDS, "implementer.resume.")
+    required = {"turn", "repos"} if repos is not None else _IMPLEMENTER_RESUME_REQUIRED
+    for name in required:
+        if name not in given:
+            raise _invalid(f"implementer.resume.{name} is required")
+    if repos is not None:
+        for name in ("branches", "checkout"):
+            if name in given:
+                raise _invalid(f"implementer.resume.{name} is not accepted next to repos")
+    elif "repos" in given:
+        raise _invalid("implementer.resume.repos is only for a job with implementer.repos")
+    turn = given["turn"]
+    if isinstance(turn, bool) or not isinstance(turn, int) or not 2 <= turn <= MAX_RESUME_TURN:
+        raise _invalid(
+            f"implementer.resume.turn must be an integer between 2 and {MAX_RESUME_TURN}"
+        )
+    resumed: tuple[ResumeRepo, ...] | None = None
+    branches: tuple[ResumeBranch, ...] = ()
+    checkout: str | None = None
+    if repos is not None:
+        resumed = _resume_repos(given, repos)
+    else:
+        branches = _resume_branches(given["branches"], "implementer.resume.branches")
+        checkout = _resume_checkout(
+            given["checkout"], branches, session_branch, "implementer.resume.checkout"
+        )
     snapshot = given.get("snapshot", False)
     if not isinstance(snapshot, bool):
         raise _invalid("implementer.resume.snapshot must be true or false")
     return ImplementerResume(
         turn=turn,
-        branches=tuple(branches),
+        branches=branches,
         checkout=checkout,
         snapshot=snapshot,
         previous_summary=_resume_text(
@@ -1266,6 +1547,7 @@ def _implementer_resume(spec: dict[str, Any], session_branch: str) -> Implemente
         digest=_resume_text(
             given.get("digest"), "implementer.resume.digest", MAX_RESUME_DIGEST_BYTES
         ),
+        repos=resumed,
     )
 
 
@@ -1483,7 +1765,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
     control_token = _control_token(job)
     mcp_access = _mcp_access(job)
-    git = _git_access(job)
+    git = _git_access(job, tokens_allowed=True)
     spec = _implementer_spec(job, git)
     raw_spec = _section(job, "implementer")
     if spec.subscription is not None:

@@ -80,7 +80,8 @@ from .host_rules import (
 from .netdoor.registries import rule_has_registries
 from .network_rule import MODE_OFF, OFF, NetworkRule
 from .placement import B_WORK_VOLUME, HOSTED, Placement, split_model_network_document
-from .reader import REPO_SUBPATH, work_volume_of
+from .reader import work_volume_of
+from .repo_places import SINGLE, RepoPlaces
 from .result_channel import AGENT_RESULT_DIRECTORY, result_mount
 from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
@@ -257,19 +258,23 @@ def agent_document(
     no_new_privileges: bool = False,
     placement: Placement = HOSTED,
     mcp: bool = False,
+    places: RepoPlaces = SINGLE,
 ) -> dict[str, Any]:
     """The agent's container. Constants, the image id and the volume name the daemon gave, and the
     memory limit the Dispatcher computed for the size of the VM. The runtime is Sysbox and the
     entrypoint the image's init; only the test lane without Sysbox names others (`AgentSeams`).
-    A turn with a result schema (#843) has the result directory beside the repository."""
+    A turn with a result schema (#843) has the result directory beside the repository. A
+    multi-repository turn (#1093) has one mount per repository, each its own Subpath of the work
+    volume at `/work/<name>`, and works in `/work` (`RepoPlaces`)."""
     mounts: list[dict[str, Any]] = [
         {
             "Type": "volume",
             "Source": work_volume,
-            "Target": AGENT_REPO,
+            "Target": places.agent_path(name),
             "ReadOnly": False,
-            "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
+            "VolumeOptions": {"Subpath": name, "NoCopy": True},
         }
+        for name in places.names
     ]
     if result:
         mounts.append(result_mount(work_volume, AGENT_RESULT_DIRECTORY, read_only=False))
@@ -287,7 +292,7 @@ def agent_document(
             f"{name}={value}" for name, value in proxy_environment(rule, placement, mcp=mcp).items()
         ],
         "Hostname": "agent",
-        "WorkingDir": AGENT_REPO,
+        "WorkingDir": places.agent_workdir,
         "Labels": role_labels("agent"),
         "NetworkingConfig": {
             "EndpointsConfig": {
@@ -476,6 +481,9 @@ class AgentSeams:
     # #1067: the turn has an MCP door, so the agent's tools do not send its address to the network
     # door.
     mcp: bool = False
+    # #1093: where the repositories of the turn are mounted; the one `/work/repo` unless the turn
+    # has several.
+    places: RepoPlaces = SINGLE
 
 
 def unavailable(reason: str) -> JobError:
@@ -556,6 +564,7 @@ class AgentContainer:
                     no_new_privileges=self._seams.no_new_privileges,
                     placement=self._seams.placement,
                     mcp=self._seams.mcp,
+                    places=self._seams.places,
                 ),
                 AGENT_CONTAINER_NAME,
             )
@@ -728,7 +737,9 @@ class AgentContainer:
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
-        allowed = {AGENT_REPO, AGENT_RESULT_DIRECTORY} if self._result else {AGENT_REPO}
+        allowed = set(self._seams.places.agent_paths)
+        if self._result:
+            allowed.add(AGENT_RESULT_DIRECTORY)
         if destinations - allowed:
             problems.append("mounts")
         if problems:
@@ -839,7 +850,7 @@ class AgentContainer:
             container,
             argv,
             env=self._exec_environment(environment),
-            workdir=AGENT_REPO,
+            workdir=self._seams.places.agent_workdir,
             timeout=timeout,
             name="a command of the engine",
         )
@@ -867,7 +878,7 @@ class AgentContainer:
             container,
             argv,
             env=self._exec_environment(environment),
-            workdir=AGENT_REPO,
+            workdir=self._seams.places.agent_workdir,
             user=user,
             stdin=stdin,
             timeout=timeout,
@@ -888,7 +899,9 @@ class AgentContainer:
                 container,
                 {
                     **exec_document(
-                        command, env=self._exec_environment(environment), workdir=AGENT_REPO
+                        command,
+                        env=self._exec_environment(environment),
+                        workdir=self._seams.places.agent_workdir,
                     ),
                     "AttachStdin": False,
                     "AttachStdout": False,

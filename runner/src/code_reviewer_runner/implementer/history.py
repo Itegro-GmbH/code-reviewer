@@ -96,19 +96,34 @@ def _subject(text: str) -> str:
     return _CONTROL.sub(" ", text).strip()[:MAX_SUBJECT_CHARS]
 
 
-def parse_commits(raw: bytes) -> list[CommitInfo]:
+def parse_commits(raw: bytes, *, limit: int = MAX_COMMITS) -> list[CommitInfo]:
     """The commits of `git log --format=%H %s` (the newest first) as the contract has them: oldest
-    first, at most `MAX_COMMITS`; when there are more, the oldest `MAX_COMMITS - 1` of those read
-    and the head commit, which is always the last."""
+    first, at most `limit` (`MAX_COMMITS`); when there are more, the oldest `limit - 1` of those
+    read and the head commit, which is always the last."""
+    commits = _commits_of(raw)
+    if len(commits) > limit:
+        commits = [*commits[: limit - 1], commits[-1]]
+    return commits
+
+
+def _commits_of(raw: bytes) -> list[CommitInfo]:
     commits: list[CommitInfo] = []
     for line in raw.decode("utf-8", errors="replace").split("\n"):
         found = _COMMIT_LINE.fullmatch(line)
         if found is not None:
             commits.append(CommitInfo(found[1], _subject(found[2])))
     commits.reverse()
-    if len(commits) > MAX_COMMITS:
-        commits = [*commits[: MAX_COMMITS - 1], commits[-1]]
     return commits
+
+
+def newest_commits(raw: bytes, *, limit: int) -> tuple[list[CommitInfo], int]:
+    """The newest `limit` commits of `git log --format=%H %s`, oldest first with the head commit
+    last, and how many older ones were left out (of those read: git was asked for the newest
+    `READ_COMMITS`). The form of a multi-repository entry (#1093): "more are cut off from the oldest
+    end"."""
+    commits = _commits_of(raw)
+    cut = max(len(commits) - limit, 0)
+    return commits[cut:], cut
 
 
 _KINDS = {

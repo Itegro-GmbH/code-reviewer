@@ -140,16 +140,35 @@ def test_the_claim_asks_for_the_split_answer_and_reads_the_job_and_its_credentia
         )
     )
 
+    app.use_features(multi_repo=True)
+
     claimed = app.claim()
 
     body = sent(opener.requests[0])
-    assert body["engines"] == ["implementer"] and body["features"] == ["worker_credential"]
+    assert body["engines"] == ["implementer"] and body["features"] == [
+        "worker_credential",
+        "implementer_multi_repo",
+    ]
     assert opener.requests[0].full_url.endswith("/api/runners/v1/claim")
     assert claimed == ClaimedWorker(
         JOB, CREDENTIAL, ("gpu", "linux"), JobAccess("claude-code", "subscription", "sonnet")
     )
     # The credential is the Worker's and never printed.
     assert CREDENTIAL not in repr(claimed)
+
+
+# #1093: without the feature (a golden image whose Worker does not read `implementer.repos`) the
+# claim does not name it: the app then keeps a multi-repository job for another runner.
+def test_the_claim_names_the_multi_repo_feature_only_when_the_runner_has_it() -> None:
+    app, opener = client(split_answer(labels=["linux"]))
+    app.claim()
+    assert sent(opener.requests[0])["features"] == ["worker_credential"]
+
+    switched, opener2 = client(split_answer(labels=["linux"]))
+    switched.use_features(multi_repo=True)
+    switched.use_features(multi_repo=False)
+    switched.claim()
+    assert sent(opener2.requests[0])["features"] == ["worker_credential"]
 
 
 # #974-T01

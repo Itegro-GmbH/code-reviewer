@@ -7,9 +7,10 @@ Only the contract is checked: the examples (and their variants: a continued bran
 neither, the tokens, the resume and the result follow the job, the feature is named in the file,
 and **the shared negative corpus** (contracts/examples/implementer-multi-repo/invalid/, the same
 files the app's test reads) is rejected: by the schema where it can state the rule, by the
-reference rules of `multi_repo_rules.py` where it cannot. The parser of the runner does not read
-`repos` yet (#1093), so nothing here parses a job of this form; #1093 must keep the corpus failing
-with the same rules.
+reference rules of `multi_repo_rules.py` where it cannot. The runner's parser
+(`job.parse_implementer_input`, #1093) reads `repos` and is held to the corpus here: every job case
+of it is refused with `invalid_job`, and every valid example and variant of a job is accepted. The
+lane cases (`AgentStep`) are the app's: only the reference rules read them.
 """
 
 import copy
@@ -25,6 +26,9 @@ from multi_repo_rules import (
     break_of_lane_rule,
     derive_mount_names,
 )
+
+from code_reviewer_runner.job import JobError, parse_implementer_input
+from code_reviewer_runner.result import ErrorCode
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACTS = ROOT / "contracts"
@@ -130,6 +134,14 @@ def test_the_job_example_follows_the_rules_the_schema_cannot_state() -> None:
             assert break_of_job_rule(_load(path)) is None, path.name
 
 
+def test_the_parser_of_the_runner_accepts_the_job_examples_and_their_variants() -> None:
+    paths = [MULTI / "RunnerJobInput.json", *VARIANTS.glob("RunnerJobInput.*.json")]
+    assert len(paths) >= 3
+    for path in paths:
+        parsed = parse_implementer_input(path.read_text(encoding="utf-8"))
+        assert parsed.implementer.repos is not None, path.name
+
+
 def test_mount_names_are_derived_without_regard_to_case_and_to_the_order() -> None:
     assert derive_mount_names(["acme/app", "acme/shared-lib", "other/app"]) == [
         "acme__app",
@@ -168,6 +180,11 @@ def test_an_invalid_case_of_the_shared_corpus_is_rejected(path: Path) -> None:
         else _load(EXAMPLES / f"{case['base']}.json")
     )
     document = apply_patch(document, case["patch"])
+    if case["definition"] == "RunnerJobInput":
+        # The real parser of the runner, not only the reference rules (#1093): invalid_job.
+        with pytest.raises(JobError) as refused:
+            parse_implementer_input(json.dumps(document))
+        assert refused.value.code is ErrorCode.INVALID_JOB, path.name
     accepted = _accepts(case["definition"], document, schema_path)
     if case["layer"] == "schema":
         assert not accepted, case["why"]
@@ -410,3 +427,19 @@ def test_a_pushed_repository_has_a_head_commit() -> None:
 def test_the_feature_is_in_the_file() -> None:
     schema: Document = _load(SCHEMA_PATH)
     assert "implementer_multi_repo" in schema["$defs"]["KnownClaimFeature"]["enum"]
+
+
+def test_the_report_validator_of_the_runner_accepts_the_example_result() -> None:
+    from code_reviewer_runner.implementer.report import valid_block
+
+    block: Document = _load(MULTI / "RunnerResult.json")["implementer"]
+    assert valid_block(block) is not None
+
+
+def test_the_worker_and_the_factory_runner_name_the_feature() -> None:
+    from code_reviewer_runner.factory_runner.app_client import FEATURE_MULTI_REPO
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    schema: Document = _load(SCHEMA_PATH)
+    known = schema["$defs"]["KnownClaimFeature"]["enum"]
+    assert FEATURE_MULTI_REPO in WORKER_FEATURES and FEATURE_MULTI_REPO in known

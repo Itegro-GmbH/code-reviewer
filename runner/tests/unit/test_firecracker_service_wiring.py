@@ -198,6 +198,9 @@ def test_run_with_the_firecracker_sandbox_prepares_without_docker_and_needs_a_us
         raise AssertionError("the Docker self-test must not run")
 
     class Client:
+        def use_features(self, *, multi_repo: bool) -> None:
+            pass
+
         def announce(self, announcement: Any) -> Announced:
             return Announced(None, False)
 

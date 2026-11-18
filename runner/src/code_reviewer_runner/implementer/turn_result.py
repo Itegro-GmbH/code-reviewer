@@ -34,6 +34,81 @@ def clip_summary(text: str, secrets: Iterable[str], *, tail: str = "") -> str:
     return clean + suffix
 
 
+# The bounds of one repository's entry in `ImplementerResult.repos` (#1091): up to ten repositories
+# share one report, so its lists are shorter than the single form's.
+MAX_REPO_COMMITS = 100
+MAX_REPO_FILES = 250
+
+
+@dataclass(frozen=True)
+class RepoOutcome:
+    """What a multi-repository turn did in one repository (#1093, `ImplementerRepoResult`): the
+    facts of the single form, per repository. `branches` is None for a profile that may not push
+    (nothing was listed, so the entry has none)."""
+
+    name: str
+    full_name: str
+    base: str
+    branch: str
+    # This turn made the working branch (it was not in the clone).
+    created: bool
+    # The tip of the working branch when the turn started; the tip when it ended (the same when
+    # the turn made no commit there; None only for a profile that may not push).
+    base_commit: str
+    head_commit: str | None
+    # The branch at `head_commit` is on the remote at the end: pushed by this turn or there already.
+    pushed: bool
+    commits: tuple[CommitInfo, ...] = ()
+    files_changed: tuple[FileChange, ...] = ()
+    branches: tuple[BranchPush, ...] | None = None
+    branches_dropped: tuple[int, int] = (0, 0)
+    checked_out: str | None = None
+    commits_truncated: int = 0
+    files_truncated: int = 0
+
+    def block(self) -> dict[str, Any]:
+        """The entry of `implementer.repos`. The lists are cut to the bounds of the entry (the
+        newest commits stay, the head last), and what was left out is counted."""
+        commits = list(self.commits)
+        files = list(self.files_changed)
+        commits_cut = self.commits_truncated + max(len(commits) - MAX_REPO_COMMITS, 0)
+        files_cut = self.files_truncated + max(len(files) - MAX_REPO_FILES, 0)
+        commits = commits[-MAX_REPO_COMMITS:]
+        files = files[:MAX_REPO_FILES]
+        entry: dict[str, Any] = {
+            "name": self.name,
+            "fullName": self.full_name,
+            "base": self.base,
+            "branch": self.branch,
+            "created": self.created,
+            "baseCommit": self.base_commit,
+            "headCommit": self.head_commit,
+            "pushed": self.pushed,
+        }
+        if self.branches is not None:
+            entry["branches"] = [
+                {
+                    "name": branch.name,
+                    "head": branch.head,
+                    "result": "pushed" if branch.pushed else "rejected",
+                    "reason": branch.reason,
+                }
+                for branch in self.branches
+            ]
+            entry["branchesDropped"] = {
+                "invalid": self.branches_dropped[0],
+                "overflow": self.branches_dropped[1],
+            }
+        entry["commits"] = [{"sha": c.sha, "subject": c.subject} for c in commits]
+        entry["filesChanged"] = [{"path": f.path, "status": f.kind.value} for f in files]
+        entry["checkedOut"] = self.checked_out
+        if commits_cut:
+            entry["commitsTruncated"] = commits_cut
+        if files_cut:
+            entry["filesTruncated"] = files_cut
+        return entry
+
+
 @dataclass(frozen=True)
 class TurnResult:
     """The outcome of a turn. `error_code` is None for a success; a failed turn carries the block
@@ -79,6 +154,9 @@ class TurnResult:
     # by
     # Control like the result; None: the turn ended with a result, or with neither. Never a command.
     agent_ask: dict[str, Any] | None = None
+    # #1093: one entry per repository of a multi-repository turn, in the order of the job; None for
+    # the turn of one repository. The fields above are then copies of the first entry.
+    repos: tuple[RepoOutcome, ...] | None = None
 
     @property
     def ok(self) -> bool:
@@ -91,7 +169,7 @@ class TurnResult:
             if self.opencode_session_id is None
             else {"sessionId": self.opencode_session_id, "version": self.opencode_version}
         )
-        return {
+        block: dict[str, Any] = {
             "baseCommit": self.base_commit,
             "headCommit": self.head_commit,
             "pushed": self.pushed,
@@ -119,3 +197,26 @@ class TurnResult:
             **({} if self.setup is None else {"setup": self.setup}),
             **({} if self.network is None else {"network": self.network}),
         }
+        if self.repos is not None:
+            block.update(self._repos_block())
+        return block
+
+    def _repos_block(self) -> dict[str, Any]:
+        """`repos`, and the old fields as copies of the first entry (so they stay equal when a list
+        is cut): a reader that does not know `repos` sees the first repository as it always saw
+        the only one."""
+        assert self.repos is not None
+        entries = [repo.block() for repo in self.repos]
+        first = entries[0]
+        copies: dict[str, Any] = {
+            "baseCommit": first["baseCommit"],
+            "headCommit": first["headCommit"],
+            "pushed": first["pushed"],
+            "branches": first.get("branches", []),
+            "branchesDropped": first.get("branchesDropped", {"invalid": 0, "overflow": 0}),
+            "commits": first["commits"],
+            "filesChanged": first["filesChanged"],
+        }
+        if first["checkedOut"] is not None:
+            copies["checkedOut"] = first["checkedOut"]
+        return {**copies, "repos": entries}

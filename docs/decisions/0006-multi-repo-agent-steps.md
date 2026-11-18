@@ -63,7 +63,9 @@ An agent step may have `repos`: one to ten entries `{ repo, base?, branch? }` (`
   headCommit, pushed }`. `branch` is the working branch, equal to `base` for direct work; `commits` is the list of commit ids
   **this turn** made on it, oldest first; `headCommit` is the tip of `branch` at the end of the turn (the commit it started from
   when the turn made none there, as for the single facts; null only for a repository with no commit at all); `pushed` says that
-  the branch with `headCommit` is on the remote. Like the single facts, they exist only for a profile that may push.
+  the branch with `headCommit` is on the remote; the one exception is a repository the push did not get to (a lost lease), which says
+  `pushed` false **with no `branches`**: not attempted, the remote state not looked at (the contract keeps this; `branches` absent is the
+  "not attempted" flag). Like the single facts, they exist only for a profile that may push.
 - The single facts (`branch`, `commits`, `headCommit`, `pushed`) **refer to the first repository** and keep their meaning there
   (`headCommit` stays non-null), so a lane written for one repository keeps working when a second one is added behind it. On a
   step with `session.continue`, `{{<step>.repos}}` is the session's list with the facts of this turn; the pull request step reads
@@ -209,11 +211,32 @@ are `ErrorCode`s of the runner contract.
 
 ## Open questions
 
-- **The agent's working directory.** The contract is `/work`, which is not a git repository. OpenCode stores a session per project
-  and `opencode import` rewrites the project id (`docs/implementer.md`, "Follow-up turns: what was measured on a real VM"); #1093
-  measures whether a session in `/work` resumes as well as one in a repository. **Fallback if it does not: the working directory
-  is the first repository's mount**; then the sentence in `docs/implementer.md`, the resume notes and the preamble change, the
-  rest of this record does not.
+- **The agent's working directory: measured (#1093), `/work` stays.** The contract is `/work`, which is not a git repository, and
+  the fallback (the first repository's mount) is **not needed**. Measured with the pinned engine (OpenCode 1.19.0, `npm install
+  opencode-ai@1.19.0`, a scratch data directory, no model): a session made with `directory=/work` (a directory that is not a
+  repository, with two repositories below it) belongs to the engine's **`global` project** (project id `global`, worktree `/`),
+  while one made in either repository belongs to the project of that repository (its root commit). `opencode export` of the `/work`
+  session and `opencode import` of it into a fresh data directory, run from `/work`, gave `Imported session: <id>`, kept the id, and
+  the engine answered `GET /session/<id>` with 200; **the project id did not change** (`global` before and after), where an
+  import into a repository rewrites it to the repository's root commit. So the one thing the import used to rewrite (the project)
+  is constant for `/work`, and a follow-up on a new VM resumes the session at least as well as one in a repository. The tools of the
+  engine reach the repositories below `/work` by their paths (`external_directory` is allowed anyway, `config.py`), and `git`
+  works in each repository (the agent changes into one). **Claude Code in `/work`, measured without a model call (#1093):** the program on this machine
+  (`claude --version`: 2.1.325; the runner pins 2.1.311) keys its session store by the working directory **path**, not by a git
+  root: the directories under its `projects/` are the cwd with `/` turned into `-`, including one for a directory that is not a git
+  repository (`/home/luca/projects/code-reviewer`, whose repositories are in the directories below it, the same layout as `/work`
+  with `/work/<name>`). The transcript lines of such a session carry the cwd and a branch of `null` or `HEAD` where the cwd is not
+  a repository, and sessions there ran their tools (shell, reads, edits) in repositories below that directory. Without a
+  repository only the git status block of the system prompt is missing (`claude --help` lists it among the per-machine
+  sections). So a session in `/work` has one stable key on every VM (`/work`), and a resume (`claude -p --resume <id>`) looks it
+  up under that key in the session volume. This is observation of a session that already existed,
+  not a controlled run of the pinned version in the agent container. **Still not measured, a required item of the live test
+  before the first release with a live multi-repository lane:** a model-driven turn of each harness (OpenCode and Claude Code in
+  `/work` in the pinned agent image, with `bypassPermissions`), a follow-up turn that resumes the Claude Code session in the same
+  container, and that the hand-over of each `/work/<name>` to the agent's user (`chown -R`, `claude_code/agent.py`) is enough. If
+  Claude Code fails there, `RepoPlaces.workdir_of_first` is the fallback and `worker_api.py` must then not announce the feature for
+  Claude Code. The switch to the fallback is one flag
+  (`RepoPlaces.workdir_of_first`), should that ever be needed.
 - **Reviews and ticket moves per pull request.** `ticket.requestReview` takes one pull request; a step that must ask for a review of
   each pull request of `pullRequests` needs the reserved `forEach` step. Until then it asks for the first.
 - **The bounds of the report.** The per-repository bounds (100/250/25) and the budget (4 MiB body, 3 MiB for `repos`) are a guess

@@ -37,3 +37,17 @@ def test_without_a_mode_nothing_starts_and_the_usage_is_named(
     error = capsys.readouterr().err
     assert "invalid arguments (one of: worker-once, probe)" in error
     assert "dummy-runner-token" not in error
+
+
+# #1093: the golden image build asks the Worker image what its Worker reads of a job.
+def test_worker_features_prints_what_the_worker_reads_and_starts_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
+
+    exit_code = main(["--worker-features"], environment={})
+
+    assert exit_code == 0
+    printed = capsys.readouterr().out.strip().split(",")
+    assert tuple(printed) == WORKER_FEATURES
+    assert "implementer_multi_repo" in printed

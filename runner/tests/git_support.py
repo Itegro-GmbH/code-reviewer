@@ -54,11 +54,12 @@ def raw(*args: str, cwd: Path | None = None, git: str = "git", **env: str) -> st
 class Origin:
     """A bare repository with a `main` branch, standing in for the repository on GitHub."""
 
-    def __init__(self, base: Path, git: str = "git") -> None:
-        self.path = base / "origin.git"
+    def __init__(self, base: Path, git: str = "git", name: str = "origin") -> None:
+        # `name`: a test with several repositories (#1093) has one origin for each.
+        self.path = base / f"{name}.git"
         self.git = git
         raw("init", "-q", "--bare", "--initial-branch=main", str(self.path), git=git)
-        seed = base / "seed"
+        seed = base / ("seed" if name == "origin" else f"seed-{name}")
         raw("clone", "-q", str(self.path), str(seed), git=git)
         raw("checkout", "-q", "-b", "main", cwd=seed, git=git)
         (seed / "README.md").write_text("# demo\n")
