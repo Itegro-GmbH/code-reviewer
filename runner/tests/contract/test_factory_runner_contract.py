@@ -107,7 +107,7 @@ def test_the_claim_names_the_implementer_and_the_split_answer_and_only_features_
     assert set(body["features"]) <= set(schema["$defs"]["KnownClaimFeature"]["enum"])
     # #974: the dispatcher asks for the credential of the job and nothing more: what a Worker reads
     # of a job (`WORKER_FEATURES`) is said by the Worker when it fetches the job.
-    assert body["features"] == ["worker_credential"]
+    assert body["features"] == ["worker_credential", "implementer_multi_repo"]
     assert {"openrouter", "anthropic"} <= set(body["llmProviders"])
 
 

@@ -261,6 +261,29 @@ def _findings(value: object) -> dict[str, Any] | None:
     return document
 
 
+def _redacted_repo(entry: Mapping[str, Any], redactor: TextRedactor) -> Result:
+    """One repository's entry of `repos` with the secrets gone from the texts the agent shaped: the
+    branch names, the subjects, the paths and the branch it ended on."""
+    redacted: Result = {**entry}
+    for key in ("base", "branch"):
+        redacted[key] = redactor.redact(entry[key])
+    if "branches" in entry:
+        redacted["branches"] = [
+            {**branch, "name": redactor.redact(branch["name"])} for branch in entry["branches"]
+        ]
+    redacted["commits"] = [
+        {"sha": commit["sha"], "subject": redactor.redact(commit["subject"])}
+        for commit in entry["commits"]
+    ]
+    redacted["filesChanged"] = [
+        {"path": redactor.redact(file["path"]), "status": file["status"]}
+        for file in entry["filesChanged"]
+    ]
+    if isinstance(entry.get("checkedOut"), str):
+        redacted["checkedOut"] = redactor.redact(entry["checkedOut"])
+    return redacted
+
+
 def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     """The block with the secrets of the job gone from every text in it. The agent wrote the
     summary, the subjects and (by naming files) the paths; the runner redacted them once, and this
@@ -283,6 +306,9 @@ def _redacted_block(block: Mapping[str, Any], redactor: TextRedactor) -> Result:
     # The name of a branch the agent ended on is the agent's too (#837).
     if isinstance(block.get("checkedOut"), str):
         redacted["checkedOut"] = redactor.redact(block["checkedOut"])
+    # #1093: the same texts in every repository of a multi-repository turn.
+    if isinstance(block.get("repos"), list):
+        redacted["repos"] = [_redacted_repo(entry, redactor) for entry in block["repos"]]
     # So is the result the agent handed in (#843): every text in it, keys included.
     if "agentResult" in block:
         redacted["agentResult"] = redacted_value(block["agentResult"], redactor.redact)
@@ -508,12 +534,27 @@ def _without_network(sent: object) -> object:
 def _short_block(block: Mapping[str, Any]) -> Result:
     """The report of a turn when even the whole result was refused: where it ended and the head
     commit, no file list, no summary and no network block."""
-    return {
+    short: Result = {
         **{k: v for k, v in block.items() if k != "network"},
         "commits": list(block["commits"])[-1:],
         "filesChanged": [],
         "summary": "",
     }
+    if "repos" in block:
+        # #1093: every repository the same, so the old fields stay copies of the first entry.
+        short["repos"] = [
+            {
+                **{
+                    k: v
+                    for k, v in entry.items()
+                    if k not in ("commitsTruncated", "filesTruncated")
+                },
+                "commits": list(entry["commits"])[-1:],
+                "filesChanged": [],
+            }
+            for entry in block["repos"]
+        ]
+    return short
 
 
 def minimal(result: Mapping[str, Any], *, keep_usage: bool = True) -> Result:

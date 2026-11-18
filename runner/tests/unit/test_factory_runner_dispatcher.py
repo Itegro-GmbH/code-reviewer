@@ -143,7 +143,10 @@ def test_the_claim_asks_for_the_split_answer_and_reads_the_job_and_its_credentia
     claimed = app.claim()
 
     body = sent(opener.requests[0])
-    assert body["engines"] == ["implementer"] and body["features"] == ["worker_credential"]
+    assert body["engines"] == ["implementer"] and body["features"] == [
+        "worker_credential",
+        "implementer_multi_repo",
+    ]
     assert opener.requests[0].full_url.endswith("/api/runners/v1/claim")
     assert claimed == ClaimedWorker(
         JOB, CREDENTIAL, ("gpu", "linux"), JobAccess("claude-code", "subscription", "sonnet")

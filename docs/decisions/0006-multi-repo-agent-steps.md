@@ -209,11 +209,20 @@ are `ErrorCode`s of the runner contract.
 
 ## Open questions
 
-- **The agent's working directory.** The contract is `/work`, which is not a git repository. OpenCode stores a session per project
-  and `opencode import` rewrites the project id (`docs/implementer.md`, "Follow-up turns: what was measured on a real VM"); #1093
-  measures whether a session in `/work` resumes as well as one in a repository. **Fallback if it does not: the working directory
-  is the first repository's mount**; then the sentence in `docs/implementer.md`, the resume notes and the preamble change, the
-  rest of this record does not.
+- **The agent's working directory: measured (#1093), `/work` stays.** The contract is `/work`, which is not a git repository, and
+  the fallback (the first repository's mount) is **not needed**. Measured with the pinned engine (OpenCode 1.19.0, `npm install
+  opencode-ai@1.19.0`, a scratch data directory, no model): a session made with `directory=/work` (a directory that is not a
+  repository, with two repositories below it) belongs to the engine's **`global` project** (project id `global`, worktree `/`),
+  while one made in either repository belongs to the project of that repository (its root commit). `opencode export` of the `/work`
+  session and `opencode import` of it into a fresh data directory, run from `/work`, gave `Imported session: <id>`, kept the id, and
+  the engine answered `GET /session/<id>` with 200; **the project id did not change** (`global` before and after), where an
+  import into a repository rewrites it to the repository's root commit. So the one thing the import used to rewrite (the project)
+  is constant for `/work`, and a follow-up on a new VM resumes the session at least as well as one in a repository. The tools of the
+  engine reach the repositories below `/work` by their paths (`external_directory` is allowed anyway, `config.py`), and `git`
+  works in each repository (the agent changes into one). **Not measured:** a model-driven turn (no model call in a test) and
+  Claude Code in `/work` (it runs from any directory, nothing of its session is kept between turns yet, and the runner hands each
+  `/work/<name>` to its user); a run on a real VM of the live test is the place to see both. The switch to the fallback is one flag
+  (`RepoPlaces.workdir_of_first`), should that ever be needed.
 - **Reviews and ticket moves per pull request.** `ticket.requestReview` takes one pull request; a step that must ask for a review of
   each pull request of `pullRequests` needs the reserved `forEach` step. Until then it asks for the first.
 - **The bounds of the report.** The per-repository bounds (100/250/25) and the budget (4 MiB body, 3 MiB for `repos`) are a guess

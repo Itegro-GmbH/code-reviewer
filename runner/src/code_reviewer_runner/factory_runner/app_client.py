@@ -55,6 +55,9 @@ ENGINE_IMPLEMENTER = "implementer"
 # The one claim feature this client names: the split answer (`worker_credential`, #320). What the
 # Worker reads of a job (`WORKER_FEATURES`) it says itself when it fetches the job.
 FEATURE_WORKER_CREDENTIAL = "worker_credential"
+# #1093 (epic #1090, ADR 0006): this runner's Workers read `implementer.repos`, so a job of several
+# repositories is a candidate for it (a runner without the feature never claims one).
+FEATURE_MULTI_REPO = "implementer_multi_repo"
 # Why a dispatcher gives a claim back (`KnownReleaseReason` of the runner API contract).
 RELEASE_LAUNCH_FAILED = "launch_failed"
 RELEASE_WORKER_EXITED = "worker_exited"
@@ -187,14 +190,16 @@ class AppClient:
         """The next job of this runner (the oldest due one it matches), or None (204: nothing for
         its labels and its manifest now).
 
-        The claim names the engine `implementer` and the feature `worker_credential`: the answer is
-        the job's id and the credential of its Worker, and the app sends nothing else of the job.
+        The claim names the engine `implementer` and the features `worker_credential` (the answer is
+        the job's id and the credential of its Worker, and the app sends nothing else of the job)
+        and `implementer_multi_repo` (a job of several repositories is a candidate for this runner:
+        its Workers read `implementer.repos`).
         The providers this runner knows go along so that the app can refuse a turn this runner
         cannot run.
         """
         body = {
             "engines": [ENGINE_IMPLEMENTER],
-            "features": [FEATURE_WORKER_CREDENTIAL],
+            "features": [FEATURE_WORKER_CREDENTIAL, FEATURE_MULTI_REPO],
             "llmProviders": list(registered_provider_ids()),
         }
         reply = self._send("POST", CLAIM_PATH, body)
