@@ -231,6 +231,7 @@ describe("the Dispatcher section of the guide", () => {
           "PAIR_IMAGE_DIGEST",
           "PAIR_COMMIT",
           "PAIR_SYSBOX",
+          "PAIR_WORKER_FEATURES",
           "KEEP_SNAPSHOT_IDS",
           "DISCARD_SNAPSHOT_ID",
           "INFISICAL_DOMAIN",

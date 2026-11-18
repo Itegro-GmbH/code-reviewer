@@ -29,6 +29,7 @@ import {
   type SnapshotPair,
 } from "./pair.ts";
 import { BUILDER_PREFIX } from "./names.ts";
+import { workerFeaturesValue } from "./worker-features.ts";
 import {
   livePair,
   pairOfDeployment,
@@ -199,6 +200,7 @@ async function runDecide(
           `image-digest=${decision.pair.imageDigest}`,
           `commit=${decision.pair.commit}`,
           `sysbox=${decision.pair.sysbox}`,
+          `worker-features=${workerFeaturesValue(decision.pair.workerFeatures)}`,
         ]),
     ...(decision.previousSnapshotId === undefined
       ? []
@@ -247,6 +249,7 @@ async function runPersist(
       env.PAIR_IMAGE_DIGEST,
       env.PAIR_COMMIT,
       env.PAIR_SYSBOX,
+      env.PAIR_WORKER_FEATURES,
     );
     if (pair === undefined)
       throw new Usage("PAIR_SNAPSHOT_ID, PAIR_IMAGE_DIGEST and PAIR_COMMIT");

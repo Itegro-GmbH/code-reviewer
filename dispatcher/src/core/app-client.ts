@@ -184,6 +184,11 @@ export type AppClientOptions = {
   fetch: typeof fetch;
   /** Per request; the claim happens while the sender of the wake-up call waits, so it is short. */
   requestTimeoutMs?: number;
+  /**
+   * #1098: the claim features that depend on the Worker image (`imageClaimFeatures`), named next to the fixed ones. Absent or
+   * empty: the claim names the fixed ones only, so a job that needs more stays queued for a Dispatcher that can run it.
+   */
+  imageFeatures?: readonly KnownClaimFeature[];
 };
 
 export type ClaimRequestBody = {
@@ -203,6 +208,12 @@ function retryAfterOf(response: Response): number | undefined {
 export function createAppClient(options: AppClientOptions) {
   const timeout = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
   const base = options.appUrl.replace(/\/+$/, "");
+  const claimFeatures: KnownClaimFeature[] = [
+    ...CLAIM_FEATURES,
+    ...(options.imageFeatures ?? []).filter(
+      (feature) => !CLAIM_FEATURES.includes(feature),
+    ),
+  ];
 
   async function send(
     path: string,
@@ -312,7 +323,7 @@ export function createAppClient(options: AppClientOptions) {
         method: "POST",
         bearer: options.token,
         runnerId: true,
-        body: { ...body, features: CLAIM_FEATURES },
+        body: { ...body, features: claimFeatures },
       });
       if (
         response === null ||

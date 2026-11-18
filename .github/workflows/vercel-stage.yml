@@ -17,7 +17,7 @@ name: Vercel stage
 # token). The CLI reads the credentials from the environment: the token is never on a command line.
 #
 # For the Dispatcher the deployment carries the golden snapshot pair this run uses (`snapshot-id`, `image-digest`,
-# `snapshot-commit`, `sysbox-proof`): as run-time variables of this one deployment (`--env`) and as its meta. The project's own
+# `snapshot-commit`, `sysbox-proof`, `worker-features`): as run-time variables of this one deployment (`--env`) and as its meta. The project's own
 # variables are not touched, so the live deployment keeps the pair it has until the promotion; the canary compares
 # the image id the staged deployment reports with the one passed here, so a pair that did not reach the deployment
 # stops the pipeline instead of passing on the old image. The job runs only for this repository on main.
@@ -57,6 +57,11 @@ on:
         type: string
       sysbox-proof:
         description: The verdict of the snapshot's Sysbox proof, proven or unproven (the fourth member of the pair)
+        required: false
+        default: ""
+        type: string
+      worker-features:
+        description: The features the Worker image of the snapshot lists, comma separated, or none (the fifth member of the pair; empty is none)
         required: false
         default: ""
         type: string
@@ -201,17 +206,21 @@ jobs:
           IMAGE_DIGEST: ${{ inputs.image-digest }}
           SNAPSHOT_COMMIT: ${{ inputs.snapshot-commit }}
           SYSBOX_PROOF: ${{ inputs.sysbox-proof }}
+          WORKER_FEATURES: ${{ inputs.worker-features }}
         run: |
           set -euo pipefail
 
-          # The pair is all four values or none, each of its own shape. The verdict is set and replaced with the snapshot id, so
-          # that the verdict of an older snapshot cannot stay behind a newer one.
+          # The pair is all its values or none, each of its own shape. The verdict and the feature list are set and replaced with
+          # the snapshot id, so that those of an older snapshot cannot stay behind a newer one. A list that is not given is `none`:
+          # the Dispatcher then names no claim feature that depends on the Worker image (#1098), so a job that needs one waits.
+          WORKER_FEATURES="${WORKER_FEATURES:-none}"
           pair=()
           if [ -n "${SNAPSHOT_ID}${IMAGE_DIGEST}${SNAPSHOT_COMMIT}${SYSBOX_PROOF}" ]; then
             if ! [[ "${SNAPSHOT_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$ ]] \
               || ! [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] \
               || ! [[ "${SNAPSHOT_COMMIT}" =~ ^[0-9a-f]{40}$ ]] \
-              || ! [[ "${SYSBOX_PROOF}" =~ ^(proven|unproven)$ ]]; then
+              || ! [[ "${SYSBOX_PROOF}" =~ ^(proven|unproven)$ ]] \
+              || ! [[ "${WORKER_FEATURES}" =~ ^(none|[a-z][a-z0-9_]{0,63}(,[a-z][a-z0-9_]{0,63}){0,63})$ ]]; then
               echo "::error::The golden snapshot pair of this deployment is incomplete or malformed."
               exit 1
             fi
@@ -219,10 +228,12 @@ jobs:
               --env "SANDBOX_SNAPSHOT_ID=${SNAPSHOT_ID}"
               --env "SANDBOX_IMAGE_DIGEST=${IMAGE_DIGEST}"
               --env "SANDBOX_SYSBOX_PROOF=${SYSBOX_PROOF}"
+              --env "SANDBOX_WORKER_FEATURES=${WORKER_FEATURES}"
               --meta "sandboxSnapshotId=${SNAPSHOT_ID}"
               --meta "sandboxImageDigest=${IMAGE_DIGEST}"
               --meta "sandboxSnapshotCommit=${SNAPSHOT_COMMIT}"
               --meta "sandboxSysboxProof=${SYSBOX_PROOF}"
+              --meta "sandboxWorkerFeatures=${WORKER_FEATURES}"
             )
           fi
 

@@ -78,6 +78,7 @@ describe("golden snapshot workflow", () => {
       "image-digest",
       "snapshot-id",
       "sysbox",
+      "worker-features",
     ]);
     for (const output of Object.values(outputs))
       expect(output.value).toMatch(/^\$\{\{ jobs\.build\.outputs\./);
@@ -91,6 +92,12 @@ describe("golden snapshot workflow", () => {
     // #745-T02: the verdict is `proven` only when the record says exactly that; a missing field is `unproven`.
     expect(read.run).toContain('if .sysbox == "proven"');
     expect(job.outputs?.sysbox).toBe("${{ steps.record.outputs.sysbox }}");
+    // #1098-T11: the Worker image's feature list travels as the fifth member; a record without one reads as `none`.
+    expect(read.run).toContain("(.workerFeatures // [])");
+    expect(read.run).toContain('then "none" else join(",")');
+    expect(job.outputs?.["worker-features"]).toBe(
+      "${{ steps.record.outputs.worker-features }}",
+    );
   });
 
   // #403-T22

@@ -2,10 +2,11 @@
 
 // Writes the golden snapshot pair to Infisical, `prod` `/dispatcher` (#403), after a deployment is live, so that the
 // next deployment and Secret Sync know which snapshot production runs. It signs in with the machine identity of the
-// workflows (Universal Auth) and touches exactly four secrets: the names are fixed here, the identity's role should
+// workflows (Universal Auth) and touches exactly five secrets: the names are fixed here, the identity's role should
 // say the same (docs/deployment-vercel.md, section 2.1). The client secret goes to the one https address it is
 // given, nothing is read back, no error text is ever repeated and no value is logged. A secret that does not exist
 // yet is created (the first deployment).
+import { NO_FEATURES } from "./worker-features.ts";
 import { PAIR_VARIABLES, pairToEnv, type SnapshotPair } from "./pair.ts";
 
 export type InfisicalTarget = {
@@ -33,19 +34,28 @@ const SECRET_PATH = "/dispatcher";
 /**
  * The only names this module ever writes, in the order it writes them. The verdict is written twice around the rest: cleared
  * to `unproven` first and set to the pair's own last, so that a write that fails in between leaves a pair that is not
- * proven (never the `proven` of an older snapshot next to a newer snapshot id), and the Implementer refuses it.
+ * proven (never the `proven` of an older snapshot next to a newer snapshot id), and the Implementer refuses it. The list of
+ * the Worker image's features (#1098) is written the same way, cleared to `none` first and set last: a write that fails in
+ * between leaves a pair that names no feature that depends on the image, never the list of an older image next to a newer
+ * snapshot id (the safe side: jobs wait in the queue).
  */
 function writes(pair: SnapshotPair): Array<[string, string]> {
   const values = pairToEnv(pair);
   const verdict = PAIR_VARIABLES.sysbox;
+  const features = PAIR_VARIABLES.workerFeatures;
+  const featuresValue = values[features] ?? NO_FEATURES;
   return [
     [verdict, "unproven"],
+    [features, NO_FEATURES],
     [PAIR_VARIABLES.snapshotId, values[PAIR_VARIABLES.snapshotId] ?? ""],
     [PAIR_VARIABLES.imageDigest, values[PAIR_VARIABLES.imageDigest] ?? ""],
     [PAIR_VARIABLES.commit, values[PAIR_VARIABLES.commit] ?? ""],
     ...(pair.sysbox === "proven"
       ? ([[verdict, pair.sysbox]] as Array<[string, string]>)
       : []),
+    ...(featuresValue === NO_FEATURES
+      ? []
+      : ([[features, featuresValue]] as Array<[string, string]>)),
   ];
 }
 

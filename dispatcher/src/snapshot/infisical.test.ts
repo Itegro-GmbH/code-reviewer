@@ -15,6 +15,7 @@ const PAIR: SnapshotPair = {
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: "1".repeat(40),
   sysbox: "proven",
+  workerFeatures: ["implementer_multi_repo"],
 };
 const TOKEN = "access-token-not-real";
 
@@ -71,10 +72,11 @@ describe("writing the snapshot pair to Infisical", () => {
     "SANDBOX_IMAGE_DIGEST",
     "SANDBOX_SNAPSHOT_COMMIT",
     "SANDBOX_SYSBOX_PROOF",
+    "SANDBOX_WORKER_FEATURES",
   ];
 
   // #403-T15
-  it("signs in with the machine identity, finds the project by its slug and updates the four secrets of /dispatcher in prod", async () => {
+  it("signs in with the machine identity, finds the project by its slug and updates the five secrets of /dispatcher in prod", async () => {
     const { fetch, seen } = infisical(undefined, ALL);
 
     expect(await persistPair(TARGET, PAIR, fetch)).toEqual({ ok: true });
@@ -94,10 +96,12 @@ describe("writing the snapshot pair to Infisical", () => {
     const writes = seen.filter((entry) => entry.method === "PATCH");
     expect(writes.map((entry) => entry.url.pathname.split("/").pop())).toEqual([
       "SANDBOX_SYSBOX_PROOF",
+      "SANDBOX_WORKER_FEATURES",
       "SANDBOX_SNAPSHOT_ID",
       "SANDBOX_IMAGE_DIGEST",
       "SANDBOX_SNAPSHOT_COMMIT",
       "SANDBOX_SYSBOX_PROOF",
+      "SANDBOX_WORKER_FEATURES",
     ]);
     for (const write of writes) {
       expect(write.url.pathname).toMatch(/^\/api\/v4\/secrets\/SANDBOX_/);
@@ -111,12 +115,15 @@ describe("writing the snapshot pair to Infisical", () => {
     }
     // #745-T02: the verdict is cleared first and set last, so that a write that fails in between leaves a pair that is not
     // proven, never the `proven` of an older snapshot next to a newer snapshot id.
+    // #1098: the list of the image's features goes the same way (cleared to `none` first, set last), and an empty one stays `none`.
     expect(writes.map((entry) => entry.body?.secretValue)).toEqual([
       "unproven",
+      "none",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
       "proven",
+      "implementer_multi_repo",
     ]);
     // Nothing is read, and every call is made without following a redirect.
     expect(
@@ -142,9 +149,11 @@ describe("writing the snapshot pair to Infisical", () => {
     expect(created.map((entry) => entry.url.pathname.split("/").pop())).toEqual(
       [
         "SANDBOX_SYSBOX_PROOF",
+        "SANDBOX_WORKER_FEATURES",
         "SANDBOX_IMAGE_DIGEST",
         "SANDBOX_SNAPSHOT_COMMIT",
         "SANDBOX_SYSBOX_PROOF",
+        "SANDBOX_WORKER_FEATURES",
       ],
     );
     expect(created[0]?.body).toMatchObject({
@@ -189,7 +198,7 @@ describe("writing the snapshot pair to Infisical", () => {
   });
 
   // #403-T15
-  it("writes only the four names, whatever the pair holds", async () => {
+  it("writes only the five names, whatever the pair holds", async () => {
     const { fetch, seen } = infisical(undefined, ALL);
 
     await persistPair(TARGET, PAIR, fetch);

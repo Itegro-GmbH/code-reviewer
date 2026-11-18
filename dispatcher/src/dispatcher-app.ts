@@ -5,6 +5,7 @@
 // choose the Launcher and say how background work is kept alive.
 import { Hono } from "hono";
 import { createLogger } from "./core/logger.ts";
+import { imageClaimFeatures } from "./core/claim-features.ts";
 import { createDispatcherCore } from "./core/dispatcher.ts";
 import { LEGACY_APP_ID } from "./core/types.ts";
 import type {
@@ -36,6 +37,11 @@ export type AppOptions = {
   operatorToken?: string;
   /** The platform's live job VMs per app: the Dispatcher's own check of every app's cap (`core/dispatcher.ts`). */
   liveVms?: LiveVmCounter;
+  /**
+   * #1098: the features the Worker image of the golden snapshot lists (`SANDBOX_WORKER_FEATURES`). Only the claim features that
+   * depend on the image (`core/claim-features.ts`) are named from it; absent, none is.
+   */
+  workerFeatures?: readonly string[];
   /** The Worker image id of the golden snapshot (`SANDBOX_IMAGE_DIGEST`): named in the answer of `POST /probe`. */
   imageDigest?: string;
   /** The golden snapshot (`SANDBOX_SNAPSHOT_ID`): named in the answer of `POST /probe` too. */
@@ -58,6 +64,7 @@ export function createDispatcher(options: AppOptions): Dispatcher {
     fetch: options.fetch,
     clock: options.clock,
     ...(options.liveVms === undefined ? {} : { liveVms: options.liveVms }),
+    imageFeatures: imageClaimFeatures(options.workerFeatures),
   });
   const app = new Hono();
   app.get("/health", (c) => c.json({ status: "ok" }));

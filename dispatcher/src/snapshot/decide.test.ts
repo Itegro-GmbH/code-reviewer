@@ -11,6 +11,7 @@ const PAIR: SnapshotPair = {
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: OLD,
   sysbox: "proven",
+  workerFeatures: ["implementer_multi_repo"],
 };
 
 function deps(overrides: Partial<DecideDeps> = {}): DecideDeps & {
@@ -217,6 +218,7 @@ describe("whether the snapshot has to be rebuilt", () => {
       imageDigest: `sha256:${"b".repeat(64)}`,
       commit: NEW,
       sysbox: "proven",
+      workerFeatures: ["implementer_multi_repo"],
     };
     const d = deps({ live: () => Promise.resolve(livePair) });
 

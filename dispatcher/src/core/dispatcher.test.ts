@@ -12,6 +12,7 @@ import {
   startApp,
   waitFor,
 } from "../test-support/harness.ts";
+import { imageClaimFeatures } from "./claim-features.ts";
 import { createDispatcherCore } from "./dispatcher.ts";
 import { createLogger } from "./logger.ts";
 import { LaunchError, type HandleResult } from "./types.ts";
@@ -49,6 +50,7 @@ function recordingFetch() {
 function build(
   overrides: Parameters<typeof settingsFor>[1] = {},
   launcherOptions: Parameters<typeof createFakeLauncher>[0] = {},
+  imageFeatures?: Parameters<typeof imageClaimFeatures>[0],
 ) {
   const logger = recordingLogger();
   const launcher = createFakeLauncher(launcherOptions);
@@ -59,6 +61,9 @@ function build(
     clock,
     logger,
     fetch: recorded.fetch,
+    ...(imageFeatures === undefined
+      ? {}
+      : { imageFeatures: imageClaimFeatures(imageFeatures) }),
   });
   return { core, launcher, logger, recorded };
 }
@@ -130,6 +135,47 @@ describe("the Dispatcher core", () => {
     });
     expect(launcher.launches[0]?.credential).toMatch(/^crj_[A-Za-z0-9_-]{43}$/);
   });
+
+  // #1098-T07
+  it("names implementer_multi_repo in its claim when the Worker image of its snapshot lists it", async () => {
+    const jobId = app.enqueue();
+    const { core, recorded } = build({}, {}, [
+      "implementer_ask",
+      "implementer_multi_repo",
+    ]);
+
+    await handled(
+      core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+    );
+
+    const claim = recorded.calls.find((call) => call.url.endsWith("/claim"));
+    expect(claim?.body).toMatchObject({
+      features: ["worker_credential", "vm_lifecycle", "implementer_multi_repo"],
+    });
+  });
+
+  // #1098-T07
+  it.each([
+    ["no list (an old snapshot)", undefined],
+    ["an empty list", []],
+    ["a list without it", ["implementer_ask", "implementer_mcp"]],
+  ])(
+    "does not name implementer_multi_repo for %s, so a multi-repo job stays queued",
+    async (_name, list) => {
+      const jobId = app.enqueue();
+      const { core, recorded } = build({}, {}, list);
+
+      await handled(
+        core.handle({ appId: "reviewer", jobId, reviewKind: "diff" }),
+      );
+
+      const claim = recorded.calls.find((call) => call.url.endsWith("/claim"));
+      expect((claim?.body as { features: string[] }).features).toEqual([
+        "worker_credential",
+        "vm_lifecycle",
+      ]);
+    },
+  );
 
   // #327-T03
   it("ignores a job the claim does not hand out (a replay, a running or a finished job) and launches nothing", async () => {

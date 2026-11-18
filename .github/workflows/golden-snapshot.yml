@@ -58,6 +58,9 @@ on:
       sysbox:
         description: The verdict of the snapshot's Sysbox proof, proven or unproven (the fourth member of the snapshot pair)
         value: ${{ jobs.build.outputs.sysbox }}
+      worker-features:
+        description: The features the Worker image lists, comma separated, or none (the fifth member of the snapshot pair, read from the image by the build)
+        value: ${{ jobs.build.outputs.worker-features }}
 
 permissions:
   contents: read
@@ -86,6 +89,7 @@ jobs:
       image-digest: ${{ steps.record.outputs.image-digest }}
       commit: ${{ steps.record.outputs.commit }}
       sysbox: ${{ steps.record.outputs.sysbox }}
+      worker-features: ${{ steps.record.outputs.worker-features }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -142,6 +146,9 @@ jobs:
             echo "commit=$(jq -r .commit "$RUNNER_TEMP/golden-snapshot.json")"
             # Whatever the record does not say exactly is unproven: only `proven` lets the Implementer start.
             echo "sysbox=$(jq -r 'if .sysbox == "proven" then "proven" else "unproven" end' "$RUNNER_TEMP/golden-snapshot.json")"
+            # The Worker image's own feature list (#1098): `none` when the record has none (an image that lists nothing, or one whose
+            # list the build could not read). The Dispatcher names a claim feature that depends on the image only when it is listed.
+            echo "worker-features=$(jq -r '(.workerFeatures // []) | if length == 0 then "none" else join(",") end' "$RUNNER_TEMP/golden-snapshot.json")"
           } >> "$GITHUB_OUTPUT"
       - name: Show the record
         run: |

@@ -12,12 +12,14 @@ const PAIR: SnapshotPair = {
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: OLD_COMMIT,
   sysbox: "proven",
+  workerFeatures: ["implementer_multi_repo"],
 };
 const NEW: SnapshotPair = {
   snapshotId: "snap_new01",
   imageDigest: `sha256:${"b".repeat(64)}`,
   commit: SHA,
   sysbox: "proven",
+  workerFeatures: ["implementer_multi_repo"],
 };
 const VERCEL = {
   VERCEL_TOKEN: "vercel-token-not-a-real-one-0123456789",
@@ -34,7 +36,7 @@ const INFISICAL = {
 function envFile(pair: SnapshotPair | undefined): string {
   return pair === undefined
     ? 'OTHER="x"\n'
-    : `SANDBOX_SNAPSHOT_ID="${pair.snapshotId}"\nSANDBOX_IMAGE_DIGEST="${pair.imageDigest}"\nSANDBOX_SNAPSHOT_COMMIT="${pair.commit}"\nSANDBOX_SYSBOX_PROOF="${pair.sysbox}"\n`;
+    : `SANDBOX_SNAPSHOT_ID="${pair.snapshotId}"\nSANDBOX_IMAGE_DIGEST="${pair.imageDigest}"\nSANDBOX_SNAPSHOT_COMMIT="${pair.commit}"\nSANDBOX_SYSBOX_PROOF="${pair.sysbox}"\nSANDBOX_WORKER_FEATURES="${pair.workerFeatures.join(",") || "none"}"\n`;
 }
 
 type Harness = ReturnType<typeof harness>;
@@ -153,6 +155,10 @@ describe("snapshot:ops decide", () => {
     expect(output).toContain(`image-digest=${PAIR.imageDigest}\n`);
     expect(output).toContain(`commit=${PAIR.commit}\n`);
     expect(output).toContain(`sysbox=${PAIR.sysbox}\n`);
+    // #1098: the feature list of the pair in use is an output too, so that a reused snapshot keeps its list.
+    expect(output).toContain(
+      `worker-features=${PAIR.workerFeatures.join(",")}\n`,
+    );
     expect(output).toContain("repair=false\n");
     // The ids go to the outputs file only (they are not secrets, and GitHub drops an output that holds a masked value).
     expect(text(h)).not.toContain(PAIR.snapshotId);
@@ -280,6 +286,7 @@ describe("snapshot:ops persist", () => {
     PAIR_IMAGE_DIGEST: NEW.imageDigest,
     PAIR_COMMIT: NEW.commit,
     PAIR_SYSBOX: NEW.sysbox,
+    PAIR_WORKER_FEATURES: NEW.workerFeatures.join(","),
   };
 
   // #403-T15
@@ -295,10 +302,12 @@ describe("snapshot:ops persist", () => {
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
     ).toEqual([
       "unproven",
+      "none",
       NEW.snapshotId,
       NEW.imageDigest,
       NEW.commit,
       NEW.sysbox,
+      NEW.workerFeatures.join(","),
     ]);
     // Every line the command prints is a code.
     expect(text(h)).not.toContain(NEW.snapshotId);
@@ -328,10 +337,12 @@ describe("snapshot:ops persist", () => {
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
     ).toEqual([
       "unproven",
+      "none",
       PAIR.snapshotId,
       PAIR.imageDigest,
       PAIR.commit,
       PAIR.sysbox,
+      PAIR.workerFeatures.join(","),
     ]);
   });
 
@@ -361,7 +372,47 @@ describe("snapshot:ops persist", () => {
     );
     expect(
       writes.map((r) => (r.body as { secretValue: string }).secretValue),
-    ).toEqual(["unproven", PAIR.snapshotId, PAIR.imageDigest, PAIR.commit]);
+    ).toEqual([
+      "unproven",
+      "none",
+      PAIR.snapshotId,
+      PAIR.imageDigest,
+      PAIR.commit,
+      PAIR.workerFeatures.join(","),
+    ]);
+  });
+
+  // #1098-T08
+  it("writes the list of a deployment that predates it as `none`, so that no list of a newer snapshot stays behind a rollback", async () => {
+    const h = harness({ live: PAIR });
+    const fetchWithOldMeta = h.deps.fetch;
+    const deps: typeof h.deps = {
+      ...h.deps,
+      fetch: async (input, init) => {
+        const answer = await fetchWithOldMeta(input, init);
+        const url = new URL(new Request(input, init).url);
+        if (url.pathname !== "/v13/deployments/dpl_oldexample01") return answer;
+        const body = (await answer.json()) as { meta: Record<string, string> };
+        delete body.meta.sandboxWorkerFeatures;
+        return Response.json(body);
+      },
+    };
+
+    expect(
+      await runOps(["persist", "--from-deployment", "dpl_oldexample01"], deps),
+    ).toBe(0);
+
+    const values = h.requests
+      .filter((r) => r.url.pathname.startsWith("/api/v4/secrets/"))
+      .map((r) => (r.body as { secretValue: string }).secretValue);
+    expect(values).toEqual([
+      "unproven",
+      "none",
+      PAIR.snapshotId,
+      PAIR.imageDigest,
+      PAIR.commit,
+      PAIR.sysbox,
+    ]);
   });
 
   // #403-T15

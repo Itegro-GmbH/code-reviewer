@@ -12,6 +12,7 @@ import {
   PROBE_OK,
   SYSBOX_PREPARE_TEXT,
   SYSBOX_PROBE_OK,
+  WORKER_FEATURES_OK,
   VM_PREPARE_TEXT,
   happyFake,
   testConfig,
@@ -89,6 +90,7 @@ describe("the golden snapshot pipeline", () => {
       `exec:${STEPS.inspectRestoredImage}`,
       `exec:${STEPS.inspectRestoredAgentImage}`,
       `exec:${STEPS.probe}`,
+      `exec:${STEPS.workerFeatures}`,
       `exec:${STEPS.sysboxProbe}`,
       `destroy:${check}`,
     ]);
@@ -108,6 +110,8 @@ describe("the golden snapshot pipeline", () => {
       target: "sandbox",
       commit: "0123456789abcdef0123456789abcdef01234567",
       sysbox: "proven",
+      // #1098-T06: what the image printed, sorted.
+      workerFeatures: ["implementer_ask", "implementer_multi_repo"],
     });
     expect(fake.liveSnapshotIds()).toEqual([record.snapshotId]);
   });
@@ -584,6 +588,56 @@ describe("the golden snapshot pipeline", () => {
 
   // Sysbox is for the Implementer only (plan implementer-sandbox, step 2). The snapshot is shared by every kind of job, so
   // nothing Sysbox does may stop it: reviews must keep getting their snapshot, as #797 asks of the Implementer's proof.
+  // #1098: the list of the Worker image's features is asked of the image in the check VM and recorded; a list that cannot be read is
+  // an empty one, never a failed run (the Dispatcher then names nothing that depends on the image).
+  describe("the Worker features of the image, which never hold back the snapshot", () => {
+    it("records what the image prints, sorted and without duplicates", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.workerFeatures, {
+        stdout: "WORKER_FEATURES supersede,implementer_multi_repo,supersede\n",
+      });
+      const { record, warnings } = await run(fake).result;
+      expect(record.workerFeatures).toEqual([
+        "implementer_multi_repo",
+        "supersede",
+      ]);
+      expect(warnings).toEqual([]);
+    });
+
+    it("records an image that lists none as an empty list", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.workerFeatures, { stdout: "WORKER_FEATURES none\n" });
+      const { record, warnings } = await run(fake).result;
+      expect(record.workerFeatures).toEqual([]);
+      expect(warnings).toEqual([]);
+    });
+
+    it.each([
+      ["no line", ""],
+      ["a line that is not the marker", "implementer_multi_repo\n"],
+      ["a name of another shape", "WORKER_FEATURES Bad-Name\n"],
+      ["a marker without a list", "WORKER_FEATURES\n"],
+    ])(
+      "records an empty list and warns for %s, and still returns the snapshot",
+      async (_name, stdout) => {
+        const fake = happyFake();
+        fake.onExec(STEPS.workerFeatures, { stdout });
+        const { record, warnings } = await run(fake).result;
+        expect(record.snapshotId).toBeTruthy();
+        expect(record.workerFeatures).toEqual([]);
+        expect(warnings).toEqual(["worker_features_unreadable"]);
+      },
+    );
+
+    it("records an empty list and warns when the command itself fails", async () => {
+      const fake = happyFake();
+      fake.onExec(STEPS.workerFeatures, { exitCode: 1 });
+      const { record, warnings } = await run(fake).result;
+      expect(record.workerFeatures).toEqual([]);
+      expect(warnings).toEqual(["worker_features_unreadable"]);
+    });
+  });
+
   describe("Sysbox, which never holds back the snapshot", () => {
     const BUILDER = "code-reviewer-golden-builder-20261015T180000Z";
     const CHECK = "code-reviewer-golden-check-20261015T180000Z";
@@ -887,6 +941,7 @@ describe("retention in the pipeline", () => {
     });
     fake.onExec(STEPS.probe, { stdout: PROBE_OK });
     fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
+    fake.onExec(STEPS.workerFeatures, { stdout: WORKER_FEATURES_OK });
     const old = fake.seedBuilder(
       "code-reviewer-golden-builder-20260101T000000Z",
       1,

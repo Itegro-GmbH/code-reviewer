@@ -49,6 +49,8 @@ import {
   startDaemonScript,
   stopDaemonScript,
   sysboxProbeScript,
+  workerFeaturesScript,
+  WORKER_PYTHON,
   writeDaemonConfigScript,
 } from "./scripts.ts";
 
@@ -90,6 +92,7 @@ describe("the scripts the builder VM runs", () => {
     stopDaemon: stopDaemonScript(),
     scan: scanScript(),
     probe: probeScript(config),
+    workerFeatures: workerFeaturesScript(config),
   };
 
   it.each(Object.entries(everyScript))(
@@ -631,6 +634,35 @@ exit 0`;
     expect(sysboxProbeScript(config)).not.toMatch(
       /token|secret|password|credential/i,
     );
+  });
+});
+
+describe("the Worker features step of the check VM", () => {
+  // #1098-T05
+  it("runs the image's own interpreter without network, capabilities or a writable root, and prints the image's list", () => {
+    const script = workerFeaturesScript(config);
+    expect(script).toContain("--network none");
+    expect(script).toContain("--read-only");
+    expect(script).toContain("--cap-drop ALL");
+    expect(script).toContain(`--entrypoint ${shellQuote(WORKER_PYTHON)}`);
+    expect(script).toContain(shellQuote(config.imageTag));
+    expect(script).toContain("WORKER_FEATURES");
+  });
+
+  // #1098-T05: the step imports the Worker's list by name; a rename in the runner must fail here, not as an empty list in a release.
+  it("asks for a list the runner defines under that name, in the interpreter the Dockerfile puts on the image", () => {
+    const script = workerFeaturesScript(config);
+    const worker = readFileSync(
+      join(REPO, "runner/src/code_reviewer_runner/job_loop/worker_api.py"),
+      "utf8",
+    );
+    expect(script).toContain(
+      "from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES",
+    );
+    expect(worker).toMatch(/^WORKER_FEATURES\b/m);
+    const dockerfile = readFileSync(join(REPO, "runner/Dockerfile"), "utf8");
+    expect(dockerfile).toContain("/opt/venv/bin");
+    expect(WORKER_PYTHON).toBe("/opt/venv/bin/python");
   });
 });
 

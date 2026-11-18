@@ -4,6 +4,7 @@
 // that a test can read, syntax check and (the scan) run them. Every one starts with `set -euo pipefail`.
 // Nothing here carries a secret: the VMs have none, and the only credential of the pipeline, the platform
 // token, never leaves the process that calls the platform API.
+import { NO_FEATURES } from "./worker-features.ts";
 import type { PipelineConfig } from "./config.ts";
 import { probeRunArguments } from "./probe-flags.ts";
 
@@ -29,6 +30,7 @@ export const STEPS = {
   inspectRestoredAgentImage: "inspect_restored_agent_image",
   probe: "probe",
   sysboxProbe: "sysbox_probe",
+  workerFeatures: "worker_features",
 } as const;
 
 /** Where files go in the VMs. The staged ones share a prefix so one `rm` removes them. */
@@ -67,6 +69,9 @@ export const EXIT_SYSBOX_VERSION = 44;
 export const SCAN_DONE = "SCAN_DONE";
 /** What the Sysbox proof prints: one `SYSBOX_PROBE ok <check>` or `SYSBOX_PROBE fail <reason>` per check, and the marker last. */
 export const SYSBOX_PROBE_DONE = "SYSBOX_PROBE_DONE";
+
+/** What the features step prints: `WORKER_FEATURES <comma separated names>` (#1098). */
+export const WORKER_FEATURES_MARKER = "WORKER_FEATURES";
 
 const STRICT = "set -euo pipefail";
 
@@ -461,6 +466,25 @@ export function probeScript(config: PipelineConfig): string {
 timeout 180 docker ${probeRunArguments(config).map(shellQuote).join(" ")}
 `;
 }
+
+/**
+ * What the Worker image of this snapshot understands (#1098): its own `WORKER_FEATURES`, the list the Worker names in the
+ * details request of every job, printed by the image itself, so that the record says what the image does and not what the
+ * commit's source seems to say. No network, nothing writable, no capability: the container runs a one line import of the
+ * runner's package, with the image's own interpreter (\`/opt/venv\`), and no job content, credential or secret is near it.
+ * Prints one \`WORKER_FEATURES <names>\` line (the names comma separated, none for an image that lists none).
+ */
+export function workerFeaturesScript(config: PipelineConfig): string {
+  const code =
+    "from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES; " +
+    `print("${WORKER_FEATURES_MARKER} " + (",".join(WORKER_FEATURES) or "${NO_FEATURES}"))`;
+  return `${STRICT}
+timeout 120 docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint ${shellQuote(WORKER_PYTHON)} ${shellQuote(config.imageTag)} -c ${shellQuote(code)}
+`;
+}
+
+/** The interpreter of the Worker image's virtual environment (`runner/Dockerfile`, stage `runtime-base`). */
+export const WORKER_PYTHON = "/opt/venv/bin/python";
 
 /** The port of the listener the Sysbox proof opens on the VM, and what it is reached from. */
 const SYSBOX_PROBE_PORT = 38417;

@@ -223,6 +223,7 @@ jobs:
       image-digest: ${{ steps.decide.outputs.image-digest }}
       commit: ${{ steps.decide.outputs.commit }}
       sysbox: ${{ steps.decide.outputs.sysbox }}
+      worker-features: ${{ steps.decide.outputs.worker-features }}
       previous-snapshot-id: ${{ steps.decide.outputs.previous-snapshot-id }}
     steps:
       # The whole history: the commit of the snapshot in use is compared with this one.
@@ -323,6 +324,7 @@ jobs:
       image-digest: ${{ needs.snapshot-build.outputs.image-digest || needs.snapshot-decide.outputs.image-digest }}
       snapshot-commit: ${{ needs.snapshot-build.outputs.commit || needs.snapshot-decide.outputs.commit }}
       sysbox-proof: ${{ needs.snapshot-build.outputs.sysbox || needs.snapshot-decide.outputs.sysbox }}
+      worker-features: ${{ needs.snapshot-build.outputs.worker-features || needs.snapshot-decide.outputs.worker-features }}
 
   # The second App (#732): the same `app/` as `stage-app`, deployed to the factory's own Vercel project, which takes its
   # variables from the factory's folder in Infisical, so the product and its capability set come from the project.
@@ -776,6 +778,7 @@ jobs:
           image-digest: ${{ needs.snapshot-build.outputs.image-digest || needs.snapshot-decide.outputs.image-digest }}
           commit: ${{ needs.snapshot-build.outputs.commit || needs.snapshot-decide.outputs.commit }}
           sysbox: ${{ needs.snapshot-build.outputs.sysbox || needs.snapshot-decide.outputs.sysbox }}
+          worker-features: ${{ needs.snapshot-build.outputs.worker-features || needs.snapshot-decide.outputs.worker-features }}
 
   # After the promotion, and after persist when it ran: the new and the previous snapshot stay (the previous
   # deployment, the rollback target, still references it), the live one is never removed, everything else the pipeline
