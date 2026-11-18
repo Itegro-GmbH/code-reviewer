@@ -104,6 +104,11 @@ const DEFAULTS_OF_COLUMNS: Record<string, Record<string, unknown>> = {
   jobs: { mcp_calls: 0 },
 };
 
+/** The names of the columns of `table` that a migration after the one under test added (a test of the columns of every old table leaves them out). */
+export function columnsAddedLater(table: string): readonly string[] {
+  return COLUMNS_ADDED_LATER[table] ?? [];
+}
+
 /** `rows` of `table` without the columns that migrations after the one under test added; those columns must be null. */
 export function withoutColumnsAddedLater(
   table: string,
