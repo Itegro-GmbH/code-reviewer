@@ -8,6 +8,7 @@ the runner is built and used, and what was **measured** before it was built; it 
 - [Registration and routing](#registration-and-routing-r1a-854): how a machine becomes a runner of a workspace (R1a).
 - [The Factory-Runner](#the-factory-runner-r1b-854): the service, the `factory-runner` command, the image, installation for a
   developer and operation in a VM (R1b).
+- [Several repositories per turn](#several-repositories-per-turn-1090): what a runner reads and does for a job with `implementer.repos` (#1090).
 - [Claude Code, R3](#claude-code-r3-856): the first slice of the Claude Code harness (adapter core) and what is left.
 - [Spikes R0](#spikes-r0-853): what was measured on a real VM before the build.
 - [Spike: Firecracker sandbox](#spike-firecracker-sandbox-970): the Runner v2 sandbox on Linux (a Firecracker microVM with Docker and Sysbox), measured in CI (#970).
@@ -931,6 +932,19 @@ What the unit tests cannot know and the first install must check (the installer 
 - **The credential file** is as safe as the machine: whoever reads it is the runner. Revoke the runner in the app if the machine is lost.
 - **The page's command** shows `factory-runner register --token ...` without an address; the command goes to `https://code-review.com`.
   `--url` is for another app.
+
+## Several repositories per turn (#1090)
+
+*#1091 fixes the contract ([ADR 0006](decisions/0006-multi-repo-agent-steps.md), [`implementer.md`](implementer.md#several-repositories-in-one-turn-1090)); the runner builds it in #1093, the app in #1092. Nothing here is built yet: a runner today refuses a job with `implementer.repos` (the job is closed) and does not name the feature.*
+
+A runner, hosted Worker or customer's, that reads `implementer.repos` names the claim feature **`implementer_multi_repo`** (in the `features` of its claim, of a Worker's details request and of the Factory-Runner's claim). Only then is a job with `repos` a candidate for it: **a runner without the feature never claims such a job, the job waits in the queue and nothing fails**, and it keeps getting single-repository jobs. A Dispatcher names the feature only when the Worker image it starts reads `repos`.
+
+What the runner does with such a job, in short (the full rules are in `implementer.md`):
+
+- **Parse.** `implementer.repos` (one to ten entries; no `fullName` twice **without regard to case**; no mount `name` twice without regard to case, and every `name` equal to the one the runner **re-derives** from the `fullName`s; `branchExists` present; the `cloneUrl` of **every** entry checked by the rule of the single repository (#762: the host of `git.baseUrl`, the path `/<fullName>[.git]`) before any token is sent there), `git.tokens` (every `tokenId` resolved, no unused token, no repeated `id`, `git.token` byte-equal to the token of `repos[0].tokenId`) and `implementer.resume.repos` (the job's names, in the job's order). Any breach is `invalid_job`. A job has `repos` or the single fields, never both. The shared corpus (`contracts/examples/implementer-multi-repo/invalid/`) is the test of this list.
+- **Workspace.** One mirror and one agent repository per entry, the agent's container mounting each at `/work/<name>`, working directory `/work` (the contract; #1093 measures it, fallback the first repository's mount). `branchExists` true checks out the remote branch (gone: `clone_failed` naming the repository), false makes it from the base (it is there after all: `branch_exists`, never overwritten). The disk and time budgets of the set-up are for all repositories together; the clean-up at the end of a turn removes every pair. The runner writes **no** repository preamble: the app puts it into `instruction`.
+- **Push and report.** The final push runs per repository with that repository's token, in the order of the list, every changed local branch **including the base** (naming a branch does not protect the base). The result carries `implementer.repos` with the old fields copying the first entry; the whole body is at most 4 MiB, and the runner cuts `filesChanged`, then `commits`, to keep `repos` and the copies within 3 MiB, counting what it cut (`implementer.md`, "The result").
+- **A customer's runner** takes the job the way it takes any other: the tokens are in the job like `git.token`. Nothing is added to the claim answer, the labels or the start payload. The job passes the Dispatcher and the VM unchanged; a place on the way that reads `implementer.repo` and would have to read `repos` is found and fixed by #1093, which lists it in its pull request.
 
 ## Claude Code with your subscription
 

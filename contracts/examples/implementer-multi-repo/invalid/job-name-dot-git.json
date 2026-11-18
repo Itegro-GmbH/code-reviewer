@@ -1,0 +1,14 @@
+{
+  "why": "`.git` would make `/work` look like a repository.",
+  "layer": "schema",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/repos/1/name",
+      "value": ".git"
+    }
+  ]
+}

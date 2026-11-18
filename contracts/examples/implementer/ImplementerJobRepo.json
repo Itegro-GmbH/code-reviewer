@@ -1,0 +1,9 @@
+{
+  "name": "acme__app",
+  "fullName": "acme/app",
+  "cloneUrl": "https://github.com/acme/app.git",
+  "base": "development",
+  "branch": "feature/ACME-12",
+  "branchExists": false,
+  "tokenId": "t1"
+}

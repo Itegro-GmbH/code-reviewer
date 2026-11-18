@@ -1,0 +1,14 @@
+{
+  "why": "`resume.repos` misses a repository of the job.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "resume_names",
+  "base": "implementer-multi-repo/variants/RunnerJobInput.follow-up",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/implementer/resume/repos/2"
+    }
+  ]
+}

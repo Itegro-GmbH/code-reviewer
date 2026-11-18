@@ -1,0 +1,20 @@
+{
+  "why": "`resume.repos` has the job's names in the job's order.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "resume_names",
+  "base": "implementer-multi-repo/variants/RunnerJobInput.follow-up",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/resume/repos/0/name",
+      "value": "shared-lib"
+    },
+    {
+      "op": "replace",
+      "path": "/implementer/resume/repos/1/name",
+      "value": "acme__app"
+    }
+  ]
+}

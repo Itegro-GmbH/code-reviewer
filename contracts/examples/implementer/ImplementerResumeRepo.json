@@ -1,0 +1,10 @@
+{
+  "name": "acme__app",
+  "branches": [
+    {
+      "name": "feature/ACME-12",
+      "head": "9d8c7b6a5f4e3d2c1b0a99887766554433221100"
+    }
+  ],
+  "checkout": "feature/ACME-12"
+}

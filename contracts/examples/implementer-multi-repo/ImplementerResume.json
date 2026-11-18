@@ -1,0 +1,28 @@
+{
+  "turn": 2,
+  "snapshot": true,
+  "previousSummary": "Added the retry with backoff to the webhook sender; the test for the give-up path is still open.",
+  "digest": "Turn 1 (instruction): Add a retry with backoff to the webhook sender.\nTurn 1 (summary): Added the retry. Commits: Add retry with backoff.\nChanged files: src/webhooks/sender.ts, src/webhooks/sender.test.ts",
+  "repos": [
+    {
+      "name": "acme__app",
+      "branches": [
+        {
+          "name": "feature/ACME-12",
+          "head": "9d8c7b6a5f4e3d2c1b0a99887766554433221100"
+        }
+      ],
+      "checkout": "feature/ACME-12"
+    },
+    {
+      "name": "shared-lib",
+      "branches": [],
+      "checkout": null
+    },
+    {
+      "name": "other-org__app",
+      "branches": [],
+      "checkout": null
+    }
+  ]
+}

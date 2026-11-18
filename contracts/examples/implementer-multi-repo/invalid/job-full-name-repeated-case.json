@@ -1,0 +1,20 @@
+{
+  "why": "`fullName` is unique without regard to case (`Acme/App` is `acme/app`).",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "full_name_repeated",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/repos/2/fullName",
+      "value": "ACME/APP"
+    },
+    {
+      "op": "replace",
+      "path": "/implementer/repos/2/cloneUrl",
+      "value": "https://github.com/ACME/APP.git"
+    }
+  ]
+}

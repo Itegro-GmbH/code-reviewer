@@ -4,7 +4,7 @@
 // `make verify` fails while this file differs from what the schema generates.
 
 /**
- * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else. #856: `llm` is required for every job except a turn of the Implementer whose profile names the harness `claude-code` (a subscription turn): that turn runs on the login of the device of the runner, has no model door and no key of ours, and carries no `llm`, no `implementer.cost` and no `implementer.modelEntry`; the runner refuses a job that carries them with it, and every other job without `llm` (`invalid_job`).
+ * Exactly the job the runner reads on stdin (see runner/src/code_reviewer_runner/job.py). Closed: the runner refuses unknown fields. Contains secrets (git.token, llm.apiKey): only the claim response carries it. #746: for `reviewKind: implementer` the job carries the `implementer` object instead of `prUrl`, `command`, `base` and `dynamic`; `git.token` is then a token that may write the contents of exactly the repository named in `implementer.repo` and nothing else. #856: `llm` is required for every job except a turn of the Implementer whose profile names the harness `claude-code` (a subscription turn): that turn runs on the login of the device of the runner, has no model door and no key of ours, and carries no `llm`, no `implementer.cost` and no `implementer.modelEntry`; the runner refuses a job that carries them with it, and every other job without `llm` (`invalid_job`). #1091: for an implementer job with `implementer.repos`, `git.tokens` holds one token for each installation that owns one of its repositories, each made for exactly the repositories of the job it covers, and `git.token` is the token of the first one.
  */
 export type RunnerJobInput = {
   [k: string]: unknown;
@@ -32,6 +32,53 @@ export type RunnerJobInput = {
     baseUrl: string;
     token: string;
     botLogin: string;
+    /**
+     * #1091 (epic #1090, ADR 0006): the git tokens of a multi-repository implementer job, one for each installation of the GitHub App that owns at least one of its repositories (at most 10, no `id` twice: a rule JSON Schema cannot state, the runner refuses a repeat). Present exactly when `implementer.repos` is. Every `implementer.repos[].tokenId` names one of them and every entry is used by at least one repository (the runner refuses a token no repository names and a name no token has: `invalid_job`). `token` stays required and is then **byte-equal** to the `token` of the `tokens` entry that `implementer.repos[0].tokenId` names (a rule JSON Schema cannot state: the runner asserts it and refuses a job that breaks it, `invalid_job`, and redacts the one value once), so a reader that only knows one token works on the first repository; a runner that reads `repos` uses `tokens` and nothing else for git. Tokens are made fresh at every claim, also for a follow-up turn (the app stores none). The token of an entry must be made for exactly the repository ids of the job that belong to that installation: the runner cannot check that, it is the app's duty (ADR 0006).
+     *
+     * @minItems 1
+     * @maxItems 10
+     */
+    tokens?:
+      | [GitToken]
+      | [GitToken, GitToken]
+      | [GitToken, GitToken, GitToken]
+      | [GitToken, GitToken, GitToken, GitToken]
+      | [GitToken, GitToken, GitToken, GitToken, GitToken]
+      | [GitToken, GitToken, GitToken, GitToken, GitToken, GitToken]
+      | [GitToken, GitToken, GitToken, GitToken, GitToken, GitToken, GitToken]
+      | [
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+        ]
+      | [
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+        ]
+      | [
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+          GitToken,
+        ];
   };
   llm?: {
     /**
@@ -69,16 +116,89 @@ export type RunnerJobInput = {
   env: JobEnv;
 };
 /**
- * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a full clone of `repo` (#909: every branch of the provider as a local branch, the whole history and the tags, no remote and no credential) on the new branch `branch` (it must not exist yet), which starts at the head of `startBranch` (the head of `baseBranch` when `startBranch` is absent); `baseBranch` is the branch the work is compared with and merged into. When the turn ends, every local branch the agent created or moved is pushed without force; a branch left as it was cloned is not. A `startBranch` the provider does not have ends the turn `clone_failed`. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base. #856: `cost` and `modelEntry` are required for every turn except one on the harness `claude-code` (the `harness` of the profile), which carries `subscription` instead and neither of them; the runner refuses a job that has both or neither.
+ * #746: what an implementer job asks for (`reviewKind: implementer`; the factory deployment only). A closed object: there is no command, permission, executable, endpoint or upstream URL here, so a job can never widen what the agent may do. The agent works in a full clone of `repo` (#909: every branch of the provider as a local branch, the whole history and the tags, no remote and no credential) on the new branch `branch` (it must not exist yet), which starts at the head of `startBranch` (the head of `baseBranch` when `startBranch` is absent); `baseBranch` is the branch the work is compared with and merged into. When the turn ends, every local branch the agent created or moved is pushed without force; a branch left as it was cloned is not. A `startBranch` the provider does not have ends the turn `clone_failed`. `instruction` is the user's task as literal data. `limits.timeLimitSeconds` is the wall clock the runner holds the turn to (the Dispatcher's own timeout for the kind is the backstop). `cost` and `modelEntry` are the `DynamicCostPolicy` and the `DynamicModelEntry` of the native Dynamic job, unchanged: the same passthrough proxy, price book and token cap, and a native job is the only way the Implementer runs a model. `capabilities` is optional, as for Dynamic. `resume` (#838) is present on a follow-up turn only: the branch then exists on the provider (an earlier turn pushed it) and the turn starts from the branches of `resume` instead of the base. #856: `cost` and `modelEntry` are required for every turn except one on the harness `claude-code` (the `harness` of the profile), which carries `subscription` instead and neither of them; the runner refuses a job that has both or neither. #1091 (epic #1090, ADR 0006): a turn may work on several repositories. `repos` then replaces `repo`, `baseBranch`, `branch` and `startBranch`; every repository is cloned as the single one is (every branch and tag, the whole history, no remote, no credential) into its own directory `/work/<name>` (`ImplementerMountName`), on its own `branch` (or directly on its `base`, see `ImplementerJobRepo`), and when the turn ends the runner pushes, repository by repository and in the order of the list, every local branch the agent created or moved, without force, with the token of that repository (`git.tokens`). **That includes the base branch, in every repository**: a base branch the agent committed on or moved is pushed as well, also when the entry names another working branch. Naming a branch does not protect the base; the branch protection of the provider does, and a refusal is reported for that repository. `profile.canPush` false pushes nothing in any repository. A repository whose clone fails ends the turn before the agent starts, whatever the others did (nothing is pushed). The result reports every repository (`ImplementerResult.repos`).
  */
 export type ImplementerJob = {
   [k: string]: unknown;
 } & {
-  repo: ImplementerRepo;
+  repo?: ImplementerRepo;
+  /**
+   * #1091 (epic #1090, ADR 0006): the repositories of the turn, one to ten, the first one being the repository the old single facts and `resume` of an old session refer to. Present only for a step whose lane names `repos`, only to a caller that named the claim feature `implementer_multi_repo`, and then **instead of** `repo`, `baseBranch`, `branch` and `startBranch` (the schema makes the two forms exclusive, so a runner reads one or the other). No `fullName` twice **without regard to case** (`Acme/App` and `acme/app` are one repository on GitHub: the app refuses such a lane when it validates it, `repo_duplicate`, and the runner refuses a job that has it, `invalid_job`) and no mount `name` twice (`invalid_job`). `git.tokens` carries the tokens, `resume.repos` the state of every repository of a follow-up. A step with `repos` of one entry is a multi-repository job all the same: the form of the job follows the step, not the number of repositories. **A follow-up turn (an answer, `session.continue`, a resume) takes its `repos`, with `name`, `base` and `branch`, from the session as the first turn resolved them and the app stored them: they are never resolved again** (a changed default branch, or a reference that now gives something else, changes nothing); `branchExists` is asked again. **The preamble is the app's:** it writes it at the start of `instruction` (it knows the names, bases and branches): the repositories with mount, base and branch, whether each branch is continued or new, and the rule that the work of a direct repository goes to its base branch. The runner adds no list of repositories and nothing of this kind; the only repository-specific text it still writes is the follow-up note about a branch that moved or is gone (a fact only it knows), naming the repository by its mount. The preamble counts against the 20000 characters of `instruction`; the app keeps the task within what is left. The agent's working directory is `/work`, which is not a repository; each repository is its directory `<name>`.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  repos?:
+    | [ImplementerJobRepo]
+    | [ImplementerJobRepo, ImplementerJobRepo]
+    | [ImplementerJobRepo, ImplementerJobRepo, ImplementerJobRepo]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ]
+    | [
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+        ImplementerJobRepo,
+      ];
   /**
    * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
    */
-  baseBranch: string;
+  baseBranch?: string;
   /**
    * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
    */
@@ -86,7 +206,7 @@ export type ImplementerJob = {
   /**
    * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
    */
-  branch: string;
+  branch?: string;
   instruction: string;
   limits: {
     timeLimitSeconds: number;
@@ -127,6 +247,341 @@ export type ImplementerEnvironment = {
   name: string;
   setupScript?: string;
   network?: ImplementerNetworkRule;
+};
+/**
+ * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `startBranch` (else `baseBranch`) as the contract says above; with it the runner takes the whole repository exactly as a first turn does (#909: every branch of the provider as a local branch and its tags, the whole history, no depth), so `branches` no longer decides what is cloned: it decides what is told to the agent when a branch moved or is gone since the earlier turn, makes the session branch at the start tip when the provider does not have it, and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again. The app still holds the agent's earlier conversation (#840): `snapshot` (optional, default false) says that a stored session exists for this session; the Worker then fetches it from the app (`GET /api/workers/v1/jobs/{id}/resume-session`, `worker-api.v1.json`) and has the engine import it before it starts, and the turn continues in that session (`ImplementerResumeResult.mode` `imported`). When there is none, when it cannot be fetched or read, or the engine cannot import it (`ImplementerResumeResult.reason`), the turn starts a fresh session and is given `previousSummary` (the summary the last turn ended with, at most 8 KiB UTF-8) and `digest` (the app's record of the earlier turns: instructions, summaries, commit subjects, changed files; at most 16 KiB UTF-8) as DATA in a part of the first message of their own, never as instructions and never in the preface the runner writes (`mode` `summary_only`). Both are text that came from the agent and from members of the workspace; the maximum is in bytes, which JSON Schema cannot state, so `maxLength` counts characters and the runner counts bytes.
+ */
+export type ImplementerResume = {
+  [k: string]: unknown;
+} & {
+  turn: number;
+  /**
+   * @maxItems 20
+   */
+  branches?:
+    | []
+    | [ImplementerResumeBranch]
+    | [ImplementerResumeBranch, ImplementerResumeBranch]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ]
+    | [
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+        ImplementerResumeBranch,
+      ];
+  checkout?: string | null;
+  /**
+   * #1091 (epic #1090, ADR 0006): the state of every repository of the session, for a follow-up of a multi-repository session: exactly the repositories of `implementer.repos` of the same job, each named by its mount `name` and holding what `branches` and `checkout` hold for a single repository (at most 20 branches, the working branch first when it is among them; `checkout` the branch HEAD was on when the last turn ended, or null for the working branch). Present exactly when the job has `implementer.repos` (and then `branches` and `checkout` are absent). The same names as the job, in the same order (a rule JSON Schema cannot state: the runner refuses a name the job has not, a repeat and a missing one with `invalid_job`). A repository the earlier turns did not push to has an empty `branches`. The repositories of a session are fixed when it starts, so a follow-up has the same ones, with the `name`, `base` and `branch` the first turn resolved (never resolved again); `repos` on a lane step that continues a session is forbidden for that reason. A direct repository has the base branch in `branches` once an earlier turn pushed to it, and `checkout` null or the base branch. Every other rule of the single form applies to each repository separately, and the conversation of the session (`snapshot`, `previousSummary`, `digest`) is one for the whole session.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  repos?:
+    | [ImplementerResumeRepo]
+    | [ImplementerResumeRepo, ImplementerResumeRepo]
+    | [ImplementerResumeRepo, ImplementerResumeRepo, ImplementerResumeRepo]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ]
+    | [
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+        ImplementerResumeRepo,
+      ];
+  snapshot?: boolean;
+  previousSummary?: string | null;
+  digest?: string | null;
 };
 /**
  * #745: one record of the live view, for one part of the engine's messages. A part is sent again when it changes (a tool: running, then completed) with the same `partId` and a higher `seq`; the app keeps the record with the highest `seq` of each part, so a retry or a record that arrives behind a newer one changes nothing. `kind` is any lower case word, and the app stores the kinds of `KnownStepKind` only. A reader ignores fields it does not know. For a kind the app does not know only `kind`, `partId`, `seq`, `startedAt` and `endedAt` are checked and the other fields are dropped unread, whatever they hold: a newer runner may send kinds of any shape, and one of them must not make the app refuse the batch beside it. For a kind it knows, `KnownStepFields` bounds the other fields. `startedAt` and `endedAt` are epoch milliseconds of the sandbox's clock. The texts are cut by the runner (`text` at 16 KiB, `input` and `error` at 4 KiB, `title` at 512 bytes) and `bytes` is the true size of the cut text; the app cleans them again (control characters, secrets, and on the operator's key the model and provider names) and stores the cost of a model call only for a job on the workspace's own key. Per kind, `text` is required for `reasoning` and `text`, `tool` and `status` for `tool`, `tokens` for `step`.
@@ -566,6 +1021,30 @@ export interface ImplementerRepo {
   cloneUrl: string;
 }
 /**
+ * #1091 (epic #1090, ADR 0006): one repository of a multi-repository turn, in `ImplementerJob.repos`. `base` and `branch` are always resolved by the app (the default branch of the repository when the step gave no base, and the base again when it gave no branch), so the runner never guesses. `branch` equal to `base` means **direct work**: the agent starts on the base branch, no branch is made, and what it commits on it is pushed to it. `branch` different from `base` means a working branch. **`branchExists` is required**: the app decides it at claim time (it asks the provider; for a follow-up turn it is true for every working branch an earlier turn pushed) and the runner follows it. **True:** the runner checks out the branch (it is in the clone, as every branch is, #909) and the work goes on from its tip; a branch the fetched refs do not have ends the turn `clone_failed` (free, before the agent starts, the message names the repository by its `name`). **False:** the runner makes the branch at the head of `base`; a branch the fetched refs have all the same ends the turn `branch_exists` (free, the message names the repository) and the runner **never overwrites or continues it**. For a direct repository it is false and the runner ignores it. A `base` the provider does not have ends the turn `base_branch_not_found` (free, before the agent starts, the message names the repository). `tokenId` names the entry of `git.tokens` whose token reads and writes this repository (the installation it belongs to). **`cloneUrl`** is held to the rule of the single repository (#762), and the runner checks it for **every** entry before it sends any token there: the host must equal the web host of `git.baseUrl` (`github.com` for `api.github.com`), the path must be exactly `/<fullName>` or `/<fullName>.git`, and it must be https without credentials, a query or a fragment (and no address or loopback host); a breach is `invalid_job`. The app builds the address from `fullName` and must give each repository the token of its own installation (`tokenId`): the runner cannot check that. A job with `repos` has no `repo`, `baseBranch`, `branch` and `startBranch`.
+ */
+export interface ImplementerJobRepo {
+  /**
+   * #1091 (epic #1090, ADR 0006): the name a repository of a multi-repository turn is mounted under: the agent finds its working copy at `/work/<name>`. The app derives it and the runner **re-derives it from the `fullName`s of the job and refuses a name that differs** (`invalid_job`), so both sides share one definition. The rule: the name part of `owner/name` (`app` for `Itegro-GmbH/app`), or `<owner>__<name>` (`Itegro-GmbH__app`) for **every** repository of the job whose name part another repository of the job has too (compared without regard to case, so the result does not depend on the order of the list) and for every repository whose name part is reserved (`result` and `reserve`, which the work volume uses itself, and `.git`, which would make `/work` look like a repository; compared without regard to case). The schema states what it can: the pattern allows no leading `-` (a name must never be read as an option by `git`, `docker` or `mkdir`; a leading `.` stays, for `.github`), and `not` forbids `.`, `..`, `.git`, `result` and `reserve` in any case. What it cannot state: the derived names of two repositories can still be equal without regard to case (`acme/app` and `x/app` give `acme__app` and `x__app`, and a third repository `acme/acme__app` then clashes with the first). The **app** refuses such a step before the agent starts with the code `repo_name_clash` (free), and a runner that gets such a job anyway refuses it (`invalid_job`). Unique in the job without regard to case.
+   */
+  name: string;
+  fullName: string;
+  cloneUrl: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  base: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  branch: string;
+  branchExists: boolean;
+  /**
+   * #1091: the name of one git token of a job (`git.tokens`): 1 to 32 letters, digits, `_` or `-`. The app makes it up (`t1`, `t2`, ...); it says nothing of the installation it stands for.
+   */
+  tokenId: string;
+}
+/**
  * #856: what a turn on the harness `claude-code` is run with instead of a model door: the own Claude login of the customer, which lives on the device of the runner and is never in a job, in the app or in a log. `model` is a model name or alias as Claude Code reads it (`sonnet`, `claude-sonnet-5-5`); left out, Claude Code uses its default. `maxBudgetUsd` is the most the turn may be worth at API prices, in US dollars as a decimal string: Claude Code stops the turn after the call that crosses it (`--max-budget-usd`); a turn of several messages gets the budget that is left of the earlier messages' estimates, and when an earlier message's worth is unknown the runner cannot tell what is left, so the turn may be worth up to twice this amount. It is the only brake besides the clock of the job, since there is no model door and no ledger. What a subscription turn is worth is an estimate (`usage.costBasis` is `subscription`) that is shown, never billed and never added to a total.
  */
 export interface ImplementerSubscription {
@@ -603,10 +1082,23 @@ export interface ImplementerResultSchema {
   [k: string]: unknown;
 }
 /**
- * #838 (part of #745): what a follow-up turn of an Implementer session is told about the branches the earlier turns left on the provider. Present only on a follow-up, and only for a caller that named the claim feature `implementer_resume`; a first turn has none. Without it the turn starts from `startBranch` (else `baseBranch`) as the contract says above; with it the runner takes the whole repository exactly as a first turn does (#909: every branch of the provider as a local branch and its tags, the whole history, no depth), so `branches` no longer decides what is cloned: it decides what is told to the agent when a branch moved or is gone since the earlier turn, makes the session branch at the start tip when the provider does not have it, and checks out `checkout`. `turn` is the number of this turn (the first is 1, so a follow-up has 2 or more). `branches` are the branches the last turn pushed with the tip it pushed, the session branch first when it is among them, at most 20, no name twice (a rule JSON Schema cannot state; the runner refuses a repeat). The `head` is only what the earlier turn knew: the runner takes the tip the provider has now, and a branch that moved is reported to the agent, not refused. A branch the provider no longer has is left out; a session branch that is gone ends the turn (`clone_failed`, free). `checkout` is the branch the agent was on when the last turn ended: one of `branches` or the session branch (which a turn that pushed nothing still has), or null for the session branch; any other name is refused by the runner (`invalid_job`). `branches` empty means the earlier turns pushed nothing: the turn starts from the base branch like a first turn. The agent still has no remote and Control still pushes every local branch that has a commit of its own when the turn ends, without force: a branch the agent did not touch is not pushed again. The app still holds the agent's earlier conversation (#840): `snapshot` (optional, default false) says that a stored session exists for this session; the Worker then fetches it from the app (`GET /api/workers/v1/jobs/{id}/resume-session`, `worker-api.v1.json`) and has the engine import it before it starts, and the turn continues in that session (`ImplementerResumeResult.mode` `imported`). When there is none, when it cannot be fetched or read, or the engine cannot import it (`ImplementerResumeResult.reason`), the turn starts a fresh session and is given `previousSummary` (the summary the last turn ended with, at most 8 KiB UTF-8) and `digest` (the app's record of the earlier turns: instructions, summaries, commit subjects, changed files; at most 16 KiB UTF-8) as DATA in a part of the first message of their own, never as instructions and never in the preface the runner writes (`mode` `summary_only`). Both are text that came from the agent and from members of the workspace; the maximum is in bytes, which JSON Schema cannot state, so `maxLength` counts characters and the runner counts bytes.
+ * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
  */
-export interface ImplementerResume {
-  turn: number;
+export interface ImplementerResumeBranch {
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  name: string;
+  head: string;
+}
+/**
+ * #1091: what a follow-up turn is told about one repository of a multi-repository session: the mount `name` of the job's repository, the branches the last turn pushed there with the tip it pushed (as `ImplementerResume.branches`) and the branch the agent was on in it when the last turn ended (as `ImplementerResume.checkout`).
+ */
+export interface ImplementerResumeRepo {
+  /**
+   * #1091 (epic #1090, ADR 0006): the name a repository of a multi-repository turn is mounted under: the agent finds its working copy at `/work/<name>`. The app derives it and the runner **re-derives it from the `fullName`s of the job and refuses a name that differs** (`invalid_job`), so both sides share one definition. The rule: the name part of `owner/name` (`app` for `Itegro-GmbH/app`), or `<owner>__<name>` (`Itegro-GmbH__app`) for **every** repository of the job whose name part another repository of the job has too (compared without regard to case, so the result does not depend on the order of the list) and for every repository whose name part is reserved (`result` and `reserve`, which the work volume uses itself, and `.git`, which would make `/work` look like a repository; compared without regard to case). The schema states what it can: the pattern allows no leading `-` (a name must never be read as an option by `git`, `docker` or `mkdir`; a leading `.` stays, for `.github`), and `not` forbids `.`, `..`, `.git`, `result` and `reserve` in any case. What it cannot state: the derived names of two repositories can still be equal without regard to case (`acme/app` and `x/app` give `acme__app` and `x__app`, and a third repository `acme/acme__app` then clashes with the first). The **app** refuses such a step before the agent starts with the code `repo_name_clash` (free), and a runner that gets such a job anyway refuses it (`invalid_job`). Unique in the job without regard to case.
+   */
+  name: string;
   /**
    * @maxItems 20
    */
@@ -858,19 +1350,6 @@ export interface ImplementerResume {
         ImplementerResumeBranch,
       ];
   checkout: string | null;
-  snapshot?: boolean;
-  previousSummary?: string | null;
-  digest?: string | null;
-}
-/**
- * #838: a branch of the session the last turn pushed: its name and the full commit id of the tip it pushed.
- */
-export interface ImplementerResumeBranch {
-  /**
-   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
-   */
-  name: string;
-  head: string;
 }
 /**
  * #1053 (epic #1049): the MCP servers the agent step of a turn may use, resolved by the app in the job's workspace when the job is claimed. Present only for a turn a workflow step started whose step has at least one server (or names one that no longer exists), and only to a caller that named the claim feature `implementer_mcp`. `servers` are the ones the workspace still has: `id` is the id the Worker API's MCP route takes, `name` is what the server is called in the harness's configuration (the tools of the agent are prefixed with it), `transport` is how the app reaches it. There is no address and no credential here by design: the agent never talks to a server, only to the local endpoint at the door, and the credential is added by the app on the way to the server. `unavailable` counts the servers the lane named that the workspace does not have (any more), for a note in the run; the turn runs without them.
@@ -885,6 +1364,16 @@ export interface ImplementerMcp {
     transport: "streamable-http" | "sse";
   }[];
   unavailable?: number;
+}
+/**
+ * #1091: one git token of a multi-repository job: `id` is what `ImplementerJob.repos[].tokenId` refers to, `token` is the installation token of one installation of the GitHub App, made for exactly the repositories of the job that belong to that installation (their repository ids) and nothing else, with the contents right the profile needs (write when `profile.canPush` is true or absent, read when it is false), as for a single repository. Secret like `git.token`: never log it.
+ */
+export interface GitToken {
+  /**
+   * #1091: the name of one git token of a job (`git.tokens`): 1 to 32 letters, digits, `_` or `-`. The app makes it up (`t1`, `t2`, ...); it says nothing of the installation it stands for.
+   */
+  id: string;
+  token: string;
 }
 /**
  * Extra options of the PR-Agent tools, as strings. The review tool's options (PR_REVIEWER__*) are used; a previous release's option families for the removed tools (PR_DESCRIPTION__*, PR_CODE_SUGGESTIONS__*, PR_QUESTIONS__*) are accepted for v1 compatibility and ignored. Nothing else is allowed here (credentials, endpoints and the model have their own fields).
@@ -1061,6 +1550,79 @@ export interface ImplementerResult {
   resume?: ImplementerResumeResult;
   agentResult?: ImplementerAgentResult;
   agentAsk?: ImplementerAgentAsk;
+  /**
+   * #1091 (epic #1090, ADR 0006): what the turn did in each repository, present exactly when the job carried `implementer.repos` (`ImplementerRepoResult`; the same repositories in the same order, even when the turn failed, as soon as the runner got as far as the repositories). The fields above then describe the **first** repository (`repos[0]`) and are copies of its entry (`baseCommit`, `headCommit`, `pushed`, `commits`, `filesChanged`, `branches`, `branchesDropped`, `checkedOut`), so a reader that does not know `repos` sees the first repository as it always saw the only one; `summary`, `opencode`, `setup`, `network`, `resume`, `agentResult` and `agentAsk` are the turn's own. **Size:** the body of a completion that carries `repos` is at most **4 MiB (4,194,304 bytes)**, measured as the runner writes it (JSON, every non-ASCII character escaped); the app's limit for the body of an Implementer report is at least that from #1092 on. The runner holds a budget of its own below it: the serialized `repos` together with the old-field copies of the first repository at most **3 MiB (3,145,728 bytes)**, which leaves 1 MiB for the rest of the body. When it is over, it cuts, until it fits: in the repository whose entry is the largest, `filesChanged` first (from the end, whole entries, ten at a time) and, when that list is empty, `commits` (from the oldest end, ten at a time, the head commit stays); it counts what it left out in `filesTruncated` and `commitsTruncated` of that entry and cuts the copy in the old fields of the first repository the same way, so the copies stay equal. Nothing else is cut, and nothing is dropped without a counter.
+   *
+   * @minItems 1
+   * @maxItems 10
+   */
+  repos?:
+    | [ImplementerRepoResult]
+    | [ImplementerRepoResult, ImplementerRepoResult]
+    | [ImplementerRepoResult, ImplementerRepoResult, ImplementerRepoResult]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ]
+    | [
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+        ImplementerRepoResult,
+      ];
 }
 /**
  * #818: what the setup script of a turn did, in `ImplementerResult.setup`; present when a script ran, absent otherwise. `ok` is whether it ended with exit status 0 within its time limit. `exitCode` is its exit status, null when it did not end by itself (the time limit, `timedOut`, or a signal). `output` is the end of what it wrote to stdout and stderr together, at most 8192 characters, with every secret known to the runner removed like every log line. A failed script ends the turn with the error code `environment_setup_failed` before the model is called.
@@ -1135,6 +1697,62 @@ export interface ImplementerAgentAsk {
         string,
       ];
   context?: string;
+}
+/**
+ * #1091 (epic #1090, ADR 0006): what a turn did in one repository of a multi-repository job, in `ImplementerResult.repos`: one entry for every repository of `ImplementerJob.repos`, in the same order, so a reader finds a repository by its `name`. The block is there as soon as every repository is cloned and checked out; a turn that ends earlier (a clone that fails) has no `implementer` block, as for one repository. `branch` and `base` are those of the job; `branch` equal to `base` is direct work. `created` is true when this turn made `branch` (it was not in the clone) and false when it was there (continued: `branchExists` true) or the work was direct. **`baseCommit` is the tip of `branch` when the turn started**: the head of `base` when the turn made the branch and for direct work; for a continued branch its own tip, as the provider had it when this turn started (on a follow-up the tip the session branch started the turn at). **`commits` are the commits this turn made on `branch` after `baseCommit`**, oldest first, and `filesChanged` the files that differ between `baseCommit` and `headCommit`: a turn that made no commit there has none, however many commits a continued branch already had. **`headCommit` is the tip of `branch` when the turn ended**, after the push, and equals `baseCommit` when the turn made no commit there; it is null only when the repository has no commit at all, or when `profile.canPush` is false (the runner then reports no head commit, no commits, no files and no `branches`, as for one repository). `pushed` is true when `branch` at `headCommit` is on the remote at the end of the turn, pushed by it or there already (a continued or direct branch it did not move); never true without a `headCommit`, and false for a repository the push did not get to (a lost lease), which has no `branches` either. `branches` has one entry for every local branch the runner dealt with in this repository (the working branch first, then alphabetical; `pushed` or `rejected` with the reason words of the single form; a rejected push to a protected base branch is `remote_rejected`) and `checkedOut` is the branch HEAD was on at the end. **A pull request is not decided from this entry alone:** the pull request step opens one for a repository when `branch` differs from `base`, the branch has commits ahead of `base` on the provider and no open pull request from that branch exists yet (so a later round without new commits opens no second one, and a branch that already existed still gets its pull request). The lists are shorter than those of the single form because up to ten repositories share one report: at most 100 commits (more are cut off from the oldest end, the head commit is always the last), 250 files and 25 branch entries; `branchesDropped` counts the branches left out as before, and `commitsTruncated` and `filesTruncated` (optional, absent means 0) count the commits and files left out, for the bound or for the size budget of the report (`ImplementerResult.repos`). The turn ends `push_rejected` when, in any repository, the working branch was not taken (rejected for any reason, or gone) or no branch arrived although some had commits, and the message names the repository by its `name`; what was pushed in the others stays pushed and is in the report.
+ */
+export interface ImplementerRepoResult {
+  /**
+   * #1091 (epic #1090, ADR 0006): the name a repository of a multi-repository turn is mounted under: the agent finds its working copy at `/work/<name>`. The app derives it and the runner **re-derives it from the `fullName`s of the job and refuses a name that differs** (`invalid_job`), so both sides share one definition. The rule: the name part of `owner/name` (`app` for `Itegro-GmbH/app`), or `<owner>__<name>` (`Itegro-GmbH__app`) for **every** repository of the job whose name part another repository of the job has too (compared without regard to case, so the result does not depend on the order of the list) and for every repository whose name part is reserved (`result` and `reserve`, which the work volume uses itself, and `.git`, which would make `/work` look like a repository; compared without regard to case). The schema states what it can: the pattern allows no leading `-` (a name must never be read as an option by `git`, `docker` or `mkdir`; a leading `.` stays, for `.github`), and `not` forbids `.`, `..`, `.git`, `result` and `reserve` in any case. What it cannot state: the derived names of two repositories can still be equal without regard to case (`acme/app` and `x/app` give `acme__app` and `x__app`, and a third repository `acme/acme__app` then clashes with the first). The **app** refuses such a step before the agent starts with the code `repo_name_clash` (free), and a runner that gets such a job anyway refuses it (`invalid_job`). Unique in the job without regard to case.
+   */
+  name: string;
+  fullName: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  base: string;
+  /**
+   * #746: the name of a branch as a job carries it: a non-empty text of at most 255 characters without whitespace and not starting with a dash (so it can never be read as an option). Whether it is a valid git ref name is decided by the app when the turn is submitted and again by the runner before it runs git; this is the floor both share.
+   */
+  branch: string;
+  created: boolean;
+  baseCommit: string;
+  headCommit: string | null;
+  pushed: boolean;
+  branchesDropped?: {
+    invalid: number;
+    overflow: number;
+  };
+  commitsTruncated?: number;
+  filesTruncated?: number;
+  /**
+   * @maxItems 25
+   */
+  branches?: {
+    name: string;
+    head: string | null;
+    result: "pushed" | "rejected";
+    reason: string | null;
+  }[];
+  /**
+   * @maxItems 100
+   */
+  commits: {
+    sha: string;
+    subject: string;
+  }[];
+  /**
+   * @maxItems 250
+   */
+  filesChanged: {
+    path: string;
+    /**
+     * #746: what happened to a file between the base commit and the head commit.
+     */
+    status:
+      "added" | "modified" | "deleted" | "renamed" | "copied" | "typechange";
+  }[];
+  checkedOut?: string | null;
 }
 export interface RunnerUsage {
   model: string | null;

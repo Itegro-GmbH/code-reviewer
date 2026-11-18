@@ -1,0 +1,14 @@
+{
+  "why": "`repos` has at least one entry.",
+  "layer": "schema",
+  "error": "invalid_lane",
+  "definition": "AgentStep",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": []
+  },
+  "patch": []
+}

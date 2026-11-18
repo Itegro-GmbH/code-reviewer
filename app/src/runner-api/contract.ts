@@ -78,6 +78,9 @@ export const CLAIM_FEATURES = [
   // a local endpoint for each at its door and points the harness at them. Sent only to a caller that named it and only to a turn a workflow
   // step started; for any other caller the turn runs as before, without MCP tools (not refused: the agent only lacks tools).
   "implementer_mcp",
+  // #1091 (epic #1090, ADR 0006): the runner reads `implementer.repos`, `git.tokens` and `implementer.resume.repos` (several repositories in one
+  // turn) and reports `implementer.repos`. The app will send `repos` only to a caller that named it (#1092); nothing sends it yet.
+  "implementer_multi_repo",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 

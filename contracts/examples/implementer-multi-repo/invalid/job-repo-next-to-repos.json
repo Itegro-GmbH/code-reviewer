@@ -1,0 +1,17 @@
+{
+  "why": "`repos` excludes the single `repo`.",
+  "layer": "schema",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/implementer/repo",
+      "value": {
+        "fullName": "acme/app",
+        "cloneUrl": "https://github.com/acme/app.git"
+      }
+    }
+  ]
+}

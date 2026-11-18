@@ -1,0 +1,13 @@
+{
+  "why": "`branchExists` is required in every entry: the app decides it at claim time.",
+  "layer": "schema",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "remove",
+      "path": "/implementer/repos/0/branchExists"
+    }
+  ]
+}
