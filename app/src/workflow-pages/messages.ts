@@ -436,6 +436,68 @@ export const PAGE_COPY = {
     "A stop was asked for before runs could be discarded: the agent is told to stop and the run ends when it has. You can discard the run instead.",
 } as const;
 
+/** The run as the lane's flow, and the panel of one step (#1079). */
+export const FLOW_COPY = {
+  flowHeading: "Where the run stands",
+  flowLabel: "The lane, with where this run stands on each step",
+  otherSteps: "Other steps of this run (not in the lane of this version)",
+  /** The word a node carries for its state: the state is never told by the colour alone. */
+  state: {
+    done: "Done",
+    running: "Running",
+    waiting: "Waiting for an answer",
+    failed: "Failed",
+    skipped: "Skipped",
+    notReached: "Not reached",
+  },
+  /** What a state means for a node that has no row to show (the panel says it in a sentence). */
+  stateNote: {
+    done: "This step is done.",
+    running: "This step is running now.",
+    waiting: "This step waits for an answer.",
+    failed: "This step failed.",
+    skipped:
+      "This step was skipped: the run took another way (a condition sent it to the other branch, or the trigger that started the run is another one).",
+    notReached: "The run has not got to this step.",
+  },
+  current: "Current step",
+  triggerUsed: "Started this run",
+  triggerUnused: "Not used in this run",
+  round: (round: number, maxRounds: number | undefined): string =>
+    maxRounds === undefined
+      ? `Round ${String(round)}`
+      : `Round ${String(round)} of max ${String(maxRounds)}`,
+  panelLabel: "Details of the selected step",
+  panelClose: "Close the details",
+  panelHint: "Select a step in the flow to see its details.",
+  step: "Step",
+  kind: "Kind",
+  definition: "In the lane",
+  status: "Status",
+  startedAt: "Started",
+  finishedAt: "Finished",
+  duration: "Took",
+  cost: "Cost",
+  profile: "Profile",
+  rounds: "Rounds",
+  roundsHeading: "All rounds",
+  roundsEarlier: "Earlier rounds",
+  resultHeading: "Result",
+  nothingYet: "Nothing yet.",
+  agentRun: "Open the agent's run (live view)",
+  noTicket: "No ticket",
+  ticket: "Ticket",
+  lane: "Lane",
+  duration_run: "Duration",
+  kindName: {
+    trigger: "Trigger",
+    agent: "Agent step",
+    action: "Action",
+    loop: "Loop",
+    if: "Condition",
+  },
+} as const;
+
 export const START_COPY = {
   heading: "Start a run",
   intro:

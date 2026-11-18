@@ -36,6 +36,47 @@ export function repositoryOfRun(
     : undefined;
 }
 
+/** The ticket a run is about, as the run stored it (`ticket.ts`): everything is text from whoever opened it. */
+export type RunTicket = {
+  /** How the ticket is called: `#15` for a GitHub issue, `PROJ-123` for a Jira one. */
+  ref: string;
+  title?: string;
+  /** A link to GitHub, only to an address of the run's own repository. */
+  url?: string;
+};
+
+/** The ticket of a run that has one (a `ticket` in its input, #916), or undefined. The address is linked through `github-link.ts` only. */
+export function ticketOfRun(
+  run: Pick<RunView, "input">,
+  repository: string | undefined,
+): RunTicket | undefined {
+  if (!isRecord(run.input) || !isRecord(run.input.ticket)) return undefined;
+  const { key, number, title, url } = run.input.ticket;
+  const name =
+    typeof key === "string" && key !== ""
+      ? key
+      : typeof number === "number" && Number.isInteger(number) && number > 0
+        ? String(number)
+        : undefined;
+  if (name === undefined) return undefined;
+  const link = githubLinkInRepository(url, repository);
+  return {
+    ref: /^\d+$/.test(name) ? `#${name}` : name,
+    ...(typeof title === "string" && title !== "" ? { title } : {}),
+    ...(link === undefined ? {} : { url: link }),
+  };
+}
+
+/** How long a run took, or null while it runs or when the times do not fit together. */
+export function runDurationMs(
+  run: Pick<RunView, "createdAt" | "finishedAt">,
+): number | null {
+  return stepDurationMs({
+    startedAt: run.createdAt,
+    finishedAt: run.finishedAt,
+  });
+}
+
 /** How long a finished step took, or null when it did not start, did not finish, or the times do not fit together. */
 export function stepDurationMs(
   step: Pick<StepView, "startedAt" | "finishedAt">,
@@ -149,6 +190,8 @@ export function controlResultOf(
 
 /** What an agent step returned: the branch it pushed to (a link when the repository is known), and the rest of the output as data. */
 export type AgentResult = {
+  /** What the agent said it did, as the text it is (the `summary` of its result). */
+  summary?: string;
   branch?: string;
   branchUrl?: string;
   /** The output without the facts the page shows itself, for the collapsed JSON; undefined when there is nothing left. */
@@ -163,7 +206,9 @@ export function agentResultOf(
 ): AgentResult | undefined {
   if (step.kind !== "agent" || !isRecord(step.output)) return undefined;
   const result: AgentResult = {};
-  const { branch } = step.output;
+  const { branch, summary } = step.output;
+  if (typeof summary === "string" && summary.trim() !== "")
+    result.summary = summary;
   if (typeof branch === "string" && branch !== "") {
     result.branch = branch;
     const link = githubBranchLink(repository, branch);
@@ -171,13 +216,13 @@ export function agentResultOf(
   }
   const rest = Object.fromEntries(
     Object.entries(step.output).filter(
-      ([name]) => !(SHOWN_FACTS as readonly string[]).includes(name),
+      ([name]) =>
+        !(SHOWN_FACTS as readonly string[]).includes(name) &&
+        !(name === "summary" && result.summary !== undefined),
     ),
   );
   if (Object.keys(rest).length > 0) result.fields = rest;
-  return result.branch === undefined && result.fields === undefined
-    ? undefined
-    : result;
+  return Object.keys(result).length === 0 ? undefined : result;
 }
 
 /**

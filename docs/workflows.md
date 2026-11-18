@@ -1406,8 +1406,16 @@ not exist.
 
     The basis is kept with the step (`workflow_step_runs.cost_basis`, null for a step that was charged nothing, and for steps written before milestone 3c) and is
     in the step of the run routes as `costBasis`.
-  - **Steps**, in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost. An agent step links to its
-    Implementer run (`/w/<slug>/runs/<jobId>`), where the live view shows what the agent does.
+  - **Header (#1079).** The ticket (its ref, its title as text, and a link only for an address of the run's own repository on github.com), the lane and the version the run uses, the status, the trigger, who put the label on, when it started and ended, how long it took, and what was spent of the budget. The controls stay as they are.
+  - **The flow (#1079).** The lane document of **the version the run uses** (read through the workflow service, so a lane saved again since does not change an old run) is drawn read-only with the layout of the builder's flow (`builder/flow-layout.tsx`, shared with the builder): the triggers with their pre-steps, the shared steps top down, a loop as a container, an `if` with then and else side by side, and `onFailure` at the bottom. Every node is a button with its kind, its name, its **state** and, where known, how long it took and what it cost:
+    - *Done*, *Running* (the symbol pulses; the pulse is off for a person who asked for less motion), *Waiting for an answer*, *Failed*, *Skipped* (the branch that was not taken, or a trigger that did not start the run) and *Not reached*. A state is told by a symbol and a word as well as by a calm hue (`--flow-*` in `theme.css`, light and dark);
+    - a loop says its round ("Round 2 of max 3"); the loop has no row of its own while it runs, so its state and round come from its body;
+    - steps are matched to nodes by `stepId`, the **latest round wins** on the node, and the earlier rounds are listed in the panel;
+    - the step that runs now is marked **Current step** and is scrolled into view when the page opens.
+
+    The mapping is a pure function (`workflow-pages/run-node-states.ts`). A lane that cannot be read falls back to the plain list of steps.
+  - **The step panel (#1079).** Selecting a node (a click or the keyboard) shows its details beside the flow (a sheet on a narrow screen) and puts `?step=<stepId>` in the address, without a new history entry; an id the lane does not have is ignored. Until somebody selects one, the selection is the current step, else the failed one, else the last. The panel (labelled by the step's name) shows the status, the times, how long, the cost with its basis, the profile, why it failed in words, the question with the answer form while the step waits, the result (what the agent said first, as text, then the branch and the other fields), every round, and for an agent step the link to its Implementer run (`/w/<slug>/runs/<jobId>`, the live view) with the MCP calls of that job. A node the run has not reached says so and what the lane says about it.
+  - **Steps (the plain list).** The steps in the order they ran, each with its status, its failure, how long it took, the profile of an agent step and its cost, for a lane that cannot be drawn.
   - **Rounds and control (#846).** Every run of a step is listed on its own, and a step that ran more than once says its round ("round 2"). A **condition** and a **loop** are steps
     of their own: the condition says which branch it took, the loop how it ended (its condition held, its last round ran, or the budget could not pay another agent step) and after how many rounds.
     A step in a branch that was not taken is listed with the status **Skipped**.

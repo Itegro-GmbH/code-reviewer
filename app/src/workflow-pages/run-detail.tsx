@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
 "use client";
-// One run of a workflow for a member (#873): the status (a failure told in words, never as its code), the budget and what was spent
-// with where the cost figures come from, and the steps with their status, failure, duration and result. An agent step links to its
-// Implementer run, where the live view shows what the agent does. While the run runs the browser asks for newer data; once it has
-// ended it stops. Everything that came from outside (the values an agent returned, what an action got from GitHub) is rendered as
-// text, and a link is made only to an address of the run's own repository on github.com (`github-link.ts`).
+// One run of a workflow for a member (#873, #1079): the header (the ticket, the lane and its version, the status, who started it and how,
+// when, how long, what was spent of the budget with where the cost figures come from), the lane as a flow with every node coloured by where
+// the run stands, and the details of the step that is selected (`?step=<id>` in the address; by default the current step, else the failed
+// one, else the last). A lane that cannot be drawn falls back to the plain list of steps. While the run runs or waits for an answer the
+// browser asks for newer data; once it has ended it stops. Everything that came from outside (the values an agent returned, what an
+// action got from GitHub, the ticket's title) is rendered as text, and a link is made only through `github-link.ts`.
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useId, useMemo, useState, type ReactNode } from "react";
+import {
+  useId,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Button } from "../components/button.tsx";
 import { DescriptionList } from "../components/description-list.tsx";
-import { InfoHint } from "../components/info-hint.tsx";
 import { StatusRegion } from "../components/status-region.tsx";
 import { Alert } from "../components/ui/alert.tsx";
 import {
@@ -20,9 +27,10 @@ import {
   CardTitle,
 } from "../components/ui/card.tsx";
 import { Progress } from "../components/ui/progress.tsx";
+import { Sheet, SheetContent } from "../components/ui/sheet.tsx";
 import { useProductIdentity } from "../product-identity/context.tsx";
 import { formatDuration } from "../runs/run-duration.ts";
-import { formatUtc } from "../ui/format-time.ts";
+import { browserRunsApi, type RunsApi } from "../runs/ui/api.ts";
 import { useLiveSnapshot } from "../ui/use-live-snapshot.ts";
 import { workspacePath } from "../workspaces/paths.ts";
 import type { RunView, StepView } from "../workflow-runs/service.ts";
@@ -31,32 +39,35 @@ import {
   WORKFLOW_RUN_POLL_MS,
   type WorkflowRunsApi,
 } from "./api.ts";
+import { normalise, type Doc } from "./builder/document.ts";
 import {
   costBasisCopy,
   COST_COPY,
   CONTROL_COPY,
-  COST_NOT_RUN_COPY,
   describeRunFailure,
   describeRunPollFailure,
   describeStartFailure,
   describeStepFailure,
+  FLOW_COPY,
   PAGE_COPY,
   STEP_KIND_COPY,
   TRIGGER_COPY,
 } from "./messages.ts";
 import { AskBlock } from "./ask-block.tsx";
+import { RunFlow } from "./run-flow.tsx";
+import { nodeStatesOf, selectionOf } from "./run-node-states.ts";
+import { StepPanel } from "./step-panel.tsx";
 import { StepStatusBadge, WorkflowRunStatusBadge } from "./status-badge.tsx";
+import { GithubLink, StepCost, StepOutcome, Time } from "./step-parts.tsx";
 import {
-  actionResultOf,
-  agentResultOf,
-  controlResultOf,
   costBasesOf,
   formatUsd,
-  neverRan,
   readableMessageOf,
   repositoryOfRun,
+  runDurationMs,
   spentShare,
   stepDurationMs,
+  ticketOfRun,
 } from "./view.ts";
 
 export type RunSnapshot = { run: RunView };
@@ -81,114 +92,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Time({ iso }: { iso: string | null }) {
-  if (iso === null)
-    return (
-      <span className="text-muted-foreground">{PAGE_COPY.stepNotStarted}</span>
-    );
-  return <time dateTime={iso}>{formatUtc(iso)}</time>;
-}
-
-/** A link to GitHub that the view checked, or the text alone. The text is from outside and stays text. */
-function GithubLink({
-  href,
-  children,
-}: {
-  href: string | undefined;
-  children: ReactNode;
-}) {
-  return href === undefined ? (
-    <span className="break-all">{children}</span>
-  ) : (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="break-all"
-    >
-      {children}
-    </a>
-  );
-}
-
-function CostBasisText({
-  basis,
-}: {
-  basis: NonNullable<StepView["costBasis"]>;
-}) {
-  const copy = costBasisCopy(basis);
-  return (
-    <span className="inline-flex items-center gap-1">
-      <span data-slot="cost-basis" data-basis={basis}>
-        {copy.label}
-      </span>
-      <InfoHint label={`About the cost basis ${copy.label}`}>
-        {copy.explanation}
-      </InfoHint>
-    </span>
-  );
-}
-
-/** The cost of a step that no runner took: it never ran, so the basis of a figure does not apply. */
-function NotRunText() {
-  return (
-    <span className="inline-flex items-center gap-1">
-      <span data-slot="cost-basis" data-basis="not_run">
-        {COST_NOT_RUN_COPY.label}
-      </span>
-      <InfoHint
-        label={`About the cost of a step that ${COST_NOT_RUN_COPY.label}`}
-      >
-        {COST_NOT_RUN_COPY.explanation}
-      </InfoHint>
-    </span>
-  );
-}
-
-/**
- * What a step cost, after the duration. A subscription turn (#856) was not billed: its figure is an estimate at API prices and reads
- * "≈ $0.42 through a subscription", or "no estimate, through a subscription" when Claude Code gave none (booked as 0). Any other
- * figure is "Cost $0.42 (reported)".
- */
-function StepCost({ step, costUsd }: { step: StepView; costUsd: number }) {
-  if (step.costBasis === "subscription") {
-    return (
-      <>
-        {" · "}
-        {COST_COPY.stepCost}{" "}
-        <span data-slot="step-cost">
-          {costUsd === 0
-            ? COST_COPY.noEstimate
-            : `${COST_COPY.approximately} ${formatUsd(costUsd)}`}
-        </span>{" "}
-        <CostBasisText basis="subscription" />
-      </>
-    );
-  }
-  return (
-    <>
-      {" · "}
-      {COST_COPY.stepCost}{" "}
-      <span data-slot="step-cost">{formatUsd(costUsd)}</span>
-      {step.costBasis === null ? null : (
-        <>
-          {" ("}
-          {neverRan(step) ? (
-            <NotRunText />
-          ) : (
-            <CostBasisText basis={step.costBasis} />
-          )}
-          {")"}
-        </>
-      )}
-    </>
-  );
-}
-
+/** What was spent of the budget, and where the cost figures come from: the lower part of the header. */
 function Budget({ run }: { run: RunView }) {
   const bases = costBasesOf(run.steps);
   return (
-    <Section title={COST_COPY.budget}>
+    <div data-slot="run-budget" className="flex flex-col gap-2">
+      <h3 className="text-sm font-semibold">{COST_COPY.budget}</h3>
       <p data-slot="run-spent" className="text-sm">
         <span className="font-semibold">{formatUsd(run.spentUsd)}</span>{" "}
         {COST_COPY.of}{" "}
@@ -214,98 +123,32 @@ function Budget({ run }: { run: RunView }) {
           </ul>
         </div>
       )}
-    </Section>
-  );
-}
-
-/** What an action step returned: the link, the number, whether it existed before. */
-function ActionOutcome({
-  step,
-  repository,
-}: {
-  step: StepView;
-  repository: string | undefined;
-}) {
-  const result = actionResultOf(step, repository);
-  if (result === undefined) return null;
-  return (
-    <div data-slot="step-action-result" className="flex flex-col gap-1 text-sm">
-      {result.url === undefined && result.urlText === undefined ? null : (
-        <p>
-          <GithubLink href={result.url}>
-            {result.url === undefined
-              ? (result.urlText ?? "")
-              : PAGE_COPY.stepLink}
-          </GithubLink>
-        </p>
-      )}
-      {result.number === undefined ? null : (
-        <p>
-          {PAGE_COPY.stepNumber}: <span>{result.number}</span>
-        </p>
-      )}
-      {result.existing === undefined ? null : (
-        <p className="text-muted-foreground">
-          {result.existing ? PAGE_COPY.stepExisting : PAGE_COPY.stepCreated}
-        </p>
-      )}
     </div>
   );
 }
 
-/** What an agent step returned: the branch, and the rest of its output as JSON text in a collapsed block. */
-function AgentOutcome({
-  step,
+/** The ticket the run is about: its ref, its title (text) and, for an address of the run's own repository, a link. */
+function Ticket({
+  run,
   repository,
 }: {
-  step: StepView;
+  run: RunView;
   repository: string | undefined;
 }) {
-  const result = agentResultOf(step, repository);
-  if (result === undefined) return null;
+  const ticket = ticketOfRun(run, repository);
+  if (ticket === undefined) return null;
   return (
-    <div data-slot="step-agent-result" className="flex flex-col gap-2 text-sm">
-      {result.branch === undefined ? null : (
-        <p>
-          {PAGE_COPY.stepBranch}:{" "}
-          <GithubLink href={result.branchUrl}>{result.branch}</GithubLink>
-        </p>
-      )}
-      {result.fields === undefined ? null : (
-        <details>
-          <summary className="cursor-pointer text-muted-foreground">
-            {PAGE_COPY.stepResultJson}
-          </summary>
-          <pre className="mt-2 max-h-96 overflow-auto font-mono text-xs break-words whitespace-pre-wrap">
-            {JSON.stringify(result.fields, null, 2)}
-          </pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
-/** What a condition or a loop decided, in a sentence, and for a loop how many rounds it ran. */
-function ControlOutcome({ step }: { step: StepView }) {
-  const result = controlResultOf(step);
-  if (result === undefined) return null;
-  return (
-    <div
-      data-slot="step-control-result"
-      className="flex flex-col gap-1 text-sm"
+    <p
+      data-slot="run-ticket"
+      className="flex flex-wrap items-baseline gap-x-2 text-base"
     >
-      {result.taken === undefined ? null : (
-        <p>{CONTROL_COPY.taken[result.taken]}</p>
+      <GithubLink href={ticket.url}>
+        <span className="font-semibold">{ticket.ref}</span>
+      </GithubLink>
+      {ticket.title === undefined ? null : (
+        <span className="min-w-0 break-words">{ticket.title}</span>
       )}
-      {result.exit === undefined ? null : (
-        <p>{CONTROL_COPY.exit[result.exit]}</p>
-      )}
-      {result.rounds === undefined ? null : (
-        <p className="text-muted-foreground">
-          {CONTROL_COPY.rounds}: {result.rounds}
-        </p>
-      )}
-    </div>
+    </p>
   );
 }
 
@@ -402,13 +245,7 @@ function Step({
         runId={runId}
         api={api}
       />
-      {step.kind === "agent" ? (
-        <AgentOutcome step={step} repository={repository} />
-      ) : step.kind === "action" ? (
-        <ActionOutcome step={step} repository={repository} />
-      ) : (
-        <ControlOutcome step={step} />
-      )}
+      <StepOutcome step={step} repository={repository} />
     </li>
   );
 }
@@ -524,18 +361,242 @@ function RunControls({
   );
 }
 
+/** The viewport is too narrow for the panel beside the flow: it opens as a sheet then. */
+const NARROW_QUERY = "(max-width: 1023px)";
+
+function useIsNarrow(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      if (typeof window.matchMedia !== "function") return () => {};
+      const list = window.matchMedia(NARROW_QUERY);
+      list.addEventListener("change", onChange);
+      return () => list.removeEventListener("change", onChange);
+    },
+    () =>
+      typeof window.matchMedia === "function" &&
+      window.matchMedia(NARROW_QUERY).matches,
+    () => false,
+  );
+}
+
+/** Puts the selected step in the address (`?step=`) without a new entry in the history and without a request. */
+function writeStepToAddress(stepId: string): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set("step", stepId);
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+}
+
+/** The lane as a flow with the panel of the selected step beside it (a sheet on a narrow screen). */
+function RunFlowView({
+  doc,
+  run,
+  states,
+  workspaceSlug,
+  workflowId,
+  repository,
+  api,
+  runsApi,
+}: {
+  doc: Doc;
+  run: RunView;
+  states: NonNullable<ReturnType<typeof nodeStatesOf>>;
+  workspaceSlug: string;
+  workflowId: string;
+  repository: string | undefined;
+  api: WorkflowRunsApi;
+  runsApi: RunsApi;
+}) {
+  const headingId = useId();
+  const narrow = useIsNarrow();
+  // What the address names is only looked up in the lane (`selectionOf`), never used as it is. A person's own choice stays; until there is
+  // one the selection follows the run (the current step moves on while it runs).
+  const fromAddress = useSearchParams()?.get("step") ?? null;
+  const known = (stepId: string | null): stepId is string =>
+    stepId !== null && states.byStepId.has(stepId);
+  const [chosen, setChosen] = useState<string | null>(fromAddress);
+  // The step the sheet is open for (a narrow screen only): a link to a step of the lane opens it, as a click does.
+  const [sheetFor, setSheetFor] = useState<string | null>(
+    known(fromAddress) ? fromAddress : null,
+  );
+  // The address can change under the page (a link inside the app to another step of the same run): the selection follows it. A click
+  // writes its own step to the address, which is no change.
+  const [seen, setSeen] = useState(fromAddress);
+  if (seen !== fromAddress) {
+    setSeen(fromAddress);
+    if (fromAddress !== null) {
+      setChosen(fromAddress);
+      if (known(fromAddress)) setSheetFor(fromAddress);
+    }
+  }
+  const selected = selectionOf(states, chosen);
+  const found =
+    selected === undefined ? undefined : states.byStepId.get(selected);
+  function select(stepId: string): void {
+    setChosen(stepId);
+    setSheetFor(stepId);
+    writeStepToAddress(stepId);
+  }
+  // A closed sheet has no trigger that Radix could hand the focus back to: the node that opened it gets it, so that a keyboard or screen
+  // reader user goes on where they were in the flow.
+  function focusNodeOf(event: Event): void {
+    event.preventDefault();
+    if (selected === undefined) return;
+    const node = [
+      ...document.querySelectorAll<HTMLElement>("[data-node-step]"),
+    ].find((each) => each.getAttribute("data-node-step") === selected);
+    node?.focus();
+  }
+  // A step run the lane has no node for (the lane of this version does not name it) has no place in the flow: it is listed under it, so
+  // that nothing a run did, and no question it asks, is out of reach.
+  const apart = run.steps.filter((step) => !states.byStepId.has(step.id));
+  // The panel is named by its heading; a lane without a node has no heading, and the region is named by a label instead.
+  const labelOf =
+    found === undefined
+      ? { "aria-label": FLOW_COPY.panelLabel }
+      : { "aria-labelledby": headingId };
+  const panel =
+    found === undefined ? (
+      <p className="text-sm text-muted-foreground">{FLOW_COPY.panelHint}</p>
+    ) : (
+      <StepPanel
+        key={found.stepId}
+        stepId={found.stepId}
+        kind={found.kind}
+        node={found.node}
+        found={found}
+        run={run}
+        workspaceSlug={workspaceSlug}
+        workflowId={workflowId}
+        repository={repository}
+        api={api}
+        runsApi={runsApi}
+        headingId={headingId}
+        inSheet={narrow}
+      />
+    );
+  return (
+    <>
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
+        <Section title={FLOW_COPY.flowHeading}>
+          <RunFlow
+            doc={doc}
+            states={states}
+            selected={selected}
+            onSelect={select}
+          />
+        </Section>
+        {narrow ? (
+          <Sheet
+            open={sheetFor !== null}
+            onOpenChange={(open) => {
+              if (!open) setSheetFor(null);
+            }}
+          >
+            <SheetContent
+              side="right"
+              className="w-full overflow-y-auto p-4 sm:max-w-md"
+              {...labelOf}
+              aria-describedby={undefined}
+              onCloseAutoFocus={focusNodeOf}
+            >
+              {panel}
+            </SheetContent>
+          </Sheet>
+        ) : (
+          <aside
+            {...labelOf}
+            data-slot="step-panel-region"
+            className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto"
+          >
+            {panel}
+          </aside>
+        )}
+      </div>
+      {apart.length === 0 ? null : (
+        <FlatSteps
+          run={run}
+          steps={apart}
+          title={FLOW_COPY.otherSteps}
+          workspaceSlug={workspaceSlug}
+          workflowId={workflowId}
+          repository={repository}
+          api={api}
+        />
+      )}
+    </>
+  );
+}
+
+/** The plain list of the steps of a run: for a lane that cannot be drawn. */
+function FlatSteps({
+  run,
+  steps,
+  title,
+  workspaceSlug,
+  workflowId,
+  repository,
+  api,
+}: {
+  run: RunView;
+  /** The steps to list: all of them, or those the lane has no node for. */
+  steps: readonly StepView[];
+  title: string;
+  workspaceSlug: string;
+  workflowId: string;
+  repository: string | undefined;
+  api: WorkflowRunsApi;
+}) {
+  return (
+    <Section title={title}>
+      {steps.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{PAGE_COPY.stepsNone}</p>
+      ) : (
+        <ol className="flex flex-col gap-3">
+          {steps.map((step) => (
+            <Step
+              key={step.position}
+              step={step}
+              repeated={run.steps.some(
+                (other) => other.id === step.id && other.round !== step.round,
+              )}
+              workspaceSlug={workspaceSlug}
+              repository={repository}
+              workflowId={workflowId}
+              runId={run.id}
+              api={api}
+            />
+          ))}
+        </ol>
+      )}
+    </Section>
+  );
+}
+
 export function WorkflowRunDetail({
   workspaceSlug,
   workflowId,
   initial,
+  laneName,
+  document,
   api: apiProp,
+  runsApi: runsApiProp,
 }: {
   /** The workspace of the page: the polling and every link stay in it. */
   workspaceSlug: string;
   workflowId: string;
   initial: RunSnapshot;
+  /** The name of the lane, for the header. */
+  laneName?: string;
+  /** The lane document of the version the run uses: what the flow draws. Left out or unusable, the steps are listed. */
+  document?: unknown;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
+  /** Only tests pass this, for the same reason: the MCP calls of an agent step's job. */
+  runsApi?: RunsApi;
 }) {
   const product = useProductIdentity();
   // One client for the life of the component: a new one every render would restart what depends on it.
@@ -544,6 +605,11 @@ export function WorkflowRunDetail({
     [workspaceSlug],
   );
   const api = apiProp ?? defaultApi;
+  const defaultRunsApi = useMemo(
+    () => browserRunsApi(workspaceSlug),
+    [workspaceSlug],
+  );
+  const runsApi = runsApiProp ?? defaultRunsApi;
   const { data, failed, failureCode, stopped } = useLiveSnapshot({
     initial,
     fetchLatest: () => api.run(workflowId, initial.run.id),
@@ -565,6 +631,12 @@ export function WorkflowRunDetail({
       : data.run;
   const repository = repositoryOfRun(run);
   const failure = describeRunFailure(run.errorCode);
+  const doc = useMemo(() => normalise(document), [document]);
+  const states = useMemo(
+    () => (doc === undefined ? undefined : nodeStatesOf(doc, run)),
+    [doc, run],
+  );
+  const duration = runDurationMs(run);
   return (
     <div className="flex flex-col gap-6">
       <StatusRegion label="Updating the run">
@@ -577,11 +649,19 @@ export function WorkflowRunDetail({
         </Alert>
       )}
       <Section title={PAGE_COPY.runTitle}>
+        <Ticket run={run} repository={repository} />
         <DescriptionList
           items={[
             {
               term: "Status",
               description: <WorkflowRunStatusBadge status={run.status} hint />,
+            },
+            ...(laneName === undefined
+              ? []
+              : [{ term: FLOW_COPY.lane, description: laneName }]),
+            {
+              term: PAGE_COPY.runWorkflowVersion,
+              description: run.workflowVersion,
             },
             {
               term: PAGE_COPY.runTrigger,
@@ -603,10 +683,18 @@ export function WorkflowRunDetail({
                     description: <Time iso={run.finishedAt} />,
                   },
                 ]),
-            {
-              term: PAGE_COPY.runWorkflowVersion,
-              description: run.workflowVersion,
-            },
+            ...(duration === null
+              ? []
+              : [
+                  {
+                    term: FLOW_COPY.duration_run,
+                    description: (
+                      <span data-slot="run-duration">
+                        {formatDuration(duration)}
+                      </span>
+                    ),
+                  },
+                ]),
             ...(repository === undefined
               ? []
               : [
@@ -619,6 +707,7 @@ export function WorkflowRunDetail({
             { term: PAGE_COPY.runBaseBranch, description: run.baseBranch },
           ]}
         />
+        <Budget run={run} />
         <RunControls
           run={run}
           workflowId={workflowId}
@@ -626,29 +715,28 @@ export function WorkflowRunDetail({
           onChanged={setChanged}
         />
       </Section>
-      <Budget run={run} />
-      <Section title={PAGE_COPY.stepsHeading}>
-        {run.steps.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{PAGE_COPY.stepsNone}</p>
-        ) : (
-          <ol className="flex flex-col gap-3">
-            {run.steps.map((step) => (
-              <Step
-                key={step.position}
-                step={step}
-                repeated={run.steps.some(
-                  (other) => other.id === step.id && other.round !== step.round,
-                )}
-                workspaceSlug={workspaceSlug}
-                repository={repository}
-                workflowId={workflowId}
-                runId={run.id}
-                api={api}
-              />
-            ))}
-          </ol>
-        )}
-      </Section>
+      {doc === undefined || states === undefined ? (
+        <FlatSteps
+          run={run}
+          steps={run.steps}
+          title={PAGE_COPY.stepsHeading}
+          workspaceSlug={workspaceSlug}
+          workflowId={workflowId}
+          repository={repository}
+          api={api}
+        />
+      ) : (
+        <RunFlowView
+          doc={doc}
+          run={run}
+          states={states}
+          workspaceSlug={workspaceSlug}
+          workflowId={workflowId}
+          repository={repository}
+          api={api}
+          runsApi={runsApi}
+        />
+      )}
     </div>
   );
 }
