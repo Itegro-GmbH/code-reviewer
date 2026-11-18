@@ -110,6 +110,33 @@ describe("the states of the nodes of a lane", () => {
   });
 
   // #1079-T03
+  it("marks neither of two triggers of one kind as unused when an old run does not say which fired", () => {
+    const lane = {
+      triggers: [
+        { id: "first", kind: "manual", steps: [] },
+        {
+          id: "second",
+          kind: "manual",
+          steps: [{ id: "pre", kind: "action" }],
+        },
+      ],
+      steps: [{ id: "only", kind: "action" }],
+    };
+    const states = nodeStatesOf(
+      lane,
+      run({
+        triggerId: null,
+        trigger: "manual",
+        steps: rows(["only", "succeeded"]),
+      }),
+    );
+    expect(states?.byStepId.get("first")?.state).toBe("notReached");
+    expect(states?.byStepId.get("second")?.state).toBe("notReached");
+    expect(states?.byStepId.get("pre")?.state).toBe("notReached");
+    expect(states?.byStepId.get("only")?.state).toBe("done");
+  });
+
+  // #1079-T03
   it("passes over no trigger when the run does not say which started it", () => {
     const { state } = statesOf([], { triggerId: null, trigger: "schedule" });
     expect(state("labeled")).toBe("notReached");
@@ -316,6 +343,25 @@ describe("the step to select", () => {
   });
 
   // #1079-T11
+  it("does not take a step that was passed over as the last one", () => {
+    const { states } = statesOf(
+      rows(
+        ["start", "succeeded"],
+        ["done", "succeeded", { kind: "if", output: { taken: "then" } }],
+        ["pr", "succeeded", { kind: "action" }],
+        ["stuck", "skipped", { kind: "action" }],
+      ),
+      { status: "succeeded" },
+    );
+    expect(states.last).toBe("pr");
+    expect(states.fallback).toBe("pr");
+    // Nothing but passed-over rows: the newest of them is still better than nothing.
+    expect(
+      statesOf(rows(["stuck", "skipped", { kind: "action" }])).states.last,
+    ).toBe("stuck");
+  });
+
+  // #1079-T11
   it("takes the one that waits for an answer as the current one, and the newest when several are open", () => {
     const waiting = statesOf(
       rows(["start", "succeeded"], ["implement", "waiting"]),
@@ -355,5 +401,129 @@ describe("the step to select", () => {
     expect(selectionOf(states, "__proto__")).toBe("implement");
     expect(selectionOf(states, null)).toBe("implement");
     expect(selectionOf(states, undefined)).toBe("implement");
+  });
+});
+
+// A loop in a loop (`LOOP_NESTING_MAX = 2`): the engine counts the rounds of a step over the whole run, so the round of a loop is
+// counted per pass of the loop it is in, and a loop whose body is newer than its own end row is not over.
+describe("loops in loops", () => {
+  const nested = {
+    triggers: [{ id: "manual", kind: "manual", steps: [] }],
+    steps: [
+      {
+        id: "outer",
+        kind: "loop",
+        maxRounds: 3,
+        body: [
+          {
+            id: "inner",
+            kind: "loop",
+            maxRounds: 3,
+            body: [{ id: "x", kind: "agent" }],
+          },
+        ],
+      },
+    ],
+  };
+  const end = (
+    rounds: number,
+  ): [string, StepView["status"], Partial<StepView>] => [
+    "inner",
+    "succeeded",
+    { kind: "loop", output: { exit: "until", rounds } },
+  ];
+  function nestedStates(
+    steps: StepView[],
+    more: Partial<Parameters<typeof run>[0]> = {},
+  ) {
+    const states = nodeStatesOf(
+      nested,
+      run({ status: "running", triggerId: "manual", steps, ...more }),
+    );
+    if (states === undefined) throw new Error("the lane is readable");
+    return states.byStepId;
+  }
+
+  // #1079-T12
+  it("counts the round of each loop per pass: x runs in round 2 of the outer loop after the inner loop ran three rounds in round 1", () => {
+    const byStepId = nestedStates(
+      rows(["x", "succeeded"], ["x", "succeeded"], ["x", "succeeded"], end(3), [
+        "x",
+        "running",
+      ]),
+    );
+    expect(byStepId.get("x")?.state).toBe("running");
+    expect(byStepId.get("inner")?.state).toBe("running");
+    expect(byStepId.get("inner")?.round).toBe(1);
+    expect(byStepId.get("inner")?.latest).toBeUndefined();
+    expect(byStepId.get("outer")?.state).toBe("running");
+    expect(byStepId.get("outer")?.round).toBe(2);
+    expect(byStepId.get("outer")?.maxRounds).toBe(3);
+  });
+
+  // #1079-T12
+  it("follows the round of the inner loop while it goes on inside one round of the outer loop", () => {
+    const byStepId = nestedStates(
+      rows(
+        ["x", "succeeded"],
+        end(1),
+        ["x", "succeeded"],
+        ["x", "succeeded"],
+        ["x", "running"],
+      ),
+    );
+    expect(byStepId.get("inner")?.round).toBe(3);
+    expect(byStepId.get("outer")?.round).toBe(2);
+  });
+
+  // #1079-T12
+  it("shows both loops as done with the rounds they ended with once everything is over", () => {
+    const byStepId = nestedStates(
+      rows(
+        ["x", "succeeded"],
+        end(1),
+        ["x", "succeeded"],
+        ["x", "succeeded"],
+        end(2),
+        [
+          "outer",
+          "succeeded",
+          { kind: "loop", output: { exit: "until", rounds: 2 } },
+        ],
+      ),
+      { status: "succeeded" },
+    );
+    expect(byStepId.get("inner")?.state).toBe("done");
+    expect(byStepId.get("inner")?.round).toBe(2);
+    expect(byStepId.get("outer")?.state).toBe("done");
+    expect(byStepId.get("outer")?.round).toBe(2);
+  });
+
+  // #1079-T12
+  it("shows both loops as failed when x fails inside the second round of the outer loop", () => {
+    const byStepId = nestedStates(
+      rows(["x", "succeeded"], end(1), [
+        "x",
+        "failed",
+        { errorCode: "no_result" },
+      ]),
+      { status: "failed" },
+    );
+    expect(byStepId.get("x")?.state).toBe("failed");
+    expect(byStepId.get("inner")?.state).toBe("failed");
+    expect(byStepId.get("inner")?.round).toBe(1);
+    expect(byStepId.get("outer")?.state).toBe("failed");
+    expect(byStepId.get("outer")?.round).toBe(2);
+  });
+
+  // #1079-T12
+  it("shows a loop that waits for an answer inside the second outer round as waiting", () => {
+    const byStepId = nestedStates(
+      rows(["x", "succeeded"], end(1), ["x", "waiting"]),
+      { status: "waiting" },
+    );
+    expect(byStepId.get("inner")?.state).toBe("waiting");
+    expect(byStepId.get("outer")?.state).toBe("waiting");
+    expect(byStepId.get("outer")?.round).toBe(2);
   });
 });

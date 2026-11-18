@@ -48,7 +48,7 @@ export type NodeStates = {
   current: string | undefined;
   /** The step that failed (the first one that did), if any. */
   failed: string | undefined;
-  /** The step of the newest row. */
+  /** The step of the newest row that was not passed over (any newest row when every row was). */
   last: string | undefined;
   /** What to select when nothing is asked for: the current step, else the failed one, else the last one, else the first node. */
   fallback: string | undefined;
@@ -113,13 +113,15 @@ function firedTriggerOf(
       : undefined;
   const wanted = triggerKindOf(run.trigger);
   if (wanted === undefined) return undefined;
-  return triggers.find((trigger) => {
+  // Two triggers of one kind: nothing says which of them fired, and a wrong answer is worse than none.
+  const same = triggers.filter((trigger) => {
     const kind = triggerKindOf(trigger.kind);
     return (
       kind !== undefined &&
       canonicalTriggerKind(kind) === canonicalTriggerKind(wanted)
     );
-  })?.id;
+  });
+  return same.length === 1 ? same[0]?.id : undefined;
 }
 
 const KINDS = ["agent", "action", "loop", "if"] as const;
@@ -135,6 +137,23 @@ function visitList(
   );
 }
 
+/**
+ * How often a direct child of a loop body has begun in the part of the run after `from` (a position): an agent, an action and an
+ * `if` write a row each time, a loop writes one when it ends, so a loop that runs counts one more. The rows of a step count over the
+ * whole run (`StepView.round` is cumulative), so the round a loop is in cannot be read from them; this counts in one pass of the loop.
+ */
+function visitsAfter(group: readonly NodeRun[], from: number): number {
+  const child = group[0];
+  if (child === undefined) return 0;
+  const own = child.rows.filter((row) => row.position > from);
+  if (child.kind !== "loop") return own.length;
+  const lastEnd = own.at(-1)?.position ?? from;
+  const running = group
+    .slice(1)
+    .some((inner) => inner.rows.some((row) => row.position > lastEnd));
+  return own.length + (running ? 1 : 0);
+}
+
 function visitNode(
   node: Record<string, unknown>,
   context: Context,
@@ -144,9 +163,16 @@ function visitNode(
     ? (node.kind as (typeof KINDS)[number])
     : undefined;
   const stepId = typeof node.id === "string" ? node.id : undefined;
+  // The direct children of a loop body, each with what is inside it (the first of a group is the child itself).
+  const groups: NodeRun[][] =
+    kind === "loop" && Array.isArray(node.body)
+      ? (node.body as unknown[]).flatMap((entry) =>
+          isRecord(entry) ? [visitNode(entry, context, unused)] : [],
+        )
+      : [];
   const inside =
     kind === "loop"
-      ? visitList(node.body, context, unused)
+      ? groups.flat()
       : kind === "if"
         ? [
             ...visitList(node.then, context, unused),
@@ -155,32 +181,45 @@ function visitNode(
         : [];
   if (kind === undefined || stepId === undefined) return inside;
   const rows = context.rows.get(stepId) ?? [];
-  const latest = rows.at(-1);
-  const found: NodeRun = {
-    stepId,
-    kind,
-    node,
-    state:
-      latest !== undefined
-        ? stateOfStatus(latest.status)
-        : stateOfContainer(inside, context.active, unused),
-    rows,
-    latest,
-  };
-  if (kind === "loop") {
-    // The round: a step of the body counts how often it ran, so the newest round any of them reached is the loop's.
-    const reached = Math.max(
-      0,
-      ...inside.flatMap((each) => each.rows.map((row) => row.round)),
-    );
-    const ended = controlResultOf({
-      kind: "loop",
-      output: latest?.output ?? null,
-    })?.rounds;
-    const round = ended ?? reached;
-    if (round > 0) found.round = round;
-    if (typeof node.maxRounds === "number") found.maxRounds = node.maxRounds;
+  if (kind !== "loop") {
+    const latest = rows.at(-1);
+    const found: NodeRun = {
+      stepId,
+      kind,
+      node,
+      state:
+        latest !== undefined
+          ? stateOfStatus(latest.status)
+          : stateOfContainer(inside, context.active, unused),
+      rows,
+      latest,
+    };
+    context.found.push(found);
+    return [found, ...inside];
   }
+  // A loop writes its row when it ends, once for every pass of the loop it is in. Rows of its body that are newer than that row belong
+  // to a pass that is not over: they decide, and the end row of the earlier pass is not the result any more.
+  const ended = rows.at(-1);
+  const from = ended?.position ?? -1;
+  const passing = inside.some((each) =>
+    each.rows.some((row) => row.position > from),
+  );
+  const latest = passing ? undefined : ended;
+  const state =
+    latest !== undefined
+      ? stateOfStatus(latest.status)
+      : stateOfContainer(inside, context.active, unused);
+  const found: NodeRun = { stepId, kind, node, state, rows, latest };
+  // The round of this pass: the most any step of the body has begun since the pass started, so a loop in a loop counts per pass of
+  // the outer one. A loop that was passed over or did not start has none.
+  const round =
+    latest !== undefined
+      ? controlResultOf({ kind: "loop", output: latest.output })?.rounds
+      : state === "skipped" || state === "notReached"
+        ? undefined
+        : Math.max(0, ...groups.map((group) => visitsAfter(group, from)));
+  if (round !== undefined && round > 0) found.round = round;
+  if (typeof node.maxRounds === "number") found.maxRounds = node.maxRounds;
   context.found.push(found);
   return [found, ...inside];
 }
@@ -248,7 +287,12 @@ function summarise(
   );
   const current = active.at(-1)?.id;
   const failed = known.find((step) => step.status === "failed")?.id;
-  const last = known.at(-1)?.id;
+  // A row that was passed over (or whose status is unknown) is not where the run got to.
+  const ran = known.filter((step) => {
+    const state = stateOfStatus(step.status);
+    return state !== "skipped" && state !== "notReached";
+  });
+  const last = (ran.length > 0 ? ran : known).at(-1)?.id;
   const first = [...byStepId.values()].find((node) => node.kind !== "trigger");
   return {
     byStepId,
