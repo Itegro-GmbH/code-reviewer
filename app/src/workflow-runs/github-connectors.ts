@@ -16,6 +16,7 @@ import {
   MAY_HAVE_HAPPENED,
   type ActionCall,
   type ActionConnector,
+  type RepoInput,
 } from "./connectors.ts";
 import {
   ACTION_BODY_MAX_CHARS,
@@ -43,6 +44,15 @@ export type GithubActionTarget = {
 export type GithubConnectorDeps = {
   /** The target of a run's repository; undefined when the repository or its connection is gone. */
   targetOf(call: ActionCall): Promise<GithubActionTarget | undefined>;
+  /**
+   * #1094: the target of an active repository of the workspace by its full name (compared without regard to case), for a pull request step
+   * with `repos`; undefined when the workspace has no such repository or no active connection for it. Left out, such a step ends with
+   * `github_not_found` for every repository.
+   */
+  targetOfRepository?(
+    call: ActionCall,
+    fullName: string,
+  ): Promise<GithubActionTarget | undefined>;
   /**
    * The ticket provider and the container of its tickets for a run (#1035): what the ticket source of the run's project names; undefined
    * when there is none. The ticket actions (`ticket.comment`, `ticket.labels`, `ticket.setStatus`) act through it, the pull request actions
@@ -550,10 +560,137 @@ function reachableText(reachable: readonly string[]): string {
 export function createGithubConnectors(
   deps: GithubConnectorDeps,
 ): ActionConnector[] {
+  /** One pull request of a step with `repos`: its state, and what it is about, as `pullRequests` lists it. */
+  type RepoPullRequest = {
+    fullName: string;
+    base: string;
+    head: string;
+    state: "opened" | "existing" | "skipped";
+    reason?: "direct" | "not_pushed" | "no_commits";
+    number?: number;
+    url?: string;
+  };
+
+  /**
+   * #1094 (ADR 0006): one pull request per repository of the list whose branch differs from its base, is pushed and has commits ahead of
+   * it, each into its own base and its own repository. A repository that already has an open pull request from that branch gives that
+   * one (`existing`); direct work, nothing pushed and no commits between the branches are skipped, not errors. The others are still
+   * tried when one fails; the step then fails with that error and says which pull requests were opened.
+   */
+  async function openForRepos(
+    call: ActionCall,
+    repos: readonly RepoInput[],
+  ): Promise<Record<string, unknown>> {
+    const name = "github.pullRequest.open";
+    const draft =
+      typeof call.inputs.draft === "boolean" ? call.inputs.draft : undefined;
+    const results: RepoPullRequest[] = [];
+    let failure: Error | undefined;
+    for (const entry of repos) {
+      const base = branchName(entry.base, "base");
+      const head = branchName(entry.branch, "head");
+      const skipped = (
+        reason: "direct" | "not_pushed" | "no_commits",
+      ): RepoPullRequest => ({
+        fullName: entry.fullName,
+        base,
+        head,
+        state: "skipped",
+        reason,
+      });
+      if (head === base) {
+        results.push(skipped("direct"));
+        continue;
+      }
+      if (!entry.pushed) {
+        results.push(skipped("not_pushed"));
+        continue;
+      }
+      const title = cleanTitle(entry.title);
+      const body =
+        entry.body === undefined ? undefined : cleanBody(entry.body, "body");
+      const target = await deps.targetOfRepository?.(call, entry.fullName);
+      if (target === undefined) {
+        failure ??= new ConnectorError(
+          "github_not_found",
+          `The repository ${entry.fullName} is not an active repository of this workspace with a GitHub connection.`,
+        );
+        continue;
+      }
+      const { provider, integration, repo } = target;
+      if (provider.openPullRequest === undefined) throw unavailable(name);
+      try {
+        const opened = await provider.openPullRequest(
+          integration,
+          repo,
+          {
+            head,
+            base,
+            title,
+            ...(body === undefined ? {} : { body }),
+            ...(draft === undefined ? {} : { draft }),
+          },
+          call.signal,
+        );
+        results.push({
+          fullName: entry.fullName,
+          base,
+          head,
+          state: opened.existing ? "existing" : "opened",
+          number: opened.number,
+          url: pageOfRepository(
+            opened.url,
+            repo,
+            `/pull/${String(opened.number)}`,
+          ),
+        });
+      } catch (error) {
+        if (
+          error instanceof IntegrationError &&
+          error.code === "INTEGRATION_NO_CHANGES_TO_COMPARE"
+        ) {
+          results.push(skipped("no_commits"));
+          continue;
+        }
+        failure ??= toConnectorError(name, error);
+        // An answer that may not have been seen stops the step at once: the pull requests of the other repositories would be guesses.
+        if (
+          failure instanceof ConnectorError &&
+          failure.code === "github_unavailable"
+        )
+          break;
+      }
+    }
+    if (failure !== undefined) {
+      const done = results
+        .filter((entry) => entry.number !== undefined)
+        .map((entry) => `${entry.fullName}#${String(entry.number)}`);
+      if (failure instanceof ConnectorError && done.length > 0)
+        throw new ConnectorError(
+          failure.code,
+          `${failure.message} Pull requests that were opened or found before: ${done.join(", ")}.`,
+        );
+      throw failure;
+    }
+    const first = results.find((entry) => entry.number !== undefined);
+    return {
+      pullRequests: results,
+      ...(first === undefined
+        ? {}
+        : {
+            number: first.number,
+            url: first.url,
+            existing: first.state === "existing",
+          }),
+    };
+  }
+
   const pullRequestOpen: ActionConnector = {
     name: "github.pullRequest.open",
     async run(call) {
       const name = "github.pullRequest.open";
+      if (Array.isArray(call.inputs.repos))
+        return openForRepos(call, call.inputs.repos as RepoInput[]);
       const head = branchName(call.inputs.head, "head");
       const base = branchName(call.inputs.base ?? call.baseBranch, "base");
       if (head === base)

@@ -11,6 +11,7 @@
 import { isRecord } from "../workflows/json.ts";
 import {
   BUILT_IN_CONNECTORS,
+  PULL_REQUEST_OPENING_CONNECTORS,
   type ConnectorSpec,
   type InputSpec,
 } from "../workflows/connectors.ts";
@@ -126,6 +127,44 @@ function holdsList(type: ValueType): boolean {
   );
 }
 
+/** One repository of the `repos` fact of an agent step, as the connector takes it; `title` and `body` are the texts rendered for it (#1094). */
+export type RepoInput = {
+  fullName: string;
+  base: string;
+  branch: string;
+  pushed: boolean;
+  headCommit: string | null;
+  title?: string;
+  body?: string;
+};
+
+function reposOf(value: unknown, input: string): RepoInput[] {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new ActionInputError(`${input} must be a list of repositories.`);
+  return value.map((entry): RepoInput => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.fullName !== "string" ||
+      typeof entry.base !== "string" ||
+      typeof entry.branch !== "string" ||
+      entry.fullName === "" ||
+      entry.base === "" ||
+      entry.branch === ""
+    )
+      throw new ActionInputError(
+        `${input} must be the repositories of an agent step: each with fullName, base and branch.`,
+      );
+    return {
+      fullName: entry.fullName,
+      base: entry.base,
+      branch: entry.branch,
+      pushed: entry.pushed === true,
+      headCommit:
+        typeof entry.headCommit === "string" ? entry.headCommit : null,
+    };
+  });
+}
+
 /** A value held to the type the spec states for the input; the issue (an object with a number, or a number) is reduced to its number. */
 function coerce(
   value: unknown,
@@ -171,6 +210,8 @@ function coerce(
       );
     }
     case "list":
+      // #1094: the `repos` of a pull request step, the facts of an agent step; held to their shape, not to a list of texts.
+      if (type.items.kind === "object") return reposOf(value, input);
       if (
         !Array.isArray(value) ||
         value.some((entry) => typeof entry !== "string" || entry === "")
@@ -194,6 +235,9 @@ export function resolveActionInputs(
   values: RunValues,
 ): Record<string, unknown> {
   const inputs: Record<string, unknown> = {};
+  const perRepo =
+    node.repos !== undefined &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name);
   for (const [name, input] of Object.entries(spec.inputs) as [
     string,
     InputSpec,
@@ -203,6 +247,8 @@ export function resolveActionInputs(
       if (input.required) throw new ActionInputError(`${name} is missing.`);
       continue;
     }
+    // #1094: with `repos` the title and the body are written once for every repository (below), not once for the step.
+    if (perRepo && (name === "title" || name === "body")) continue;
     const resolved =
       typeof raw === "string" && input.type.kind === "string"
         ? renderText(raw, values, undefined, {
@@ -227,11 +273,47 @@ export function resolveActionInputs(
       input.required || input.target !== undefined,
     );
   }
+  // The pull request step names a branch or the repositories; with neither, the message is the one of the single form (`head` is its input).
+  if (
+    PULL_REQUEST_OPENING_CONNECTORS.includes(spec.name) &&
+    node.head === undefined &&
+    node.repos === undefined
+  )
+    throw new ActionInputError("head is missing.");
+  if (perRepo) {
+    inputs.repos = (inputs.repos as RepoInput[]).map((entry) => {
+      const repoValues: RunValues = {
+        ...values,
+        repo: {
+          fullName: entry.fullName,
+          base: entry.base,
+          branch: entry.branch,
+        },
+      };
+      const render = (name: "title" | "body"): string | undefined => {
+        const raw = node[name];
+        if (typeof raw !== "string") return undefined;
+        return renderText(raw, repoValues, undefined, {
+          defuse: true,
+          plain: name === "title",
+        });
+      };
+      const title = render("title");
+      const body = render("body");
+      return {
+        ...entry,
+        ...(title === undefined ? {} : { title }),
+        ...(body === undefined ? {} : { body }),
+      };
+    });
+    // The texts live in the entries now, one per repository; the connector checks them there like the single form's.
+  }
   if (
     spec.atLeastOneOf !== undefined &&
-    !spec.atLeastOneOf.some(
-      (name) => Array.isArray(inputs[name]) && inputs[name].length > 0,
-    )
+    !spec.atLeastOneOf.some((name) => {
+      const given = inputs[name];
+      return Array.isArray(given) ? given.length > 0 : given !== undefined;
+    })
   )
     throw new ActionInputError(
       `At least one entry in ${spec.atLeastOneOf.join(" or ")} is needed.`,

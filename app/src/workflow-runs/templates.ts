@@ -34,6 +34,8 @@ export type RunValues = {
   failure?: Readonly<Record<string, unknown>>;
   /** The ids of the steps in `steps` that an agent produced: what they report is text an agent wrote, not a literal of the workflow. */
   agentSteps?: ReadonlySet<string>;
+  /** #1094: the repository a pull request is being opened in (`{{repo.fullName}}`, `.base`, `.branch`); set for the title and body of one pull request of a step with `repos`. */
+  repo?: Readonly<Record<string, unknown>>;
 };
 
 export type RenderOptions = {
@@ -338,6 +340,7 @@ function lookup(path: readonly string[], values: RunValues): unknown {
   if (root === "trigger") at = values.trigger;
   else if (root === "failure" && values.failure !== undefined)
     at = values.failure;
+  else if (root === "repo" && values.repo !== undefined) at = values.repo;
   else if (root === "previous") {
     // `previous.<step>.…` starts at the output of that step in the round before.
     const [step, ...inner] = rest;

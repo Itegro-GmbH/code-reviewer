@@ -21,6 +21,7 @@ import { NAMES_LISTED_MAX } from "./limits.ts";
 import {
   describeType,
   valueFits,
+  STRING,
   UNKNOWN,
   type FieldType,
   type ObjectType,
@@ -134,6 +135,8 @@ export type Use = {
   env: Env;
   /** `previous.` is fine without a default here (the `next` instruction of a loop). */
   previousOk: boolean;
+  /** #1094: the text is written once for every repository of a pull request step with `repos`: `repo.fullName`, `repo.base` and `repo.branch` are texts. */
+  repoScope?: true;
   /** Where the node that holds the text sits, to tell a step that comes later from one in another branch. */
   nodePath: string;
   /** The branches around the node, outermost first. */
@@ -341,6 +344,13 @@ function notPreviousMessage(
   return `${shown(stepId)} is no step of the body of the loop '${frame.id}'. 'previous.' names its direct steps.`;
 }
 
+/** #1094: what `{{repo.…}}` offers in the title and the body of a pull request step with `repos`. */
+export const REPO_SCOPE_FIELDS: readonly string[] = [
+  "fullName",
+  "base",
+  "branch",
+];
+
 /** The type of what `ref` points at, or an issue reported and `unknown` returned (so a mistake is reported once). */
 export function resolveReference(
   ref: Reference,
@@ -348,6 +358,22 @@ export function resolveReference(
   use: Use,
 ): Resolution {
   const [root, ...rest] = ref.path as [string, ...string[]];
+  if (root === "repo" && use.repoScope === true) {
+    const [field, ...more] = rest;
+    if (
+      field !== undefined &&
+      more.length === 0 &&
+      REPO_SCOPE_FIELDS.includes(field)
+    )
+      return { type: STRING };
+    return fail(
+      context,
+      use,
+      "reference_unknown_field",
+      `'repo' stands for the repository a pull request is opened in; it has ${listNames(REPO_SCOPE_FIELDS)}.`,
+      REPO_SCOPE_FIELDS,
+    );
+  }
   if (root === "previous") {
     const frame = use.env.loops[use.env.loops.length - 1];
     if (frame === undefined)

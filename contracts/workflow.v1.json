@@ -297,7 +297,7 @@
     "PullRequestOpenAction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "connector", "head", "title"],
+      "required": ["id", "kind", "connector", "title"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -315,6 +315,10 @@
         "head": {
           "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
           "$ref": "#/$defs/Template"
+        },
+        "repos": {
+          "description": "#1094 (epic #1090, ADR 0006): exactly one reference to the `repos` fact of an earlier agent step that may push (`{{implement.repos}}`); the validator refuses anything else (`target_from_untrusted_value`). Replaces `head` and `base`: opens one pull request for each entry whose branch differs from its base, has commits ahead of the base on the provider and has no open pull request from that branch yet, in that entry's repository against its base (an open one is reported as `existing`). An entry with direct work (branch equal to base), nothing pushed or no commits ahead is skipped, not an error. `title` and `body` apply to every pull request, and `{{repo.fullName}}`, `{{repo.base}}` and `{{repo.branch}}` stand for the repository being opened in them. The step yields `pullRequests` (one entry per repository: `fullName`, `base`, `head`, `state` opened|existing|skipped, `reason` for a skipped one, `number` and `url`) and the single `number`, `url` and `existing` of the first pull request that exists (absent when none does). `ticket.requestReview` asks for the first pull request only.",
+          "$ref": "#/$defs/Reference"
         },
         "base": {
           "description": "A branch: a literal, or exactly one reference to `{{trigger.repo.defaultBranch}}` or to an input of a manual trigger (`{{trigger.input.<name>}}`). The default branch of the repository when left out. The validator refuses anything else.",
@@ -336,7 +340,38 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "#1094: a pull request step names the branch to open it from (`head`) or the repositories (`repos`).",
+          "anyOf": [
+            {
+              "required": ["head"]
+            },
+            {
+              "required": ["repos"]
+            }
+          ]
+        },
+        {
+          "description": "#1094: `repos` replaces `head` and `base`: not together.",
+          "if": {
+            "required": ["repos"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["head"]
+                },
+                {
+                  "required": ["base"]
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     "IssueCommentAction": {
       "type": "object",

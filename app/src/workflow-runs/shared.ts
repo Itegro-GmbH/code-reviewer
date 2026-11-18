@@ -165,6 +165,15 @@ const projectOfRun = runTicketTargets.projectOfRun;
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    // #1094: a pull request step with `repos` acts on any active repository of the workspace, by its full name.
+    async targetOfRepository(call, fullName) {
+      const found = await repositoryByName(
+        createRepositoriesRepository(getDatabase(), call.workspaceId),
+      )(fullName);
+      return found === undefined
+        ? undefined
+        : connectorTargetOf(call.workspaceId, found.id);
+    },
     ticketTargetOf,
     // #922: the board of the project the run's lane belongs to.
     async projectBoard(call) {
