@@ -49,7 +49,7 @@ import {
   deriveMountNames,
   firstRepeat,
   type SessionRepo,
-} from "./session-repos.ts";
+} from "../db/session-repos.ts";
 
 export type RepositoryChoice = {
   id: string;

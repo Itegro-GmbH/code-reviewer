@@ -243,9 +243,7 @@ export function createGithubAppProvider(
             "INTEGRATION_ACCESS_SCOPE_REFUSED",
             "The repository does not belong to this integration or has no usable id.",
           );
-        const repositoryIds = [
-          ...new Set(ids.flatMap((entry) => entry ?? [])),
-        ];
+        const repositoryIds = [...new Set(ids.flatMap((entry) => entry ?? []))];
         const minted = await (
           await getClient()
         ).mintInstallationToken(integration.externalId, {

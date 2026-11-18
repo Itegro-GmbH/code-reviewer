@@ -2,7 +2,7 @@
 
 // The repositories of a session of several repositories (#1092, epic #1090, ADR 0006): a step of a lane with `repos` starts a session
 // that works on up to ten repositories. The list, as the first turn resolved it (the repository, its mount `name`, the `base` and the
-// `branch`, never resolved again), is kept here as JSON text (`SessionRepo[]` in src/implementer/session-repos.ts). Null for every
+// `branch`, never resolved again), is kept here as JSON text (`SessionRepo[]` in src/db/session-repos.ts). Null for every
 // session that exists and for every session of a step without `repos`, which works on its one repository (`repository_id`, `base_branch`,
 // `branch`) as always. A session with a list has the first repository of the list in `repository_id`, and a name of the platform's own
 // in `branch` that keeps the unique index of the branch (`workflow/<run>/<step>`; no git branch of that name exists).

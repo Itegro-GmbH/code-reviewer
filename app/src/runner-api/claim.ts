@@ -45,7 +45,7 @@ import {
 } from "../network-rule/network.ts";
 import { IntegrationError } from "../integrations/errors.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
-import type { SessionRepo } from "../implementer/session-repos.ts";
+import type { SessionRepo } from "../db/session-repos.ts";
 import {
   buildMultiRepo,
   MultiRepoRefusal,

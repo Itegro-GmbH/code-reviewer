@@ -7,6 +7,7 @@
 // repository, so the pages need no second lookup. The list is read without the columns it never
 // shows (the stored result with the log, the arguments, the lease): it is asked for every few seconds
 // by every open tab.
+import { parseSessionRepos } from "../session-repos.ts";
 import { labelsFromText } from "../../runner-identity/announcement.ts";
 import "server-only";
 import type { Kysely } from "kysely";
@@ -124,6 +125,11 @@ function readResultValue(text: string | null): Record<string, unknown> | null {
   }
 }
 
+/** The branch of a task to show: the working branch of the first repository for a session of several (its own `branch` is the platform's name), else the session's. */
+function shownBranch(branch: string, repos: string | null): string {
+  return parseSessionRepos(repos)?.[0]?.branch ?? branch;
+}
+
 export function createRunsRepository(
   db: Kysely<Database>,
   workspaceId: WorkspaceId,
@@ -166,6 +172,7 @@ export function createRunsRepository(
           "repositories.full_name as project",
           "repositories.url as repository_url",
           "implementer_sessions.branch as session_branch",
+          "implementer_sessions.repos as session_repos",
           "implementer_turns.profile_can_push as turn_profile_can_push",
         ])
         .where("jobs.workspace_id", "=", workspaceId);
@@ -189,7 +196,8 @@ export function createRunsRepository(
               ? {}
               : {
                   implementer: {
-                    branch: row.session_branch,
+                    // #1092: a session of several repositories has the platform's own name in `branch`; its working branch is the first repository's.
+                    branch: shownBranch(row.session_branch, row.session_repos),
                     repositoryUrl: row.repository_url,
                     ...(row.turn_profile_can_push === null
                       ? {}
@@ -251,6 +259,7 @@ export function createRunsRepository(
         .select([
           "repositories.url as repository_url",
           "implementer_sessions.branch as session_branch",
+          "implementer_sessions.repos as session_repos",
           "implementer_sessions.base_branch as session_base_branch",
           "implementer_turns.instruction as turn_instruction",
           "implementer_turns.profile_can_push as turn_profile_can_push",
@@ -278,7 +287,8 @@ export function createRunsRepository(
         model_tier: modelTier,
         review_comment: reviewComment,
         repository_url: repositoryUrl,
-        session_branch: branch,
+        session_branch: storedBranch,
+        session_repos: sessionRepos,
         session_base_branch: baseBranch,
         turn_instruction: instruction,
         turn_profile_can_push: profileCanPush,
@@ -292,6 +302,8 @@ export function createRunsRepository(
         turn_environment_labels: environmentLabels,
         ...job
       } = row;
+      const branch =
+        storedBranch === null ? null : shownBranch(storedBranch, sessionRepos);
       return {
         job: toJob(job),
         project,

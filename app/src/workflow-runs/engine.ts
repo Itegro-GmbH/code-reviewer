@@ -35,7 +35,7 @@ import {
   BRANCH_NAME_MAX_LENGTH,
   checkBranchName,
 } from "../implementer/branch-name.ts";
-import { deriveMountNames, firstRepeat } from "../implementer/session-repos.ts";
+import { deriveMountNames, firstRepeat } from "../db/session-repos.ts";
 import {
   INSTRUCTION_MAX_LENGTH,
   type StartRepo,

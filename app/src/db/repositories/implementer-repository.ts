@@ -41,7 +41,7 @@ import {
   parseSessionRepos,
   serializeSessionRepos,
   type SessionRepo,
-} from "../../implementer/session-repos.ts";
+} from "../session-repos.ts";
 import type { AgentResultValue, StoredResultSchema } from "../agent-result.ts";
 
 /** A session as the rest of the app sees it. Timestamps are ISO 8601 text in UTC. */

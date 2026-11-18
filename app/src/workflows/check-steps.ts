@@ -68,7 +68,7 @@ import {
   SESSION_REPOS_MAX,
   deriveMountNames,
   firstRepeat,
-} from "../implementer/session-repos.ts";
+} from "../db/session-repos.ts";
 import {
   firstOf,
   type Binding,

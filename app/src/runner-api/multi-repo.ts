@@ -13,7 +13,7 @@ import {
   isDirect,
   preambleOf,
   type SessionRepo,
-} from "../implementer/session-repos.ts";
+} from "../db/session-repos.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { revealGitAccess } from "../integrations/normalized.ts";
 import type { IntegrationRegistry } from "../integrations/registry.ts";
@@ -259,4 +259,3 @@ export async function buildMultiRepo(
     ),
   };
 }
-

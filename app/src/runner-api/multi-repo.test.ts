@@ -4,7 +4,7 @@
 // `branchExists`, one token for each installation made for exactly the repositories of the turn that belong to it, `git.token` (the first
 // repository's), the preamble in front of the instruction, and the refusals that leave no token behind.
 import { describe, expect, it } from "vitest";
-import type { SessionRepo } from "../implementer/session-repos.ts";
+import type { SessionRepo } from "../db/session-repos.ts";
 import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
 import { createGitAccess } from "../integrations/normalized.ts";
 import type { Integration, RepoRef } from "../integrations/types.ts";

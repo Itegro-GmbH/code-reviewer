@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { sha } from "../../test-support/jobs.ts";
 import { createRunsFixture } from "../../test-support/runs.ts";
 import { addUser } from "../../test-support/workspace-deletion-fixture.ts";
-import type { SessionRepo } from "../../implementer/session-repos.ts";
+import type { SessionRepo } from "../session-repos.ts";
 
 async function start() {
   const f = await createRunsFixture();

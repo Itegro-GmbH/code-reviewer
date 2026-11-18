@@ -4,7 +4,7 @@
 // `contracts/examples/implementer-multi-repo/invalid/`, the runner's parser holds the same list). The claim builds a job and holds its
 // own work to them before anything leaves (`checkMultiRepoJob`), so a rule of the contract broken by the app is the app's refusal and
 // never a runner's `invalid_job`. Pure.
-import { deriveMountNames } from "../implementer/session-repos.ts";
+import { deriveMountNames } from "../db/session-repos.ts";
 
 /** A JSON document edited by key (the corpus, the job as it is built). */
 export type JobDocument = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- a JSON document read by key; the rules read what the schema does not state

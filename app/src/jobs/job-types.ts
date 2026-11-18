@@ -11,7 +11,7 @@ import type { JobKind, ProjectReviewKind } from "../job-kind/job-kind.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import type { StoredResultSchema } from "../db/agent-result.ts";
-import type { SessionRepo } from "../implementer/session-repos.ts";
+import type { SessionRepo } from "../db/session-repos.ts";
 import type {
   StoredImplementerSession,
   StoredImplementerTurn,

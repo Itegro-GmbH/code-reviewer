@@ -9,7 +9,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { deriveMountNames } from "../implementer/session-repos.ts";
+import { deriveMountNames } from "../db/session-repos.ts";
 import { applyPatch } from "../test-support/multi-repo-rules.ts";
 import { FAKE_RESOLVER } from "../workflows/test-fixtures.ts";
 import { validateWorkflow } from "../workflows/validate.ts";

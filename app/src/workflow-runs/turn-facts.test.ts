@@ -832,7 +832,8 @@ describe("the facts of a turn on several repositories", () => {
       999,
     );
     expect(
-      (outcome as { output: { repos: { fullName: string }[] } }).output.repos,
+      (outcome as unknown as { output: { repos: { fullName: string }[] } })
+        .output.repos,
     ).toEqual([expect.objectContaining({ fullName: "acme/app" })]);
   });
 
@@ -840,7 +841,7 @@ describe("the facts of a turn on several repositories", () => {
   it("reads nothing but what the runner measured: an entry that is no repository report is left out", () => {
     const outcome = outcomeOfTurn(multi([entry({}), "x", { name: 3 }]), 999);
     expect(
-      (outcome as { output: { repos: unknown[] } }).output.repos,
+      (outcome as unknown as { output: { repos: unknown[] } }).output.repos,
     ).toHaveLength(1);
   });
 });
