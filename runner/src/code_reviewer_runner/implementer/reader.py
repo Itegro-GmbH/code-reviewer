@@ -68,6 +68,7 @@ from .docker_api import DockerApi, DockerError
 from .exec_run import run_exec
 from .git_process import Outcome
 from .placement import B_WORK_VOLUME, HOSTED, Placement
+from .repo_places import SINGLE, RepoPlaces
 from .result_channel import (
     ASK_FILE,
     READ_RESULT_SCRIPT,
@@ -125,9 +126,7 @@ UPLOAD_PACK_PROTOCOL_VARIABLE: Final = "GIT_PROTOCOL"
 # programs git runs for it (an fsmonitor, hooks) or work that outlives the command (gc,
 # maintenance).
 # Not a wall: a filter driver or an attribute of the tree cannot be switched off by name.
-READER_GIT_OPTIONS: Final = (
-    "-c",
-    f"safe.directory={READER_REPO}",
+_READER_GIT_OPTIONS_REST: Final = (
     "-c",
     "core.fsmonitor=false",
     "-c",
@@ -149,14 +148,23 @@ READER_GIT_OPTIONS: Final = (
 )
 
 
+def reader_git_options(repo: str = READER_REPO) -> tuple[str, ...]:
+    """The options every git command in a reader starts with; git is told that the repository at
+    `repo` (its path in the reader) is safe."""
+    return ("-c", f"safe.directory={repo}", *_READER_GIT_OPTIONS_REST)
+
+
+READER_GIT_OPTIONS: Final = reader_git_options(READER_REPO)
+
+
 # What `append_exclude` runs: the directory and the file are git's own, the text comes on stdin.
 APPEND_EXCLUDE_SCRIPT: Final = "umask 022 && mkdir -p .git/info && cat >> .git/info/exclude"
 
 
-def reader_argv(args: Sequence[str]) -> list[str]:
+def reader_argv(args: Sequence[str], repo: str = READER_REPO) -> list[str]:
     """The command of every look into the repository: git with its options, under the one
-    capability a reader keeps."""
-    return [*READER_DROP_CAPABILITIES, GIT, *READER_GIT_OPTIONS, *args]
+    capability a reader keeps. `repo` is the repository's path in the reader."""
+    return [*READER_DROP_CAPABILITIES, GIT, *reader_git_options(repo), *args]
 
 
 def reader_environment(identity: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -181,19 +189,22 @@ def reader_document(
     writable: bool = False,
     runtime: str = READER_RUNTIME,
     result: bool = False,
+    places: RepoPlaces = SINGLE,
 ) -> dict[str, Any]:
     """The reader's container: constants, the image id and the volume name the daemon gave. The
     repository is read-only unless `writable`. The runtime is `sysbox-runc`; only a test lane
     without Sysbox names another. A turn with a result schema (#843) has the result directory in
-    it too, read-only at `/result`."""
+    it too, read-only at `/result`. A multi-repository turn (#1093) has every repository mounted,
+    each its own Subpath at `/repos/<name>`, and nothing else of the volume."""
     mounts: list[dict[str, Any]] = [
         {
             "Type": "volume",
             "Source": work_volume,
-            "Target": READER_REPO,
+            "Target": places.reader_path(name),
             "ReadOnly": not writable,
-            "VolumeOptions": {"Subpath": REPO_SUBPATH, "NoCopy": True},
+            "VolumeOptions": {"Subpath": name, "NoCopy": True},
         }
+        for name in places.names
     ]
     if result:
         mounts.append(result_mount(work_volume, READER_RESULT_DIRECTORY, read_only=True))
@@ -224,6 +235,10 @@ def reader_document(
         },
     }
 
+
+# The option of the upload-pack command that names the repository of a multi-repository turn in the
+# reader (`exec_pipe`): `--reader-repo=/repos/<name>`.
+REPO_OPTION: Final = "--reader-repo="
 
 SEED_NAME: Final = "code-reviewer-seed"
 SEED_TARGET: Final = "/seed"
@@ -267,9 +282,12 @@ def _plain(info: tarfile.TarInfo) -> tarfile.TarInfo:
     return info
 
 
-def repository_archive(repo: Path, scratch: Path) -> IO[bytes]:
+def repository_archive(
+    repo: Path, scratch: Path, *, others: Mapping[str, Path] | None = None
+) -> IO[bytes]:
     """The tar of Control's checkout (as `repo/`) and an empty `result/`, in a file that is deleted
-    when it is closed. Links are stored as links and never followed."""
+    when it is closed. Links are stored as links and never followed. A multi-repository turn
+    (#1093) gives `others`: every repository by its mount name (`repo` is then not added)."""
     archive = tempfile.TemporaryFile(dir=scratch)  # noqa: SIM115 - the caller closes it
     try:
         with tarfile.open(fileobj=archive, mode="w", format=tarfile.PAX_FORMAT) as tar:
@@ -277,7 +295,10 @@ def repository_archive(repo: Path, scratch: Path) -> IO[bytes]:
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o755
             tar.addfile(directory)
-            tar.add(repo, arcname="repo", filter=_plain)
+            if others is None:
+                tar.add(repo, arcname="repo", filter=_plain)
+            for name, path in (others or {}).items():
+                tar.add(path, arcname=name, filter=_plain)
         archive.seek(0)
     except BaseException:
         archive.close()
@@ -333,8 +354,12 @@ class ReaderAccess:
         seams: ReaderSeams = ReaderSeams(),  # noqa: B008
         *,
         result: bool = False,
+        places: RepoPlaces = SINGLE,
     ) -> None:
         self._api = seams.api()
+        # #1093: the repositories the readers hold: `repo` for a turn of one, every mount name for
+        # a multi-repository turn.
+        self._places = places
         # #843: the readers see the result directory (read-only) when the turn has a result schema.
         self._result = result
         self._seams = seams
@@ -355,27 +380,45 @@ class ReaderAccess:
         waits for the end of its input, the one of protocol 0 ends after the pack."""
         return 0 if self._seams.placement.split else 2
 
-    def upload_pack(self) -> str:
+    def upload_pack(self, repo: str | None = None) -> str:
         command = f"{self._seams.python} -I -m {UPLOAD_PACK_MODULE}"
         if self._seams.placement.split:
             command += f" {DOCKER_SOCKET_OPTION}{self._seams.placement.docker_socket}"
+        if self._places.multi:
+            command += f" {REPO_OPTION}{self._places.reader_path(self._name(repo))}"
         return command
+
+    def _name(self, repo: str | None) -> str:
+        """The mount name a command is for: the one repository of a turn of one, or the named one
+        of a multi-repository turn (a name the turn does not have is a bug of the caller)."""
+        name = self._places.names[0] if repo is None else repo
+        if name not in self._places.names:
+            raise ValueError("a repository the readers do not hold")
+        return name
+
+    def for_repo(self, name: str) -> "RepoView":
+        """The agent's repository `name` of a multi-repository turn as a `RepoAccess` of its own:
+        the readers are the turn's, shared, and every command runs in that repository."""
+        return RepoView(self, self._name(name))
 
     def warm(self) -> bool:
         """Make both readers now, before the agent runs: the final push must not need a container
         to be created on a disk the agent may have filled."""
         return self._ensure(False) is not None and self._ensure(True) is not None
 
-    def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
+    def run(
+        self, args: Sequence[str], *, timeout: float, write: bool = False, repo: str | None = None
+    ) -> Outcome:
         container = self._ensure(write)
         if container is None:
             return Outcome(255, "", "the reader cannot run", unanswered=True)
+        path = self._places.reader_path(self._name(repo))
         return run_exec(
             self._api,
             container,
-            reader_argv(args),
+            reader_argv(args, path),
             env=self._environment,
-            workdir=READER_REPO,
+            workdir=path,
             timeout=timeout,
             name=f"git {args[0] if args else ''}",
         )
@@ -420,7 +463,7 @@ class ReaderAccess:
         )
         return bytes(kept) if done.returncode == 0 and not done.unanswered else None
 
-    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+    def append_exclude(self, data: bytes, *, timeout: float, repo: str | None = None) -> Outcome:
         """Append lines to the repository's `info/exclude` (git's local ignore file, never
         committed), in the reader that writes. For the step after an environment's script (#818):
         what it left untracked is the base of the turn, not a change of the agent. The text is the
@@ -434,42 +477,54 @@ class ReaderAccess:
             container,
             [*READER_DROP_CAPABILITIES, "/bin/sh", "-c", APPEND_EXCLUDE_SCRIPT, "append"],
             stdin=data,
-            workdir=READER_REPO,
+            workdir=self._places.reader_path(self._name(repo)),
             timeout=timeout,
             name="append to the exclude file",
         )
 
     def update_refs(
-        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+        self,
+        options: Sequence[str],
+        commands: Iterable[bytes],
+        *,
+        timeout: float,
+        repo: str | None = None,
     ) -> Outcome:
         """`git update-ref --stdin -z` in the reader that writes, the commands streamed to its
         standard input (#818: the refs a setup script made are removed this way)."""
         container = self._ensure(True)
         if container is None:
             return Outcome(255, "", "the reader cannot run", unanswered=True)
+        path = self._places.reader_path(self._name(repo))
         return run_exec(
             self._api,
             container,
-            reader_argv([*options, "update-ref", "--stdin", "-z"]),
+            reader_argv([*options, "update-ref", "--stdin", "-z"], path),
             env=self._environment,
             stdin=commands,
-            workdir=READER_REPO,
+            workdir=path,
             timeout=timeout,
             name="git update-ref",
         )
 
     def stream(
-        self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
+        self,
+        args: Sequence[str],
+        consume: Callable[[bytes], None],
+        *,
+        timeout: float,
+        repo: str | None = None,
     ) -> Outcome:
         container = self._ensure(False)
         if container is None:
             return Outcome(255, "", "the reader cannot run", unanswered=True)
+        path = self._places.reader_path(self._name(repo))
         return run_exec(
             self._api,
             container,
-            reader_argv(args),
+            reader_argv(args, path),
             env=self._environment,
-            workdir=READER_REPO,
+            workdir=path,
             timeout=timeout,
             consume=consume,
             name=f"git {args[0] if args else ''}",
@@ -539,6 +594,7 @@ class ReaderAccess:
                     writable=writable,
                     runtime=self._seams.runtime,
                     result=self._result,
+                    places=self._places,
                 ),
                 name,
             )
@@ -568,8 +624,14 @@ class ReaderAccess:
         api = self._api
         seeder = api.create_container(seed_document(image, volume, self._seams.runtime), SEED_NAME)
         try:
+            repo = Path(self._seams.repo_directory)
+            repos = (
+                {name: repo.parent / name for name in self._places.names}
+                if self._places.multi
+                else None
+            )
             with repository_archive(
-                Path(self._seams.repo_directory), Path(self._seams.scratch_directory)
+                repo, Path(self._seams.scratch_directory), others=repos
             ) as archive:
                 api.put_archive(seeder, SEED_TARGET, archive, timeout=SEED_SECONDS)
         finally:
@@ -591,3 +653,48 @@ class ReaderAccess:
     def close(self) -> None:
         for writable in (True, False):
             self._drop(writable)
+
+
+class RepoView:
+    """One repository of a multi-repository turn as the workspace sees it
+    (`git_workspace.RepoAccess`): every command runs in that repository of the shared readers
+    (#1093)."""
+
+    def __init__(self, access: ReaderAccess, name: str) -> None:
+        self._access = access
+        self._name = name
+
+    @property
+    def repo_source(self) -> str:
+        """What Control's `git fetch` names as the source repository: the path is never opened
+        (the upload-pack is the reader's), but it is the repository's directory on the volume."""
+        return f"{WORK_VOLUME_TARGET}/{self._name}"
+
+    @property
+    def protocol_version(self) -> int:
+        return self._access.protocol_version
+
+    def upload_pack(self) -> str:
+        return self._access.upload_pack(self._name)
+
+    def warm(self) -> bool:
+        return self._access.warm()
+
+    def reset(self, *, seconds: float) -> bool:
+        return self._access.reset(seconds=seconds)
+
+    def append_exclude(self, data: bytes, *, timeout: float) -> Outcome:
+        return self._access.append_exclude(data, timeout=timeout, repo=self._name)
+
+    def run(self, args: Sequence[str], *, timeout: float, write: bool = False) -> Outcome:
+        return self._access.run(args, timeout=timeout, write=write, repo=self._name)
+
+    def stream(
+        self, args: Sequence[str], consume: Callable[[bytes], None], *, timeout: float
+    ) -> Outcome:
+        return self._access.stream(args, consume, timeout=timeout, repo=self._name)
+
+    def update_refs(
+        self, options: Sequence[str], commands: Iterable[bytes], *, timeout: float
+    ) -> Outcome:
+        return self._access.update_refs(options, commands, timeout=timeout, repo=self._name)

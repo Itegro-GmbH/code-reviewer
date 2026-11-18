@@ -98,7 +98,7 @@ from .history import (
     parse_name_status,
 )
 from .push_guard import SecretScanner
-from .push_policy import branch_name_problem, select_branches
+from .push_policy import MAX_PUSHED_BRANCHES, branch_name_problem, select_branches
 from .ref_drop import RefDeletions, RefListingFailed
 
 LEFTOVER_MESSAGE = "Implementer: uncommitted changes of the turn"
@@ -150,6 +150,8 @@ MIN_FREE_INODES = 10_000
 # The mirror's directory below the work directory. In production it is a mount of its own, a
 # pre-allocated file system the agent cannot fill (`reserve disk`, `container.ts`).
 RESERVE_DIRECTORY = "reserve"
+# Below it, a multi-repository turn (#1093) keeps one mirror per repository: `mirror/<name>.git`.
+MIRRORS_DIRECTORY = "mirror"
 # The scratch refs of the mirror: the agent's branches are fetched here, numbered, so that no name
 # the agent chose ever becomes a local ref of the runner.
 SCRATCH_PREFIX = "refs/runner/in/"
@@ -312,6 +314,23 @@ class WorkspaceSpec:
     resume: ImplementerResume | None = None
     # #909: the branch the session branch is made from on a first turn; None: the base branch.
     start_branch: str | None = None
+    # #1093 (epic #1090): one repository of a multi-repository turn. `name` is its mount (the
+    # agent's repository is the directory `<name>` of the work volume and the mirror is
+    # `reserve/mirror/<name>.git`); None is the one repository of a turn of today (`repo`,
+    # `reserve/mirror.git`). The app resolved `base` and `branch`: `direct` is `branch == base`
+    # (the agent works on the base branch, no branch is made), and `branch_exists` is the app's
+    # answer for a first turn, which the runner follows: true checks the branch out (gone:
+    # `clone_failed`), false makes it from the base (there after all: `branch_exists`).
+    name: str | None = None
+    direct: bool = False
+    branch_exists: bool = False
+    # The most branches the final push reports for this repository (a multi-repository report is
+    # shared by up to ten of them).
+    max_branches: int = MAX_PUSHED_BRANCHES
+
+    @property
+    def multi(self) -> bool:
+        return self.name is not None
 
 
 @dataclass(frozen=True)
@@ -488,8 +507,14 @@ class GitWorkspace:
         self._path = ":".join(dict.fromkeys([str(Path(executable).parent), *path.split(":")]))
         self._process = GitProcess(executable, self._path, layout.run_dir, spec.token)
         self.reserve = layout.work_dir / RESERVE_DIRECTORY
-        self.mirror = self.reserve / "mirror.git"
-        self.repo = layout.work_dir / "repo"
+        # One mirror and one agent repository per repository: the turn of one repository keeps its
+        # paths, a multi-repository turn (#1093) has `reserve/mirror/<name>.git` and `<name>`.
+        self.mirror = (
+            self.reserve / "mirror.git"
+            if spec.name is None
+            else self.reserve / MIRRORS_DIRECTORY / f"{spec.name}.git"
+        )
+        self.repo = layout.work_dir / ("repo" if spec.name is None else spec.name)
         # The tip each branch starts the turn at: the base branch, the session branch (the base tip
         # when the earlier turn never pushed it) and every branch of a follow-up that arrived. The
         # one of the form's branch is `_start`.
@@ -508,6 +533,9 @@ class GitWorkspace:
         self._checkout: str | None = None
         self._moved: list[BranchMoved] = []
         self._missing: list[str] = []
+        # Whether this turn made the working branch (the provider did not have it): never true for
+        # direct work and for a branch that continues (#1093).
+        self.branch_created = False
         self._names_checked = False
         self._progress = _Progress()
         # How many tracked files `settle_after_setup` found changed, and how many entries it put on
@@ -524,6 +552,23 @@ class GitWorkspace:
         self.checked_out: str | None = None
 
     # -- what the caller needs -------------------------------------------------------------------
+
+    @property
+    def _creates_branch(self) -> bool:
+        """Whether the agent's repository gets a new working branch at the start tip: a first turn
+        of the form of today, and a first turn of a multi-repository entry that is not direct work
+        and whose branch the app said is not there. A follow-up and a continued branch check the
+        branch that is there out."""
+        if self.spec.resume is not None:
+            return False
+        if not self.spec.multi:
+            return True
+        return not self.spec.direct and not self.spec.branch_exists
+
+    def _where(self) -> str:
+        """` (repository <name>)` for the messages of a multi-repository turn: the failure names the
+        repository by its mount, which is the one thing the person needs."""
+        return f" (repository {self.spec.name})" if self.spec.name is not None else ""
 
     @property
     def start_commit(self) -> str:
@@ -589,6 +634,8 @@ class GitWorkspace:
         self._check_names()
         self._prepare_directories()
         mirror = self.mirror
+        if self.spec.multi:
+            mirror.parent.mkdir(mode=0o700, exist_ok=True)
         mirror.mkdir(mode=0o700)
         os.chmod(mirror, 0o700)
         base = self.spec.base_branch
@@ -633,7 +680,8 @@ class GitWorkspace:
         )
         if fetched.returncode != 0:
             raise fail(
-                ErrorCode.CLONE_FAILED, "the repository cannot be cloned: " + self._detail(fetched)
+                ErrorCode.CLONE_FAILED,
+                "the repository cannot be cloned" + self._where() + ": " + self._detail(fetched),
             )
         # Fail fast: a mirror that alone leaves less than the push needs ends the turn here, free,
         # before the agent's repository is cloned. `prepare` asks again once that clone exists.
@@ -641,13 +689,18 @@ class GitWorkspace:
         tips = self._ref_tips("refs/heads/")
         self._tags = self._ref_tips("refs/tags/")
         if base not in tips:
-            raise fail(ErrorCode.BASE_BRANCH_NOT_FOUND, "the base branch is not on the provider")
+            raise fail(
+                ErrorCode.BASE_BRANCH_NOT_FOUND,
+                "the base branch is not on the provider" + self._where(),
+            )
         resume = self.spec.resume
         # A follow-up continues from its own branches: a start branch the provider no longer has
         # (a step branch that was merged and deleted) is no reason to end it.
         if start is not None and start not in tips and resume is None:
             raise fail(ErrorCode.CLONE_FAILED, "the start branch is not on the provider")
-        if resume is None:
+        if resume is None and self.spec.multi:
+            self._check_working_branch(tips)
+        elif resume is None:
             if tips.pop(branch, None) is not None:
                 self._mirror(["update-ref", "-d", f"refs/heads/{branch}"])
         else:
@@ -656,7 +709,8 @@ class GitWorkspace:
                 if tip is None:
                     if entry.name == branch:
                         raise fail(
-                            ErrorCode.CLONE_FAILED, "the session branch is gone on the provider"
+                            ErrorCode.CLONE_FAILED,
+                            "the session branch is gone on the provider" + self._where(),
                         )
                     self._missing.append(entry.name)
                 elif tip != entry.head:
@@ -665,8 +719,30 @@ class GitWorkspace:
         # The session branch starts at the start branch's tip unless an earlier turn pushed it.
         self._earlier_head = tips.get(branch)
         self._start_source = start if start is not None and start in tips else base
+        self.branch_created = branch not in tips
         self._start = tips.setdefault(branch, tips[self._start_source])
         return tips
+
+    def _check_working_branch(self, tips: dict[str, str]) -> None:
+        """The first turn of an entry of a multi-repository job (#1093): the working branch is what
+        the app said it is. Direct work (the branch is the base) needs nothing; `branchExists` true
+        needs the branch in the fetched refs (`clone_failed`, the branch is gone); false needs it
+        not to be there (`branch_exists`: the runner never overwrites or continues a branch it was
+        told is new)."""
+        spec = self.spec
+        if spec.direct:
+            return
+        present = spec.branch in tips
+        if spec.branch_exists and not present:
+            raise fail(
+                ErrorCode.CLONE_FAILED,
+                "the working branch is gone on the provider" + self._where(),
+            )
+        if not spec.branch_exists and present:
+            raise fail(
+                ErrorCode.BRANCH_EXISTS,
+                "the working branch exists on the provider already" + self._where(),
+            )
 
     def _ref_tips(self, prefix: str) -> dict[str, str]:
         """The object each ref under `prefix` of the mirror is, by short name. A name with a control
@@ -726,7 +802,10 @@ class GitWorkspace:
             self._require_room()  # a clone that ran the disk full is the clone's failure
             raise fail(
                 ErrorCode.SETUP_FAILED,
-                "the agent repository cannot be cloned: " + self._detail(cloned),
+                "the agent repository cannot be cloned"
+                + self._where()
+                + ": "
+                + self._detail(cloned),
             )
         self._make_local_branches()
         source = self.start_source
@@ -738,7 +817,7 @@ class GitWorkspace:
             # A new branch at the start tip on the first turn; on a follow-up every branch exists
             # already and the checkout fills the empty tree.
             ["checkout", "-q", "-b", self.spec.branch, f"refs/heads/{source}"]
-            if self.spec.resume is None
+            if self._creates_branch
             else ["checkout", "-q", target, "--"],
         )
         for arguments in setup:
@@ -754,7 +833,7 @@ class GitWorkspace:
             raise fail(
                 ErrorCode.SETUP_FAILED,
                 "the agent repository is not at the start tip"
-                if self.spec.resume is None
+                if self._creates_branch
                 else "the agent repository is not at the tip of the branch to check out",
             )
         self._checkout = target
@@ -775,7 +854,7 @@ class GitWorkspace:
         reader, with the tips the mirror gave; the names are the provider's and are not read by
         anything that parses them."""
         skip = {self.spec.base_branch}
-        if self.spec.resume is None:
+        if self._creates_branch:
             skip.add(self.spec.branch)
         commands = (
             b"create refs/heads/" + name.encode() + b"\0" + tip.encode() + b"\0"
@@ -1104,7 +1183,9 @@ class GitWorkspace:
         self._progress.form_listed = any(name == self.spec.branch for name, _ in listed)
         # A branch still at its start tip has nothing on it: it is neither fetched nor reported.
         names = [name for name, tip in listed if not self._unchanged(name, tip)]
-        selection = select_branches(names, form_branch=self.spec.branch)
+        selection = select_branches(
+            names, form_branch=self.spec.branch, limit=self.spec.max_branches
+        )
         self._progress.invalid = selection.invalid
         self._progress.overflow = selection.overflow
         for name, reason in selection.excluded:
@@ -1572,7 +1653,9 @@ class GitWorkspace:
         if self._names_checked:
             return
         base, branch, start = self.spec.base_branch, self.spec.branch, self.spec.start_branch
-        if branch == base or branch == "HEAD" or branch.startswith("-") or base.startswith("-"):
+        # Direct work (#1093) is the one form where the branch is the base.
+        same = branch == base and not self.spec.direct
+        if same or branch == "HEAD" or branch.startswith("-") or base.startswith("-"):
             raise _invalid("the branch must be a new name that git accepts")
         for name in (base, branch):
             done = self._root(["check-ref-format", f"refs/heads/{name}"], protocols="file")
