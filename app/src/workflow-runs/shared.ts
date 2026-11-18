@@ -232,6 +232,16 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     }),
     connectors,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    // #1092: the `repos` of an agent step name repositories of the workspace by their full name.
+    repositoryByName: async (fullName) => {
+      const wanted = fullName.toLowerCase();
+      const found = (await repositories.list({ active: true })).find(
+        (repository) => repository.fullName.toLowerCase() === wanted,
+      );
+      return found === undefined
+        ? undefined
+        : { id: found.id, fullName: found.fullName };
+    },
   });
 }
 
