@@ -10,6 +10,7 @@
 // credential, the platform token, belongs to the `SnapshotService` it is given; no command, file or log line
 // of the pipeline carries it.
 import { z } from "zod";
+import { NO_FEATURES, parseWorkerFeatures } from "./worker-features.ts";
 import type { Logger } from "../core/types.ts";
 import type { PipelineConfig } from "./config.ts";
 import { SnapshotPipelineError } from "./errors.ts";
@@ -41,6 +42,8 @@ import {
   startDaemonScript,
   stopDaemonScript,
   sysboxProbeScript,
+  workerFeaturesScript,
+  WORKER_FEATURES_MARKER,
   writeDaemonConfigScript,
 } from "./scripts.ts";
 import type { ExecResult, SandboxVm, SnapshotService } from "./service.ts";
@@ -120,6 +123,8 @@ class Run {
   /** Whether Sysbox was installed in the builder, and whether the check VM proved it. Neither ever fails the run. */
   private sysboxInstalled = false;
   private sysboxProven = false;
+  /** #1098: the features the Worker image lists, read from the image in the check VM; none when they could not be read. */
+  private workerFeatures: string[] = [];
   private readonly warnings: string[] = [];
   private readonly deps: PipelineDeps;
   private readonly input: PipelineInput;
@@ -337,6 +342,7 @@ class Run {
       target: config.target,
       ...(this.input.commit ? { commit: this.input.commit } : {}),
       sysbox: this.sysboxProven ? "proven" : "unproven",
+      workerFeatures: this.workerFeatures,
     });
     if (!record.success)
       throw new SnapshotPipelineError("record_invalid", "record");
@@ -446,7 +452,50 @@ class Run {
       },
     );
     this.checkVerdict(probe.stdout);
+    await this.readWorkerFeatures(check);
     await this.proveSysbox(check);
+  }
+
+  /**
+   * What the Worker image lists (#1098), asked of the image in the check VM: the one place that says what the Worker in this
+   * snapshot can read. Soft, like the Sysbox proof: a snapshot whose list could not be read is a snapshot for everything that
+   * does not depend on the list. It is recorded as the empty list with a warning, and the Dispatcher then names no claim feature
+   * that depends on the image, so jobs that need one wait in the queue until a snapshot says it can.
+   */
+  private async readWorkerFeatures(check: SandboxVm): Promise<void> {
+    await this.softStep(
+      STEPS.workerFeatures,
+      "worker_features_unreadable",
+      async () => {
+        const result = await this.exec(
+          check,
+          STEPS.workerFeatures,
+          workerFeaturesScript(this.config),
+          "worker_features_unreadable",
+          { sudo: true, timeoutMs: 3 * 60_000 },
+        );
+        const last = result.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line !== "")
+          .at(-1);
+        const match = new RegExp(`^${WORKER_FEATURES_MARKER} (\\S+)$`).exec(
+          last ?? "",
+        );
+        // A list that is not of the shape (or no line at all) is not a list: the error names no text of the output.
+        const listed = parseWorkerFeatures(match?.[1]);
+        if (
+          match?.[1] === undefined ||
+          (listed.length === 0 && match[1] !== NO_FEATURES)
+        )
+          throw new SnapshotPipelineError(
+            "worker_features_unreadable",
+            STEPS.workerFeatures,
+            ["unreadable"],
+          );
+        this.workerFeatures = listed;
+      },
+    );
   }
 
   /**

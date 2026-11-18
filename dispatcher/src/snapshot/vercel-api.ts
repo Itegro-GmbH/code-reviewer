@@ -63,6 +63,7 @@ export async function pairOfDeployment(
     meta[PAIR_META.imageDigest],
     meta[PAIR_META.commit],
     meta[PAIR_META.sysbox],
+    meta[PAIR_META.workerFeatures],
   );
   return pair === undefined ? { status: "none" } : { status: "pair", pair };
 }
