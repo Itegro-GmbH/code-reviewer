@@ -3,9 +3,20 @@
 // #1091 (epic #1090, ADR 0006): the contract of an Implementer turn on several repositories
 // (contracts/runner-api.v1.json and contracts/workflow.v1.json). Only the contract is checked here (Ajv, no database): the examples are
 // valid, the job form is `repos` or `repo`, never both and never neither, the tokens, the resume and the result follow the job, and the
-// lists the app keeps in TypeScript equal those of the file. Nothing in the app sends or reads `repos` yet (#1092).
+// lists the app keeps in TypeScript equal those of the file. The shared negative corpus (contracts/examples/implementer-multi-repo/
+// invalid/, the same files the runner's contract test reads) must be rejected: by the schema where it can state the rule, by the
+// reference rules of test-support/multi-repo-rules.ts where it cannot. Nothing in the app sends or reads `repos` yet (#1092).
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  applyPatch,
+  breakOfJobRule,
+  breakOfLaneRule,
+  deriveMountNames,
+} from "../test-support/multi-repo-rules.ts";
+import {
+  CONTRACTS_DIRECTORY,
   createContractValidator,
   readContract,
   readExamples,
@@ -41,9 +52,29 @@ function repoEntry(index: number): Document {
     cloneUrl: `https://github.com/acme/r${String(index)}.git`,
     base: "main",
     branch: "main",
+    branchExists: false,
     tokenId: "t1",
   };
 }
+
+const VARIANTS = join(
+  CONTRACTS_DIRECTORY,
+  "examples",
+  "implementer-multi-repo",
+  "variants",
+);
+const INVALID = join(
+  CONTRACTS_DIRECTORY,
+  "examples",
+  "implementer-multi-repo",
+  "invalid",
+);
+
+function readJson(path: string): Document {
+  return JSON.parse(readFileSync(path, "utf8")) as Document;
+}
+
+const variant = (name: string): Document => readJson(join(VARIANTS, name));
 
 describe("a multi-repository implementer job", () => {
   // #1091-T01
@@ -123,6 +154,7 @@ describe("a multi-repository implementer job", () => {
       "cloneUrl",
       "base",
       "branch",
+      "branchExists",
       "tokenId",
     ]) {
       const job = multiJob();
@@ -133,12 +165,37 @@ describe("a multi-repository implementer job", () => {
     unknown.implementer.repos[0].remote = "origin";
     expect(jobAccepted(unknown)).toBe(false);
 
-    for (const name of ["", ".", "..", "a/b", "a b", "x".repeat(203)]) {
+    for (const name of [
+      "",
+      ".",
+      "..",
+      "a/b",
+      "a b",
+      "x".repeat(203),
+      "-x",
+      "result",
+      "Result",
+      "RESERVE",
+      "reserve",
+      ".git",
+      ".GIT",
+    ]) {
       const job = multiJob();
       job.implementer.repos[0].name = name;
       expect(jobAccepted(job), `name ${name}`).toBe(false);
     }
-    for (const name of [".github", "app", "Itegro-GmbH__app", "a.b_c-d"]) {
+    for (const name of [
+      ".github",
+      "app",
+      "Itegro-GmbH__app",
+      "a.b_c-d",
+      "x".repeat(202),
+      "results",
+      "reserved",
+      "x-",
+      "git",
+      ".gitignore",
+    ]) {
       const job = multiJob();
       job.implementer.repos[0].name = name;
       expect(jobAccepted(job), `name ${name}`).toBe(true);
@@ -283,10 +340,96 @@ describe("a multi-repository implementer job", () => {
       false,
     );
     expect(check((e) => (e.extra = 1))).toBe(false);
+    expect(check((e) => (e.commitsTruncated = 3))).toBe(true);
+    expect(check((e) => (e.filesTruncated = 0))).toBe(true);
+    expect(check((e) => (e.commitsTruncated = -1))).toBe(false);
+    expect(check((e) => (e.filesTruncated = "1"))).toBe(false);
 
     const none = multiResult();
     none.implementer.repos = [];
     expect(runnerApi.check("RunnerResult", none).valid).toBe(false);
+  });
+
+  // #1091-T14
+  it("has valid variants: a continued branch, direct work, a job that may not push, a follow-up", () => {
+    const names = readdirSync(VARIANTS)
+      .filter((name) => name.endsWith(".json"))
+      .sort();
+    expect(names.length).toBeGreaterThanOrEqual(9);
+    for (const name of names)
+      expect(
+        runnerApi.check(name.split(".")[0] as string, variant(name)),
+        name,
+      ).toStrictEqual({ valid: true, errors: "" });
+  });
+
+  // #1091-T15
+  it("counts a continued branch from its own tip: it made nothing, or only the commits after that tip", () => {
+    const untouched = variant("ImplementerRepoResult.continued-branch.json");
+    expect(untouched.created).toBe(false);
+    expect(untouched.baseCommit).toBe(untouched.headCommit);
+    expect(untouched.commits).toEqual([]);
+    expect(untouched.filesChanged).toEqual([]);
+    expect(untouched.pushed).toBe(true);
+
+    const worked = variant(
+      "ImplementerRepoResult.continued-branch-with-commits.json",
+    );
+    expect(worked.created).toBe(false);
+    expect(worked.baseCommit).not.toBe(worked.headCommit);
+    expect(worked.commits.map((commit: Document) => commit.sha)).toEqual([
+      worked.headCommit,
+    ]);
+  });
+
+  // #1091-T16
+  it("reports direct work as a push to the base branch, and a job that may not push without head commit and branches", () => {
+    const direct = variant("ImplementerRepoResult.direct-push.json");
+    expect(direct.branch).toBe(direct.base);
+    expect(direct.pushed).toBe(true);
+    expect(direct.branches[0]).toMatchObject({
+      name: direct.base,
+      result: "pushed",
+    });
+
+    const job = variant("RunnerJobInput.can-push-false.json");
+    expect(job.implementer.profile.canPush).toBe(false);
+    const reader = variant("ImplementerRepoResult.can-push-false.json");
+    expect(reader.headCommit).toBeNull();
+    expect(reader.pushed).toBe(false);
+    expect(reader.commits).toEqual([]);
+    expect(reader.branches).toBeUndefined();
+  });
+
+  // #1091-T17
+  it("has a follow-up whose `resume.repos` are the job's names in the job's order, and a resume of direct work", () => {
+    const job = variant("RunnerJobInput.follow-up.json");
+    expect(
+      job.implementer.resume.repos.map((entry: Document) => entry.name),
+    ).toEqual(job.implementer.repos.map((entry: Document) => entry.name));
+    expect(breakOfJobRule(job)).toBeNull();
+    const resume = variant("ImplementerResume.direct-pushed.json");
+    expect(resume.repos[1].checkout).toBe("main");
+    expect(resume.repos[2].checkout).toBeNull();
+    expect(resume.repos[2].branches).toHaveLength(1);
+  });
+
+  // #1091-T18
+  it("derives mount names without regard to case and to the order of the list", () => {
+    expect(
+      deriveMountNames(["acme/app", "acme/shared-lib", "other/app"]),
+    ).toEqual(["acme__app", "shared-lib", "other__app"]);
+    expect(
+      deriveMountNames(["other/app", "acme/shared-lib", "acme/app"]),
+    ).toEqual(["other__app", "shared-lib", "acme__app"]);
+    expect(deriveMountNames(["acme/App", "other/app"])).toEqual([
+      "acme__App",
+      "other__app",
+    ]);
+    expect(
+      deriveMountNames(["acme/result", "acme/Reserve", "acme/.git", "acme/x"]),
+    ).toEqual(["acme__result", "acme__Reserve", "acme__.git", "x"]);
+    expect(breakOfJobRule(multiJob())).toBeNull();
   });
 
   // #1091-T10
@@ -368,8 +511,48 @@ describe("the repositories of an agent step", () => {
     expect(accepted(step({ session: "new", repos: [{ repo: "a/b" }] }))).toBe(
       true,
     );
+    // A `session` object needs `continue`; `{}` is no session at all.
+    expect(accepted(step({ session: {}, repos: [{ repo: "a/b" }] }))).toBe(
+      false,
+    );
     // Without `repos` both stay as they were.
     expect(accepted(step({ branch: "main" }))).toBe(true);
     expect(accepted(step({ session: { continue: "implement" } }))).toBe(true);
+  });
+});
+
+describe("the shared negative corpus of multi-repository jobs and lanes", () => {
+  const files = readdirSync(INVALID)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+
+  // #1091-T19
+  it("is there", () => {
+    expect(files.length).toBeGreaterThanOrEqual(20);
+  });
+
+  // #1091-T20
+  it.each(files)("rejects %s", (name) => {
+    const entry = readJson(join(INVALID, name));
+    const base: Document =
+      entry.document ??
+      readJson(join(CONTRACTS_DIRECTORY, "examples", `${entry.base}.json`));
+    const document = applyPatch(base, entry.patch);
+    const lane = entry.definition === "AgentStep";
+    const schema = lane ? workflow : runnerApi;
+    const accepted = schema.check(entry.definition, document);
+    if (entry.layer === "schema") {
+      expect(accepted.valid, entry.why).toBe(false);
+      return;
+    }
+    // A rule the schema cannot state: the schema takes the document and a rule breaks it.
+    expect(
+      accepted.valid,
+      `${name}: the schema refuses it (${accepted.errors}), so the case belongs to layer 'schema'`,
+    ).toBe(true);
+    expect(
+      lane ? breakOfLaneRule(document) : breakOfJobRule(document),
+      entry.why,
+    ).toBe(entry.rule);
   });
 });

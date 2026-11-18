@@ -68,6 +68,7 @@
         "cloneUrl": "https://github.com/acme/shared-lib.git",
         "base": "main",
         "branch": "main",
+        "branchExists": false,
         "tokenId": "t1"
       },
       {

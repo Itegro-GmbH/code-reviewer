@@ -52,24 +52,28 @@ An agent step may have `repos`: one to ten entries `{ repo, base?, branch? }` (`
 - `repo`, `base` and `branch` are **targets** (they decide where the agent works and where its commits go): a literal or a
   reference to a value the platform or the caller vouches for, never a result field or the title, body or labels of an issue
   (`target_from_untrusted_value`). `branch` may be a text with such references in it (`feature/{{trigger.ticket.key}}`).
-- Two entries may not name the same repository (`repo_duplicate`). `repos` is not allowed with the step's `branch` (the old start
-  branch of a session of its own) or with `session.continue` (a session that goes on keeps its repositories).
+- Two entries may not name the same repository, **compared without regard to case** (`Acme/App` is `acme/app` on GitHub): `repo_duplicate`, rejected at lane validation for equal literals and by the engine for filled-in references. Two repositories whose derived mount names clash (below) end the step `repo_name_clash`. `repos` is not allowed with the step's `branch` (the old start
+  branch of a session of its own) or with `session.continue` (a session that goes on keeps its repositories, **as the first turn resolved them**: bases and branches are never resolved again for an answer turn, a `session.continue` step or a resume).
 - A step **without** `repos` is the step of today: the run's repository, the platform's session branch `workflow/…`, the job with
   one `repo`.
 
 ### Facts
 
 - `{{<step>.repos}}` is a list with one entry per repository, in the order of the step: `{ fullName, base, branch, commits,
-  headCommit, pushed }`. `branch` is the working branch, equal to `base` for direct work; `commits` is the list of commit ids the
-  turn made, oldest first; `pushed` says that the branch reached the remote. Like the single facts, they exist only for a profile
-  that may push.
-- The single facts (`branch`, `commits`, `headCommit`, `pushed`) **refer to the first repository**, so a lane written for one
-  repository keeps working when a second one is added behind it.
+  headCommit, pushed }`. `branch` is the working branch, equal to `base` for direct work; `commits` is the list of commit ids
+  **this turn** made on it, oldest first; `headCommit` is the tip of `branch` at the end of the turn (the commit it started from
+  when the turn made none there, as for the single facts; null only for a repository with no commit at all); `pushed` says that
+  the branch with `headCommit` is on the remote. Like the single facts, they exist only for a profile that may push.
+- The single facts (`branch`, `commits`, `headCommit`, `pushed`) **refer to the first repository** and keep their meaning there
+  (`headCommit` stays non-null), so a lane written for one repository keeps working when a second one is added behind it. On a
+  step with `session.continue`, `{{<step>.repos}}` is the session's list with the facts of this turn; the pull request step reads
+  it there.
 
 ### The pull request step
 
-The pull request step opens **one pull request per repository** of an agent step that has a branch different from its base and
-pushed commits: `repos: "{{<agent>.repos}}"` replaces `head` and `base`, `title`, `body` and `draft` apply to every pull request,
+The pull request step opens **one pull request per repository** of an agent step whose branch differs from its base, **has commits
+ahead of the base on the provider, and has no open pull request from that branch yet** (the turn's own `commits` do not decide it, so
+a later round without new commits opens no second pull request and a continued branch still gets its pull request): `repos: "{{<agent>.repos}}"` replaces `head` and `base`, `title`, `body` and `draft` apply to every pull request,
 and `{{repo.fullName}}`, `{{repo.base}}` and `{{repo.branch}}` are available in the texts. A repository with direct work, with
 nothing pushed or without commits between its branch and its base is skipped, not an error. The step yields `pullRequests` (one
 entry per repository with its state) and, for the first pull request that exists, the old `number`, `url` and `existing`. The
@@ -81,42 +85,86 @@ app's connector registry and the schema are held equal by a test.
 `ImplementerJob` gets `repos[]` (`ImplementerJobRepo`), **instead of** `repo`, `baseBranch`, `branch` and `startBranch` (the schema
 makes the two forms exclusive; the job is closed, so a runner that does not know `repos` refuses it).
 
-- Each entry has `name` (the mount: `/work/<name>`), `fullName`, `cloneUrl`, `base`, `branch`, optionally `branchExists`, and
-  `tokenId`.
+- Each entry has `name` (the mount: `/work/<name>`), `fullName`, `cloneUrl`, `base`, `branch`, **`branchExists`** and `tokenId`, all
+  required.
 - The **app resolves** `base` (the default branch when the step gave none) and `branch` (the base again when it gave none), so
-  `branch == base` means direct work and the runner never guesses. `branchExists` is what the app saw at claim time, for the note
-  to the agent; the runner decides from the refs it fetched and follows them when the two disagree.
+  `branch == base` means direct work and the runner never guesses. For a follow-up they are the values the session stored from
+  the first turn, never resolved again. **`branchExists`** is decided by the app at claim time and the runner follows it: true,
+  fetch and check out the remote branch (missing there: `clone_failed` naming the repository); false, create it from `base` (it
+  exists after all: `branch_exists`, a clear failure, never overwritten or continued).
 - `name` is the name part of `owner/name`, or `<owner>__<name>` for **every** repository whose name part another repository of the
-  job has too (so the result does not depend on the order) and for the names the work volume uses itself (`result`, `reserve`).
+  job has too (so the result does not depend on the order) and for the reserved names (`result`, `reserve`, `.git`, any case). The
+  schema forbids those, `.`, `..` and a leading `-`; the runner **re-derives** every name from the `fullName`s and refuses one
+  that differs. Derived names that clash without regard to case are `repo_name_clash` in the app.
+- **`cloneUrl` is checked for every entry** by the rule of the single repository (#762): host equal to the web host of
+  `git.baseUrl`, path `/<fullName>[.git]`, https without credentials. The token goes only there.
+- **The preamble is the app's.** It writes it at the start of `instruction` (it knows names, bases and branches); the runner adds no
+  list of repositories.
 - **Tokens.** `git.tokens` holds one installation token per installation that owns a repository of the job, made for exactly the
   repository ids of the job that belong to it, with the contents right the profile needs; `tokenId` names the entry. `git.token`
-  stays and is the first repository's token. A job has `git.tokens` exactly when it has `repos`.
-- **Feature gate.** The claim feature `implementer_multi_repo`: the app sends a job with `repos` only to a caller that named it and
-  ends the turn `implementer_engine_unavailable` (free, reason `multi_repo_not_supported`) otherwise. A step without `repos` is a
-  job of today for every caller, so an old runner keeps getting single-repository jobs. A step with `repos` of one entry is a
-  multi-repository job: the form follows the step, not the number of repositories.
+  stays and is byte-equal to the token of the first repository's `tokenId`. A job has `git.tokens` exactly when it has `repos`.
+  **The app, not the runner, must make each token for exactly the repository ids of the job that belong to that installation**
+  and give every repository the token of its own installation: the runner can check the host and path of the clone address but
+  not which installation a token belongs to.
+- **Feature gate.** The claim feature `implementer_multi_repo`: a job with `repos` is **only claimed by a caller that named it**. For
+  every other caller it is not a candidate: it **waits in the queue** (as a job for a runner with other labels does), nothing
+  fails, and there is no error code or reason word for it. The app ends it only when no runner exists that could claim it, with
+  the codes it has today. A Dispatcher names the feature only when the Worker image it starts reads `repos`; a Worker handed such
+  a job anyway (Dispatcher and snapshot disagree) is refused at its details request and the job ends
+  `implementer_engine_unavailable` (free) with a message that names the feature. A step without `repos` is a job of today for
+  every caller, so an old runner keeps getting single-repository jobs. A step with `repos` of one entry is a multi-repository
+  job: the form follows the step, not the number of repositories.
 
 ### Running and pushing
 
 Every repository is cloned as a single one is today (every branch and tag, the whole history, no remote, no credential) into
-`/work/<name>`. The agent's working directory is `/work`. When the turn ends the runner pushes **per repository, in the order of
+`/work/<name>`. **The agent's working directory is `/work`**, which is not a repository (the contract; #1093 measures how OpenCode
+behaves there, see "Open questions"). When the turn ends the runner pushes **per repository, in the order of
 the list, every local branch the agent created or moved, without force, with the token of that repository**: the push of today
-(`docs/implementer.md`, "The git rules"), repeated. `profile.canPush` false pushes nothing anywhere. A repository whose clone or
+(`docs/implementer.md`, "The git rules"), repeated. That includes **the base branch of every repository**, also where the entry names a
+working branch: the owner's rule is that everything committed is pushed. `profile.canPush` false pushes nothing anywhere. A repository whose clone or
 checkout fails ends the turn before the agent starts and nothing is pushed.
 
 ### The result
 
 `ImplementerResult.repos[]` (`ImplementerRepoResult`) has one entry per repository, in the order of the job, with the name, base,
 branch, whether the turn **created** the branch, base commit, head commit, `pushed`, commits, files and the per-branch push
-report. The old fields of `ImplementerResult` are copies of the **first** repository's entry, so a reader that does not know
+report. Per repository: `created` is true when this turn made the branch; **`baseCommit` is the tip of the branch when the turn
+started** (the base head if the turn created it or the work is direct, its own tip for a continued branch); `commits` are the
+commits **this turn** made on the branch after it; `headCommit` is the tip at the end (equal to `baseCommit` when the turn made
+none); `pushed` that the branch with `headCommit` is on the remote. The old fields of `ImplementerResult` are copies of the **first** repository's entry, so a reader that does not know
 `repos` still reads a valid single-repository result. A rejected push is reported per repository; the turn ends `push_rejected`
 when in any repository the working branch was not taken, and says which one; what was pushed elsewhere stays pushed.
+
+**Size.** The body of a completion with `repos` is at most 4 MiB (4,194,304 bytes); the runner keeps `repos` plus the old-field copies
+within 3 MiB by cutting `filesChanged`, then `commits`, ten entries at a time, and counts what it cut (`filesTruncated`,
+`commitsTruncated`). The app's limit is raised to the 4 MiB in #1092.
 
 ### The session and resume
 
 The session keeps its repository list for answer turns and for `session.continue` (the repositories of a session are fixed when it
-starts). A follow-up job carries `resume.repos`: one entry per repository, by mount name, with the branches the last turn pushed
+starts), **with the `name`, `base` and `branch` the first turn resolved and the app stored: a follow-up never resolves them again**
+(`branchExists` is asked again, tokens are made fresh). A follow-up job carries `resume.repos`: one entry per repository, by mount name, with the branches the last turn pushed
 and the branch HEAD was on; `branches` and `checkout` are then absent. Resume restores every repository.
+
+### Error codes
+
+All end the step before the agent starts and cost nothing, except `push_rejected`. The lane codes are the app's and get their rows
+in the table of semantic codes of `docs/workflows.md` with #1092 (a test holds that table to the validator); the runner's codes
+are `ErrorCode`s of the runner contract.
+
+| Code | Emitted by, when | Free |
+| --- | --- | --- |
+| `repos_with_branch`, `repos_with_session_continue` | validator, when the lane is saved | yes |
+| `repo_duplicate` | validator (equal literals) and engine (filled-in references), without regard to case | yes |
+| `repo_name_clash` | engine, when the step runs: derived mount names equal without regard to case | yes |
+| `repo_invalid`, `branch_invalid` | engine: a reference gave no repository or no branch name | yes |
+| `repo_not_available` | engine: no active installation, or none that can write when the profile may push | yes |
+| `base_branch_not_found` | the runner (existing code), or the app when it resolves `base` | yes |
+| `clone_failed` | runner: a clone or checkout fails; `branchExists` true and the branch is gone | yes |
+| `branch_exists` | runner (re-used): `branchExists` false and the refs have the branch | yes |
+| `invalid_job` | runner's parser: a rule of the job that the schema cannot state (the shared corpus) | yes |
+| `push_rejected` | runner: in any repository the working branch was not taken | no (the agent ran) |
 
 ## Alternatives considered
 
@@ -130,8 +178,9 @@ and the branch HEAD was on; `branches` and `checkout` are then absent. Resume re
   because a reader that ignores new fields is harmless there.
 - **One token for everything (a user token or the App's JWT).** Rejected: it would reach more than the job named, and a push
   would no longer be limited to the listed repositories.
-- **The runner chooses the mount names.** Rejected: the app writes facts and the preface and must agree with the runner; the
-  names are derived by one rule and carried in the job, and the runner checks them.
+- **The runner chooses the mount names and writes the preamble.** Rejected: the app writes the facts and the preamble and must
+  agree with the runner on the names; they are derived by one rule, carried in the job, and the runner re-derives and checks
+  them. One owner for the preamble (the app) avoids two agents writing one, or none.
 - **Opening a pull request for every repository with a changed branch, whatever the turn pushed.** Rejected: a repository with
   direct work or with nothing pushed has no pull request to open, and a skipped repository must be visible, not an error.
 
@@ -141,13 +190,17 @@ and the branch HEAD was on; `branches` and `checkout` are then absent. Resume re
   branches of the first. A lane can work on a repository next to the ticket's, with a pull request in each.
 - **Harder:** the job, the result and the resume each have two forms; the app builds a job per installation of tokens and the runner
   holds several repositories, mirrors and pushes. The result is larger (up to ten repositories, with the lists shortened per
-  repository: 100 commits, 250 files and 25 branches), so the app's limit for the body of an Implementer report is raised in #1092.
+  repository: 100 commits, 250 files and 25 branches), so the app's limit for the body of an Implementer report is raised to 4 MiB in #1092 (the runner's budget is 3 MiB, see "The result").
 - **The project repository is not required.** A lane that names its repositories does not need the project's one, and the
   repository of the run is just one more repository. This is the first lane feature that does not depend on
   `projects.repository_id`; the owner plans to drop the project↔repository tie later, and nothing new may depend on it.
 - **Direct work on a base branch is allowed and unforced.** A protected branch refuses the push; the refusal is the turn's
-  `push_rejected` for that repository, with the commits left on the agent's side only until the sandbox ends. A lane that must not
-  touch a base branch names a branch.
+  `push_rejected` for that repository, with the commits left on the agent's side only until the sandbox ends.
+- **Everything committed is pushed, the base branch included.** The owner's rule is that every changed local branch of every
+  repository is pushed. A consequence, stated plainly: **naming a branch does not protect the base.** An agent that commits on
+  `main` in a repository that has a working branch gets that commit pushed to `main` as well, unless the provider's branch
+  protection refuses it (then it is a `remote_rejected` entry). Branch protection is the only guard; a lane that must never
+  change a base branch needs it on the repository. The single-repository form behaves the same today.
 - **Rollout.** Contract first (this record and #1091, no behaviour change: the parsers still refuse `repos` and no code sends or
   reads it), then the app and the runner in parallel behind `implementer_multi_repo`, then the pull request step and the lane
   editor. A runner and an app of different releases keep working because of the gate.
@@ -156,14 +209,21 @@ and the branch HEAD was on; `branches` and `checkout` are then absent. Resume re
 
 ## Open questions
 
-- **The agent's working directory.** `/work` is not a git repository. OpenCode stores a session per project and `opencode import`
-  rewrites the project id (`docs/implementer.md`, "Follow-up turns: what was measured on a real VM"); whether a session in `/work`
-  resumes as well as one in a repository has to be measured by #1093. Fallback: the working directory is the first repository's
-  mount.
+- **The agent's working directory.** The contract is `/work`, which is not a git repository. OpenCode stores a session per project
+  and `opencode import` rewrites the project id (`docs/implementer.md`, "Follow-up turns: what was measured on a real VM"); #1093
+  measures whether a session in `/work` resumes as well as one in a repository. **Fallback if it does not: the working directory
+  is the first repository's mount**; then the sentence in `docs/implementer.md`, the resume notes and the preamble change, the
+  rest of this record does not.
 - **Reviews and ticket moves per pull request.** `ticket.requestReview` takes one pull request; a step that must ask for a review of
   each pull request of `pullRequests` needs the reserved `forEach` step. Until then it asks for the first.
-- **The size of the report.** The per-repository bounds (100/250/25) are a guess from the single-repository bounds; #1092 sets the
-  body limit from them and may tighten them after a measured turn on ten repositories.
+- **The bounds of the report.** The per-repository bounds (100/250/25) and the budget (4 MiB body, 3 MiB for `repos`) are a guess
+  from the single-repository bounds; a measured turn on ten repositories may tighten them.
+- **A rejected direct push ends the turn `push_rejected`,** so the facts and the pull request step for the other repositories are
+  not reachable on that failure path (a pull request step is skipped when the agent step fails). A `continue_on_error` for the
+  step, or a pull request step that runs on a failed agent step, would fix that; not decided here.
+- **Repository access of the person.** "Any active repository of the workspace" is checked at workspace level (the GitHub App's
+  installation). A manual input `repo` is free text typed by a member of the workspace, who may have no access to that
+  repository on GitHub; the run's own repository has the same property today, but now every repository is free text. Not decided here.
 - **`{{trigger.ticket.key}}`.** The epic's example uses it; the validator in #1092 must say which tickets have a key (a Jira issue
   does) and what a GitHub issue gives (its number).
 

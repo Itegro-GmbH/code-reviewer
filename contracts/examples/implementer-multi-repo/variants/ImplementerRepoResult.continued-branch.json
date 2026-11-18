@@ -1,0 +1,13 @@
+{
+  "name": "other-org__app",
+  "fullName": "other-org/app",
+  "base": "main",
+  "branch": "feature/ACME-12",
+  "created": false,
+  "baseCommit": "c0ffee1234567890abcdef1234567890abcdef12",
+  "headCommit": "c0ffee1234567890abcdef1234567890abcdef12",
+  "pushed": true,
+  "commits": [],
+  "filesChanged": [],
+  "checkedOut": "feature/ACME-12"
+}

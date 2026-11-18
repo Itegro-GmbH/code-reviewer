@@ -1,0 +1,25 @@
+{
+  "why": "`acme/app` is mounted as `acme__app` because of `x/app`, and `acme/acme__app` is `acme__app` too: `repo_name_clash`.",
+  "layer": "rule",
+  "error": "repo_name_clash",
+  "definition": "AgentStep",
+  "rule": "repo_name_clash",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": [
+      {
+        "repo": "acme/app"
+      },
+      {
+        "repo": "x/app"
+      },
+      {
+        "repo": "acme/acme__app"
+      }
+    ]
+  },
+  "patch": []
+}

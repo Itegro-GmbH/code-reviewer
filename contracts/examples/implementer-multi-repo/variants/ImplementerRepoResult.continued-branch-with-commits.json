@@ -1,0 +1,31 @@
+{
+  "name": "other-org__app",
+  "fullName": "other-org/app",
+  "base": "main",
+  "branch": "feature/ACME-12",
+  "created": false,
+  "baseCommit": "c0ffee1234567890abcdef1234567890abcdef12",
+  "headCommit": "b16b00b5b16b00b5b16b00b5b16b00b5b16b00b5",
+  "pushed": true,
+  "branches": [
+    {
+      "name": "feature/ACME-12",
+      "head": "b16b00b5b16b00b5b16b00b5b16b00b5b16b00b5",
+      "result": "pushed",
+      "reason": null
+    }
+  ],
+  "commits": [
+    {
+      "sha": "b16b00b5b16b00b5b16b00b5b16b00b5b16b00b5",
+      "subject": "Fix the review remark about the backoff"
+    }
+  ],
+  "filesChanged": [
+    {
+      "path": "src/webhooks/sender.ts",
+      "status": "modified"
+    }
+  ],
+  "checkedOut": "feature/ACME-12"
+}

@@ -1,0 +1,15 @@
+{
+  "why": "The runner re-derives every name from the `fullName`s and refuses a name that differs.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "mount_name_not_derived",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/repos/1/name",
+      "value": "lib"
+    }
+  ]
+}

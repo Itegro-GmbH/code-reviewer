@@ -125,7 +125,7 @@
         "base": "main",
         "branch": "main",
         "created": false,
-        "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+        "baseCommit": "7e6d5c4b3a2918070605f4e3d2c1b0a998877665",
         "headCommit": "3c2b1a0f9e8d7c6b5a49382716059483726150ab",
         "pushed": false,
         "branches": [
@@ -156,9 +156,9 @@
         "base": "main",
         "branch": "feature/ACME-12",
         "created": false,
-        "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
-        "headCommit": null,
-        "pushed": false,
+        "baseCommit": "c0ffee1234567890abcdef1234567890abcdef12",
+        "headCommit": "c0ffee1234567890abcdef1234567890abcdef12",
+        "pushed": true,
         "commits": [],
         "filesChanged": [],
         "checkedOut": "feature/ACME-12"

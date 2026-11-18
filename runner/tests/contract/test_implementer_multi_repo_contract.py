@@ -2,10 +2,14 @@
 
 """The multi-repository implementer job of contracts/runner-api.v1.json (#1091, ADR 0006).
 
-Only the contract is checked: the examples are valid, the job form is `repos` or `repo`, never both
-and never neither, the tokens, the resume and the result follow the job, and the feature is named
-in the file. The parser of the runner does not read `repos` yet (#1093), so nothing here parses a
-job of this form.
+Only the contract is checked: the examples (and their variants: a continued branch, direct work,
+`canPush` false, a follow-up) are valid, the job form is `repos` or `repo`, never both and never
+neither, the tokens, the resume and the result follow the job, the feature is named in the file,
+and **the shared negative corpus** (contracts/examples/implementer-multi-repo/invalid/, the same
+files the app's test reads) is rejected: by the schema where it can state the rule, by the
+reference rules of `multi_repo_rules.py` where it cannot. The parser of the runner does not read
+`repos` yet (#1093), so nothing here parses a job of this form; #1093 must keep the corpus failing
+with the same rules.
 """
 
 import copy
@@ -15,12 +19,22 @@ from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
+from multi_repo_rules import (
+    apply_patch,
+    break_of_job_rule,
+    break_of_lane_rule,
+    derive_mount_names,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACTS = ROOT / "contracts"
 SCHEMA_PATH = CONTRACTS / "runner-api.v1.json"
 SINGLE = CONTRACTS / "examples" / "implementer"
-MULTI = CONTRACTS / "examples" / "implementer-multi-repo"
+EXAMPLES = CONTRACTS / "examples"
+MULTI = EXAMPLES / "implementer-multi-repo"
+VARIANTS = MULTI / "variants"
+INVALID = MULTI / "invalid"
+WORKFLOW_PATH = CONTRACTS / "workflow.v1.json"
 
 Document = dict[str, Any]
 
@@ -29,8 +43,8 @@ def _load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _accepts(definition: str, document: Any) -> bool:
-    schema: Document = _load(SCHEMA_PATH)
+def _accepts(definition: str, document: Any, schema_path: Path = SCHEMA_PATH) -> bool:
+    schema: Document = _load(schema_path)
     validator = Draft202012Validator(
         {"$schema": schema["$schema"], "$ref": f"#/$defs/{definition}", "$defs": schema["$defs"]}
     )
@@ -48,6 +62,7 @@ def _entry(index: int) -> Document:
         "cloneUrl": f"https://github.com/acme/r{index}.git",
         "base": "main",
         "branch": "main",
+        "branchExists": False,
         "tokenId": "t1",
     }
 
@@ -58,6 +73,113 @@ def test_the_examples_of_a_multi_repository_turn_are_valid() -> None:
     assert _accepts("ImplementerResume", _load(MULTI / "ImplementerResume.json"))
     for name in ("ImplementerJobRepo", "ImplementerRepoResult", "ImplementerResumeRepo"):
         assert _accepts(name, _load(SINGLE / f"{name}.json")), name
+
+
+def _variants() -> list[Path]:
+    return sorted(VARIANTS.glob("*.json"))
+
+
+@pytest.mark.parametrize("path", _variants(), ids=lambda path: path.stem)
+def test_every_variant_is_a_valid_document_of_its_definition(path: Path) -> None:
+    # `Definition.case.json`: the part before the first dot names the definition.
+    assert _accepts(path.name.split(".", 1)[0], _load(path)), path.name
+
+
+def test_a_continued_branch_starts_at_its_own_tip_and_made_nothing() -> None:
+    entry: Document = _load(VARIANTS / "ImplementerRepoResult.continued-branch.json")
+    assert entry["created"] is False
+    assert entry["baseCommit"] == entry["headCommit"]
+    assert entry["commits"] == [] and entry["filesChanged"] == []
+    assert entry["pushed"] is True
+
+
+def test_a_continued_branch_that_got_commits_counts_from_its_start_tip() -> None:
+    entry: Document = _load(VARIANTS / "ImplementerRepoResult.continued-branch-with-commits.json")
+    assert entry["created"] is False
+    assert [commit["sha"] for commit in entry["commits"]] == [entry["headCommit"]]
+    assert entry["baseCommit"] != entry["headCommit"]
+
+
+def test_direct_work_is_pushed_to_the_base_branch() -> None:
+    entry: Document = _load(VARIANTS / "ImplementerRepoResult.direct-push.json")
+    assert entry["branch"] == entry["base"]
+    assert entry["created"] is False and entry["pushed"] is True
+    assert entry["branches"][0]["name"] == entry["base"]
+    assert entry["branches"][0]["result"] == "pushed"
+
+
+def test_a_job_that_may_not_push_reports_no_head_commit_and_no_branches() -> None:
+    job: Document = _load(VARIANTS / "RunnerJobInput.can-push-false.json")
+    assert job["implementer"]["profile"]["canPush"] is False
+    entry: Document = _load(VARIANTS / "ImplementerRepoResult.can-push-false.json")
+    assert entry["headCommit"] is None and entry["pushed"] is False
+    assert entry["commits"] == [] and "branches" not in entry
+
+
+def test_a_follow_up_has_resume_repos_in_the_order_of_the_job() -> None:
+    job: Document = _load(VARIANTS / "RunnerJobInput.follow-up.json")
+    names = [repo["name"] for repo in job["implementer"]["repos"]]
+    assert [entry["name"] for entry in job["implementer"]["resume"]["repos"]] == names
+    assert break_of_job_rule(job) is None
+
+
+def test_the_job_example_follows_the_rules_the_schema_cannot_state() -> None:
+    assert break_of_job_rule(_job()) is None
+    for path in _variants():
+        if path.name.startswith("RunnerJobInput"):
+            assert break_of_job_rule(_load(path)) is None, path.name
+
+
+def test_mount_names_are_derived_without_regard_to_case_and_to_the_order() -> None:
+    assert derive_mount_names(["acme/app", "acme/shared-lib", "other/app"]) == [
+        "acme__app",
+        "shared-lib",
+        "other__app",
+    ]
+    assert derive_mount_names(["other/app", "acme/shared-lib", "acme/app"]) == [
+        "other__app",
+        "shared-lib",
+        "acme__app",
+    ]
+    assert derive_mount_names(["acme/App", "other/app"]) == ["acme__App", "other__app"]
+    assert derive_mount_names(["acme/result", "acme/Reserve", "acme/.git", "acme/x"]) == [
+        "acme__result",
+        "acme__Reserve",
+        "acme__.git",
+        "x",
+    ]
+
+
+def _corpus() -> list[Path]:
+    return sorted(INVALID.glob("*.json"))
+
+
+def test_the_corpus_is_there() -> None:
+    assert len(_corpus()) >= 20
+
+
+@pytest.mark.parametrize("path", _corpus(), ids=lambda path: path.stem)
+def test_an_invalid_case_of_the_shared_corpus_is_rejected(path: Path) -> None:
+    case: Document = _load(path)
+    schema_path = WORKFLOW_PATH if case["definition"] == "AgentStep" else SCHEMA_PATH
+    document: Document = (
+        copy.deepcopy(case["document"])
+        if "document" in case
+        else _load(EXAMPLES / f"{case['base']}.json")
+    )
+    document = apply_patch(document, case["patch"])
+    accepted = _accepts(case["definition"], document, schema_path)
+    if case["layer"] == "schema":
+        assert not accepted, case["why"]
+        return
+    # A rule the schema cannot state: the document is valid for the schema and a rule breaks it.
+    assert accepted, f"{path.name}: the schema refuses it, so the case belongs to layer 'schema'"
+    broken = (
+        break_of_lane_rule(document)
+        if case["definition"] == "AgentStep"
+        else break_of_job_rule(document)
+    )
+    assert broken == case["rule"], case["why"]
 
 
 def test_the_job_of_today_is_still_valid() -> None:
@@ -93,21 +215,54 @@ def test_a_job_has_one_to_ten_repositories() -> None:
     assert not _accepts("RunnerJobInput", job)
 
 
-@pytest.mark.parametrize("key", ["name", "fullName", "cloneUrl", "base", "branch", "tokenId"])
+@pytest.mark.parametrize(
+    "key", ["name", "fullName", "cloneUrl", "base", "branch", "branchExists", "tokenId"]
+)
 def test_every_field_of_a_repository_is_needed(key: str) -> None:
     job = _job()
     del job["implementer"]["repos"][0][key]
     assert not _accepts("RunnerJobInput", job)
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a b", "x" * 203])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a b",
+        "x" * 203,
+        "-x",
+        "result",
+        "Result",
+        "RESERVE",
+        "reserve",
+        ".git",
+        ".GIT",
+    ],
+)
 def test_a_mount_name_that_is_not_safe_is_refused(name: str) -> None:
     job = _job()
     job["implementer"]["repos"][0]["name"] = name
     assert not _accepts("RunnerJobInput", job)
 
 
-@pytest.mark.parametrize("name", [".github", "app", "Itegro-GmbH__app", "a.b_c-d", "x" * 202])
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".github",
+        "app",
+        "Itegro-GmbH__app",
+        "a.b_c-d",
+        "x" * 202,
+        "results",
+        "reserved",
+        "x-",
+        "git",
+        ".gitignore",
+    ],
+)
 def test_a_mount_name_that_is_safe_is_accepted(name: str) -> None:
     job = _job()
     job["implementer"]["repos"][0]["name"] = name
@@ -210,6 +365,8 @@ def test_the_lists_of_a_repository_of_a_result_are_bounded() -> None:
         result["implementer"]["repos"][0][key] = value
         return _accepts("RunnerResult", result)
 
+    assert accepts("commitsTruncated", 3) and accepts("filesTruncated", 0)
+    assert not accepts("commitsTruncated", -1) and not accepts("filesTruncated", "1")
     commit = {"sha": "a" * 40, "subject": "c"}
     assert accepts("commits", [commit] * 100)
     assert not accepts("commits", [commit] * 101)

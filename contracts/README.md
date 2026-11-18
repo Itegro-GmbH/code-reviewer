@@ -606,14 +606,14 @@ The meaning of the calls (status codes, the lease, what happens on failure) is i
 
 ## Several repositories in one turn (#1091, epic #1090)
 
-`ImplementerJob.repos` (`ImplementerJobRepo`: `name`, `fullName`, `cloneUrl`, `base`, `branch`, optional `branchExists`, `tokenId`; one to ten) replaces
+`ImplementerJob.repos` (`ImplementerJobRepo`: `name`, `fullName`, `cloneUrl`, `base`, `branch`, `branchExists`, `tokenId`, all required; one to ten) replaces
 `repo`, `baseBranch`, `branch` and `startBranch`; the two forms are exclusive in the schema. `git.tokens` (`GitToken`: `id`, `token`) holds the token of each installation and is
-there exactly when the job has `repos`; `git.token` stays and is the first repository's. `ImplementerResume.repos` (`ImplementerResumeRepo`) replaces `branches` and `checkout`
+there exactly when the job has `repos`; `git.token` stays and is byte-equal to the token of the first repository's `tokenId`. `ImplementerResume.repos` (`ImplementerResumeRepo`) replaces `branches` and `checkout`
 of a follow-up. `ImplementerResult.repos` (`ImplementerRepoResult`, one per repository, in the job's order) is added to the result, and the old fields are copies of the first
-repository's entry. The claim feature `implementer_multi_repo` (`KnownClaimFeature`) gates it: only a caller that names it gets a job with `repos`. `workflow.v1.json` gets
+repository's entry. The claim feature `implementer_multi_repo` (`KnownClaimFeature`) gates it: only a caller that names it ever claims a job with `repos` (for the others it waits in the queue; nothing fails). `workflow.v1.json` gets
 `repos` on the agent step (`AgentStepRepo`: `repo`, optional `base` and `branch`; one to ten; not with `branch` or `session.continue`). The rules are in
 [`docs/decisions/0006-multi-repo-agent-steps.md`](../docs/decisions/0006-multi-repo-agent-steps.md) and [`docs/implementer.md`](../docs/implementer.md#several-repositories-in-one-turn-1090).
-`examples/implementer-multi-repo/` holds a whole job, result and resume of this form and `examples/implementer/` the pieces (`ImplementerJobRepo`, `ImplementerRepoResult`,
+`examples/implementer-multi-repo/` holds a whole job, result and resume of this form, `variants/` the valid cases beside them (a continued branch, direct work, a job that may not push, a follow-up) and `invalid/` **the shared negative corpus**: jobs and lane steps that both the app's and the runner's contract test must reject (by the schema, or by the reference rules for what a schema cannot state); `examples/implementer/` holds the pieces (`ImplementerJobRepo`, `ImplementerRepoResult`,
 `ImplementerResumeRepo`). The checks are `app/src/runner-api/multi-repo-contract.test.ts` and `runner/tests/contract/test_implementer_multi_repo_contract.py`. Nothing reads or
 sends `repos` yet (#1092, #1093): the runner's parser still refuses it.
 

@@ -1,0 +1,15 @@
+{
+  "why": "A mount name is unique without regard to case.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "mount_name_repeated",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/repos/1/name",
+      "value": "ACME__APP"
+    }
+  ]
+}

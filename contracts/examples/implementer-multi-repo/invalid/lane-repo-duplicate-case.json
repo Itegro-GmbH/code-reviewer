@@ -1,0 +1,22 @@
+{
+  "why": "Two entries name one repository without regard to case: `repo_duplicate` at validation.",
+  "layer": "rule",
+  "error": "repo_duplicate",
+  "definition": "AgentStep",
+  "rule": "repo_duplicate",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": [
+      {
+        "repo": "Acme/App"
+      },
+      {
+        "repo": "acme/app"
+      }
+    ]
+  },
+  "patch": []
+}

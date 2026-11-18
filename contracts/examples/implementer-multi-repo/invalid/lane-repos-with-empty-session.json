@@ -1,0 +1,19 @@
+{
+  "why": "A `session` object without `continue` is not a session.",
+  "layer": "schema",
+  "error": "repos_with_session_continue",
+  "definition": "AgentStep",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": [
+      {
+        "repo": "a/b"
+      }
+    ],
+    "session": {}
+  },
+  "patch": []
+}

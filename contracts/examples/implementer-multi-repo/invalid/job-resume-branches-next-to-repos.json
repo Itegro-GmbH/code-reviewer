@@ -1,0 +1,19 @@
+{
+  "why": "A follow-up of a multi-repository job has `resume.repos`, never `branches`/`checkout`.",
+  "layer": "schema",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "base": "implementer-multi-repo/variants/RunnerJobInput.follow-up",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/implementer/resume/branches",
+      "value": []
+    },
+    {
+      "op": "add",
+      "path": "/implementer/resume/checkout",
+      "value": null
+    }
+  ]
+}

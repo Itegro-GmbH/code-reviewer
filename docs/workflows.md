@@ -251,13 +251,13 @@ An agent step with `repos` works on **several repositories at once**, in one ses
 `{{trigger.repo.defaultBranch}}` or a manual input; `branch`: also a **text** around such references, `feature/{{trigger.ticket.key}}`, whose references are
 `{{trigger.ticket.key}}`, `{{trigger.ticket.number}}` or a manual input), never a result field or the title, body or labels of an issue
 (`target_from_untrusted_value`). A reference that gives no repository or no branch name ends the step before the agent starts (`repo_invalid`, `branch_invalid`).
-Two entries may not name the same repository (`repo_duplicate`: the validator checks equal literals, the engine the filled-in references).
+Two entries may not name the same repository, **compared without regard to case** (`Acme/App` and `acme/app` are one repository on GitHub): `repo_duplicate`, which the validator reports for equal literals and the engine for the filled-in references, before the agent starts. Two repositories whose mount names clash after the derivation below end the step `repo_name_clash`.
 
 **What the agent finds.** Each repository is cloned in full (every branch and tag, no remote, no credential) into `/work/<name>`: `<name>` is the repository's
 name (`app` for `Itegro-GmbH/app`) or, when two repositories of the step have the same name or the name is one of the work volume's own (`result`, `reserve`),
-`<owner>__<name>` for every one of them. The instruction gets a **preamble** that lists the repositories, their mounts, bases and branches and whether each branch
-was continued or made. What the agent commits is pushed **when the turn ends**: every local branch it created or moved in each repository, without force, with a
-token of that repository ([`implementer.md`](implementer.md#several-repositories-in-one-turn-1090)).
+`<owner>__<name>` for every one of them (the rule is one, shared by the app and the runner: [`implementer.md`](implementer.md#several-repositories-in-one-turn-1090)). The agent's working directory is `/work`, where each repository is its directory. **The app writes the preamble** into the instruction (it knows the names, bases and branches): the repositories, their mounts, bases and branches and whether each branch
+was continued or made, the same text on every turn of the session; the runner adds no list of repositories. What the agent commits is pushed **when the turn ends**: every local branch it created or moved in each repository, without force, with a
+token of that repository ([`implementer.md`](implementer.md#several-repositories-in-one-turn-1090)). That **includes the base branch** of every repository: naming a branch does not protect the base, the provider's branch protection does.
 
 **Facts.** `{{<step>.repos}}` is a list with one entry per repository, in the order of the step:
 
@@ -266,23 +266,23 @@ token of that repository ([`implementer.md`](implementer.md#several-repositories
 | `fullName` | `owner/name` |
 | `base` | the base branch (the default branch when the entry gave none) |
 | `branch` | the working branch; equal to `base` for direct work |
-| `commits` | the commit ids the turn made on `branch`, oldest first |
-| `headCommit` | the last commit of `branch`, or null when the turn made none |
-| `pushed` | true when `branch` with `headCommit` is on the remote |
+| `commits` | the commit ids **this turn** made on `branch`, oldest first (none for a continued branch the turn added nothing to, however many commits it had) |
+| `headCommit` | the tip of `branch` when the turn ended, the commit it started from when the turn made none there, as for the single facts; null only for a repository with no commit at all |
+| `pushed` | true when `branch` with `headCommit` is on the remote at the end of the turn |
 
-They exist only for a profile that may push. The single facts `branch`, `commits`, `headCommit` and `pushed` **refer to the first repository**, so a lane written
-for one repository keeps working when another is added behind it. A rejected push is reported for that repository (`push_rejected` ends the turn when a working
+They exist only for a profile that may push. The single facts `branch`, `commits`, `headCommit` and `pushed` **refer to the first repository** and mean for it what they
+always meant (`headCommit` is never null there while the repository has a commit), so a lane written for one repository keeps working when another is added behind it. A rejected push is reported for that repository (`push_rejected` ends the turn when a working
 branch was not taken, the message names the repository); what was pushed elsewhere stays pushed and is in `repos`.
 
-**The session** keeps its repositories: an answer turn and a step with `session.continue` work on the same ones, in the same mounts, and resume restores every
-repository (`resume.repos`). A step with `session.continue` therefore has no `repos` of its own.
+**The session** keeps its repositories: an answer turn and a step with `session.continue` work on the same ones, in the same mounts, **with the `base` and the `branch` the first turn resolved, never resolved again** (a changed default branch, or a reference that now gives something else, changes nothing), and resume restores every
+repository (`resume.repos`). A step with `session.continue` therefore has **no `repos` of its own** (`repos_with_session_continue`), and `{{<step>.repos}}` of such a step is the session's list with the facts of this turn: that is what the pull request step reads (`{{implement.repos}}` of the continuing step).
 
 **The pull request step.** `github.pullRequest.open` (`pullRequest.open`) takes, instead of `head` and `base`, `repos`: exactly one reference to the `repos` fact of
 an earlier agent step that may push (`{{implement.repos}}`; anything else is `target_from_untrusted_value`). It opens **one pull request for each entry whose
-`branch` differs from its `base` and whose turn pushed it**, in the order of the list, in that entry's repository against its base. `title`, `body` and `draft`
+`branch` differs from its `base`, whose branch has commits ahead of the base on the provider and for which no open pull request from that branch exists yet**, in the order of the list, in that entry's repository against its base. The turn's own `commits` do not decide it: a later round that adds no commit opens no second pull request, and a branch that already existed (a continued one) still gets its pull request. `title`, `body` and `draft`
 apply to every pull request; `{{repo.fullName}}`, `{{repo.base}}` and `{{repo.branch}}` stand for the repository being opened in `title` and `body`. An entry with
 direct work (`branch` equal to `base`), with nothing pushed or with no commits between branch and base is **skipped**, not an error. An open pull request for the
-same head and base is reused as always (`existing`). The step yields:
+same head and base is not opened again, as always: the entry is `existing`. The step yields:
 
 | Output | What |
 | --- | --- |
@@ -293,7 +293,7 @@ The step fails when GitHub refuses a pull request for another reason; the others
 pull request needs the reserved `forEach` step; `ticket.requestReview` asks for the first one. The token of the step is made for the repositories it opens a
 pull request in, with the rights of today (Pull requests: Read and write, Contents: Read-only).
 
-**Codes.** The validator and the engine report these with #1092, and the table of semantic codes below gets their rows then (a test holds that table to the codes the validator has): `repos_with_branch` and `repos_with_session_continue` (the step has `repos` next to `branch` or `session.continue`), `repo_duplicate` (two entries name one repository), and, when the step runs and before the agent starts, free of charge, `repo_invalid` and `branch_invalid` (a reference gave no repository or no branch name), `repo_not_available` (the workspace has no active installation of the GitHub App for a repository, or the profile may push and the installation cannot write to it) and `base_branch_not_found`. `result_field_reserved` also covers a result field `repos` in a step that has `repos`.
+**Codes.** The validator and the engine report these with #1092, and the table of semantic codes below gets their rows then (a test holds that table to the codes the validator has; the codes are listed once, with who emits them and when, in [`implementer.md`](implementer.md#several-repositories-in-one-turn-1090) and the ADR): `repos_with_branch` and `repos_with_session_continue` (the step has `repos` next to `branch` or `session.continue`), `repo_duplicate` (two entries name one repository, without regard to case), `repo_name_clash` (the derived mount names of two repositories are equal without regard to case), and, when the step runs and before the agent starts, free of charge, `repo_invalid` and `branch_invalid` (a reference gave no repository or no branch name), `repo_not_available` (the workspace has no active installation of the GitHub App for a repository, or the profile may push and the installation cannot write to it) and `base_branch_not_found`. `result_field_reserved` also covers a result field `repos` in a step that has `repos`.
 
 **Not in version 1:** repositories of another workspace or provider, more than ten repositories, a `repos` that is built at run time, and a step that adds
 repositories to a session that has begun.
