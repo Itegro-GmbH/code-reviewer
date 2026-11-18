@@ -800,7 +800,9 @@ class GitWorkspace:
             name != branch and (name.startswith(branch + "/") or branch.startswith(name + "/"))
             for name in provider
         ):
-            raise _invalid("a branch of the provider is the directory of the session branch")
+            raise _invalid(
+                "a branch of the provider is the directory of the session branch" + self._where()
+            )
 
     def create_agent_repository(self) -> None:
         """The agent's repository: a full local clone of the mirror (no hard links, so nothing is
@@ -1697,14 +1699,14 @@ class GitWorkspace:
         # Direct work (#1093) is the one form where the branch is the base.
         same = branch == base and not self.spec.direct
         if same or branch == "HEAD" or branch.startswith("-") or base.startswith("-"):
-            raise _invalid("the branch must be a new name that git accepts")
+            raise _invalid("the branch must be a new name that git accepts" + self._where())
         for name in (base, branch):
             done = self._root(["check-ref-format", f"refs/heads/{name}"], protocols="file")
             if done.returncode != 0:
-                raise _invalid("a branch name is not one git accepts")
+                raise _invalid("a branch name is not one git accepts" + self._where())
         if start is not None:
             if start == branch:
-                raise _invalid("the start branch must differ from the new branch")
+                raise _invalid("the start branch must differ from the new branch" + self._where())
             self._check_session_name(start)
         for entry in () if self.spec.resume is None else self.spec.resume.branches:
             self._check_session_name(entry.name)
@@ -1724,17 +1726,17 @@ class GitWorkspace:
         if self.spec.resume is not None:
             names.update(entry.name for entry in self.spec.resume.branches)
         if any(other.startswith(name + "/") for name in names for other in names):
-            raise _invalid("a branch of the session is the directory of another")
+            raise _invalid("a branch of the session is the directory of another" + self._where())
 
     def _check_session_name(self, name: str) -> None:
         """A name of a branch of the session is used in refspecs and ref names as the others are."""
         # A control character (a NUL above all) is refused before a name reaches a command line or
         # the standard input of `update-ref -z`.
         if name == "HEAD" or name.startswith("-") or _CONTROL_CHARS.search(name):
-            raise _invalid("a branch name of the session is not one git accepts")
+            raise _invalid("a branch name of the session is not one git accepts" + self._where())
         done = self._root(["check-ref-format", f"refs/heads/{name}"], protocols="file")
         if done.returncode != 0:
-            raise _invalid("a branch name of the session is not one git accepts")
+            raise _invalid("a branch name of the session is not one git accepts" + self._where())
 
     def _prepare_directories(self) -> None:
         for directory in (self.layout.work_dir, self.layout.run_dir, self.reserve):

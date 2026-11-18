@@ -78,7 +78,7 @@ from .network_rule import OFF
 from .placement import placement_of
 from .reader import ReaderAccess
 from .repo_places import places_of
-from .report import MAX_REPO_BRANCHES, clip_texts, escaped_size, fit_block, valid_block
+from .report import MAX_REPO_BRANCHES, body_fits, clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
 from .runner_profile import agent_seams, outer_proxy_for_job, reader_seams, setup_seams
@@ -429,6 +429,8 @@ def _fitted(block: Mapping[str, object] | None, rest: JobResult | None) -> dict[
         return None
     other = 0 if rest is None else escaped_size(rest.to_json())
     fitted = fit_block(clip_texts(block), other)
+    if "repos" in fitted and not body_fits(fitted, other):
+        return None
     return fitted if valid_block(fitted) is not None else None
 
 

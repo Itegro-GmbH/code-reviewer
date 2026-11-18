@@ -16,6 +16,7 @@ from code_reviewer_runner.implementer.report import (
     MAX_REPO_COMMITS,
     MAX_REPO_FILES,
     REPOS_BUDGET_BYTES,
+    body_fits,
     escaped_size,
     fit_block,
     fit_repos,
@@ -229,3 +230,38 @@ def test_a_repository_that_may_not_push_has_no_head_no_commits_and_no_branches()
 # #1093-T61
 def test_the_entries_are_json_the_runner_can_write() -> None:
     json.dumps(block_of(outcome("app"), outcome("lib")))
+
+
+# #1093-T68
+def test_the_cut_counts_what_surrounds_the_block_so_that_the_body_stays_within_its_budget() -> None:
+    long = "d" * 4000
+    block = block_of(
+        outcome("app", files=250, path=long),
+        outcome("lib", files=250, path=long),
+    )
+    # A result around the block that takes most of the 1 MiB the 3 MiB budget leaves: the body
+    # budget (4 MiB) is what decides, not the 3 MiB of `repos` alone.
+    around = 2 * 1024 * 1024
+    plain = fit_repos(block, 1000)
+
+    fitted = fit_repos(block, around)
+
+    assert escaped_size(fitted["repos"]) < escaped_size(plain["repos"])
+    assert body_fits(fitted, around)
+    assert not body_fits(plain, around)
+    assert valid_block(fitted) is not None
+    assert fitted["filesChanged"] == fitted["repos"][0]["filesChanged"]
+
+
+# #1093-T69
+def test_a_body_that_cannot_be_cut_to_fit_is_said_not_to_fit_and_a_smaller_budget_cuts_more() -> (
+    None
+):
+    block = block_of(outcome("app", files=250, path="d" * 4000), outcome("lib"))
+
+    fitted = fit_repos(block, 1000, body_budget=1024 * 1024)
+
+    assert escaped_size(fitted) + 1000 <= 1024 * 1024
+    # Nothing left to cut and still too large: the caller is told (and leaves the report out).
+    assert body_fits(fitted, 1000, body_budget=1024 * 1024)
+    assert not body_fits(fitted, 5 * 1024 * 1024)

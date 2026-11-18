@@ -1691,6 +1691,19 @@ def test_the_pipe_runs_upload_pack_in_the_named_repository(
         ["--reader-repo=/repos/a/b", "/work/a/b"],
         ["--reader-repo=/repos/result", "/work/result"],
         ["--reader-repo=/repos/x;rm", "/work/x;rm"],
+        # The reserved names of the work volume and `.git` in any case, the empty name, the dots.
+        ["--reader-repo=/repos/reserve", "/work/reserve"],
+        ["--reader-repo=/repos/RESULT", "/work/RESULT"],
+        ["--reader-repo=/repos/.GIT", "/work/.GIT"],
+        ["--reader-repo=/repos/", "/work/"],
+        ["--reader-repo=/repos/.", "/work/."],
+        ["--reader-repo=/repos//x", "/work//x"],
+        ["--reader-repo=/repos/x/", "/work/x/"],
+        ["--reader-repo=repos/x", "/work/x"],
+        ["--reader-repo=/repos/" + "x" * 203, "/work/" + "x" * 203],
+        # The option twice, or with the name of a single-repository turn's directory.
+        ["--reader-repo=/repos/a", "--reader-repo=/repos/a", "/work/a"],
+        ["--reader-repo=/repo", "/work/repo"],
     ],
 )
 def test_the_pipe_takes_a_repository_only_as_a_mount_name_and_the_same_one_twice(

@@ -63,7 +63,9 @@ An agent step may have `repos`: one to ten entries `{ repo, base?, branch? }` (`
   headCommit, pushed }`. `branch` is the working branch, equal to `base` for direct work; `commits` is the list of commit ids
   **this turn** made on it, oldest first; `headCommit` is the tip of `branch` at the end of the turn (the commit it started from
   when the turn made none there, as for the single facts; null only for a repository with no commit at all); `pushed` says that
-  the branch with `headCommit` is on the remote. Like the single facts, they exist only for a profile that may push.
+  the branch with `headCommit` is on the remote; the one exception is a repository the push did not get to (a lost lease), which says
+  `pushed` false **with no `branches`**: not attempted, the remote state not looked at (the contract keeps this; `branches` absent is the
+  "not attempted" flag). Like the single facts, they exist only for a profile that may push.
 - The single facts (`branch`, `commits`, `headCommit`, `pushed`) **refer to the first repository** and keep their meaning there
   (`headCommit` stays non-null), so a lane written for one repository keeps working when a second one is added behind it. On a
   step with `session.continue`, `{{<step>.repos}}` is the session's list with the facts of this turn; the pull request step reads

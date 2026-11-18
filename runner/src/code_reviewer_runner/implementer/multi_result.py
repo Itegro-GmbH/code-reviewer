@@ -109,6 +109,9 @@ def _outcome(fact: MemberFacts, *, can_push: bool) -> RepoOutcome:
     on_the_remote_already = (
         fact.reached and report.listed and report.form_listed and not member.branch_created
     )
+    # A repository the push did not get to (a lost lease ended it first) says `pushed` false and has
+    # no `branches` (`branches=None` below): not attempted, its remote state was not looked at. The
+    # contract keeps this ("pushed" in docs/implementer.md); `branches` absent is the flag.
     pushed = form.pushed if form is not None else on_the_remote_already
     commits, commits_cut = member.newest_commits_since_start(MAX_REPO_COMMITS)
     return RepoOutcome(

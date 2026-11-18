@@ -575,3 +575,26 @@ def test_a_malformed_truncation_flag_is_an_invalid_job(flag: Any) -> None:
     with pytest.raises(JobError) as refused:
         parse_job(json.dumps(dynamic_job(attemptedShasTruncated=flag)))
     assert refused.value.code is ErrorCode.INVALID_JOB
+
+
+# #1093: `git.tokens` belongs to the Implementer's multi-repository job. A review never carries it,
+# and `ReviewInput.secrets` would not mask it: refused, not ignored.
+def test_a_review_job_with_git_tokens_is_refused() -> None:
+    job = valid_job()
+    job["git"] = {**job["git"], "tokens": [{"id": "t1", "token": "ghs_other-0123456789"}]}
+
+    error = refusal(json.dumps(job))
+
+    assert error.code is ErrorCode.INVALID_JOB
+    assert "git.tokens is only for an implementer job" in error.detail
+    assert "ghs_other" not in error.detail
+
+
+def test_a_dynamic_review_job_with_git_tokens_is_refused() -> None:
+    job = dynamic_job()
+    job["git"] = {**job["git"], "tokens": [{"id": "t1", "token": "ghs_other-0123456789"}]}
+
+    error = refusal(json.dumps(job))
+
+    assert error.code is ErrorCode.INVALID_JOB
+    assert "git.tokens is only for an implementer job" in error.detail

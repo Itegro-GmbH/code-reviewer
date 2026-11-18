@@ -573,6 +573,17 @@ def fit_block(
     return fitted
 
 
+_COPIED_KEYS = ("repos", "commits", "filesChanged")
+
+
+def body_fits(
+    block: Mapping[str, Any], other_bytes: int, body_budget: int = REPOS_BODY_BYTES
+) -> bool:
+    """Whether a block with `repos` (cut by `fit_repos`) and `other_bytes` of result around it is
+    within the body budget."""
+    return other_bytes + escaped_size(block) <= body_budget
+
+
 def _repos_size(entries: Sequence[Mapping[str, Any]], first: Mapping[str, Any]) -> int:
     """The bytes `repos` and the copies of the first repository in the old fields take."""
     copies = {key: first[key] for key in ("commits", "filesChanged") if key in first}
@@ -586,14 +597,17 @@ def fit_repos(
     body_budget: int = REPOS_BODY_BYTES,
 ) -> dict[str, Any]:
     """The block cut so that `repos` together with the copies of the first repository in the old
-    fields takes at most `budget` bytes (3 MiB, which leaves 1 MiB of the 4 MiB body for the rest).
-    Until it fits: in the repository whose entry is the largest, `filesChanged` first (from the
-    end, whole entries, ten at a time) and, when that list is empty, `commits` (from the oldest
-    end, ten at a time, the head commit stays); what was left out is counted in `filesTruncated`
-    and `commitsTruncated` of that entry, and the copies in the old fields are those of the first
+    fields takes at most `budget` bytes (3 MiB, which leaves 1 MiB of the 4 MiB body for the rest)
+    and, with `other_bytes` of result around the block and the rest of the block (summary,
+    branches), at most `body_budget` bytes: the smaller room of the two counts. Until it fits: in
+    the repository whose entry is the largest, `filesChanged` first (from the end, whole entries,
+    ten at a time) and, when that list is empty, `commits` (from the oldest end, ten at a time,
+    the head commit stays); what was left out is counted in `filesTruncated` and
+    `commitsTruncated` of that entry, and the copies in the old fields are those of the first
     entry, so they stay equal. Nothing else is cut and nothing is dropped without a counter. A body
-    that is still over `body_budget` (the rest of the block is too large) is the caller's to
-    refuse (`valid_block` does not judge it)."""
+    that is still over `body_budget` when nothing is left to cut (the rest of the result is too
+    large) is the caller's to refuse: `body_fits` says so, and `job_run._fitted` leaves the report
+    out then (the app is never sent a body it would answer with 400)."""
     fitted: dict[str, Any] = dict(block)
     entries: list[dict[str, Any]] = [dict(entry) for entry in fitted["repos"]]
     item_sizes: list[tuple[list[int], list[int]]] = [
@@ -606,7 +620,11 @@ def fit_repos(
     entry_sizes = [escaped_size(entry) for entry in entries]
     first = entries[0]
     total = _repos_size(entries, first)
-    while total > budget:
+    around = other_bytes + escaped_size(
+        {key: value for key, value in fitted.items() if key not in _COPIED_KEYS}
+    )
+    room = min(budget, body_budget - around)
+    while total > room:
         order = sorted(range(len(entries)), key=lambda index: entry_sizes[index], reverse=True)
         chosen: int | None = next(
             (

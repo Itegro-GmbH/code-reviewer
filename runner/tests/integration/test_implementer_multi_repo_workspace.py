@@ -10,13 +10,16 @@ agent starts and name the repository, the push of every repository with its own 
 each repository, and that one rejected repository does not keep the others from being pushed.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from code_reviewer_runner.implementer import git_workspace
 from code_reviewer_runner.implementer.git_workspace import (
+    REASON_LOGIN_SECRET,
+    REASON_UNCHECKED,
     GitWorkspace,
     WorkspaceLayout,
     WorkspaceSpec,
@@ -72,6 +75,8 @@ class MultiRig:
         *,
         resume: ImplementerResume | None = None,
         schemes: tuple[str, ...] = ("file",),
+        before_push: Callable[[], None] | None = None,
+        guard_secrets: Sequence[str] = (),
     ) -> MultiWorkspace:
         members: list[GitWorkspace] = []
         for repo in repos:
@@ -95,6 +100,8 @@ class MultiRig:
                     LocalAccess(self.layout.work_dir / repo.name, self.git, self.home),
                     git=self.git,
                     schemes=schemes,
+                    before_push=before_push,
+                    guard_secrets=guard_secrets,
                 )
             )
         return MultiWorkspace(tuple(members))
@@ -455,3 +462,251 @@ def test_the_directories_of_a_multi_repository_turn_are_found_by_their_mirrors(
     assert {"app", "shared", "lib"} <= set(names)
     assert clear_work(work) == []
     assert sorted(entry.name for entry in work.iterdir()) == []
+
+
+LOGIN = "sk-" + "ant-" + "oat01-Zq9Lm3XvTn8Rk5Wc2-multirepotestmultirepotest"
+
+
+def gate_with(answers: list[str]) -> tuple[Callable[[], None], list[str]]:
+    """One lease gate for the whole turn (the job's host answers one question for every repository):
+    "held" or "lost" in turn, the last one repeating; and the list of what it was asked."""
+    asked: list[str] = []
+
+    def gate() -> None:
+        answer = answers[min(len(asked), len(answers) - 1)]
+        asked.append(answer)
+        if answer == "lost":
+            raise JobError(ErrorCode.LEASE_LOST, "the job is no longer held by this runner")
+
+    return gate, asked
+
+
+# #1093-T60
+def test_a_lease_lost_in_the_second_repository_stops_the_push_before_the_third(
+    rig: MultiRig,
+) -> None:
+    repos = three(rig)
+    # app: asked at the start and before its push (held, held); shared: asked at its start (lost).
+    gate, asked = gate_with(["held", "held", "lost"])
+    workspace = rig.workspace(repos, before_push=gate)
+    workspace.prepare()
+    app, shared, lib = workspace.members
+    app_tip = commit(app, "feature.txt")
+    commit(shared, "direct.txt")
+    commit(lib, "round2.txt")
+    lib_remote = repos[2].origin.tip("feature/x")
+
+    with pytest.raises(JobError) as ended:
+        workspace.push_all(seconds=120.0)
+
+    assert ended.value.code is ErrorCode.LEASE_LOST
+    assert asked == ["held", "held", "lost"], "nothing is asked or pushed after the loss"
+    assert repos[0].origin.tip("feature/x") == app_tip
+    assert repos[1].origin.tip("main") == workspace.members[1].start_commit
+    assert repos[2].origin.tip("feature/x") == lib_remote
+    reached = {fact.workspace.spec.name: fact.reached for fact in workspace.facts()}
+    assert reached == {"app": True, "shared": True, "lib": False}
+    # The report: what arrived is said; the repository the push did not get to says `pushed` false
+    # and no `branches` (not attempted, its remote state was not looked at).
+    entries = {entry.name: entry for entry in outcomes_of(workspace, can_push=True)}
+    assert entries["app"].pushed is True and entries["app"].branches is not None
+    assert entries["lib"].pushed is False and entries["lib"].branches is None
+    assert entries["lib"].head_commit is not None
+
+
+# #1093-T61
+def test_the_login_in_one_repository_stops_that_branch_only_and_names_the_repository(
+    rig: MultiRig,
+) -> None:
+    repos = three(rig)
+    workspace = rig.workspace(repos, guard_secrets=(LOGIN,))
+    workspace.prepare()
+    app, shared, lib = workspace.members
+    app_tip = commit(app, "feature.txt")
+    commit(shared, "notes.txt", f"token={LOGIN}\n")
+    lib_tip = commit(lib, "round2.txt")
+
+    workspace.push_all(seconds=120.0)
+
+    assert repos[0].origin.tip("feature/x") == app_tip
+    assert repos[2].origin.tip("feature/x") == lib_tip
+    assert repos[1].origin.tip("main") == workspace.members[1].start_commit
+    error = push_error(workspace, handed_in_something=False)
+    assert error is not None and error[0] is ErrorCode.PUSH_REJECTED
+    assert "login_secret" in error[1] and "(repository shared)" in error[1]
+    assert LOGIN not in error[1]
+    entries = {entry.name: entry for entry in outcomes_of(workspace, can_push=True)}
+    assert entries["shared"].pushed is False and entries["shared"].branches is not None
+    assert [(b.name, b.reason) for b in entries["shared"].branches] == [
+        ("main", REASON_LOGIN_SECRET)
+    ]
+    assert entries["app"].pushed is True and entries["lib"].pushed is True
+
+
+# #1093-T62
+def test_a_branch_the_guard_cannot_read_to_its_end_is_unchecked_in_its_repository_only(
+    rig: MultiRig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_workspace, "GUARD_READ_MAX_BYTES", 2048)
+    repos = three(rig)
+    workspace = rig.workspace(repos, guard_secrets=(LOGIN,))
+    workspace.prepare()
+    app, shared, _ = workspace.members
+    app_tip = commit(app, "feature.txt")
+    commit(shared, "big.txt", "x" * 8192)
+
+    workspace.push_all(seconds=120.0)
+
+    assert repos[0].origin.tip("feature/x") == app_tip
+    assert repos[1].origin.tip("main") == workspace.members[1].start_commit
+    error = push_error(workspace, handed_in_something=False)
+    assert error is not None and error[0] is ErrorCode.PUSH_REJECTED
+    assert "unchecked" in error[1] and "(repository shared)" in error[1]
+    entries = {entry.name: entry for entry in outcomes_of(workspace, can_push=True)}
+    assert [(b.name, b.reason) for b in entries["shared"].branches or ()] == [
+        ("main", REASON_UNCHECKED)
+    ]
+    assert entries["app"].pushed is True
+
+
+# #1093-T63
+def test_a_follow_up_whose_branch_is_gone_in_one_repository_names_it_and_pushes_nothing(
+    rig: MultiRig,
+) -> None:
+    repos = [
+        rig.repo("app", branch="feature/x", exists=True),
+        rig.repo("lib", branch="feature/x", exists=True),
+    ]
+    first = repos[0].origin.commit_on("feature/x", "round1.txt")
+    # `lib` never had the branch the follow-up resumes (deleted on the provider since).
+    resume = ImplementerResume(
+        turn=2,
+        repos=(
+            ResumeRepo("app", (ResumeBranch("feature/x", first),), "feature/x"),
+            ResumeRepo("lib", (ResumeBranch("feature/x", "1" * 40),), "feature/x"),
+        ),
+    )
+
+    with pytest.raises(JobError) as refused:
+        rig.workspace(repos, resume=resume).prepare()
+
+    assert refused.value.code is ErrorCode.CLONE_FAILED
+    assert "lib" in refused.value.detail and "app" not in refused.value.detail
+    assert repos[0].origin.tip("feature/x") == first
+
+
+# #1093-T64
+def test_a_follow_up_that_only_continues_direct_work_on_the_base_is_resumed(rig: MultiRig) -> None:
+    repos = [rig.repo("app", branch="main"), rig.repo("lib", branch="main")]
+    tip = repos[0].origin.tip("main")
+    assert tip is not None
+    resume = ImplementerResume(
+        turn=2,
+        repos=(
+            ResumeRepo("app", (ResumeBranch("main", tip),), "main"),
+            ResumeRepo("lib", (), None),
+        ),
+    )
+    workspace = rig.workspace(repos, resume=resume)
+
+    workspace.prepare()
+
+    app, lib = workspace.members
+    assert checked_out(app) == "main" and checked_out(lib) == "main"
+    assert app.branch_created is False and lib.branch_created is False
+    new = commit(app, "again.txt")
+    workspace.push_all(seconds=120.0)
+    assert repos[0].origin.tip("main") == new
+    assert push_error(workspace, handed_in_something=False) is None
+
+
+# #1093-T65
+def test_a_profile_that_may_not_push_reports_every_repository_without_facts_through_the_session(
+    rig: MultiRig,
+) -> None:
+    from types import SimpleNamespace
+
+    from code_reviewer_runner.implementer.session import ImplementerSession
+    from code_reviewer_runner.implementer.turn_result import TurnResult
+    from code_reviewer_runner.result import Usage
+
+    repos = three(rig)
+    workspace = rig.workspace(repos)
+    workspace.prepare()
+    commit(workspace.members[0], "feature.txt")
+    # Nothing is pushed: `canPush` false never reaches `push_all`.
+
+    def turn_result(
+        error: Any, head: Any, pushed: Any, branches: Any, dropped: Any, commits: Any, files: Any
+    ) -> TurnResult:
+        return TurnResult(
+            error_code=None if error is None else error[0],
+            error_detail=None if error is None else error[1],
+            base_commit=workspace.start_commit,
+            head_commit=head,
+            pushed=pushed,
+            branches=branches,
+            branches_dropped=dropped,
+            commits=commits,
+            files_changed=files,
+            summary="done",
+            opencode_session_id=None,
+            opencode_version="1",
+            usage=Usage(None, 0, 0, 0, 0, False, None),
+        )
+
+    # `_multi_result` reads five attributes of the session and calls `_turn_result`.
+    stub = SimpleNamespace(
+        _can_push=False,
+        _error=None,
+        _agent_ask=None,
+        _agent_result=None,
+        _turn_result=turn_result,
+    )
+
+    result = ImplementerSession._multi_result(stub, workspace)  # type: ignore[arg-type]  # pyright: ignore[reportPrivateUsage]
+
+    assert result.error_code is None, "a turn that may not push is no failed push"
+    assert result.repos is not None and [entry.name for entry in result.repos] == [
+        "app",
+        "shared",
+        "lib",
+    ]
+    for entry in result.repos:
+        assert entry.head_commit is None and entry.pushed is False
+        assert entry.commits == () and entry.files_changed == () and entry.branches is None
+    assert result.head_commit is None and result.pushed is False and result.commits == ()
+    block = valid_block(result.implementer_block())
+    assert block is not None
+    assert [(e["name"], e["headCommit"], e["pushed"]) for e in block["repos"]] == [
+        ("app", None, False),
+        ("shared", None, False),
+        ("lib", None, False),
+    ]
+    assert block["headCommit"] is None and block["commits"] == []
+    assert repos[0].origin.tip("feature/x") is None
+
+
+# #1093-T66
+def test_a_ref_collision_in_one_repository_names_it(rig: MultiRig) -> None:
+    # The provider has `feature`, the new branch is `feature/x`: git cannot hold both as refs.
+    colliding = rig.repo("lib", branch="feature/x")
+    colliding.origin.commit_on("feature", "f.txt")
+    workspace = rig.workspace([rig.repo("app", branch="feature/y"), colliding])
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert "(repository lib)" in refused.value.detail
+
+
+# #1093-T67
+def test_a_branch_name_git_does_not_accept_names_its_repository(rig: MultiRig) -> None:
+    workspace = rig.workspace([rig.repo("app", branch="feature/y"), rig.repo("lib", branch="a..b")])
+
+    with pytest.raises(JobError) as refused:
+        workspace.prepare()
+
+    assert refused.value.code is ErrorCode.IMPLEMENTER_CONFIG_INVALID
+    assert "(repository lib)" in refused.value.detail

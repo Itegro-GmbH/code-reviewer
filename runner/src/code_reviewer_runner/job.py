@@ -745,9 +745,14 @@ def _checked_url(value: str, field_name: str) -> SplitResult:
     return parts
 
 
-def _git_access(data: dict[str, Any]) -> GitAccess:
+def _git_access(data: dict[str, Any], *, tokens_allowed: bool = False) -> GitAccess:
+    """`git` of a job. `git.tokens` belongs to the Implementer's multi-repository job alone: a
+    review (Diff or Dynamic) never carries it, and one that does is refused, since `ReviewInput`
+    would not mask such tokens (#1093)."""
     git = _section(data, "git")
     _check_fields(git, _GIT_FIELDS, "git.")
+    if "tokens" in git and not tokens_allowed:
+        raise _invalid("git.tokens is only for an implementer job")
     provider = _string(git, "provider", "git.")
     if provider not in PLATFORMS:
         raise _invalid(f"git.provider must be one of: {', '.join(sorted(PLATFORMS))}")
@@ -1760,7 +1765,7 @@ def _implementer_input(job: dict[str, Any]) -> ImplementerInput:
     _check_fields(job, _IMPLEMENTER_TOP_LEVEL_FIELDS, "")
     control_token = _control_token(job)
     mcp_access = _mcp_access(job)
-    git = _git_access(job)
+    git = _git_access(job, tokens_allowed=True)
     spec = _implementer_spec(job, git)
     raw_spec = _section(job, "implementer")
     if spec.subscription is not None:
