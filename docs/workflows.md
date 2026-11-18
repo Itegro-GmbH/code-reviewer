@@ -161,8 +161,9 @@ Other triggers (Jira) come later. Who may set the label is decided by GitHub, no
 ### One repository per run, and targets
 
 **A run works on one repository** in version 1: the one of the ticket (`trigger.ticket.repo` of a label trigger and of a trigger with a `ticket` input), or the input `repo` of a manual one. No agent step and
-no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. Several repositories in one run are a later
-extension.
+no action names a repository (a `repo` field is `unknown_field`); they all work on the run's. **The one exception is the `repos` of an agent step**
+(#1090, [ADR 0006](decisions/0006-multi-repo-agent-steps.md)): a step that names its repositories works on those, whatever the run's is, and the pull request step
+opens a pull request in each ([Several repositories in one step](#several-repositories-in-one-step)).
 
 The inputs that decide **what the workflow acts on** are *targets*: `issue`, `ticket`, `pullRequest`, `head`, `base`, the labels `add` and `remove` and the `reviewers` of an action, the `board` and `status` of `ticket.setStatus`, and
 the `environment` of an agent step. An agent's result is data, never a command, and so is what whoever opened the issue wrote (its title, body
@@ -207,6 +208,7 @@ A run of an agent step gets a **profile**, and the profile says who works **and 
 | `instruction` | yes | The task: a text, or `{"first": "...", "next": "..."}` in a loop body (`first` in round one, `next` from round two on, where `previous.*` exists). |
 | `session` | no | `"new"` (the default) or `{"continue": "<step id>"}`: go on in the session of an agent step that ran before on every path with **the same profile name and the same environment**, or of **this step itself** when it is a direct step of a loop body (round two continues round one; not inside an `if` of the body, where the step may not have run). |
 | `branch` | no | The branch a session of its own **starts from**, instead of the base branch of the run: a literal, `{{trigger.repo.defaultBranch}}`, an input of a manual trigger, or `{{<agent step>.branch}}`, the branch of an earlier agent step that may push (it ran before on every path; a profile that may not push yields no branch, `reference_fact_unavailable`). It decides what the agent works on, so it is a [target](#one-repository-per-run-and-targets): nothing an agent wrote (`target_from_untrusted_value`). Not together with `session.continue` (`session_target_invalid`): a session that goes on keeps its branch. See [Branches](#branches-and-what-a-step-starts-from). |
+| `repos` | no | **Several repositories** (#1090): one to ten entries `{ "repo", "base", "branch" }`, see [Several repositories in one step](#several-repositories-in-one-step). Left out, the step works on the run's repository on a branch of its own, as always. Not together with `branch` (`repos_with_branch`) or `session.continue` (`repos_with_session_continue`). |
 | `result` | no | What the agent's result looks like, a [result schema](#result-schemas). The agent gets a finish tool made from it. Without one the step yields the facts and the fields of the default result schema of its profile (if the profile version has one). |
 | `mcp` | no | The MCP servers this step may use: a list of server ids, a **subset of the lane's** `mcp`. Left out: all of the lane's. `[]`: none ([MCP servers of a lane](#mcp-servers-of-a-lane)). |
 | `description` | no | A note. |
@@ -216,8 +218,85 @@ reporting them: `costUsd` (always), and, **only if the profile may push**, `bran
 (the last commit of the branch, or the commit the branch started from when the agent made none) and `pushed` (true/false: whether the branch reached
 the remote). For a profile that may push, `branch` is **always there**: the platform creates the branch when the turn starts, so it exists even when
 the agent made no commit (`commits` is then an empty list). A step run with a profile that may not push has none of these four, and a reference to
-them is refused (`reference_fact_unavailable`). Result fields named `costUsd`, `branch`, `commits`, `headCommit` or `pushed` are refused (`result_field_reserved`). A `result`
+them is refused (`reference_fact_unavailable`). A step with `repos` also yields `repos`, one entry for each repository ([below](#several-repositories-in-one-step)); its `branch`, `commits`, `headCommit` and `pushed` are those of the **first** repository. Result fields named `costUsd`, `branch`, `commits`, `headCommit` or `pushed` are refused (`result_field_reserved`), and so is `repos` in a step that has `repos` (a lane that has a result field `repos` today keeps it). A `result`
 that fails its own check binds its fields as unknown: you get the errors of the schema, not one for every use of a field.
+
+### Several repositories in one step
+
+*#1090, #1091. The format and the contract are fixed here and in [ADR 0006](decisions/0006-multi-repo-agent-steps.md); the validator and the engine follow in #1092, the pull request step and the lane editor in #1094. A document that uses `repos` is refused (`unknown_field`) until then.*
+
+An agent step with `repos` works on **several repositories at once**, in one session, one conversation and one budget:
+
+```json
+{
+  "id": "implement",
+  "kind": "agent",
+  "profile": "implementer",
+  "instruction": "Add the retry policy to the library and use it in the app.",
+  "repos": [
+    { "repo": "{{trigger.ticket.repo.fullName}}", "base": "development", "branch": "feature/{{trigger.ticket.key}}" },
+    { "repo": "Itegro-GmbH/shared-lib" }
+  ]
+}
+```
+
+| Field | Needed | What |
+| --- | --- | --- |
+| `repo` | yes | An **active repository of the workspace** (one the GitHub App can reach, and write to when the profile may push): a literal `owner/name`, or one reference (`{{trigger.ticket.repo.fullName}}`, `{{trigger.repo.fullName}}`, an input of a manual trigger). The run's repository is **not special**: it need not be listed, and the project's repository is not required. A repository the workspace has no active installation for ends the step before the agent starts (`repo_not_available`, free). |
+| `base` | no | The branch the work starts from when `branch` does not exist, and the branch a pull request goes against. Default: **the default branch of that repository**, read when the step runs. A base the repository does not have ends the step `base_branch_not_found` (free). |
+| `branch` | no | The branch to work on. **It exists:** it is checked out and the work goes on from its tip (a second fix round, a retry). **It does not exist:** it is created from the head of `base`. **Left out, or equal to `base`:** the agent works **directly on the base branch** and what it commits is pushed to it; a branch protection rule may refuse that, and the refusal is reported for that repository, never forced. |
+
+`repo`, `base` and `branch` are [targets](#one-repository-per-run-and-targets): literals, or references to values the platform or the caller vouches for
+(`repo`: `{{trigger.ticket.repo.fullName}}`, `{{trigger.repo.fullName}}` or a manual input; `base`: `{{trigger.ticket.repo.defaultBranch}}`,
+`{{trigger.repo.defaultBranch}}` or a manual input; `branch`: also a **text** around such references, `feature/{{trigger.ticket.key}}`, whose references are
+`{{trigger.ticket.key}}`, `{{trigger.ticket.number}}` or a manual input), never a result field or the title, body or labels of an issue
+(`target_from_untrusted_value`). A reference that gives no repository or no branch name ends the step before the agent starts (`repo_invalid`, `branch_invalid`).
+Two entries may not name the same repository (`repo_duplicate`: the validator checks equal literals, the engine the filled-in references).
+
+**What the agent finds.** Each repository is cloned in full (every branch and tag, no remote, no credential) into `/work/<name>`: `<name>` is the repository's
+name (`app` for `Itegro-GmbH/app`) or, when two repositories of the step have the same name or the name is one of the work volume's own (`result`, `reserve`),
+`<owner>__<name>` for every one of them. The instruction gets a **preamble** that lists the repositories, their mounts, bases and branches and whether each branch
+was continued or made. What the agent commits is pushed **when the turn ends**: every local branch it created or moved in each repository, without force, with a
+token of that repository ([`implementer.md`](implementer.md#several-repositories-in-one-turn-1090)).
+
+**Facts.** `{{<step>.repos}}` is a list with one entry per repository, in the order of the step:
+
+| Field | What |
+| --- | --- |
+| `fullName` | `owner/name` |
+| `base` | the base branch (the default branch when the entry gave none) |
+| `branch` | the working branch; equal to `base` for direct work |
+| `commits` | the commit ids the turn made on `branch`, oldest first |
+| `headCommit` | the last commit of `branch`, or null when the turn made none |
+| `pushed` | true when `branch` with `headCommit` is on the remote |
+
+They exist only for a profile that may push. The single facts `branch`, `commits`, `headCommit` and `pushed` **refer to the first repository**, so a lane written
+for one repository keeps working when another is added behind it. A rejected push is reported for that repository (`push_rejected` ends the turn when a working
+branch was not taken, the message names the repository); what was pushed elsewhere stays pushed and is in `repos`.
+
+**The session** keeps its repositories: an answer turn and a step with `session.continue` work on the same ones, in the same mounts, and resume restores every
+repository (`resume.repos`). A step with `session.continue` therefore has no `repos` of its own.
+
+**The pull request step.** `github.pullRequest.open` (`pullRequest.open`) takes, instead of `head` and `base`, `repos`: exactly one reference to the `repos` fact of
+an earlier agent step that may push (`{{implement.repos}}`; anything else is `target_from_untrusted_value`). It opens **one pull request for each entry whose
+`branch` differs from its `base` and whose turn pushed it**, in the order of the list, in that entry's repository against its base. `title`, `body` and `draft`
+apply to every pull request; `{{repo.fullName}}`, `{{repo.base}}` and `{{repo.branch}}` stand for the repository being opened in `title` and `body`. An entry with
+direct work (`branch` equal to `base`), with nothing pushed or with no commits between branch and base is **skipped**, not an error. An open pull request for the
+same head and base is reused as always (`existing`). The step yields:
+
+| Output | What |
+| --- | --- |
+| `pullRequests` | one entry per repository of the list: `fullName`, `base`, `head`, `state` (`opened`, `existing` or `skipped`), `reason` for a skipped one (`direct`, `not_pushed`, `no_commits`), and `number` and `url` for the others |
+| `number`, `url`, `existing` | those of the first repository that has a pull request, as the single form yields them; **absent** when none has one (read them with `\| default`) |
+
+The step fails when GitHub refuses a pull request for another reason; the others are still tried, and `pullRequests` says what was done. Asking for a review of each
+pull request needs the reserved `forEach` step; `ticket.requestReview` asks for the first one. The token of the step is made for the repositories it opens a
+pull request in, with the rights of today (Pull requests: Read and write, Contents: Read-only).
+
+**Codes.** The validator and the engine report these with #1092, and the table of semantic codes below gets their rows then (a test holds that table to the codes the validator has): `repos_with_branch` and `repos_with_session_continue` (the step has `repos` next to `branch` or `session.continue`), `repo_duplicate` (two entries name one repository), and, when the step runs and before the agent starts, free of charge, `repo_invalid` and `branch_invalid` (a reference gave no repository or no branch name), `repo_not_available` (the workspace has no active installation of the GitHub App for a repository, or the profile may push and the installation cannot write to it) and `base_branch_not_found`. `result_field_reserved` also covers a result field `repos` in a step that has `repos`.
+
+**Not in version 1:** repositories of another workspace or provider, more than ten repositories, a `repos` that is built at run time, and a step that adds
+repositories to a session that has begun.
 
 ### MCP servers of a lane
 
@@ -905,7 +984,7 @@ For a run a label started, `input` is `{"issue": {...}, "repo": {...}}` ([The la
 ### Results and facts
 
 An agent step yields the **result** of the agent and the **facts** the platform measured (`costUsd`, and, if the profile may push, `branch`, `commits`,
-`headCommit`, `pushed`). Before any part of the result is used, **the engine checks `result_value` against the turn's stored `result_schema` again**
+`headCommit`, `pushed`, and for a step with `repos` the list `repos`). Before any part of the result is used, **the engine checks `result_value` against the turn's stored `result_schema` again**
 with `checkResultValue`; a value that fails, a missing value or a turn that ended with `no_result` makes the step fail with `no_result`. A result is
 data: it can be put into a text (an instruction, a comment), never into a target, and nothing in it is read again as a template.
 

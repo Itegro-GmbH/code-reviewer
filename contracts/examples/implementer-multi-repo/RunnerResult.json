@@ -1,0 +1,168 @@
+{
+  "ok": false,
+  "durationMs": 912340,
+  "commentUrl": null,
+  "errorCode": "push_rejected",
+  "errorMessage": "the working branch of shared-lib was not pushed: remote_rejected (main)",
+  "logTail": "implementer: push_rejected: shared-lib: main: remote_rejected",
+  "logTruncated": false,
+  "usage": {
+    "model": "deepseek/deepseek-v4.1-flash",
+    "promptTokens": 412000,
+    "completionTokens": 18400,
+    "totalTokens": 430400,
+    "aiCalls": 37,
+    "fallbackUsed": false,
+    "costUsd": 0.1534
+  },
+  "implementer": {
+    "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+    "headCommit": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+    "pushed": true,
+    "branches": [
+      {
+        "name": "feature/ACME-12",
+        "head": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+        "result": "pushed",
+        "reason": null
+      }
+    ],
+    "commits": [
+      {
+        "sha": "5a4b3c2d1e0f99887766554433221100aabbccdd",
+        "subject": "Add a retry with backoff to the webhook sender"
+      },
+      {
+        "sha": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+        "subject": "Test the retry of the webhook sender"
+      }
+    ],
+    "filesChanged": [
+      {
+        "path": "src/webhooks/sender.ts",
+        "status": "modified"
+      }
+    ],
+    "summary": "The webhook sender now retries a failed delivery up to three times with exponential backoff. The new test covers the retry and the give-up path.",
+    "opencode": {
+      "sessionId": "ses_01HZXEXAMPLE0123456789",
+      "version": "1.4.2"
+    },
+    "checkedOut": "feature/ACME-12",
+    "resume": {
+      "mode": "summary_only",
+      "reason": "version_changed"
+    },
+    "network": {
+      "mode": "list",
+      "door": true,
+      "vmPolicy": "narrowed",
+      "allowed": 3,
+      "refused": 1,
+      "bytesIn": 10240,
+      "bytesOut": 2048,
+      "dropped": 0,
+      "connections": [
+        {
+          "host": "registry.npmjs.org",
+          "port": 443,
+          "outcome": "allowed",
+          "reason": null,
+          "count": 3,
+          "bytesIn": 10240,
+          "bytesOut": 2048
+        },
+        {
+          "host": "example.com",
+          "port": 443,
+          "outcome": "refused",
+          "reason": "not_listed",
+          "count": 1,
+          "bytesIn": 0,
+          "bytesOut": 0
+        }
+      ]
+    },
+    "repos": [
+      {
+        "name": "acme__app",
+        "fullName": "acme/app",
+        "base": "development",
+        "branch": "feature/ACME-12",
+        "created": true,
+        "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+        "headCommit": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+        "pushed": true,
+        "branches": [
+          {
+            "name": "feature/ACME-12",
+            "head": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+            "result": "pushed",
+            "reason": null
+          }
+        ],
+        "commits": [
+          {
+            "sha": "5a4b3c2d1e0f99887766554433221100aabbccdd",
+            "subject": "Add a retry with backoff to the webhook sender"
+          },
+          {
+            "sha": "9d8c7b6a5f4e3d2c1b0a99887766554433221100",
+            "subject": "Test the retry of the webhook sender"
+          }
+        ],
+        "filesChanged": [
+          {
+            "path": "src/webhooks/sender.ts",
+            "status": "modified"
+          }
+        ],
+        "checkedOut": "feature/ACME-12"
+      },
+      {
+        "name": "shared-lib",
+        "fullName": "acme/shared-lib",
+        "base": "main",
+        "branch": "main",
+        "created": false,
+        "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+        "headCommit": "3c2b1a0f9e8d7c6b5a49382716059483726150ab",
+        "pushed": false,
+        "branches": [
+          {
+            "name": "main",
+            "head": "3c2b1a0f9e8d7c6b5a49382716059483726150ab",
+            "result": "rejected",
+            "reason": "remote_rejected"
+          }
+        ],
+        "commits": [
+          {
+            "sha": "3c2b1a0f9e8d7c6b5a49382716059483726150ab",
+            "subject": "Export the retry policy"
+          }
+        ],
+        "filesChanged": [
+          {
+            "path": "src/retry.ts",
+            "status": "added"
+          }
+        ],
+        "checkedOut": "main"
+      },
+      {
+        "name": "other-org__app",
+        "fullName": "other-org/app",
+        "base": "main",
+        "branch": "feature/ACME-12",
+        "created": false,
+        "baseCommit": "1f3a5c7e9b2d4f60a8c1e3b5d7f90a2c4e6b8d01",
+        "headCommit": null,
+        "pushed": false,
+        "commits": [],
+        "filesChanged": [],
+        "checkedOut": "feature/ACME-12"
+      }
+    ]
+  }
+}

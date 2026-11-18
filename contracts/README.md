@@ -604,6 +604,19 @@ The meaning of the calls (status codes, the lease, what happens on failure) is i
   by the runner; the app does not send it until a chain is decided, and then `maxTokens` must fit the
   smallest window of the chain.
 
+## Several repositories in one turn (#1091, epic #1090)
+
+`ImplementerJob.repos` (`ImplementerJobRepo`: `name`, `fullName`, `cloneUrl`, `base`, `branch`, optional `branchExists`, `tokenId`; one to ten) replaces
+`repo`, `baseBranch`, `branch` and `startBranch`; the two forms are exclusive in the schema. `git.tokens` (`GitToken`: `id`, `token`) holds the token of each installation and is
+there exactly when the job has `repos`; `git.token` stays and is the first repository's. `ImplementerResume.repos` (`ImplementerResumeRepo`) replaces `branches` and `checkout`
+of a follow-up. `ImplementerResult.repos` (`ImplementerRepoResult`, one per repository, in the job's order) is added to the result, and the old fields are copies of the first
+repository's entry. The claim feature `implementer_multi_repo` (`KnownClaimFeature`) gates it: only a caller that names it gets a job with `repos`. `workflow.v1.json` gets
+`repos` on the agent step (`AgentStepRepo`: `repo`, optional `base` and `branch`; one to ten; not with `branch` or `session.continue`). The rules are in
+[`docs/decisions/0006-multi-repo-agent-steps.md`](../docs/decisions/0006-multi-repo-agent-steps.md) and [`docs/implementer.md`](../docs/implementer.md#several-repositories-in-one-turn-1090).
+`examples/implementer-multi-repo/` holds a whole job, result and resume of this form and `examples/implementer/` the pieces (`ImplementerJobRepo`, `ImplementerRepoResult`,
+`ImplementerResumeRepo`). The checks are `app/src/runner-api/multi-repo-contract.test.ts` and `runner/tests/contract/test_implementer_multi_repo_contract.py`. Nothing reads or
+sends `repos` yet (#1092, #1093): the runner's parser still refuses it.
+
 ## Size of a result
 
 A `complete` request must stay under 64 KiB serialized, or the app answers `413` and the job can never
