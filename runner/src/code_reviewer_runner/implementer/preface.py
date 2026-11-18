@@ -60,6 +60,19 @@ class MovedBranch:
 
 
 @dataclass(frozen=True)
+class RepoPrefaceFacts:
+    """What the preface of a multi-repository follow-up (#1093) says of one repository, named by its
+    mount: its branches at the start of the turn, the one that is checked out, the branches that
+    moved on GitHub since the last turn and the ones that are gone."""
+
+    name: str
+    branches: Sequence[tuple[str, str]]
+    checkout: str
+    moved: Sequence[MovedBranch] = ()
+    missing: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
 class PrefaceFacts:
     """What the preface is made of, as the caller found it. Nothing here is trusted: `build_preface`
     checks every name and id again."""
@@ -77,6 +90,10 @@ class PrefaceFacts:
     base: str | None = None
     start: str | None = None
     session: str | None = None
+    # #1093: the repositories of a multi-repository session. Given, the single fields above
+    # (`branches`, `checkout`, `moved`, `missing`, `base`, `start`, `session`) are not used: the
+    # preface speaks of each repository by its mount.
+    repos: Sequence[RepoPrefaceFacts] = ()
 
 
 def _name(value: str) -> str | None:
@@ -114,6 +131,32 @@ def _repository_sentences(base: str, start: str, session: str) -> str:
     else:
         text += f" `{shown_session}` was made from a branch whose name is not shown here."
     return text + " Only the branches you create or change are pushed when your turn ends."
+
+
+_MULTI_SENTENCES: Final = (
+    "Your working directory is `/work`, which is not a git repository: each repository of this "
+    "task is a full clone in its own directory `/work/<name>`, as a developer has it (every branch "
+    "of it is a local branch there, no `origin/` branches, no remote, its whole history and its "
+    "tags), so change into a repository to use git. Only the branches you create or change are "
+    "pushed when your turn ends, in every repository, and that includes a base branch you commit "
+    "on."
+)
+
+
+def multi_repository_note() -> str:
+    """The text of the synthetic part that tells a multi-repository turn how its repositories are
+    laid out (#1093). It names none of them: the list, the bases and the branches are the app's, at
+    the start of the instruction."""
+    return f"{_MARK} {_MULTI_SENTENCES}"
+
+
+def multi_first_turn_parts(instruction: str) -> list[dict[str, Any]]:
+    """The parts of the first message of a first turn of several repositories: the note about the
+    layout (synthetic), then the instruction exactly as given."""
+    return [
+        {"type": "text", "text": multi_repository_note(), "synthetic": True},
+        {"type": "text", "text": instruction},
+    ]
 
 
 def repository_note(*, base: str, start: str, session: str) -> str:
@@ -180,6 +223,28 @@ def _missing_line(facts: PrefaceFacts) -> str:
     )
 
 
+def _repo_lines(repo: RepoPrefaceFacts) -> list[str]:
+    """What the preface says of one repository of a multi-repository follow-up: its branches and
+    which is checked out, then the branches that moved or are gone, all under its mount name."""
+    name = _name(repo.name)
+    label = f"`{name}`" if name is not None else "a repository whose name is not shown here"
+    facts = PrefaceFacts(
+        turn=0,
+        mode=ResumeMode.IMPORTED,
+        branches=repo.branches,
+        checkout=repo.checkout,
+        moved=repo.moved,
+        missing=repo.missing,
+    )
+    lines = [f"In {label}: " + _branch_line(facts)]
+    if _name(repo.checkout) is None:
+        lines.append(f"The branch checked out in {label} has a name that is not shown here.")
+    for extra in (_moved_line(facts), _missing_line(facts)):
+        if extra:
+            lines.append(f"In {label}: " + extra)
+    return lines
+
+
 def build_preface(facts: PrefaceFacts) -> str:
     """The text of the synthetic part in front of the instruction of a follow-up turn."""
     if facts.mode is ResumeMode.IMPORTED:
@@ -202,14 +267,19 @@ def build_preface(facts: PrefaceFacts) -> str:
     ]
     if facts.setup_ran:
         lines.append("The environment's setup script ran again on the branch that is checked out.")
-    if facts.base is not None and facts.start is not None and facts.session is not None:
-        lines.append(_repository_sentences(facts.base, facts.start, facts.session))
-    lines.append(_branch_line(facts))
-    if checkout is None:
-        lines.append("The branch that is checked out has a name that is not shown here.")
-    for extra in (_moved_line(facts), _missing_line(facts)):
-        if extra:
-            lines.append(extra)
+    if facts.repos:
+        lines.append(_MULTI_SENTENCES)
+        for repo in facts.repos:
+            lines.extend(_repo_lines(repo))
+    else:
+        if facts.base is not None and facts.start is not None and facts.session is not None:
+            lines.append(_repository_sentences(facts.base, facts.start, facts.session))
+        lines.append(_branch_line(facts))
+        if checkout is None:
+            lines.append("The branch that is checked out has a name that is not shown here.")
+        for extra in (_moved_line(facts), _missing_line(facts)):
+            if extra:
+                lines.append(extra)
     lines.append(
         "Before you continue: run `git status` and `git branch` and check that you are on the "
         "right branch. Check what is running (`ps`, `docker ps`, the listening ports) and start "

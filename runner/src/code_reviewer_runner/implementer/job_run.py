@@ -73,10 +73,12 @@ from .git_workspace import (
     WorkspaceSpec,
 )
 from .mcp_config import mcp_door_wanted
+from .multi_workspace import AnyWorkspace, MultiWorkspace
 from .network_rule import OFF
 from .placement import placement_of
 from .reader import ReaderAccess
-from .report import clip_texts, escaped_size, fit_block, valid_block
+from .repo_places import places_of
+from .report import MAX_REPO_BRANCHES, clip_texts, escaped_size, fit_block, valid_block
 from .result_channel import ResultReader, make_result_directory, redacted_value
 from .resume_session import ResumeInput
 from .runner_profile import agent_seams, outer_proxy_for_job, reader_seams, setup_seams
@@ -134,7 +136,7 @@ class TurnSetup:
     """What a turn needs, made from trusted configuration only: the git workspace (whose reader is
     closed with `close`), what makes the agent's container, and the engine's command in it."""
 
-    workspace: GitWorkspace
+    workspace: AnyWorkspace
     place: Callable[[], AgentPlace]
     command: tuple[str, ...]
     close: Callable[[], None] = lambda: None
@@ -268,6 +270,9 @@ def production_setup(
         rule_of_turn = subscription_rule(environment_rule)
     else:
         rule_of_turn = OFF if spec.environment is None else spec.environment.network
+    # #1093 (epic #1090): where the repositories are: the one `/work/repo`, or one mount for each
+    # repository of a multi-repository turn.
+    places = places_of(None if spec.repos is None else tuple(repo.name for repo in spec.repos))
     reader = ReaderAccess(
         {
             "GIT_AUTHOR_NAME": identity.name,
@@ -277,28 +282,60 @@ def production_setup(
         },
         reader_seams(environment),
         result=with_result,
+        places=places,
     )
     if with_result:
         # Before the agent's container: its mount of the directory needs the directory.
         make_result_directory(work_dir)
-    workspace = GitWorkspace(
-        WorkspaceSpec(
-            clone_url=spec.repo.clone_url,
-            token=job.git.token,
-            base_branch=spec.base_branch,
-            branch=spec.branch,
-            resume=spec.resume,
-            start_branch=spec.start_branch,
-        ),
-        WorkspaceLayout(work_dir=work_dir),
-        identity,
-        reader,
-        before_push=gate,
-        guard_secrets=() if harness is None else (harness.login.secret,),
-        # A VM on a customer's machine (#994): the clone, the fetch and the push go through the
-        # host's outer-wall proxy and nowhere else.
-        proxy=outer_proxy_for_job(environment),
-    )
+    layout = WorkspaceLayout(work_dir=work_dir)
+    guard_secrets = () if harness is None else (harness.login.secret,)
+    # A VM on a customer's machine (#994): the clone, the fetch and the push go through the host's
+    # outer-wall proxy and nowhere else.
+    proxy = outer_proxy_for_job(environment)
+    workspace: AnyWorkspace
+    if spec.repos is None:
+        workspace = GitWorkspace(
+            WorkspaceSpec(
+                clone_url=spec.repo.clone_url,
+                token=job.git.token,
+                base_branch=spec.base_branch,
+                branch=spec.branch,
+                resume=spec.resume,
+                start_branch=spec.start_branch,
+            ),
+            layout,
+            identity,
+            reader,
+            before_push=gate,
+            guard_secrets=guard_secrets,
+            proxy=proxy,
+        )
+    else:
+        workspace = MultiWorkspace(
+            tuple(
+                GitWorkspace(
+                    WorkspaceSpec(
+                        clone_url=repo.clone_url,
+                        token=job.git.token_of(repo.token_id),
+                        base_branch=repo.base,
+                        branch=repo.branch,
+                        resume=None if spec.resume is None else spec.resume.for_repo(repo.name),
+                        name=repo.name,
+                        full_name=repo.full_name,
+                        direct=repo.direct,
+                        branch_exists=repo.branch_exists,
+                        max_branches=MAX_REPO_BRANCHES,
+                    ),
+                    layout,
+                    identity,
+                    reader.for_repo(repo.name),
+                    before_push=gate,
+                    guard_secrets=guard_secrets,
+                    proxy=proxy,
+                )
+                for repo in spec.repos
+            )
+        )
 
     def run_environment(
         turn: ImplementerInput,
@@ -315,7 +352,7 @@ def production_setup(
             elapsed=elapsed,
             should_stop=should_stop,
             secrets=turn.secrets,
-            seams=replace(setup_seams(environment), result=with_result),
+            seams=replace(setup_seams(environment), result=with_result, places=places),
         )
 
     rule = rule_of_turn
@@ -325,13 +362,13 @@ def production_setup(
     claude = (
         None
         if harness is None
-        else AgentSeams(image=harness.image, no_new_privileges=True, mcp=has_mcp)
+        else AgentSeams(image=harness.image, no_new_privileges=True, mcp=has_mcp, places=places)
     )
 
     def place_from(adopted: Adopted) -> Callable[[], AgentPlace]:
         return lambda: AgentContainer(
             memory,
-            agent_seams(environment, AgentSeams(mcp=has_mcp)),
+            agent_seams(environment, AgentSeams(mcp=has_mcp, places=places)),
             rule,
             result=with_result,
             adopted=adopted,
@@ -341,7 +378,9 @@ def production_setup(
         workspace,
         lambda: AgentContainer(
             memory,
-            agent_seams(environment, AgentSeams(mcp=has_mcp) if claude is None else claude),
+            agent_seams(
+                environment, AgentSeams(mcp=has_mcp, places=places) if claude is None else claude
+            ),
             rule,
             result=with_result,
         ),
@@ -437,18 +476,19 @@ def result_of(turn: TurnResult, *, duration_ms: int, secrets: tuple[str, ...]) -
 
 
 def _early_block(
-    workspace: GitWorkspace | None, setup: Mapping[str, object] | None = None
+    workspace: AnyWorkspace | None, setup: Mapping[str, object] | None = None
 ) -> dict[str, object] | None:
     """The report of a turn that failed after the repository was cloned but before the agent ran:
     where it started and nothing else (and what the environment's script did, when it ran). None
-    when there is no repository to speak of."""
+    when there is no repository to speak of. A multi-repository turn (#1093) reports every
+    repository, as soon as all of them are cloned and checked out."""
     if workspace is None:
         return None
     try:
         start = workspace.start_commit
     except JobError:
         return None
-    return {
+    block: dict[str, object] = {
         **({} if setup is None else {"setup": dict(setup)}),
         "baseCommit": start,
         "headCommit": None,
@@ -459,6 +499,32 @@ def _early_block(
         "filesChanged": [],
         "summary": "",
         "opencode": None,
+    }
+    if not isinstance(workspace, MultiWorkspace):
+        return block
+    entries = [early_repo_entry(member) for member in workspace.members]
+    # The old fields are copies of the first entry (the contract of `repos`).
+    block["headCommit"] = entries[0]["headCommit"]
+    block["pushed"] = entries[0]["pushed"]
+    block["repos"] = entries
+    return block
+
+
+def early_repo_entry(member: GitWorkspace) -> dict[str, object]:
+    """One repository's entry of a turn that ended before the agent ran: the tip it started at (the
+    head, since nothing was added), on the remote when the branch was there before."""
+    start = member.start_commit
+    return {
+        "name": member.spec.name or "",
+        "fullName": member.spec.full_name or "",
+        "base": member.spec.base_branch,
+        "branch": member.spec.branch,
+        "created": member.branch_created,
+        "baseCommit": start,
+        "headCommit": start,
+        "pushed": not member.branch_created,
+        "commits": [],
+        "filesChanged": [],
     }
 
 

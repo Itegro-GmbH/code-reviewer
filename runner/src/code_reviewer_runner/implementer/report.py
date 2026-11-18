@@ -59,6 +59,7 @@ _BLOCK_KEYS = frozenset(
         "resume",
         "agentResult",
         "agentAsk",
+        "repos",
     }
 )
 MAX_BRANCHES = 50
@@ -67,8 +68,47 @@ MAX_REASON_CHARS = 40
 _REASON = re.compile(r"[a-z][a-z_]*")
 # Not required: a block without the count (an older shape) is still one the app reads.
 _OPTIONAL_KEYS = frozenset(
-    {"branchesDropped", "setup", "network", "checkedOut", "agentResult", "agentAsk", "resume"}
+    {
+        "branchesDropped",
+        "setup",
+        "network",
+        "checkedOut",
+        "agentResult",
+        "agentAsk",
+        "resume",
+        "repos",
+    }
 )
+# #1091 (epic #1090): the entry of `repos`, one per repository of a multi-repository turn.
+MAX_REPOS = 10
+MAX_REPO_COMMITS = 100
+MAX_REPO_FILES = 250
+MAX_REPO_BRANCHES = 25
+# The body of a completion that carries `repos` is at most 4 MiB, and the runner keeps `repos` and
+# the copies of the first repository in the old fields within 3 MiB (1 MiB is left for the rest).
+REPOS_BODY_BYTES = 4 * 1024 * 1024
+REPOS_BUDGET_BYTES = 3 * 1024 * 1024
+# Ten entries at a time: the unit of the cut (`fit_repos`).
+CUT_STEP = 10
+_REPO_REQUIRED = frozenset(
+    {
+        "name",
+        "fullName",
+        "base",
+        "branch",
+        "created",
+        "baseCommit",
+        "headCommit",
+        "pushed",
+        "commits",
+        "filesChanged",
+    }
+)
+_REPO_OPTIONAL = frozenset(
+    {"branchesDropped", "commitsTruncated", "filesTruncated", "branches", "checkedOut"}
+)
+_REPO_FULL_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}")
+_MOUNT_NAME = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._-]{0,201}")
 _RESUME_KEYS = frozenset({"mode", "reason"})
 _RESUME_MODES = frozenset({"imported", "summary_only"})
 # The words of `ResumeReason` (`resume_wire.py`); a test pins them against it.
@@ -290,6 +330,82 @@ def _sha_or_none(value: object, *, allow_none: bool) -> bool:
     return isinstance(value, str) and _SHA.fullmatch(value) is not None
 
 
+def _count_of(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_DROPPED
+
+
+def _repo_ok(value: object) -> bool:
+    """One entry of `repos` (`ImplementerRepoResult`): closed, bounded, `pushed` never without a
+    head commit, the head commit the last of the commits when there are any."""
+    entry = as_object(value)
+    if entry is None or not _REPO_REQUIRED <= set(entry) <= _REPO_REQUIRED | _REPO_OPTIONAL:
+        return False
+    name, full_name = entry["name"], entry["fullName"]
+    if not isinstance(name, str) or _MOUNT_NAME.fullmatch(name) is None:
+        return False
+    if not isinstance(full_name, str) or _REPO_FULL_NAME.fullmatch(full_name) is None:
+        return False
+    if not _is_string(entry["base"], MAX_BRANCH_NAME_CHARS, minimum=1):
+        return False
+    if not _is_string(entry["branch"], MAX_BRANCH_NAME_CHARS, minimum=1):
+        return False
+    head, pushed = entry["headCommit"], entry["pushed"]
+    if not isinstance(entry["created"], bool) or not isinstance(pushed, bool):
+        return False
+    if not _sha_or_none(entry["baseCommit"], allow_none=False):
+        return False
+    if not _sha_or_none(head, allow_none=True) or (pushed and head is None):
+        return False
+    commits, files = entry["commits"], entry["filesChanged"]
+    if not isinstance(commits, list) or not isinstance(files, list):
+        return False
+    commit_list, file_list = cast("list[object]", commits), cast("list[object]", files)
+    if len(commit_list) > MAX_REPO_COMMITS or len(file_list) > MAX_REPO_FILES:
+        return False
+    if not all(_commit_ok(commit) for commit in commit_list):
+        return False
+    if not all(_file_ok(file) for file in file_list):
+        return False
+    if commit_list and cast("dict[str, str]", commit_list[-1])["sha"] != head:
+        return False
+    if "branches" in entry:
+        branches = entry["branches"]
+        if (
+            not isinstance(branches, list)
+            or len(cast("list[object]", branches)) > MAX_REPO_BRANCHES
+        ):
+            return False
+        if not all(_branch_ok(branch) for branch in cast("list[object]", branches)):
+            return False
+    if "branchesDropped" in entry and not _dropped_ok(entry["branchesDropped"]):
+        return False
+    if "checkedOut" in entry and not _checked_out_ok(entry["checkedOut"]):
+        return False
+    return all(
+        _count_of(entry[key]) for key in ("commitsTruncated", "filesTruncated") if key in entry
+    )
+
+
+def _repos_ok(block: Mapping[str, Any]) -> bool:
+    """`repos` of a block: one to ten valid entries, no mount name twice, and the old fields of the
+    block copies of the first entry (the contract: a reader that does not know `repos` sees the
+    first repository as it always saw the only one)."""
+    repos = block["repos"]
+    if not isinstance(repos, list) or not 1 <= len(cast("list[object]", repos)) <= MAX_REPOS:
+        return False
+    entries = cast("list[object]", repos)
+    if not all(_repo_ok(entry) for entry in entries):
+        return False
+    first = cast("dict[str, Any]", entries[0])
+    names = [cast("dict[str, Any]", entry)["name"].lower() for entry in entries]
+    if len(set(names)) != len(names):
+        return False
+    return all(
+        block[key] == first[key]
+        for key in ("baseCommit", "headCommit", "pushed", "commits", "filesChanged")
+    )
+
+
 def valid_block(value: object) -> dict[str, Any] | None:
     """The block when it is what the app reads (the bounds of the contract, its invariants), else
     None. A copy: the caller's object is not kept."""
@@ -334,6 +450,8 @@ def valid_block(value: object) -> dict[str, Any] | None:
         return None
     if not _is_string(block["summary"], MAX_SUMMARY_CHARS) or not _opencode_ok(block["opencode"]):
         return None
+    if "repos" in block and not _repos_ok(block):
+        return None
     return dict(block)
 
 
@@ -366,8 +484,39 @@ def clip_texts(block: Mapping[str, Any]) -> dict[str, Any]:
             for file in clipped["filesChanged"]
             if len(_APP_CONTROLS.sub("", file["path"][:MAX_PATH_CHARS])) >= 1
         ]
+        if isinstance(clipped.get("repos"), list):
+            clipped["repos"] = [_clip_repo(entry) for entry in clipped["repos"]]
+            # The copies of the first entry stay copies of it (`_repos_ok`).
+            first = clipped["repos"][0]
+            clipped["commits"] = first["commits"]
+            clipped["filesChanged"] = first["filesChanged"]
     except (KeyError, TypeError):
         return dict(block)
+    return clipped
+
+
+def _clip_repo(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """`clip_texts` for one entry of `repos`: the branch names, the subjects and the paths cut to
+    the bound, and a file the app would refuse left out."""
+    clipped: dict[str, Any] = dict(entry)
+    for key in ("base", "branch"):
+        clipped[key] = str(clipped[key])[:MAX_BRANCH_NAME_CHARS]
+    if "branches" in clipped:
+        clipped["branches"] = [
+            {**branch, "name": branch["name"][:MAX_BRANCH_NAME_CHARS]}
+            for branch in clipped["branches"]
+        ]
+    if isinstance(clipped.get("checkedOut"), str):
+        clipped["checkedOut"] = clipped["checkedOut"][:MAX_BRANCH_NAME_CHARS]
+    clipped["commits"] = [
+        {**commit, "subject": commit["subject"][:MAX_SUBJECT_CHARS]}
+        for commit in clipped["commits"]
+    ]
+    clipped["filesChanged"] = [
+        {**file, "path": file["path"][:MAX_PATH_CHARS]}
+        for file in clipped["filesChanged"]
+        if len(_APP_CONTROLS.sub("", file["path"][:MAX_PATH_CHARS])) >= 1
+    ]
     return clipped
 
 
@@ -394,7 +543,10 @@ def fit_block(
     """The block cut so that the body (`other_bytes` of result around it, plus the block) is at
     most `budget` bytes: the counts of the contract first, then the files, then the commits.
 
-    `other_bytes` is `escaped_size` of the result without its block."""
+    `other_bytes` is `escaped_size` of the result without its block. A block with `repos` is cut by
+    `fit_repos` (its own budget) and not by this one."""
+    if "repos" in block:
+        return fit_repos(block, other_bytes)
     fitted: dict[str, Any] = dict(block)
     commits: list[Mapping[str, str]] = list(fitted["commits"])[-MAX_COMMITS:]
     files: list[Mapping[str, str]] = list(fitted["filesChanged"])[:MAX_FILES]
@@ -418,4 +570,73 @@ def fit_block(
         files = kept
     fitted["commits"] = commits
     fitted["filesChanged"] = files
+    return fitted
+
+
+def _repos_size(entries: Sequence[Mapping[str, Any]], first: Mapping[str, Any]) -> int:
+    """The bytes `repos` and the copies of the first repository in the old fields take."""
+    copies = {key: first[key] for key in ("commits", "filesChanged") if key in first}
+    return escaped_size(entries) + escaped_size(copies)
+
+
+def fit_repos(
+    block: Mapping[str, Any],
+    other_bytes: int,
+    budget: int = REPOS_BUDGET_BYTES,
+    body_budget: int = REPOS_BODY_BYTES,
+) -> dict[str, Any]:
+    """The block cut so that `repos` together with the copies of the first repository in the old
+    fields takes at most `budget` bytes (3 MiB, which leaves 1 MiB of the 4 MiB body for the rest).
+    Until it fits: in the repository whose entry is the largest, `filesChanged` first (from the
+    end, whole entries, ten at a time) and, when that list is empty, `commits` (from the oldest
+    end, ten at a time, the head commit stays); what was left out is counted in `filesTruncated`
+    and `commitsTruncated` of that entry, and the copies in the old fields are those of the first
+    entry, so they stay equal. Nothing else is cut and nothing is dropped without a counter. A body
+    that is still over `body_budget` (the rest of the block is too large) is the caller's to
+    refuse (`valid_block` does not judge it)."""
+    fitted: dict[str, Any] = dict(block)
+    entries: list[dict[str, Any]] = [dict(entry) for entry in fitted["repos"]]
+    item_sizes: list[tuple[list[int], list[int]]] = [
+        (
+            [escaped_size(item) + 2 for item in entry["filesChanged"]],
+            [escaped_size(item) + 2 for item in entry["commits"]],
+        )
+        for entry in entries
+    ]
+    entry_sizes = [escaped_size(entry) for entry in entries]
+    first = entries[0]
+    total = _repos_size(entries, first)
+    while total > budget:
+        order = sorted(range(len(entries)), key=lambda index: entry_sizes[index], reverse=True)
+        chosen: int | None = next(
+            (
+                index
+                for index in order
+                if entries[index]["filesChanged"] or len(entries[index]["commits"]) > 1
+            ),
+            None,
+        )
+        if chosen is None:
+            break
+        entry = entries[chosen]
+        file_sizes, commit_sizes = item_sizes[chosen]
+        if entry["filesChanged"]:
+            cut = min(CUT_STEP, len(entry["filesChanged"]))
+            removed = sum(file_sizes[-cut:])
+            entry["filesChanged"] = entry["filesChanged"][:-cut]
+            del file_sizes[-cut:]
+            entry["filesTruncated"] = int(entry.get("filesTruncated", 0)) + cut
+        else:
+            cut = min(CUT_STEP, len(entry["commits"]) - 1)
+            removed = sum(commit_sizes[:cut])
+            entry["commits"] = entry["commits"][cut:]
+            del commit_sizes[:cut]
+            entry["commitsTruncated"] = int(entry.get("commitsTruncated", 0)) + cut
+        entry_sizes[chosen] -= removed
+        # Counting the counter (`"filesTruncated": 10, `) as it appears keeps the loop honest about
+        # a list that is cut to nothing: the count is a few bytes, the entries are many.
+        total = _repos_size(entries, first) if chosen == 0 else total - removed
+    fitted["repos"] = entries
+    fitted["commits"] = first["commits"]
+    fitted["filesChanged"] = first["filesChanged"]
     return fitted

@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -67,7 +67,6 @@ from . import finish_tool
 from .agent import AgentTurn, EngineRuntime, ImplementerAgent, ResumeOutcome
 from .agent_container import (
     AGENT_HOME,
-    AGENT_REPO,
     AGENT_TMP,
     ENGINE_PORT,
     KILL_SECONDS,
@@ -96,7 +95,6 @@ from .git_workspace import (
     REASON_OUT_OF_SPACE,
     REASON_UNCHECKED,
     BranchPush,
-    GitWorkspace,
     PushReport,
 )
 from .history import CommitInfo, FileChange
@@ -107,6 +105,8 @@ from .limits import MAX_RETURNED_BYTES as MAX_RETURNED_BYTES
 from .limits import MAX_TOOL_RESULT_BYTES as MAX_TOOL_RESULT_BYTES
 from .mcp_config import McpEndpoint, endpoints_of
 from .mcpdoor_launcher import McpDoorSeams, RunningMcpDoor, start_mcp_door
+from .multi_result import outcomes_of, push_error
+from .multi_workspace import AnyWorkspace, MultiWorkspace
 from .netdoor.registries import rule_has_registries
 from .netdoor_launcher import NetDoorSeams, RunningNetDoor, start_network_door
 from .network_report import (
@@ -118,9 +118,18 @@ from .network_report import (
 from .network_rule import MODE_OFF, MODE_OPEN, OFF, NetworkRule
 from .network_switch import Post, model_host_of, urllib_post
 from .placement import placement_of
-from .preface import MovedBranch, PrefaceFacts, ResumeMode, first_turn_parts, message_parts
+from .preface import (
+    MovedBranch,
+    PrefaceFacts,
+    RepoPrefaceFacts,
+    ResumeMode,
+    first_turn_parts,
+    message_parts,
+    multi_first_turn_parts,
+)
 from .prompts import LEFTOVER_PROMPT, RESULT_REMINDER_PROMPT, instructions_text
 from .reader import RESET_SECONDS as READER_RESET_SECONDS
+from .repo_places import places_of
 from .report import agent_ask_ok, agent_result_ok
 from .result_channel import (
     CONFIG_DIRECTORY,
@@ -411,7 +420,7 @@ class ImplementerSession:
         self,
         job: ImplementerInput,
         *,
-        workspace: GitWorkspace,
+        workspace: AnyWorkspace,
         command: Sequence[str],
         place: Callable[[], AgentPlace],
         environment: Mapping[str, str],
@@ -449,6 +458,10 @@ class ImplementerSession:
         )
         self._agent_ask: dict[str, Any] | None = None
         self.workspace = workspace
+        # #1093: where the repositories are in the agent's container; the working directory is the
+        # repository of a turn of one, `/work` for several.
+        repos = job.implementer.repos
+        self._places = places_of(None if repos is None else tuple(r.name for r in repos))
         self.command = tuple(command)
         self._place_factory = place
         self.environment = environment
@@ -625,6 +638,7 @@ class ImplementerSession:
             can_ask=self._can_ask,
             max_budget_usd=subscription.max_budget_usd,
             mcp_endpoints=self._mcp_endpoints,
+            repo_paths=self._places.agent_paths,
         )
         self._claude = agent
         agent.start()
@@ -667,6 +681,8 @@ class ImplementerSession:
         resume = self.job.implementer.resume
         workspace = self.workspace
         base, session = self.job.implementer.base_branch, self.job.implementer.branch
+        if isinstance(workspace, MultiWorkspace):
+            return self._multi_first_message(workspace, agent)
         if resume is None:
             return first_turn_parts(
                 instruction, base=base, start=workspace.start_source, session=session
@@ -687,6 +703,46 @@ class ImplementerSession:
             base=base,
             start=workspace.start_source,
             session=session,
+        )
+        return message_parts(
+            facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest
+        )
+
+    def _multi_first_message(
+        self, workspace: MultiWorkspace, agent: ImplementerAgent | ClaudeCodeAgent
+    ) -> str | list[dict[str, Any]]:
+        """The first message of a multi-repository turn (#1093). The list of the repositories, their
+        bases and branches is the app's, at the start of the instruction; the runner adds only the
+        fixed note about the layout and, on a follow-up, what only it knows: the branches that moved
+        or are gone since the last turn, per repository by its mount."""
+        instruction = self.job.implementer.instruction
+        resume = self.job.implementer.resume
+        if resume is None:
+            return multi_first_turn_parts(instruction)
+        outcome = agent.resume or ResumeOutcome(ResumeMode.SUMMARY_ONLY, ResumeReason.IMPORT_FAILED)
+        repos: list[RepoPrefaceFacts] = []
+        for member in workspace.members:
+            tips = member.start_tips
+            branch = member.spec.branch
+            names = sorted(
+                tips, key=lambda name: (name != branch, name != member.spec.base_branch, name)
+            )
+            repos.append(
+                RepoPrefaceFacts(
+                    name=member.spec.name or "",
+                    branches=[(name, tips[name]) for name in names],
+                    checkout=member.start_checkout or branch,
+                    moved=[MovedBranch(m.name, m.was, m.now) for m in member.resume_moved],
+                    missing=member.resume_missing,
+                )
+            )
+        facts = PrefaceFacts(
+            turn=resume.turn,
+            mode=outcome.mode,
+            branches=(),
+            checkout="",
+            setup_ran=self._has_script(),
+            repos=repos,
         )
         return message_parts(
             facts, instruction, previous_summary=resume.previous_summary, digest=resume.digest
@@ -1017,7 +1073,7 @@ class ImplementerSession:
             ledger=model.ledger,
             runtime=place,
             command=self.command,
-            directory=AGENT_REPO,
+            directory=self._places.agent_workdir,
             make_config=make_config,
             instructions=(
                 INSTRUCTIONS_FILE,
@@ -1203,8 +1259,18 @@ class ImplementerSession:
             )
         except Exception as error:
             self._stopped_by(error)
-        self._note_branches(self.workspace.push_report())
+        self._note_pushed()
         self._note_disk()
+
+    def _note_pushed(self) -> None:
+        """The lines of the final push: the branches of the one repository, or of every repository
+        of a multi-repository turn (each under its mount name, `repo:branch`)."""
+        workspace = self.workspace
+        if isinstance(workspace, MultiWorkspace):
+            for fact in workspace.facts():
+                self._note_branches(fact.report, f"{fact.workspace.spec.name}:")
+            return
+        self._note_branches(workspace.push_report())
 
     def _collect_result(self) -> None:
         """The result of the agent, once its container is gone: nothing in it can change the file
@@ -1275,10 +1341,10 @@ class ImplementerSession:
         if free is not None and free < LOW_DISK_BYTES:
             self._note(f"the VM's disk had {free // (1024 * 1024)} MB left at the end")
 
-    def _note_branches(self, report: PushReport) -> None:
+    def _note_branches(self, report: PushReport, where: str = "") -> None:
         for branch in report.branches:
             outcome = "pushed" if branch.pushed else f"rejected ({branch.reason})"
-            self._note(f"branch {branch.name}: {outcome}")
+            self._note(f"branch {where}{branch.name}: {outcome}")
         if any(branch.reason == REASON_OUT_OF_SPACE for branch in report.branches):
             self._note(
                 "the disk of the workspace had no room left to take every branch over, "
@@ -1298,6 +1364,8 @@ class ImplementerSession:
 
     def _result(self) -> TurnResult:
         workspace = self.workspace
+        if isinstance(workspace, MultiWorkspace):
+            return self._multi_result(workspace)
         if not self._can_push:
             # #843: no branch, no head, no commits and no files: nothing was pushed, so there is
             # nothing Control vouches for. A turn that ended well is a success whether the agent
@@ -1351,6 +1419,29 @@ class ImplementerSession:
             tuple(commits),
             tuple(files),
         )
+
+    def _multi_result(self, workspace: MultiWorkspace) -> TurnResult:
+        """The result of a multi-repository turn (#1093): one entry per repository, the old fields
+        the copies of the first one. Judged repository by repository (`multi_result.push_error`)."""
+        outcomes = outcomes_of(workspace, can_push=self._can_push)
+        error = self._error
+        if self._can_push and error is None:
+            error = push_error(
+                workspace,
+                handed_in_something=self._agent_ask is not None or self._agent_result is not None,
+            )
+        first = outcomes[0]
+        facts = workspace.facts()[0]
+        result = self._turn_result(
+            error,
+            first.head_commit,
+            first.pushed,
+            () if first.branches is None else first.branches,
+            (facts.report.invalid, facts.report.overflow) if self._can_push else (0, 0),
+            first.commits,
+            first.files_changed,
+        )
+        return replace(result, repos=outcomes)
 
     def _turn_result(
         self,

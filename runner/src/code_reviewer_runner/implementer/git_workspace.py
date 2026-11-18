@@ -94,6 +94,7 @@ from .history import (
     CommitInfo,
     FileChange,
     StopReading,
+    newest_commits,
     parse_commits,
     parse_name_status,
 )
@@ -322,6 +323,8 @@ class WorkspaceSpec:
     # answer for a first turn, which the runner follows: true checks the branch out (gone:
     # `clone_failed`), false makes it from the base (there after all: `branch_exists`).
     name: str | None = None
+    # `owner/name`, for the report of a multi-repository turn (the clone address holds it too).
+    full_name: str | None = None
     direct: bool = False
     branch_exists: bool = False
     # The most branches the final push reports for this repository (a multi-repository report is
@@ -536,6 +539,9 @@ class GitWorkspace:
         # Whether this turn made the working branch (the provider did not have it): never true for
         # direct work and for a branch that continues (#1093).
         self.branch_created = False
+        # The seconds of the whole set-up still left for the one fetch, when the set-up is shared by
+        # several repositories (`MultiWorkspace`); None: `CLONE_FETCH_SECONDS` as a single one has.
+        self.fetch_seconds: float | None = None
         self._names_checked = False
         self._progress = _Progress()
         # How many tracked files `settle_after_setup` found changed, and how many entries it put on
@@ -618,14 +624,37 @@ class GitWorkspace:
         """Everything before the agent starts: the mirror and the agent's repository. Raises
         `JobError` with a stable code; nothing is left half done that a retry would trip over (the
         work volume is a new one per turn)."""
+        self.check_names()
+        self.prepare_repository()
+        self.finish_prepare()
+
+    def check_names(self) -> None:
+        """The branch names of the job are ones git accepts (`_check_names`)."""
+        self._check_names()
+
+    def prepare_repository(self) -> None:
+        """The mirror and the agent's repository of this one repository. A multi-repository turn
+        (`MultiWorkspace`) runs it for each, then `finish_prepare` once."""
         self._check_names()
         self.clone_mirror()
         self.create_agent_repository()
-        # The agent's repository is a second full copy of the mirror: the room the push needs has
-        # to be left after both.
-        self._require_room()
-        if not self._access.warm():
+
+    def finish_prepare(self, *, warm: bool = True) -> None:
+        """The last step of the set-up: the room the push needs is left after the agent's
+        repository (a second full copy of the mirror), and the readers are made before the agent
+        runs (a container needs room to be made, and the disk may be full later). A multi-repository
+        turn makes the readers once, for all."""
+        self.require_room()
+        if warm and not self._access.warm():
             raise fail(ErrorCode.SETUP_FAILED, "reader_unavailable: the reader cannot be made")
+
+    def warm_readers(self) -> bool:
+        """Make the readers now (`RepoAccess.warm`); False when they cannot be had."""
+        return self._access.warm()
+
+    def require_room(self) -> None:
+        """`clone_failed` (free) when the mirror's file system has less room than the push needs."""
+        self._require_room()
 
     def clone_mirror(self) -> None:
         """Fetch the whole repository into the new bare mirror: every branch as `refs/heads/<name>`,
@@ -676,7 +705,9 @@ class GitWorkspace:
             ],
             protocols=":".join(self._schemes),
             token=True,
-            timeout=min(CLONE_FETCH_SECONDS, self._timeout),
+            timeout=min(
+                CLONE_FETCH_SECONDS, self._timeout, self.fetch_seconds or CLONE_FETCH_SECONDS
+            ),
         )
         if fetched.returncode != 0:
             raise fail(
@@ -1222,9 +1253,19 @@ class GitWorkspace:
         result is (`history.parse_commits`). Read from the mirror, where the branch was taken over:
         a stream, so a subject of any size costs no memory. Empty when that branch was not taken
         over."""
+        raw = self._read_commit_log()
+        return [] if raw is None else parse_commits(raw)
+
+    def newest_commits_since_start(self, limit: int) -> tuple[list[CommitInfo], int]:
+        """`commits_since_start` for an entry of a multi-repository report (#1093): the newest
+        `limit` commits, the head last, and how many older ones were left out."""
+        raw = self._read_commit_log()
+        return ([], 0) if raw is None else newest_commits(raw, limit=limit)
+
+    def _read_commit_log(self) -> bytes | None:
         ref = self._progress.form_ref
         if ref is None:
-            return []
+            return None
         reader = CappedLines()
         done = self._mirror_stream(
             [
@@ -1237,7 +1278,7 @@ class GitWorkspace:
             ],
             reader.feed,
         )
-        return parse_commits(bytes(reader.data)) if done.returncode == 0 else []
+        return bytes(reader.data) if done.returncode == 0 else None
 
     def changed_files(self) -> list[FileChange]:
         """The files that differ between the start commit and the form's branch
