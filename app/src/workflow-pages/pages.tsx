@@ -21,6 +21,7 @@ import type {
   RunView,
   WorkflowRunService,
 } from "../workflow-runs/service.ts";
+import type { RunsApi } from "../runs/ui/api.ts";
 import type { WorkflowRunsApi } from "./api.ts";
 import type { BuilderApi } from "./builder/api.ts";
 import { LaneBuilder } from "./builder/builder.tsx";
@@ -259,7 +260,31 @@ export type RunPageData =
       kind: "ready";
       workflow: Pick<WorkflowView, "id" | "name">;
       run: RunView;
+      /**
+       * The lane document of the version the run uses (#1079), what the flow draws; null when that version cannot be read (the page then
+       * lists the steps).
+       */
+      document: unknown;
     };
+
+async function laneOfVersion(
+  workflows: Pick<WorkflowService, "get">,
+  workflowId: string,
+  version: number,
+  current: Pick<WorkflowView, "documentVersion" | "document">,
+): Promise<unknown> {
+  if (current.documentVersion === version) return current.document;
+  try {
+    return (await workflows.get(workflowId, version)).document;
+  } catch (error) {
+    if (
+      error instanceof WorkflowError &&
+      error.code === "WORKFLOW_VERSION_NOT_FOUND"
+    )
+      return null;
+    throw error;
+  }
+}
 
 export async function loadRunPage(
   workflowId: string,
@@ -274,10 +299,19 @@ export async function loadRunPage(
     run: await deps.runs.get(workflowId, runId),
   }));
   if (found === undefined) return { kind: "not_found" };
+  // The lane as it was when the run started: the run keeps the version it uses, whatever has been saved since. The same service, so the
+  // workspace's scope holds; a version that cannot be read is no reason to hide the run.
+  const document = await laneOfVersion(
+    deps.workflows,
+    workflowId,
+    found.run.workflowVersion,
+    found.workflow,
+  );
   return {
     kind: "ready",
     workflow: { id: found.workflow.id, name: found.workflow.name },
     run: found.run,
+    document,
   };
 }
 
@@ -285,11 +319,14 @@ export function RunPageContent({
   workspaceSlug,
   data,
   api,
+  runsApi,
 }: {
   workspaceSlug: string;
   data: Extract<RunPageData, { kind: "ready" }>;
   /** Only tests pass this: a server component cannot hand functions to the client component. */
   api?: WorkflowRunsApi;
+  /** Only tests pass this, for the same reason: the MCP calls of an agent step's job. */
+  runsApi?: RunsApi;
 }) {
   const { workflow, run } = data;
   const workflowHref = workspacePath(
@@ -325,7 +362,10 @@ export function RunPageContent({
         workspaceSlug={workspaceSlug}
         workflowId={workflow.id}
         initial={{ run }}
+        laneName={workflow.name}
+        document={data.document}
         {...(api === undefined ? {} : { api })}
+        {...(runsApi === undefined ? {} : { runsApi })}
       />
     </>
   );
