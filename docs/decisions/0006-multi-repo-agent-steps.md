@@ -219,9 +219,21 @@ are `ErrorCode`s of the runner contract.
   import into a repository rewrites it to the repository's root commit. So the one thing the import used to rewrite (the project)
   is constant for `/work`, and a follow-up on a new VM resumes the session at least as well as one in a repository. The tools of the
   engine reach the repositories below `/work` by their paths (`external_directory` is allowed anyway, `config.py`), and `git`
-  works in each repository (the agent changes into one). **Not measured:** a model-driven turn (no model call in a test) and
-  Claude Code in `/work` (it runs from any directory, nothing of its session is kept between turns yet, and the runner hands each
-  `/work/<name>` to its user); a run on a real VM of the live test is the place to see both. The switch to the fallback is one flag
+  works in each repository (the agent changes into one). **Claude Code in `/work`, measured without a model call (#1093):** the program on this machine
+  (`claude --version`: 2.1.325; the runner pins 2.1.311) keys its session store by the working directory **path**, not by a git
+  root: the directories under its `projects/` are the cwd with `/` turned into `-`, including one for a directory that is not a git
+  repository (`/home/luca/projects/code-reviewer`, whose repositories are in the directories below it, the same layout as `/work`
+  with `/work/<name>`). The transcript lines of such a session carry the cwd and a branch of `null` or `HEAD` where the cwd is not
+  a repository, and sessions there ran their tools (shell, reads, edits) in repositories below that directory. Without a
+  repository only the git status block of the system prompt is missing (`claude --help` lists it among the per-machine
+  sections). So a session in `/work` has one stable key on every VM (`/work`), and a resume (`claude -p --resume <id>`) looks it
+  up under that key in the session volume. This is observation of a session that already existed,
+  not a controlled run of the pinned version in the agent container. **Still not measured, a required item of the live test
+  before the first release with a live multi-repository lane:** a model-driven turn of each harness (OpenCode and Claude Code in
+  `/work` in the pinned agent image, with `bypassPermissions`), a follow-up turn that resumes the Claude Code session in the same
+  container, and that the hand-over of each `/work/<name>` to the agent's user (`chown -R`, `claude_code/agent.py`) is enough. If
+  Claude Code fails there, `RepoPlaces.workdir_of_first` is the fallback and `worker_api.py` must then not announce the feature for
+  Claude Code. The switch to the fallback is one flag
   (`RepoPlaces.workdir_of_first`), should that ever be needed.
 - **Reviews and ticket moves per pull request.** `ticket.requestReview` takes one pull request; a step that must ask for a review of
   each pull request of `pullRequests` needs the reserved `forEach` step. Until then it asks for the first.

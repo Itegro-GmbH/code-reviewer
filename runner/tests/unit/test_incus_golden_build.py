@@ -134,8 +134,11 @@ def test_build_golden_records_what_it_found_in_the_image_under_the_names_the_run
         harnesses.PROPERTY_AGENT_IMAGE,
         harnesses.PROPERTY_CLAUDE_CODE,
         harnesses.PROPERTY_CLAUDE_CODE_LAYER,
+        harnesses.PROPERTY_WORKER_FEATURES,
     ):
         assert name in text, name
+    # #1093: the Worker image itself is asked what it reads of a job.
+    assert '"$WORKER" --worker-features' in text
     # Observed in the build instance (the program's own answer), not copied from the pin.
     assert "claude --version" in text and "opencode --version" in text
     published = text[text.index("ix publish") :].splitlines()[0]

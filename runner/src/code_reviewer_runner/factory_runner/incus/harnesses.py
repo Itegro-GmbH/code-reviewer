@@ -17,7 +17,11 @@ Incus image, and this module reads them back:
 * `code-reviewer.agent-image`: the id of the agent image in the image's Docker;
 * `code-reviewer.claude-code`: the version `claude --version` printed in the layer;
 * `code-reviewer.claude-code.layer`: the tag of the layer (`layer_tag`: the version, the digests it
-  was checked against, the base it sits on).
+  was checked against, the base it sits on);
+* `code-reviewer.worker-features`: what the Worker image says it reads of a job
+  (`code-reviewer-runner --worker-features`, #1093), comma separated. The runner names a claim
+  feature (`implementer_multi_repo`) only when the image has it: a service on new code with a golden
+  image that was not rebuilt claims no job it cannot run, and such a job waits for another runner.
 
 Claude Code is ready only when the layer in the image is **exactly** the one this runner would
 build (the same tag): a runner whose pin moved on, or a device that chose another version, announces
@@ -38,10 +42,12 @@ PROPERTY_OPENCODE: Final = "code-reviewer.opencode"
 PROPERTY_AGENT_IMAGE: Final = "code-reviewer.agent-image"
 PROPERTY_CLAUDE_CODE: Final = "code-reviewer.claude-code"
 PROPERTY_CLAUDE_CODE_LAYER: Final = "code-reviewer.claude-code.layer"
+PROPERTY_WORKER_FEATURES: Final = "code-reviewer.worker-features"
 
 REBUILD: Final = "build the golden image again with docker/incus/build-golden.sh"
 _VERSION: Final = re.compile(r"\d{1,4}\.\d{1,4}\.\d{1,4}")
 _IMAGE_ID: Final = re.compile(r"sha256:[0-9a-f]{64}")
+_FEATURE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -53,6 +59,9 @@ class GoldenHarnesses:
     opencode_version: str | None
     claude: HarnessStatus | None
     notes: tuple[str, ...]
+    # What the image's Worker reads of a job; empty for an image that does not say (built before
+    # the property existed: it then has none of the features that came after).
+    worker_features: tuple[str, ...] = ()
 
 
 def _claude_status(
@@ -99,4 +108,16 @@ def golden_harnesses(
             "the golden image has no Claude Code (built with --no-claude-code, or before it was "
             f"installed there): {REBUILD}"
         )
-    return GoldenHarnesses(opencode if _VERSION.fullmatch(opencode) else None, claude, tuple(notes))
+    features = worker_features(properties)
+    if not features:
+        notes.append(f"the golden image does not name the features of its Worker: {REBUILD}")
+    return GoldenHarnesses(
+        opencode if _VERSION.fullmatch(opencode) else None, claude, tuple(notes), features
+    )
+
+
+def worker_features(properties: Mapping[str, str]) -> tuple[str, ...]:
+    """The features the image's Worker reads, as the build recorded them (names only: anything
+    that is not a name is dropped)."""
+    listed = properties.get(PROPERTY_WORKER_FEATURES, "").split(",")
+    return tuple(name for each in listed if _FEATURE.fullmatch(name := each.strip()))

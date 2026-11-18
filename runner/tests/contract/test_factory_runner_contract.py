@@ -96,6 +96,8 @@ def test_the_claim_names_the_implementer_and_the_split_answer_and_only_features_
 ) -> None:
     client, _ = registered(app)
     app.queue_job(JOB)
+    # A runner whose Workers read `implementer.repos` (#1093) names that feature too.
+    client.use_features(multi_repo=True)
 
     claimed = client.claim()
 

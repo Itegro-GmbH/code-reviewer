@@ -22,6 +22,7 @@ from code_reviewer_runner.factory_runner.incus.harnesses import (
     PROPERTY_CLAUDE_CODE,
     PROPERTY_CLAUDE_CODE_LAYER,
     PROPERTY_OPENCODE,
+    PROPERTY_WORKER_FEATURES,
     golden_harnesses,
 )
 from code_reviewer_runner.factory_runner.incus.prepare import prepare_incus
@@ -215,3 +216,53 @@ def test_the_log_says_what_the_login_of_the_device_is_without_a_secret() -> None
         assert with_login.claude is not None and with_login.claude.ready
         assert not any(TOKEN in note for note in with_login.claude.notes)
         assert not with_login.claude.notes
+
+
+# #1093: the Worker is the golden image's, so the claim feature `implementer_multi_repo` is named
+# only when the image says its Worker reads `implementer.repos`.
+def multi_repo_of(properties: Mapping[str, str] | None) -> bool:
+    with short_directory() as root:
+        incus = FakeIncus(pool="crpool")
+        if properties is not None:
+            incus.image_properties_of["code-reviewer-golden"] = dict(properties)
+        return prepare_incus(runner_config(), environment(root), client=incus.provision).multi_repo
+
+
+def test_an_image_whose_worker_reads_several_repositories_makes_the_runner_claim_them() -> None:
+    features = "worker_api,implementer_mcp,implementer_multi_repo"
+
+    assert multi_repo_of(golden(**{PROPERTY_WORKER_FEATURES: features})) is True
+
+
+def test_a_service_on_new_code_with_an_old_golden_image_does_not_announce_the_feature() -> None:
+    # The image was built before the feature: no property, or a list without it.
+    assert multi_repo_of(golden()) is False
+    assert (
+        multi_repo_of(golden(**{PROPERTY_WORKER_FEATURES: "worker_api,implementer_mcp"})) is False
+    )
+    assert multi_repo_of(golden(**{PROPERTY_WORKER_FEATURES: ""})) is False
+    assert multi_repo_of(golden(**{PROPERTY_WORKER_FEATURES: "implementer_multi_repo x!"})) is False
+    # No properties at all, an image that cannot be read, a machine that is not ready.
+    assert multi_repo_of({"description": "old"}) is False
+    assert multi_repo_of(None) is False
+    with short_directory() as root:
+        incus = FakeIncus(pool="crpool")
+        incus.fail["image_properties"] = IncusError("image list", "boom")
+        prepared = prepare_incus(runner_config(), environment(root), client=incus.provision)
+        assert prepared.multi_repo is False
+
+
+def test_an_image_without_the_property_says_so_in_the_log_with_the_rebuild_step() -> None:
+    _, _, notes = announced_by(golden())
+
+    assert any("features of its Worker" in note and "build-golden.sh" in note for note in notes)
+
+
+def test_the_golden_image_features_are_names_only() -> None:
+    found = golden_harnesses(
+        golden(**{PROPERTY_WORKER_FEATURES: " a_b , C, implementer_multi_repo,,x y"}),
+        {},
+        Path("/nonexistent"),
+    )
+
+    assert found.worker_features == ("a_b", "implementer_multi_repo")

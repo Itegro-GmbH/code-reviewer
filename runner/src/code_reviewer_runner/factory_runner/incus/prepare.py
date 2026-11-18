@@ -17,6 +17,7 @@ import asyncio
 import os
 from collections.abc import Callable, Mapping
 
+from code_reviewer_runner.factory_runner.app_client import FEATURE_MULTI_REPO
 from code_reviewer_runner.factory_runner.config import RunnerConfig, home_directory
 from code_reviewer_runner.factory_runner.prepare import (
     Prepared,
@@ -145,4 +146,8 @@ def prepare_incus(
         result,
         found.notes,
         claude_version=claude.version if claude is not None and claude.ready else None,
+        # The Worker is the golden image's, not this service's code: the feature is announced only
+        # when the image says its Worker has it (a rebuild of the image and a restart of the service
+        # make it so; `docs/runner.md`, "Rolling out a new Worker").
+        multi_repo=FEATURE_MULTI_REPO in found.worker_features,
     )
