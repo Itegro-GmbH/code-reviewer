@@ -18,6 +18,7 @@ import type {
   WorkflowRunsTable,
   WorkflowStepRunsTable,
 } from "../schema.ts";
+import type { WorkspaceRunStatusFilter } from "../workflow-run-filters.ts";
 import type { WorkspaceId } from "../workspace-scope.ts";
 
 /**
@@ -158,6 +159,56 @@ export type TicketRunSummary = {
     stepId: string | null;
     status: WorkflowRunStatus;
   } | null;
+};
+
+export type WorkspaceRunsFilter = {
+  status?: WorkspaceRunStatusFilter;
+  /** Only the runs on this repository: the project of the list. */
+  repositoryId?: string;
+  /** Only the runs of this workflow: the lane. */
+  workflowId?: string;
+};
+
+/**
+ * Where the next page of the list starts: right after this run. The list is ordered the active runs first (`active`), then by start, newest
+ * first, then by id, so these three values say exactly where a page ended, however many runs came or went since.
+ */
+export type WorkspaceRunsCursor = {
+  active: boolean;
+  createdAt: string;
+  id: string;
+};
+
+/** What a step row says about where its run stands: nothing of its output, its cost or its texts. */
+export type StepSummary = {
+  stepId: string;
+  kind: StepRunKind;
+  status: StepRunStatus;
+  round: number;
+};
+
+/** The ticket a run is about, as the mirror of the tickets has it: texts of whoever opened the ticket, to be shown as text. */
+export type MirroredTicket = { title: string };
+
+/** One run of the workspace list with what the row of the list shows, read in a handful of queries for the whole page. */
+export type WorkspaceRunRow = {
+  run: StoredWorkflowRun;
+  /** The name of the workflow now: the lane. */
+  laneName: string;
+  /** `owner/name` of the repository the run works on (the project); null when the repository row is gone. */
+  repositoryName: string | null;
+  /** The rows of its steps in the order they were written. */
+  steps: StepSummary[];
+  /** The stored text of the version of the document the run started with; null when that version is gone. */
+  document: string | null;
+  /** The ticket of the run from the mirror; null when the run has none or the mirror does not hold it. */
+  ticket: MirroredTicket | null;
+};
+
+export type WorkspaceRunsPage = {
+  rows: WorkspaceRunRow[];
+  /** Where the page after this one starts; null on the last page. */
+  next: WorkspaceRunsCursor | null;
 };
 
 export type CreateRunOutcome =
@@ -307,6 +358,16 @@ export type WorkflowRunsRepository = {
   /** The runs of one workflow, newest first. */
   listRuns(workflowId: string, limit: number): Promise<StoredWorkflowRun[]>;
   /**
+   * #1078: the runs of the workspace, the active ones first and then the newest first, `limit` at a time (`after` is the `next` of the page
+   * before). With the step summaries, the version of the document and the mirrored ticket of every run of the page, read in one query each
+   * for the whole page, never one for each run.
+   */
+  listWorkspaceRuns(options: {
+    filter?: WorkspaceRunsFilter;
+    limit: number;
+    after?: WorkspaceRunsCursor;
+  }): Promise<WorkspaceRunsPage>;
+  /**
    * What the runs of each of these tickets (`github:owner/repo#128`) add up to (#923); a ticket without a run is not in the answer.
    * Read at the moment of the question, never stored.
    */
@@ -408,6 +469,68 @@ export type WorkflowRunsRepository = {
   /** Ends a step that is `running` and has no job (an action, or an agent step that could not be started); returns whether it was written. */
   settleOwnStep(stepRunId: string, outcome: StepOutcome): Promise<boolean>;
 };
+
+/** The statuses a filter of the workspace list stands for. */
+/** The statuses of a run that goes on: the runs of these come first in the list of the workspace. */
+const ACTIVE_STATUSES: readonly WorkflowRunStatus[] = ["running", "waiting"];
+
+const STATUSES_OF_FILTER: Record<
+  WorkspaceRunStatusFilter,
+  WorkflowRunStatus[]
+> = {
+  active: ["running", "waiting"],
+  waiting: ["waiting"],
+  ended: ["succeeded", "failed", "cancelled", "discarded"],
+  failed: ["failed"],
+};
+
+/**
+ * The tickets of the mirror (`tracker_items`) for these references (`github:owner/repo#128`: provider, repository, key), found in one
+ * query and matched exactly here, by the reference the run stored. A reference the mirror does not hold is not in the answer.
+ */
+async function mirroredTickets(
+  db: Kysely<Database>,
+  workspaceId: WorkspaceId,
+  refs: readonly string[],
+): Promise<Map<string, MirroredTicket>> {
+  const wanted = new Map<
+    string,
+    { provider: string; repo: string; key: string }
+  >();
+  for (const ref of new Set(refs)) {
+    const colon = ref.indexOf(":");
+    const hash = ref.lastIndexOf("#");
+    if (colon < 1 || hash < colon) continue;
+    wanted.set(ref, {
+      provider: ref.slice(0, colon),
+      repo: ref.slice(colon + 1, hash),
+      key: ref.slice(hash + 1),
+    });
+  }
+  const found = new Map<string, MirroredTicket>();
+  if (wanted.size === 0) return found;
+  const parts = [...wanted.values()];
+  const keyOf = sql<string>`coalesce(tracker_items.key, cast(tracker_items.number as text))`;
+  const rows = await db
+    .selectFrom("tracker_items")
+    .select(["provider", "repo", "title"])
+    .select(keyOf.as("ticket_key"))
+    .where("workspace_id", "=", workspaceId)
+    .where("provider", "in", [...new Set(parts.map((part) => part.provider))])
+    .where("repo", "in", [...new Set(parts.map((part) => part.repo))])
+    .where(keyOf, "in", [...new Set(parts.map((part) => part.key))])
+    .execute();
+  for (const [ref, part] of wanted) {
+    const row = rows.find(
+      (candidate) =>
+        candidate.provider === part.provider &&
+        candidate.repo === part.repo &&
+        candidate.ticket_key === part.key,
+    );
+    if (row !== undefined) found.set(ref, { title: row.title });
+  }
+  return found;
+}
 
 function runFrom(row: Selectable<WorkflowRunsTable>): StoredWorkflowRun {
   return {
@@ -655,6 +778,178 @@ export function createWorkflowRunsRepository(
         .limit(limit)
         .execute();
       return rows.map(runFrom);
+    },
+
+    async listWorkspaceRuns({ filter = {}, limit, after }) {
+      // Active runs (running, waiting for an answer) on top, then every other run, each part newest first. The two parts are two reads
+      // that each follow an index (`workflow_runs_active_index`, `workflow_runs_workspace_index`) and stop at the limit: the active
+      // ones first, and the others only for what the page still lacks. One `order by case …` could not use an index.
+      const read = (active: boolean, room: number) => {
+        let statuses: readonly WorkflowRunStatus[] | undefined =
+          filter.status === undefined
+            ? undefined
+            : STATUSES_OF_FILTER[filter.status].filter(
+                (status) => ACTIVE_STATUSES.includes(status) === active,
+              );
+        if (statuses?.length === 0) return undefined;
+        let query = db
+          .selectFrom("workflow_runs")
+          .innerJoin("workflows", (join) =>
+            join
+              .onRef("workflows.id", "=", "workflow_runs.workflow_id")
+              .onRef(
+                "workflows.workspace_id",
+                "=",
+                "workflow_runs.workspace_id",
+              ),
+          )
+          .leftJoin("repositories", (join) =>
+            join
+              .onRef("repositories.id", "=", "workflow_runs.repository_id")
+              .onRef(
+                "repositories.workspace_id",
+                "=",
+                "workflow_runs.workspace_id",
+              ),
+          )
+          .selectAll("workflow_runs")
+          .select([
+            "workflows.name as lane_name",
+            "repositories.full_name as repository_name",
+          ])
+          .where("workflow_runs.workspace_id", "=", workspaceId);
+        statuses = statuses ?? (active ? ACTIVE_STATUSES : undefined);
+        query =
+          statuses !== undefined
+            ? query.where("workflow_runs.status", "in", [...statuses])
+            : query.where("workflow_runs.status", "not in", [
+                ...ACTIVE_STATUSES,
+              ]);
+        if (filter.repositoryId !== undefined)
+          query = query.where(
+            "workflow_runs.repository_id",
+            "=",
+            filter.repositoryId,
+          );
+        if (filter.workflowId !== undefined)
+          query = query.where(
+            "workflow_runs.workflow_id",
+            "=",
+            filter.workflowId,
+          );
+        // The cursor only cuts the part it was taken in; the part after it starts from its newest run.
+        if (after !== undefined && after.active === active)
+          query = query.where((eb) =>
+            eb.or([
+              eb("workflow_runs.created_at", "<", after.createdAt),
+              eb.and([
+                eb("workflow_runs.created_at", "=", after.createdAt),
+                eb("workflow_runs.id", "<", after.id),
+              ]),
+            ]),
+          );
+        return query
+          .orderBy("workflow_runs.created_at", "desc")
+          .orderBy("workflow_runs.id", "desc")
+          .limit(room)
+          .execute();
+      };
+      // One more than asked for tells whether there is a next page.
+      const found: Awaited<ReturnType<typeof read>> = [];
+      // A cursor from the part of the ended runs leaves the active ones behind it.
+      if (after === undefined || after.active)
+        found.push(...((await read(true, limit + 1)) ?? []));
+      if (found.length < limit + 1)
+        found.push(...((await read(false, limit + 1 - found.length)) ?? []));
+      const page = found.slice(0, limit);
+      const last = page.at(-1);
+      const next: WorkspaceRunsCursor | null =
+        found.length > limit && last !== undefined
+          ? {
+              active: last.status === "running" || last.status === "waiting",
+              createdAt: last.created_at,
+              id: last.id,
+            }
+          : null;
+      if (page.length === 0) return { rows: [], next };
+
+      const [stepRows, versionRows, tickets] = await Promise.all([
+        db
+          .selectFrom("workflow_step_runs")
+          .select(["run_id", "step_id", "kind", "status", "round"])
+          .where("workspace_id", "=", workspaceId)
+          .where(
+            "run_id",
+            "in",
+            page.map((row) => row.id),
+          )
+          .orderBy("run_id")
+          .orderBy("position")
+          .execute(),
+        db
+          .selectFrom("workflow_versions")
+          .select(["workflow_id", "version", "document"])
+          .where("workspace_id", "=", workspaceId)
+          .where((eb) =>
+            eb.or(
+              [
+                ...new Map(
+                  page.map((row) => [
+                    `${row.workflow_id}@${String(row.workflow_version)}`,
+                    row,
+                  ]),
+                ).values(),
+              ].map((row) =>
+                eb.and([
+                  eb("workflow_id", "=", row.workflow_id),
+                  eb("version", "=", row.workflow_version),
+                ]),
+              ),
+            ),
+          )
+          .execute(),
+        mirroredTickets(
+          db,
+          workspaceId,
+          page.flatMap((row) =>
+            row.ticket_ref === null ? [] : [row.ticket_ref],
+          ),
+        ),
+      ]);
+      const stepsOf = new Map<string, StepSummary[]>();
+      for (const row of stepRows) {
+        const list = stepsOf.get(row.run_id) ?? [];
+        list.push({
+          stepId: row.step_id,
+          kind: row.kind as StepRunKind,
+          status: row.status as StepRunStatus,
+          round: row.round,
+        });
+        stepsOf.set(row.run_id, list);
+      }
+      const documents = new Map(
+        versionRows.map((row) => [
+          `${row.workflow_id}@${String(row.version)}`,
+          row.document,
+        ]),
+      );
+      return {
+        rows: page.map((row) => ({
+          run: runFrom(row),
+          laneName: row.lane_name,
+          repositoryName: row.repository_name,
+          steps: stepsOf.get(row.id) ?? [],
+          document:
+            documents.get(
+              `${row.workflow_id}@${String(row.workflow_version)}`,
+            ) ?? null,
+          ticket:
+            row.ticket_ref === null
+              ? null
+              : (tickets.get(row.ticket_ref) ?? null),
+        })),
+        next,
+      };
     },
 
     async summarizeTickets(ticketRefs) {

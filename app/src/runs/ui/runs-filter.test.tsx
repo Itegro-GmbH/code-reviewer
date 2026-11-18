@@ -49,7 +49,52 @@ describe("the runs filter", () => {
     );
 
     expect(navigation.push).toHaveBeenCalledWith(
-      "/w/acme/runs?repository=repo-1",
+      "/w/acme/runs?view=agents&repository=repo-1",
+      { scroll: false },
+    );
+  });
+
+  // #1078-T50: with the capability `implementer` the page opens on the Lane runs tab, so a filter chosen on the Agent runs tab has to say
+  // `view=agents`, or it lands on the other tab.
+  it("keeps the Agent runs tab when a filter is picked or cleared", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <RunsFilterToolbar
+        workspaceSlug="acme"
+        filter={{}}
+        projects={projects}
+      />,
+    );
+
+    await user.click(screen.getByLabelText("Status"));
+    await user.click(await screen.findByRole("option", { name: "Failed" }));
+    expect(navigation.push).toHaveBeenLastCalledWith(
+      "/w/acme/runs?view=agents&status=failed",
+      { scroll: false },
+    );
+
+    rerender(
+      <RunsFilterToolbar
+        workspaceSlug="acme"
+        filter={{ repositoryId: "repo-1", status: "failed" }}
+        projects={projects}
+      />,
+    );
+    await user.click(screen.getByLabelText("Status"));
+    await user.click(
+      await screen.findByRole("option", { name: "All statuses" }),
+    );
+    expect(navigation.push).toHaveBeenLastCalledWith(
+      "/w/acme/runs?view=agents&repository=repo-1",
+      { scroll: false },
+    );
+
+    await user.click(screen.getByLabelText("Project"));
+    await user.click(
+      await screen.findByRole("option", { name: "All projects" }),
+    );
+    expect(navigation.push).toHaveBeenLastCalledWith(
+      "/w/acme/runs?view=agents&status=failed",
       { scroll: false },
     );
   });
@@ -84,7 +129,7 @@ describe("the runs filter", () => {
 
     expect(
       screen.getByRole("link", { name: "Reset filter" }).getAttribute("href"),
-    ).toBe("/w/acme/runs");
+    ).toBe("/w/acme/runs?view=agents");
   });
 
   // #175-T01

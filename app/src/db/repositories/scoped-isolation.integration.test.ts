@@ -2667,6 +2667,19 @@ const CASES: Case[] = [
     expectAnswer: (answer) => expect(answer).toEqual([]),
   },
   {
+    // #1078: the list of the workspace holds A's own run, with A's lane version, and nothing of B's.
+    name: "workflowRuns.listWorkspaceRuns",
+    run: (a) => a.workflowRuns.listWorkspaceRuns({ limit: 10 }),
+    expectAnswer: (answer, a, b) => {
+      const { rows } = answer as {
+        rows: { run: { id: string }; document: string | null }[];
+      };
+      expect(rows.map((row) => row.run.id)).toEqual([a.workflowRun.id]);
+      expect(rows.map((row) => row.run.id)).not.toContain(b.workflowRun.id);
+      expect(rows.map((row) => row.document)).toEqual(['{"tag":"a"}']);
+    },
+  },
+  {
     // #924: the steps of B's run are not read for A, only an empty list answers for the id.
     name: "workflowRuns.listStepsOfRuns",
     run: (a, b) => a.workflowRuns.listStepsOfRuns([b.workflowRun.id]),

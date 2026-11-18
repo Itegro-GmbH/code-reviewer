@@ -17,17 +17,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select.tsx";
-import { workspacePath } from "../../workspaces/paths.ts";
 import { RUN_STATUS_ORDER, RUN_STATUS_PRESENTATION } from "../run-status.ts";
 import type { RunsFilter } from "../run-view.ts";
+import { agentRunsPath, AGENT_RUNS_VIEW } from "./agent-runs-path.ts";
 
 /** The value of a select that means "do not filter by this field" (Radix reserves the empty string). */
 const ANY = "any";
-
-/** The Runs page of a workspace, without the filter. */
-function runsPath(workspaceSlug: string): string {
-  return workspacePath(workspaceSlug, "/runs");
-}
 
 export function RunsFilterToolbar({
   workspaceSlug,
@@ -48,12 +43,12 @@ export function RunsFilterToolbar({
   const statusLabelId = useId();
 
   function apply(next: RunsFilter): void {
-    const params = new URLSearchParams();
+    // The page has two tabs: the filter stays on this one.
+    const params = new URLSearchParams({ view: AGENT_RUNS_VIEW });
     if (next.repositoryId !== undefined)
       params.set("repository", next.repositoryId);
     if (next.status !== undefined) params.set("status", next.status);
-    const query = params.toString();
-    const href = query === "" ? pathname : `${pathname}?${query}`;
+    const href = `${pathname}?${params.toString()}`;
     // `push` (not `replace`): the Back button walks the filters a person tried, like the GET form did.
     startTransition(() => router.push(href, { scroll: false }));
   }
@@ -132,7 +127,7 @@ export function RunsFilterToolbar({
       </div>
       {active ? (
         <Button asChild variant="ghost">
-          <Link href={runsPath(workspaceSlug)}>Reset filter</Link>
+          <Link href={agentRunsPath(workspaceSlug)}>Reset filter</Link>
         </Button>
       ) : null}
     </div>

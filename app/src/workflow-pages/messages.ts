@@ -291,6 +291,82 @@ export const COST_COPY = {
   basisHeading: "Where the costs come from",
 } as const;
 
+/** The compact step track of a lane run (#1078): the text alternative of the dots and the words for a node that has no note of its own. */
+export const TRACK_COPY = {
+  /** The kind of a node, for a node whose author gave it no note and which calls no connector. */
+  kind: {
+    agent: "Agent step",
+    action: "Action",
+    if: "Condition",
+    loop: "Repeat",
+    unsupported: "Step",
+  },
+  /** How a node stands, as a word to put after its name. */
+  state: {
+    done: "done",
+    running: "running",
+    waiting: "waiting for an answer",
+    failed: "failed",
+    skipped: "skipped",
+    not_reached: "not reached",
+  },
+  notStarted: "No step has started yet",
+  noLane: "The steps of this lane version are not available",
+  position: (
+    index: number,
+    total: number,
+    title: string,
+    state: string,
+  ): string => `Step ${String(index)} of ${String(total)}: ${title}, ${state}`,
+} as const;
+
+/** The Lane runs tab of the Runs page (#1078): the tabs, the filters, the columns and the sentences of an empty list. */
+export const LANE_RUNS_COPY = {
+  tabsLabel: "Kind of run",
+  tabLanes: "Lane runs",
+  tabAgents: "Agent runs",
+  listLabel: "Lane runs",
+  filterStatus: "Status",
+  filterProject: "Project",
+  filterLane: "Lane",
+  anyStatus: "All statuses",
+  anyProject: "All projects",
+  anyLane: "All lanes",
+  statuses: {
+    active: "Active",
+    waiting: "Waiting for an answer",
+    ended: "Ended",
+    failed: "Failed",
+  },
+  resetFilter: "Reset filter",
+  columnTicket: "Ticket",
+  columnLane: "Lane",
+  columnProject: "Project",
+  columnSteps: "Steps",
+  columnStatus: "Status",
+  columnStarted: "Started",
+  columnDuration: "Duration",
+  columnSpent: "Spent of budget",
+  noTicket: "No ticket",
+  ticketUntitled: "Title not known",
+  openTicket: "Open the ticket",
+  projectGone: "Repository not available",
+  version: "version",
+  openRun: "Open the run",
+  notAvailable: "—",
+  loadMore: "Show more runs",
+  loadingMore: "Loading more runs",
+  updating: "Updating the lane runs",
+  emptyTitle: "No lane runs yet",
+  emptyDescription:
+    "A run starts when a ticket gets the label or status a lane waits for, or when someone starts a lane by hand. Open a project and its Lanes tab to set one up.",
+  emptyFiltered: "No lane run matches this filter.",
+  invalidFilterTitle: "This filter is not valid",
+  invalidFilterDescription:
+    "The status, project or lane in the address is not one this page knows.",
+  loadMoreFailed: "The next runs could not be loaded. Try again.",
+} as const;
+
 export const PAGE_COPY = {
   workflowVersion: "Version",
   workflowUpdated: "Last saved",

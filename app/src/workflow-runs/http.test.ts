@@ -70,6 +70,10 @@ function setup(
       calls.push(`list ${workflowId}`),
       { runs: [SUMMARY] }
     ),
+    listWorkspace: async (query) => (
+      calls.push(`listWorkspace ${JSON.stringify(query)}`),
+      { runs: [], nextCursor: null, now: "2026-11-18T12:00:00.000Z" }
+    ),
     discard: async (workflowId, runId) => (
       calls.push(`discard ${workflowId} ${runId}`),
       { run: VIEW, outcome: "discarded" }
@@ -109,6 +113,7 @@ describe("the workflow run handlers", () => {
     for (const call of [
       () => handlers.start(json({}), "wf-1"),
       () => handlers.list(new Request(url), "wf-1"),
+      () => handlers.listWorkspace(new Request(url)),
       () => handlers.get(new Request(url), "wf-1", "run-1"),
       () =>
         handlers.cancel(new Request(url, { method: "POST" }), "wf-1", "run-1"),
@@ -412,5 +417,68 @@ describe("answering a question from the page (#920)", () => {
       'answer user-2 null wf-1 run-1 {"text":"Use Redis."}',
     ]);
     expect(withoutLogin.calls.join()).not.toContain("person@example.test");
+  });
+});
+
+describe("the workspace list handler (#1078)", () => {
+  // #1078-T80
+  it("hands the filters of the address to the service and answers the page, uncached", async () => {
+    const { handlers, calls } = setup();
+
+    const response = await handlers.listWorkspace(
+      new Request(
+        "https://app.test/api/w/default/workflow-runs?status=active&project=repo-1&lane=wf-1&cursor=abc&limit=10",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      runs: [],
+      nextCursor: null,
+      now: "2026-11-18T12:00:00.000Z",
+    });
+    expect(calls).toEqual([
+      'listWorkspace {"status":"active","project":"repo-1","lane":"wf-1","cursor":"abc","limit":"10"}',
+    ]);
+  });
+
+  // #1078-T81
+  it("answers a refusal of the service with its stable code", async () => {
+    const { handlers } = setup({
+      listWorkspace: async () => {
+        throw new WorkflowRunError(
+          "WORKFLOW_RUN_REQUEST_INVALID",
+          "No such status.",
+        );
+      },
+    });
+
+    const response = await handlers.listWorkspace(
+      new Request("https://app.test/api/w/default/workflow-runs?status=x"),
+    );
+
+    expect(response.status).toBe(
+      WORKFLOW_RUN_ERROR_STATUS.WORKFLOW_RUN_REQUEST_INVALID,
+    );
+    expect(await response.json()).toMatchObject({
+      error: "WORKFLOW_RUN_REQUEST_INVALID",
+    });
+  });
+
+  // #1078-T82
+  it("refuses a request from another site", async () => {
+    const { handlers, calls } = setup();
+
+    const response = await handlers.listWorkspace(
+      new Request("https://app.test/api/w/default/workflow-runs", {
+        headers: { "sec-fetch-site": "cross-site" },
+      }),
+    );
+
+    expect(response.status).toBe(
+      WORKFLOW_RUN_ERROR_STATUS.WORKFLOW_RUN_CROSS_SITE_REQUEST,
+    );
+    expect(calls).toEqual([]);
   });
 });

@@ -7,7 +7,9 @@ import {
   agentResultOf,
   controlResultOf,
   costBasesOf,
+  formatRelativeTime,
   formatUsd,
+  laneRunDurationMs,
   neverRan,
   readableMessageOf,
   repositoryOfRun,
@@ -383,6 +385,55 @@ describe("the form that starts a run", () => {
     expect(
       controlResultOf({ kind: "action", output: { taken: "then" } }),
     ).toBeUndefined();
+  });
+});
+
+describe("the times of the lane runs list (#1078)", () => {
+  const NOW = "2026-11-18T12:00:00.000Z";
+
+  // #1078-T50
+  it("says how long ago a run started, against the clock it is given", () => {
+    expect(formatRelativeTime("2026-11-18T11:59:50.000Z", NOW)).toBe(
+      "just now",
+    );
+    expect(formatRelativeTime("2026-11-18T11:48:00.000Z", NOW)).toBe(
+      "12 min ago",
+    );
+    expect(formatRelativeTime("2026-11-18T09:00:00.000Z", NOW)).toBe("3 h ago");
+    expect(formatRelativeTime("2026-11-16T12:00:00.000Z", NOW)).toBe("2 d ago");
+    expect(formatRelativeTime("2026-11-01T12:00:00.000Z", NOW)).toBe(
+      "2026-11-01 12:00 UTC",
+    );
+    expect(formatRelativeTime("nope", NOW)).toBe("unknown time");
+    // A start a little after the clock (two servers) never reads as negative.
+    expect(formatRelativeTime("2026-11-18T12:00:05.000Z", NOW)).toBe(
+      "just now",
+    );
+  });
+
+  // #1078-T51
+  it("counts the duration to the end of a run that ended and to now for an active one", () => {
+    const base = { createdAt: "2026-11-18T11:00:00.000Z" };
+
+    expect(
+      laneRunDurationMs(
+        {
+          ...base,
+          status: "succeeded",
+          finishedAt: "2026-11-18T11:30:00.000Z",
+        },
+        NOW,
+      ),
+    ).toBe(30 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "running", finishedAt: null }, NOW),
+    ).toBe(60 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "waiting", finishedAt: null }, NOW),
+    ).toBe(60 * 60_000);
+    expect(
+      laneRunDurationMs({ ...base, status: "failed", finishedAt: null }, NOW),
+    ).toBeNull();
   });
 });
 

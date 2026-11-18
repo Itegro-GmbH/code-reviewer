@@ -8,7 +8,7 @@ import Link from "next/link";
 import { Breadcrumbs } from "../../components/breadcrumbs.tsx";
 import { Button } from "../../components/button.tsx";
 import { PageHeader } from "../../components/page-header.tsx";
-import { workspacePath } from "../../workspaces/paths.ts";
+import { agentRunsPath } from "./agent-runs-path.ts";
 import type { RunsService } from "../runs-service.ts";
 import type { RunDetailSnapshot } from "../run-view.ts";
 import type { RunsApi } from "./api.ts";
@@ -53,7 +53,7 @@ export function RunDetailPageContent({
             items={[
               {
                 label: "Runs",
-                href: workspacePath(workspaceSlug, "/runs"),
+                href: agentRunsPath(workspaceSlug),
               },
               { label: title },
             ]}
@@ -61,7 +61,7 @@ export function RunDetailPageContent({
         }
         actions={
           <Button asChild variant="secondary">
-            <Link href={workspacePath(workspaceSlug, "/runs")}>All runs</Link>
+            <Link href={agentRunsPath(workspaceSlug)}>All runs</Link>
           </Button>
         }
       />

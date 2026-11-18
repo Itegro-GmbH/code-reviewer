@@ -23,6 +23,12 @@ export type WorkflowRunRouteDependencies = {
 export type WorkflowRunRouteHandlers = {
   start(request: Request, workflowId: string): Promise<Response>;
   list(request: Request, workflowId: string): Promise<Response>;
+  /**
+   * #1078: `GET /api/w/:workspace/workflow-runs?status=&project=&lane=&cursor=&limit=`: the runs of every lane of the workspace, the active
+   * ones first, then the newest first, with the step summaries and the nodes of the lane versions. 200 `{ runs, nextCursor, now }`; 400
+   * `WORKFLOW_RUN_REQUEST_INVALID` for a status, a limit or a cursor that is none.
+   */
+  listWorkspace(request: Request): Promise<Response>;
   get(request: Request, workflowId: string, runId: string): Promise<Response>;
   /**
    * #920: answers the question a run waits for: `{ question: { stepRunId, n }, choice?, text? }` (the question that is answered, and an option by its number from 1, a text, or both). 202 `{ run }` once the
@@ -139,6 +145,20 @@ export function createWorkflowRunRouteHandlers({
       guarded(request, async () =>
         Response.json(await service.list(workflowId), { headers: NO_STORE }),
       ),
+    listWorkspace: (request) =>
+      guarded(request, async () => {
+        const { searchParams } = new URL(request.url);
+        return Response.json(
+          await service.listWorkspace({
+            status: searchParams.get("status"),
+            project: searchParams.get("project"),
+            lane: searchParams.get("lane"),
+            cursor: searchParams.get("cursor"),
+            limit: searchParams.get("limit"),
+          }),
+          { headers: NO_STORE },
+        );
+      }),
     get: (request, workflowId, runId) =>
       guarded(request, async () =>
         Response.json(

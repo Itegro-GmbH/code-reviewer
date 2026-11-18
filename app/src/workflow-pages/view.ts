@@ -4,6 +4,7 @@
 // step's output is data from outside the page (an agent's result, what a connector got from GitHub): this file only picks the few
 // values the page shows, checks their types, and decides which of them may become a link; the components render them as text.
 import { isRecord } from "../workflows/json.ts";
+import { formatUtc } from "../ui/format-time.ts";
 import { formatMoney } from "../workspace-billing/money.ts";
 import type { RunView, StepView } from "../workflow-runs/service.ts";
 import { githubBranchLink, githubLinkInRepository } from "./github-link.ts";
@@ -222,4 +223,40 @@ export function agentResultOf(
   );
   if (Object.keys(rest).length > 0) result.fields = rest;
   return Object.keys(result).length === 0 ? undefined : result;
+}
+
+/**
+ * How long ago a time was, against a clock the caller hands in (the server's time of answering, so the page the server rendered and the
+ * browser say the same): "just now", "12 min ago", "3 h ago", "2 d ago", and the date once it is over a week. A time that cannot be read
+ * is "unknown time".
+ */
+export function formatRelativeTime(iso: string, nowIso: string): string {
+  const then = Date.parse(iso);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(then) || Number.isNaN(now)) return "unknown time";
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${String(Math.max(1, minutes))} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${String(hours)} h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${String(days)} d ago`;
+  return formatUtc(iso);
+}
+
+/**
+ * How long a lane run took, or has been going: from its start to its end, or to `nowIso` while it is active (running or waiting for an
+ * answer). Null for a run that ended without an end time, and for times that cannot be read.
+ */
+export function laneRunDurationMs(
+  run: { status: string; createdAt: string; finishedAt: string | null },
+  nowIso: string,
+): number | null {
+  const start = Date.parse(run.createdAt);
+  if (Number.isNaN(start)) return null;
+  const active = run.status === "running" || run.status === "waiting";
+  const end = Date.parse(run.finishedAt ?? (active ? nowIso : ""));
+  if (Number.isNaN(end) || end < start) return null;
+  return end - start;
 }

@@ -111,6 +111,7 @@ test.describe("a deployment with the capabilities review and dynamic-review", ()
       `/w/${slug}/workflows`,
       `/w/${slug}/workflows/x`,
       `/w/${slug}/workflows/x/runs/y`,
+      `/api/w/${slug}/workflow-runs`,
     ];
     for (const [label, method, headers] of READS) {
       const expected = await observe(page, MISSING, { method, headers });

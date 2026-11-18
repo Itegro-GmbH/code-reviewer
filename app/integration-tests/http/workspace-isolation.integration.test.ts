@@ -709,6 +709,18 @@ const ENTRIES: Entry[] = [
     implementer: true,
   },
   {
+    // #1078: the list of the runs of every lane answers every member the runs of their own workspace only.
+    name: "GET workflow-runs",
+    route: "/api/w/[workspace]/workflow-runs",
+    method: "GET",
+    minRole: MINIMUM_ROLE.start_implementer_task,
+    path: () => "/workflow-runs",
+    params: () => ({}),
+    file: "workflow-runs/route.ts",
+    takesNoIds: true,
+    implementer: true,
+  },
+  {
     // The body names a repository that is none of the workspace's, so the start ends before it asks GitHub or writes anything.
     name: "POST workflows/[workflowId]/runs",
     route: "/api/w/[workspace]/workflows/[workflowId]/runs",

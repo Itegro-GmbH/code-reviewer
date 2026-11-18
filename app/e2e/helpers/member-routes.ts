@@ -107,6 +107,7 @@ export function addressesOf(
         route.pattern === "/w/:workspace/environments" ||
         route.pattern.startsWith("/api/w/:workspace/environments") ||
         route.pattern.startsWith("/api/w/:workspace/workflows") ||
+        route.pattern === "/api/w/:workspace/workflow-runs" ||
         route.pattern.startsWith("/w/:workspace/workflows") ||
         route.pattern.startsWith("/api/w/:workspace/profiles") ||
         route.pattern.startsWith("/api/w/:workspace/runners") ||

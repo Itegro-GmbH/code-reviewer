@@ -329,7 +329,7 @@ describe("the empty list", () => {
     ).toBeTruthy();
     expect(
       screen.getByRole("link", { name: "Reset filter" }).getAttribute("href"),
-    ).toBe("/w/acme/runs");
+    ).toBe("/w/acme/runs?view=agents");
   });
 });
 

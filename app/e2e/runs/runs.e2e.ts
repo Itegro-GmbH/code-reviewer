@@ -219,7 +219,7 @@ test.describe("the runs pages", () => {
       .filter({ visible: true });
     await expect(project.getByText(/Succeeded/)).toBeVisible();
     await project.getByRole("link", { name: "All runs" }).click();
-    await expect(page).toHaveURL(/\/w\/default\/runs\?repository=/);
+    await expect(page).toHaveURL(/\/w\/default\/runs\?view=agents&repository=/);
     await expect(
       page
         .locator("[data-run-id]")
