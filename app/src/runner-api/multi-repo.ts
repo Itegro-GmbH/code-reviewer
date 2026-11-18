@@ -61,9 +61,14 @@ export type MultiRepoParts = {
   instruction: string;
 };
 
-function entryOf(git: GitAccess, now: Date): GitTokenEntry {
+function entryOf(
+  git: GitAccess,
+  integrationId: string,
+  now: Date,
+): GitTokenEntry {
   return {
     token: git.token,
+    integrationId,
     expiresAt:
       git.expiresAt ??
       new Date(now.getTime() + DEFAULT_TOKEN_LIFETIME_MS).toISOString(),
@@ -219,7 +224,7 @@ export async function buildMultiRepo(
             ...(others.length === 0 ? {} : { alsoRepos: others }),
           }),
       );
-      ledger.push(entryOf(made, deps.now()));
+      ledger.push(entryOf(made, integration.id, deps.now()));
       const id = `t${String(tokens.length + 1)}`;
       tokens.push({ id, token: made.token });
       tokenIdOf.set(integration.id, id);

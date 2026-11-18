@@ -68,6 +68,7 @@ import {
   SESSION_REPOS_MAX,
   deriveMountNames,
   firstRepeat,
+  isRepositoryFullName,
 } from "../db/session-repos.ts";
 import {
   firstOf,
@@ -870,9 +871,6 @@ function continuesRepos(node: Record<string, unknown>, env: Env): boolean {
   return env.scope.get(session.continue)?.repos === true;
 }
 
-/** A repository as GitHub names it: an owner and a name, letters, digits, `_`, `.` and `-` (the claim and the runner hold the clone address to it). */
-const REPOSITORY_FULL_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-
 /**
  * `repos` (#1092, epic #1090, ADR 0006): one to ten entries `{ repo, base?, branch? }`. All three decide what the agent works on and where its
  * commits go, so they are targets. Beside `branch` and `session` it is refused; two literals that name one repository (without regard to
@@ -973,7 +971,7 @@ function checkRepos(
       const literal =
         parsed.problems.length > 0 ? undefined : literalText(parsed);
       if (literal === undefined) allLiteral = false;
-      else if (!REPOSITORY_FULL_NAME.test(literal)) {
+      else if (!isRepositoryFullName(literal)) {
         allLiteral = false;
         c.report(
           issue(

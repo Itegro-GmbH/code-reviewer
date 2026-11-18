@@ -35,7 +35,11 @@ import {
   BRANCH_NAME_MAX_LENGTH,
   checkBranchName,
 } from "../implementer/branch-name.ts";
-import { deriveMountNames, firstRepeat } from "../db/session-repos.ts";
+import {
+  deriveMountNames,
+  firstRepeat,
+  isRepositoryFullName,
+} from "../db/session-repos.ts";
 import {
   INSTRUCTION_MAX_LENGTH,
   type StartRepo,
@@ -507,9 +511,6 @@ export function sessionBranchOf(
     : `workflow/${tail}`;
 }
 
-/** A repository as GitHub names it (the clone address and the runner hold it to the same form). */
-const REPOSITORY_FULL_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-
 /**
  * The `repos` of an agent step with their references filled in (#1092): a repository (`owner/name`), and a base and a branch where the entry
  * names them. A reference that gave no repository or no name of a branch, two entries that are one repository (without regard to case) and
@@ -533,7 +534,7 @@ function stepRepos(
       isRecord(entry) && typeof entry.repo === "string"
         ? resolveValue(entry.repo, values)
         : undefined;
-    if (typeof named !== "string" || !REPOSITORY_FULL_NAME.test(named))
+    if (typeof named !== "string" || !isRepositoryFullName(named))
       return failed(
         "repo_invalid",
         `${place} is not a repository (owner/name).`,

@@ -86,28 +86,33 @@ export function createWriteTokens(deps: {
       else live.push(entry);
     }
     let off = 0;
+    let gone = 0;
     if (live.length > 0) {
-      const integration = await integrationOf(job);
-      if (integration === undefined) {
-        deps.logger.error(
-          `[runner-api] job=${job.id} ${String(live.length)} write token(s) not switched off: the connection is gone`,
-        );
-      } else {
-        const provider = deps.registry.resolve(integration.type);
-        const outcomes = await Promise.all(
-          live.map((entry) =>
-            provider
-              .revokeImplementerAccess(integration, entry.token)
-              .catch(() => false),
-          ),
-        );
-        live.forEach((entry, index) => {
-          if (outcomes[index] === true) {
-            done.push(entry.token);
-            off += 1;
+      // #1092: each token is switched off through the connection that made it (a turn on several repositories holds one for each
+      // installation); one of the job's first repository stands in for a token remembered without its connection, or whose own is gone.
+      const outcomes = await Promise.all(
+        live.map(async (entry) => {
+          const integration = await integrationFor(job, entry);
+          if (integration === undefined) {
+            gone += 1;
+            return false;
           }
-        });
-      }
+          return deps.registry
+            .resolve(integration.type)
+            .revokeImplementerAccess(integration, entry.token)
+            .catch(() => false);
+        }),
+      );
+      if (gone > 0)
+        deps.logger.error(
+          `[runner-api] job=${job.id} ${String(gone)} write token(s) not switched off: the connection is gone`,
+        );
+      live.forEach((entry, index) => {
+        if (outcomes[index] === true) {
+          done.push(entry.token);
+          off += 1;
+        }
+      });
     }
     if (done.length > 0)
       await deps.claimedKeys.forgetGitTokens(job.id, done).catch((error) => {
@@ -124,6 +129,17 @@ export function createWriteTokens(deps: {
       deps.logger.error(
         `[runner-api] job=${job.id} ${String(kept)} write token(s) not switched off yet; tried again until they expire`,
       );
+  }
+
+  /** The connection that made the token; else the one of the job's first repository. */
+  async function integrationFor(job: WriteTokenJob, entry: GitTokenEntry) {
+    if (entry.integrationId !== undefined) {
+      const own = await deps
+        .integrations(job.workspaceId)
+        .get(entry.integrationId);
+      if (own !== undefined) return own;
+    }
+    return integrationOf(job);
   }
 
   async function integrationOf(job: WriteTokenJob) {
@@ -159,7 +175,12 @@ export function createWriteTokens(deps: {
         // The token in hand is switched off whatever the ledger says; it is put in the ledger first, so that a failure leaves a
         // record to retry from. A ledger that cannot be written does not keep the token alive.
         await deps.claimedKeys
-          .rememberGitToken(job.id, entry.token, entry.expiresAt)
+          .rememberGitToken(
+            job.id,
+            entry.token,
+            entry.expiresAt,
+            entry.integrationId,
+          )
           .catch(() => undefined);
         await settle(job, [entry]);
       }),

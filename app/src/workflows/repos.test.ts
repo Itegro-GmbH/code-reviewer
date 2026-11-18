@@ -91,6 +91,36 @@ describe("the repos of an agent step", () => {
     ]);
   });
 
+  // #1092 (review finding 6): a repository whose mount name the runner contract refuses is the lane's invalid_value, never a runner's invalid_job.
+  it.each([
+    "acme/-app",
+    "-acme/app",
+    "acme/.",
+    "acme/..",
+    "acme/.git",
+    "acme/.GIT",
+    "../app",
+    "./app",
+  ])(
+    "refuses the repository %s, whose mount name the runner would refuse",
+    (repo) => {
+      expect(codes(lane({ repos: [{ repo }] }))).toEqual([
+        [`${AT}/0/repo`, "invalid_value"],
+      ]);
+    },
+  );
+
+  // #1092 (review finding 6)
+  it("still takes a name that starts with a dot, and the reserved names (they are mounted as owner__name)", () => {
+    expect(
+      codes(
+        lane({
+          repos: [{ repo: "acme/.github" }, { repo: "acme/result" }],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   // #1092-T04
   it("does not take repos together with the start branch or with a session that goes on", () => {
     expect(codes(lane({ branch: "main", repos: [{ repo: "a/b" }] }))).toEqual([

@@ -6,6 +6,7 @@
 // are claimed by every caller as before.
 import { describe, expect, it } from "vitest";
 import { sha } from "../../test-support/jobs.ts";
+import { createImplementerRepository } from "./implementer-repository.ts";
 import { createRunsFixture } from "../../test-support/runs.ts";
 import { addUser } from "../../test-support/workspace-deletion-fixture.ts";
 import type { SessionRepo } from "../session-repos.ts";
@@ -65,6 +66,52 @@ describe("the repositories of a session", () => {
     // Two sessions may work on the same working branch: the unique key of the session is its own name.
     const again = await enqueue(repos);
     expect(again.session.repos).toEqual(repos);
+  });
+});
+
+describe("the key of a session of several repositories", () => {
+  const repos = (id: string): SessionRepo[] => [
+    {
+      repositoryId: id,
+      fullName: "acme/gadgets",
+      name: "gadgets",
+      base: "main",
+      branch: "feature/x",
+    },
+  ];
+
+  // #1092 (review finding 7): the session's own branch is a key; the link of its job points at a real branch.
+  it("never shows as a branch: the link of the job is the first repository's working branch", async () => {
+    const { f, enqueue } = await start();
+
+    const multi = await enqueue(repos(f.repositoryId));
+    const single = await enqueue();
+
+    expect(multi.session.branch).toMatch(/^workflow\/run\/step/);
+    expect(multi.job.prUrl).toBe(
+      "https://github.test/acme/gadgets/tree/feature/x",
+    );
+    expect(multi.job.prUrl).not.toContain("workflow/");
+    expect(single.job.prUrl).toContain("/tree/workflow/run/step2");
+  });
+
+  // #1092 (review finding 3)
+  it("is not a session of one repository when the stored list cannot be read: it says so", async () => {
+    const { f, enqueue } = await start();
+    const multi = await enqueue(repos(f.repositoryId));
+    await f.db
+      .updateTable("implementer_sessions")
+      .set({ repos: "{not json" })
+      .where("id", "=", multi.session.id)
+      .execute();
+
+    const found = await createImplementerRepository(
+      f.db,
+      f.workspaceId,
+    ).getTurnByJob(multi.job.id);
+
+    expect(found?.session.repos).toBeNull();
+    expect(found?.session.reposUnreadable).toBe(true);
   });
 });
 

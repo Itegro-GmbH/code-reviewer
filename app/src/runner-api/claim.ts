@@ -990,6 +990,10 @@ export async function checkJob(
       : undefined;
   if (job.reviewKind === "implementer" && turn === undefined)
     return refuse("implementer_config_invalid", "reason=turn_missing");
+  // #1092: a session whose stored repositories cannot be read is not a session of one repository: the turn ends, it never runs on the
+  // platform's key branch of the first repository alone.
+  if (turn?.session.reposUnreadable === true)
+    return refuse("implementer_config_invalid", "reason=repos_unreadable");
   if (turn !== undefined) {
     // The model of a turn is the one it was started with, for the key mode it was started in. If the workspace changed its key
     // mode since, the choice no longer fits and the turn ends: it is never moved to another entry, provider or model.
@@ -1425,7 +1429,7 @@ export async function buildJobInput(
   }
   // Every token of the turn, for the ledger: one for a single repository, one for each installation for several (#1092).
   const writeTokens: GitTokenEntry[] =
-    multi === undefined ? [writeTokenOf(git)] : multi.ledger;
+    multi === undefined ? [writeTokenOf(git, integration.id)] : multi.ledger;
   const revokeAll = async (): Promise<void> => {
     for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
   };
@@ -1748,6 +1752,9 @@ export async function buildSubscriptionJob(
     return undefined;
   if (turn.turn.runnerEnvironment == null)
     return refuse("implementer_config_invalid", "reason=harness_needs_runner");
+  // #1092: the same as for a hosted turn (`checkJob`): unreadable stored repositories never become a single repository.
+  if (turn.session.reposUnreadable === true)
+    return refuse("implementer_config_invalid", "reason=repos_unreadable");
   const decision = await deps.guard.check(job);
   if (!decision.allow)
     return decision.outcome === "cancel"
@@ -1891,7 +1898,7 @@ export async function buildSubscriptionJob(
     return refuse(accessFailureCode(error));
   }
   const writeTokens: GitTokenEntry[] =
-    multi === undefined ? [writeTokenOf(git)] : multi.ledger;
+    multi === undefined ? [writeTokenOf(git, integration.id)] : multi.ledger;
   if (git.provider !== "github" || git.botLogin === null) {
     for (const entry of writeTokens) await deps.revokeUndelivered(job, entry);
     return refuse("git_access_failed");
@@ -2171,9 +2178,14 @@ export async function cancelJob(
 }
 
 /** The token of a turn with the time it expires; a platform that says none gets the lifetime GitHub gives. */
-function writeTokenOf(git: GitAccess, now: Date = new Date()): GitTokenEntry {
+function writeTokenOf(
+  git: GitAccess,
+  integrationId: string,
+  now: Date = new Date(),
+): GitTokenEntry {
   return {
     token: git.token,
+    integrationId,
     expiresAt:
       git.expiresAt ??
       new Date(now.getTime() + DEFAULT_TOKEN_LIFETIME_MS).toISOString(),
@@ -2354,6 +2366,7 @@ export async function handleClaim(
           claimed.job.id,
           entry.token,
           entry.expiresAt,
+          entry.integrationId,
         );
       deps.logger.info(
         `[runner-api] ${origin.label} job=${claimed.job.id} command=${claimed.job.command}`,

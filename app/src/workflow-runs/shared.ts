@@ -3,6 +3,7 @@
 // The wiring of the running server behind the workflow engine (#844): the real database, the Implementer service, the registry of
 // connectors, and the three entry points the rest of the app uses: the run service behind the routes, the hook of the runner API that
 // says a turn is over, and the reconciler of the sweep.
+import { repositoryByName } from "./repository-by-name.ts";
 import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
@@ -233,15 +234,7 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     connectors,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
     // #1092: the `repos` of an agent step name repositories of the workspace by their full name.
-    repositoryByName: async (fullName) => {
-      const wanted = fullName.toLowerCase();
-      const found = (await repositories.list({ active: true })).find(
-        (repository) => repository.fullName.toLowerCase() === wanted,
-      );
-      return found === undefined
-        ? undefined
-        : { id: found.id, fullName: found.fullName };
-    },
+    repositoryByName: repositoryByName(repositories),
   });
 }
 

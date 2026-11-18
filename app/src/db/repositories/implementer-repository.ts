@@ -61,6 +61,11 @@ export type StoredImplementerSession = {
    * The first one is `repositoryId`, and `branch` is then the platform's own name for the session (no git branch).
    */
   repos: SessionRepo[] | null;
+  /**
+   * #1092: the stored `repos` is set and is not a list of repositories this code can read (bad JSON, too many entries, a branch with
+   * whitespace). `repos` is then null, but the session is NOT one of a single repository: the claim ends its turns (fail closed).
+   */
+  reposUnreadable?: true;
   /** The last commit pushed to the branch; null until a turn has pushed one. */
   headCommit: string | null;
   /** `running` from the start of the first turn until a turn has ended. */
@@ -400,6 +405,7 @@ function sessionFrom(
   row: Selectable<ImplementerSessionsTable>,
 ): StoredImplementerSession {
   const queued = readQueued(row.queued_instruction);
+  const repos = parseSessionRepos(row.repos);
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -408,7 +414,10 @@ function sessionFrom(
     baseBranch: row.base_branch,
     startBranch: row.start_branch,
     branch: row.branch,
-    repos: parseSessionRepos(row.repos),
+    repos,
+    ...(row.repos !== null && repos === null
+      ? { reposUnreadable: true as const }
+      : {}),
     headCommit: row.head_commit,
     status: row.status,
     opencodeSessionId: row.opencode_session_id,

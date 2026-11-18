@@ -100,7 +100,10 @@ export type StartQueuedOutcome =
 /** What the Runs page needs to offer "Continue" on a run; absent for a run that is not the newest turn of its session. */
 export type Continuation = {
   sessionId: string;
+  /** The session's working branch; for a session of several repositories the working branch of its first repository (the session's own `branch` is a key, no git branch). */
   branch: string;
+  /** #1092: the repositories of a session of several repositories with their working branches, in the order of the session; absent for one repository. */
+  repos?: { name: string; branch: string }[];
   turnNumber: number;
   /** The session's state now: a turn runs (the form queues) or it is idle (the form starts). */
   sessionStatus: "running" | "idle";
@@ -784,7 +787,15 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         count("output");
       return {
         sessionId: session.id,
-        branch: session.branch,
+        branch: session.repos?.[0]?.branch ?? session.branch,
+        ...(session.repos === null
+          ? {}
+          : {
+              repos: session.repos.map(({ name, branch }) => ({
+                name,
+                branch,
+              })),
+            }),
         turnNumber: turn.number,
         sessionStatus: session.status,
         defaults: {

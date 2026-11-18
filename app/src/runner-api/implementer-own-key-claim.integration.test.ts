@@ -20,7 +20,17 @@ import { anthropicDescriptor } from "../llm/providers/anthropic/descriptor.ts";
 import { openrouterDescriptor } from "../llm/providers/openrouter/descriptor.ts";
 import { createWorkspaceEntitlementsRepository } from "../db/repositories/workspace-entitlements-repository.ts";
 import { createImplementerSnapshotsRepository } from "../db/repositories/implementer-snapshots-repository.ts";
-import { startRunnerApiHarness } from "../test-support/runner-api-harness.ts";
+import {
+  cloneFromTheFake,
+  otherName,
+  secondInstallation,
+  sessionRepo,
+  WRITE,
+} from "../test-support/multi-repo-claim.ts";
+import {
+  startRunnerApiHarness,
+  type RunnerApiHarness,
+} from "../test-support/runner-api-harness.ts";
 import type { ClaimResponse } from "./contract.ts";
 
 const NOW = new Date("2026-11-02T10:00:00.000Z");
@@ -765,5 +775,290 @@ describe("the claim of a follow-up turn of the Implementer", () => {
       (job.input as { implementer: { resume: { checkout: string | null } } })
         .implementer.resume.checkout,
     ).toBeNull();
+  });
+});
+
+// #1092 (epic #1090, ADR 0006; review finding 4): the claim of a turn on several repositories: what the job carries, the tokens it makes (one for each
+// installation, each in the ledger with its connection), and what happens to them when the job cannot be handed out.
+describe("the claim of a turn of the Implementer on several repositories", () => {
+  const READ_ONLY = { ...WRITE, contents: "read" } as const;
+  const MULTI = [...FEATURES, "implementer_multi_repo"];
+  const hosted = { modelChoice: { provider: "anthropic", model: SONNET } };
+
+  async function twoOnOneInstallation(h: RunnerApiHarness) {
+    return h.enqueueTurn({
+      ...hosted,
+      costLimitCents: 500,
+      repos: [
+        sessionRepo(h.repositoryId, h.repository.fullName),
+        sessionRepo(h.otherRepositoryId, await otherName(h)),
+      ],
+    });
+  }
+
+  // #1092-T100
+  it("hands a Worker that names the feature the repositories, one token for the installation they share, and remembers it with its connection", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    const turn = await twoOnOneInstallation(h);
+
+    const { job } = await h.claimed({ ...claimOptions(), features: MULTI });
+
+    expect(job.id).toBe(turn.job.id);
+    const input = job.input as unknown as {
+      git: { token: string; tokens: Array<{ id: string; token: string }> };
+      implementer: {
+        repos: Array<{ name: string; fullName: string; tokenId: string }>;
+        branch?: unknown;
+      };
+    };
+    expect(input.implementer.repos.map((repo) => repo.fullName)).toEqual([
+      h.repository.fullName,
+      await otherName(h),
+    ]);
+    expect(input.implementer).not.toHaveProperty("branch");
+    expect(input.git.tokens).toHaveLength(1);
+    expect(input.git.token).toBe(input.git.tokens[0]?.token);
+    expect(input.implementer.repos.map((repo) => repo.tokenId)).toEqual([
+      input.git.tokens[0]?.id,
+      input.git.tokens[0]?.id,
+    ]);
+    // One request to the platform, for exactly the two repositories.
+    expect(h.issuedJobTokens()).toHaveLength(1);
+    expect(h.fake.tokenRequests().at(-1)?.repositoryIds?.sort()).toEqual([
+      7001, 7002,
+    ]);
+    const ledger = await h.claimedKeys.gitTokensOf(job.id);
+    expect(ledger.map((entry) => entry.token)).toEqual([input.git.token]);
+    expect(ledger[0]?.integrationId).toBeDefined();
+  });
+
+  // #1092-T101
+  it("makes one token for each installation, each for exactly its repositories, and every one is in the ledger with the connection that made it", async () => {
+    const h = await start();
+    const second = await secondInstallation(h);
+    await cloneFromTheFake(h);
+    const turn = await h.enqueueTurn({
+      ...hosted,
+      costLimitCents: 500,
+      repos: [
+        sessionRepo(h.repositoryId, h.repository.fullName),
+        sessionRepo(second.repositoryId, "other/docs"),
+        sessionRepo(h.otherRepositoryId, await otherName(h)),
+      ],
+    });
+
+    const { job } = await h.claimed({ ...claimOptions(), features: MULTI });
+
+    expect(job.id).toBe(turn.job.id);
+    const input = job.input as unknown as {
+      git: { token: string; tokens: Array<{ id: string; token: string }> };
+      implementer: { repos: Array<{ name: string; tokenId: string }> };
+    };
+    expect(input.git.tokens).toHaveLength(2);
+    // The first repository's installation comes first: its token is `git.token`.
+    expect(input.git.token).toBe(input.git.tokens[0]?.token);
+    const byName = new Map(
+      input.implementer.repos.map((repo) => [repo.name, repo.tokenId]),
+    );
+    const first = h.repository.fullName.split("/")[1] as string;
+    const other = (await otherName(h)).split("/")[1] as string;
+    expect(byName.get(first)).toBe(byName.get(other));
+    expect(byName.get("docs")).not.toBe(byName.get(first));
+    expect(
+      h.fake
+        .tokenRequests()
+        .map((request) => [
+          request.installationId,
+          request.repositoryIds?.length,
+        ]),
+    ).toEqual([
+      [4242, 2],
+      [4243, 1],
+    ]);
+    const ledger = await h.claimedKeys.gitTokensOf(job.id);
+    expect(ledger.map((entry) => entry.token).sort()).toEqual(
+      input.git.tokens.map((entry) => entry.token).sort(),
+    );
+    expect(new Set(ledger.map((entry) => entry.integrationId)).size).toBe(2);
+    // The end of the turn switches every one of them off, whatever the first repository's state.
+    await h.writeTokens.revokeAllOf({
+      id: job.id,
+      reviewKind: "implementer",
+      workspaceId: h.workspaceId,
+      repositoryId: h.repositoryId,
+    });
+    expect(h.fake.revokedInstallationTokens().sort()).toEqual(
+      input.git.tokens.map((entry) => entry.token).sort(),
+    );
+    expect(await h.claimedKeys.gitTokensOf(job.id)).toEqual([]);
+  });
+
+  // #1092-T102
+  it("switches off every token it made when the job breaks a rule of the contract after the tokens exist, and ends the turn with the app's own code", async () => {
+    const h = await start();
+    const second = await secondInstallation(h);
+    // The clone addresses are on another host than the API: the job breaks `clone_url_host`, which is only seen when the job is built.
+    const turn = await h.enqueueTurn({
+      ...hosted,
+      costLimitCents: 500,
+      repos: [
+        sessionRepo(h.repositoryId, h.repository.fullName),
+        sessionRepo(second.repositoryId, "other/docs"),
+      ],
+    });
+
+    expect((await h.claim({ ...claimOptions(), features: MULTI })).status).toBe(
+      204,
+    );
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+    expect(h.issuedJobTokens()).toHaveLength(2);
+    expect(h.fake.revokedInstallationTokens().sort()).toEqual(
+      h.issuedJobTokens().sort(),
+    );
+    expect(await h.claimedKeys.gitTokensOf(turn.job.id)).toEqual([]);
+    expect(h.logLines().join("\n")).toContain("clone_url_host");
+  });
+
+  // #1092-T103
+  it("leaves the turn queued for a Worker that does not name the feature: no token, nothing fails", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    const turn = await twoOnOneInstallation(h);
+
+    expect((await h.claim(claimOptions())).status).toBe(204);
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({ status: "queued" });
+    expect(h.issuedJobTokens()).toEqual([]);
+  });
+
+  // #1092-T104
+  it("ends the turn implementer_engine_unavailable, free, when the Worker that fetches it does not name the feature, before a token exists", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    const turn = await twoOnOneInstallation(h);
+
+    const claim = await h.claimedSplit({
+      engines: ["implementer"],
+      features: MULTI,
+    });
+    const response = await h.worker.details(
+      claim.job.id,
+      claim.job.credential,
+      FEATURES.join(","),
+    );
+
+    expect(claim.job.id).toBe(turn.job.id);
+    expect(response.status).toBe(409);
+    expect(h.issuedJobTokens()).toEqual([]);
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_engine_unavailable",
+    });
+    expect(h.logLines().join("\n")).toContain("implementer_multi_repo");
+  });
+
+  // #1092-T105
+  it("hands a Worker that names the feature the job of a Worker fetch, with the tokens remembered before they leave", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    await twoOnOneInstallation(h);
+
+    const claim = await h.claimedSplit({
+      engines: ["implementer"],
+      features: MULTI,
+    });
+    const response = await h.worker.details(
+      claim.job.id,
+      claim.job.credential,
+      MULTI.join(","),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      job: {
+        input: {
+          git: { tokens: unknown[] };
+          implementer: { repos: unknown[] };
+        };
+      };
+    };
+    expect(body.job.input.implementer.repos).toHaveLength(2);
+    expect(body.job.input.git.tokens).toHaveLength(1);
+    expect(await h.claimedKeys.gitTokensOf(claim.job.id)).toHaveLength(1);
+  });
+
+  // #1092-T106
+  it("asks for no right to write when the profile may not push, and makes a token that cannot write; without that profile the same installation refuses the turn", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    h.fake.setInstallationPermissions(4242, READ_ONLY);
+    const profile = {
+      id: "p-1",
+      name: "reader",
+      version: 1,
+      instructions: "",
+      canPush: false,
+    };
+    await h.enqueueTurn({
+      ...hosted,
+      costLimitCents: 500,
+      profile,
+      repos: [
+        sessionRepo(h.repositoryId, h.repository.fullName),
+        sessionRepo(h.otherRepositoryId, await otherName(h)),
+      ],
+    });
+
+    const { job } = await h.claimed({
+      ...claimOptions(),
+      features: [...MULTI, "implementer_profile"],
+    });
+
+    expect(job.input).toMatchObject({
+      implementer: { profile: { canPush: false } },
+    });
+    expect(h.fake.tokenRequests().at(-1)?.permissions).toMatchObject({
+      contents: "read",
+    });
+
+    const refused = await start();
+    await cloneFromTheFake(refused);
+    refused.fake.setInstallationPermissions(4242, READ_ONLY);
+    const writer = await twoOnOneInstallation(refused);
+    expect(
+      (await refused.claim({ ...claimOptions(), features: MULTI })).status,
+    ).toBe(204);
+    expect(await refused.queue.get(writer.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "git_write_not_granted",
+    });
+    expect(refused.issuedJobTokens()).toEqual([]);
+  });
+
+  // #1092-T107 (review finding 3)
+  it("ends a turn whose stored repositories cannot be read, instead of running it on the first repository alone", async () => {
+    const h = await start();
+    await cloneFromTheFake(h);
+    const turn = await twoOnOneInstallation(h);
+    await h.db
+      .updateTable("implementer_sessions")
+      .set({ repos: "{broken" })
+      .where("id", "=", turn.session.id)
+      .execute();
+
+    expect((await h.claim({ ...claimOptions(), features: MULTI })).status).toBe(
+      204,
+    );
+
+    expect(await h.queue.get(turn.job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "implementer_config_invalid",
+    });
+    expect(h.issuedJobTokens()).toEqual([]);
   });
 });

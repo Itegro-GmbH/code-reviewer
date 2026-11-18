@@ -20,7 +20,10 @@ import type { ClaimedKeys } from "./claimed-keys.ts";
 import { maskModelInText } from "../llm/access.ts";
 import { maskProvidersInText } from "../llm/provider-mask.ts";
 import { withoutUnaccountedManagedSuccess } from "./managed-cost-guard.ts";
-import { implementerBlockProblems } from "./implementer-report.ts";
+import {
+  implementerBlockProblems,
+  implementerReposProblems,
+} from "./implementer-report.ts";
 import { withAgentResultOrNoResult } from "./implementer-result-guard.ts";
 import { redactResult } from "./redact.ts";
 import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
@@ -66,6 +69,17 @@ export type ReportDeps = {
           resultSchema: unknown;
           /** #856: the profile version the turn ran with; its harness says whether the turn may report a subscription. */
           profile: { harness?: string | undefined } | null;
+        };
+        /** #1092: the repositories of a session of several repositories (null for one repository), which the report of a turn is held to. */
+        session: {
+          repos:
+            | readonly {
+                name: string;
+                fullName: string;
+                base: string;
+                branch: string;
+              }[]
+            | null;
         };
       }
     | undefined
@@ -173,6 +187,31 @@ export function withoutManagedModel(
               ...commit,
               subject: mask(commit.subject),
             })),
+            // #1092: the report of each repository of a multi-repository turn carries the same texts (the working branch, the branches,
+            // the subjects, the branch that was checked out); the repository's own `name` and `fullName` are the job's and stay.
+            ...(result.implementer.repos === undefined
+              ? {}
+              : {
+                  repos: result.implementer.repos.map((repo) => ({
+                    ...repo,
+                    branch: mask(repo.branch),
+                    ...(repo.checkedOut == null
+                      ? {}
+                      : { checkedOut: mask(repo.checkedOut) }),
+                    ...(repo.branches === undefined
+                      ? {}
+                      : {
+                          branches: repo.branches.map((branch) => ({
+                            ...branch,
+                            name: mask(branch.name),
+                          })),
+                        }),
+                    commits: repo.commits.map((commit) => ({
+                      ...commit,
+                      subject: mask(commit.subject),
+                    })),
+                  })),
+                }),
           },
         }),
   };
@@ -312,6 +351,19 @@ export async function finishJob(
   // #754: the implementer block belongs to a turn and to no other job, and a turn that succeeded has to carry it. Refused like
   // any invalid result: nothing is stored and the job is not completed by it.
   const problems = implementerBlockProblems(job.reviewKind, reported);
+  // #1092: and the repositories it reports are the job's, in its order (a block the runner sent for a job it never had `repos` for, or
+  // for other repositories, is refused like any other invalid result).
+  if (
+    problems.length === 0 &&
+    job.reviewKind === "implementer" &&
+    reported.implementer !== undefined
+  ) {
+    const turn = await deps.implementerTurn(job);
+    if (turn !== undefined)
+      problems.push(
+        ...implementerReposProblems(turn.session.repos, reported.implementer),
+      );
+  }
   if (problems.length > 0) {
     deps.logger.info(
       `[runner-api] complete ${who} job=${jobId} refused: ${problems.map((problem) => `${problem.field} ${problem.code}`).join(", ")}`,

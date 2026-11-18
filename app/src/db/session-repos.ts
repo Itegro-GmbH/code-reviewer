@@ -46,6 +46,25 @@ export function deriveMountNames(fullNames: readonly string[]): string[] {
   );
 }
 
+const REPOSITORY_FULL_NAME = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+
+/**
+ * Whether the text is a repository a multi-repository job can mount (#1092, review finding 6): `owner/name` in the characters GitHub allows,
+ * and a name whose mount name the runner contract accepts (`ImplementerMountName`: no leading `-`, which `git`, `docker` or `mkdir` would read as an
+ * option, and never `.`, `..` or `.git`). A name this refuses is the app's `repo_invalid` (or the validator's `invalid_value`), never a runner's `invalid_job`.
+ */
+export function isRepositoryFullName(text: string): boolean {
+  if (!REPOSITORY_FULL_NAME.test(text)) return false;
+  const [owner, name] = text.split("/") as [string, string];
+  return (
+    !owner.startsWith("-") &&
+    !name.startsWith("-") &&
+    owner !== "." &&
+    owner !== ".." &&
+    ![".", "..", ".git"].includes(name.toLowerCase())
+  );
+}
+
 /** The index of the second one of two entries equal without regard to case, or -1. */
 export function firstRepeat(values: readonly string[]): number {
   const seen = new Set<string>();

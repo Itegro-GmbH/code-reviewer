@@ -1083,7 +1083,7 @@ function truncatedCount(
 
 /**
  * `implementer.repos` of a result (#1092, `ImplementerRepoResult`): one closed entry for each repository of the job, in the order of the job,
- * one to ten. Whether they are the job's repositories is checked with the job (`implementer-report.ts`).
+ * one to ten. Whether they are the job's repositories is checked with the job (`implementerReposProblems` in `implementer-report.ts`, called by `finishJob`).
  */
 function parseImplementerRepos(
   check: Checker,

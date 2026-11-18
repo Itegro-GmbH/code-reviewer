@@ -17,6 +17,7 @@ import {
 } from "../db/repositories/billing-journal-repository.ts";
 import { createBillingTopUpIntentsRepository } from "../db/repositories/billing-topup-intents-repository.ts";
 import type { Database } from "../db/schema.ts";
+import { parseSessionRepos } from "../db/session-repos.ts";
 import { can } from "../workspaces/permissions.ts";
 import {
   JOURNAL_ROW_KINDS,
@@ -168,6 +169,7 @@ export function createWorkspaceBillingService({
         "repositories.full_name as full_name",
         "usage_records.key_mode as key_mode",
         "implementer_sessions.branch as branch",
+        "implementer_sessions.repos as repos",
       ])
       .where("jobs.workspace_id", "=", workspaceId)
       .where("jobs.id", "in", [...jobIds])
@@ -176,7 +178,7 @@ export function createWorkspaceBillingService({
       facts.set(row.id, {
         label:
           row.review_kind === "implementer"
-            ? `${row.full_name} ${row.branch ?? "(Implementer)"}`
+            ? `${row.full_name} ${implementerBranchLabel(row.branch, row.repos)}`
             : `${row.full_name} #${String(row.pr_number)}`,
         keyMode: row.key_mode,
       });
@@ -335,4 +337,20 @@ function profileFormOf(profile: {
     vatId: profile.vatId,
     businessConfirmed: profile.businessConfirmed,
   };
+}
+
+/**
+ * The branch a turn of the Implementer is named by in the usage list: its working branch, or for a session of several repositories (#1092; its own
+ * `branch` is a key, no git branch) the working branch of the first repository and how many more repositories there are.
+ */
+export function implementerBranchLabel(
+  branch: string | null,
+  repos: string | null,
+): string {
+  const stored = parseSessionRepos(repos);
+  if (stored === null || stored[0] === undefined)
+    return branch ?? "(Implementer)";
+  return stored.length === 1
+    ? stored[0].branch
+    : `${stored[0].branch} (+${String(stored.length - 1)} more repositories)`;
 }

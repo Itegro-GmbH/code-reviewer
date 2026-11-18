@@ -26,6 +26,7 @@ import {
   implementerDeliveryId,
   implementerJobShape,
 } from "../implementer-job-shape.ts";
+import { parseSessionRepos } from "../session-repos.ts";
 import { JobQueueError } from "../../jobs/errors.ts";
 import {
   labelsFromText,
@@ -724,7 +725,8 @@ export function createJobsRepository(
               const shape = implementerJobShape({
                 workspaceId,
                 repositoryUrl: repository.url,
-                branch: input.branch,
+                // #1092: a session of several repositories names its first repository's working branch; its own `branch` is a key.
+                branch: input.repos?.[0]?.branch ?? input.branch,
                 slot,
                 baseSha: input.baseSha,
                 clientRequestId: input.clientRequestId,
@@ -840,6 +842,7 @@ export function createJobsRepository(
                   .select([
                     "implementer_sessions.repository_id as repository_id",
                     "implementer_sessions.branch as branch",
+                    "implementer_sessions.repos as repos",
                     "repositories.url as url",
                   ])
                   .where("implementer_sessions.workspace_id", "=", workspaceId)
@@ -848,7 +851,10 @@ export function createJobsRepository(
                 const shape = implementerJobShape({
                   workspaceId,
                   repositoryUrl: session.url,
-                  branch: session.branch,
+                  // #1092: the working branch of the first repository when the session has several (its own `branch` is a key, no git branch).
+                  branch:
+                    parseSessionRepos(session.repos)?.[0]?.branch ??
+                    session.branch,
                   slot,
                   baseSha: input.headSha,
                   clientRequestId: input.clientRequestId,

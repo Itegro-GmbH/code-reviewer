@@ -228,6 +228,18 @@ describe("an agent step with repos", () => {
       "repo_duplicate",
     ],
     [
+      "a repository whose mount name starts with a dash (the runner would end the job invalid_job)",
+      [{ repo: "acme/app" }, { repo: "{{trigger.input.repo}}" }],
+      { repo: "acme/-app" },
+      "repo_invalid",
+    ],
+    [
+      "a repository named .git",
+      [{ repo: "acme/app" }, { repo: "{{trigger.input.repo}}" }],
+      { repo: "acme/.git" },
+      "repo_invalid",
+    ],
+    [
       "mount names that clash",
       [
         { repo: "acme/app" },

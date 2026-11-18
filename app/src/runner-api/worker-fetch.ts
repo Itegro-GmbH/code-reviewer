@@ -159,6 +159,7 @@ export async function handleFetch(
         job.id,
         entry.token,
         entry.expiresAt,
+        entry.integrationId,
       );
     const current = await deps.queue.get(job.id);
     if (current?.leaseExpiresAt == null)
