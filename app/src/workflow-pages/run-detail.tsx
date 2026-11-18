@@ -425,6 +425,9 @@ function RunFlowView({
     setSheetOpen(true);
     writeStepToAddress(stepId);
   }
+  // A step run the lane has no node for (the lane of this version does not name it) has no place in the flow: it is listed under it, so
+  // that nothing a run did, and no question it asks, is out of reach.
+  const apart = run.steps.filter((step) => !states.byStepId.has(step.id));
   const panel =
     found === undefined ? (
       <p className="text-sm text-muted-foreground">{FLOW_COPY.panelHint}</p>
@@ -446,60 +449,78 @@ function RunFlowView({
       />
     );
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
-      <Section title={FLOW_COPY.flowHeading}>
-        <RunFlow
-          doc={doc}
-          states={states}
-          selected={selected}
-          onSelect={select}
-        />
-      </Section>
-      {narrow ? (
-        <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-          <SheetContent
-            side="right"
-            className="w-full overflow-y-auto p-4 sm:max-w-md"
+    <>
+      <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
+        <Section title={FLOW_COPY.flowHeading}>
+          <RunFlow
+            doc={doc}
+            states={states}
+            selected={selected}
+            onSelect={select}
+          />
+        </Section>
+        {narrow ? (
+          <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+            <SheetContent
+              side="right"
+              className="w-full overflow-y-auto p-4 sm:max-w-md"
+              aria-labelledby={headingId}
+              aria-describedby={undefined}
+            >
+              {panel}
+            </SheetContent>
+          </Sheet>
+        ) : (
+          <aside
             aria-labelledby={headingId}
-            aria-describedby={undefined}
+            data-slot="step-panel-region"
+            className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto"
           >
             {panel}
-          </SheetContent>
-        </Sheet>
-      ) : (
-        <aside
-          aria-labelledby={headingId}
-          data-slot="step-panel-region"
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto"
-        >
-          {panel}
-        </aside>
+          </aside>
+        )}
+      </div>
+      {apart.length === 0 ? null : (
+        <FlatSteps
+          run={run}
+          steps={apart}
+          title={FLOW_COPY.otherSteps}
+          workspaceSlug={workspaceSlug}
+          workflowId={workflowId}
+          repository={repository}
+          api={api}
+        />
       )}
-    </div>
+    </>
   );
 }
 
 /** The plain list of the steps of a run: for a lane that cannot be drawn. */
 function FlatSteps({
   run,
+  steps,
+  title,
   workspaceSlug,
   workflowId,
   repository,
   api,
 }: {
   run: RunView;
+  /** The steps to list: all of them, or those the lane has no node for. */
+  steps: readonly StepView[];
+  title: string;
   workspaceSlug: string;
   workflowId: string;
   repository: string | undefined;
   api: WorkflowRunsApi;
 }) {
   return (
-    <Section title={PAGE_COPY.stepsHeading}>
-      {run.steps.length === 0 ? (
+    <Section title={title}>
+      {steps.length === 0 ? (
         <p className="text-sm text-muted-foreground">{PAGE_COPY.stepsNone}</p>
       ) : (
         <ol className="flex flex-col gap-3">
-          {run.steps.map((step) => (
+          {steps.map((step) => (
             <Step
               key={step.position}
               step={step}
@@ -661,6 +682,8 @@ export function WorkflowRunDetail({
       {doc === undefined || states === undefined ? (
         <FlatSteps
           run={run}
+          steps={run.steps}
+          title={PAGE_COPY.stepsHeading}
           workspaceSlug={workspaceSlug}
           workflowId={workflowId}
           repository={repository}

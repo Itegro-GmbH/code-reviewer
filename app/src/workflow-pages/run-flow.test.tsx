@@ -504,6 +504,46 @@ describe("text from the lane document", () => {
   });
 });
 
+describe("a step run the lane has no node for", () => {
+  // #1079-T31
+  it("is listed under the flow with its question, so nothing a run did is out of reach", () => {
+    const { container } = show(
+      rows(
+        ["start", "succeeded"],
+        [
+          "work",
+          "waiting",
+          {
+            kind: "agent",
+            finishedAt: null,
+            ask: {
+              n: 1,
+              state: "open",
+              question: "Which one?",
+              options: ["A"],
+            },
+          },
+        ],
+      ),
+      { status: "waiting" },
+    );
+    const listed = container.querySelectorAll("[data-slot=run-step]");
+    expect(
+      [...listed].map((entry) => entry.getAttribute("data-step-id")),
+    ).toEqual(["work"]);
+    expect(
+      listed[0]?.querySelector("[data-slot=step-ask-question]")?.textContent,
+    ).toBe("Which one?");
+    expect(screen.getByRole("button", { name: "Answer 1" })).toBeTruthy();
+  });
+
+  // #1079-T31
+  it("adds no list when every step has a node", () => {
+    const { container } = show(MIDWAY());
+    expect(container.querySelectorAll("[data-slot=run-step]")).toHaveLength(0);
+  });
+});
+
 describe("a lane that cannot be drawn", () => {
   // #1079-T27
   it("lists the steps as the page always did, when the lane is missing or is no lane", () => {

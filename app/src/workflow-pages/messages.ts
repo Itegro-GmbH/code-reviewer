@@ -364,8 +364,7 @@ export const PAGE_COPY = {
 export const FLOW_COPY = {
   flowHeading: "Where the run stands",
   flowLabel: "The lane, with where this run stands on each step",
-  flowOnlyList:
-    "The lane of this version could not be drawn, so the steps are listed.",
+  otherSteps: "Other steps of this run (not in the lane of this version)",
   /** The word a node carries for its state: the state is never told by the colour alone. */
   state: {
     done: "Done",
