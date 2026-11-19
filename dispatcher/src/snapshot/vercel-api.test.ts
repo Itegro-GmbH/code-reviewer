@@ -19,6 +19,7 @@ const PAIR: SnapshotPair = {
   imageDigest: `sha256:${"a".repeat(64)}`,
   commit: "1".repeat(40),
   sysbox: "proven",
+  workerFeatures: ["implementer_multi_repo"],
 };
 
 type Seen = { url: URL; headers: Headers; redirect: string };

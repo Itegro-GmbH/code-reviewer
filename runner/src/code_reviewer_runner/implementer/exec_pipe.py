@@ -23,10 +23,14 @@ from .reader import (
     DOCKER_SOCKET_OPTION,
     READER_CONTAINER_NAME,
     READER_REPO,
+    REPO_OPTION,
     UPLOAD_PACK_PROTOCOL_VARIABLE,
+    WORK_VOLUME_TARGET,
     reader_argv,
     reader_environment,
 )
+from .repo_names import is_mount_name
+from .repo_places import READER_MULTI_ROOT
 
 _PROTOCOL = re.compile(r"version=[0-9]")
 _SOCKET = re.compile(r"/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
@@ -49,7 +53,19 @@ def main(
         if not _SOCKET.fullmatch(socket_path):
             return USAGE_ERROR
         argv = argv[1:]
-    if argv != [CONTROL_REPO]:
+    # #1093: a multi-repository turn names the repository in the reader (`--reader-repo=
+    # /repos/<name>`, a mount name), and the one argument git appends is the same repository's
+    # directory.
+    reader_repo = READER_REPO
+    source = CONTROL_REPO
+    if argv and argv[0].startswith(REPO_OPTION):
+        reader_repo = argv[0][len(REPO_OPTION) :]
+        name = reader_repo.removeprefix(f"{READER_MULTI_ROOT}/")
+        if reader_repo != f"{READER_MULTI_ROOT}/{name}" or not is_mount_name(name):
+            return USAGE_ERROR
+        source = f"{WORK_VOLUME_TARGET}/{name}"
+        argv = argv[1:]
+    if argv != [source]:
         return USAGE_ERROR
     env = reader_environment()
     protocol = environment.get(UPLOAD_PACK_PROTOCOL_VARIABLE, "")
@@ -62,9 +78,9 @@ def main(
         exec_id = api.create_exec(
             READER_CONTAINER_NAME,
             exec_document(
-                reader_argv(["upload-pack", READER_REPO]),
+                reader_argv(["upload-pack", reader_repo], reader_repo),
                 env=env,
-                workdir=READER_REPO,
+                workdir=reader_repo,
             ),
         )
         streams = api.attach_exec(exec_id)

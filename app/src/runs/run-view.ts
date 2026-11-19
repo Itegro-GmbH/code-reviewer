@@ -172,6 +172,25 @@ export type ImplementerResumeView = {
 };
 
 /** What the detail page shows of a task besides the facts every run has. Built only from the fields listed here. */
+/** One repository of a task of several, as the page shows it. Every text is cleaned and rendered as text; the links are made from the full name only. */
+export type ImplementerRepoView = {
+  fullName: string;
+  /** `https://github.com/<owner>/<name>`; null for a name that is no repository. */
+  url: string | null;
+  base: string;
+  /** The working branch; equal to `base` for direct work. */
+  branch: string;
+  branchUrl: string | null;
+  /** True for a branch the turn made (it was not there before). */
+  created: boolean;
+  /** The commits this turn made on the branch (the report holds the newest 100, `commitsTruncated` counts the rest). */
+  commits: number;
+  files: number;
+  pushed: boolean;
+  /** The tip of the branch when the turn ended, when it is on the remote. */
+  shortSha: string | null;
+};
+
 export type ImplementerDetailView = ImplementerRowView & {
   /** The branch the new one started from; null when the turn of the job cannot be read. Untrusted text. */
   baseBranch: string | null;
@@ -188,6 +207,11 @@ export type ImplementerDetailView = ImplementerRowView & {
     /** Local branches that are in no entry: their name cannot be pushed, or they are beyond the limit of 50. */
     dropped: { invalid: number; overflow: number };
   };
+  /**
+   * #1094 (epic #1090): what the turn did in each repository of a task of several, in the order of the job; empty for a task of one repository
+   * (its branch, commits and files are above) and for a report without the block. The first entry is the repository the fields above describe.
+   */
+  repos: ImplementerRepoView[];
   /** The environment the task started with; null for a task without one (the standard). */
   environment: ImplementerEnvironmentView | null;
   /** #854: the runner environment the task started with (name and labels, untrusted text); null for any other task. */
@@ -506,6 +530,17 @@ type StoredImplementerResult = {
   commits: { sha: string; subject: string }[];
   files: { path: string; status: ImplementerFileStatus }[];
   summary: string | null;
+  /** #1094: the entries of `implementer.repos` that are what the contract says; empty for a result of one repository. */
+  repos: {
+    fullName: string;
+    base: string;
+    branch: string;
+    created: boolean;
+    commits: number;
+    files: number;
+    pushed: boolean;
+    headCommit: string | null;
+  }[];
 };
 
 const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
@@ -517,6 +552,7 @@ const EMPTY_IMPLEMENTER_RESULT: StoredImplementerResult = {
   commits: [],
   files: [],
   summary: null,
+  repos: [],
 };
 
 function isRecord(value: unknown): value is Record<string, JsonValue> {
@@ -615,7 +651,43 @@ function readStoredImplementer(
     commits,
     files,
     summary: typeof block.summary === "string" ? block.summary : null,
+    repos: readStoredRepos(block.repos),
   };
+}
+
+const REPO_FULL_NAME = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
+
+/** The entries of `implementer.repos` (#1094), held to the contract again field by field: an entry that is not what it says is left out. */
+function readStoredRepos(
+  value: JsonValue | undefined,
+): StoredImplementerResult["repos"] {
+  if (!Array.isArray(value)) return [];
+  const repos: StoredImplementerResult["repos"] = [];
+  for (const entry of value.slice(0, 10)) {
+    if (
+      !isRecord(entry) ||
+      typeof entry.fullName !== "string" ||
+      !REPO_FULL_NAME.test(entry.fullName) ||
+      typeof entry.base !== "string" ||
+      typeof entry.branch !== "string"
+    )
+      continue;
+    repos.push({
+      fullName: entry.fullName,
+      base: entry.base,
+      branch: entry.branch,
+      created: entry.created === true,
+      commits: Array.isArray(entry.commits) ? entry.commits.length : 0,
+      files: Array.isArray(entry.filesChanged) ? entry.filesChanged.length : 0,
+      pushed: entry.pushed === true,
+      headCommit:
+        typeof entry.headCommit === "string" &&
+        COMMIT_SHA.test(entry.headCommit)
+          ? entry.headCommit
+          : null,
+    });
+  }
+  return repos;
 }
 
 /**
@@ -912,6 +984,30 @@ function implementerDetailView(
       };
     })
     .sort((a, b) => Number(b.isTaskBranch) - Number(a.isTaskBranch));
+  const repos = stored.repos.map((repo): ImplementerRepoView => {
+    const base = agentText(head(repo.base, 255 * 4), 255, true);
+    const branch = agentText(head(repo.branch, 255 * 4), 255, true);
+    const url = `https://github.com/${repo.fullName}`;
+    return {
+      fullName: repo.fullName,
+      url,
+      base,
+      branch,
+      // The link is made from the raw name, as for the branches above.
+      branchUrl:
+        repo.pushed && branch === repo.branch
+          ? githubBranchUrl(url, repo.branch)
+          : null,
+      created: repo.created,
+      commits: repo.commits,
+      files: repo.files,
+      pushed: repo.pushed,
+      shortSha:
+        repo.pushed && repo.headCommit !== null
+          ? repo.headCommit.slice(0, SHORT_SHA_CHARS)
+          : null,
+    };
+  });
   const pushedHead =
     stored.pushed && stored.headCommit !== null ? stored.headCommit : null;
   const failed = job.status === "failed" || job.status === "cancelled";
@@ -932,6 +1028,7 @@ function implementerDetailView(
           : null,
     },
     summary: summary === "" ? null : summary,
+    repos,
     environment: environmentView(source, job.result, display),
     runner:
       source?.runner == null

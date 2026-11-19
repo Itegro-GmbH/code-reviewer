@@ -110,7 +110,12 @@ function textFits(expected: ValueType): boolean {
  * what an agent reported is data, and so is what whoever opened the issue wrote (its title, body and labels); data does not choose
  * what the platform acts on.
  */
-export type TargetCheck = { input: string; roots: readonly TargetRoot[] };
+export type TargetCheck = {
+  input: string;
+  roots: readonly TargetRoot[];
+  /** #1092: a text around the references is fine as long as each reference is one the roots take (`feature/{{trigger.ticket.key}}`). */
+  text?: true;
+};
 
 const ROOT_WORDS: Record<TargetRoot, string> = {
   input: "an input of the caller of a manual trigger, {{trigger.input.<name>}}",
@@ -120,9 +125,16 @@ const ROOT_WORDS: Record<TargetRoot, string> = {
     "the ticket the run is about, {{trigger.ticket}} or {{trigger.ticket.number}}",
   defaultBranch:
     "the default branch of the repository, {{trigger.repo.defaultBranch}} or {{trigger.ticket.repo.defaultBranch}}",
+  repository:
+    "the repository the run is about, {{trigger.ticket.repo.fullName}} or {{trigger.repo.fullName}}",
+  ticketKey:
+    "the key of the ticket the run is about, {{trigger.ticket.key}} or {{trigger.ticket.number}}",
   branch: "the branch of an agent step that may push, {{<step id>.branch}}",
+  repos: "the repositories of an agent step that may push, {{<step id>.repos}}",
   pullRequest:
     "the number of the pull request an action opened, {{<step id>.number}} of a pullRequest.open step",
+  prRepository:
+    "the repository of the first pull request of a pullRequest.open step with repos, {{<step id>.repository}}",
 };
 
 function refuseTarget(
@@ -157,6 +169,16 @@ export function targetVerdict(
       only(["repo", "defaultBranch"])
     )
       return "ok";
+    if (field === "ticket" && takes("repository") && only(["repo", "fullName"]))
+      return "ok";
+    if (field === "repo" && takes("repository") && only(["fullName"]))
+      return "ok";
+    if (
+      field === "ticket" &&
+      takes("ticketKey") &&
+      (only(["key"]) || only(["number"]))
+    )
+      return "ok";
     if (field === "issue" || field === "ticket")
       return takes(field) && (more.length === 0 || only(["number"]))
         ? "ok"
@@ -179,6 +201,16 @@ export function targetVerdict(
     binding.connector !== undefined &&
     PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector);
   if (branchOfAgent) return takes("branch") ? "ok" : "refused";
+  if (binding.kind === "agent" && field === "repos" && more.length === 0)
+    return takes("repos") ? "ok" : "refused";
+  if (
+    field === "repository" &&
+    more.length === 0 &&
+    binding.kind === "action" &&
+    binding.connector !== undefined &&
+    PULL_REQUEST_OPENING_CONNECTORS.includes(binding.connector)
+  )
+    return takes("prRepository") ? "ok" : "refused";
   return openedPullRequest && takes("pullRequest") ? "ok" : "refused";
 }
 
@@ -307,7 +339,19 @@ function checkString(
   const parsed = parseChecked(value, context, here);
   if (parsed === undefined || literalText(parsed) !== undefined) return;
   if (!isWholeReference(parsed)) {
-    refuseTarget(target, here.path, context);
+    if (target.text !== true) {
+      refuseTarget(target, here.path, context);
+      return;
+    }
+    // #1092: a text with references in it: every one of them must be a value the roots take.
+    for (const part of parsed.parts) {
+      if (!("ref" in part)) continue;
+      if (targetVerdict(part.ref, target, here) === "refused") {
+        refuseTarget(target, here.path, context);
+        return;
+      }
+    }
+    checkText(value, context, here);
     return;
   }
   const ref = (parsed.parts[0] as { ref: Reference }).ref;
@@ -322,7 +366,8 @@ function checkString(
     expected,
     here,
     context,
-    true,
+    // A text target (the `branch` of an entry of `repos`) takes a number into the name; an identifier does not.
+    target.text !== true,
   );
   checkTargetDefault(ref, expected, target, here, context);
 }

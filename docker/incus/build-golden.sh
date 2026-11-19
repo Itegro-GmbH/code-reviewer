@@ -35,7 +35,7 @@
 #   5. RESTARTS the instance and checks that the images and the layer are still there with the same ids: dockerd and containerd must keep the images
 #      across a boot (an image that is gone after a reboot is the failure of two Docker units that disagree on who owns the store);
 #   6. removes the build network's DHCP file and the caches (an instance of the image has addresses from files the launcher pushes), publishes the
-#      image with what step 4 found as image properties (`code-reviewer.opencode`, `code-reviewer.claude-code`, ...: the runner reads them to
+#      image with what step 4 found as image properties (`code-reviewer.opencode`, `code-reviewer.claude-code`, `code-reviewer.worker-features`, ...: the runner reads them to
 #      announce its harnesses, it boots no instance for that), deletes the build instance and network, and starts one throwaway instance from the
 #      alias so that the first job does not pay the unpack of the image into the pool (the installer, #1011, does the same).
 # It prints `FACTORY_RUNNER_VM_IMAGE_ID=<the Worker image's id>`: the value the launcher checks in instance A.
@@ -222,6 +222,11 @@ say "loaded: worker $worker_id, agent $agent_id"
 # What the programs of the agent's image report, read here and recorded in the image (the runner announces these, never a copy of a pin).
 opencode_version="$(exe docker run --rm --network none --entrypoint /usr/local/bin/opencode "$AGENT" --version | tr -d '\r\n')"
 [[ "$opencode_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { say "OpenCode in the agent image does not report a version ($opencode_version)"; exit 1; }
+# What the Worker image says it reads of a job (#1093): the runner names a claim feature such as `implementer_multi_repo` only when the image it
+# starts says so. An image whose Worker does not know the flag (built before it) records nothing, and the runner then names no such feature.
+worker_features="$(exe docker run --rm --network none "$WORKER" --worker-features 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+[[ "$worker_features" =~ ^[a-z0-9_,]*$ ]] || worker_features=""
+say "the Worker image reads: ${worker_features:-nothing it names}"
 claude_tag=""
 claude_version=""
 claude_id=""
@@ -275,6 +280,7 @@ if [ "$REPLACE" = 1 ]; then
 fi
 # zstd: the image file lives on the machine's system disk (the daemon's image store), which is the small one.
 props=("code-reviewer.opencode=$opencode_version" "code-reviewer.agent-image=$agent_id")
+[ -z "$worker_features" ] || props+=("code-reviewer.worker-features=$worker_features")
 [ -z "$claude_tag" ] || props+=("code-reviewer.claude-code=$claude_version" "code-reviewer.claude-code.layer=$claude_tag")
 ix publish "$BUILD" --alias "$ALIAS" --compression zstd "description=code-reviewer golden image (Docker $DOCKER_VERSION; worker $worker_id)" "${props[@]}" >/dev/null
 ix delete --force "$BUILD"

@@ -9,6 +9,8 @@
 /** The Sysbox verdict of the snapshot's proof (the record's `sysbox`). Only `proven` lets the Implementer start. */
 export type SysboxVerdict = "proven" | "unproven";
 
+import { parseWorkerFeatures, workerFeaturesValue } from "./worker-features.ts";
+
 export type SnapshotPair = {
   snapshotId: string;
   imageDigest: string;
@@ -20,6 +22,13 @@ export type SnapshotPair = {
    * from before this member existed, a value nobody can read) is `unproven`. Reviews never read it.
    */
   sysbox: SysboxVerdict;
+  /**
+   * #1098: the features the Worker image of the snapshot lists (`WORKER_FEATURES` of the runner), read from the image itself by
+   * the build and kept with the snapshot id like the verdict, so that the list of an older snapshot cannot stay behind a newer
+   * one. The Dispatcher names a claim feature that depends on the image (`multi-repo`) only when it is in this list. Sorted;
+   * a pair from before this member existed, or a value nobody can read, has the empty list.
+   */
+  workerFeatures: readonly string[];
 };
 
 export const PAIR_VARIABLES = {
@@ -27,6 +36,7 @@ export const PAIR_VARIABLES = {
   imageDigest: "SANDBOX_IMAGE_DIGEST",
   commit: "SANDBOX_SNAPSHOT_COMMIT",
   sysbox: "SANDBOX_SYSBOX_PROOF",
+  workerFeatures: "SANDBOX_WORKER_FEATURES",
 } as const;
 
 export const PAIR_META = {
@@ -34,6 +44,7 @@ export const PAIR_META = {
   imageDigest: "sandboxImageDigest",
   commit: "sandboxSnapshotCommit",
   sysbox: "sandboxSysboxProof",
+  workerFeatures: "sandboxWorkerFeatures",
 } as const;
 
 /**
@@ -73,6 +84,7 @@ export const IMAGE_INPUT_PATHS = [
   "dispatcher/src/snapshot/pipeline.ts",
   "dispatcher/src/snapshot/probe-flags.ts",
   "dispatcher/src/snapshot/scripts.ts",
+  "dispatcher/src/snapshot/worker-features.ts",
 ] as const;
 
 const SNAPSHOT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{2,127}$/;
@@ -99,11 +111,18 @@ export function pairFromValues(
   imageDigest: unknown,
   commit: unknown,
   sysbox?: unknown,
+  workerFeatures?: unknown,
 ): SnapshotPair | undefined {
   if (!isSnapshotId(snapshotId) || !isImageDigest(imageDigest))
     return undefined;
   if (!isCommit(commit)) return undefined;
-  return { snapshotId, imageDigest, commit, sysbox: sysboxVerdictOf(sysbox) };
+  return {
+    snapshotId,
+    imageDigest,
+    commit,
+    sysbox: sysboxVerdictOf(sysbox),
+    workerFeatures: parseWorkerFeatures(workerFeatures),
+  };
 }
 
 export function pairFrom(
@@ -114,6 +133,7 @@ export function pairFrom(
     variables[PAIR_VARIABLES.imageDigest],
     variables[PAIR_VARIABLES.commit],
     variables[PAIR_VARIABLES.sysbox],
+    variables[PAIR_VARIABLES.workerFeatures],
   );
 }
 
@@ -123,6 +143,7 @@ export function pairToEnv(pair: SnapshotPair): Record<string, string> {
     [PAIR_VARIABLES.imageDigest]: pair.imageDigest,
     [PAIR_VARIABLES.commit]: pair.commit,
     [PAIR_VARIABLES.sysbox]: pair.sysbox,
+    [PAIR_VARIABLES.workerFeatures]: workerFeaturesValue(pair.workerFeatures),
   };
 }
 
@@ -132,6 +153,7 @@ export function pairToMeta(pair: SnapshotPair): Record<string, string> {
     [PAIR_META.imageDigest]: pair.imageDigest,
     [PAIR_META.commit]: pair.commit,
     [PAIR_META.sysbox]: pair.sysbox,
+    [PAIR_META.workerFeatures]: workerFeaturesValue(pair.workerFeatures),
   };
 }
 
@@ -145,7 +167,9 @@ export function pairsEqual(
     a.snapshotId === b.snapshotId &&
     a.imageDigest === b.imageDigest &&
     a.commit === b.commit &&
-    a.sysbox === b.sysbox
+    a.sysbox === b.sysbox &&
+    workerFeaturesValue(a.workerFeatures) ===
+      workerFeaturesValue(b.workerFeatures)
   );
 }
 

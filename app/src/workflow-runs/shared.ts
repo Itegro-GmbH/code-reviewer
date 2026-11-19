@@ -3,10 +3,13 @@
 // The wiring of the running server behind the workflow engine (#844): the real database, the Implementer service, the registry of
 // connectors, and the three entry points the rest of the app uses: the run service behind the routes, the hook of the runner API that
 // says a turn is over, and the reconciler of the sweep.
+import { repositoryByName } from "./repository-by-name.ts";
+import { targetOfNamedRepository } from "./repository-target.ts";
 import "server-only";
 import { createImplementerEnvironmentsRepository } from "../db/repositories/implementer-environments-repository.ts";
 import { createImplementerRepository } from "../db/repositories/implementer-repository.ts";
 import { createIntegrationsRepository } from "../db/repositories/integrations-repository.ts";
+import { createJiraConnectionsRepository } from "../db/repositories/jira-connections-repository.ts";
 import { createJobsRepository } from "../db/repositories/jobs-repository.ts";
 import { createProfilesRepository } from "../db/repositories/profiles-repository.ts";
 import {
@@ -51,6 +54,7 @@ import {
   createGithubConnectors,
   type GithubActionTarget,
 } from "./github-connectors.ts";
+import { jiraSiteLookup } from "./jira-site.ts";
 import { createTurnReader } from "./turn-reader.ts";
 import { DEFAULT_TICKET_PROVIDER } from "./ticket-target.ts";
 import { createRunTicketTargets } from "./run-ticket-targets.ts";
@@ -162,6 +166,12 @@ const projectOfRun = runTicketTargets.projectOfRun;
 const connectors = createConnectorRegistry(
   createGithubConnectors({
     targetOf: (call) => connectorTargetOf(call.workspaceId, call.repository.id),
+    // #1094: a pull request step with `repos` acts on any active repository of the workspace, by its full name.
+    targetOfRepository: targetOfNamedRepository({
+      repositories: (workspaceId) =>
+        createRepositoriesRepository(getDatabase(), workspaceId),
+      targetOf: connectorTargetOf,
+    }),
     ticketTargetOf,
     // #922: the board of the project the run's lane belongs to.
     async projectBoard(call) {
@@ -230,6 +240,8 @@ export function workflowEngineFor(workspaceId: string): WorkflowEngine {
     }),
     connectors,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    // #1092: the `repos` of an agent step name repositories of the workspace by their full name.
+    repositoryByName: repositoryByName(repositories),
   });
 }
 
@@ -348,13 +360,17 @@ export function workflowRunServiceFor(
 ): WorkflowRunService {
   const db = getDatabase();
   const repositories = createRepositoriesRepository(db, workspaceId);
+  const projects = createProjectsRepository(db, workspaceId);
+  const jiraConnections = createJiraConnectionsRepository(db, workspaceId);
   return createWorkflowRunService({
     runs: createWorkflowRunsRepository(db, workspaceId),
     // #920: the engine that takes an answer from the page of the run.
     engine: lazyAnswerEngine(workspaceId),
     workflows: createWorkflowsRepository(db, workspaceId),
-    projects: createProjectsRepository(db, workspaceId),
+    projects,
     repositoryName: async (id) => (await repositories.get(id))?.fullName,
+    // #1086: the site of a Jira ticket's link, from the stored connection of the project's source (never a call to Jira).
+    jiraSiteUrlOf: jiraSiteLookup({ projects, jiraConnections }),
     ...githubReads(workspaceId, ticketProvidersWith(extraTicketProviders)),
     // The first steps run after the response: starting a turn asks GitHub several times.
     kick: (runId) =>

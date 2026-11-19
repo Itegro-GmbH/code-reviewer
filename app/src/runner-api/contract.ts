@@ -9,6 +9,7 @@ import type { JsonValue, ReviewCommand } from "../integrations/types.ts";
 import type { JobStatus } from "../db/job-status.ts";
 import type { CostPolicyJson } from "../native-cost/policy.ts";
 import type { JobModelEntry } from "../models-dev/job-entry.ts";
+import type { ImplementerJobRepo } from "../contracts/runner-api.ts";
 import {
   PROJECT_REVIEW_KINDS,
   type ProjectReviewKind,
@@ -78,6 +79,9 @@ export const CLAIM_FEATURES = [
   // a local endpoint for each at its door and points the harness at them. Sent only to a caller that named it and only to a turn a workflow
   // step started; for any other caller the turn runs as before, without MCP tools (not refused: the agent only lacks tools).
   "implementer_mcp",
+  // #1091 (epic #1090, ADR 0006): the runner reads `implementer.repos`, `git.tokens` and `implementer.resume.repos` (several repositories in one
+  // turn) and reports `implementer.repos`. The app will send `repos` only to a caller that named it (#1092); nothing sends it yet.
+  "implementer_multi_repo",
 ] as const;
 export type ClaimFeature = (typeof CLAIM_FEATURES)[number];
 
@@ -471,6 +475,8 @@ export type RunnerJobInput = {
     baseUrl: string;
     token: string;
     botLogin: string;
+    /** #1092: one token for each installation that owns a repository of a multi-repository turn (`GitToken` in the contract); `token` is the first repository's. */
+    tokens?: Array<{ id: string; token: string }>;
   };
   llm: {
     /** A slug of the registry (`LlmProviderId`); the claim sends `openrouter` for now. */
@@ -497,11 +503,17 @@ export type RunnerJobInput = {
 
 /** #746: `ImplementerJob` in the contract: what a turn of the Implementer asks for. A closed object. */
 export type ImplementerJobOptions = {
-  repo: { fullName: string; cloneUrl: string };
-  baseBranch: string;
+  /** The one repository of a turn of today. Exactly one of `repo` (with `baseBranch` and `branch`) and `repos` is there (#1092). */
+  repo?: { fullName: string; cloneUrl: string };
+  baseBranch?: string;
   /** #909: the branch the new branch is made from when that is not the base; absent: the tip of the base. */
   startBranch?: string;
-  branch: string;
+  branch?: string;
+  /**
+   * #1092 (epic #1090, ADR 0006): the repositories of a turn on several, one to ten, instead of `repo`, `baseBranch`, `branch` and `startBranch`
+   * (`ImplementerJobRepo` in the contract). Only for a caller that named the claim feature `implementer_multi_repo`; the job then has `git.tokens`.
+   */
+  repos?: ImplementerJobRepo[];
   /** The task as the user wrote it, at most 20 000 characters; literal data. */
   instruction: string;
   limits: { timeLimitSeconds: number };
@@ -519,9 +531,20 @@ export type ImplementerJobOptions = {
  */
 export type ImplementerJobResume = {
   turn: number;
-  /** At most 20, the session branch first, no name twice. */
-  branches: Array<{ name: string; head: string }>;
-  checkout: string | null;
+  /** At most 20, the session branch first, no name twice. Absent exactly when `repos` is there. */
+  branches?: Array<{ name: string; head: string }>;
+  /** Absent exactly when `repos` is there. */
+  checkout?: string | null;
+  /**
+   * #1092: a follow-up turn of a session of several repositories: one entry for each repository of the job, by mount name, in the order of
+   * the job, with the branches the last turn pushed there (at most 20, the working branch first) and the branch HEAD was on. Instead of
+   * `branches` and `checkout`.
+   */
+  repos?: Array<{
+    name: string;
+    branches: Array<{ name: string; head: string }>;
+    checkout: string | null;
+  }>;
   snapshot: boolean;
   /** At most 8 KiB of UTF-8. */
   previousSummary?: string;
@@ -842,6 +865,9 @@ export const IMPLEMENTER_MAX_BODY_BYTES =
       IMPLEMENTER_RESULT_LIMITS.networkConnections * (253 + 160) +
       (8192 + 2000));
 
+// #1092: a completion with `repos` is at most 4 MiB (4,194,304 bytes) as the runner writes it (ADR 0006, "The result"). The bound above is about 27 MB, so
+// the limit the contract asks to raise is already higher; it stays as it is (the bounds of `ImplementerRepoResult` are smaller than those of the single form).
+
 /** What became of one local branch of the agent's repository at the end of a turn (`branches` of `ImplementerResult`). */
 export type ImplementerBranchResult = {
   name: string;
@@ -886,6 +912,30 @@ export type ImplementerNetworkReport = {
   }[];
 };
 
+/**
+ * #1092 (epic #1090, ADR 0006): what a turn did in one repository of a multi-repository job (`ImplementerRepoResult` in the contract), in
+ * `ImplementerResult.repos`, one for each repository, in the order of the job. `baseCommit` is the tip of `branch` when the turn started,
+ * `commits` and `filesChanged` what this turn made on it after that, `headCommit` the tip at the end and `pushed` whether that tip is on the remote.
+ */
+export type ImplementerRepoResult = {
+  name: string;
+  fullName: string;
+  base: string;
+  branch: string;
+  created: boolean;
+  baseCommit: string;
+  headCommit: string | null;
+  pushed: boolean;
+  branches?: ImplementerBranchResult[];
+  branchesDropped?: { invalid: number; overflow: number };
+  commits: { sha: string; subject: string }[];
+  filesChanged: { path: string; status: ImplementerFileStatus }[];
+  /** How many commits and files the runner cut to keep the report within its budget. */
+  commitsTruncated?: number;
+  filesTruncated?: number;
+  checkedOut?: string | null;
+};
+
 /** #746: `ImplementerResult` in the contract: facts the runner measured in the repository, and a plain-text summary. */
 export type ImplementerResult = {
   baseCommit: string;
@@ -924,6 +974,11 @@ export type ImplementerResult = {
    * is then recorded `no_result`).
    */
   agentResult?: { [key: string]: JsonValue };
+  /**
+   * #1092: what the turn did in each repository of a multi-repository job, one to ten, in the order of the job; the fields above are then the first
+   * repository's copy. Absent in the result of a single-repository turn.
+   */
+  repos?: ImplementerRepoResult[];
   /**
    * #920: the question the agent ended the turn with instead of a result (`ImplementerAgentAsk` in the contract). A turn with one succeeds
    * and has no `agentResult`; the workflow engine puts the step into `waiting`. Agent text, bounded by `boundAgentAsk`, the secrets taken

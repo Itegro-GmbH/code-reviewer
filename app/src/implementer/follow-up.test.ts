@@ -46,6 +46,7 @@ function session(
     baseBranch: "main",
     startBranch: null,
     branch: "implementer/abc123",
+    repos: null,
     headCommit: TIP,
     status: "idle",
     opencodeSessionId: null,
@@ -615,6 +616,57 @@ describe("the continuation of a run", () => {
 
     expect(found).toBeUndefined();
     expect(f.sessions.getTurnByJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("the continuation of a run of a session of several repositories (#1092)", () => {
+  // #1092 (review finding 7): the session's own branch is a platform key, no git branch.
+  it("shows the working branches of the repositories, never the key of the session", async () => {
+    const f = fakes(session());
+    f.sessions.getTurnByJob.mockResolvedValue({
+      turn: lastTurn(),
+      session: session({
+        branch: "workflow/run-1/implement",
+        repos: [
+          {
+            repositoryId: "repo-1",
+            fullName: "acme/app",
+            name: "app",
+            base: "main",
+            branch: "feature/x",
+          },
+          {
+            repositoryId: "repo-2",
+            fullName: "acme/lib",
+            name: "lib",
+            base: "main",
+            branch: "main",
+          },
+        ],
+      }),
+    });
+
+    const found = await createFollowUps(f.deps).continuation("job-1");
+
+    expect(found?.branch).toBe("feature/x");
+    expect(found?.repos).toEqual([
+      { name: "app", branch: "feature/x" },
+      { name: "lib", branch: "main" },
+    ]);
+    expect(JSON.stringify(found)).not.toContain("workflow/run-1");
+  });
+
+  it("has no repos for a session of one repository", async () => {
+    const f = fakes(session());
+    f.sessions.getTurnByJob.mockResolvedValue({
+      turn: lastTurn(),
+      session: session(),
+    });
+
+    const found = await createFollowUps(f.deps).continuation("job-1");
+
+    expect(found?.branch).toBe("implementer/abc123");
+    expect(found).not.toHaveProperty("repos");
   });
 });
 

@@ -267,6 +267,20 @@ describe("the write tokens remembered for a job", () => {
     expect(await keys.gitTokensOf(job.id)).toEqual([entry("ghs_second_0002")]);
   });
 
+  // #1092
+  it("remembers the connection that made a token, next to it, and none for a token remembered without one", async () => {
+    const { job, keys } = await start();
+    await keys.rememberGitToken(job.id, "ghs_first_0001", LATER, "i-1");
+    await keys.rememberGitToken(job.id, "ghs_second_0002", LATER, "i-2");
+    await keys.rememberGitToken(job.id, "ghs_third_0003", LATER);
+
+    expect(await keys.gitTokensOf(job.id)).toEqual([
+      { ...entry("ghs_first_0001"), integrationId: "i-1" },
+      { ...entry("ghs_second_0002"), integrationId: "i-2" },
+      entry("ghs_third_0003"),
+    ]);
+  });
+
   // #753
   it("says whether any token is remembered, expired or not", async () => {
     const { job, keys } = await start();

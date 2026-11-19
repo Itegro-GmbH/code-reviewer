@@ -126,6 +126,15 @@ const STEP_FAILURE_TEXT: Record<
   environment_not_found: "The environment of the step does not exist.",
   environment_mismatch:
     "The step names another environment than its profile runs in.",
+  repo_duplicate: "Two repositories of the step are the same repository.",
+  repo_name_clash:
+    "Two repositories of the step would be mounted under the same name.",
+  repo_invalid: "A repository of the step is not a repository (owner/name).",
+  branch_invalid: "A branch of the step is not the name of a branch.",
+  repo_not_available:
+    "A repository of the step is not one the workspace's GitHub App can reach (or write to).",
+  base_branch_not_found:
+    "A repository of the step has no branch with the name of its base.",
   agent_start_failed: "The agent could not be started.",
   turn_unreadable: "The result of the agent could not be read.",
   no_result:
@@ -399,6 +408,23 @@ export const PAGE_COPY = {
   stepNotStarted: "Not started",
   stepResultJson: "Show everything the step returned (JSON)",
   stepBranch: "Branch",
+  stepRepos: "Repositories",
+  stepRepoDirect: "directly on",
+  stepRepoFrom: "from",
+  stepRepoCommits: (count: number): string =>
+    `${String(count)} ${count === 1 ? "commit" : "commits"} this turn`,
+  stepRepoPushed: "pushed",
+  stepRepoNotPushed: "not pushed",
+  stepPullRequests: "Pull requests",
+  stepPrOpened: "opened",
+  stepPrExisting: "already open",
+  stepPrSkipped: "skipped",
+  stepPrReason: {
+    direct: "the agent worked directly on the base branch",
+    not_pushed: "nothing was pushed",
+    push_rejected: "GitHub refused the push of the branch",
+    no_commits: "no commits ahead of the base",
+  },
   stepLink: "Open on GitHub",
   stepNumber: "Number",
   stepExisting: "This already existed, so nothing new was created.",

@@ -13,11 +13,13 @@ import pytest
 from code_reviewer_runner.implementer.preface import (
     MovedBranch,
     PrefaceFacts,
+    RepoPrefaceFacts,
     ResumeMode,
     build_preface,
     first_turn_parts,
     history_part,
     message_parts,
+    multi_first_turn_parts,
     repository_note,
 )
 
@@ -381,3 +383,68 @@ def test_the_preface_of_a_follow_up_carries_the_note_in_its_own_part() -> None:
 # #909-T09
 def test_a_preface_without_base_and_start_has_no_note() -> None:
     assert "full clone" not in build_preface(facts())
+
+
+# -- several repositories (#1093) -----------------------------------------------------------------
+
+
+# #1093-T70
+def test_the_first_turn_of_several_repositories_gets_a_note_of_the_layout_and_the_instruction() -> (
+    None
+):
+    parts = multi_first_turn_parts(INSTRUCTION)
+
+    assert parts[-1] == {"type": "text", "text": INSTRUCTION}
+    note = parts[0]
+    assert (
+        note["synthetic"] is True
+        and "/work" in note["text"]
+        and "not a git repository" in note["text"]
+    )
+    # The runner names no repository: the list is the app's, at the start of the instruction.
+    assert "acme" not in note["text"]
+
+
+# #1093-T71
+def test_the_follow_up_of_several_repositories_speaks_of_each_by_its_mount() -> None:
+    preface = build_preface(
+        PrefaceFacts(
+            turn=3,
+            mode=ResumeMode.IMPORTED,
+            branches=(),
+            checkout="",
+            repos=[
+                RepoPrefaceFacts(
+                    "acme__app",
+                    [("feature/x", SHA_A), ("main", SHA_B)],
+                    "feature/x",
+                    moved=[MovedBranch("main", SHA_A, SHA_B)],
+                ),
+                RepoPrefaceFacts("shared-lib", [("main", SHA_B)], "main", missing=["feature/old"]),
+            ],
+        )
+    )
+
+    assert "turn 3" in preface and "NEW sandbox" in preface
+    assert (
+        "In `acme__app`: Branches in this repository: `feature/x` (checked out, aaaaaaa)" in preface
+    )
+    assert "In `acme__app`: On GitHub these branches moved" in preface
+    assert "In `shared-lib`: These branches of your last turn are no longer on GitHub" in preface
+    assert "`feature/old`" in preface
+
+
+# #1093-T72
+def test_a_name_that_is_not_plain_is_not_shown_in_the_multi_preface() -> None:
+    preface = build_preface(
+        PrefaceFacts(
+            turn=2,
+            mode=ResumeMode.IMPORTED,
+            branches=(),
+            checkout="",
+            repos=[RepoPrefaceFacts("a b`", [("`evil`", SHA_A)], "`evil`")],
+        )
+    )
+
+    assert "`evil`" not in preface and "a b`" not in preface
+    assert "a repository whose name is not shown here" in preface

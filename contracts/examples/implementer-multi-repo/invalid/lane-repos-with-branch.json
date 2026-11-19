@@ -1,0 +1,19 @@
+{
+  "why": "`repos` and the step's `branch` exclude each other.",
+  "layer": "schema",
+  "error": "repos_with_branch",
+  "definition": "AgentStep",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": [
+      {
+        "repo": "a/b"
+      }
+    ],
+    "branch": "main"
+  },
+  "patch": []
+}

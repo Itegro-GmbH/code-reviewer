@@ -6,6 +6,7 @@ import type {
   TicketList,
   TicketListItem,
 } from "../tracker/service.ts";
+import type { LaneNodeView } from "../workflow-runs/lane-nodes.ts";
 import type { StartLane } from "./start-lanes.ts";
 
 export function ticket(
@@ -46,6 +47,8 @@ export function ticketList(
     repositoryId: "repo-1",
     repo: "acme/widgets",
     items,
+    // The nodes of `TRACKED_LANE`'s lane version, which any lane built on it names.
+    laneNodes: { [TRACKED_NODES_KEY]: TRACKED_NODES },
     sync: {
       lastFullSyncAt: "2026-11-06T09:00:00.000Z",
       inProgress: false,
@@ -66,6 +69,37 @@ export const LANE: StartLane = {
   turnTimeLimitMinutes: 60,
 };
 
+/** The key of the nodes of `TRACKED_LANE` in `TicketList.laneNodes` (#1087). */
+export const TRACKED_NODES_KEY = "wf-9@1|manual|by-hand";
+
+/** The top-level nodes of `TRACKED_LANE`'s lane version. */
+export const TRACKED_NODES: LaneNodeView[] = [
+  {
+    id: "implement",
+    kind: "agent",
+    note: "Implement",
+    connector: null,
+    innerIds: [],
+    body: [],
+  },
+  {
+    id: "review",
+    kind: "agent",
+    note: "Review",
+    connector: null,
+    innerIds: [],
+    body: [],
+  },
+  {
+    id: "merge",
+    kind: "action",
+    note: null,
+    connector: "pr.merge",
+    innerIds: [],
+    body: [],
+  },
+];
+
 /** A lane run on a ticket with its track (#1080): three steps, the first done, the second running. */
 export const TRACKED_LANE: TicketLane = {
   runId: "run-9",
@@ -73,32 +107,7 @@ export const TRACKED_LANE: TicketLane = {
   name: "Issue to PR",
   step: "review",
   status: "running",
-  nodes: [
-    {
-      id: "implement",
-      kind: "agent",
-      note: "Implement",
-      connector: null,
-      innerIds: [],
-      body: [],
-    },
-    {
-      id: "review",
-      kind: "agent",
-      note: "Review",
-      connector: null,
-      innerIds: [],
-      body: [],
-    },
-    {
-      id: "merge",
-      kind: "action",
-      note: null,
-      connector: "pr.merge",
-      innerIds: [],
-      body: [],
-    },
-  ],
+  nodesKey: TRACKED_NODES_KEY,
   steps: [
     { id: "implement", kind: "agent", status: "succeeded", round: 1 },
     { id: "review", kind: "agent", status: "running", round: 1 },

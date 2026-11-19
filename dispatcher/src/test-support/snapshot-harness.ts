@@ -16,6 +16,9 @@ export const PROBE_OK =
 export const MANIFEST_HASH = "c".repeat(64);
 export const MANIFEST_OK = `MANIFEST_SHA256 ${MANIFEST_HASH}\n`;
 export const VM_PREPARE_TEXT = "#!/usr/bin/env bash\n# stand-in vm-prepare\n";
+/** What the image prints for its own `WORKER_FEATURES` (#1098); sorted in the record. */
+export const WORKER_FEATURES_OK =
+  "WORKER_FEATURES implementer_multi_repo,implementer_ask\n";
 export const SYSBOX_PREPARE_TEXT =
   "#!/usr/bin/env bash\n# stand-in sysbox-prepare\n";
 export const SYSBOX_PROBE_OK =
@@ -35,6 +38,7 @@ export function happyFake(): FakeSandboxService {
   });
   fake.onExec(STEPS.probe, { stdout: PROBE_OK });
   fake.onExec(STEPS.sysboxProbe, { stdout: SYSBOX_PROBE_OK });
+  fake.onExec(STEPS.workerFeatures, { stdout: WORKER_FEATURES_OK });
   return fake;
 }
 

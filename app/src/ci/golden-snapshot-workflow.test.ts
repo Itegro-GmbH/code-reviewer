@@ -78,6 +78,7 @@ describe("golden snapshot workflow", () => {
       "image-digest",
       "snapshot-id",
       "sysbox",
+      "worker-features",
     ]);
     for (const output of Object.values(outputs))
       expect(output.value).toMatch(/^\$\{\{ jobs\.build\.outputs\./);
@@ -91,6 +92,12 @@ describe("golden snapshot workflow", () => {
     // #745-T02: the verdict is `proven` only when the record says exactly that; a missing field is `unproven`.
     expect(read.run).toContain('if .sysbox == "proven"');
     expect(job.outputs?.sysbox).toBe("${{ steps.record.outputs.sysbox }}");
+    // #1098-T11: the Worker image's feature list travels as the fifth member; a record without one reads as `none`.
+    expect(read.run).toContain("(.workerFeatures // [])");
+    expect(read.run).toContain('then "none" else join(",")');
+    expect(job.outputs?.["worker-features"]).toBe(
+      "${{ steps.record.outputs.worker-features }}",
+    );
   });
 
   // #403-T22
@@ -249,6 +256,15 @@ describe("golden snapshot workflow", () => {
     expect(show.run).toContain("sandbox_unproven");
     expect(show.run).not.toContain("still launches");
     expect(show.run).not.toContain("will not start a Sysbox container");
+  });
+
+  // #1098: a snapshot whose image lists no feature is shown, never failed; the multi-repo jobs then wait, so the first release is checked by eye.
+  it("shows a snapshot without a Worker feature as a warning annotation of the run and does not fail on it", () => {
+    const show = stepNamed("Show the record");
+    expect(show.run).toContain("::warning title=Worker features none::");
+    expect(show.run).toContain('[ "$features" = "none" ]');
+    expect(show.run).toContain(".workerFeatures");
+    expect(show.run).not.toMatch(/::error|exit 1/);
   });
 
   // #330-extra-workflow

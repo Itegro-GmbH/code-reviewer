@@ -15,6 +15,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ISSUES_POLL, type IssuesApi } from "./api.ts";
 import { IssuesBoard } from "./issues-board.tsx";
+import type { TicketList } from "../tracker/service.ts";
 import { LANE, TRACKED_LANE, ticket, ticketList } from "./test-fixtures.ts";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -30,7 +31,7 @@ const RUNNING = {
   name: "Issue to PR",
   step: "implement",
   status: "running" as const,
-  nodes: [],
+  nodesKey: null,
   steps: [],
 };
 
@@ -554,25 +555,32 @@ describe("the lane run on a ticket of the board (#1080)", () => {
       status: "succeeded" | "waiting",
     ) => ({ id, kind, status, round: 1 });
     board({
-      initial: ticketList([
-        ticket(2, {
-          lane: {
-            ...TRACKED_LANE,
-            status: "waiting",
-            step: "work",
-            nodes: [node("plan", "agent"), loop, node("ship", "action")],
-            steps: [
-              step("plan", "agent", "succeeded"),
-              step("work", "agent", "succeeded"),
-              step("deep", "action", "succeeded"),
-              step("inner", "loop", "succeeded"),
-              step("work", "agent", "waiting"),
-              // a step of `onFailure`: no node of the lane
-              step("notify", "action", "succeeded"),
-            ],
+      initial: ticketList(
+        [
+          ticket(2, {
+            lane: {
+              ...TRACKED_LANE,
+              status: "waiting",
+              step: "work",
+              nodesKey: "nested",
+              steps: [
+                step("plan", "agent", "succeeded"),
+                step("work", "agent", "succeeded"),
+                step("deep", "action", "succeeded"),
+                step("inner", "loop", "succeeded"),
+                step("work", "agent", "waiting"),
+                // a step of `onFailure`: no node of the lane
+                step("notify", "action", "succeeded"),
+              ],
+            },
+          }),
+        ],
+        {
+          laneNodes: {
+            nested: [node("plan", "agent"), loop, node("ship", "action")],
           },
-        }),
-      ]),
+        },
+      ),
     });
 
     const track = within(rowOf(2)).getByRole("img", {
@@ -626,6 +634,61 @@ describe("the lane run on a ticket of the board (#1080)", () => {
       within(rowOf(2)).getByRole("img", {
         name: "Step 3 of 3: pr.merge, running",
       }),
+    ).toBeTruthy();
+  });
+
+  // #1087-T10
+  it("keeps the track in the drawer when the ticket falls out of the list and the next list carries no nodes for its lane", async () => {
+    const { rerender } = board({
+      initial: ticketList([
+        ticket(2, { title: "Fix crash", lane: TRACKED_LANE }),
+      ]),
+    });
+    await userEvent.click(
+      within(rowOf(2)).getByRole("button", { name: "#2 Fix crash" }),
+    );
+    const drawer = await screen.findByRole("dialog", { name: /Fix crash/ });
+    expect(
+      within(drawer).getByRole("img", { name: "Step 2 of 3: Review, running" }),
+    ).toBeTruthy();
+
+    rerender(
+      <IssuesBoard
+        workspaceSlug="acme"
+        repositoryId="repo-1"
+        projectId="p-1"
+        initial={ticketList([ticket(1, { title: "Add caching" })], {
+          laneNodes: {},
+        })}
+        lanes={[LANE]}
+        mayStart
+        api={api}
+      />,
+    );
+
+    expect(
+      within(screen.getByRole("dialog", { name: /Fix crash/ })).getByRole(
+        "img",
+        { name: "Step 2 of 3: Review, running" },
+      ),
+    ).toBeTruthy();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  // #1087-T11
+  it("shows no track and does not crash when the response of an older server carries no lane nodes", () => {
+    board({
+      initial: ticketList([ticket(2, { lane: TRACKED_LANE })], {
+        // An older server sends no `laneNodes` (nor a `nodesKey`).
+        laneNodes: undefined as unknown as TicketList["laneNodes"],
+      }),
+    });
+
+    const row = within(rowOf(2));
+    expect(row.queryByRole("img")).toBeNull();
+    expect(
+      row.getByRole("link", { name: "Open the run of Issue to PR" }),
     ).toBeTruthy();
   });
 });

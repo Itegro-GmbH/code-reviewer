@@ -60,6 +60,7 @@ from code_reviewer_runner.implementer.reader import (
     ReaderSeams,
     reader_document,
 )
+from code_reviewer_runner.implementer.repo_places import SINGLE, RepoPlaces, places_of
 from code_reviewer_runner.job import JobError
 from code_reviewer_runner.result import ErrorCode
 
@@ -1569,3 +1570,146 @@ def test_an_adopted_container_made_with_new_privileges_sealed_passes_when_the_se
             OFF,
             adopted=Adopted(identifier, setup_network=sc.SETUP_NETWORK_NAME, dns=sc.SETUP_DNS),
         ).create()
+
+
+# -- several repositories in one turn (#1093) ---------------------------------------------------
+
+MULTI_PLACES = places_of(("acme__app", "shared-lib"))
+
+
+# #1093-T40
+def test_a_multi_repository_turn_mounts_every_repository_at_its_own_path_and_works_in_work() -> (
+    None
+):
+    document = agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024, places=MULTI_PLACES)
+
+    assert document["WorkingDir"] == "/work", "not a repository: the agent changes into one"
+    assert document["HostConfig"]["Mounts"] == [
+        {
+            "Type": "volume",
+            "Source": WORK_VOLUME,
+            "Target": f"/work/{name}",
+            "ReadOnly": False,
+            "VolumeOptions": {"Subpath": name, "NoCopy": True},
+        }
+        for name in ("acme__app", "shared-lib")
+    ], "each repository is its own Subpath, so the mirrors stay out of the agent's reach"
+
+
+# #1093-T41
+def test_the_turn_of_one_repository_has_the_container_it_always_had() -> None:
+    document = agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024)
+
+    assert document["WorkingDir"] == "/work/repo"
+    assert [m["Target"] for m in document["HostConfig"]["Mounts"]] == ["/work/repo"]
+    assert document == agent_document(AGENT_IMAGE_ID, WORK_VOLUME, 1024, places=SINGLE)
+
+
+# #1093-T42
+def test_the_fallback_working_directory_is_the_first_repository() -> None:
+    fallback = RepoPlaces(names=("a", "b"), multi=True, workdir_of_first=True)
+
+    assert fallback.agent_workdir == "/work/a"
+
+
+# #1093-T43
+def test_the_readers_of_a_multi_repository_turn_have_every_repository_and_nothing_else() -> None:
+    reading = reader_document(IMAGE_ID, WORK_VOLUME, places=MULTI_PLACES)
+    writing = reader_document(IMAGE_ID, WORK_VOLUME, places=MULTI_PLACES, writable=True)
+
+    for document, read_only in ((reading, True), (writing, False)):
+        assert document["HostConfig"]["Mounts"] == [
+            {
+                "Type": "volume",
+                "Source": WORK_VOLUME,
+                "Target": f"/repos/{name}",
+                "ReadOnly": read_only,
+                "VolumeOptions": {"Subpath": name, "NoCopy": True},
+            }
+            for name in ("acme__app", "shared-lib")
+        ]
+
+
+# #1093-T44
+def test_the_agent_container_of_a_multi_repository_turn_passes_its_own_boundary_check(
+    rig: Rig,
+) -> None:
+    place = AgentContainer(1024, rig.seams(places=MULTI_PLACES))
+
+    place.create()
+
+    made = rig.engine.container(AGENT_CONTAINER_NAME)
+    assert {m["Target"] for m in made.document["HostConfig"]["Mounts"]} == {
+        "/work/acme__app",
+        "/work/shared-lib",
+    }
+    place.stop()
+
+
+# #1093-T45
+def test_a_command_in_a_repository_of_a_multi_repository_turn_runs_there(rig: Rig) -> None:
+    access = ReaderAccess(
+        None, ReaderSeams(rig.api, lambda: HOSTNAME), places=MULTI_PLACES
+    ).for_repo("shared-lib")
+
+    done = access.run(["status"], timeout=5.0)
+
+    assert done.returncode == 0
+    argv, _, workdir = rig.execs[0]
+    assert workdir == "/repos/shared-lib"
+    assert "safe.directory=/repos/shared-lib" in argv
+    assert access.repo_source == "/work/shared-lib"
+    assert access.upload_pack() == (
+        "/opt/venv/bin/python -I -m code_reviewer_runner.implementer.exec_pipe "
+        "--reader-repo=/repos/shared-lib"
+    )
+
+
+# #1093-T46
+def test_the_pipe_runs_upload_pack_in_the_named_repository(
+    rig: Rig, reader_up: ReaderAccess
+) -> None:
+    rig.engine.exec_behaviour = lambda made, stdin, stdout: 0
+
+    code, _ = pipe_run(rig, ["--reader-repo=/repos/shared-lib", "/work/shared-lib"], {}, b"")
+
+    assert code == 0
+    (made,) = list(rig.engine.execs.values())[-1:]
+    assert made.document["Cmd"][-2:] == ["upload-pack", "/repos/shared-lib"]
+    assert made.document["WorkingDir"] == "/repos/shared-lib"
+
+
+# #1093-T47
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--reader-repo=/repos/shared-lib", "/work/other"],
+        ["--reader-repo=/repos/shared-lib"],
+        ["--reader-repo=/etc", "/work/etc"],
+        ["--reader-repo=/repos/..", "/work/.."],
+        ["--reader-repo=/repos/-x", "/work/-x"],
+        ["--reader-repo=/repos/a/b", "/work/a/b"],
+        ["--reader-repo=/repos/result", "/work/result"],
+        ["--reader-repo=/repos/x;rm", "/work/x;rm"],
+        # The reserved names of the work volume and `.git` in any case, the empty name, the dots.
+        ["--reader-repo=/repos/reserve", "/work/reserve"],
+        ["--reader-repo=/repos/RESULT", "/work/RESULT"],
+        ["--reader-repo=/repos/.GIT", "/work/.GIT"],
+        ["--reader-repo=/repos/", "/work/"],
+        ["--reader-repo=/repos/.", "/work/."],
+        ["--reader-repo=/repos//x", "/work//x"],
+        ["--reader-repo=/repos/x/", "/work/x/"],
+        ["--reader-repo=repos/x", "/work/x"],
+        ["--reader-repo=/repos/" + "x" * 203, "/work/" + "x" * 203],
+        # The option twice, or with the name of a single-repository turn's directory.
+        ["--reader-repo=/repos/a", "--reader-repo=/repos/a", "/work/a"],
+        ["--reader-repo=/repo", "/work/repo"],
+    ],
+)
+def test_the_pipe_takes_a_repository_only_as_a_mount_name_and_the_same_one_twice(
+    rig: Rig, reader_up: ReaderAccess, argv: list[str]
+) -> None:
+    code, _ = pipe_run(rig, argv, {}, b"")
+
+    assert code == exec_pipe.USAGE_ERROR
+    assert rig.execs == [], "nothing was started in the reader"

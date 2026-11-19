@@ -50,11 +50,10 @@ AGENT_REPO: Final = "/work/repo"
 WATCH_INTERVAL_SECONDS: Final = 0.05
 # The exec outlives the clock by this much, so that the clock's own limit is what ends a turn.
 TIMEOUT_MARGIN_SECONDS: Final = 30.0
-# Hands the repository and the result directory (made by the runner, as root) to the user Claude
-# Code runs as. Constants only; the user is the argument.
-_HAND_OVER: Final = (
-    'chown -R "$0" /work/repo && { [ ! -d /work/result ] || chown -R "$0" /work/result; }'
-)
+# Hands the repository (or the repositories of a multi-repository turn, #1093: the paths come after
+# the user) and the result directory (made by the runner, as root) to the user Claude Code runs as.
+# Constants only; the user and the paths are the arguments.
+_HAND_OVER: Final = 'chown -R "$0" "$@" && { [ ! -d /work/result ] || chown -R "$0" /work/result; }'
 HAND_OVER_SECONDS: Final = 120.0
 # The smallest amount `--max-budget-usd` takes; a leftover below it is spent.
 _BUDGET_STEP: Final = Decimal("0.000001")
@@ -113,8 +112,12 @@ class ClaudeCodeAgent:
         resume_from: str | None = None,
         base_url: str | None = None,
         mcp_endpoints: Sequence[McpEndpoint] = (),
+        repo_paths: Sequence[str] = (AGENT_REPO,),
     ) -> None:
         self._place = place
+        # Where the repositories are in the container (`/work/repo`, or `/work/<name>` for each
+        # repository of a multi-repository turn).
+        self._repo_paths = tuple(repo_paths)
         self._login = login
         self._model = model
         self._remaining = remaining_seconds
@@ -185,7 +188,9 @@ class ClaudeCodeAgent:
         if files:
             self._place.write_files(files)
         done = self._place.run_command(
-            ["/bin/sh", "-c", _HAND_OVER, AGENT_USER], {"PATH": AGENT_PATH}, HAND_OVER_SECONDS
+            ["/bin/sh", "-c", _HAND_OVER, AGENT_USER, *self._repo_paths],
+            {"PATH": AGENT_PATH},
+            HAND_OVER_SECONDS,
         )
         if not done.ok:
             raise EngineError(

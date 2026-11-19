@@ -17,7 +17,7 @@ import type {
   StoredImplementerTurn,
 } from "../db/repositories/implementer-repository.ts";
 import { CLAUDE_CODE_HARNESS } from "../runner-identity/harness.ts";
-import { FACT_NAMES } from "../workflows/facts.ts";
+import { FACT_NAMES, REPOS_FACT } from "../workflows/facts.ts";
 import { isRecord } from "../workflows/json.ts";
 import {
   checkResultValue,
@@ -142,11 +142,9 @@ function implementerBlock(jobResult: unknown): Record<string, unknown> {
     : {};
 }
 
-/** The facts of a turn that may push; the cost is added by the caller. */
-function pushFacts(ended: EndedTurn): Record<string, unknown> {
-  const block = implementerBlock(ended.jobResult);
-  const commits = Array.isArray(block.commits)
-    ? block.commits.flatMap((commit: unknown) =>
+function commitShas(commits: unknown): string[] {
+  return Array.isArray(commits)
+    ? commits.flatMap((commit: unknown) =>
         isRecord(commit) &&
         typeof commit.sha === "string" &&
         COMMIT_SHA.test(commit.sha)
@@ -154,6 +152,75 @@ function pushFacts(ended: EndedTurn): Record<string, unknown> {
           : [],
       )
     : [];
+}
+
+/** The tip of a branch when the turn ended, else where it started (the commit it started from when the agent made none), else nothing. */
+function tipOf(entry: Record<string, unknown>): string {
+  return typeof entry.headCommit === "string" &&
+    COMMIT_SHA.test(entry.headCommit)
+    ? entry.headCommit
+    : typeof entry.baseCommit === "string" && COMMIT_SHA.test(entry.baseCommit)
+      ? entry.baseCommit
+      : "";
+}
+
+/**
+ * #1092: `{{<step>.repos}}`, one entry for each repository of a turn on several, in the order of the step: the repository, its base and working
+ * branch, the commits this turn made on it, its tip and whether that tip is on the remote. Read from what the runner measured; an entry that
+ * is not a repository report is left out, so a report that has none gives an empty list.
+ */
+function repoFacts(block: Record<string, unknown>): Record<string, unknown>[] {
+  if (!Array.isArray(block.repos)) return [];
+  return block.repos.flatMap((entry: unknown) =>
+    isRecord(entry) &&
+    typeof entry.fullName === "string" &&
+    typeof entry.base === "string" &&
+    typeof entry.branch === "string"
+      ? [
+          {
+            fullName: entry.fullName,
+            base: entry.base,
+            branch: entry.branch,
+            commits: commitShas(entry.commits),
+            headCommit: tipOf(entry),
+            pushed: entry.pushed === true,
+            ...(workingBranchRejected(entry) ? { pushRejected: true } : {}),
+          },
+        ]
+      : [],
+  );
+}
+
+/** Whether the runner reported the working branch of a repository as rejected by the remote (#1094): it is not on the remote, and says why. */
+function workingBranchRejected(entry: Record<string, unknown>): boolean {
+  if (entry.pushed === true || !Array.isArray(entry.branches)) return false;
+  return entry.branches.some(
+    (branch: unknown) =>
+      isRecord(branch) &&
+      branch.name === entry.branch &&
+      branch.result === "rejected",
+  );
+}
+
+/**
+ * The facts of a turn that may push; the cost is added by the caller. A turn on several repositories (#1092) also yields `repos`, and the
+ * single facts are the first repository's: its working branch (the session's own name is no git branch), its commits of this turn, its tip
+ * and its push state.
+ */
+function pushFacts(ended: EndedTurn): Record<string, unknown> {
+  const block = implementerBlock(ended.jobResult);
+  if (ended.session.repos !== null) {
+    const repos = repoFacts(block);
+    const first = repos[0];
+    return {
+      branch: first?.branch ?? ended.session.repos[0]?.branch ?? "",
+      commits: first?.commits ?? [],
+      headCommit: first?.headCommit ?? "",
+      pushed: first?.pushed === true,
+      [REPOS_FACT]: repos,
+    };
+  }
+  const commits = commitShas(block.commits);
   const head =
     typeof block.headCommit === "string" && COMMIT_SHA.test(block.headCommit)
       ? block.headCommit
@@ -296,8 +363,13 @@ export function outcomeOfTurn(
 
   // A fact name is never the agent's: a profile that may not push has no `branch` fact, and a result field of that name (a stored
   // schema from before the validator refused it) must not stand in for one. So the names are taken out of the result first.
+  // A step on several repositories (#1092) reserves `repos` as well; a field of that name in the schema stored with the turn is dropped too.
   const agentFields = Object.fromEntries(
-    Object.entries(result).filter(([name]) => !FACT_NAMES.includes(name)),
+    Object.entries(result).filter(
+      ([name]) =>
+        !FACT_NAMES.includes(name) &&
+        !(ended.session.repos !== null && name === REPOS_FACT),
+    ),
   );
   const facts: Record<string, unknown> = {
     ...(ended.turn.profile?.canPush === true ? pushFacts(ended) : {}),

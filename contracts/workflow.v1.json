@@ -186,6 +186,15 @@
           "pattern": "\\S",
           "maxLength": 20000
         },
+        "repos": {
+          "description": "#1091 (epic #1090, ADR 0006): the repositories this step works on, one to ten. Left out, the step works on the run's one repository on a branch of its own, exactly as before (and the `branch` above applies). With `repos`, each entry names a repository of the workspace (any active one the GitHub App can reach, and write to when the profile may push), its base branch and, optionally, the branch to work on: a branch that exists is checked out and continued, one that does not is created from the base, and an entry without a branch works and pushes directly on its base branch. The run's repository is not special and need not be listed. Not together with `branch` (`repos_with_branch`) and not with `session.continue` (`repos_with_session_continue`): a session that goes on keeps the repositories of the session it continues, as the first turn resolved them (`name`, `base`, `branch` are never resolved again, also for an answer turn or a resume). `{{<step>.repos}}` of a step that continues a session yields the session's list. Two entries may not name the same repository, **compared without regard to case** (`Acme/App` and `acme/app` are one repository on GitHub): `repo_duplicate`, which the validator reports for two literals that are equal in that sense and the engine for the filled-in references when the step runs, before the agent starts (free). Two repositories whose mount names (`ImplementerMountName` in `runner-api.v1.json`) clash after the derivation end the step `repo_name_clash` (free). Version 1 documents without `repos` are unchanged.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/AgentStepRepo"
+          }
+        },
         "result": {
           "description": "What the agent's result looks like; the finish tool is made from it. Without one the step yields the facts only (and the result schema of the profile, once profiles bring one).",
           "$ref": "result-schema.v1.json#/$defs/ResultSchema"
@@ -193,6 +202,57 @@
         "mcp": {
           "description": "The MCP servers this step may use (#1052): a subset of the lane's `mcp`. Left out: all of the lane's. An empty list: none. A server the lane does not name is `mcp_server_not_in_lane` (checked by the validator).",
           "$ref": "#/$defs/McpServerList"
+        }
+      },
+      "allOf": [
+        {
+          "description": "#1091: `repos` and the single start `branch` exclude each other.",
+          "if": {
+            "required": ["repos"]
+          },
+          "then": {
+            "not": {
+              "required": ["branch"]
+            }
+          }
+        },
+        {
+          "description": "#1091: `repos` and `session.continue` exclude each other: a session that goes on keeps its repositories.",
+          "if": {
+            "required": ["repos", "session"],
+            "properties": {
+              "session": {
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": ["repos"]
+            }
+          }
+        }
+      ]
+    },
+    "AgentStepRepo": {
+      "description": "#1091 (epic #1090): one repository of an agent step. All three fields decide what the agent works on and where its commits go, so they are targets: `repo` is a literal `owner/name` or exactly one reference to `{{trigger.ticket.repo.fullName}}`, `{{trigger.repo.fullName}}` or an input of a manual trigger; `base` is a literal branch name or exactly one reference to `{{trigger.ticket.repo.defaultBranch}}`, `{{trigger.repo.defaultBranch}}` or an input of a manual trigger; `branch` is a literal or a text whose references are only values the platform or the caller vouches for (`{{trigger.ticket.key}}`, `{{trigger.ticket.number}}`, `{{trigger.input.<name>}}`), so `feature/{{trigger.ticket.key}}` is valid. Nothing an agent or an issue's title, body or labels wrote (`target_from_untrusted_value`). A reference that gives something that is not a repository or a branch name fails the step before the agent starts (`repo_invalid`, `branch_invalid`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo"],
+      "properties": {
+        "repo": {
+          "description": "The repository, `owner/name`, as a literal or one reference. A repository the workspace has no active installation for is `repo_not_available` (checked when the step runs, free).",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "base": {
+          "description": "The branch the work starts from when `branch` does not exist, and the branch a pull request is opened against. Left out: the default branch of that repository, read when the step runs. A base branch the repository does not have ends the step `base_branch_not_found` (free).",
+          "$ref": "#/$defs/Template"
+        },
+        "branch": {
+          "description": "The branch to work on. It exists: it is checked out and the work continues on it (a second fix round, a retry). It does not exist: it is created from the head of `base`. Left out, or equal to `base`: the agent works directly on the base branch and what it commits is pushed to it (a branch protection rule may refuse that; the refusal is reported for that repository, never forced). A pull request needs a branch different from the base.",
+          "$ref": "#/$defs/Template"
         }
       }
     },
@@ -237,7 +297,7 @@
     "PullRequestOpenAction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "connector", "head", "title"],
+      "required": ["id", "kind", "connector", "title"],
       "properties": {
         "id": {
           "$ref": "#/$defs/StepId"
@@ -255,6 +315,10 @@
         "head": {
           "description": "A branch: a literal, or exactly one reference to the branch of an agent step that may push (`{{implement.branch}}`). The validator refuses anything else.",
           "$ref": "#/$defs/Template"
+        },
+        "repos": {
+          "description": "#1094 (epic #1090, ADR 0006): exactly one reference to the `repos` fact of an earlier agent step that may push (`{{implement.repos}}`); the validator refuses anything else (`target_from_untrusted_value`). Replaces `head` and `base`: opens one pull request for each entry whose branch differs from its base, has commits ahead of the base on the provider and has no open pull request from that branch yet, in that entry's repository against its base (an open one is reported as `existing`). An entry with direct work (branch equal to base), nothing pushed or no commits ahead is skipped, not an error. `title` and `body` apply to every pull request, and `{{repo.fullName}}`, `{{repo.base}}` and `{{repo.branch}}` stand for the repository being opened in them. The step yields `pullRequests` (one entry per repository: `fullName`, `base`, `head`, `state` opened|existing|skipped, `reason` for a skipped one, `number` and `url`) and the single `number`, `url`, `existing` and `repository` of the first pull request that exists (absent when none does). `ticket.requestReview` asks for the first pull request only, in its own repository (`repository` of the step output: `{{pr.repository}}`); it skips when there is none. The `reason` of a skipped one is `direct`, `not_pushed`, `push_rejected` or `no_commits`.",
+          "$ref": "#/$defs/Reference"
         },
         "base": {
           "description": "A branch: a literal, or exactly one reference to `{{trigger.repo.defaultBranch}}` or to an input of a manual trigger (`{{trigger.input.<name>}}`). The default branch of the repository when left out. The validator refuses anything else.",
@@ -276,7 +340,38 @@
             }
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "description": "#1094: a pull request step names the branch to open it from (`head`) or the repositories (`repos`).",
+          "anyOf": [
+            {
+              "required": ["head"]
+            },
+            {
+              "required": ["repos"]
+            }
+          ]
+        },
+        {
+          "description": "#1094: `repos` replaces `head` and `base`: not together.",
+          "if": {
+            "required": ["repos"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["head"]
+                },
+                {
+                  "required": ["base"]
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     "IssueCommentAction": {
       "type": "object",
@@ -442,6 +537,10 @@
         },
         "pullRequest": {
           "$ref": "#/$defs/PullRequestInput"
+        },
+        "repository": {
+          "description": "#1094: the repository of the pull request as `owner/name`, when it is not the repository of the run: a literal, or exactly one reference to `{{<step id>.repository}}` of a `pullRequest.open` step with `repos` (the repository of its first pull request). Only an active repository of the workspace is acted on. Left out, the review is asked in the repository of the run. When the number has no value because that step opened no pull request, the step skips (`skipped: \"no_pull_request\"`); a `| default` on that number is refused.",
+          "$ref": "#/$defs/Template"
         },
         "reviewers": {
           "description": "The text \"project members\" (the members of the project that has a GitHub login; the ones that cannot review this pull request are left out), or a list of GitHub logins (literals and references to inputs of a manual trigger, one reference per entry), or exactly one reference to a list input. `invalid_value` names \"project members\" in `available` for another text.",

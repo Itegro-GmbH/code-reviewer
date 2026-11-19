@@ -331,17 +331,17 @@ yours.
   under **LLM key** (`/admin/llm`, section 3.5), also encrypted in the database. The `GITHUB_*` and `LLM_API_KEY`
   variables the code still reads are not used by a hosted instance, which never sets them (section 3.1).
 
-**The golden snapshot keys.** Four keys of `/dispatcher` belong to the pipeline: `SANDBOX_SNAPSHOT_ID`,
-`SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from) and `SANDBOX_SYSBOX_PROOF` (the verdict of the snapshot's Sysbox proof, the fourth member of the pair). **Do not create them,
+**The golden snapshot keys.** Five keys of `/dispatcher` belong to the pipeline: `SANDBOX_SNAPSHOT_ID`,
+`SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from), `SANDBOX_SYSBOX_PROOF` (the verdict of the snapshot's Sysbox proof, the fourth member of the pair) and `SANDBOX_WORKER_FEATURES` (the features the Worker image lists, the fifth member; #1098). **Do not create them,
 and do not give them a placeholder.** Absent is the supported state ("no launcher, nothing is claimed"); a placeholder
 that is not an id makes the Dispatcher refuse to start (`SANDBOX_SNAPSHOT_ID` set without a valid
 `SANDBOX_IMAGE_DIGEST`, or the other way round, is a `ConfigError` when the function initialises), in every deployment
 that does not get the pipeline's own values. The first deployment writes the keys (the write creates what is missing, so
-the identity needs *create* as well as *edit* on exactly these four names: a 403 on that first write means the role
+the identity needs *create* as well as *edit* on exactly these five names: a 403 on that first write means the role
 lacks it), and from then on **do not edit them by hand**: the pipeline writes them, and only after a promotion. They
 are not secrets, and they must reach Vercel as ordinary variables, **not as Sensitive ones**: `vercel pull` does not
 return a Sensitive variable, and a blank pair makes every deployment rebuild the snapshot (safe, but slow and wasteful).
-After the first run, check once that the four keys exist in Infisical and in the Vercel project, and that Vercel does
+After the first run, check once that the five keys exist in Infisical and in the Vercel project, and that Vercel does
 not show them as Sensitive. The pipeline works from the pair its live Dispatcher deployment carries (section 5.1); the
 keys are what Secret Sync and a deployment made by hand see.
 
@@ -351,7 +351,7 @@ Its role is exactly this, and nothing more (create a custom role and add the ide
 | Permission (Infisical project role) | Environment | Secret path | Secret names | Why |
 |---|---|---|---|---|
 | Secrets: describe and read value | `prod` | `/ci` | any | The jobs load the keys of `/ci` |
-| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` | The persist job and the rollback write the pair |
+| Secrets: describe, create and edit | `prod` | `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF`, `SANDBOX_WORKER_FEATURES` | The persist job and the rollback write the pair |
 | Read the project (to find it by its slug) | the project | | | The write path looks the project id up from `INFISICAL_PROJECT_SLUG` |
 
 - **No** read of `/app` or `/dispatcher`, no other environment, no delete, no folder, project or identity
@@ -366,9 +366,15 @@ Its role is exactly this, and nothing more (create a custom role and add the ide
   release repeats the same refusal at `persist`, because it tries the same first write again: they all stay red until the
   permission is granted, after which *Re-run failed jobs* of the latest run writes the pair and lets the cleanup run.
   Nothing live breaks meanwhile: the staged Dispatcher deployment carries its pair, the verdict included, as its own variables.
-- **The condition on the four secret names (`$in` the four names) is recommended hardening**: it makes the write
+- **Grant the fifth name, `SANDBOX_WORKER_FEATURES`, before the release that carries the Dispatcher's feature gate (#1098).** Same
+  rule and same consequence as for the fourth name above: the persist job writes the list first (cleared to `none`) and *creates* the
+  key on that first write, and a role without it makes `persist` fail after the promotion (the run is red, `cleanup` is skipped, every
+  later release stays red until the grant is made and the run's failed jobs are re-run). It is the very first write, so a missing
+  grant fails before anything else in Infisical changed (no cleared verdict next to the old snapshot id). Nothing live breaks
+  meanwhile: the staged Dispatcher deployment carries the list as its own variable.
+- **The condition on the five secret names (`$in` the five names) is recommended hardening**: it makes the write
   path unable to touch any other key of `/dispatcher` even if the code that calls it were changed. The pipeline does not
-  depend on it (the code fixes the four names itself), so a role without it works.
+  depend on it (the code fixes the five names itself), so a role without it works.
 - The same identity reads `/ci` in the read-only jobs and writes in two places; the repository's structure tests pin
   that only the `persist` job of `deploy-production.yml` and the `rollback` job of `rollback-production.yml` use the
   write path (`.github/actions/infisical-write-snapshot-pair`), and that every other job only loads keys of `/ci`.
@@ -510,6 +516,7 @@ A refusal at start names the variable, never its value (`ConfigError`: `required
 | `SANDBOX_SNAPSHOT_ID` | yes | no | The golden snapshot: `snapshotId` of its record. **The deployment pipeline sets it** (section 5.1): the Dispatcher deployment of every run carries the pair it uses as its own run-time variables, and the pipeline writes the pair to Infisical after the promotion. **Unset, the Dispatcher has no Launcher and claims nothing** (every wake-up is answered `200 ignored` with `not_capable`). Set with `SANDBOX_IMAGE_DIGEST` or not at all. |
 | `SANDBOX_IMAGE_DIGEST` | with the snapshot | no | The Worker image id in that snapshot (`imageDigest` of the same record), `sha256:` and 64 hex characters. The Launcher refuses a VM whose image has another id. The pipeline sets the two together, and writes `SANDBOX_SNAPSHOT_COMMIT` (the commit the snapshot was built from; the Dispatcher does not read it) next to them. |
 | `SANDBOX_SYSBOX_PROOF` | with the snapshot | no | The golden snapshot's Sysbox verdict (`sysbox` of its record): `proven` or `unproven`, the fourth member of the pair. **The deployment pipeline sets it** with the snapshot id (section 5.1). Only `proven` lets an Implementer turn start; anything else, unset included, ends it with the free `sandbox_unproven`. Reviews never read it, whatever it holds. **Do not set it by hand**: a `proven` that stays behind a newer snapshot would let the Implementer start on a snapshot nobody proved |
+| `SANDBOX_WORKER_FEATURES` | with the snapshot | no | The features the Worker image of the snapshot lists (`workerFeatures` of its record, read from the image by the build), comma separated, or `none`: the fifth member of the pair (#1098). **The deployment pipeline sets it** with the snapshot id (section 5.1). The Dispatcher names a claim feature that depends on the image (`implementer_multi_repo`: a job with several repositories) only when it is listed, so that such a job waits in the queue while the Dispatcher runs an older snapshot instead of ending `implementer_engine_unavailable`. Unset, `none`, or a value of another shape (an old pair, a hand deployment): none is named. Never an error. **Do not set it by hand** |
 | `DISPATCHER_PUBLIC_URL` | optional | no | The `https` address this Dispatcher is reached at, an origin without a path (a path is refused when the Dispatcher starts: the route is served at the root): the base of the network switch call (`POST /network`, #745 step 7) by which the Control container of an Implementer VM has the VM's network policy narrowed once the environment's setup script is done (the second wall of the network door, `docs/implementer.md`). Unset, the production address the platform sets (`VERCEL_PROJECT_PRODUCTION_URL`) is used. With neither, no VM gets a switch: the Worker reports `vmPolicy: not_configured` (for every rule, `off` included) and the first wall is the only wall. Not a secret |
 | `VERCEL_PROJECT_PRODUCTION_URL` | set by the platform | no | The production host of the project, without a scheme. **Do not set it by hand.** Read only as the fallback of `DISPATCHER_PUBLIC_URL` |
 | `DISPATCHER_ENGINES` | optional | no | `pr-agent`, `opencode` or both (default both). `implementer` is added to the default when an App of `DISPATCHER_APPS` names the kind, and naming it here never gives it to `reviewer` (#759). The Launcher advertises `implementer` when it is in this list, and then `POST /probe` requires the canary report to name it (the canary VM runs a second probe in the Implementer's profile, #765); without it in the list nothing changes. `pr-agent` for a Diff-only deployment: it has no `POST /probe` and no canary VM. A Dynamic job is accepted whenever `opencode` is in this list and the snapshot pair is set: the Dispatcher runs no capability probe on a dispatch (section 8). |
@@ -555,7 +562,7 @@ its `RUNNER_WEBHOOK_SECRET` as `DISPATCHER_APP_<ID>_SIGNING_SECRET`, its `RUNNER
 |---|---|---|
 | environment `production` (secrets) | `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_DOMAIN`, `INFISICAL_PROJECT_SLUG` | The sign-in to Infisical (section 2.1). Secrets, not variables |
 | Infisical `prod` `/ci` | `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_APP_PROJECT_ID`, `VERCEL_DISPATCHER_PROJECT_ID`, the two bypass secrets, `DATABASE_URL_MIGRATE`, `RUNNER_TOKEN` | What the workflows need (section 2.1). The golden snapshot build reads `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_DISPATCHER_PROJECT_ID`; the Dispatcher's project is the one the snapshot has to be in |
-| Infisical `prod` `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` | Written by the pipeline after a promotion, with the same machine identity (section 2.1 has its role). Not secrets |
+| Infisical `prod` `/dispatcher` | `SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF`, `SANDBOX_WORKER_FEATURES` | Written by the pipeline after a promotion, with the same machine identity (section 2.1 has its role). Not secrets |
 | retired | the environments `hosted-snapshot` and `hosted-canary`, the variables `DISPATCHER_CANARY_HOSTS` and `GOLDEN_SNAPSHOT_ENABLED` | Replaced by the above. The canary no longer keeps a list of hosts: the Vercel API says whether a staged host is the Dispatcher project's |
 
 **What the build sees.** `vercel build` (which runs `next build`, the bundler and every plugin of the two projects) runs
@@ -921,8 +928,8 @@ snapshot it has:
    with the machine identity's write path (section 2.1), after the same freshness check (a pair of an older run must not
    overwrite a newer one; if `main` moved on, the next run finds the live pair and writes it). Secret Sync then carries it
    to the project's variables for deployments made by hand and for the next `vercel pull`. Written also when nothing was
-   rebuilt but the variables are behind the live pair (a repair, below). The four keys are written one after the other,
-   the verdict twice (cleared to `unproven` first, set last): a failure in between leaves a mixed set (a new id with an
+   rebuilt but the variables are behind the live pair (a repair, below). The keys are written one after the other, the list of
+   features first (cleared to `none`, set last), the verdict twice (cleared to `unproven` second, set last): a failure in between leaves a mixed set (a new id with an
    old image id, say), which a deployment made by hand would refuse to start with and which the next run repairs, and
    never a `proven` next to a snapshot nobody proved.
 7. **Clean up** (`cleanup`), **after every promotion of the Dispatcher** (and after persist, when persist had something

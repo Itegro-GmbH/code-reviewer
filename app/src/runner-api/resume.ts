@@ -45,6 +45,11 @@ export type ResumeInput = {
   /** The number of the turn being claimed (2 or more). */
   turnNumber: number;
   sessionBranch: string;
+  /**
+   * #1092: the repositories of a session of several repositories (the mount `name` and the working `branch` of each, in the order of the job).
+   * The block then has `repos`, one entry for each, instead of `branches` and `checkout`.
+   */
+  repos?: ReadonlyArray<{ name: string; branch: string }> | null;
   /** The turns of the session before this one, oldest first. */
   history: readonly TurnHistoryEntry[];
   /** The summary the session holds (the latest a turn reported); null for none. */
@@ -73,6 +78,8 @@ export function cutBytes(text: string, max: number): string {
 
 /** What one earlier turn reported, as far as the app reads it. A field of another type is left out. */
 type Reported = {
+  /** #1092: what the turn reported for each repository of a session of several (`implementer.repos`), by mount name. */
+  repos: Map<string, RepoReported> | null;
   summary: string | null;
   headCommit: string | null;
   pushed: boolean;
@@ -81,6 +88,60 @@ type Reported = {
   commits: Array<{ sha: string; subject: string }>;
   files: string[];
 };
+
+/** What one turn reported about one repository: the pushed branches, the tip, whether it is on the remote and the branch HEAD was on. */
+type RepoReported = Pick<
+  Reported,
+  "headCommit" | "pushed" | "branches" | "checkedOut" | "commits" | "files"
+>;
+
+function branchesReported(value: unknown): Reported["branches"] {
+  const branches: Reported["branches"] = [];
+  if (Array.isArray(value))
+    for (const entry of value) {
+      if (
+        isRecord(entry) &&
+        entry.result === "pushed" &&
+        typeof entry.name === "string" &&
+        typeof entry.head === "string" &&
+        COMMIT_SHA.test(entry.head)
+      )
+        branches.push({ name: entry.name, head: entry.head });
+    }
+  return branches;
+}
+
+function repoReportOf(entry: Record<string, unknown>): RepoReported {
+  return {
+    headCommit:
+      typeof entry.headCommit === "string" && COMMIT_SHA.test(entry.headCommit)
+        ? entry.headCommit
+        : null,
+    pushed: entry.pushed === true,
+    branches: branchesReported(entry.branches),
+    checkedOut:
+      "checkedOut" in entry
+        ? typeof entry.checkedOut === "string"
+          ? entry.checkedOut
+          : null
+        : undefined,
+    commits: Array.isArray(entry.commits)
+      ? entry.commits.flatMap((commit: unknown) =>
+          isRecord(commit) &&
+          typeof commit.sha === "string" &&
+          COMMIT_SHA.test(commit.sha) &&
+          typeof commit.subject === "string"
+            ? [{ sha: commit.sha, subject: commit.subject }]
+            : [],
+        )
+      : [],
+    files: Array.isArray(entry.filesChanged)
+      ? entry.filesChanged.flatMap((file: unknown) =>
+          isRecord(file) && typeof file.path === "string" ? [file.path] : [],
+        )
+      : [],
+  };
+}
 
 function reportOf(result: unknown): Reported | null {
   if (!isRecord(result) || !isRecord(result.implementer)) return null;
@@ -107,7 +168,25 @@ function reportOf(result: unknown): Reported | null {
         typeof entry.subject === "string"
       )
         commits.push({ sha: entry.sha, subject: entry.subject });
+  // #1092: a turn on several repositories: the old fields are the first repository's, `repos` has them all. The digest names each commit
+  // and file by the repository it is in.
+  let repos: Map<string, RepoReported> | null = null;
+  if (Array.isArray(block.repos)) {
+    repos = new Map();
+    commits.length = 0;
+    for (const entry of block.repos)
+      if (isRecord(entry) && typeof entry.name === "string") {
+        const reported = repoReportOf(entry);
+        repos.set(entry.name, reported);
+        for (const commit of reported.commits)
+          commits.push({
+            sha: commit.sha,
+            subject: `[${entry.name}] ${commit.subject}`,
+          });
+      }
+  }
   return {
+    repos,
     summary:
       typeof block.summary === "string" && block.summary.trim() !== ""
         ? block.summary
@@ -125,14 +204,19 @@ function reportOf(result: unknown): Reported | null {
           : null
         : undefined,
     commits,
-    files: Array.isArray(block.filesChanged)
-      ? block.filesChanged.filter((f): f is string => typeof f === "string")
-      : [],
+    files:
+      repos !== null
+        ? [...repos.entries()].flatMap(([name, reported]) =>
+            reported.files.map((file) => `${name}/${file}`),
+          )
+        : Array.isArray(block.filesChanged)
+          ? block.filesChanged.filter((f): f is string => typeof f === "string")
+          : [],
   };
 }
 
 function branchesOf(
-  reports: readonly Reported[],
+  reports: readonly RepoReported[],
   sessionBranch: string,
 ): Array<{ name: string; head: string }> {
   const heads = new Map<string, string>();
@@ -216,23 +300,46 @@ export function buildResume(input: ResumeInput): ResumeBlock {
   const present = reports.filter(
     (report): report is Reported => report !== null,
   );
-  const branches = branchesOf(present, input.sessionBranch);
-
   // Only the turn that ran last says where the agent was; an older turn's checkout may be a branch the later turns left behind.
   const lastReport = reports[reports.length - 1] ?? null;
-  const wanted = lastReport?.checkedOut ?? null;
-  const reachable =
-    wanted !== null &&
-    (wanted === input.sessionBranch ||
-      branches.some((branch) => branch.name === wanted));
-  const checkout = reachable ? wanted : null;
 
-  const block: ResumeBlock = {
-    turn: input.turnNumber,
-    branches,
-    checkout,
-    snapshot: input.hasSnapshot,
+  /** The branches an earlier turn pushed and the branch to check out, from the reports of one repository (or of the only one). */
+  const resumeOf = (
+    each: readonly RepoReported[],
+    last: RepoReported | null,
+    branch: string,
+  ): {
+    branches: Array<{ name: string; head: string }>;
+    checkout: string | null;
+  } => {
+    const pushed = branchesOf(each, branch);
+    const wanted = last?.checkedOut ?? null;
+    const reachable =
+      wanted !== null &&
+      (wanted === branch || pushed.some((entry) => entry.name === wanted));
+    return { branches: pushed, checkout: reachable ? wanted : null };
   };
+
+  const block: ResumeBlock =
+    input.repos === undefined || input.repos === null
+      ? {
+          turn: input.turnNumber,
+          ...resumeOf(present, lastReport, input.sessionBranch),
+          snapshot: input.hasSnapshot,
+        }
+      : {
+          turn: input.turnNumber,
+          // #1092: one entry for each repository, by mount name, in the order of the job; the branches and the checkout are its own.
+          repos: input.repos.map(({ name, branch }) => ({
+            name,
+            ...resumeOf(
+              present.flatMap((report) => report.repos?.get(name) ?? []),
+              lastReport?.repos?.get(name) ?? null,
+              branch,
+            ),
+          })),
+          snapshot: input.hasSnapshot,
+        };
   const summary =
     input.sessionSummary === null || input.sessionSummary.trim() === ""
       ? ""

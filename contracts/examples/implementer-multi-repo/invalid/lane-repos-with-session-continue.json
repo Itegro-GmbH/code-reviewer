@@ -1,0 +1,21 @@
+{
+  "why": "`repos` and `session.continue` exclude each other: the session keeps its repositories.",
+  "layer": "schema",
+  "error": "repos_with_session_continue",
+  "definition": "AgentStep",
+  "document": {
+    "id": "implement",
+    "kind": "agent",
+    "profile": "implementer",
+    "instruction": "Do it.",
+    "repos": [
+      {
+        "repo": "a/b"
+      }
+    ],
+    "session": {
+      "continue": "implement"
+    }
+  },
+  "patch": []
+}

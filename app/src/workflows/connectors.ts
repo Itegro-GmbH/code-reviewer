@@ -9,10 +9,12 @@
 // action names none. The inputs that decide a TARGET (which issue, which branches, which labels) are marked: they take a literal or
 // one reference to a value the platform or the caller vouches for, never a value an agent reported and never the free text of whoever
 // opened the issue (`check-values.ts`).
+import { REPOS_FACT_TYPE } from "./facts.ts";
 import {
   BOOLEAN,
   INTEGER,
   STRING,
+  enumOf,
   listOf,
   objectOf,
   type ObjectType,
@@ -26,8 +28,12 @@ import {
  *   opened the issue wrote those);
  * - `ticket` (#916): `{{trigger.ticket}}` or `{{trigger.ticket.number}}`, the ticket the run is about, the same way (a Jira ticket is `{{trigger.ticket}}`, #1040);
  * - `defaultBranch`: `{{trigger.repo.defaultBranch}}` or `{{trigger.ticket.repo.defaultBranch}}`;
+ * - `repository` (#1092): `{{trigger.ticket.repo.fullName}}` or `{{trigger.repo.fullName}}`, the repository the run is about (`owner/name`);
+ * - `ticketKey` (#1092): `{{trigger.ticket.key}}` or `{{trigger.ticket.number}}`, the key of the ticket (a GitHub issue's key is its number), for a branch name;
+ * - `repos` (#1094): `{{<agent step>.repos}}`, the list of repositories (with their branches) of an agent step that may push;
  * - `branch`: `{{<agent step>.branch}}`, the branch the platform made;
- * - `pullRequest` (#917): `{{<action>.number}}` of a `pullRequest.open` action, the pull request the platform opened.
+ * - `pullRequest` (#917): `{{<action>.number}}` of a `pullRequest.open` action, the pull request the platform opened;
+ * - `prRepository` (#1094): `{{<action>.repository}}` of a `pullRequest.open` action with `repos`, the repository of its first pull request.
  *
  * An input with no root at all (`target: []`) takes a literal only: a name the platform looks up on the provider (a board, a status).
  */
@@ -38,6 +44,10 @@ export const TARGET_ROOTS = [
   "defaultBranch",
   "branch",
   "pullRequest",
+  "repository",
+  "ticketKey",
+  "repos",
+  "prRepository",
 ] as const;
 export type TargetRoot = (typeof TARGET_ROOTS)[number];
 
@@ -48,11 +58,27 @@ export const START_BRANCH_ROOTS: readonly TargetRoot[] = [
   "branch",
 ];
 
+/**
+ * #1092: where a reference in the `repo`, the `base` and the `branch` of an entry of the `repos` of an agent step may start. They decide what the
+ * agent works on and where its commits go, so they are targets: a literal, or a value the platform or the caller vouches for.
+ */
+export const REPOS_REPO_ROOTS: readonly TargetRoot[] = ["input", "repository"];
+export const REPOS_BASE_ROOTS: readonly TargetRoot[] = [
+  "input",
+  "defaultBranch",
+];
+export const REPOS_BRANCH_ROOTS: readonly TargetRoot[] = ["input", "ticketKey"];
+
 export type InputSpec = {
   type: ValueType;
   required: boolean;
   /** Set on the inputs that decide a target: the roots a reference in it may start with. A literal is always fine. */
   target?: readonly TargetRoot[];
+  /**
+   * #1094: a reference that gives no value (the `number` of a pull request step whose repositories were all skipped) does not fail the step:
+   * the input is left out and the connector skips (`ticket.requestReview` answers `skipped: "no_pull_request"`).
+   */
+  skipsWhenMissing?: true;
 };
 
 export type ConnectorSpec = {
@@ -86,11 +112,42 @@ const ISSUE_ROOTS: readonly TargetRoot[] = ["issue", "ticket", "input"];
 const LABEL_ROOTS: readonly TargetRoot[] = ["input"];
 /** A pull request is given as its number: a positive whole number, the number a `pullRequest.open` action yielded, or a manual input. */
 const PULL_REQUEST_ROOTS: readonly TargetRoot[] = ["pullRequest", "input"];
+/** #1094: why a repository of `repos` got no pull request (ADR 0006): direct work, nothing pushed, a push the remote refused, no commits ahead of the base. */
+export const PULL_REQUEST_SKIP_REASONS = [
+  "direct",
+  "not_pushed",
+  "push_rejected",
+  "no_commits",
+] as const;
+export type PullRequestSkipReason = (typeof PULL_REQUEST_SKIP_REASONS)[number];
+export const PULL_REQUEST_STATES = ["opened", "existing", "skipped"] as const;
+
+/** One entry of `pullRequests`, the output of a pull request step with `repos`. */
+export const PULL_REQUEST_RESULT_TYPE = objectOf(
+  {
+    fullName: STRING,
+    base: STRING,
+    head: STRING,
+    state: enumOf(...PULL_REQUEST_STATES),
+    reason: enumOf(...PULL_REQUEST_SKIP_REASONS),
+    number: INTEGER,
+    url: STRING,
+  },
+  ["reason", "number", "url"],
+);
+
+/**
+ * Opens a pull request: from `head` into `base` in the repository of the run, or, with `repos` (#1094, ADR 0006), one pull request for every
+ * repository of an agent step that has a branch of its own with commits (`repos: "{{implement.repos}}"` replaces `head` and `base`). `number`,
+ * `url` and `existing` are those of the first pull request that exists, with `repository` (its `owner/name`, for `ticket.requestReview`), and
+ * absent when none does (a step with `repos` whose repositories are all skipped).
+ */
 export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
   name: "github.pullRequest.open",
   description: "Opens a pull request from a branch.",
   inputs: {
-    head: { type: STRING, required: true, target: ["branch"] },
+    head: { type: STRING, required: false, target: ["branch"] },
+    repos: { type: REPOS_FACT_TYPE, required: false, target: ["repos"] },
     base: {
       type: STRING,
       required: false,
@@ -100,7 +157,17 @@ export const GITHUB_PULL_REQUEST_OPEN: ConnectorSpec = {
     body: { type: STRING, required: false },
     draft: { type: BOOLEAN, required: false },
   },
-  output: objectOf({ number: INTEGER, url: STRING, existing: BOOLEAN }),
+  output: objectOf(
+    {
+      number: INTEGER,
+      url: STRING,
+      existing: BOOLEAN,
+      repository: STRING,
+      pullRequests: listOf(PULL_REQUEST_RESULT_TYPE),
+    },
+    ["pullRequests", "repository"],
+  ),
+  atLeastOneOf: ["head", "repos"],
 };
 
 export const GITHUB_ISSUE_COMMENT: ConnectorSpec = {
@@ -194,14 +261,26 @@ export const TICKET_REQUEST_REVIEW: ConnectorSpec = {
   name: "ticket.requestReview",
   description: "Asks for a review of a pull request.",
   inputs: {
-    pullRequest: { type: INTEGER, required: true, target: PULL_REQUEST_ROOTS },
+    pullRequest: {
+      type: INTEGER,
+      required: true,
+      target: PULL_REQUEST_ROOTS,
+      skipsWhenMissing: true,
+    },
+    // #1094: the repository of the pull request when it is not the run's (the first pull request of a step with `repos`).
+    repository: {
+      type: STRING,
+      required: false,
+      target: ["prRepository", "repository"],
+      skipsWhenMissing: true,
+    },
     reviewers: {
       type: { kind: "oneOf", options: [STRING, listOf(STRING)] },
       required: true,
       target: LABEL_ROOTS,
     },
   },
-  output: objectOf({ requested: listOf(STRING) }),
+  output: objectOf({ requested: listOf(STRING), skipped: STRING }, ["skipped"]),
 };
 
 /** The action a `pullRequest` target may come from: the one that opens a pull request, under either name. */

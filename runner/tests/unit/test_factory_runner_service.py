@@ -127,6 +127,10 @@ class FakeClient:
         # What the app says about a job (`GET /jobs/{id}`); a list is the sequence of answers.
         self.states: list[str | Exception | None] = []
         self.state_calls: list[str] = []
+        self.multi_repo: bool | None = None
+
+    def use_features(self, *, multi_repo: bool) -> None:
+        self.multi_repo = multi_repo
 
     def claim(self) -> ClaimedWorker | None:
         self.claim_calls += 1
@@ -268,7 +272,11 @@ class TurnLauncher(AutoLauncher):
 
 
 def prepared(
-    *, ready: bool = True, work: Path | None = None, claude: str | None = None
+    *,
+    ready: bool = True,
+    work: Path | None = None,
+    claude: str | None = None,
+    multi_repo: bool = False,
 ) -> Prepared:
     result = SelfTestResult(
         (Check("docker", True), Check("agent-container", ready, "" if ready else "did not start")),
@@ -293,6 +301,7 @@ def prepared(
         Announcement(("linux",), "1.0.0", manifest, {}),
         result,
         claude_version=claude,
+        multi_repo=multi_repo,
     )
 
 
@@ -308,6 +317,7 @@ class Rig:
         auto_update: bool = True,
         reap_check_seconds: float | None = None,
         claude: str | None = None,
+        multi_repo: bool = False,
     ) -> None:
         extra: dict[str, Any] = {}
         if reap_check_seconds is not None:
@@ -328,7 +338,7 @@ class Rig:
         self.service = RunnerService(
             self.config,
             self.environment,
-            prepared(ready=ready, work=self.work, claude=claude),
+            prepared(ready=ready, work=self.work, claude=claude, multi_repo=multi_repo),
             self.client,  # type: ignore[arg-type]
             seams=Seams(
                 clock=self.clock,
@@ -2024,3 +2034,14 @@ def test_a_service_that_started_before_the_first_credential_offers_claude_code_w
         "auth": "subscription",
         "models": ["opus"],
     }
+
+
+# #1093: the service hands the claim feature to the client from what was prepared (the golden
+# image's answer), never from its own version.
+def test_the_service_tells_the_client_whether_the_workers_read_several_repositories(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "old").mkdir()
+    (tmp_path / "new").mkdir()
+    assert Rig(tmp_path / "old").client.multi_repo is False
+    assert Rig(tmp_path / "new", multi_repo=True).client.multi_repo is True

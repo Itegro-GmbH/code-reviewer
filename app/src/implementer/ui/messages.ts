@@ -211,6 +211,11 @@ const FIELD_COPY: Record<
     invalid: "This start branch cannot be used. Choose another.",
     too_long: "This start branch cannot be used. Choose another.",
   },
+  repos: {
+    required: "Choose a repository.",
+    invalid: "The repositories of this task cannot be used.",
+    too_long: "The repositories of this task cannot be used.",
+  },
   instruction: {
     required: "Describe the task for the agent.",
     invalid:

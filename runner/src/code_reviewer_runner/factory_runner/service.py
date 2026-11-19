@@ -213,6 +213,8 @@ class RunnerService:
         self._environment = environment
         self._prepared = prepared
         self._client = client
+        # The claim names `implementer_multi_repo` only when the Workers of this runner read it.
+        client.use_features(multi_repo=prepared.multi_repo)
         self._seams = seams
         self._clock = seams.clock
         # The runner's own credential, and the login of this device once a job needed it: neither

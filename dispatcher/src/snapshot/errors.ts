@@ -13,6 +13,8 @@ export const SNAPSHOT_ERROR_CODES = [
   // The two Sysbox steps never end a run (reviews do not use Sysbox): they name what a warning and `sysbox: "unproven"` of the record say.
   "sysbox_install_failed",
   "sysbox_probe_failed",
+  // The Worker features step never ends a run either (#1098): the record then lists none, and nothing that depends on the image is named.
+  "worker_features_unreadable",
   "context_upload_failed",
   "image_build_failed",
   "image_digest_invalid",

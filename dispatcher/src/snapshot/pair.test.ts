@@ -20,6 +20,7 @@ const GOOD = {
   imageDigest: DIGEST,
   commit: COMMIT,
   sysbox: "proven" as const,
+  workerFeatures: ["implementer_multi_repo", "implementer_ask"].sort(),
 };
 
 describe("the snapshot pair", () => {
@@ -31,8 +32,44 @@ describe("the snapshot pair", () => {
         SANDBOX_IMAGE_DIGEST: DIGEST,
         SANDBOX_SNAPSHOT_COMMIT: COMMIT,
         SANDBOX_SYSBOX_PROOF: "proven",
+        SANDBOX_WORKER_FEATURES: "implementer_ask,implementer_multi_repo",
       }),
     ).toEqual(GOOD);
+  });
+
+  // #1098-T01
+  it.each([
+    ["no list (a pair from before the member existed)", undefined],
+    ["an empty value", ""],
+    ["none", "none"],
+    ["a name of another shape", "implementer_ask,Not A Name"],
+    ["a list with an empty name", "implementer_ask,,implementer_multi_repo"],
+    ["a value that is no string", 42],
+  ])("reads %s as no features, never as a guess", (_name, list) => {
+    expect(
+      pairFromValues("snap_example01", DIGEST, COMMIT, "proven", list)
+        ?.workerFeatures,
+    ).toEqual([]);
+  });
+
+  // #1098-T01
+  it("reads the list sorted and without duplicates", () => {
+    expect(
+      pairFromValues(
+        "snap_example01",
+        DIGEST,
+        COMMIT,
+        "proven",
+        "implementer_multi_repo, implementer_ask,implementer_ask",
+      )?.workerFeatures,
+    ).toEqual(["implementer_ask", "implementer_multi_repo"]);
+  });
+
+  // #1098-T01
+  it("writes an empty list as `none`, because a variable must not be empty", () => {
+    const pair = { ...GOOD, workerFeatures: [] };
+    expect(pairToEnv(pair).SANDBOX_WORKER_FEATURES).toBe("none");
+    expect(pairToMeta(pair).sandboxWorkerFeatures).toBe("none");
   });
 
   // #745-T01
@@ -118,12 +155,14 @@ describe("the snapshot pair", () => {
       SANDBOX_IMAGE_DIGEST: DIGEST,
       SANDBOX_SNAPSHOT_COMMIT: COMMIT,
       SANDBOX_SYSBOX_PROOF: "proven",
+      SANDBOX_WORKER_FEATURES: "implementer_ask,implementer_multi_repo",
     });
     expect(pairToMeta(GOOD)).toEqual({
       sandboxSnapshotId: "snap_example01",
       sandboxImageDigest: DIGEST,
       sandboxSnapshotCommit: COMMIT,
       sandboxSysboxProof: "proven",
+      sandboxWorkerFeatures: "implementer_ask,implementer_multi_repo",
     });
   });
 
@@ -135,6 +174,14 @@ describe("the snapshot pair", () => {
     );
     // A verdict is part of the pair: the same snapshot with another verdict is another pair.
     expect(pairsEqual(GOOD, { ...GOOD, sysbox: "unproven" })).toBe(false);
+    // The list of the image's features is part of the pair too (#1098), whatever the order it is given in.
+    expect(pairsEqual(GOOD, { ...GOOD, workerFeatures: [] })).toBe(false);
+    expect(
+      pairsEqual(GOOD, {
+        ...GOOD,
+        workerFeatures: ["implementer_multi_repo", "implementer_ask"],
+      }),
+    ).toBe(true);
     expect(pairsEqual(GOOD, undefined)).toBe(false);
   });
 });
@@ -203,6 +250,7 @@ describe("the inputs of the Worker image", () => {
       "dispatcher/src/snapshot/pipeline.ts",
       "dispatcher/src/snapshot/probe-flags.ts",
       "dispatcher/src/snapshot/scripts.ts",
+      "dispatcher/src/snapshot/worker-features.ts",
     ]);
     for (const path of IMAGE_INPUT_PATHS)
       expect(
@@ -258,6 +306,7 @@ describe("the inputs of the Worker image", () => {
       "pipeline.ts",
       "probe-flags.ts",
       "scripts.ts",
+      "worker-features.ts",
     ]);
     for (const file of tooling)
       expect(IMAGE_INPUT_PATHS as readonly string[]).toContain(

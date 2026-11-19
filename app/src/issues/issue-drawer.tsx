@@ -255,7 +255,12 @@ function DrawerBody({
         </Section>
 
         <Section title={DRAWER_COPY.lane}>
-          <LaneSection workspaceSlug={workspaceSlug} item={item} run={run} />
+          <LaneSection
+            workspaceSlug={workspaceSlug}
+            list={list}
+            item={item}
+            run={run}
+          />
         </Section>
 
         <Section title={DRAWER_COPY.effort}>
@@ -372,10 +377,12 @@ function PullRequests({
 
 function LaneSection({
   workspaceSlug,
+  list,
   item,
   run,
 }: {
   workspaceSlug: string;
+  list: TicketList;
   item: TicketListItem;
   run: RunState;
 }) {
@@ -399,7 +406,7 @@ function LaneSection({
           <WorkflowRunStatusBadge status={run.run.status} />
         ) : null}
       </div>
-      <LaneTrack lane={lane} />
+      <LaneTrack lane={lane} laneNodes={list.laneNodes} />
       {lane.step === null ? null : (
         <span className="text-muted-foreground">
           at <span className="font-mono">{lane.step}</span>

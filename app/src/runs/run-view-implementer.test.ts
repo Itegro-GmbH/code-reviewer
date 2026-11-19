@@ -363,6 +363,75 @@ describe("the detail of an implementer run", () => {
     expect(byName.proto?.reason).toBe("The branch was not pushed.");
   });
 
+  // #1094-T70
+  it("lists every repository of a task of several, with its branch linked into its own repository, and none for a task of one", () => {
+    const run = view(
+      turn({
+        result: resultWith({
+          repos: [
+            {
+              name: "widgets",
+              fullName: "acme/widgets",
+              base: "main",
+              branch: "feature/7",
+              created: true,
+              baseCommit: SHA_A,
+              headCommit: SHA_B,
+              pushed: true,
+              commits: [{ sha: SHA_B, subject: "One" }],
+              filesChanged: [{ path: "a.ts", status: "added" }],
+              branches: [],
+            },
+            {
+              name: "shared",
+              fullName: "acme/shared",
+              base: "develop",
+              branch: "develop",
+              created: false,
+              baseCommit: SHA_A,
+              headCommit: SHA_A,
+              pushed: false,
+              commits: [],
+              filesChanged: [],
+              branches: [],
+            },
+            { fullName: "not a repository", base: "x", branch: "y" },
+          ],
+        }),
+      }),
+      source(),
+    ).implementer;
+    expect(run?.repos).toEqual([
+      {
+        fullName: "acme/widgets",
+        url: "https://github.com/acme/widgets",
+        base: "main",
+        branch: "feature/7",
+        branchUrl: "https://github.com/acme/widgets/tree/feature/7",
+        created: true,
+        commits: 1,
+        files: 1,
+        pushed: true,
+        shortSha: SHA_B.slice(0, 7),
+      },
+      {
+        fullName: "acme/shared",
+        url: "https://github.com/acme/shared",
+        base: "develop",
+        branch: "develop",
+        branchUrl: null,
+        created: false,
+        commits: 0,
+        files: 0,
+        pushed: false,
+        shortSha: null,
+      },
+    ]);
+    expect(
+      view(turn({ result: resultWith({}) }), source()).implementer?.repos,
+    ).toEqual([]);
+  });
+
   it("has no branches for a result of an older runner, and cleans the name of a branch like any text of the agent", () => {
     const old = view(turn({ result: resultWith({}) }), source()).implementer;
     const redact = (text: string) => text.replaceAll(GIT_TOKEN, "[redacted]");
@@ -726,6 +795,7 @@ describe("the detail of an implementer run", () => {
         "head",
         "instruction",
         "pushedNote",
+        "repos",
         "reported",
         "result",
         "resultExpected",

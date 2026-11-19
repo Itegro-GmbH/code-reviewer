@@ -24,5 +24,14 @@ export const GoldenRecordSchema = z.strictObject({
    * whose Sysbox is broken still goes live and the Implementer's own boot step names the problem.
    */
   sysbox: z.enum(["proven", "unproven"]).optional(),
+  /**
+   * #1098: the features the Worker image lists (`WORKER_FEATURES` of the runner), asked of the image in the check VM. It is what
+   * the Dispatcher names claim features from (`core/claim-features.ts`); older records have none, which reads as an empty list,
+   * and so does a list the build could not read (a warning, never a failed run).
+   */
+  workerFeatures: z
+    .array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/))
+    .max(64)
+    .optional(),
 });
 export type GoldenRecord = z.infer<typeof GoldenRecordSchema>;

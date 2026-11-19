@@ -76,6 +76,7 @@ const FIELD_OF_ISSUE: Record<ImplementerIssue["field"], FieldKey | null> = {
   repositoryId: "repository",
   baseBranch: "baseBranch",
   startBranch: null,
+  repos: null,
   branch: "branch",
   instruction: "instruction",
   model: "model",

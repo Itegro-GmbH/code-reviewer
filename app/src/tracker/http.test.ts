@@ -16,6 +16,7 @@ const LIST = {
   repositoryId: "r-1",
   repo: "acme/widgets",
   items: [],
+  laneNodes: {},
   sync: { lastFullSyncAt: null, inProgress: false, lastWriteAt: null },
 };
 const PROGRESS = {

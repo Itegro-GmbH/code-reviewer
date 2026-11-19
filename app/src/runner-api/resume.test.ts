@@ -121,7 +121,7 @@ describe("the branches of a follow-up turn", () => {
     ]);
 
     expect(resume.branches).toHaveLength(MAX_RESUME_BRANCHES);
-    expect(resume.branches[0]).toEqual({ name: "feature/x", head: sha("f") });
+    expect(resume.branches?.[0]).toEqual({ name: "feature/x", head: sha("f") });
   });
 
   // #841-U06
@@ -358,5 +358,142 @@ describe("the block against the contract", () => {
     expect(
       contract.check("ImplementerResume", build([turn(1, {})], {})),
     ).toStrictEqual({ valid: true, errors: "" });
+  });
+});
+
+describe("the resume of a session of several repositories", () => {
+  const repos = [
+    { name: "app", branch: "feature/x" },
+    { name: "lib", branch: "main" },
+  ];
+  const report = (
+    entries: Array<Record<string, unknown>>,
+  ): Record<string, unknown> => ({
+    branches: [],
+    repos: entries,
+  });
+
+  // #1092-T50
+  it("has one entry for each repository, by name and in the order of the job, with its own branches and checkout, and no branches or checkout of its own", () => {
+    const resume = build(
+      [
+        turn(
+          1,
+          report([
+            {
+              name: "app",
+              branches: [
+                pushed("aux", sha("b")),
+                pushed("feature/x", sha("a")),
+              ],
+              checkedOut: "aux",
+            },
+            {
+              name: "lib",
+              branches: [pushed("main", sha("c"))],
+              checkedOut: "feature/unreachable",
+            },
+          ]),
+        ),
+      ],
+      { repos },
+    );
+
+    expect(resume.branches).toBeUndefined();
+    expect(resume.checkout).toBeUndefined();
+    expect(resume.repos).toEqual([
+      {
+        name: "app",
+        branches: [
+          { name: "feature/x", head: sha("a") },
+          { name: "aux", head: sha("b") },
+        ],
+        checkout: "aux",
+      },
+      {
+        name: "lib",
+        // Direct work: the base branch an earlier turn pushed.
+        branches: [{ name: "main", head: sha("c") }],
+        checkout: null,
+      },
+    ]);
+  });
+
+  // #1092-T51
+  it("lists nothing for a repository an earlier turn did not report, and keeps the newest tip of a branch", () => {
+    const resume = build(
+      [
+        turn(
+          1,
+          report([{ name: "app", branches: [pushed("feature/x", sha("a"))] }]),
+        ),
+        turn(
+          2,
+          report([{ name: "app", branches: [pushed("feature/x", sha("d"))] }]),
+        ),
+      ],
+      { repos },
+    );
+    expect(resume.repos).toEqual([
+      {
+        name: "app",
+        branches: [{ name: "feature/x", head: sha("d") }],
+        checkout: null,
+      },
+      { name: "lib", branches: [], checkout: null },
+    ]);
+  });
+
+  // #1092-T52
+  it("names every commit and file of the digest by its repository", () => {
+    const resume = build(
+      [
+        turn(
+          1,
+          report([
+            {
+              name: "app",
+              commits: [{ sha: sha("a"), subject: "add retry" }],
+              filesChanged: [{ path: "src/a.ts", status: "added" }],
+            },
+            {
+              name: "lib",
+              commits: [{ sha: sha("b"), subject: "export policy" }],
+              filesChanged: [{ path: "index.ts", status: "modified" }],
+            },
+          ]),
+        ),
+      ],
+      { repos },
+    );
+    expect(resume.digest).toContain("[app] add retry");
+    expect(resume.digest).toContain("[lib] export policy");
+    expect(resume.digest).toContain("app/src/a.ts");
+    expect(resume.digest).toContain("lib/index.ts");
+  });
+
+  // #1092-T53
+  it("is valid against the contract", () => {
+    const resume = build(
+      [
+        turn(
+          1,
+          report([
+            { name: "app", branches: [pushed("feature/x", sha("a"))] },
+            { name: "lib", branches: [] },
+          ]),
+        ),
+      ],
+      { repos },
+    );
+    const job = {
+      ...createContractValidator().check("ImplementerResume", {
+        turn: resume.turn,
+        repos: resume.repos,
+        snapshot: resume.snapshot,
+        ...(resume.digest === undefined ? {} : { digest: resume.digest }),
+      }),
+    };
+    expect(job.valid).toBe(true);
   });
 });

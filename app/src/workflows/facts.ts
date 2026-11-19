@@ -8,6 +8,7 @@ import {
   NUMBER,
   STRING,
   listOf,
+  objectOf,
   type ValueType,
 } from "./value-type.ts";
 
@@ -30,3 +31,26 @@ export const FACT_TYPES: Record<string, ValueType> = {
   /** Whether the branch reached the remote. */
   pushed: BOOLEAN,
 };
+
+/**
+ * #1092 (epic #1090, ADR 0006): the fact of a step with `repos` (and of a step that continues the session of one), a list with one entry per
+ * repository, in the order of the step. Not one of `FACT_NAMES`: a lane that has a result field `repos` today keeps it, and only a step with
+ * `repos` reserves the name (`result_field_reserved`). Like the push facts it exists only for a profile that may push.
+ */
+export const REPOS_FACT = "repos";
+
+/** One entry of `{{<step>.repos}}`: the repository, its base and working branch, the commits this turn made on it, its tip and whether it is on the remote. */
+export const REPOS_FACT_ENTRY_TYPE = objectOf(
+  {
+    fullName: STRING,
+    base: STRING,
+    branch: STRING,
+    commits: listOf(STRING),
+    headCommit: STRING,
+    pushed: BOOLEAN,
+    // #1094: present (true) only when the push of the working branch was refused; the pull request step reports that repository as `push_rejected`.
+    pushRejected: BOOLEAN,
+  },
+  ["pushRejected"],
+);
+export const REPOS_FACT_TYPE: ValueType = listOf(REPOS_FACT_ENTRY_TYPE);

@@ -1,0 +1,14 @@
+{
+  "why": "The work volume's own directory `result` is a reserved mount name (any case in the next case).",
+  "layer": "schema",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/implementer/repos/1/name",
+      "value": "result"
+    }
+  ]
+}

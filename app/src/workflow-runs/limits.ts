@@ -22,6 +22,20 @@ export const STEP_STALE_MS = 2 * 60 * 1000;
  * for abandoned and run a second time while its action is still running. Every connector keeps to it (`docs/workflows.md`).
  */
 export const ACTION_TIMEOUT_MS = 60 * 1000;
+/**
+ * #1094: the budget a pull request step with `repos` gets for each repository after the first (a token, a lookup and a create, one
+ * after the other), and the most it may add up to: still under `STEP_STALE_MS`, so a step that is working is not taken over.
+ */
+export const ACTION_PER_REPO_MS = 4 * 1000;
+export const ACTION_TIMEOUT_MAX_MS = 100 * 1000;
+
+/** What a call that does its work for `units` repositories may take: `ACTION_TIMEOUT_MS`, plus a share for each one after the first, up to `ACTION_TIMEOUT_MAX_MS`. */
+export function actionBudgetMs(units: number): number {
+  return Math.min(
+    ACTION_TIMEOUT_MS + ACTION_PER_REPO_MS * Math.max(units - 1, 0),
+    ACTION_TIMEOUT_MAX_MS,
+  );
+}
 /** An agent step that has no job this long after it was written is given up (`agent_start_failed`). */
 export const STEP_GIVE_UP_MS = 60 * 60 * 1000;
 /** The sweep looks at a run that nobody touched for this long. */

@@ -249,17 +249,27 @@ function LiveBoard({
     refusal !== undefined &&
     shown.some((item) => waitsFor(data, item)?.kind === "start");
   // The list is the issues that changed last: an issue can fall out of it while its drawer is open. The drawer then keeps the last data
-  // it had instead of closing under the person's hands.
+  // it had instead of closing under the person's hands. The nodes of its lane (`laneNodes`, once for each lane version, #1087) belong to
+  // that data: the next poll may no longer carry them, so they are kept with the item.
   const found =
     opened === null ? undefined : issues.find((item) => item.number === opened);
-  const [lastOpened, setLastOpened] = useState<TicketListItem | undefined>(
-    undefined,
+  const [lastOpened, setLastOpened] = useState<
+    { item: TicketListItem; laneNodes: TicketList["laneNodes"] } | undefined
+  >(undefined);
+  if (found !== undefined && found !== lastOpened?.item)
+    setLastOpened({ item: found, laneNodes: data.laneNodes });
+  const kept =
+    opened !== null && lastOpened?.item.number === opened
+      ? lastOpened
+      : undefined;
+  const openedItem = opened === null ? undefined : (found ?? kept?.item);
+  const drawerList = useMemo(
+    () =>
+      kept === undefined
+        ? data
+        : { ...data, laneNodes: { ...kept.laneNodes, ...data.laneNodes } },
+    [data, kept],
   );
-  if (found !== undefined && found !== lastOpened) setLastOpened(found);
-  const openedItem =
-    opened === null
-      ? undefined
-      : (found ?? (lastOpened?.number === opened ? lastOpened : undefined));
   return (
     <div className="flex flex-col gap-8">
       <Tiles list={data} />
@@ -348,7 +358,7 @@ function LiveBoard({
         workspaceSlug={workspaceSlug}
         repositoryId={repositoryId}
         projectId={projectId}
-        list={data}
+        list={drawerList}
         item={openedItem}
         onClose={() => setOpened(null)}
         onCloseAutoFocus={drawerFocus.onCloseAutoFocus}
@@ -462,7 +472,7 @@ function IssueRow({
             >
               {item.lane.name}
             </Link>
-            <LaneTrack lane={item.lane} />
+            <LaneTrack lane={item.lane} laneNodes={list.laneNodes} />
             {item.lane.step === null ? null : (
               <span className="text-xs text-muted-foreground">
                 {BOARD_COPY.step(item.lane.step)}

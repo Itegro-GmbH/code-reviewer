@@ -79,6 +79,7 @@ export type ClaimedKeys = {
     jobId: string,
     token: string,
     expiresAt: string,
+    integrationId?: string,
   ): Promise<void>;
   /** The write tokens remembered for the job, oldest first (empty if none, unknown or unreadable). */
   gitTokensOf(jobId: string): Promise<GitTokenEntry[]>;
@@ -88,8 +89,16 @@ export type ClaimedKeys = {
   forgetGitTokens(jobId: string, tokens: readonly string[]): Promise<void>;
 };
 
-/** A write token and when it expires on its own (ISO 8601). */
-export type GitTokenEntry = { token: string; expiresAt: string };
+/**
+ * A write token and when it expires on its own (ISO 8601). #1092: `integrationId` is the connection (installation) that made it; a turn on
+ * several repositories holds one token for each installation, and each is switched off through its own. Absent for a token remembered
+ * before this field existed (it is then switched off through the connection of the job's first repository).
+ */
+export type GitTokenEntry = {
+  token: string;
+  expiresAt: string;
+  integrationId?: string;
+};
 
 type Sealed = {
   keys: string[];
@@ -107,10 +116,17 @@ function gitTokenEntries(value: unknown): GitTokenEntry[] | undefined {
   const entries: GitTokenEntry[] = [];
   for (const entry of value as unknown[]) {
     if (typeof entry !== "object" || entry === null) return undefined;
-    const { token, expiresAt } = entry as Record<string, unknown>;
+    const { token, expiresAt, integrationId } = entry as Record<
+      string,
+      unknown
+    >;
     if (typeof token !== "string" || typeof expiresAt !== "string")
       return undefined;
-    entries.push({ token, expiresAt });
+    entries.push({
+      token,
+      expiresAt,
+      ...(typeof integrationId === "string" ? { integrationId } : {}),
+    });
   }
   return entries;
 }
@@ -242,12 +258,19 @@ export function createClaimedKeys({
       update(jobId, (known) => ({ ...known, native })),
     wasNative: async (jobId) =>
       (await read(createJobClaimedKeysRepository(db, now), jobId)).native,
-    rememberGitToken: (jobId, token, expiresAt) =>
+    rememberGitToken: (jobId, token, expiresAt, integrationId) =>
       update(jobId, (known) => ({
         ...known,
         gitTokens: known.gitTokens.some((entry) => entry.token === token)
           ? known.gitTokens
-          : [...known.gitTokens, { token, expiresAt }],
+          : [
+              ...known.gitTokens,
+              {
+                token,
+                expiresAt,
+                ...(integrationId === undefined ? {} : { integrationId }),
+              },
+            ],
       })),
     gitTokensOf: async (jobId) =>
       (await read(createJobClaimedKeysRepository(db, now), jobId)).gitTokens,

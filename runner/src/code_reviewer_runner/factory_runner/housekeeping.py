@@ -8,7 +8,9 @@ next one starts:
 
 - **The work volume.** `reserve` (the git mirror), `repo` (the agent's tree) and `result` (the
   finish tool's file) are created by the turn and refused when they exist (`setup_failed ... exists
-  already`). Only these three are touched, and a link in the way is removed, never followed.
+  already`). Only these three are touched, and a link in the way is removed, never followed. A
+  multi-repository turn (#1093) has one agent repository per repository, named by its mount: they
+  are found by the mirrors under `reserve/mirror/<name>.git` and removed with the three.
 - **The containers and the networks of Control**, found by the label `code-reviewer.role` that
   every one of them carries (the door, the rule helpers, the agent, the reader, the setup, the model
   network) and by `code-reviewer.runner`, the id of this runner. A runner that was killed leaves
@@ -41,6 +43,8 @@ from typing import Final
 from urllib.parse import quote
 
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
+from code_reviewer_runner.implementer.git_workspace import MIRRORS_DIRECTORY
+from code_reviewer_runner.implementer.repo_names import is_mount_name
 from code_reviewer_runner.implementer.role_labels import ROLE_LABEL, RUNNER_LABEL
 from code_reviewer_runner.job import IMPLEMENTER_WORK_DIR
 from code_reviewer_runner.job_loop.jsonvalues import as_object
@@ -72,9 +76,28 @@ class TidySeams:
 # -- the work volume -------------------------------------------------------------------------------
 
 
+def work_subdirectories(work_dir: Path) -> tuple[str, ...]:
+    """The folders of the work volume a turn made: the three of a turn of one repository and, for a
+    multi-repository turn (#1093), the directory of each repository, found by its mirror
+    (`reserve/mirror/<name>.git`). Only a name the contract allows as a mount is taken
+    (`is_mount_name`), so a stray entry can never name a folder outside the turn's own."""
+    mirrors = work_dir / "reserve" / MIRRORS_DIRECTORY
+    try:
+        listed = sorted(entry.name for entry in mirrors.iterdir())
+    except OSError:
+        listed = []
+    names = [
+        entry.removesuffix(".git")
+        for entry in listed
+        if entry.endswith(".git") and is_mount_name(entry.removesuffix(".git"))
+    ]
+    return (*WORK_SUBDIRECTORIES, *(name for name in names if name not in WORK_SUBDIRECTORIES))
+
+
 def clear_work(work_dir: Path) -> list[str]:
-    """Empty `reserve`, `repo` and `result` in `work_dir`. The problems, by folder name (empty: all
-    gone). A folder that is a link or a file is removed itself; a folder is removed with what is in
+    """Empty `reserve`, `repo` and `result` in `work_dir`, and the directory of each repository of
+    a multi-repository turn. The problems, by folder name (empty: all gone). A folder that is a link
+    or a file is removed itself; a folder is removed with what is in
     it, links inside unlinked and not followed. A folder with a mount point below it (another
     device than `work_dir`) is left alone and reported: removing through a mount would delete what
     the mount shows."""
@@ -83,7 +106,8 @@ def clear_work(work_dir: Path) -> list[str]:
         device = work_dir.stat().st_dev
     except OSError:
         device = None
-    for name in WORK_SUBDIRECTORIES:
+    # The repositories are found by the mirrors in `reserve`: listed before it is removed.
+    for name in work_subdirectories(work_dir):
         try:
             _remove(work_dir / name, device)
         except OSError as error:

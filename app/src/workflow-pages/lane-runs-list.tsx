@@ -28,6 +28,11 @@ import { formatDuration } from "../runs/run-duration.ts";
 import { formatUtc } from "../ui/format-time.ts";
 import { useLiveSnapshot } from "../ui/use-live-snapshot.ts";
 import { workspacePath } from "../workspaces/paths.ts";
+import {
+  laneNodesFor,
+  type LaneNodesByKey,
+  type LaneNodeView,
+} from "../workflow-runs/lane-nodes.ts";
 import type {
   LaneRunListItemView,
   LaneRunListView,
@@ -47,6 +52,7 @@ import {
   TRIGGER_COPY,
 } from "./messages.ts";
 import { githubLinkInRepository } from "./github-link.ts";
+import { jiraIssueLink } from "./jira-link.ts";
 import { RunTrackView } from "./run-track.tsx";
 import { trackOf } from "./run-track.ts";
 import { WorkflowRunStatusBadge } from "./status-badge.tsx";
@@ -113,11 +119,17 @@ export function LaneRunsList({
   // The pages after the first: read when asked, not polled. A run that moved up to the first page meanwhile is shown once, there.
   const [more, setMore] = useState<{
     runs: LaneRunListItemView[];
+    laneNodes: LaneNodesByKey;
     nextCursor: string | null;
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const runs = mergeRunPages(data.runs, more?.runs ?? []);
+  // The nodes of a lane version never change, so the entries of every page read so far can be pooled.
+  const laneNodes = useMemo(
+    () => ({ ...more?.laneNodes, ...data.laneNodes }),
+    [more?.laneNodes, data.laneNodes],
+  );
   const nextCursor = more === null ? data.nextCursor : more.nextCursor;
 
   async function loadMore(): Promise<void> {
@@ -132,6 +144,7 @@ export function LaneRunsList({
     }
     setMore({
       runs: mergeRunPages(more?.runs ?? [], result.data.runs),
+      laneNodes: { ...more?.laneNodes, ...result.data.laneNodes },
       nextCursor: result.data.nextCursor,
     });
   }
@@ -186,6 +199,7 @@ export function LaneRunsList({
               <LaneRunRow
                 key={run.id}
                 run={run}
+                nodes={laneNodesFor(laneNodes, run.nodesKey)}
                 now={data.now}
                 workspaceSlug={workspaceSlug}
                 inLane={inLane !== undefined}
@@ -211,11 +225,14 @@ export function LaneRunsList({
 
 function LaneRunRow({
   run,
+  nodes,
   now,
   workspaceSlug,
   inLane,
 }: {
   run: LaneRunListItemView;
+  /** The top-level nodes of the lane version of the run (`laneNodes` of the list, by `run.nodesKey`). */
+  nodes: readonly LaneNodeView[];
   now: string;
   workspaceSlug: string;
   /** On the page of one lane the row has no lane and project cell, and the ticket column links to the run. */
@@ -223,14 +240,16 @@ function LaneRunRow({
 }) {
   const failure = describeRunFailure(run.errorCode);
   const duration = laneRunDurationMs(run, now);
-  const track = trackOf(run.nodes, run.steps, run.status);
+  const track = trackOf(nodes, run.steps, run.status);
   const ticketUrl =
-    run.ticket?.githubRepository == null
+    run.ticket === null
       ? undefined
-      : githubLinkInRepository(
-          `https://github.com/${run.ticket.githubRepository}/issues/${encodeURIComponent(run.ticket.key)}`,
-          run.ticket.githubRepository,
-        );
+      : run.ticket.githubRepository !== null
+        ? githubLinkInRepository(
+            `https://github.com/${run.ticket.githubRepository}/issues/${encodeURIComponent(run.ticket.key)}`,
+            run.ticket.githubRepository,
+          )
+        : jiraIssueLink(run.ticket.jiraSiteUrl, run.ticket.key);
   const runPath = workspacePath(
     workspaceSlug,
     `/workflows/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`,

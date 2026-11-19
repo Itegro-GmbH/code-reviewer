@@ -124,7 +124,11 @@ describe("the workspace workflow runs route file", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(await response.json()).toMatchObject({
+    const body = (await response.json()) as {
+      runs: { nodesKey: string }[];
+      laneNodes: Record<string, unknown>;
+    };
+    expect(body).toMatchObject({
       runs: [
         {
           id: run.id,
@@ -132,13 +136,19 @@ describe("the workspace workflow runs route file", () => {
           laneName: "Run me",
           status: "running",
           project: { id: seed.repositoryId },
-          nodes: [{ id: "work", kind: "agent" }],
+          nodesKey: expect.any(String),
           steps: [],
           budgetUsd: 20,
         },
       ],
       nextCursor: null,
     });
+    // #1087: the nodes of the lane version are in the list once, under the key of the run.
+    const nodesKey = body.runs[0]?.nodesKey ?? "";
+    expect(Object.keys(body.laneNodes)).toEqual([nodesKey]);
+    expect(body.laneNodes[nodesKey]).toMatchObject([
+      { id: "work", kind: "agent" },
+    ]);
   });
 
   // #1078-T121

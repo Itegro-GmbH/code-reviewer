@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Final
 
 from code_reviewer_runner.capabilities import ENGINE_IMPLEMENTER
-from code_reviewer_runner.factory_runner.app_client import Announcement
+from code_reviewer_runner.factory_runner.app_client import FEATURE_MULTI_REPO, Announcement
 from code_reviewer_runner.factory_runner.base import (
     AUTH_APP_KEY,
     AUTH_SUBSCRIPTION,
@@ -61,6 +61,7 @@ from code_reviewer_runner.job import (
     IMPLEMENTER_WORK_DIR_VARIABLE,
 )
 from code_reviewer_runner.job_loop.settings import WorkerSettings, worker_settings_from_environment
+from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES
 from code_reviewer_runner.pr_agent_config import PASSTHROUGH_VARIABLES
 
 PULL_SECONDS: Final = 900.0
@@ -83,6 +84,12 @@ class Prepared:
     # credentials before every claim and leaves the entry out while none is usable (#980); the rest
     # of the manifest is fixed here.
     claude_version: str | None = None
+    # The Workers this runner starts read `implementer.repos` (several repositories in one turn,
+    # #1093): the claim then names the feature `implementer_multi_repo`. Never assumed from the
+    # runner's own version: with a golden image the Worker is the image's, and only what the image
+    # says counts (`incus/harnesses.py`); an image that does not say, or says no, makes this False
+    # and a multi-repository job waits for another runner.
+    multi_repo: bool = False
 
     @property
     def ready(self) -> bool:
@@ -275,6 +282,8 @@ def prepare(
         result,
         tuple(f"{name}: {note}" for name, status in sorted(added.items()) for note in status.notes),
         claude_version=_ready_version(added.get(HARNESS_CLAUDE_CODE)),
+        # The Docker mode starts the Worker of this same installation as a process.
+        multi_repo=FEATURE_MULTI_REPO in WORKER_FEATURES,
     )
 
 

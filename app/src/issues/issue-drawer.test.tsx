@@ -25,7 +25,7 @@ const LANE = {
   name: "Issue to PR",
   step: "implement",
   status: "waiting" as const,
-  nodes: [],
+  nodesKey: null,
   steps: [],
 };
 

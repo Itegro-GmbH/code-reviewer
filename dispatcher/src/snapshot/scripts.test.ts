@@ -23,6 +23,7 @@ import {
   WORKER_CONTAINER_SPEC,
 } from "../launchers/container-spec.ts";
 import { renderDockerRunArguments } from "../launchers/container.ts";
+import { featuresRunArguments } from "./probe-flags.ts";
 import { resolveConfig } from "./config.ts";
 import {
   EXIT_ANCHOR_MISSING,
@@ -49,6 +50,8 @@ import {
   startDaemonScript,
   stopDaemonScript,
   sysboxProbeScript,
+  workerFeaturesScript,
+  WORKER_PYTHON,
   writeDaemonConfigScript,
 } from "./scripts.ts";
 
@@ -90,6 +93,7 @@ describe("the scripts the builder VM runs", () => {
     stopDaemon: stopDaemonScript(),
     scan: scanScript(),
     probe: probeScript(config),
+    workerFeatures: workerFeaturesScript(config),
   };
 
   it.each(Object.entries(everyScript))(
@@ -631,6 +635,80 @@ exit 0`;
     expect(sysboxProbeScript(config)).not.toMatch(
       /token|secret|password|credential/i,
     );
+  });
+});
+
+describe("the Worker features step of the check VM", () => {
+  // #1098-T05
+  it("runs the image's own interpreter under the Worker's own container spec, only without network, and prints the image's list", () => {
+    const script = workerFeaturesScript(config);
+    const args = featuresRunArguments({
+      imageTag: config.imageTag,
+      probeMemory: config.probeMemory,
+      entrypoint: WORKER_PYTHON,
+      code: "print(1)",
+    });
+    // The Worker's spec, as the probe renders it: the two flags that differ are the network and the entrypoint.
+    const probe = probeRunArguments(config);
+    const without = (list: string[]) =>
+      list.filter(
+        (arg, i) =>
+          arg !== "--name" &&
+          list[i - 1] !== "--name" &&
+          arg !== "--entrypoint" &&
+          list[i - 1] !== "--entrypoint",
+      );
+    const flags = (list: string[]) =>
+      without(list.slice(0, list.indexOf(config.imageTag)));
+    expect(flags(args).filter((arg) => arg !== "none")).toEqual(
+      flags(probe).filter((arg) => arg !== "bridge"),
+    );
+    const joined = args.join(" ");
+    for (const flag of [
+      "--network none",
+      "--read-only",
+      "--cap-drop ALL",
+      "--security-opt no-new-privileges:true",
+      "--pids-limit 512",
+      "--env HOME=/home/runner",
+      "--tmpfs /tmp:",
+      "--tmpfs /home/runner:",
+      `--entrypoint ${WORKER_PYTHON}`,
+    ])
+      expect(joined, flag).toContain(flag);
+    expect(joined).not.toContain("--network bridge");
+    expect(script).toContain(shellQuote(config.imageTag));
+    expect(script).toContain("WORKER_FEATURES");
+    // The entrypoint is in front of the image, the code after it.
+    expect(args.at(-3)).toBe(config.imageTag);
+    expect(args.at(-2)).toBe("-c");
+  });
+
+  // #1098-T05: a timeout only kills the client of Docker; the container must go with it.
+  it("removes its named container when the timeout hits or the script ends otherwise", () => {
+    const script = workerFeaturesScript(config);
+    expect(script).toMatch(
+      /^trap 'docker rm --force code-reviewer-worker-features /m,
+    );
+    expect(script).toContain("'--name' 'code-reviewer-worker-features'");
+    expect(script).toContain("timeout 120 docker ");
+    expect(script).toContain("</dev/null");
+  });
+
+  // #1098-T05: the step imports the Worker's list by name; a rename in the runner must fail here, not as an empty list in a release.
+  it("asks for a list the runner defines under that name, in the interpreter the Dockerfile puts on the image", () => {
+    const script = workerFeaturesScript(config);
+    const worker = readFileSync(
+      join(REPO, "runner/src/code_reviewer_runner/job_loop/worker_api.py"),
+      "utf8",
+    );
+    expect(script).toContain(
+      "from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES",
+    );
+    expect(worker).toMatch(/^WORKER_FEATURES\b/m);
+    const dockerfile = readFileSync(join(REPO, "runner/Dockerfile"), "utf8");
+    expect(dockerfile).toContain("/opt/venv/bin");
+    expect(WORKER_PYTHON).toBe("/opt/venv/bin/python");
   });
 });
 

@@ -16,22 +16,32 @@ import {
   MAY_HAVE_HAPPENED,
   type ActionCall,
   type ActionConnector,
+  type RepoInput,
 } from "./connectors.ts";
 import {
   ACTION_BODY_MAX_CHARS,
+  ACTION_TIMEOUT_MS,
   ACTION_BRANCH_MAX_CHARS,
   ACTION_LABELS_MAX,
   ACTION_LABEL_MAX_CHARS,
   ACTION_TITLE_MAX_CHARS,
   GITHUB_REASON_MAX_CHARS,
+  actionBudgetMs,
 } from "./limits.ts";
-import { PROJECT_MEMBERS } from "../workflows/connectors.ts";
+import {
+  PROJECT_MEMBERS,
+  type PullRequestSkipReason,
+} from "../workflows/connectors.ts";
 import { BIDI_CONTROLS, defuseMentions } from "./templates.ts";
 import {
   TicketProviderError,
   type TicketScope,
 } from "../integrations/ticket-provider.ts";
 import type { TicketTarget } from "./ticket-target.ts";
+
+/** A repository as GitHub names it: an owner and a name. */
+const REPOSITORY_NAME =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 
 /** The connection and the repository an action acts on, resolved for the repository of the run. */
 export type GithubActionTarget = {
@@ -43,6 +53,15 @@ export type GithubActionTarget = {
 export type GithubConnectorDeps = {
   /** The target of a run's repository; undefined when the repository or its connection is gone. */
   targetOf(call: ActionCall): Promise<GithubActionTarget | undefined>;
+  /**
+   * #1094: the target of an active repository of the workspace by its full name (compared without regard to case), for a pull request step
+   * with `repos`; undefined when the workspace has no such repository or no active connection for it. Left out, such a step ends with
+   * `github_not_found` for every repository.
+   */
+  targetOfRepository?(
+    call: ActionCall,
+    fullName: string,
+  ): Promise<GithubActionTarget | undefined>;
   /**
    * The ticket provider and the container of its tickets for a run (#1035): what the ticket source of the run's project names; undefined
    * when there is none. The ticket actions (`ticket.comment`, `ticket.labels`, `ticket.setStatus`) act through it, the pull request actions
@@ -550,10 +569,198 @@ function reachableText(reachable: readonly string[]): string {
 export function createGithubConnectors(
   deps: GithubConnectorDeps,
 ): ActionConnector[] {
+  /** One pull request of a step with `repos`: its state, and what it is about, as `pullRequests` lists it. */
+  type RepoPullRequest = {
+    fullName: string;
+    base: string;
+    head: string;
+    state: "opened" | "existing" | "skipped";
+    reason?: PullRequestSkipReason;
+    number?: number;
+    url?: string;
+  };
+
+  /** What a step with `repos` yields: the list, and the single fields of the first pull request that exists (with its repository). */
+  function repoOutput(results: readonly RepoPullRequest[]) {
+    const first = results.find((entry) => entry.number !== undefined);
+    return {
+      pullRequests: [...results],
+      ...(first === undefined
+        ? {}
+        : {
+            number: first.number,
+            url: first.url,
+            existing: first.state === "existing",
+            repository: first.fullName,
+          }),
+    };
+  }
+
+  /** The codes of a failure that is not one repository's: the same answer would come for the others, so they are not tried. */
+  const STOPS_THE_STEP: readonly string[] = [
+    "github_unavailable",
+    "github_rate_limited",
+  ];
+
+  /** The part of the budget kept back so that the step can say what it did before the engine gives up on it. */
+  function reserveMs(budgetMs: number): number {
+    return Math.min(5000, Math.floor(budgetMs / 10));
+  }
+
+  /**
+   * #1094 (ADR 0006): one pull request per repository of the list whose branch differs from its base, is pushed and has commits ahead of
+   * it, each into its own base and its own repository. A repository that already has an open pull request from that branch gives that
+   * one (`existing`); direct work, nothing pushed (or a push the remote refused) and no commits between the branches are skipped, not
+   * errors. The others are still tried when one fails; the step then fails with that error, says which pull requests were opened and keeps
+   * them as its output. A failure that is not one repository's (rate limit, GitHub unreachable) stops it, and so does the end of its budget
+   * (`actionBudgetMs`: it scales with the number of repositories); what was not tried is opened by running the step again (`existing`).
+   * An empty list is a step with nothing to open.
+   */
+  async function openForRepos(
+    call: ActionCall,
+    repos: readonly RepoInput[],
+  ): Promise<Record<string, unknown>> {
+    const name = "github.pullRequest.open";
+    const draft =
+      typeof call.inputs.draft === "boolean" ? call.inputs.draft : undefined;
+    // Every entry is checked before the first call is made: a bad title of the third repository must not leave two pull requests behind.
+    const plan = repos.map((entry) => {
+      const base = branchName(entry.base, "base");
+      const head = branchName(entry.branch, "head");
+      // Only what will be opened needs its texts: a skipped repository is not held to them.
+      const opens = head !== base && entry.pushed;
+      return {
+        entry,
+        base,
+        head,
+        title: opens ? cleanTitle(entry.title) : "",
+        body:
+          opens && entry.body !== undefined
+            ? cleanBody(entry.body, "body")
+            : undefined,
+      };
+    });
+    const budget = call.budgetMs ?? ACTION_TIMEOUT_MS;
+    const stopAt = Date.now() + budget - reserveMs(budget);
+    const results: RepoPullRequest[] = [];
+    let failure: ConnectorError | undefined;
+    let untried = 0;
+    for (const [index, { entry, base, head, title, body }] of plan.entries()) {
+      const skipped = (reason: PullRequestSkipReason): RepoPullRequest => ({
+        fullName: entry.fullName,
+        base,
+        head,
+        state: "skipped",
+        reason,
+      });
+      if (head === base) {
+        results.push(skipped("direct"));
+        continue;
+      }
+      if (!entry.pushed) {
+        results.push(
+          skipped(entry.pushRejected ? "push_rejected" : "not_pushed"),
+        );
+        continue;
+      }
+      if (Date.now() >= stopAt) {
+        untried = plan.length - index;
+        failure ??= new ConnectorError(
+          "action_timeout",
+          "The step ran out of time before it had tried every repository. Run it again: pull requests that exist are found, not opened twice.",
+        );
+        break;
+      }
+      const target = await deps.targetOfRepository?.(call, entry.fullName);
+      if (target === undefined) {
+        failure ??= new ConnectorError(
+          "github_not_found",
+          `The repository ${entry.fullName} is not an active repository of this workspace with a GitHub connection.`,
+        );
+        continue;
+      }
+      const { provider, integration, repo } = target;
+      if (provider.openPullRequest === undefined) throw unavailable(name);
+      try {
+        const opened = await provider.openPullRequest(
+          integration,
+          repo,
+          {
+            head,
+            base,
+            title,
+            ...(body === undefined ? {} : { body }),
+            ...(draft === undefined ? {} : { draft }),
+          },
+          call.signal,
+        );
+        results.push({
+          fullName: entry.fullName,
+          base,
+          head,
+          state: opened.existing ? "existing" : "opened",
+          number: opened.number,
+          url: pageOfRepository(
+            opened.url,
+            repo,
+            `/pull/${String(opened.number)}`,
+          ),
+        });
+      } catch (error) {
+        if (
+          error instanceof IntegrationError &&
+          error.code === "INTEGRATION_NO_CHANGES_TO_COMPARE"
+        ) {
+          results.push(skipped("no_commits"));
+          continue;
+        }
+        const failed = toConnectorError(name, error);
+        // What is not a failure of the connector (an unexpected throw) is not for people to read, but the pull requests before it are.
+        const known =
+          failed instanceof ConnectorError
+            ? failed
+            : failed instanceof ActionInputError
+              ? new ConnectorError("action_failed", failed.message)
+              : new ConnectorError(
+                  "action_failed",
+                  `The action failed for ${entry.fullName}.`,
+                );
+        failure ??= known;
+        // An answer that is the same for every repository (the rate limit) or may not have been seen (unreachable) stops the step at once.
+        if (STOPS_THE_STEP.includes(known.code)) {
+          untried = plan.length - index - 1;
+          break;
+        }
+      }
+    }
+    if (failure !== undefined) {
+      const done = results
+        .filter((entry) => entry.number !== undefined)
+        .map((entry) => `${entry.fullName}#${String(entry.number)}`);
+      const notTried =
+        untried > 0
+          ? ` ${String(untried)} repositor${untried === 1 ? "y was" : "ies were"} not tried.`
+          : "";
+      throw new ConnectorError(
+        failure.code,
+        `${failure.message}${notTried}${done.length === 0 ? "" : ` Pull requests that were opened or found before: ${done.join(", ")}.`}`,
+        repoOutput(results),
+      );
+    }
+    return repoOutput(results);
+  }
+
   const pullRequestOpen: ActionConnector = {
     name: "github.pullRequest.open",
+    // #1094: with `repos` the step gets a share of time for every repository (`actionBudgetMs`).
+    budgetMs: (inputs) =>
+      Array.isArray(inputs.repos)
+        ? actionBudgetMs(inputs.repos.length)
+        : ACTION_TIMEOUT_MS,
     async run(call) {
       const name = "github.pullRequest.open";
+      if (Array.isArray(call.inputs.repos))
+        return openForRepos(call, call.inputs.repos as RepoInput[]);
       const head = branchName(call.inputs.head, "head");
       const base = branchName(call.inputs.base ?? call.baseBranch, "base");
       if (head === base)
@@ -783,11 +990,31 @@ export function createGithubConnectors(
     },
   };
 
+  async function reviewTargetOf(call: ActionCall): Promise<GithubActionTarget> {
+    const named = call.inputs.repository;
+    if (named === undefined) return targetOrFail(deps, call);
+    if (typeof named !== "string" || !REPOSITORY_NAME.test(named))
+      throw new ActionInputError(
+        "repository must be a repository like owner/name.",
+      );
+    const target = await deps.targetOfRepository?.(call, named);
+    if (target === undefined)
+      throw new ConnectorError(
+        "github_not_found",
+        `The repository ${named} is not an active repository of this workspace with a GitHub connection.`,
+      );
+    return target;
+  }
+
   const requestReview: ActionConnector = {
     name: "ticket.requestReview",
     idempotent: true,
     async run(call) {
       const name = "ticket.requestReview";
+      // #1094: the pull request step with `repos` opened none (every repository skipped), so there is nothing to ask a review of: the step
+      // skips, and does not fall back on some other pull request of the run's repository.
+      if (call.inputs.pullRequest === undefined)
+        return { requested: [], skipped: "no_pull_request" };
       const pullRequest = wholeNumber(call.inputs.pullRequest, "pullRequest");
       const { reviewers } = call.inputs;
       const members = reviewers === PROJECT_MEMBERS;
@@ -812,7 +1039,9 @@ export function createGithubConnectors(
           );
         logins = [...known.values()];
       } else logins = reviewerLogins(reviewers);
-      const { provider, integration, repo } = await targetOrFail(deps, call);
+      // The pull request may be in another repository than the run's (the first one of a step with `repos`): it is named, and only a repository
+      // of the workspace with an active connection is acted on.
+      const { provider, integration, repo } = await reviewTargetOf(call);
       if (provider.requestReviewers === undefined) throw unavailable(name);
       try {
         // The members of a project need not all be able to review this pull request (a collaborator of the repository, not its author),

@@ -39,7 +39,7 @@ from typing import Final
 from urllib.parse import quote
 
 from code_reviewer_runner.factory_runner.config import Limits
-from code_reviewer_runner.factory_runner.housekeeping import WORK_SUBDIRECTORIES, container_filters
+from code_reviewer_runner.factory_runner.housekeeping import container_filters, work_subdirectories
 from code_reviewer_runner.implementer.agent_container import AGENT_RUNTIME
 from code_reviewer_runner.implementer.docker_api import DockerApi, DockerError
 from code_reviewer_runner.implementer.exec_run import run_exec
@@ -133,7 +133,7 @@ def inner_docker_bytes(api: DockerApi, container: str) -> int:
 def used_bytes(api: DockerApi, work_dir: Path, runner_id: str) -> int:
     """What the job holds now, see the module text. A part the daemon cannot say counts as 0: a
     daemon that cannot answer is the loop's problem to find, not a reason to end a job."""
-    total = sum(tree_bytes(work_dir / name) for name in WORK_SUBDIRECTORIES)
+    total = sum(tree_bytes(work_dir / name) for name in work_subdirectories(work_dir))
     selector = quote(json.dumps({"label": container_filters(runner_id)}))
     try:
         listed = api.request("GET", f"/containers/json?all=1&filters={selector}")

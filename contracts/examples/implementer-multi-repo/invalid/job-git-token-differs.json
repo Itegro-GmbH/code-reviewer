@@ -1,0 +1,15 @@
+{
+  "why": "`git.token` is byte-equal to the token the first repository's `tokenId` names.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "git_token_mismatch",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/git/token",
+      "value": "another-token"
+    }
+  ]
+}

@@ -111,6 +111,38 @@ service names, `/api/runners/v1`) stay until a dedicated rename.
 Nothing here is shared as source: the three projects (`app/`, `dispatcher/`, `runner/`) exchange only the contracts
 in `contracts/` and the generated types in `src/contracts/`; a test fails on any import across projects.
 
+## Claim features that depend on the Worker image
+
+Most of what a Worker understands it names itself in the `features` of its details request (`WORKER_FEATURES` in the runner). A few
+claim features change which jobs the App hands to the **Dispatcher**, before any Worker exists, so the Dispatcher has to know what
+the Worker image of its golden snapshot can do. Today that is `implementer_multi_repo` (#1090): the App offers a job with `repos` only
+to a caller that names it (`runner.md`, "Several repositories per turn"); for every other caller the job is not a candidate, it
+stays queued and nothing fails.
+
+A fixed entry in the claim would be wrong. The Dispatcher is deployed before a new golden snapshot is live (or reuses an older
+snapshot), and a Worker of an older image that is handed a multi-repo job ends it `implementer_engine_unavailable` instead of letting
+it wait. So the signal travels **with the snapshot**:
+
+1. **The build asks the image.** In the check VM the snapshot build runs the image's own interpreter without network and capabilities
+   and prints the Worker's `WORKER_FEATURES` (`golden-snapshot.md`, step 11a). The list is the record's `workerFeatures`. A list the
+   build cannot read is empty, with the warning `worker_features_unreadable`; it never fails a run.
+2. **It is the fifth member of the snapshot pair**, next to the snapshot id, the image id, the commit and the Sysbox verdict:
+   `SANDBOX_WORKER_FEATURES` (comma separated names, or `none`), the meta `sandboxWorkerFeatures` of the Dispatcher deployment, the
+   `worker-features` output of the snapshot workflow and of the decide step (the pair that is reused keeps its list). The staged
+   deployment gets it as its own variable with the snapshot id, and the persist job writes it to Infisical after the promotion (cleared
+   to `none` first, set last, like the verdict, so a list of an older image never stays behind a newer snapshot id).
+3. **The Dispatcher names only what the list has.** `core/claim-features.ts` keeps the features that depend on the image
+   (`IMAGE_GATED_CLAIM_FEATURES`); the claim carries `worker_credential` and `vm_lifecycle` always, and a gated feature only when the
+   list of the active snapshot names it. Without a snapshot, with an old pair that has no list, with `none` or with a value of another
+   shape the claim names none of them: fail closed, multi-repo jobs wait in the queue for a Dispatcher whose snapshot can run them.
+
+Deploy order: nothing has to be done by hand except granting the Infisical role the fifth key (`deployment-vercel.md`, section 2.1).
+The Dispatcher change deploys first and, with the pair it has, names nothing new. The release that carries the runner's
+`implementer_multi_repo` changes the Worker image inputs, so *Deploy production* builds a new snapshot (`snapshot-decide`), the build
+reads the new list from the image, the staged Dispatcher gets the pair with the list, and the canary proves the image id; from the
+promotion on the Dispatcher names the feature. A rollback writes the list of the deployment it returns to (`none` for one from
+before the member existed).
+
 ## What exists
 
 The Dispatcher has one Trigger, the Webhook-Trigger, and one Launcher, the Sandbox-Launcher: the hosted deployment

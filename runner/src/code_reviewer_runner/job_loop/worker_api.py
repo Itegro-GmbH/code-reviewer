@@ -106,6 +106,11 @@ WORKER_FEATURES: tuple[str, ...] = (
     # #1067: the Worker reads `implementer.mcp` (the MCP servers of the agent step), starts the MCP
     # door with its job credential and configures the harness to talk to the door.
     "implementer_mcp",
+    # #1093 (epic #1090, ADR 0006): the Worker reads `implementer.repos` (several repositories in
+    # one turn), `git.tokens` and `implementer.resume.repos`, mounts each repository at
+    # `/work/<name>`, pushes each with its own token and reports `implementer.repos`. Both
+    # harnesses work this way.
+    "implementer_multi_repo",
 )
 # The feature of `GET /api/runners/v1/version` that says the Worker API exists.
 FEATURE_WORKER_API = "worker_api"

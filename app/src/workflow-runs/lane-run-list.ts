@@ -15,8 +15,14 @@ import {
   type WorkspaceRunStatusFilter,
 } from "../db/workflow-run-filters.ts";
 import { parseTicketRef } from "../workflows/ticket-ref.ts";
+import type { JiraSiteOfRepository } from "./jira-site.ts";
 import { WorkflowRunError } from "./errors.ts";
-import { laneNodesOfRun, type LaneNodeView } from "./lane-nodes.ts";
+import {
+  createLaneNodesIndex,
+  laneNodesOfRun,
+  type LaneNodesByKey,
+  type LaneNodesIndex,
+} from "./lane-nodes.ts";
 import { MICRO_USD_PER_USD, RUNS_LISTED_MAX } from "./limits.ts";
 
 /** How many runs a page holds when the request does not say. */
@@ -70,12 +76,17 @@ export type LaneRunListItemView = {
     label: string;
     /** The title from the ticket mirror, or null when the mirror does not hold the ticket. The words of whoever opened it: text only. */
     title: string | null;
-    /** The reference of the ticket as the engine wrote it: its key, and the `owner/name` of its repository for a GitHub issue (null for any other provider, whose site the list does not know). The page makes the link with `githubLinkInRepository`. */
+    /** The reference of the ticket as the engine wrote it: its key, and the `owner/name` of its repository for a GitHub issue (null for any other provider). The page makes the link with `githubLinkInRepository`, or with `jiraIssueLink` from `jiraSiteUrl` for a Jira ticket. */
     key: string;
     githubRepository: string | null;
+    /** The address of the Jira site the ticket lives on (`https://<site>.atlassian.net`), from the Jira connection of the project; null for a GitHub issue and when the project's connection is not known. The page makes the link with `jiraIssueLink`. */
+    jiraSiteUrl: string | null;
   } | null;
-  /** The top-level nodes of the version of the lane the run started with; empty when that version cannot be read any more. */
-  nodes: LaneNodeView[];
+  /**
+   * The key of the top-level nodes of the version of the lane the run started with, in the `laneNodes` of the list (#1087); null when
+   * that version cannot be read any more.
+   */
+  nodesKey: string | null;
   steps: StepSummaryView[];
   budgetUsd: number;
   spentUsd: number;
@@ -85,6 +96,8 @@ export type LaneRunListItemView = {
 
 export type LaneRunListView = {
   runs: LaneRunListItemView[];
+  /** The top-level nodes of the lane versions the runs started with, once for each; a run names its entry by `nodesKey` (#1087). */
+  laneNodes: LaneNodesByKey;
   /** The `cursor` of the request for the next page; null on the last page. */
   nextCursor: string | null;
   /** When the list was read: the clock the relative times and the running durations of the page are counted against. */
@@ -169,12 +182,14 @@ export function readListQuery(raw: RawLaneRunsQuery): LaneRunsQuery {
 
 /**
  * The ticket of a run as the list shows it. The reference was written by the engine (`github:owner/repo#128`, `jira:…#PROJ-7`); one that
- * does not parse shows no ticket rather than a made-up one. A link exists only for GitHub, where the reference names the page; the page makes it
- * (`workflow-pages/github-link.ts`, the one place that links into a repository), so the view hands over the parts.
+ * does not parse shows no ticket rather than a made-up one. A GitHub issue is linked through the reference, which names the page; a Jira issue
+ * through the site of the connection of the project (the reference holds no site, #1086). The page makes the link
+ * (`workflow-pages/github-link.ts`, `jira-link.ts`), so the view hands over the parts.
  */
 function ticketOf(
   ref: string | null,
   title: string | null,
+  jiraSite: JiraSiteOfRepository | undefined,
 ): LaneRunListItemView["ticket"] {
   if (ref === null) return null;
   const parsed = parseTicketRef(ref);
@@ -186,10 +201,32 @@ function ticketOf(
     title,
     key,
     githubRepository: github ? repo : null,
+    // The site is the project's current one: a key of another Jira project (the project was pointed elsewhere since) gets no link.
+    jiraSiteUrl:
+      provider === "jira" &&
+      jiraSite !== undefined &&
+      key.startsWith(`${jiraSite.projectKey}-`)
+        ? jiraSite.siteUrl
+        : null,
   };
 }
 
-export function listItemOf(row: WorkspaceRunRow): LaneRunListItemView {
+/** What `listItemOf` and `listRunsOf` need besides the row. */
+export type ListItemOptions = {
+  /** Gets the nodes of the lane version of the row (once for each version); the row names them by key. */
+  index?: LaneNodesIndex;
+  /** The site address and the Jira project key of the project's Jira source, by the id of its repository; only a run about a Jira ticket looks it up. */
+  sites?: ReadonlyMap<string, JiraSiteOfRepository>;
+};
+
+/** One row of the list; the nodes of its lane version are put into `options.index` (once for each version) and the row names them by key. */
+export function listItemOf(
+  row: WorkspaceRunRow,
+  {
+    index = createLaneNodesIndex(),
+    sites = new Map<string, JiraSiteOfRepository>(),
+  }: ListItemOptions = {},
+): LaneRunListItemView {
   const { run } = row;
   return {
     id: run.id,
@@ -201,11 +238,17 @@ export function listItemOf(row: WorkspaceRunRow): LaneRunListItemView {
     trigger: run.triggerKind,
     actorLogin: run.actorLogin,
     project: { id: run.repositoryId, name: row.repositoryName },
-    ticket: ticketOf(run.ticketRef, row.ticket?.title ?? null),
-    nodes: laneNodesOfRun(row.document ?? undefined, {
-      id: run.triggerId,
-      kind: run.triggerKind,
-    }),
+    ticket: ticketOf(
+      run.ticketRef,
+      row.ticket?.title ?? null,
+      sites.get(run.repositoryId),
+    ),
+    nodesKey: index.refer(run, () =>
+      laneNodesOfRun(row.document ?? undefined, {
+        id: run.triggerId,
+        kind: run.triggerKind,
+      }),
+    ),
     steps: row.steps.map((step) => ({
       id: step.stepId,
       kind: step.kind,
@@ -216,5 +259,17 @@ export function listItemOf(row: WorkspaceRunRow): LaneRunListItemView {
     spentUsd: run.spentMicroUsd / MICRO_USD_PER_USD,
     createdAt: run.createdAt,
     finishedAt: run.finishedAt,
+  };
+}
+
+/** The rows of a page as the list answers them: the runs and the nodes of their lane versions, each version once. */
+export function listRunsOf(
+  rows: readonly WorkspaceRunRow[],
+  sites?: ReadonlyMap<string, JiraSiteOfRepository>,
+): Pick<LaneRunListView, "runs" | "laneNodes"> {
+  const index = createLaneNodesIndex();
+  return {
+    runs: rows.map((row) => listItemOf(row, { index, sites })),
+    laneNodes: index.byKey,
   };
 }

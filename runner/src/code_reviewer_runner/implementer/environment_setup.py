@@ -57,7 +57,7 @@ from code_reviewer_runner.redaction import Redactor
 from code_reviewer_runner.result import ErrorCode
 
 from .agent_container import Adopted
-from .git_workspace import GitWorkspace
+from .multi_workspace import AnyWorkspace
 from .session import ShutdownRequested, deadline_seconds
 from .setup_container import (
     OUTCOME_NOT_HANDED_OVER,
@@ -138,7 +138,7 @@ def _closing_line(text: str, secrets: tuple[str, ...]) -> str:
 def run_environment_setup(
     environment: ImplementerEnvironment,
     *,
-    workspace: GitWorkspace,
+    workspace: AnyWorkspace,
     memory_mb: int,
     time_limit: float,
     elapsed: Callable[[], float],
@@ -205,7 +205,7 @@ def run_environment_setup(
 def _after_success(
     run: SetupRun,
     output: str,
-    workspace: GitWorkspace,
+    workspace: AnyWorkspace,
     notes: list[str],
     container: SetupContainer,
 ) -> EnvironmentSetup:

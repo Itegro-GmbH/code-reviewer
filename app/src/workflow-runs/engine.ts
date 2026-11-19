@@ -31,8 +31,19 @@ import type { WorkspaceMembersRepository } from "../db/repositories/workspace-me
 import { ImplementerError } from "../implementer/errors.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
 import type { ImplementerService } from "../implementer/service.ts";
-import { BRANCH_NAME_MAX_LENGTH } from "../implementer/branch-name.ts";
-import { INSTRUCTION_MAX_LENGTH } from "../implementer/start-input.ts";
+import {
+  BRANCH_NAME_MAX_LENGTH,
+  checkBranchName,
+} from "../implementer/branch-name.ts";
+import {
+  deriveMountNames,
+  firstRepeat,
+  isRepositoryFullName,
+} from "../db/session-repos.ts";
+import {
+  INSTRUCTION_MAX_LENGTH,
+  type StartRepo,
+} from "../implementer/start-input.ts";
 import { canonicalJson, isRecord } from "../workflows/json.ts";
 import { parseProfileRef } from "../workflows/resolver.ts";
 import {
@@ -133,6 +144,13 @@ export type EngineDependencies = {
   asks?: AskChannel;
   /** The full name of the repository of a run, for the call of an action. */
   repositoryName(repositoryId: string): Promise<string | undefined>;
+  /**
+   * #1092: the active repository of the workspace with this full name (compared without regard to case), for the `repos` of an agent step;
+   * undefined when there is none. Left out, a step with `repos` ends `repo_not_available`.
+   */
+  repositoryByName?(
+    fullName: string,
+  ): Promise<{ id: string; fullName: string } | undefined>;
   now?: () => Date;
   /** The most one call of a connector may take; `ACTION_TIMEOUT_MS` unless a test shortens it. */
   actionTimeoutMs?: number;
@@ -491,6 +509,69 @@ export function sessionBranchOf(
   return named !== undefined && named.length <= BRANCH_NAME_MAX_LENGTH
     ? named
     : `workflow/${tail}`;
+}
+
+/**
+ * The `repos` of an agent step with their references filled in (#1092): a repository (`owner/name`), and a base and a branch where the entry
+ * names them. A reference that gave no repository or no name of a branch, two entries that are one repository (without regard to case) and
+ * two repositories that would be mounted under one name end the step before anything starts, free of charge.
+ */
+function stepRepos(
+  raw: unknown,
+  values: RunValues,
+):
+  | { repos: { fullName: string; base?: string; branch?: string }[] }
+  | StepOutcome {
+  if (!Array.isArray(raw) || raw.length < 1)
+    return failed(
+      "repo_invalid",
+      "The repositories of this step are not a list.",
+    );
+  const repos: { fullName: string; base?: string; branch?: string }[] = [];
+  for (const [index, entry] of raw.entries()) {
+    const place = `Repository ${String(index + 1)} of this step`;
+    const named =
+      isRecord(entry) && typeof entry.repo === "string"
+        ? resolveValue(entry.repo, values)
+        : undefined;
+    if (typeof named !== "string" || !isRepositoryFullName(named))
+      return failed(
+        "repo_invalid",
+        `${place} is not a repository (owner/name).`,
+      );
+    const found: { fullName: string; base?: string; branch?: string } = {
+      fullName: named,
+    };
+    for (const field of ["base", "branch"] as const) {
+      const given = (entry as Record<string, unknown>)[field];
+      if (given === undefined) continue;
+      const resolved =
+        typeof given === "string" ? resolveValue(given, values) : undefined;
+      if (
+        typeof resolved !== "string" ||
+        resolved === "" ||
+        !checkBranchName(resolved, "").ok
+      )
+        return failed(
+          "branch_invalid",
+          `The ${field} of ${place.toLowerCase()} is not the name of a branch.`,
+        );
+      found[field] = resolved;
+    }
+    repos.push(found);
+  }
+  const names = repos.map((entry) => entry.fullName);
+  if (firstRepeat(names) >= 0)
+    return failed(
+      "repo_duplicate",
+      "Two repositories of this step are the same repository.",
+    );
+  if (firstRepeat(deriveMountNames(names)) >= 0)
+    return failed(
+      "repo_name_clash",
+      "Two repositories of this step would be mounted under the same name.",
+    );
+  return { repos };
 }
 
 /** The `branch` of an agent step with its reference filled in: a text, else the step ends. A missing value fails the step (`TemplateError`). */
@@ -1178,6 +1259,37 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         ? undefined
         : startBranchOf(node.branch, values);
     if (typeof start === "object") return { outcome: start };
+    // #1092: a step with `repos` works on those repositories, whatever the run's is: the references are filled in, and each repository
+    // must be one of the workspace. The run's repository is not special and is not needed.
+    let repos: { start: StartRepo[]; names: string[] } | undefined;
+    if (node.repos !== undefined) {
+      const resolved = stepRepos(node.repos, values);
+      if ("status" in resolved) return { outcome: resolved };
+      const start: StartRepo[] = [];
+      for (const entry of resolved.repos) {
+        const found = await deps.repositoryByName?.(entry.fullName);
+        if (found === undefined)
+          return {
+            outcome: failed(
+              "repo_not_available",
+              `The workspace has no active repository ${entry.fullName} that the GitHub App can reach.`,
+            ),
+          };
+        start.push({
+          repositoryId: found.id,
+          ...(entry.base === undefined ? {} : { base: entry.base }),
+          ...(entry.branch === undefined ? {} : { branch: entry.branch }),
+        });
+      }
+      if (new Set(start.map((entry) => entry.repositoryId)).size < start.length)
+        return {
+          outcome: failed(
+            "repo_duplicate",
+            "Two repositories of this step are the same repository.",
+          ),
+        };
+      repos = { start, names: resolved.repos.map((entry) => entry.fullName) };
+    }
     const owner = await sessionOwner(run);
     if ("missing" in owner)
       return { outcome: failed("agent_start_failed", ownerMissingText(owner)) };
@@ -1185,8 +1297,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       const started = await deps.implementer.startTask(
         owner,
         {
-          repositoryId: run.repositoryId,
+          repositoryId: repos?.start[0]?.repositoryId ?? run.repositoryId,
           baseBranch: run.baseBranch,
+          ...(repos === undefined ? {} : { repos: repos.start }),
           ...(start === undefined ? {} : { startBranch: start }),
           branch: sessionBranchOf(run, step),
           instruction,
@@ -1203,7 +1316,7 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
       );
       return { runId: started.runId };
     } catch (error) {
-      return resolvedStartFailure(error, run, step);
+      return resolvedStartFailure(error, run, step, repos?.names);
     }
   }
 
@@ -1289,10 +1402,37 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
     error: unknown,
     run: StoredWorkflowRun,
     step: StoredStepRun,
+    /** #1092: the repositories of a step with `repos`, by their place in the list (`repoIndex` of a refusal). */
+    repoNames?: readonly string[],
   ): Promise<Begun> {
     if (!(error instanceof ImplementerError)) throw error;
     const existing = await deps.turns.findByRequest(requestIdOf(run, step));
     if (existing !== undefined) return { runId: existing.jobId };
+    const named =
+      error.repoIndex === undefined ? undefined : repoNames?.[error.repoIndex];
+    if (named !== undefined) {
+      const code =
+        error.code === "IMPLEMENTER_BASE_BRANCH_NOT_FOUND"
+          ? "base_branch_not_found"
+          : error.code === "IMPLEMENTER_REPOSITORY_NOT_FOUND" ||
+              error.code === "IMPLEMENTER_APP_NOT_INSTALLED" ||
+              error.code === "IMPLEMENTER_WRITE_NOT_GRANTED"
+            ? "repo_not_available"
+            : undefined;
+      if (code !== undefined) {
+        log(
+          `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code} repo=${named}`,
+        );
+        return {
+          outcome: failed(
+            code,
+            code === "base_branch_not_found"
+              ? `The repository ${named} has no branch with the name of the base.`
+              : `The repository ${named} is not one the GitHub App of the workspace can reach${error.code === "IMPLEMENTER_WRITE_NOT_GRANTED" ? " with the right to write" : ""}.`,
+          ),
+        };
+      }
+    }
     // The code and the message are for the log: the step keeps a sentence, and the code is its `errorCode`.
     log(
       `[workflow-runs] STEP_START_FAILED run=${run.id} step=${step.stepId} code=${error.code} message=${error.message}`,
@@ -1413,6 +1553,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
         "action_failed",
         "The repository of the run is no longer one of the workspace.",
       );
+    // #1094: a connector that does one thing per repository has a budget that grows with their number (a test may shorten it).
+    const budgetMs =
+      deps.actionTimeoutMs ?? connector.budgetMs?.(inputs) ?? ACTION_TIMEOUT_MS;
     try {
       const output = await withTimeout(
         (signal) =>
@@ -1426,8 +1569,9 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             idempotencyKey: requestIdOf(run, step),
             stepCreatedAt: step.createdAt,
             signal,
+            budgetMs,
           }),
-        deps.actionTimeoutMs ?? ACTION_TIMEOUT_MS,
+        budgetMs,
       );
       return {
         status: "succeeded",
@@ -1443,7 +1587,13 @@ export function createWorkflowEngine(deps: EngineDependencies): WorkflowEngine {
             : `The connector did not answer in time and the action was not repeated. ${MAY_HAVE_HAPPENED}`,
         );
       if (error instanceof ConnectorError)
-        return failed(error.code, error.message);
+        return {
+          ...failed(error.code, error.message),
+          // What the action had done before it failed stays with the step (the pull requests a step with `repos` opened).
+          ...(error.output === undefined
+            ? {}
+            : { output: JSON.stringify(error.output) }),
+        };
       if (error instanceof ActionInputError)
         return failed("action_input_invalid", error.message);
       // Whatever else the connector threw is not for people to read: it goes to the log, the step keeps a sentence.

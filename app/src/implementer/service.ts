@@ -21,7 +21,7 @@ import type { ModelChoice } from "../db/implementer-model-choice.ts";
 import { JobQueueError } from "../jobs/errors.ts";
 import type { EnqueueImplementerTurnResult } from "../jobs/job-types.ts";
 import type { JobQueue } from "../jobs/job-queue.ts";
-import { branchConflict } from "./branch-name.ts";
+import { branchConflict, checkBranchName } from "./branch-name.ts";
 import { createRunCanceller, type RunCanceller } from "./cancel.ts";
 import { ImplementerError, type UnwritableReason } from "./errors.ts";
 import {
@@ -45,6 +45,11 @@ import {
   type FollowUpDependencies,
 } from "./follow-up.ts";
 import { validateStartInput, type StartInput } from "./start-input.ts";
+import {
+  deriveMountNames,
+  firstRepeat,
+  type SessionRepo,
+} from "../db/session-repos.ts";
 
 export type RepositoryChoice = {
   id: string;
@@ -144,6 +149,29 @@ function sameProfile(
   );
 }
 
+/**
+ * Whether the repositories of a repeated body are those of the earlier task (#1092): one repository with the same base, or the same list
+ * of repositories, where a base or a branch the body names is the stored one (left out is not compared: the default branch may have moved).
+ */
+function sameRepos(
+  stored: SessionRepo[] | null,
+  task: Pick<StartInput, "repos" | "baseBranch">,
+  base?: string,
+): boolean {
+  if (task.repos === undefined)
+    return (stored ?? null) === null && base === task.baseBranch;
+  return (
+    stored !== null &&
+    stored.length === task.repos.length &&
+    task.repos.every(
+      (entry, index) =>
+        stored[index]?.repositoryId === entry.repositoryId &&
+        (entry.base === undefined || stored[index]?.base === entry.base) &&
+        (entry.branch === undefined || stored[index]?.branch === entry.branch),
+    )
+  );
+}
+
 /** The answer for a request id that made a task before: that task when the body is the same, else the conflict. */
 function repeatOf(
   earlier: EnqueueImplementerTurnResult,
@@ -158,7 +186,7 @@ function repeatOf(
       sameModel(turn.modelChoice, task.model));
   const same =
     session.repositoryId === task.repositoryId &&
-    session.baseBranch === task.baseBranch &&
+    sameRepos(session.repos, task, session.baseBranch) &&
     (session.startBranch ?? null) === (task.startBranch ?? null) &&
     session.branch === task.branch &&
     turn.instruction === task.instruction &&
@@ -185,6 +213,153 @@ export function createImplementerService(
     queue: deps.queue,
     ...(deps.log === undefined ? {} : { log: deps.log }),
   });
+
+  /** The one repository of a task of today: the permission, the repository, the base (and start) branch and the branch that must not exist. */
+  async function resolveSingle(
+    task: StartInput,
+  ): Promise<{ baseSha: string; fullName: string }> {
+    const { integration, repo } = await resolveRepository(
+      deps,
+      task.repositoryId,
+    );
+    const provider = deps.registry.resolve(integration.type);
+
+    let baseSha: string;
+    try {
+      if (!(await provider.installationPermissions(integration)).contentsWrite)
+        throw new ImplementerError(
+          "IMPLEMENTER_WRITE_NOT_GRANTED",
+          "The installation has not accepted the permission to write contents yet.",
+        );
+      // The repository path must still resolve before a missing branch can be believed (`getBranch` answers null for a
+      // repository that was renamed, too).
+      await provider.getRepositoryFacts(integration, repo);
+      const base = await provider.getBranch(integration, repo, task.baseBranch);
+      if (base === null)
+        throw new ImplementerError(
+          "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+          "The repository has no branch with the name of the base branch.",
+        );
+      baseSha = base.sha;
+      // #909: the session starts at the start branch when the task names one; its tip is where the work begins.
+      if (task.startBranch !== undefined) {
+        const start = await provider.getBranch(
+          integration,
+          repo,
+          task.startBranch,
+        );
+        if (start === null)
+          throw new ImplementerError(
+            "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+            "The repository has no branch with the name of the start branch.",
+          );
+        baseSha = start.sha;
+      }
+      if ((await provider.getBranch(integration, repo, task.branch)) !== null)
+        throw BRANCH_EXISTS();
+      // Git holds `foo` or `foo/bar`, not both. What the read can tell: the first 100 branches the platform lists.
+      const listed = await provider.listBranches(integration, repo);
+      if (branchConflict(task.branch, listed.names) !== null)
+        throw BRANCH_CONFLICT();
+    } catch (error) {
+      throw platformFailure(error);
+    }
+
+    return { baseSha, fullName: repo.fullName };
+  }
+
+  /**
+   * #1092: the repositories of a step with `repos`, resolved: each one is a repository of the workspace with an active integration, the
+   * installation can write to it when the profile may push, and its base branch (the default branch when the step named none) exists.
+   * A branch is not asked for here: whether it exists is decided when the job is claimed (`branchExists`), so a retry or a second round on
+   * the same branch is the ordinary case. Refusals carry the place of the repository in `repoIndex`.
+   */
+  async function resolveRepos(
+    entries: NonNullable<StartInput["repos"]>,
+    mustWrite: boolean,
+  ): Promise<{ repos: SessionRepo[]; baseSha: string }> {
+    const refusal = (error: unknown, index: number): ImplementerError => {
+      const known = platformFailure(error);
+      return known.code === "IMPLEMENTER_GITHUB_UNAVAILABLE"
+        ? known
+        : new ImplementerError(known.code, known.message, {
+            ...(known.issues.length === 0 ? {} : { issues: known.issues }),
+            repoIndex: index,
+          });
+    };
+    const permissions = new Map<string, Promise<boolean>>();
+    const seen = new Set<string>();
+    const resolved: Array<Omit<SessionRepo, "name">> = [];
+    let firstSha = "";
+    for (const [index, entry] of entries.entries()) {
+      if (seen.has(entry.repositoryId))
+        throw new ImplementerError(
+          "IMPLEMENTER_REQUEST_INVALID",
+          "A repository is named twice.",
+          { repoIndex: index },
+        );
+      seen.add(entry.repositoryId);
+      try {
+        const { integration, repo } = await resolveRepository(
+          deps,
+          entry.repositoryId,
+        );
+        const provider = deps.registry.resolve(integration.type);
+        if (mustWrite) {
+          let granted = permissions.get(integration.id);
+          if (granted === undefined) {
+            granted = provider
+              .installationPermissions(integration)
+              .then((held) => held.contentsWrite);
+            permissions.set(integration.id, granted);
+          }
+          if (!(await granted))
+            throw new ImplementerError(
+              "IMPLEMENTER_WRITE_NOT_GRANTED",
+              "The installation has not accepted the permission to write contents yet.",
+            );
+        }
+        // The repository path must still resolve before a missing branch can be believed; its default branch is the base when none is named.
+        const facts = await provider.getRepositoryFacts(integration, repo);
+        const base = entry.base ?? facts.defaultBranch;
+        const head = await provider.getBranch(integration, repo, base);
+        if (head === null)
+          throw new ImplementerError(
+            "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+            "The repository has no branch with the name of the base branch.",
+          );
+        const branch = entry.branch ?? base;
+        if (branch !== base && !checkBranchName(branch, "").ok)
+          throw new ImplementerError(
+            "IMPLEMENTER_REQUEST_INVALID",
+            "The branch is not a valid branch name.",
+          );
+        if (index === 0) firstSha = head.sha;
+        resolved.push({
+          repositoryId: entry.repositoryId,
+          fullName: repo.fullName,
+          base,
+          branch,
+        });
+      } catch (error) {
+        throw refusal(error, index);
+      }
+    }
+    const fullNames = resolved.map((entry) => entry.fullName);
+    const names = deriveMountNames(fullNames);
+    if (firstRepeat(fullNames) >= 0 || firstRepeat(names) >= 0)
+      throw new ImplementerError(
+        "IMPLEMENTER_REQUEST_INVALID",
+        "Two repositories of the task are the same repository or would be mounted under one name.",
+      );
+    return {
+      repos: resolved.map((entry, index) => ({
+        ...entry,
+        name: names[index] as string,
+      })),
+      baseSha: firstSha,
+    };
+  }
 
   return {
     ...followUps,
@@ -280,57 +455,27 @@ export function createImplementerService(
       );
       if (earlier !== undefined) return repeatOf(earlier, task);
 
-      const { integration, repo } = await resolveRepository(
-        deps,
-        task.repositoryId,
-      );
-      const provider = deps.registry.resolve(integration.type);
-
+      // #1092: a step with `repos` is checked repository by repository; the profile is read first, because whether the repositories must be
+      // writable depends on it (a profile that may not push gets read access only).
+      const preCopied =
+        task.repos !== undefined && task.profile !== null
+          ? await copyProfile(deps.profiles, task.profile)
+          : undefined;
       let baseSha: string;
-      try {
-        if (
-          !(await provider.installationPermissions(integration)).contentsWrite
-        )
-          throw new ImplementerError(
-            "IMPLEMENTER_WRITE_NOT_GRANTED",
-            "The installation has not accepted the permission to write contents yet.",
-          );
-        // The repository path must still resolve before a missing branch can be believed (`getBranch` answers null for a
-        // repository that was renamed, too).
-        await provider.getRepositoryFacts(integration, repo);
-        const base = await provider.getBranch(
-          integration,
-          repo,
-          task.baseBranch,
+      let repoName: string;
+      let sessionRepos: SessionRepo[] | undefined;
+      if (task.repos !== undefined) {
+        const resolved = await resolveRepos(
+          task.repos,
+          (preCopied?.profile ?? null)?.canPush !== false,
         );
-        if (base === null)
-          throw new ImplementerError(
-            "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
-            "The repository has no branch with the name of the base branch.",
-          );
-        baseSha = base.sha;
-        // #909: the session starts at the start branch when the task names one; its tip is where the work begins.
-        if (task.startBranch !== undefined) {
-          const start = await provider.getBranch(
-            integration,
-            repo,
-            task.startBranch,
-          );
-          if (start === null)
-            throw new ImplementerError(
-              "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
-              "The repository has no branch with the name of the start branch.",
-            );
-          baseSha = start.sha;
-        }
-        if ((await provider.getBranch(integration, repo, task.branch)) !== null)
-          throw BRANCH_EXISTS();
-        // Git holds `foo` or `foo/bar`, not both. What the read can tell: the first 100 branches the platform lists.
-        const listed = await provider.listBranches(integration, repo);
-        if (branchConflict(task.branch, listed.names) !== null)
-          throw BRANCH_CONFLICT();
-      } catch (error) {
-        throw platformFailure(error);
+        baseSha = resolved.baseSha;
+        sessionRepos = resolved.repos;
+        repoName = resolved.repos.map((entry) => entry.fullName).join(",");
+      } else {
+        const resolved = await resolveSingle(task);
+        baseSha = resolved.baseSha;
+        repoName = resolved.fullName;
       }
 
       // A profile (#843) is read now and its version copied into the turn: what it says at this moment is what the task runs with,
@@ -345,7 +490,8 @@ export function createImplementerService(
         model = task.model as ModelChoice;
         costLimitCents = task.costLimitCents;
       } else {
-        const copied = await copyProfile(deps.profiles, task.profile);
+        const copied =
+          preCopied ?? (await copyProfile(deps.profiles, task.profile));
         profile = copied.profile;
         model = copied.model;
         costLimitCents = null;
@@ -398,12 +544,14 @@ export function createImplementerService(
       try {
         result = await deps.queue.enqueueImplementerTurn({
           repositoryId: task.repositoryId,
-          baseBranch: task.baseBranch,
+          // #1092: with `repos` the session names the first repository and its resolved base; the list is stored with it.
+          baseBranch: sessionRepos?.[0]?.base ?? task.baseBranch,
           ...(task.startBranch === undefined
             ? {}
             : { startBranch: task.startBranch }),
           baseSha,
           branch: task.branch,
+          ...(sessionRepos === undefined ? {} : { repos: sessionRepos }),
           instruction: task.instruction,
           modelChoice: model,
           costLimitCents,
@@ -443,7 +591,7 @@ export function createImplementerService(
       }
       if (result.status === "existing") return repeatOf(result, task);
       log(
-        `[implementer] task ${result.status} job=${result.job.id} session=${result.session.id} repo=${repo.fullName} by=${user.githubLogin}`,
+        `[implementer] task ${result.status} job=${result.job.id} session=${result.session.id} repo=${repoName} by=${user.githubLogin}`,
       );
       return {
         runId: result.job.id,

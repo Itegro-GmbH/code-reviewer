@@ -124,6 +124,8 @@ describe("the production deployment workflow", () => {
       ["image-digest", "image-digest"],
       ["snapshot-commit", "commit"],
       ["sysbox-proof", "sysbox"],
+      // #1098: the list of the Worker image's features travels with the pair, from the build or from the pair that is reused.
+      ["worker-features", "worker-features"],
     ] as const)
       expect(dispatcher.with?.[name]).toBe(
         `\${{ needs.snapshot-build.outputs.${output} || needs.snapshot-decide.outputs.${output} }}`,
@@ -715,6 +717,7 @@ describe("the shell of the pipeline", () => {
       IMAGE_DIGEST: "",
       SNAPSHOT_COMMIT: "",
       SYSBOX_PROOF: "",
+      WORKER_FEATURES: "",
     };
     const vercel = (document: string) => ({
       vercel: `printf '%s\\n' '${document}'`,
@@ -750,6 +753,7 @@ describe("the shell of the pipeline", () => {
           IMAGE_DIGEST: DIGEST,
           SNAPSHOT_COMMIT: COMMIT,
           SYSBOX_PROOF: "proven",
+          WORKER_FEATURES: "implementer_ask,implementer_multi_repo",
         },
         stubs: vercel(GOOD),
       });
@@ -757,6 +761,13 @@ describe("the shell of the pipeline", () => {
       expect(run.status).toBe(0);
       const call = run.calls.find((c) => c.startsWith("vercel deploy")) ?? "";
       expect(call).toContain("--env SANDBOX_SNAPSHOT_ID=snap_example01");
+      // #1098-T09: the feature list of the image is set with the snapshot id too, as a variable and as meta.
+      expect(call).toContain(
+        "--env SANDBOX_WORKER_FEATURES=implementer_ask,implementer_multi_repo",
+      );
+      expect(call).toContain(
+        "--meta sandboxWorkerFeatures=implementer_ask,implementer_multi_repo",
+      );
       // #745-T02: the verdict is set with the snapshot id, as a variable and as meta, in the same deployment.
       expect(call).toContain("--env SANDBOX_SYSBOX_PROOF=proven");
       expect(call).toContain("--meta sandboxSysboxProof=proven");
@@ -764,7 +775,27 @@ describe("the shell of the pipeline", () => {
       expect(call).toContain("--meta sandboxSnapshotId=snap_example01");
       expect(call).toContain(`--meta sandboxImageDigest=${DIGEST}`);
       expect(call).toContain(`--meta sandboxSnapshotCommit=${COMMIT}`);
-      expect(call.match(/--env /g)).toHaveLength(3);
+      expect(call.match(/--env /g)).toHaveLength(4);
+    });
+
+    // #1098-T09
+    it("gives a pair without a feature list the list `none`, so that the Dispatcher names nothing that depends on the image", () => {
+      const run = runStep(selector, {
+        env: {
+          ...env,
+          SNAPSHOT_ID: "snap_example01",
+          IMAGE_DIGEST: DIGEST,
+          SNAPSHOT_COMMIT: COMMIT,
+          SYSBOX_PROOF: "proven",
+          WORKER_FEATURES: "",
+        },
+        stubs: vercel(GOOD),
+      });
+
+      expect(run.status).toBe(0);
+      const call = run.calls.find((c) => c.startsWith("vercel deploy")) ?? "";
+      expect(call).toContain("--env SANDBOX_WORKER_FEATURES=none");
+      expect(call).toContain("--meta sandboxWorkerFeatures=none");
     });
 
     // #403-T13
@@ -789,6 +820,17 @@ describe("the shell of the pipeline", () => {
         },
       ],
       ["a verdict without the pair", { SYSBOX_PROOF: "proven" }],
+      // #1098-T09: a feature list that is not of the shape is refused, not passed on to the Dispatcher
+      [
+        "a feature list that is not of the shape",
+        {
+          SNAPSHOT_ID: "snap_example01",
+          IMAGE_DIGEST: DIGEST,
+          SNAPSHOT_COMMIT: COMMIT,
+          SYSBOX_PROOF: "proven",
+          WORKER_FEATURES: "Bad Name,x",
+        },
+      ],
       [
         "a digest that is not an image id",
         {
@@ -980,6 +1022,36 @@ describe("the freshness check, where a partial re-run cannot skip it", () => {
     );
   });
 
+  // #1098: the persist job writes the same pair as the stage job, with the same fallback; a typo in an input name would persist `none` silently.
+  it("persists the pair from the build or, when the build output is empty (a reused pair), from the decision, and the action hands the list on", () => {
+    const write = stepsOf(job("persist")).find(
+      (step) => step.uses === "./.github/actions/infisical-write-snapshot-pair",
+    );
+    for (const [name, output] of [
+      ["snapshot-id", "snapshot-id"],
+      ["image-digest", "image-digest"],
+      ["commit", "commit"],
+      ["sysbox", "sysbox"],
+      ["worker-features", "worker-features"],
+    ] as const)
+      expect(write?.with?.[name], name).toBe(
+        `\${{ needs.snapshot-build.outputs.${output} || needs.snapshot-decide.outputs.${output} }}`,
+      );
+    // The build output comes first: a rebuild's list wins; with no rebuild the build job is skipped, its output is empty and the
+    // decision's (the live pair's own) list is used. `||` does not fall back to anything else, so a missing one is `none` downstream.
+    expect(String(write?.with?.["worker-features"])).toMatch(
+      /^\$\{\{ needs\.snapshot-build\.outputs\.worker-features \|\| needs\.snapshot-decide\.outputs\.worker-features \}\}$/,
+    );
+    const action = readText(
+      ".github/actions/infisical-write-snapshot-pair/action.yml",
+    );
+    expect(action).toContain("worker-features:");
+    expect(action).toContain(
+      "PAIR_WORKER_FEATURES: ${{ inputs.worker-features }}",
+    );
+    expect(action).toContain("PAIR_SYSBOX: ${{ inputs.sysbox }}");
+  });
+
   // #403-T23
   it("is a composite action that reads the head of main with the job's own token and takes the override as an input only", () => {
     const text = readText(".github/actions/check-current-commit/action.yml");
@@ -1064,6 +1136,7 @@ describe("the shell of the stage that carries a pair", () => {
       IMAGE_DIGEST: "",
       SNAPSHOT_COMMIT: "",
       SYSBOX_PROOF: "",
+      WORKER_FEATURES: "",
     };
     const vercel = (document: string, status = 0) => ({
       vercel: `printf '%s\\n' '${document}'\nexit ${String(status)}`,

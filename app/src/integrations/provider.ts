@@ -286,11 +286,14 @@ export interface IntegrationProvider {
    * anything, whatever the App was set to by hand. A token lives up to an hour; `revokeImplementerAccess` ends it.
    * `readOnly` (#843, a turn whose profile may not push): the same token but with the right to read the contents and nothing
    * else, so the turn could not push even with a bug.
+   * `alsoRepos` (#1092, a turn on several repositories): the other repositories of the same installation the token covers: it is made
+   * for exactly `repo` and these, in one call, and for nothing else. Every one must belong to `integration`, or the call is refused
+   * with `INTEGRATION_ACCESS_SCOPE_REFUSED`.
    */
   implementerAccess(
     integration: Integration,
     repo: RepoRef,
-    options?: { readOnly?: boolean },
+    options?: { readOnly?: boolean; alsoRepos?: readonly RepoRef[] },
   ): Promise<GitAccess>;
 
   /**

@@ -28,6 +28,7 @@ In order:
 | 9   | `scan_filesystem`                                             | No secret and no job data in what the pipeline added or changed in the restored snapshot (below).                                                                                                                                                                                                                                                                             | `scan_findings`, `scan_unreadable`                                |
 | 10  | `start_daemon_check`, `inspect_restored_image`, `inspect_restored_agent_image` | `vm-prepare.sh` brings the daemon up; both image ids must equal step 5.                                                                                                                                                                                                                                                                                                         | `host_prepare_failed`, `image_digest_mismatch`                    |
 | 11  | `probe`                                                       | The image runs in `probe` mode (#324) with the flags the shared renderer (#325) makes for the Sandbox variant (the hardened container spec plus the IPv6 sysctls); its verdict must advertise every engine in `requiredEngines` (`pr-agent`, `opencode`).                                                                                                                     | `probe_failed`, `probe_unreadable`, `engine_missing`              |
+| 11a | `worker_features`                                             | The image lists what its Worker understands (#1098): `docker run` with the flags of the shared Worker renderer (the Worker's own tmpfs, `HOME`, pids and memory limits, read-only root, no extra capability) except `--network none`, `--entrypoint /opt/venv/bin/python <image> -c 'from code_reviewer_runner.job_loop.worker_api import WORKER_FEATURES ...'` prints `WORKER_FEATURES <names>`; the names (lower case words, at most 64, sorted, no duplicates) become `workerFeatures` of the record. **Never fails a run**: a line that is not of the shape, or a failing command, is the warning `worker_features_unreadable` and an empty list; a timeout removes the named container. The golden snapshot workflow shows a record with no feature as the annotation `Worker features none`. | warning `worker_features_unreadable` |
 | 11b | `sysbox_probe`                                                | Sysbox boots as on a job VM and **the agent image** runs under it with its own Docker, runs a container, on a network with no exit (section "Sysbox"). **Never fails a run**: warning `sysbox_probe_failed`, `"sysbox": "unproven"`.                                                                                                                                                                 | warning `sysbox_probe_failed`                                     |
 | 12  | record, retention                                             | The record is returned and written; older builders are removed unless `--skip-retention` is given (the deployment removes them itself, below); the check VM is deleted.                                                                                                                                                                                                       | `record_invalid`; retention only warns                            |
 
@@ -76,21 +77,22 @@ the container start of a Diff or Dynamic job does not read the new layers.
   "target": "sandbox",
   "commit": "<sha>",
   "agentImageDigest": "sha256:<64 hex>",
-  "sysbox": "proven"
+  "sysbox": "proven",
+  "workerFeatures": ["implementer_multi_repo"]
 }
 ```
 
-`sysbox` is `proven` or `unproven` (section "Sysbox"). The Launcher does not read the record: the Dispatcher's `SANDBOX_SYSBOX_PROOF` carries the verdict to the Implementer's gate (section "Sysbox"). `agentImageDigest` is the id of the Implementer's agent image in the snapshot (absent in older records).
+`sysbox` is `proven` or `unproven` (section "Sysbox"). The Launcher does not read the record: the Dispatcher's `SANDBOX_SYSBOX_PROOF` carries the verdict to the Implementer's gate (section "Sysbox"). `agentImageDigest` is the id of the Implementer's agent image in the snapshot (absent in older records). `workerFeatures` (#1098) is the list of the features the snapshot's Worker image names to the App (`WORKER_FEATURES` of `runner/src/code_reviewer_runner/job_loop/worker_api.py`), **read from the image itself** in the check VM and not from the commit's source; absent in older records, which reads as an empty list. It travels with the snapshot as the fifth member of the pair (`SANDBOX_WORKER_FEATURES`, meta `sandboxWorkerFeatures`) and is what the Dispatcher names claim features from (`dispatcher.md`, "Claim features that depend on the Worker image").
 `snapshotId` and `imageDigest` are what the Sandbox-Launcher (#329) is configured with. The Launcher creates job VMs
 from `snapshotId` in `fra1` and refuses to run when `docker image inspect` in the VM reports another id than
 `imageDigest`. The workflow keeps the record as the artifact `golden-snapshot-record` (90 days) and shows it in the run
-summary and as the outputs `snapshot-id`, `image-digest`, `commit` and `sysbox` of the workflow. The build itself changes no
+summary and as the outputs `snapshot-id`, `image-digest`, `commit`, `sysbox` and `worker-features` (`none` for an empty list) of the workflow. The build itself changes no
 deployment, removes no snapshot of an earlier run and writes nothing to Infisical: _Deploy production_ wires the
 snapshot into a staged Dispatcher deployment, proves it with the canary, and only after the promotion writes it to
-Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT` and `SANDBOX_SYSBOX_PROOF` of `/dispatcher`) and removes
+Infisical (`SANDBOX_SNAPSHOT_ID`, `SANDBOX_IMAGE_DIGEST`, `SANDBOX_SNAPSHOT_COMMIT`, `SANDBOX_SYSBOX_PROOF` and `SANDBOX_WORKER_FEATURES` of `/dispatcher`) and removes
 the snapshots nobody needs. **The write of `SANDBOX_SYSBOX_PROOF` needs the permission the owner grants before the first release with the
 Sysbox gate** (*create* and *edit* on that key, `docs/deployment-vercel.md`, section 2.1): without it `persist` fails after the promotion, the
-cleanup is skipped and every later release stays red until it is granted.
+cleanup is skipped and every later release stays red until it is granted. **The same holds for `SANDBOX_WORKER_FEATURES`** (#1098): grant *create* and *edit* on it before the release that carries the feature gate.
 
 ## Running it
 
@@ -243,7 +245,7 @@ because `sysbox-runc`, `sysbox-mgr` or `sysbox-fs` are missing) ends the launch 
 for the proof (its start-up check wants the Docker, the Sysbox runtime and the agent image, not the verdict), so an unproven snapshot cannot hold back a release of code-review.com (#797).
 **The verdict is the fourth member of the pair.** `golden-snapshot.yml` outputs it (`sysbox`: `proven` only when the record says exactly that, else `unproven`), `deploy-production.yml` passes it on
 (`snapshot-decide` reuses the verdict of the pair it reuses), `vercel-stage.yml` sets `SANDBOX_SYSBOX_PROOF` and the meta `sandboxSysboxProof` on the staged deployment together with the snapshot id (all four or none),
-and `snapshot:ops persist` writes it to Infisical: cleared to `unproven` first, the other three, the real verdict last, so a half-written pair is never `proven`. A rollback restores the verdict of the deployment it returns to, and a deployment from
+and `snapshot:ops persist` writes it to Infisical: the list of features cleared to `none` first (a missing grant on it fails before anything changed), then the verdict cleared to `unproven`, the other three, the real verdict and the list last, so a half-written pair is never `proven`. A rollback restores the verdict of the deployment it returns to, and a deployment from
 before this member has none, which reads `unproven`. **Nothing is `unrecorded` any more:** a Dispatcher that was never told a verdict has `unproven` and the Implementer does not start on it. Reviews never read the variable, whatever it holds.
 
 **Where it is shown, and what it cannot be.** A soft failure also comes from the network at build time (a GitHub 5xx for the package, a Docker Hub rate limit for the proof's image),

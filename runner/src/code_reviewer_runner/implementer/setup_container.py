@@ -85,7 +85,6 @@ from code_reviewer_runner.outer_proxy import OuterProxy
 from .agent_container import (
     AGENT_CONTAINER_NAME,
     AGENT_IMAGE_REFERENCE,
-    AGENT_REPO,
     AGENT_RUNTIME,
     READY_FILE,
     WRITE_FILE_SCRIPT,
@@ -106,6 +105,7 @@ from .host_rules import (
 )
 from .placement import B_WORK_VOLUME, HOSTED, Placement
 from .reader import work_volume_of
+from .repo_places import SINGLE, RepoPlaces
 from .result_channel import AGENT_RESULT_DIRECTORY
 from .role_labels import role_labels
 from .vm_memory import MEMINFO, REASON_VM_MEMORY, MemoryGuard
@@ -301,6 +301,7 @@ def setup_document(
     result: bool = False,
     no_new_privileges: bool = False,
     placement: Placement = HOSTED,
+    places: RepoPlaces = SINGLE,
 ) -> dict[str, Any]:
     """The container of the setup, which is the agent's: the agent's definition (its image, limits,
     name, labels and mounts, so that nothing has to change when it takes over) on the setup network
@@ -318,6 +319,7 @@ def setup_document(
         nano_cpus=nano_cpus,
         no_new_privileges=no_new_privileges,
         placement=placement,
+        places=places,
     )
     document["Env"] = [] if outer_proxy is None else outer_proxy.tool_environment()
     document["NetworkingConfig"] = {
@@ -413,6 +415,9 @@ class SetupSeams:
     # `install_rules` is False: the setup network's walls are the NICs of the instances (the
     # outer wall's proxy for the setup, the inner wall in A), and no host of ours is in B.
     placement: Placement = HOSTED
+    # #1093: where the repositories are mounted (the agent's own layout, so nothing changes when the
+    # agent takes the container over); the script runs in the working directory of the agent.
+    places: RepoPlaces = SINGLE
 
 
 def _variables(listed: object) -> set[str]:
@@ -576,6 +581,7 @@ class SetupContainer:
                 result=self._seams.result,
                 no_new_privileges=self._seams.no_new_privileges,
                 placement=self._seams.placement,
+                places=self._seams.places,
             ),
             self._seams.container_name,
         )
@@ -673,7 +679,9 @@ class SetupContainer:
         for mount in cast("list[Any]", mounts) if isinstance(mounts, list) else []:
             given = as_object(mount)
             destinations.add(None if given is None else given.get("Destination"))
-        allowed = {AGENT_REPO, AGENT_RESULT_DIRECTORY} if self._seams.result else {AGENT_REPO}
+        allowed = set(self._seams.places.agent_paths)
+        if self._seams.result:
+            allowed.add(AGENT_RESULT_DIRECTORY)
         if destinations - allowed:
             problems.append("mounts")
         # Not one variable besides the image's own (and the host's proxy on a customer's machine).
@@ -731,7 +739,7 @@ class SetupContainer:
                     container,
                     [SH, "-c", RUN_SCRIPT, "run", SCRIPT_PATH, SCRIPT_OUTPUT],
                     env=SCRIPT_ENVIRONMENT,
-                    workdir=AGENT_REPO,
+                    workdir=self._seams.places.agent_workdir,
                     timeout=seconds + 60.0,
                     consume=tail.add,
                     name="the setup script",

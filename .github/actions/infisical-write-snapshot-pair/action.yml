@@ -1,6 +1,6 @@
 name: Write the golden snapshot pair to Infisical
 description: >-
-  Writes SANDBOX_SNAPSHOT_ID, SANDBOX_IMAGE_DIGEST, SANDBOX_SNAPSHOT_COMMIT and SANDBOX_SYSBOX_PROOF to Infisical prod /dispatcher with the
+  Writes SANDBOX_SNAPSHOT_ID, SANDBOX_IMAGE_DIGEST, SANDBOX_SNAPSHOT_COMMIT, SANDBOX_SYSBOX_PROOF and SANDBOX_WORKER_FEATURES to Infisical prod /dispatcher with the
   repository's machine identity, through `pnpm snapshot:ops persist` (dispatcher/src/snapshot/ops-cli.ts). The pair is
   either given (the snapshot a deployment has just made live) or read from the meta of a deployment (a rollback). This is
   the only write path to Infisical of the repository: only the persist job of deploy-production.yml and the rollback
@@ -38,6 +38,10 @@ inputs:
     description: The verdict of the snapshot's Sysbox proof, proven or unproven (anything else is written as unproven)
     required: false
     default: ""
+  worker-features:
+    description: The features the Worker image lists, comma separated, or none (anything unreadable is written as none)
+    required: false
+    default: ""
   from-deployment:
     description: A deployment (id or address) of the Dispatcher project whose pair is written instead, for a rollback
     required: false
@@ -62,6 +66,7 @@ runs:
         PAIR_IMAGE_DIGEST: ${{ inputs.image-digest }}
         PAIR_COMMIT: ${{ inputs.commit }}
         PAIR_SYSBOX: ${{ inputs.sysbox }}
+        PAIR_WORKER_FEATURES: ${{ inputs.worker-features }}
         FROM_DEPLOYMENT: ${{ inputs.from-deployment }}
         VERCEL_PROJECT_ID: ${{ inputs.vercel-project-id }}
       run: |

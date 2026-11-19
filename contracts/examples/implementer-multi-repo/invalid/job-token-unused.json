@@ -1,0 +1,18 @@
+{
+  "why": "Every token must be named by a repository.",
+  "layer": "rule",
+  "error": "invalid_job",
+  "definition": "RunnerJobInput",
+  "rule": "token_unused",
+  "base": "implementer-multi-repo/RunnerJobInput",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/git/tokens/-",
+      "value": {
+        "id": "t3",
+        "token": "example-git-write-token-3"
+      }
+    }
+  ]
+}

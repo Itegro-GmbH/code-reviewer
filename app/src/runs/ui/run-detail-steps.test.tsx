@@ -44,6 +44,7 @@ function task(): ImplementerDetailView {
     environment: null,
     commits: { shown: [], more: 0 },
     files: { count: 0, shown: [], more: 0 },
+    repos: [],
     branches: { shown: [], more: 0, dropped: NONE_DROPPED },
     head: null,
     pushedNote: null,

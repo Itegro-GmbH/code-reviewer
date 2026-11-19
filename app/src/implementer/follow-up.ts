@@ -100,7 +100,10 @@ export type StartQueuedOutcome =
 /** What the Runs page needs to offer "Continue" on a run; absent for a run that is not the newest turn of its session. */
 export type Continuation = {
   sessionId: string;
+  /** The session's working branch; for a session of several repositories the working branch of its first repository (the session's own `branch` is a key, no git branch). */
   branch: string;
+  /** #1092: the repositories of a session of several repositories with their working branches, in the order of the session; absent for one repository. */
+  repos?: { name: string; branch: string }[];
   turnNumber: number;
   /** The session's state now: a turn runs (the form queues) or it is idle (the form starts). */
   sessionStatus: "running" | "idle";
@@ -217,7 +220,9 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     session: StoredImplementerSession,
     integration: Integration,
     repo: RepoRef,
+    mustWrite = true,
   ): Promise<string> {
+    if (session.repos !== null) return tipOfRepos(session, mustWrite);
     const provider = deps.registry.resolve(integration.type);
     try {
       if (!(await provider.installationPermissions(integration)).contentsWrite)
@@ -257,6 +262,47 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
     } catch (error) {
       throw platformFailure(error);
     }
+  }
+
+  /**
+   * #1092: the tip a turn of a session of several repositories is accepted at: every repository must still be one of the workspace with an
+   * active installation (that can write to it when the turn may push), its path must still resolve and its base branch must exist; the tip is
+   * the first repository's base. A working branch is not asked for: the claim decides `branchExists`, and the runner ends the turn
+   * `clone_failed` for a branch that was pushed and is gone. Nothing is resolved again: the repositories, bases and branches are the stored ones.
+   */
+  async function tipOfRepos(
+    session: StoredImplementerSession,
+    mustWrite: boolean,
+  ): Promise<string> {
+    let first = "";
+    try {
+      for (const [index, entry] of (session.repos ?? []).entries()) {
+        const { integration, repo } = await resolveRepository(
+          deps,
+          entry.repositoryId,
+        );
+        const provider = deps.registry.resolve(integration.type);
+        if (
+          mustWrite &&
+          !(await provider.installationPermissions(integration)).contentsWrite
+        )
+          throw new ImplementerError(
+            "IMPLEMENTER_WRITE_NOT_GRANTED",
+            "The installation has not accepted the permission to write contents yet.",
+          );
+        await provider.getRepositoryFacts(integration, repo);
+        const base = await provider.getBranch(integration, repo, entry.base);
+        if (base === null)
+          throw new ImplementerError(
+            "IMPLEMENTER_BASE_BRANCH_NOT_FOUND",
+            "The repository has no branch with the name of the base branch.",
+          );
+        if (index === 0) first = base.sha;
+      }
+    } catch (error) {
+      throw platformFailure(error);
+    }
+    return first;
   }
 
   /** The choices of the body over the defaults of the last turn (`continue-input.ts`: left out is as before, `null` is none). */
@@ -494,7 +540,12 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         deps,
         session.repositoryId,
       );
-      const headSha = await tipOf(session, integration, repo);
+      const headSha = await tipOf(
+        session,
+        integration,
+        repo,
+        last.profile?.canPush !== false,
+      );
       const choices = await resolveChoices(input, last, options);
 
       const queued: QueuedInstruction = {
@@ -619,7 +670,12 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
           deps,
           session.repositoryId,
         );
-        tip = await tipOf(session, integration, repo);
+        tip = await tipOf(
+          session,
+          integration,
+          repo,
+          queued.profile?.canPush !== false,
+        );
       } catch (error) {
         if (error instanceof ImplementerError) {
           if (error.code === "IMPLEMENTER_BRANCH_GONE")
@@ -731,7 +787,15 @@ export function createFollowUps(deps: FollowUpDependencies): FollowUps {
         count("output");
       return {
         sessionId: session.id,
-        branch: session.branch,
+        branch: session.repos?.[0]?.branch ?? session.branch,
+        ...(session.repos === null
+          ? {}
+          : {
+              repos: session.repos.map(({ name, branch }) => ({
+                name,
+                branch,
+              })),
+            }),
         turnNumber: turn.number,
         sessionStatus: session.status,
         defaults: {

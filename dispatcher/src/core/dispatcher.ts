@@ -29,6 +29,7 @@ import {
   type ReleaseReason,
   VM_LIFECYCLE_FEATURE,
 } from "./app-client.ts";
+import type { KnownClaimFeature } from "../contracts/runner-api.ts";
 import { systemClock } from "./clock.ts";
 import { vcpusOfSizeLabel } from "./size-labels.ts";
 import {
@@ -102,6 +103,8 @@ export type CoreDependencies = {
    * the launches in progress only. Present, an app is refused above its cap (`busy`) whatever it sends.
    */
   liveVms?: LiveVmCounter;
+  /** #1098: the claim features of the Worker image of the golden snapshot (`imageClaimFeatures`), for every app's claim. */
+  imageFeatures?: readonly KnownClaimFeature[];
   /** Milliseconds, for the memory of the version answer. */
   now?: () => number;
   requestTimeoutMs?: number;
@@ -157,6 +160,9 @@ export function createDispatcherCore(deps: CoreDependencies): DispatcherCore {
         poolId: configured.poolId,
         fetch: deps.fetch ?? fetch,
         requestTimeoutMs: deps.requestTimeoutMs,
+        ...(deps.imageFeatures === undefined
+          ? {}
+          : { imageFeatures: deps.imageFeatures }),
       }),
       launching: 0,
       versionOkUntil: 0,

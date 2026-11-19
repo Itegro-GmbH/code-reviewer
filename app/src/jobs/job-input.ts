@@ -183,6 +183,33 @@ export function validateImplementerTurnInput(
     (typeof startBranch !== "string" || !BRANCH_NAME.test(startBranch))
   )
     refuse("startBranch", "invalid");
+  // #1092: the repositories of a session of several repositories: one to ten, resolved, the first being the session's repository.
+  const repos = fields.repos;
+  if (repos !== undefined && repos !== null) {
+    const listed = Array.isArray(repos) ? (repos as unknown[]) : [];
+    const first = listed[0] as Record<string, unknown> | undefined;
+    if (
+      !Array.isArray(repos) ||
+      listed.length < 1 ||
+      listed.length > 10 ||
+      first?.repositoryId !== fields.repositoryId ||
+      listed.some((entry) => {
+        const repo = entry as Record<string, unknown> | null;
+        return (
+          typeof repo !== "object" ||
+          repo === null ||
+          !isNonEmptyString(repo.repositoryId) ||
+          !isNonEmptyString(repo.fullName) ||
+          !isNonEmptyString(repo.name) ||
+          typeof repo.base !== "string" ||
+          !BRANCH_NAME.test(repo.base) ||
+          typeof repo.branch !== "string" ||
+          !BRANCH_NAME.test(repo.branch)
+        );
+      })
+    )
+      refuse("repos", "invalid");
+  }
   const baseSha = fields.baseSha;
   if (typeof baseSha !== "string" || !HEAD_SHA.test(baseSha))
     refuse("baseSha", "invalid");
